@@ -1,0 +1,88 @@
+{
+    "_comment": "EXAMPLE CONFIGURATION - Copy this file to config.json and fill in your credentials",
+
+    "saxo_api": {
+        "app_key": "YOUR_SAXO_APP_KEY",
+        "app_secret": "YOUR_SAXO_APP_SECRET",
+        "access_token": "YOUR_ACCESS_TOKEN",
+        "refresh_token": "YOUR_REFRESH_TOKEN",
+        "token_expiry": null,
+        "environment": "sim",
+        "_environment_options": "sim (paper trading) or live",
+        "base_url_sim": "https://gateway.saxobank.com/sim/openapi",
+        "base_url_live": "https://gateway.saxobank.com/openapi",
+        "streaming_url_sim": "wss://streaming.saxobank.com/sim/openapi/streamingws/connect",
+        "streaming_url_live": "wss://streaming.saxobank.com/openapi/streamingws/connect",
+        "redirect_uri": "http://localhost:8080/callback",
+        "auth_url": "https://sim.logonvalidation.net/authorize",
+        "token_url": "https://sim.logonvalidation.net/token"
+    },
+
+    "strategy": {
+        "underlying_symbol": "SPY",
+        "underlying_uic": 211,
+        "_underlying_uic_note": "UIC for SPY - verify this in your Saxo environment",
+        "vix_symbol": "VIX",
+        "vix_uic": 19217,
+        "_vix_uic_note": "UIC for VIX index - verify this in your Saxo environment",
+        "max_vix_entry": 18.0,
+        "_max_vix_entry_note": "Only enter trades when VIX is below this level",
+        "long_straddle_min_dte": 90,
+        "long_straddle_max_dte": 120,
+        "_dte_note": "Days to expiration range for long straddle",
+        "recenter_threshold_points": 5.0,
+        "_recenter_note": "Recenter position when SPY moves this many points from strike",
+        "weekly_strangle_multiplier_min": 1.5,
+        "weekly_strangle_multiplier_max": 2.0,
+        "_strangle_note": "Short strangle strikes at N times expected weekly move",
+        "exit_dte_min": 30,
+        "exit_dte_max": 60,
+        "_exit_note": "Exit entire position when DTE falls within this range",
+        "roll_days": ["Thursday", "Friday"],
+        "_roll_note": "Days to roll weekly shorts",
+        "max_bid_ask_spread_percent": 0.5,
+        "_spread_note": "Maximum acceptable bid-ask spread for slippage protection",
+        "position_size": 1
+    },
+
+    "circuit_breaker": {
+        "max_consecutive_errors": 3,
+        "_errors_note": "Open circuit after this many consecutive API errors",
+        "max_disconnection_seconds": 60,
+        "_disconnection_note": "Open circuit if no successful connection for this long",
+        "cooldown_minutes": 15,
+        "_cooldown_note": "How long to wait before retrying after circuit opens"
+    },
+
+    "google_sheets": {
+        "enabled": false,
+        "_enabled_note": "Set to true to enable Google Sheets logging",
+        "credentials_file": "google_credentials.json",
+        "_credentials_note": "Path to Google service account JSON file",
+        "spreadsheet_name": "Trading_Bot_Log",
+        "worksheet_name": "Trades"
+    },
+
+    "microsoft_sheets": {
+        "enabled": false,
+        "_enabled_note": "Set to true to enable Microsoft Excel/SharePoint logging",
+        "client_id": "YOUR_MS_CLIENT_ID",
+        "client_secret": "YOUR_MS_CLIENT_SECRET",
+        "tenant_id": "YOUR_TENANT_ID",
+        "site_url": "https://yourtenant.sharepoint.com/sites/yoursite",
+        "workbook_name": "Trading_Bot_Log.xlsx",
+        "worksheet_name": "Trades"
+    },
+
+    "logging": {
+        "log_file": "bot_log.txt",
+        "log_level": "INFO",
+        "_log_level_options": "DEBUG, INFO, WARNING, ERROR, CRITICAL",
+        "console_output": true
+    },
+
+    "account": {
+        "account_key": "YOUR_ACCOUNT_KEY",
+        "client_key": "YOUR_CLIENT_KEY"
+    }
+}
