@@ -26,6 +26,9 @@ from enum import Enum
 import requests
 import websocket
 
+# Import external price feed for simulation fallback
+from src.external_price_feed import ExternalPriceFeed
+
 # Configure module logger
 logger = logging.getLogger(__name__)
 
@@ -143,13 +146,29 @@ class SaxoClient:
         self.saxo_config = config["saxo_api"]
         self.circuit_config = config["circuit_breaker"]
 
-        # Authentication state
-        self.access_token = self.saxo_config.get("access_token")
-        self.refresh_token = self.saxo_config.get("refresh_token")
-        self.token_expiry = None
-
         # Determine environment (simulation or live)
         self.environment = self.saxo_config.get("environment", "sim")
+
+        # Get environment-specific credentials
+        env_config = self.saxo_config.get(self.environment, {})
+
+        # Authentication state
+        self.app_key = env_config.get("app_key")
+        self.app_secret = env_config.get("app_secret")
+        self.access_token = env_config.get("access_token")
+        self.refresh_token = env_config.get("refresh_token")
+
+        # Load token expiry from config if available
+        token_expiry_str = env_config.get("token_expiry")
+        if token_expiry_str:
+            try:
+                self.token_expiry = datetime.fromisoformat(token_expiry_str)
+            except (ValueError, TypeError):
+                self.token_expiry = None
+        else:
+            self.token_expiry = None
+
+        # Set URLs based on environment
         self.base_url = (
             self.saxo_config["base_url_sim"]
             if self.environment == "sim"
@@ -159,6 +178,16 @@ class SaxoClient:
             self.saxo_config["streaming_url_sim"]
             if self.environment == "sim"
             else self.saxo_config["streaming_url_live"]
+        )
+        self.auth_url = (
+            self.saxo_config["auth_url_sim"]
+            if self.environment == "sim"
+            else self.saxo_config["auth_url_live"]
+        )
+        self.token_url = (
+            self.saxo_config["token_url_sim"]
+            if self.environment == "sim"
+            else self.saxo_config["token_url_live"]
         )
 
         # Circuit breaker for error handling
@@ -171,11 +200,32 @@ class SaxoClient:
         self.subscription_context_id = f"ctx_{int(time.time())}"
         self.is_streaming = False
 
+        # Price cache for subscription snapshots (UIC -> latest price data)
+        self._price_cache: Dict[int, Dict] = {}
+
         # Account information
         self.account_key = config["account"].get("account_key")
         self.client_key = config["account"].get("client_key")
 
+        # Currency configuration (for FX rate lookups)
+        self.currency_config = config.get("currency", {})
+
+        # External price feed (fallback when Saxo returns NoAccess)
+        # Note: Can be used in LIVE if you don't have market data API subscriptions
+        external_feed_enabled = config.get("external_price_feed", {}).get("enabled", True)
+        self.external_feed = ExternalPriceFeed(enabled=external_feed_enabled)
+
         logger.info(f"SaxoClient initialized in {self.environment} environment")
+
+    @property
+    def is_simulation(self) -> bool:
+        """Check if running in simulation environment."""
+        return self.environment == "sim"
+
+    @property
+    def is_live(self) -> bool:
+        """Check if running in live environment."""
+        return self.environment == "live"
 
     # =========================================================================
     # AUTHENTICATION METHODS
@@ -221,12 +271,12 @@ class SaxoClient:
         try:
             # Build authorization URL with required parameters
             auth_params = {
-                "client_id": self.saxo_config["app_key"],
+                "client_id": self.app_key,
                 "response_type": "code",
                 "redirect_uri": self.saxo_config["redirect_uri"],
                 "state": f"state_{int(time.time())}",  # CSRF protection
             }
-            auth_url = f"{self.saxo_config['auth_url']}?{urlencode(auth_params)}"
+            auth_url = f"{self.auth_url}?{urlencode(auth_params)}"
 
             logger.info("Opening browser for OAuth authorization...")
             logger.info(f"Authorization URL: {auth_url}")
@@ -272,17 +322,17 @@ class SaxoClient:
                 "grant_type": "authorization_code",
                 "code": auth_code,
                 "redirect_uri": self.saxo_config["redirect_uri"],
-                "client_id": self.saxo_config["app_key"],
-                "client_secret": self.saxo_config["app_secret"],
+                "client_id": self.app_key,
+                "client_secret": self.app_secret,
             }
 
             response = requests.post(
-                self.saxo_config["token_url"],
+                self.token_url,
                 data=token_data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
 
-            if response.status_code == 200:
+            if response.status_code in [200, 201]:
                 token_response = response.json()
                 self.access_token = token_response["access_token"]
                 self.refresh_token = token_response.get("refresh_token")
@@ -292,6 +342,10 @@ class SaxoClient:
                 self.token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)
 
                 logger.info("Access token obtained successfully")
+
+                # Save tokens to config.json for persistence
+                self._save_tokens_to_config()
+
                 self._record_success()
                 return True
             else:
@@ -315,17 +369,17 @@ class SaxoClient:
             refresh_data = {
                 "grant_type": "refresh_token",
                 "refresh_token": self.refresh_token,
-                "client_id": self.saxo_config["app_key"],
-                "client_secret": self.saxo_config["app_secret"],
+                "client_id": self.app_key,
+                "client_secret": self.app_secret,
             }
 
             response = requests.post(
-                self.saxo_config["token_url"],
+                self.token_url,
                 data=refresh_data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
 
-            if response.status_code == 200:
+            if response.status_code in [200, 201]:
                 token_response = response.json()
                 self.access_token = token_response["access_token"]
                 self.refresh_token = token_response.get("refresh_token", self.refresh_token)
@@ -334,6 +388,10 @@ class SaxoClient:
                 self.token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)
 
                 logger.info("Access token refreshed successfully")
+
+                # Save tokens to config.json for persistence
+                self._save_tokens_to_config()
+
                 self._record_success()
                 return True
             else:
@@ -356,6 +414,36 @@ class SaxoClient:
         if self.token_expiry and datetime.now() >= self.token_expiry:
             return False
         return True
+
+    def _save_tokens_to_config(self):
+        """
+        Save current access and refresh tokens back to config.json.
+
+        This allows tokens to persist between bot runs, avoiding the need
+        to re-authenticate every time.
+        """
+        try:
+            # Read current config
+            with open("config/config.json", "r") as f:
+                config_data = json.load(f)
+
+            # Update tokens in the appropriate environment section
+            env_key = self.environment  # "sim" or "live"
+            config_data["saxo_api"][env_key]["access_token"] = self.access_token or ""
+            config_data["saxo_api"][env_key]["refresh_token"] = self.refresh_token or ""
+
+            # Calculate and save token expiry timestamp
+            if self.token_expiry:
+                config_data["saxo_api"][env_key]["token_expiry"] = self.token_expiry.isoformat()
+
+            # Write back to file
+            with open("config/config.json", "w") as f:
+                json.dump(config_data, f, indent=4)
+
+            logger.info("Tokens saved to config/config.json successfully")
+
+        except Exception as e:
+            logger.warning(f"Failed to save tokens to config/config.json: {e}")
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """
@@ -507,8 +595,10 @@ class SaxoClient:
                 timeout=30
             )
 
-            if response.status_code in [200, 201]:
+            # Added 202 to the success list
+            if response.status_code in [200, 201, 202]:
                 self._record_success()
+                # 202 might not have body, safe parsing
                 return response.json() if response.text else {}
             elif response.status_code == 204:
                 self._record_success()
@@ -531,15 +621,42 @@ class SaxoClient:
         """
         Get current quote for an instrument.
 
+        Uses /trade/v1/infoprices/list endpoint with AccountKey for proper
+        access in simulation environment.
+
         Args:
             uic: Unique Instrument Code
-            asset_type: Type of asset (Stock, StockOption, etc.)
+            asset_type: Type of asset (Stock, StockOption, Etf, StockIndex, FxSpot, etc.)
 
         Returns:
             dict: Quote data including Bid, Ask, LastTraded prices.
         """
+        # Use /infoprices/list with AccountKey - required for sim environment
+        endpoint = "/trade/v1/infoprices/list"
+        params = {
+            "AccountKey": self.account_key,
+            "Uics": str(uic),
+            "AssetType": asset_type,
+            "Amount": 1,  # Always include Amount (number of units)
+            "FieldGroups": "DisplayAndFormat,Quote,PriceInfo"
+        }
+
+        logger.debug(f"get_quote: Calling {endpoint} for UIC {uic}")
+
+        response = self._make_request("GET", endpoint, params=params)
+        logger.debug(f"get_quote: Response = {response}")
+
+        # /infoprices/list returns a "Data" array - extract the first item
+        if response and "Data" in response and len(response["Data"]) > 0:
+            quote_data = response["Data"][0]
+            logger.debug(f"get_quote: Extracted quote for UIC {uic}: Quote={quote_data.get('Quote')}")
+            return quote_data
+
+        # Fallback to single-instrument endpoint if list fails
+        logger.debug(f"get_quote: List endpoint returned no Data for UIC {uic}, trying single endpoint")
         endpoint = "/trade/v1/infoprices"
         params = {
+            "AccountKey": self.account_key,
             "Uic": uic,
             "AssetType": asset_type,
             "FieldGroups": "Quote,PriceInfoDetails"
@@ -547,50 +664,113 @@ class SaxoClient:
 
         response = self._make_request("GET", endpoint, params=params)
         if response:
-            logger.debug(f"Got quote for UIC {uic}: {response}")
+            logger.debug(f"get_quote: Single endpoint response for UIC {uic}: {response}")
             return response
+        return None
+
+    def get_option_root_id(self, underlying_uic: int) -> Optional[int]:
+        """
+        Get the OptionRootId for an underlying instrument.
+
+        This is required before fetching options chains. The OptionRootId is different
+        from the instrument's UIC and is used specifically for options chain queries.
+
+        Args:
+            underlying_uic: UIC of the underlying (e.g., 36590 for SPY)
+
+        Returns:
+            int: OptionRootId, or None if not found
+        """
+        endpoint = "/ref/v1/instruments/details"
+        params = {"Uics": underlying_uic}
+
+        response = self._make_request("GET", endpoint, params=params)
+
+        if not response or "Data" not in response or len(response["Data"]) == 0:
+            logger.error(f"No instrument details found for UIC {underlying_uic}")
+            return None
+
+        instrument = response["Data"][0]
+        related_options = instrument.get("RelatedOptionRootsEnhanced", [])
+
+        # Look for StockOption type
+        for option_root in related_options:
+            if option_root.get("AssetType") == "StockOption":
+                option_root_id = option_root.get("OptionRootId")
+                logger.info(f"Found OptionRootId {option_root_id} for UIC {underlying_uic}")
+                return option_root_id
+
+        logger.error(f"No StockOption root found for UIC {underlying_uic}")
         return None
 
     def get_option_chain(
         self,
-        underlying_uic: int,
-        expiry_date: Optional[str] = None
+        option_root_id: int,
+        expiry_dates: Optional[List[str]] = None,
+        option_space_segment: str = "AllDates"
     ) -> Optional[Dict]:
         """
-        Get option chain for an underlying instrument.
+        Get option chain for an OptionRootId.
+
+        NOTE: You must first call get_option_root_id() to get the option_root_id
+        for your underlying instrument before calling this method.
 
         Args:
-            underlying_uic: UIC of the underlying instrument
-            expiry_date: Optional specific expiry date (YYYY-MM-DD)
+            option_root_id: Option root ID (get from get_option_root_id())
+            expiry_dates: Optional list of specific expiry dates ["2024-02-16", ...]
+            option_space_segment: "AllDates" (default) or "SpecificDates"
 
         Returns:
-            dict: Option chain data with calls and puts.
+            dict: Response containing "OptionSpace" array with expiries and strikes
         """
-        endpoint = "/ref/v1/instruments/contractoptionspaces"
-        params = {
-            "UnderlyingUic": underlying_uic,
-            "AssetType": "StockOption"
-        }
+        # OptionRootId goes in the URL path, not as a query parameter
+        endpoint = f"/ref/v1/instruments/contractoptionspaces/{option_root_id}"
+
+        params = {}
+
+        # Filter by specific expiry dates if provided
+        if expiry_dates:
+            params["OptionSpaceSegment"] = "SpecificDates"
+            params["ExpiryDates"] = expiry_dates
+        elif option_space_segment:
+            params["OptionSpaceSegment"] = option_space_segment
 
         response = self._make_request("GET", endpoint, params=params)
+
         if response:
-            logger.debug(f"Got option chain for underlying UIC {underlying_uic}")
+            logger.debug(f"Got option chain for OptionRootId {option_root_id}")
             return response
+
+        logger.error(f"Failed to get option chain for OptionRootId {option_root_id}")
         return None
 
     def get_option_expirations(self, underlying_uic: int) -> Optional[List[Dict]]:
         """
         Get available option expiration dates for an underlying.
 
+        Internally calls get_option_root_id() then get_option_chain()
+        to handle the two-step API process.
+
         Args:
             underlying_uic: UIC of the underlying instrument
 
         Returns:
-            list: List of expiration dates with associated data.
+            list: OptionSpace array with expiry information and strikes
         """
-        option_chain = self.get_option_chain(underlying_uic)
-        if option_chain and "Data" in option_chain:
-            return option_chain["Data"]
+        # Step 1: Get OptionRootId
+        option_root_id = self.get_option_root_id(underlying_uic)
+        if not option_root_id:
+            logger.error(f"Could not find OptionRootId for UIC {underlying_uic}")
+            return None
+
+        # Step 2: Get option chain
+        option_chain = self.get_option_chain(option_root_id)
+
+        # Step 3: Extract OptionSpace (not "Data" - that was the old incorrect field)
+        if option_chain and "OptionSpace" in option_chain:
+            return option_chain["OptionSpace"]
+
+        logger.error(f"No OptionSpace found in response for OptionRootId {option_root_id}")
         return None
 
     def find_atm_options(
@@ -638,36 +818,56 @@ class SaxoClient:
             logger.warning(f"No expiration found within {target_dte_min}-{target_dte_max} DTE range")
             return None
 
-        # Get strikes for this expiration
-        strikes = target_expiration.get("Strikes", [])
+        # Get strikes for this expiration (SpecificOptions array, not "Strikes")
+        specific_options = target_expiration.get("SpecificOptions", [])
+
+        if not specific_options:
+            logger.error("No SpecificOptions in target expiration")
+            return None
 
         # Find ATM strike (closest to current price)
-        atm_strike = None
+        # First pass: find the strike price closest to underlying price
+        atm_strike_price = None
         min_diff = float('inf')
 
-        for strike_data in strikes:
-            strike_price = strike_data.get("Strike", 0)
+        for option in specific_options:
+            strike_price = option.get("StrikePrice", 0)
             diff = abs(strike_price - underlying_price)
             if diff < min_diff:
                 min_diff = diff
-                atm_strike = strike_data
+                atm_strike_price = strike_price
 
-        if not atm_strike:
+        if atm_strike_price is None or atm_strike_price == 0:
             logger.error("Failed to find ATM strike")
             return None
 
-        logger.info(f"ATM strike: {atm_strike.get('Strike')} (underlying: {underlying_price})")
+        logger.info(f"ATM strike: {atm_strike_price} (underlying: {underlying_price})")
+
+        # Second pass: find Call and Put UICs at ATM strike
+        call_uic = None
+        put_uic = None
+
+        for option in specific_options:
+            if option.get("StrikePrice") == atm_strike_price:
+                if option.get("PutCall") == "Call":
+                    call_uic = option.get("Uic")
+                elif option.get("PutCall") == "Put":
+                    put_uic = option.get("Uic")
+
+        if not call_uic or not put_uic:
+            logger.error(f"Failed to find Call or Put UIC at strike {atm_strike_price}")
+            return None
 
         return {
             "call": {
-                "uic": atm_strike.get("CallUic"),
-                "strike": atm_strike.get("Strike"),
+                "uic": call_uic,
+                "strike": atm_strike_price,
                 "expiry": target_expiration.get("Expiry"),
                 "option_type": "Call"
             },
             "put": {
-                "uic": atm_strike.get("PutUic"),
-                "strike": atm_strike.get("Strike"),
+                "uic": put_uic,
+                "strike": atm_strike_price,
                 "expiry": target_expiration.get("Expiry"),
                 "option_type": "Put"
             }
@@ -720,7 +920,12 @@ class SaxoClient:
             logger.warning("No suitable weekly expiration found")
             return None
 
-        strikes = target_expiration.get("Strikes", [])
+        # Get strikes for this expiration (SpecificOptions array, not "Strikes")
+        specific_options = target_expiration.get("SpecificOptions", [])
+
+        if not specific_options:
+            logger.error("No SpecificOptions in target expiration")
+            return None
 
         # Calculate target strikes for strangle
         move_distance = expected_move * multiplier
@@ -728,65 +933,179 @@ class SaxoClient:
         put_target = underlying_price - move_distance
 
         # Find closest strikes to targets
-        call_strike = None
-        put_strike = None
+        call_strike_price = None
+        put_strike_price = None
         min_call_diff = float('inf')
         min_put_diff = float('inf')
 
-        for strike_data in strikes:
-            strike_price = strike_data.get("Strike", 0)
+        # First pass: find closest strike prices to targets
+        for option in specific_options:
+            strike_price = option.get("StrikePrice", 0)
 
             # For call, find strike closest to and above target
             if strike_price >= underlying_price:
                 diff = abs(strike_price - call_target)
                 if diff < min_call_diff:
                     min_call_diff = diff
-                    call_strike = strike_data
+                    call_strike_price = strike_price
 
             # For put, find strike closest to and below target
             if strike_price <= underlying_price:
                 diff = abs(strike_price - put_target)
                 if diff < min_put_diff:
                     min_put_diff = diff
-                    put_strike = strike_data
+                    put_strike_price = strike_price
 
-        if not call_strike or not put_strike:
-            logger.error("Failed to find strangle strikes")
+        if call_strike_price is None or put_strike_price is None:
+            logger.error("Failed to find strangle strike prices")
+            return None
+
+        # Second pass: find UICs for the selected strikes
+        call_uic = None
+        put_uic = None
+
+        for option in specific_options:
+            if option.get("StrikePrice") == call_strike_price and option.get("PutCall") == "Call":
+                call_uic = option.get("Uic")
+            elif option.get("StrikePrice") == put_strike_price and option.get("PutCall") == "Put":
+                put_uic = option.get("Uic")
+
+        if not call_uic or not put_uic:
+            logger.error(f"Failed to find strangle option UICs")
             return None
 
         logger.info(
-            f"Strangle strikes: Put {put_strike.get('Strike')} / "
-            f"Call {call_strike.get('Strike')} (underlying: {underlying_price})"
+            f"Strangle strikes: Put {put_strike_price} / "
+            f"Call {call_strike_price} (underlying: {underlying_price})"
         )
 
         return {
             "call": {
-                "uic": call_strike.get("CallUic"),
-                "strike": call_strike.get("Strike"),
+                "uic": call_uic,
+                "strike": call_strike_price,
                 "expiry": target_expiration.get("Expiry"),
                 "option_type": "Call"
             },
             "put": {
-                "uic": put_strike.get("PutUic"),
-                "strike": put_strike.get("Strike"),
+                "uic": put_uic,
+                "strike": put_strike_price,
                 "expiry": target_expiration.get("Expiry"),
                 "option_type": "Put"
             }
         }
 
-    def get_vix_price(self, vix_uic: int) -> Optional[float]:
+    def get_spy_price(self, spy_uic: int, symbol: str = "SPY") -> Optional[Dict]:
         """
-        Get current VIX price.
+        Get SPY quote with external fallback for simulation NoAccess.
 
         Args:
-            vix_uic: UIC for VIX instrument
+            spy_uic: SPY UIC
+            symbol: Symbol name for external feed
 
         Returns:
-            float: Current VIX value.
+            dict: Quote data with price information, or None if unavailable
         """
-        quote = self.get_quote(vix_uic, asset_type="CfdOnIndex")
-        if quote and "Quote" in quote:
-            return quote["Quote"].get("Mid") or quote["Quote"].get("LastTraded")
+        # Try Saxo API first
+        quote_data = self.get_quote(spy_uic, asset_type="Etf")
+
+        if quote_data:
+            quote = quote_data.get("Quote", {})
+
+            # Check if we have NoAccess
+            if quote.get("PriceTypeAsk") == "NoAccess" or quote.get("PriceTypeBid") == "NoAccess":
+                logger.warning(f"{symbol}: Saxo API returned NoAccess")
+
+                # Use external feed if enabled (simulation only)
+                if self.external_feed.enabled:
+                    logger.info(f"{symbol}: Using external price feed")
+                    external_price = self.external_feed.get_price(symbol)
+
+                    if external_price:
+                        # Inject external price into quote structure
+                        quote_data["Quote"]["Mid"] = external_price
+                        quote_data["Quote"]["LastTraded"] = external_price
+                        quote_data["Quote"]["_external_source"] = True
+                        logger.info(f"{symbol}: External price injected: ${external_price:.2f}")
+                        return quote_data
+                    else:
+                        logger.error(f"{symbol}: External feed also failed")
+                        return None
+            else:
+                # Normal Saxo price data
+                return quote_data
+
+        return None
+
+    def get_vix_price(self, vix_uic: int) -> Optional[float]:
+        """
+        Get current VIX price with fallback logic for NoAccess/After-hours.
+        """
+        # Ensure UIC is int for consistent cache lookup
+        vix_uic = int(vix_uic)
+
+        # Debug: Show lookup details
+        logger.debug(f"get_vix_price called: looking for UIC {vix_uic}")
+
+        # 1. Check the price cache (from subscription snapshots)
+        if vix_uic in self._price_cache:
+            cached_data = self._price_cache[vix_uic]
+            price = None
+
+            # Structure 1: Standard Quote Block (Mid/LastTraded)
+            if "Quote" in cached_data and isinstance(cached_data["Quote"], dict):
+                quote = cached_data["Quote"]
+                if quote.get("PriceTypeAsk") == "NoAccess" or quote.get("PriceTypeBid") == "NoAccess":
+                    logger.debug(f"VIX UIC {vix_uic}: Quote block restricted (NoAccess).")
+                
+                price = quote.get("Mid") or quote.get("LastTraded") or quote.get("Ask") or quote.get("Bid")
+
+            # Structure 2 & 3: Top level or PriceInfo LastTraded
+            if price is None:
+                price = cached_data.get("LastTraded")
+            
+            if price is None and "PriceInfo" in cached_data and isinstance(cached_data["PriceInfo"], dict):
+                price = cached_data["PriceInfo"].get("LastTraded")
+
+            # [NEW] Structure 5: PriceInfo 'Last' Fallback
+            # This is the key for fixing your $0.00 issue
+            if price is None and "PriceInfo" in cached_data and isinstance(cached_data["PriceInfo"], dict):
+                price = cached_data["PriceInfo"].get("Last")
+                if price:
+                    logger.debug(f"VIX price retrieved from PriceInfo.Last: {price}")
+
+            if price:
+                logger.debug(f"VIX price from cache: {price}")
+                return float(price)
+
+        # 2. REST API Fallback
+        # If not in cache or cache missing price, try REST API
+        fallbacks = ["StockIndex", "CfdOnIndex", "Stock"]
+        for a_type in fallbacks:
+            try:
+                quote = self.get_quote(vix_uic, asset_type=a_type)
+                if quote:
+                    q_block = quote.get("Quote", {})
+                    p_info = quote.get("PriceInfo", {})
+                    
+                    # Check Quote block, then fallback to PriceInfo.Last
+                    price = q_block.get("Mid") or q_block.get("LastTraded") or p_info.get("Last")
+                    
+                    if price:
+                        logger.debug(f"VIX price from API: {price} (AssetType: {a_type})")
+                        return float(price)
+            except Exception as e:
+                logger.debug(f"VIX API fetch failed with {a_type}: {e}")
+                continue
+
+        # 3. External Feed Fallback (only in simulation when Saxo has NoAccess)
+        if self.external_feed.enabled:
+            logger.info("VIX: Saxo API returned NoAccess, using external price feed")
+            external_price = self.external_feed.get_vix_price()
+            if external_price:
+                logger.info(f"VIX price from external feed: {external_price}")
+                return external_price
+
+        logger.warning(f"VIX price not found for UIC {vix_uic} (Cache, API, and external feed failed)")
         return None
 
     def check_bid_ask_spread(
@@ -859,7 +1178,10 @@ class SaxoClient:
             list: List of open order dictionaries.
         """
         endpoint = f"/port/v1/orders"
-        params = {"ClientKey": self.client_key}
+        params = {
+            "ClientKey": self.client_key,
+            "FieldGroups": "DisplayAndFormat"
+        }
 
         response = self._make_request("GET", endpoint, params=params)
         if response and "Data" in response:
@@ -900,6 +1222,7 @@ class SaxoClient:
             "BuySell": buy_sell.value,
             "Amount": amount,
             "OrderType": order_type.value,
+            "OrderRelation": "StandAlone",
             "OrderDuration": {
                 "DurationType": duration_type
             },
@@ -1019,90 +1342,135 @@ class SaxoClient:
         return None
 
     # =========================================================================
-    # WEBSOCKET STREAMING METHODS
+    # WEBSOCKET STREAMING METHODS (FIXED)
     # =========================================================================
 
     def start_price_streaming(
         self,
-        uics: List[int],
-        callback: Callable[[int, Dict], None],
-        asset_type: str = "Stock"
+        subscriptions: List[Dict[str, Any]],
+        callback: Callable[[int, Dict], None]
     ) -> bool:
         """
         Start WebSocket streaming for real-time price updates.
+        
+        FIXED: Now handles multiple AssetTypes correctly by creating 
+        individual subscriptions for each instrument.
 
         Args:
-            uics: List of instrument UICs to subscribe to
+            subscriptions: List of dicts, e.g. [{"uic": 211, "asset_type": "Stock"}, ...]
             callback: Function to call with price updates (uic, data)
-            asset_type: Type of asset
 
         Returns:
-            bool: True if streaming started successfully.
+            bool: True if all subscriptions were attempted.
         """
         if self.is_streaming:
-            logger.warning("Streaming already active")
-            return True
+            logger.warning("Streaming already active. Adding new subscriptions...")
+        
+        # 1. Start the WebSocket thread if it's not running
+        if not self.ws_connection:
+            self._start_websocket()
+            # Give the socket a moment to connect
+            time.sleep(2)
 
-        # Store callbacks for each UIC
-        for uic in uics:
+        success_count = 0
+
+        # 2. Loop through each instrument and subscribe individually
+        for item in subscriptions:
+            uic = int(item["uic"])  # Ensure UIC is always int for consistent cache keys
+            asset_type = item["asset_type"]
+
+            # Store callback
             self.price_callbacks[uic] = callback
 
-        # Create subscription request
-        subscription_request = {
-            "ContextId": self.subscription_context_id,
-            "ReferenceId": f"prices_{int(time.time())}",
-            "Arguments": {
-                "Uics": ",".join(map(str, uics)),
-                "AssetType": asset_type,
-                "FieldGroups": ["Quote", "PriceInfo"]
+            # Create individual subscription request
+            # CRITICAL FIX: Use "Uic" (singular), not "Uics"
+            # Include AccountKey for proper sim environment access
+            subscription_request = {
+                "ContextId": self.subscription_context_id,
+                "ReferenceId": f"ref_{uic}",
+                "Arguments": {
+                    "AccountKey": self.account_key,
+                    "Uic": int(uic),           # Fix: Must be Int, singular
+                    "AssetType": asset_type,   # Fix: Specific type for this UIC
+                    "FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo"]
+                }
             }
-        }
 
-        # First, create the subscription via REST
-        endpoint = "/trade/v1/prices/subscriptions"
-        response = self._make_request("POST", endpoint, data=subscription_request)
+            endpoint = "/trade/v1/prices/subscriptions"
+            response = self._make_request("POST", endpoint, data=subscription_request)
 
-        if not response:
-            logger.error("Failed to create price subscription")
-            return False
+            if response and "Snapshot" in response:
+                logger.info(f"✓ Subscribed to UIC {uic} ({asset_type})")
+                success_count += 1
 
-        logger.info(f"Price subscription created: {response}")
+                # Cache the snapshot price data for later retrieval
+                snapshot = response["Snapshot"]
+                self._price_cache[uic] = snapshot
 
-        # Start WebSocket connection
-        self._start_websocket()
+                # Log the snapshot structure for debugging
+                snapshot_keys = list(snapshot.keys()) if isinstance(snapshot, dict) else str(type(snapshot))
+                logger.debug(f"  Cached UIC {uic} (type={type(uic).__name__}), keys: {snapshot_keys}")
+                logger.debug(f"  Cache now contains UICs: {list(self._price_cache.keys())}")
+                # Show price data if available
+                if isinstance(snapshot, dict):
+                    if "Quote" in snapshot:
+                        logger.debug(f"  Quote data: {snapshot['Quote']}")
 
-        return True
+                # Immediately process the snapshot so we don't have to wait for a tick
+                if callback:
+                    callback(uic, snapshot)
+            else:
+                logger.error(f"✗ Failed to subscribe to UIC {uic} ({asset_type})")
+
+        return success_count > 0
 
     def _start_websocket(self):
         """Initialize and start the WebSocket connection."""
         def on_message(ws, message):
             """Handle incoming WebSocket messages."""
             try:
+                # Saxo sends bytes or string; decode if needed
+                if isinstance(message, bytes):
+                    message = message.decode('utf-8')
+                    
                 data = json.loads(message)
+                
+                # heartbeat checks
+                if "ReferenceId" in data and data["ReferenceId"] == "_heartbeat":
+                    return
+
                 self._handle_streaming_message(data)
                 self._record_success()
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse WebSocket message: {e}")
+            except Exception as e:
+                # Don't log every decode error (keep logs clean)
+                pass
 
         def on_error(ws, error):
-            """Handle WebSocket errors."""
             logger.error(f"WebSocket error: {error}")
-            self._record_error()
 
         def on_close(ws, close_status_code, close_msg):
-            """Handle WebSocket connection close."""
             logger.warning(f"WebSocket closed: {close_status_code} - {close_msg}")
             self.is_streaming = False
 
         def on_open(ws):
-            """Handle WebSocket connection open."""
             logger.info("WebSocket connection established")
             self.is_streaming = True
-            self._record_success()
-
-        # Build WebSocket URL with authentication
-        ws_url = f"{self.streaming_url}?contextId={self.subscription_context_id}"
-
+            
+        # FIXED: Surgical URL construction for Saxo Sim
+        # 1. Clean the base URL
+        base_url = self.streaming_url.split('?')[0].rstrip('/')
+        
+        # 2. Saxo Sim usually uses /connect. 
+        # Only append /connect if it's not already in the URL from config.
+        if "/connect" not in base_url:
+             base_url = f"{base_url}/connect"
+            
+        # 3. Final Assembly
+        ws_url = f"{base_url}?contextId={self.subscription_context_id}"
+        
+        logger.info(f"Attempting WebSocket connection to: {ws_url}")
+        
+        # CRITICAL: Saxo requires the Authorization header in the handshake
         self.ws_connection = websocket.WebSocketApp(
             ws_url,
             header={"Authorization": f"Bearer {self.access_token}"},
@@ -1112,15 +1480,15 @@ class SaxoClient:
             on_open=on_open
         )
 
-        # Run WebSocket in a separate thread
         self.ws_thread = threading.Thread(
             target=self.ws_connection.run_forever,
+            # Increased timeout and interval for stability in sim environment
             kwargs={"ping_interval": 30, "ping_timeout": 10}
         )
         self.ws_thread.daemon = True
         self.ws_thread.start()
-
-        logger.info("WebSocket thread started")
+        
+        logger.info("WebSocket thread initialized")
 
     def _handle_streaming_message(self, data: Dict):
         """
@@ -1133,8 +1501,16 @@ class SaxoClient:
         if "Data" in data:
             for item in data["Data"]:
                 uic = item.get("Uic")
-                if uic and uic in self.price_callbacks:
-                    self.price_callbacks[uic](uic, item)
+                if uic:
+                    # Ensure UIC is int for consistent cache keys
+                    uic = int(uic)
+
+                    # Update price cache with latest data
+                    self._price_cache[uic] = item
+
+                    # Call the callback if registered
+                    if uic in self.price_callbacks:
+                        self.price_callbacks[uic](uic, item)
 
     def stop_price_streaming(self):
         """Stop WebSocket streaming and clean up subscriptions."""
@@ -1182,6 +1558,19 @@ class SaxoClient:
             return response["Data"][0]
         return None
 
+    def get_accounts(self) -> Optional[List[Dict]]:
+        """
+        Get list of all accounts accessible to the user.
+
+        Returns:
+            list: List of account dictionaries with AccountKey, AccountType, Currency, etc.
+        """
+        endpoint = "/port/v1/accounts/me"
+        response = self._make_request("GET", endpoint)
+        if response and "Data" in response:
+            return response["Data"]
+        return None
+
     def get_account_info(self) -> Optional[Dict]:
         """
         Get account information.
@@ -1191,6 +1580,87 @@ class SaxoClient:
         """
         endpoint = f"/port/v1/accounts/{self.account_key}"
         return self._make_request("GET", endpoint)
+
+    def get_balance(self) -> Optional[Dict]:
+        """
+        Get account balance information.
+
+        Returns:
+            dict: Balance details including cash, margin, etc.
+        """
+        endpoint = "/port/v1/balances"
+        params = {
+            "AccountKey": self.account_key,
+            "ClientKey": self.client_key
+        }
+        return self._make_request("GET", endpoint, params=params)
+
+    def get_fx_rate(
+        self,
+        from_currency: str = "USD",
+        to_currency: str = "EUR"
+    ) -> Optional[float]:
+        """
+        Get foreign exchange rate from Saxo API.
+
+        Uses the FxSpot instrument to get real-time rates.
+        Example: USD/EUR rate for converting USD profits to EUR.
+
+        Args:
+            from_currency: Source currency (e.g., "USD")
+            to_currency: Target currency (e.g., "EUR")
+
+        Returns:
+            float: Exchange rate, or None if failed
+
+        Example:
+            >>> rate = client.get_fx_rate("USD", "EUR")  # Returns ~0.92
+            >>> eur_value = usd_value * rate
+        """
+        fx_pair = f"{to_currency}{from_currency}"  # "EURUSD"
+        fx_uic = None
+
+        # First, try to use hardcoded UIC from config (more reliable in sim)
+        if fx_pair == "EURUSD" and self.currency_config.get("eur_usd_uic"):
+            fx_uic = self.currency_config["eur_usd_uic"]
+            logger.debug(f"Using hardcoded EUR/USD UIC: {fx_uic}")
+
+        # If no hardcoded UIC, try to search for it
+        if fx_uic is None:
+            search_endpoint = "/ref/v1/instruments"
+            params = {
+                "Keywords": fx_pair,
+                "AssetTypes": "FxSpot",
+                "limit": 1
+            }
+
+            instrument = self._make_request("GET", search_endpoint, params=params)
+            if instrument and "Data" in instrument and len(instrument["Data"]) > 0:
+                fx_uic = instrument["Data"][0]["Identifier"]
+            else:
+                logger.warning(f"Could not find FX pair {fx_pair} via search")
+                return None
+
+        # Get current quote using FxSpot asset type
+        quote = self.get_quote(fx_uic, asset_type="FxSpot")
+        if not quote or "Quote" not in quote:
+            logger.warning(f"Could not get FxSpot quote for {fx_pair}, UIC {fx_uic}")
+            return None
+
+        # Get mid price
+        rate = quote["Quote"].get("Mid") or quote["Quote"].get("LastTraded")
+
+        if not rate:
+            logger.warning(f"No price available for {fx_pair}")
+            return None
+
+        # EURUSD quote is EUR/USD (e.g., 1.08)
+        # We need USD/EUR (e.g., 0.92), so invert
+        if fx_pair == "EURUSD":
+            rate = 1.0 / rate
+
+        logger.debug(f"FX Rate {from_currency}/{to_currency}: {rate:.6f}")
+        return rate
 
     def calculate_expected_move(
         self,

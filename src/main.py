@@ -15,10 +15,12 @@ Strategy Summary:
 
 Usage:
 ------
-    python main.py                    # Run with default config
-    python main.py --config my.json   # Run with custom config
-    python main.py --dry-run          # Simulate without trading
+    python main.py                    # Run in SIM environment (paper trading)
+    python main.py --live             # Run in LIVE environment (real money)
+    python main.py --dry-run          # Simulate without placing orders
+    python main.py --live --dry-run   # Test with live data, no order execution
     python main.py --status           # Show current status only
+    python main.py --config my.json   # Use custom config file
 
 Author: Trading Bot Developer
 Date: 2024
@@ -35,9 +37,9 @@ from datetime import datetime
 from typing import Optional
 
 # Import bot modules
-from saxo_client import SaxoClient
-from strategy import DeltaNeutralStrategy, StrategyState
-from logger_service import TradeLoggerService, setup_logging
+from src.saxo_client import SaxoClient
+from src.strategy import DeltaNeutralStrategy, StrategyState
+from src.logger_service import TradeLoggerService, setup_logging
 
 # Configure main logger
 logger = logging.getLogger(__name__)
@@ -57,7 +59,7 @@ def signal_handler(signum, frame):
     shutdown_requested = True
 
 
-def load_config(config_path: str = "config.json") -> dict:
+def load_config(config_path: str = "config/config.json") -> dict:
     """
     Load configuration from JSON file.
 
@@ -94,20 +96,28 @@ def validate_config(config: dict) -> bool:
     Returns:
         bool: True if valid, raises ValueError otherwise
     """
-    required_keys = [
-        ("saxo_api", "app_key"),
-        ("saxo_api", "app_secret"),
-        ("account", "account_key"),
-        ("account", "client_key"),
-    ]
+    # Check account keys
+    if "account" not in config:
+        raise ValueError("Missing config section: account")
+    if "account_key" not in config["account"]:
+        raise ValueError("Missing config key: account.account_key")
+    if "client_key" not in config["account"]:
+        raise ValueError("Missing config key: account.client_key")
 
-    for section, key in required_keys:
-        if section not in config:
-            raise ValueError(f"Missing config section: {section}")
-        if key not in config[section]:
-            raise ValueError(f"Missing config key: {section}.{key}")
-        if config[section][key].startswith("YOUR_"):
-            logger.warning(f"Config placeholder detected: {section}.{key} - Please update with real values")
+    # Check saxo_api section exists
+    if "saxo_api" not in config:
+        raise ValueError("Missing config section: saxo_api")
+
+    # Validate environment-specific credentials
+    environment = config["saxo_api"].get("environment", "sim")
+    if environment not in config["saxo_api"]:
+        raise ValueError(f"Missing config section: saxo_api.{environment}")
+
+    env_config = config["saxo_api"][environment]
+    if "app_key" not in env_config or not env_config["app_key"]:
+        raise ValueError(f"Missing app_key for {environment} environment")
+    if "app_secret" not in env_config or not env_config["app_secret"]:
+        raise ValueError(f"Missing app_secret for {environment} environment")
 
     return True
 
@@ -129,6 +139,69 @@ def print_banner():
     ╚═══════════════════════════════════════════════════════════════╝
     """
     print(banner)
+
+
+def list_accounts(config: dict):
+    """
+    List all available accounts for the authenticated user.
+
+    Args:
+        config: Configuration dictionary
+    """
+    # Initialize logging (required for SaxoClient)
+    setup_logging(config)
+
+    # Initialize Saxo client
+    client = SaxoClient(config)
+
+    # Authenticate with Saxo API
+    print("\nAuthenticating...")
+    if not client.authenticate():
+        print("❌ Failed to authenticate. Please check your credentials.")
+        return
+
+    print("✅ Authentication successful!\n")
+
+    # Get list of accounts
+    print("Fetching accounts...\n")
+    accounts = client.get_accounts()
+
+    if not accounts:
+        print("❌ No accounts found or failed to fetch accounts.")
+        return
+
+    print("=" * 80)
+    print("AVAILABLE ACCOUNTS")
+    print("=" * 80)
+
+    for idx, account in enumerate(accounts, 1):
+        print(f"\n{idx}. Account Key: {account.get('AccountKey')}")
+        print(f"   Account Type: {account.get('AccountType')}")
+        print(f"   Currency: {account.get('Currency')}")
+        print(f"   Account ID: {account.get('AccountId')}")
+
+        # Show if this is the currently configured account
+        if account.get('AccountKey') == config["account"].get("account_key"):
+            print(f"   ⭐ CURRENTLY CONFIGURED")
+
+        # Show account balance if available
+        client_temp = SaxoClient(config)
+        client_temp.access_token = client.access_token
+        client_temp.account_key = account.get('AccountKey')
+        client_temp.client_key = account.get('ClientKey', account.get('AccountKey'))
+
+        balance = client_temp.get_balance()
+        if balance:
+            total = balance.get('TotalValue', 0)
+            currency = balance.get('Currency', 'USD')
+            print(f"   Balance: {total:,.2f} {currency}")
+
+    print("\n" + "=" * 80)
+    print("\nTo use a specific account, run:")
+    print(f"  python main.py --account <ACCOUNT_KEY>")
+    print(f"\nExample:")
+    print(f"  python main.py --live --account {accounts[0].get('AccountKey')}")
+    print("=" * 80 + "\n")
 
 
 def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
@@ -165,19 +238,20 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     strategy = DeltaNeutralStrategy(client, config, trade_logger)
 
     # Start real-time price streaming
-    underlying_uic = config["strategy"]["underlying_uic"]
-    trade_logger.log_event(f"Starting price streaming for UIC {underlying_uic}...")
+    # FIXED: Define full subscription details with correct AssetTypes to avoid 404 errors
+    subscriptions = [
+        {"uic": config["strategy"]["underlying_uic"], "asset_type": "Etf"},
+        {"uic": config["strategy"]["vix_uic"], "asset_type": "StockIndex"} # Keep as StockIndex
+    ]
+    
+    trade_logger.log_event(f"Starting price streaming for {len(subscriptions)} instruments...")
 
     def price_update_handler(uic: int, data: dict):
         """Handle real-time price updates."""
         strategy.handle_price_update(uic, data)
 
-    streaming_started = client.start_price_streaming(
-        uics=[underlying_uic],
-        callback=price_update_handler,
-        asset_type="Etf"
-    )
-
+    # FIXED: Pass the list of dicts to the new start_price_streaming method
+    streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
     if not streaming_started:
         trade_logger.log_event("Warning: Real-time streaming not started. Using polling mode.")
 
@@ -204,19 +278,22 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     time.sleep(check_interval)
                     continue
 
-                # Run strategy check
-                if not dry_run:
-                    action = strategy.run_strategy_check()
-                    if action != "No action":
-                        trade_logger.log_event(f"ACTION: {action}")
-                else:
-                    # Dry run - just update market data and report
-                    strategy.update_market_data()
+                # Run strategy check (works in both live and dry-run)
+                action = strategy.run_strategy_check()
+
+                if dry_run:
+                    # In dry-run, prefix all actions with [DRY RUN]
                     status = strategy.get_status_summary()
                     trade_logger.log_event(
                         f"[DRY RUN] SPY: ${status['underlying_price']:.2f} | "
                         f"VIX: {status['vix']:.2f} | State: {status['state']}"
                     )
+                    if action != "No action":
+                        trade_logger.log_event(f"[DRY RUN] ACTION: {action}")
+                else:
+                    # Live mode
+                    if action != "No action":
+                        trade_logger.log_event(f"ACTION: {action}")
 
                 # Periodic status logging
                 now = datetime.now()
@@ -325,9 +402,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                     Run bot with default config
-  python main.py --dry-run           Simulate without trading
+  python main.py                     Run in SIM environment (paper trading)
+  python main.py --live              Run in LIVE environment (real money)
+  python main.py --dry-run           Simulate without placing orders
+  python main.py --live --dry-run    Test with live data, no orders
   python main.py --status            Show current status only
+  python main.py --status --live     Show status on live account
   python main.py --config prod.json  Use custom config file
   python main.py --interval 30       Check every 30 seconds
         """
@@ -335,8 +415,8 @@ Examples:
 
     parser.add_argument(
         "--config", "-c",
-        default="config.json",
-        help="Path to configuration file (default: config.json)"
+        default="config/config.json",
+        help="Path to configuration file (default: config/config.json)"
     )
 
     parser.add_argument(
@@ -364,6 +444,24 @@ Examples:
         help="Enable verbose logging (DEBUG level)"
     )
 
+    parser.add_argument(
+        "--live", "-l",
+        action="store_true",
+        help="Use LIVE environment (real money trading) instead of SIM"
+    )
+
+    parser.add_argument(
+        "--account",
+        type=str,
+        help="Account key to use (overrides config.json). Use --list-accounts to see available accounts."
+    )
+
+    parser.add_argument(
+        "--list-accounts",
+        action="store_true",
+        help="List all available accounts and exit"
+    )
+
     args = parser.parse_args()
 
     # Print banner
@@ -373,12 +471,28 @@ Examples:
         # Load configuration
         config = load_config(args.config)
 
+        # Override environment if --live flag is used
+        if args.live:
+            config["saxo_api"]["environment"] = "live"
+            print("\n⚠️  WARNING: LIVE ENVIRONMENT ENABLED - REAL MONEY TRADING ⚠️\n")
+
         # Override log level if verbose
         if args.verbose:
             config["logging"]["log_level"] = "DEBUG"
 
+        # Override account if specified
+        if args.account:
+            config["account"]["account_key"] = args.account
+            config["account"]["client_key"] = args.account
+            print(f"Using account: {args.account[:8]}...")
+
         # Validate configuration
         validate_config(config)
+
+        # Handle list-accounts mode
+        if args.list_accounts:
+            list_accounts(config)
+            return
 
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, signal_handler)

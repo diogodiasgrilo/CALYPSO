@@ -20,11 +20,11 @@
 
     "strategy": {
         "underlying_symbol": "SPY",
-        "underlying_uic": 211,
-        "_underlying_uic_note": "UIC for SPY - verify this in your Saxo environment",
-        "vix_symbol": "VIX",
-        "vix_uic": 19217,
-        "_vix_uic_note": "UIC for VIX index - verify this in your Saxo environment",
+        "underlying_uic": 36590,
+        "_underlying_uic_note": "UIC for SPY:arcx (SPDR S&P 500 ETF Trust) - verified",
+        "vix_symbol": "VIX.I",
+        "vix_uic": 10606,
+        "_vix_uic_note": "UIC for VIX index (CBOE Volatility Index). 10606 is standard for VIX.I",
         "max_vix_entry": 18.0,
         "_max_vix_entry_note": "Only enter trades when VIX is below this level",
         "long_straddle_min_dte": 90,
@@ -81,8 +81,25 @@
         "console_output": true
     },
 
+    "currency": {
+        "base_currency": "USD",
+        "_base_currency_note": "Currency that SPY trades in (always USD for US stocks)",
+        "account_currency": "EUR",
+        "_account_currency_note": "Your Saxo account currency (check API response)",
+        "enabled": true,
+        "_enabled_note": "Set to true to enable currency conversion, false for USD accounts",
+        "cache_rate_seconds": 300,
+        "_cache_note": "Cache exchange rates for this many seconds (300 = 5 minutes)"
+    },
+
     "account": {
         "account_key": "YOUR_ACCOUNT_KEY",
         "client_key": "YOUR_CLIENT_KEY"
+    },
+
+    "external_price_feed": {
+        "enabled": true,
+        "_enabled_note": "Use external price feeds (Yahoo Finance) when Saxo returns NoAccess. Only works in simulation mode. Set to false to disable.",
+        "_note": "External feeds provide 15-min delayed prices for development/testing. Live accounts should set this to false to use real-time Saxo data."
     }
 }

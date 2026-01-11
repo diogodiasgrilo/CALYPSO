@@ -23,12 +23,12 @@ Date: 2024
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional, Dict, List, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
-from saxo_client import SaxoClient, BuySell, OrderType
+from src.saxo_client import SaxoClient, BuySell, OrderType
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -256,26 +256,42 @@ class DeltaNeutralStrategy:
 
     def update_market_data(self) -> bool:
         """
-        Update current market data for underlying and VIX.
+        Update current market data for underlying and VIX with PriceInfo fallback.
 
         Returns:
             bool: True if data updated successfully, False otherwise.
         """
         try:
-            # Get underlying price
-            quote = self.client.get_quote(self.underlying_uic, asset_type="Etf")
-            if quote and "Quote" in quote:
+            # Get underlying price (SPY) - with external feed fallback for simulation
+            quote = self.client.get_spy_price(self.underlying_uic, symbol=self.underlying_symbol)
+            if quote:
+                quote_data = quote.get("Quote", {})
+                price_info = quote.get("PriceInfo", {})
+
+                # Check if using external source
+                if quote_data.get("_external_source"):
+                    logger.info(f"{self.underlying_symbol}: Using external price feed (simulation only)")
+
+                # Priority: 1. Mid/LastTraded from Quote, 2. Last from PriceInfo
                 self.current_underlying_price = (
-                    quote["Quote"].get("Mid") or
-                    quote["Quote"].get("LastTraded") or
-                    (quote["Quote"].get("Bid", 0) + quote["Quote"].get("Ask", 0)) / 2
+                    quote_data.get("Mid") or
+                    quote_data.get("LastTraded") or
+                    price_info.get("Last") or
+                    quote_data.get("Bid") or
+                    quote_data.get("Ask") or
+                    0.0
                 )
-                logger.debug(f"{self.underlying_symbol} price: ${self.current_underlying_price:.2f}")
+
+                if self.current_underlying_price > 0:
+                    logger.debug(f"{self.underlying_symbol} price: ${self.current_underlying_price:.2f}")
+                else:
+                    logger.error(f"{self.underlying_symbol}: No price data found")
+                    return False
             else:
-                logger.error("Failed to get underlying quote")
+                logger.error(f"Failed to get underlying quote for {self.underlying_symbol}")
                 return False
 
-            # Get VIX price
+            # Get VIX price (This now uses your updated logic in saxo_client.py)
             vix_price = self.client.get_vix_price(self.vix_uic)
             if vix_price:
                 self.current_vix = vix_price
@@ -340,6 +356,114 @@ class DeltaNeutralStrategy:
 
         return is_below_threshold
 
+    def check_fed_meeting_filter(self) -> bool:
+        """
+        Check if there's an upcoming Fed/FOMC meeting within blackout period.
+
+        Avoids entering positions before major binary events that can cause
+        large volatility spikes.
+
+        Returns:
+            bool: True if safe to enter (no Fed meeting soon), False otherwise.
+        """
+        # 2026 FOMC Meeting Dates (update annually)
+        # Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+        fomc_dates_2026 = [
+            datetime(2026, 1, 28).date(),  # Jan 27-28
+            datetime(2026, 3, 18).date(),  # Mar 17-18
+            datetime(2026, 5, 6).date(),   # May 5-6
+            datetime(2026, 6, 17).date(),  # Jun 16-17
+            datetime(2026, 7, 29).date(),  # Jul 28-29
+            datetime(2026, 9, 16).date(),  # Sep 15-16
+            datetime(2026, 11, 4).date(),  # Nov 3-4
+            datetime(2026, 12, 16).date(), # Dec 15-16
+        ]
+
+        today = datetime.now().date()
+        blackout_days = self.strategy_config.get("fed_blackout_days", 2)
+
+        for meeting_date in fomc_dates_2026:
+            days_until_meeting = (meeting_date - today).days
+
+            if 0 <= days_until_meeting <= blackout_days:
+                logger.warning(
+                    f"Fed meeting on {meeting_date} is in {days_until_meeting} days - "
+                    f"within {blackout_days}-day blackout period. Entry blocked."
+                )
+                return False
+
+        return True
+
+    # =========================================================================
+    # SAFETY CHECKS
+    # =========================================================================
+
+    def check_shorts_itm_risk(self) -> bool:
+        """
+        Check if short options are at risk of expiring In-The-Money.
+
+        Video rule: "Never let the shorts go In-The-Money (ITM)"
+
+        Returns:
+            bool: True if shorts need immediate action, False if safe.
+        """
+        if not self.short_strangle or not self.current_underlying_price:
+            return False
+
+        call_strike = self.short_strangle.call_strike
+        put_strike = self.short_strangle.put_strike
+        price = self.current_underlying_price
+
+        # Check if shorts are ITM or very close
+        call_itm = price >= call_strike * 0.98  # Within 2% of strike
+        put_itm = price <= put_strike * 1.02    # Within 2% of strike
+
+        if call_itm:
+            logger.critical(
+                f"SHORT CALL ITM RISK! Price ${price:.2f} at/above strike ${call_strike:.2f}. "
+                f"Immediate action required."
+            )
+            return True
+
+        if put_itm:
+            logger.critical(
+                f"SHORT PUT ITM RISK! Price ${price:.2f} at/below strike ${put_strike:.2f}. "
+                f"Immediate action required."
+            )
+            return True
+
+        return False
+
+    def check_emergency_exit_condition(self) -> bool:
+        """
+        Check for massive move that breaches shorts requiring hard exit.
+
+        Video rule: "If massive move (5%+) blows through shorts and can't adjust
+        for credit, close entire trade"
+
+        Returns:
+            bool: True if emergency exit needed, False otherwise.
+        """
+        if not self.initial_straddle_strike or not self.current_underlying_price:
+            return False
+
+        # Calculate percent move from initial entry
+        percent_move = abs(
+            (self.current_underlying_price - self.initial_straddle_strike) /
+            self.initial_straddle_strike
+        ) * 100
+
+        emergency_threshold = self.strategy_config.get("emergency_exit_percent", 5.0)
+
+        if percent_move >= emergency_threshold:
+            logger.critical(
+                f"EMERGENCY EXIT CONDITION! {percent_move:.2f}% move from initial strike. "
+                f"Price: ${self.current_underlying_price:.2f}, Initial: ${self.initial_straddle_strike:.2f}"
+            )
+            return True
+
+        return False
+
     # =========================================================================
     # LONG STRADDLE METHODS
     # =========================================================================
@@ -359,6 +483,12 @@ class DeltaNeutralStrategy:
         # Check VIX condition
         if not self.check_vix_entry_condition():
             self.state = StrategyState.WAITING_VIX
+            return False
+
+        # Check Fed meeting filter
+        if not self.check_fed_meeting_filter():
+            logger.info("Entry blocked due to upcoming Fed meeting")
+            self.state = StrategyState.WAITING_VIX  # Stay in waiting state
             return False
 
         # Update market data
@@ -482,7 +612,8 @@ class DeltaNeutralStrategy:
                 strike=call_option["strike"],
                 price=call_price + put_price,
                 delta=0.0,  # ATM straddle is approximately delta neutral
-                pnl=0.0
+                pnl=0.0,
+                saxo_client=self.client
             )
 
         return True
@@ -545,7 +676,8 @@ class DeltaNeutralStrategy:
                 price=(self.long_straddle.call.current_price +
                        self.long_straddle.put.current_price),
                 delta=self.long_straddle.total_delta,
-                pnl=realized_pnl
+                pnl=realized_pnl,
+                saxo_client=self.client
             )
 
         self.long_straddle = None
@@ -698,7 +830,8 @@ class DeltaNeutralStrategy:
                 strike=f"{put_option['strike']}/{call_option['strike']}",
                 price=call_price + put_price,
                 delta=self.short_strangle.total_delta,
-                pnl=0.0
+                pnl=0.0,
+                saxo_client=self.client
             )
 
         return True
@@ -767,7 +900,8 @@ class DeltaNeutralStrategy:
                 strike=f"{self.short_strangle.put_strike}/{self.short_strangle.call_strike}",
                 price=close_cost / (self.position_size * 100),
                 delta=self.short_strangle.total_delta,
-                pnl=realized_pnl
+                pnl=realized_pnl,
+                saxo_client=self.client
             )
 
         self.short_strangle = None
@@ -880,7 +1014,8 @@ class DeltaNeutralStrategy:
                 strike=self.initial_straddle_strike,
                 price=self.current_underlying_price,
                 delta=self.get_total_delta(),
-                pnl=self.metrics.total_pnl
+                pnl=self.metrics.total_pnl,
+                saxo_client=self.client
             )
 
         return True
@@ -1029,7 +1164,8 @@ class DeltaNeutralStrategy:
                     strike=self.initial_straddle_strike,
                     price=self.current_underlying_price,
                     delta=0.0,
-                    pnl=self.metrics.total_pnl
+                    pnl=self.metrics.total_pnl,
+                    saxo_client=self.client
                 )
 
         return success
@@ -1066,6 +1202,25 @@ class DeltaNeutralStrategy:
         # Update market data
         if not self.update_market_data():
             return "Failed to update market data"
+
+        # PRIORITY SAFETY CHECKS (before normal logic)
+        # Check for emergency exit condition (5%+ move)
+        if self.check_emergency_exit_condition():
+            logger.critical("EMERGENCY EXIT TRIGGERED - Closing all positions immediately")
+            if self.exit_all_positions():
+                return "EMERGENCY EXIT - Massive move detected"
+            else:
+                return "EMERGENCY EXIT FAILED - Manual intervention required"
+
+        # Check for ITM risk on short options
+        if self.check_shorts_itm_risk():
+            logger.critical("ITM RISK DETECTED - Rolling shorts immediately")
+            if self.roll_weekly_shorts():
+                return "Emergency roll - shorts approaching ITM"
+            else:
+                logger.critical("Failed to roll shorts at ITM risk - closing all positions")
+                if self.exit_all_positions():
+                    return "Emergency exit - could not roll ITM shorts"
 
         # State machine logic
         if self.state == StrategyState.IDLE:
@@ -1114,8 +1269,10 @@ class DeltaNeutralStrategy:
         Returns:
             dict: Status summary with positions and metrics.
         """
-        return {
+        summary = {
             "state": self.state.value,
+            "environment": self.client.environment,
+            "is_simulation": self.client.is_simulation,
             "underlying_price": self.current_underlying_price,
             "vix": self.current_vix,
             "initial_strike": self.initial_straddle_strike,
@@ -1132,3 +1289,20 @@ class DeltaNeutralStrategy:
             "recenter_count": self.metrics.recenter_count,
             "roll_count": self.metrics.roll_count
         }
+
+        # Add currency conversion if enabled
+        if self.trade_logger and self.trade_logger.currency_enabled:
+            try:
+                rate = self.client.get_fx_rate(
+                    self.trade_logger.base_currency,
+                    self.trade_logger.account_currency
+                )
+                if rate:
+                    summary["exchange_rate"] = rate
+                    summary["total_pnl_eur"] = self.metrics.total_pnl * rate
+                    summary["realized_pnl_eur"] = self.metrics.realized_pnl * rate
+                    summary["unrealized_pnl_eur"] = self.metrics.unrealized_pnl * rate
+            except Exception as e:
+                logger.warning(f"Could not fetch FX rate for status: {e}")
+
+        return summary

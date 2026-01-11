@@ -41,17 +41,18 @@ env/
 .settings/
 
 # Configuration files with secrets - NEVER COMMIT THESE!
-config.json
-config.*.json
-!config.example.json
+config/config.json
+config/config.*.json
+!config/config.example.json
 
 # Google credentials - NEVER COMMIT!
-google_credentials.json
-*credentials*.json
+config/google_credentials.json
+config/*credentials*.json
 *.pem
 *.key
 
 # Log files
+logs/
 *.log
 *.txt
 bot_log*.txt
