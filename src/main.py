@@ -36,11 +36,19 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+# Ensure project root is in path for imports when running as script
+# This allows both `python src/main.py` and `python -m src.main` to work
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 # Import bot modules
 from src.saxo_client import SaxoClient
 from src.strategy import DeltaNeutralStrategy, StrategyState
 from src.logger_service import TradeLoggerService, setup_logging
 from src.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration
+from src.config_loader import ConfigLoader, get_config_loader
+from src.secret_manager import is_running_on_gcp
 
 # Configure main logger
 logger = logging.getLogger(__name__)
@@ -60,30 +68,45 @@ def signal_handler(signum, frame):
     shutdown_requested = True
 
 
-def load_config(config_path: str = "config/config.json") -> dict:
+def interruptible_sleep(seconds: int, check_interval: int = 5) -> bool:
     """
-    Load configuration from JSON file.
+    Sleep for the specified duration, but check for shutdown signal periodically.
 
     Args:
-        config_path: Path to the configuration file
+        seconds: Total seconds to sleep
+        check_interval: How often to check for shutdown (default 5 seconds)
+
+    Returns:
+        bool: True if sleep completed, False if interrupted by shutdown
+    """
+    remaining = seconds
+    while remaining > 0 and not shutdown_requested:
+        time.sleep(min(check_interval, remaining))
+        remaining -= check_interval
+    return not shutdown_requested
+
+
+def load_config(config_path: str = "config/config.json") -> dict:
+    """
+    Load configuration from appropriate source (cloud or local).
+
+    On GCP: Loads from Secret Manager (always LIVE environment)
+    Locally: Loads from config.json (supports SIM or LIVE via --live flag)
+
+    Args:
+        config_path: Path to local configuration file (used in local mode only)
 
     Returns:
         dict: Configuration dictionary
 
     Raises:
-        FileNotFoundError: If config file doesn't exist
-        json.JSONDecodeError: If config file is invalid JSON
+        FileNotFoundError: If local config file doesn't exist (local mode)
+        ValueError: If required secrets not found (cloud mode)
     """
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(
-            f"Configuration file not found: {config_path}\n"
-            f"Please copy config.json.example to {config_path} and fill in your credentials."
-        )
+    # Use smart config loader that auto-detects environment
+    loader = ConfigLoader(config_path)
+    config = loader.load_config()
 
-    with open(config_path, "r") as f:
-        config = json.load(f)
-
-    logger.info(f"Configuration loaded from: {config_path}")
     return config
 
 
@@ -97,13 +120,28 @@ def validate_config(config: dict) -> bool:
     Returns:
         bool: True if valid, raises ValueError otherwise
     """
-    # Check account keys
+    # Check account keys (supports both old and new structure)
     if "account" not in config:
         raise ValueError("Missing config section: account")
-    if "account_key" not in config["account"]:
-        raise ValueError("Missing config key: account.account_key")
-    if "client_key" not in config["account"]:
-        raise ValueError("Missing config key: account.client_key")
+
+    # Get the environment to validate the correct account keys
+    environment = config.get("saxo_api", {}).get("environment", "sim")
+    account_config = config["account"]
+
+    # Check for new structure (account.sim / account.live) or legacy (account.account_key)
+    if environment in account_config and isinstance(account_config[environment], dict):
+        # New structure
+        env_account = account_config[environment]
+        if "account_key" not in env_account:
+            raise ValueError(f"Missing config key: account.{environment}.account_key")
+        if "client_key" not in env_account:
+            raise ValueError(f"Missing config key: account.{environment}.client_key")
+    else:
+        # Legacy structure
+        if "account_key" not in account_config:
+            raise ValueError("Missing config key: account.account_key")
+        if "client_key" not in account_config:
+            raise ValueError("Missing config key: account.client_key")
 
     # Check saxo_api section exists
     if "saxo_api" not in config:
@@ -182,7 +220,13 @@ def list_accounts(config: dict):
         print(f"   Account ID: {account.get('AccountId')}")
 
         # Show if this is the currently configured account
-        if account.get('AccountKey') == config["account"].get("account_key"):
+        env = config["saxo_api"].get("environment", "sim")
+        account_cfg = config["account"]
+        if env in account_cfg and isinstance(account_cfg[env], dict):
+            configured_key = account_cfg[env].get("account_key")
+        else:
+            configured_key = account_cfg.get("account_key")
+        if account.get('AccountKey') == configured_key:
             print(f"   ⭐ CURRENTLY CONFIGURED")
 
         # Show account balance if available
@@ -235,8 +279,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
 
     trade_logger.log_event("Authentication successful!")
 
-    # Initialize strategy
-    strategy = DeltaNeutralStrategy(client, config, trade_logger)
+    # Initialize strategy (pass dry_run flag)
+    strategy = DeltaNeutralStrategy(client, config, trade_logger, dry_run=dry_run)
+
+    # CRITICAL: Attempt to recover existing positions on startup
+    # This handles bot restarts, GCP VM reboots, and crash recovery
+    trade_logger.log_event("Checking for existing positions to recover...")
+    positions_recovered = strategy.recover_positions()
+    if positions_recovered:
+        trade_logger.log_event(f"Position recovery complete - resuming with state: {strategy.state.value}")
+    else:
+        trade_logger.log_event("No existing positions found - starting fresh")
 
     # Start real-time price streaming
     # FIXED: Define full subscription details with correct AssetTypes to avoid 404 errors
@@ -263,12 +316,22 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
 
     last_status_time = datetime.now()
     status_interval = 300  # Log status every 5 minutes
+    last_daily_summary_date = None  # Track last daily summary logged
+    trading_day_started = False  # Track if we've started tracking for today
 
     try:
         while not shutdown_requested:
             try:
                 # Check if market is open
                 if not is_market_open():
+                    # If market just closed and we haven't logged today's summary, do it now
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    if trading_day_started and last_daily_summary_date != today:
+                        trade_logger.log_event("Market closed - logging daily summary...")
+                        strategy.log_daily_summary()
+                        last_daily_summary_date = today
+                        trading_day_started = False
+
                     market_status = get_market_status_message()
                     trade_logger.log_event(market_status)
 
@@ -282,22 +345,35 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                             f"Sleeping for {hours}h {minutes}m. "
                             f"Bot will wake up to recheck market status."
                         )
-                        time.sleep(sleep_time)
+                        if not interruptible_sleep(sleep_time):
+                            break  # Shutdown requested
                     else:
-                        time.sleep(60)  # Recheck in 1 minute if close to market open
+                        if not interruptible_sleep(60):
+                            break  # Shutdown requested
                     continue
 
                 # Check circuit breaker
                 if client.is_circuit_open():
                     trade_logger.log_event("Circuit breaker is OPEN - waiting for cooldown...")
-                    time.sleep(check_interval)
+                    if not interruptible_sleep(check_interval):
+                        break  # Shutdown requested
                     continue
 
                 # Check connection timeout
                 if client.check_connection_timeout():
                     trade_logger.log_error("Connection timeout detected - circuit breaker activated")
-                    time.sleep(check_interval)
+                    if not interruptible_sleep(check_interval):
+                        break  # Shutdown requested
                     continue
+
+                # Start daily tracking if this is first check of the trading day
+                if not trading_day_started:
+                    strategy.start_new_trading_day()
+                    trading_day_started = True
+                    trade_logger.log_event("Daily tracking initialized")
+
+                # Update intraday tracking (SPY high/low, VIX high, etc.)
+                strategy.update_intraday_tracking()
 
                 # Run strategy check (works in both live and dry-run)
                 action = strategy.run_strategy_check()
@@ -323,8 +399,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     trade_logger.log_status(status)
                     last_status_time = now
 
-                # Sleep until next check
-                time.sleep(check_interval)
+                # Sleep until next check (interruptible for fast shutdown)
+                if not interruptible_sleep(check_interval):
+                    break  # Shutdown requested
 
             except KeyboardInterrupt:
                 # This should be caught by signal handler, but just in case
@@ -334,7 +411,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
             except Exception as e:
                 trade_logger.log_error(f"Error in main loop: {e}", exception=e)
                 # Continue running unless it's a critical error
-                time.sleep(check_interval)
+                if not interruptible_sleep(check_interval):
+                    break  # Shutdown requested
 
     finally:
         # Graceful shutdown
@@ -352,11 +430,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
 
         # Note: We don't auto-close positions on shutdown
         # This allows the user to restart the bot without losing positions
+        # Position recovery will automatically restore state on next startup
         if strategy.state != StrategyState.IDLE:
             trade_logger.log_event(
-                "WARNING: Bot shutting down with active positions! "
-                "Positions will remain open. Restart the bot to continue managing them, "
-                "or close them manually."
+                "NOTE: Bot shutting down with active positions. "
+                "Positions will remain open on Saxo. On next startup, the bot will "
+                "automatically recover and resume managing these positions."
             )
 
         # Shutdown logger
@@ -489,22 +568,50 @@ Examples:
     print_banner()
 
     try:
-        # Load configuration
+        # Load configuration (auto-detects cloud vs local)
         config = load_config(args.config)
 
-        # Override environment if --live flag is used
-        if args.live:
-            config["saxo_api"]["environment"] = "live"
-            print("\n⚠️  WARNING: LIVE ENVIRONMENT ENABLED - REAL MONEY TRADING ⚠️\n")
+        # Show environment info
+        running_on_cloud = is_running_on_gcp()
+        if running_on_cloud:
+            # Cloud always uses LIVE
+            print("\n" + "=" * 60)
+            print("  RUNNING ON GOOGLE CLOUD PLATFORM")
+            print("  Environment: LIVE (Cloud deployment)")
+            print("  Credentials: Loaded from Secret Manager")
+            print("=" * 60 + "\n")
+        else:
+            # Local mode - respect --live flag
+            if args.live:
+                config["saxo_api"]["environment"] = "live"
+                if args.dry_run:
+                    print("\n" + "=" * 60)
+                    print("  DRY RUN MODE - LIVE DATA, NO REAL ORDERS")
+                    print("  Using LIVE market data for realistic simulation")
+                    print("  All trades will be SIMULATED (logged but not executed)")
+                    print("=" * 60 + "\n")
+                else:
+                    print("\n⚠️  WARNING: LIVE ENVIRONMENT ENABLED - REAL MONEY TRADING ⚠️\n")
+            else:
+                env_name = config['saxo_api'].get('environment', 'sim').upper()
+                if args.dry_run:
+                    print(f"\n  Environment: {env_name} (DRY RUN - No real orders)\n")
+                else:
+                    print(f"\n  Environment: {env_name}\n")
 
         # Override log level if verbose
         if args.verbose:
             config["logging"]["log_level"] = "DEBUG"
 
-        # Override account if specified
+        # Override account if specified (handles both old and new config structure)
         if args.account:
-            config["account"]["account_key"] = args.account
-            config["account"]["client_key"] = args.account
+            env = config["saxo_api"].get("environment", "sim")
+            if env in config["account"] and isinstance(config["account"][env], dict):
+                config["account"][env]["account_key"] = args.account
+                config["account"][env]["client_key"] = args.account
+            else:
+                config["account"]["account_key"] = args.account
+                config["account"]["client_key"] = args.account
             print(f"Using account: {args.account[:8]}...")
 
         # Validate configuration

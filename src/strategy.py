@@ -69,6 +69,9 @@ class OptionPosition:
         entry_price: Price at entry
         current_price: Current market price
         delta: Position delta
+        gamma: Position gamma (rate of change of delta)
+        theta: Position theta (time decay)
+        vega: Position vega (volatility sensitivity)
     """
     position_id: str
     uic: int
@@ -80,6 +83,9 @@ class OptionPosition:
     entry_price: float
     current_price: float = 0.0
     delta: float = 0.0
+    gamma: float = 0.0
+    theta: float = 0.0
+    vega: float = 0.0
 
 
 @dataclass
@@ -168,6 +174,12 @@ class StrategyMetrics:
         unrealized_pnl: Unrealized profit/loss
         recenter_count: Number of times position was recentered
         roll_count: Number of times shorts were rolled
+        daily_pnl_start: P&L at start of trading day (for daily tracking)
+        spy_open: SPY price at market open
+        spy_high: SPY high of day
+        spy_low: SPY low of day
+        vix_high: VIX high of day
+        vix_samples: List of VIX readings for daily average
     """
     total_premium_collected: float = 0.0
     total_straddle_cost: float = 0.0
@@ -175,6 +187,49 @@ class StrategyMetrics:
     unrealized_pnl: float = 0.0
     recenter_count: int = 0
     roll_count: int = 0
+    # Daily tracking
+    daily_pnl_start: float = 0.0
+    spy_open: float = 0.0
+    spy_high: float = 0.0
+    spy_low: float = 0.0
+    vix_high: float = 0.0
+    vix_samples: list = None
+
+    def __post_init__(self):
+        """Initialize mutable defaults."""
+        if self.vix_samples is None:
+            self.vix_samples = []
+
+    def reset_daily_tracking(self, current_pnl: float, spy_price: float, vix: float):
+        """Reset daily tracking at start of trading day."""
+        self.daily_pnl_start = current_pnl
+        self.spy_open = spy_price
+        self.spy_high = spy_price
+        self.spy_low = spy_price
+        self.vix_high = vix
+        self.vix_samples = [vix]
+
+    def update_daily_tracking(self, spy_price: float, vix: float):
+        """Update daily high/low tracking."""
+        if spy_price > self.spy_high:
+            self.spy_high = spy_price
+        if spy_price < self.spy_low or self.spy_low == 0:
+            self.spy_low = spy_price
+        if vix > self.vix_high:
+            self.vix_high = vix
+        self.vix_samples.append(vix)
+
+    @property
+    def spy_range(self) -> float:
+        """Calculate SPY range for the day."""
+        return self.spy_high - self.spy_low
+
+    @property
+    def vix_avg(self) -> float:
+        """Calculate VIX average for the day."""
+        if self.vix_samples:
+            return sum(self.vix_samples) / len(self.vix_samples)
+        return 0.0
 
     @property
     def total_pnl(self) -> float:
@@ -203,7 +258,7 @@ class DeltaNeutralStrategy:
         >>> strategy.run()
     """
 
-    def __init__(self, client: SaxoClient, config: Dict[str, Any], trade_logger: Any = None):
+    def __init__(self, client: SaxoClient, config: Dict[str, Any], trade_logger: Any = None, dry_run: bool = False):
         """
         Initialize the strategy.
 
@@ -211,11 +266,13 @@ class DeltaNeutralStrategy:
             client: SaxoClient instance for API operations
             config: Configuration dictionary with strategy parameters
             trade_logger: Optional logger service for trade logging
+            dry_run: If True, simulate trades without placing real orders
         """
         self.client = client
         self.config = config
         self.strategy_config = config["strategy"]
         self.trade_logger = trade_logger
+        self.dry_run = dry_run
 
         # Strategy state
         self.state = StrategyState.IDLE
@@ -249,6 +306,539 @@ class DeltaNeutralStrategy:
         logger.info(f"DeltaNeutralStrategy initialized for {self.underlying_symbol}")
         logger.info(f"Recenter threshold: {self.recenter_threshold} points")
         logger.info(f"VIX entry threshold: < {self.max_vix}")
+        if self.dry_run:
+            logger.warning("DRY RUN MODE - No real orders will be placed")
+
+    # =========================================================================
+    # POSITION RECOVERY METHODS
+    # =========================================================================
+
+    def recover_positions(self) -> bool:
+        """
+        Recover existing positions from Saxo on bot startup.
+
+        This method queries Saxo for open SPY option positions and reconstructs
+        the strategy state. Essential for bot restarts and GCP VM recovery.
+
+        Returns:
+            bool: True if positions were recovered, False if starting fresh
+        """
+        logger.info("Checking for existing positions to recover...")
+
+        # Get all open positions from Saxo
+        positions = self.client.get_positions()
+        if not positions:
+            logger.info("No existing positions found - starting fresh")
+            return False
+
+        # Filter for SPY options only
+        spy_options = self._filter_spy_options(positions)
+        if not spy_options:
+            logger.info("No SPY option positions found - starting fresh")
+            return False
+
+        logger.info(f"Found {len(spy_options)} SPY option positions to analyze")
+
+        # Categorize positions by type and expiry
+        long_positions = []
+        short_positions = []
+
+        for pos in spy_options:
+            pos_base = pos.get("PositionBase", {})
+            amount = pos_base.get("Amount", 0)
+
+            if amount > 0:
+                long_positions.append(pos)
+            elif amount < 0:
+                short_positions.append(pos)
+
+        logger.info(f"Long positions: {len(long_positions)}, Short positions: {len(short_positions)}")
+
+        # Try to reconstruct long straddle (long call + long put at same strike)
+        straddle_recovered = self._recover_long_straddle(long_positions)
+
+        # Try to reconstruct short strangle (short call + short put at different strikes)
+        strangle_recovered = self._recover_short_strangle(short_positions)
+
+        # Determine strategy state based on recovered positions
+        if straddle_recovered and strangle_recovered:
+            self.state = StrategyState.FULL_POSITION
+            logger.info("RECOVERED: Full position (long straddle + short strangle)")
+        elif straddle_recovered:
+            self.state = StrategyState.LONG_STRADDLE_ACTIVE
+            logger.info("RECOVERED: Long straddle active (no short strangle)")
+        elif strangle_recovered:
+            # Unusual state - short strangle without long straddle
+            self.state = StrategyState.FULL_POSITION
+            logger.warning("RECOVERED: Short strangle without long straddle (unusual)")
+        else:
+            logger.info("Could not reconstruct strategy positions - starting fresh")
+            return False
+
+        # Fetch current market data for logging
+        self.update_market_data()
+
+        # Log recovery to trade logger and Google Sheets
+        if self.trade_logger:
+            self.trade_logger.log_event("=" * 50)
+            self.trade_logger.log_event("POSITION RECOVERY COMPLETED")
+            self.trade_logger.log_event(f"State: {self.state.value}")
+
+            # Build list of all individual positions (4 legs) for comprehensive logging
+            individual_positions = []
+
+            # Add long straddle legs (2 positions: call + put)
+            if self.long_straddle:
+                straddle_expiry = self.long_straddle.call.expiry if self.long_straddle.call else "N/A"
+                straddle_strike = self.long_straddle.initial_strike
+
+                self.trade_logger.log_event(
+                    f"Long Straddle: Strike ${straddle_strike:.2f}, Expiry {straddle_expiry}"
+                )
+
+                if self.long_straddle.call:
+                    individual_positions.append({
+                        "position_type": "LONG",
+                        "option_type": "Call",
+                        "strike": self.long_straddle.call.strike,
+                        "expiry": self.long_straddle.call.expiry,
+                        "quantity": self.long_straddle.call.quantity,
+                        "entry_price": self.long_straddle.call.entry_price,
+                        "current_price": self.long_straddle.call.current_price,
+                        "delta": self.long_straddle.call.delta,
+                        "gamma": self.long_straddle.call.gamma,
+                        "theta": self.long_straddle.call.theta,
+                        "vega": self.long_straddle.call.vega
+                    })
+
+                if self.long_straddle.put:
+                    individual_positions.append({
+                        "position_type": "LONG",
+                        "option_type": "Put",
+                        "strike": self.long_straddle.put.strike,
+                        "expiry": self.long_straddle.put.expiry,
+                        "quantity": self.long_straddle.put.quantity,
+                        "entry_price": self.long_straddle.put.entry_price,
+                        "current_price": self.long_straddle.put.current_price,
+                        "delta": self.long_straddle.put.delta,
+                        "gamma": self.long_straddle.put.gamma,
+                        "theta": self.long_straddle.put.theta,
+                        "vega": self.long_straddle.put.vega
+                    })
+
+            # Add short strangle legs (2 positions: call + put)
+            if self.short_strangle:
+                strangle_expiry = self.short_strangle.expiry
+
+                self.trade_logger.log_event(
+                    f"Short Strangle: Call ${self.short_strangle.call_strike:.2f}, "
+                    f"Put ${self.short_strangle.put_strike:.2f}, Expiry {strangle_expiry}"
+                )
+
+                if self.short_strangle.call:
+                    individual_positions.append({
+                        "position_type": "SHORT",
+                        "option_type": "Call",
+                        "strike": self.short_strangle.call.strike,
+                        "expiry": self.short_strangle.call.expiry,
+                        "quantity": self.short_strangle.call.quantity,
+                        "entry_price": self.short_strangle.call.entry_price,
+                        "current_price": self.short_strangle.call.current_price,
+                        "delta": self.short_strangle.call.delta,
+                        "gamma": self.short_strangle.call.gamma,
+                        "theta": self.short_strangle.call.theta,
+                        "vega": self.short_strangle.call.vega
+                    })
+
+                if self.short_strangle.put:
+                    individual_positions.append({
+                        "position_type": "SHORT",
+                        "option_type": "Put",
+                        "strike": self.short_strangle.put.strike,
+                        "expiry": self.short_strangle.put.expiry,
+                        "quantity": self.short_strangle.put.quantity,
+                        "entry_price": self.short_strangle.put.entry_price,
+                        "current_price": self.short_strangle.put.current_price,
+                        "delta": self.short_strangle.put.delta,
+                        "gamma": self.short_strangle.put.gamma,
+                        "theta": self.short_strangle.put.theta,
+                        "vega": self.short_strangle.put.vega
+                    })
+
+            # Check if ANY position is already logged (to avoid duplicates on restart)
+            already_logged = False
+            if individual_positions:
+                first_pos = individual_positions[0]
+                already_logged = self.trade_logger.check_position_logged(
+                    first_pos["position_type"],
+                    first_pos["strike"],
+                    first_pos["expiry"]
+                )
+
+            if not already_logged and individual_positions:
+                # Log ALL 4 positions to ALL sheets (Trades, Positions, Greeks, Safety Events)
+                # Pass saxo_client so FX rate can be fetched for currency conversion
+                self.trade_logger.log_recovered_positions_full(
+                    individual_positions=individual_positions,
+                    underlying_price=self.current_underlying_price,
+                    vix=self.current_vix,
+                    saxo_client=self.client
+                )
+                self.trade_logger.log_event(f"  -> Logged {len(individual_positions)} individual positions to ALL Google Sheets tabs")
+            else:
+                self.trade_logger.log_event("  -> Positions already logged in Google Sheets (skipping)")
+
+            self.trade_logger.log_event("=" * 50)
+
+        return True
+
+    def _filter_spy_options(self, positions: List[Dict]) -> List[Dict]:
+        """
+        Filter positions to only include SPY options.
+
+        Args:
+            positions: List of all positions from Saxo API
+
+        Returns:
+            List of SPY option positions only
+        """
+        spy_options = []
+
+        for pos in positions:
+            display_format = pos.get("DisplayAndFormat", {})
+            symbol = display_format.get("Symbol", "")
+            asset_type = pos.get("PositionBase", {}).get("AssetType", "")
+
+            # Check if this is a SPY option
+            # Symbol format is typically like "SPY:xnas/20250321/C575" or similar
+            if ("SPY" in symbol.upper() or self.underlying_symbol.upper() in symbol.upper()) and \
+               asset_type in ["StockOption", "ContractFutures"]:
+                spy_options.append(pos)
+                logger.debug(f"Found SPY option: {symbol}")
+
+        return spy_options
+
+    def _recover_long_straddle(self, long_positions: List[Dict]) -> bool:
+        """
+        Attempt to recover a long straddle from long option positions.
+
+        A long straddle consists of:
+        - 1 long call at strike X
+        - 1 long put at strike X (same strike as call)
+        - Both with the same expiry (typically 90-120 DTE)
+
+        Args:
+            long_positions: List of long option positions
+
+        Returns:
+            bool: True if straddle was recovered
+        """
+        if len(long_positions) < 2:
+            return False
+
+        # Parse positions into call/put groups by strike and expiry
+        calls_by_strike = {}
+        puts_by_strike = {}
+
+        for pos in long_positions:
+            parsed = self._parse_option_position(pos)
+            if not parsed:
+                continue
+
+            key = (parsed["strike"], parsed["expiry"])
+
+            if parsed["option_type"] == "Call":
+                calls_by_strike[key] = parsed
+            elif parsed["option_type"] == "Put":
+                puts_by_strike[key] = parsed
+
+        # Find matching call/put pairs (same strike and expiry)
+        for key, call_data in calls_by_strike.items():
+            if key in puts_by_strike:
+                put_data = puts_by_strike[key]
+
+                # Found a straddle! Create the position objects with Greeks
+                call_option = OptionPosition(
+                    position_id=call_data["position_id"],
+                    uic=call_data["uic"],
+                    strike=call_data["strike"],
+                    expiry=call_data["expiry"],
+                    option_type="Call",
+                    position_type=PositionType.LONG_CALL,
+                    quantity=call_data["quantity"],
+                    entry_price=call_data["entry_price"],
+                    current_price=call_data["current_price"],
+                    delta=call_data.get("delta", 0.5),
+                    gamma=call_data.get("gamma", 0),
+                    theta=call_data.get("theta", 0),
+                    vega=call_data.get("vega", 0)
+                )
+
+                put_option = OptionPosition(
+                    position_id=put_data["position_id"],
+                    uic=put_data["uic"],
+                    strike=put_data["strike"],
+                    expiry=put_data["expiry"],
+                    option_type="Put",
+                    position_type=PositionType.LONG_PUT,
+                    quantity=put_data["quantity"],
+                    entry_price=put_data["entry_price"],
+                    current_price=put_data["current_price"],
+                    delta=put_data.get("delta", -0.5),
+                    gamma=put_data.get("gamma", 0),
+                    theta=put_data.get("theta", 0),
+                    vega=put_data.get("vega", 0)
+                )
+
+                self.long_straddle = StraddlePosition(
+                    call=call_option,
+                    put=put_option,
+                    initial_strike=call_data["strike"],
+                    entry_underlying_price=call_data["strike"]  # Approximate
+                )
+
+                # Set the initial straddle strike for recentering logic
+                self.initial_straddle_strike = call_data["strike"]
+
+                logger.info(
+                    f"Recovered long straddle: Strike ${call_data['strike']:.2f}, "
+                    f"Expiry {call_data['expiry']}, "
+                    f"Qty {call_data['quantity']}"
+                )
+                return True
+
+        return False
+
+    def _recover_short_strangle(self, short_positions: List[Dict]) -> bool:
+        """
+        Attempt to recover a short strangle from short option positions.
+
+        A short strangle consists of:
+        - 1 short call at strike X (OTM)
+        - 1 short put at strike Y (OTM), where Y < X
+        - Both with the same expiry (typically weekly)
+
+        Args:
+            short_positions: List of short option positions
+
+        Returns:
+            bool: True if strangle was recovered
+        """
+        if len(short_positions) < 2:
+            return False
+
+        # Parse positions into call/put groups by expiry
+        calls_by_expiry = {}
+        puts_by_expiry = {}
+
+        for pos in short_positions:
+            parsed = self._parse_option_position(pos)
+            if not parsed:
+                continue
+
+            expiry = parsed["expiry"]
+
+            if parsed["option_type"] == "Call":
+                if expiry not in calls_by_expiry:
+                    calls_by_expiry[expiry] = []
+                calls_by_expiry[expiry].append(parsed)
+            elif parsed["option_type"] == "Put":
+                if expiry not in puts_by_expiry:
+                    puts_by_expiry[expiry] = []
+                puts_by_expiry[expiry].append(parsed)
+
+        # Find matching call/put pairs (same expiry, different strikes)
+        for expiry, calls in calls_by_expiry.items():
+            if expiry in puts_by_expiry:
+                puts = puts_by_expiry[expiry]
+
+                # Take the first call and put (typically only one of each)
+                call_data = calls[0]
+                put_data = puts[0]
+
+                # Verify this looks like a strangle (call strike > put strike)
+                if call_data["strike"] <= put_data["strike"]:
+                    logger.warning(
+                        f"Short positions don't form valid strangle: "
+                        f"Call ${call_data['strike']}, Put ${put_data['strike']}"
+                    )
+                    continue
+
+                # Found a strangle! Create the position objects with Greeks
+                call_option = OptionPosition(
+                    position_id=call_data["position_id"],
+                    uic=call_data["uic"],
+                    strike=call_data["strike"],
+                    expiry=call_data["expiry"],
+                    option_type="Call",
+                    position_type=PositionType.SHORT_CALL,
+                    quantity=call_data["quantity"],
+                    entry_price=call_data["entry_price"],
+                    current_price=call_data["current_price"],
+                    delta=call_data.get("delta", -0.15),
+                    gamma=call_data.get("gamma", 0),
+                    theta=call_data.get("theta", 0),
+                    vega=call_data.get("vega", 0)
+                )
+
+                put_option = OptionPosition(
+                    position_id=put_data["position_id"],
+                    uic=put_data["uic"],
+                    strike=put_data["strike"],
+                    expiry=put_data["expiry"],
+                    option_type="Put",
+                    position_type=PositionType.SHORT_PUT,
+                    quantity=put_data["quantity"],
+                    entry_price=put_data["entry_price"],
+                    current_price=put_data["current_price"],
+                    delta=put_data.get("delta", 0.15),
+                    gamma=put_data.get("gamma", 0),
+                    theta=put_data.get("theta", 0),
+                    vega=put_data.get("vega", 0)
+                )
+
+                self.short_strangle = StranglePosition(
+                    call=call_option,
+                    put=put_option,
+                    call_strike=call_data["strike"],
+                    put_strike=put_data["strike"],
+                    expiry=expiry
+                )
+
+                logger.info(
+                    f"Recovered short strangle: Call ${call_data['strike']:.2f}, "
+                    f"Put ${put_data['strike']:.2f}, Expiry {expiry}"
+                )
+                return True
+
+        return False
+
+    def _parse_option_position(self, pos: Dict) -> Optional[Dict]:
+        """
+        Parse a Saxo position response into a standardized format.
+
+        Args:
+            pos: Raw position dictionary from Saxo API
+
+        Returns:
+            Parsed position dict or None if parsing fails
+        """
+        import re
+
+        try:
+            display_format = pos.get("DisplayAndFormat", {})
+            pos_base = pos.get("PositionBase", {})
+            pos_view = pos.get("PositionView", {})
+
+            symbol = display_format.get("Symbol", "")
+
+            # Parse the symbol to extract option details
+            strike = None
+            expiry = None
+            option_type = None
+
+            symbol_upper = symbol.upper()
+
+            # Saxo symbol format: SPY/DDMYYC{STRIKE}:xcbf or SPY/DDMYYP{STRIKE}:xcbf
+            # Example: SPY/31H26C690:xcbf = SPY Call 690 expiring March 31, 2026
+            # Month codes: F=Jan, G=Feb, H=Mar, J=Apr, K=May, M=Jun,
+            #              N=Jul, Q=Aug, U=Sep, V=Oct, X=Nov, Z=Dec
+            month_codes = {
+                'F': '01', 'G': '02', 'H': '03', 'J': '04', 'K': '05', 'M': '06',
+                'N': '07', 'Q': '08', 'U': '09', 'V': '10', 'X': '11', 'Z': '12'
+            }
+
+            # Try Saxo format: SPY/DDMYYC{STRIKE}:xcbf
+            saxo_match = re.match(r'SPY/(\d{2})([FGHJKMQUVXZ])(\d{2})([CP])(\d+)', symbol_upper)
+            if saxo_match:
+                day = saxo_match.group(1)
+                month_code = saxo_match.group(2)
+                year = saxo_match.group(3)
+                cp = saxo_match.group(4)
+                strike_str = saxo_match.group(5)
+
+                month = month_codes.get(month_code, '01')
+                expiry = f"20{year}{month}{day}"  # Format: 20260331
+                option_type = "Call" if cp == 'C' else "Put"
+                strike = float(strike_str)
+
+                logger.debug(f"Parsed Saxo symbol {symbol}: {option_type} ${strike} exp {expiry}")
+
+            # If Saxo format didn't match, try other formats
+            if not option_type:
+                # Determine call or put from symbol
+                if "/C" in symbol_upper or "C" in symbol_upper.split("/")[-1].split(":")[0]:
+                    option_type = "Call"
+                elif "/P" in symbol_upper or "P" in symbol_upper.split("/")[-1].split(":")[0]:
+                    option_type = "Put"
+
+            # Try to get strike from the position data if not parsed
+            if not strike:
+                strike = pos_base.get("Strike") or display_format.get("Strike")
+                if not strike:
+                    # Try to parse from symbol - look for number after C or P
+                    strike_match = re.search(r'[CP](\d+(?:\.\d+)?)', symbol_upper)
+                    if strike_match:
+                        strike = float(strike_match.group(1))
+
+            # Try to get expiry from position data if not parsed
+            if not expiry:
+                expiry = pos_base.get("ExpiryDate") or display_format.get("ExpiryDate")
+                if not expiry:
+                    # Try to parse from symbol - look for date pattern
+                    date_match = re.search(r'(\d{8})', symbol)  # Format: 20250321
+                    if date_match:
+                        expiry = date_match.group(1)
+
+            # Final fallback - use any available data
+            if not all([strike, expiry, option_type]):
+                logger.warning(f"Could not fully parse position: {symbol}")
+                if not strike:
+                    strike = pos_base.get("Strike", 0)
+                if not expiry:
+                    expiry = pos_base.get("ExpiryDate", "Unknown")
+                if not option_type:
+                    option_type = pos_base.get("PutCall", "Unknown")
+
+            # Only return if we have essential data
+            if not strike or strike == 0:
+                logger.warning(f"No strike price found for {symbol}, skipping")
+                return None
+
+            # Extract Greeks from the dedicated Greeks FieldGroup (if available)
+            # Saxo returns Greeks in a separate "Greeks" object when requested
+            # Note: Saxo uses "Instrument" prefix for Greeks (InstrumentDelta, InstrumentGamma, etc.)
+            greeks = pos.get("Greeks", {})
+
+            # Delta can come from either Greeks object (with Instrument prefix) or PositionView
+            delta = greeks.get("InstrumentDelta") or greeks.get("Delta") or pos_view.get("Delta", 0)
+            gamma = greeks.get("InstrumentGamma") or greeks.get("Gamma", 0)
+            theta = greeks.get("InstrumentTheta") or greeks.get("Theta", 0)
+            vega = greeks.get("InstrumentVega") or greeks.get("Vega", 0)
+
+            # Log if we got Greeks
+            if any([gamma, theta, vega]):
+                logger.info(f"Greeks for {symbol}: Delta={delta:.4f}, Gamma={gamma:.4f}, Theta={theta:.4f}, Vega={vega:.4f}")
+
+            return {
+                "position_id": str(pos_base.get("PositionId", "")),
+                "uic": pos_base.get("Uic", 0),
+                "symbol": symbol,
+                "strike": float(strike) if strike else 0,
+                "expiry": str(expiry) if expiry else "",
+                "option_type": option_type,
+                "quantity": abs(pos_base.get("Amount", 0)),
+                "entry_price": pos_base.get("OpenPrice", 0) or pos_view.get("AverageOpenPrice", 0),
+                "current_price": pos_view.get("CurrentPrice", 0) or pos_view.get("MarketValue", 0),
+                "delta": delta,
+                "gamma": gamma,
+                "theta": theta,
+                "vega": vega,
+            }
+
+        except Exception as e:
+            logger.error(f"Error parsing option position {symbol}: {e}")
+            return None
 
     # =========================================================================
     # MARKET DATA METHODS
@@ -556,7 +1146,12 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        order_response = self.client.place_multi_leg_order(legs)
+        # In dry_run mode, simulate the order
+        if self.dry_run:
+            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
+            logger.info("[DRY RUN] Simulating long straddle order (no real order placed)")
+        else:
+            order_response = self.client.place_multi_leg_order(legs)
 
         if not order_response:
             logger.error("Failed to place straddle order")
@@ -607,8 +1202,9 @@ class DeltaNeutralStrategy:
 
         # Log trade
         if self.trade_logger:
+            action_prefix = "[SIMULATED] " if self.dry_run else ""
             self.trade_logger.log_trade(
-                action="OPEN_LONG_STRADDLE",
+                action=f"{action_prefix}OPEN_LONG_STRADDLE",
                 strike=call_option["strike"],
                 price=call_price + put_price,
                 delta=0.0,  # ATM straddle is approximately delta neutral
@@ -647,7 +1243,12 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        order_response = self.client.place_multi_leg_order(legs)
+        # In dry_run mode, simulate the order
+        if self.dry_run:
+            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
+            logger.info("[DRY RUN] Simulating close straddle order (no real order placed)")
+        else:
+            order_response = self.client.place_multi_leg_order(legs)
 
         if not order_response:
             logger.error("Failed to close straddle")
@@ -670,8 +1271,9 @@ class DeltaNeutralStrategy:
 
         # Log trade
         if self.trade_logger:
+            action_prefix = "[SIMULATED] " if self.dry_run else ""
             self.trade_logger.log_trade(
-                action="CLOSE_LONG_STRADDLE",
+                action=f"{action_prefix}CLOSE_LONG_STRADDLE",
                 strike=self.long_straddle.initial_strike,
                 price=(self.long_straddle.call.current_price +
                        self.long_straddle.put.current_price),
@@ -775,7 +1377,12 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        order_response = self.client.place_multi_leg_order(legs)
+        # In dry_run mode, simulate the order
+        if self.dry_run:
+            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
+            logger.info("[DRY RUN] Simulating short strangle order (no real order placed)")
+        else:
+            order_response = self.client.place_multi_leg_order(legs)
 
         if not order_response:
             logger.error("Failed to place strangle order")
@@ -823,16 +1430,46 @@ class DeltaNeutralStrategy:
             f"Expiry {call_option['expiry']}, Premium ${premium:.2f}"
         )
 
-        # Log trade
+        # Log each leg individually to Trades tab for detailed premium tracking
         if self.trade_logger:
+            action_prefix = "[SIMULATED] " if self.dry_run else ""
+            roll_reason = "Weekly Roll" if self.metrics.roll_count > 0 else "Initial Entry"
+
+            # Log Short Call
             self.trade_logger.log_trade(
-                action="OPEN_SHORT_STRANGLE",
-                strike=f"{put_option['strike']}/{call_option['strike']}",
-                price=call_price + put_price,
-                delta=self.short_strangle.total_delta,
+                action=f"{action_prefix}OPEN_SHORT_Call",
+                strike=call_option['strike'],
+                price=call_price,
+                delta=-0.15,  # Approximation for OTM call
                 pnl=0.0,
+                option_type="Short Call",
+                expiry_date=call_option['expiry'],
+                quantity=self.position_size,
+                trade_reason=roll_reason,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                premium_received=call_price * self.position_size * 100,
                 saxo_client=self.client
             )
+
+            # Log Short Put
+            self.trade_logger.log_trade(
+                action=f"{action_prefix}OPEN_SHORT_Put",
+                strike=put_option['strike'],
+                price=put_price,
+                delta=0.15,  # Approximation for OTM put
+                pnl=0.0,
+                option_type="Short Put",
+                expiry_date=put_option['expiry'],
+                quantity=self.position_size,
+                trade_reason=roll_reason,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                premium_received=put_price * self.position_size * 100,
+                saxo_client=self.client
+            )
+
+            logger.info(f"Logged short strangle legs to Trades: Call ${call_option['strike']} (+${call_price * 100:.2f}), Put ${put_option['strike']} (+${put_price * 100:.2f})")
 
         return True
 
@@ -865,7 +1502,12 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        order_response = self.client.place_multi_leg_order(legs)
+        # In dry_run mode, simulate the order
+        if self.dry_run:
+            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
+            logger.info("[DRY RUN] Simulating close strangle order (no real order placed)")
+        else:
+            order_response = self.client.place_multi_leg_order(legs)
 
         if not order_response:
             logger.error("Failed to close strangle")
@@ -895,8 +1537,9 @@ class DeltaNeutralStrategy:
 
         # Log trade
         if self.trade_logger:
+            action_prefix = "[SIMULATED] " if self.dry_run else ""
             self.trade_logger.log_trade(
-                action="CLOSE_SHORT_STRANGLE",
+                action=f"{action_prefix}CLOSE_SHORT_STRANGLE",
                 strike=f"{self.short_strangle.put_strike}/{self.short_strangle.call_strike}",
                 price=close_cost / (self.position_size * 100),
                 delta=self.short_strangle.total_delta,
@@ -1009,8 +1652,9 @@ class DeltaNeutralStrategy:
 
         # Log trade
         if self.trade_logger:
+            action_prefix = "[SIMULATED] " if self.dry_run else ""
             self.trade_logger.log_trade(
-                action="RECENTER",
+                action=f"{action_prefix}RECENTER",
                 strike=self.initial_straddle_strike,
                 price=self.current_underlying_price,
                 delta=self.get_total_delta(),
@@ -1024,7 +1668,7 @@ class DeltaNeutralStrategy:
     # ROLLING AND EXIT LOGIC
     # =========================================================================
 
-    def should_roll_shorts(self) -> bool:
+    def should_roll_shorts(self) -> tuple:
         """
         Check if weekly shorts should be rolled.
 
@@ -1032,7 +1676,8 @@ class DeltaNeutralStrategy:
         (price approaching short strikes).
 
         Returns:
-            bool: True if shorts should be rolled, False otherwise.
+            tuple: (should_roll: bool, challenged_side: str or None)
+                   challenged_side is "call", "put", or None for scheduled roll
         """
         # Check if it's a roll day
         today = datetime.now().strftime("%A")
@@ -1040,7 +1685,7 @@ class DeltaNeutralStrategy:
 
         if is_roll_day:
             logger.info(f"Today is {today} - roll day for weekly shorts")
-            return True
+            return (True, None)  # Scheduled roll, no specific challenge
 
         # Check if shorts are being challenged (price within 50% of strike distance)
         if self.short_strangle and self.current_underlying_price:
@@ -1057,40 +1702,101 @@ class DeltaNeutralStrategy:
 
             if call_distance < original_call_distance * 0.5:
                 logger.warning(f"Short call being challenged! Price ${self.current_underlying_price:.2f} approaching ${call_strike}")
-                return True
+                return (True, "call")
 
             if put_distance < original_put_distance * 0.5:
                 logger.warning(f"Short put being challenged! Price ${self.current_underlying_price:.2f} approaching ${put_strike}")
-                return True
+                return (True, "put")
 
-        return False
+        return (False, None)
 
-    def roll_weekly_shorts(self) -> bool:
+    def roll_weekly_shorts(self, challenged_side: str = None) -> bool:
         """
         Roll the weekly short strangle to the next week.
+
+        Per the video strategy:
+        1. Close current short strangle
+        2. Open new strangle centered on CURRENT price (not initial strike)
+        3. This naturally moves the challenged side further away
+        4. And moves the unchallenged side closer for more credit
+
+        Args:
+            challenged_side: "call" or "put" if rolling due to challenge, None for regular roll
 
         Returns:
             bool: True if roll successful, False otherwise.
         """
-        logger.info("Rolling weekly shorts...")
+        logger.info("=" * 50)
+        logger.info("ROLLING WEEKLY SHORTS")
+
+        old_call_strike = None
+        old_put_strike = None
+        old_premium = 0
+
+        # Log what we're rolling from
+        if self.short_strangle:
+            old_call_strike = self.short_strangle.call_strike
+            old_put_strike = self.short_strangle.put_strike
+            logger.info(f"Current strangle: Put ${old_put_strike} / Call ${old_call_strike}")
+            logger.info(f"Challenged side: {challenged_side or 'None (regular roll)'}")
+            logger.info(f"Current SPY: ${self.current_underlying_price:.2f}")
 
         self.state = StrategyState.ROLLING_SHORTS
 
-        # Close current shorts
+        # Close current shorts and capture P&L
         if self.short_strangle:
+            # Get current value before closing
+            old_premium = self.short_strangle.premium_collected
             if not self.close_short_strangle():
                 logger.error("Failed to close shorts for rolling")
                 return False
 
         # Enter new shorts for next week
+        # The enter_short_strangle() method uses CURRENT price to calculate strikes
+        # This naturally implements the "roll both sides" strategy:
+        # - Challenged side: moves further from current price
+        # - Unchallenged side: moves closer to current price (more credit)
         if not self.enter_short_strangle():
             logger.error("Failed to enter new shorts after rolling")
             return False
+
+        # Log the roll details
+        new_call_strike = self.short_strangle.call_strike if self.short_strangle else 0
+        new_put_strike = self.short_strangle.put_strike if self.short_strangle else 0
+        new_premium = self.short_strangle.premium_collected if self.short_strangle else 0
+
+        logger.info(f"New strangle: Put ${new_put_strike} / Call ${new_call_strike}")
+        logger.info(f"New premium collected: ${new_premium:.2f}")
+
+        # Log the adjustment made
+        if old_call_strike and old_put_strike:
+            call_adjustment = new_call_strike - old_call_strike
+            put_adjustment = new_put_strike - old_put_strike
+            logger.info(f"Call strike adjusted: {'+' if call_adjustment >= 0 else ''}{call_adjustment:.0f}")
+            logger.info(f"Put strike adjusted: {'+' if put_adjustment >= 0 else ''}{put_adjustment:.0f}")
 
         self.metrics.roll_count += 1
         self.state = StrategyState.FULL_POSITION
 
         logger.info(f"Weekly shorts rolled successfully. Total rolls: {self.metrics.roll_count}")
+        logger.info("=" * 50)
+
+        # Log safety event for the roll
+        if self.trade_logger:
+            self.trade_logger.log_safety_event({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_type": "SHORT_ROLL",
+                "severity": "INFO",
+                "spy_price": self.current_underlying_price,
+                "initial_strike": self.initial_straddle_strike,
+                "distance_pct": abs(self.current_underlying_price - self.initial_straddle_strike) / self.initial_straddle_strike * 100 if self.initial_straddle_strike else 0,
+                "vix": self.current_vix,
+                "action_taken": f"Rolled shorts ({challenged_side or 'scheduled'})",
+                "short_call_strike": new_call_strike,
+                "short_put_strike": new_put_strike,
+                "description": f"Rolled from Put ${old_put_strike}/Call ${old_call_strike} to Put ${new_put_strike}/Call ${new_call_strike}. Premium: ${new_premium:.2f}",
+                "result": "SUCCESS"
+            })
 
         return True
 
@@ -1159,8 +1865,9 @@ class DeltaNeutralStrategy:
 
             # Log trade
             if self.trade_logger:
+                action_prefix = "[SIMULATED] " if self.dry_run else ""
                 self.trade_logger.log_trade(
-                    action="EXIT_ALL",
+                    action=f"{action_prefix}EXIT_ALL",
                     strike=self.initial_straddle_strike,
                     price=self.current_underlying_price,
                     delta=0.0,
@@ -1254,9 +1961,14 @@ class DeltaNeutralStrategy:
                     action_taken = "Executed 5-point recenter"
 
             # Check roll condition
-            elif self.should_roll_shorts():
-                if self.roll_weekly_shorts():
-                    action_taken = "Rolled weekly shorts"
+            else:
+                should_roll, challenged_side = self.should_roll_shorts()
+                if should_roll:
+                    if self.roll_weekly_shorts(challenged_side=challenged_side):
+                        if challenged_side:
+                            action_taken = f"Rolled weekly shorts ({challenged_side} challenged)"
+                        else:
+                            action_taken = "Rolled weekly shorts (scheduled)"
 
         logger.info(f"Strategy check: {action_taken} | State: {self.state.value}")
 
@@ -1306,3 +2018,126 @@ class DeltaNeutralStrategy:
                 logger.warning(f"Could not fetch FX rate for status: {e}")
 
         return summary
+
+    def get_total_greeks(self) -> Dict[str, float]:
+        """
+        Calculate total Greeks across all positions.
+
+        Returns:
+            dict: Total delta, gamma, theta, vega
+        """
+        total_delta = 0.0
+        total_gamma = 0.0
+        total_theta = 0.0
+        total_vega = 0.0
+
+        if self.long_straddle:
+            if self.long_straddle.call:
+                total_delta += self.long_straddle.call.delta
+                total_gamma += getattr(self.long_straddle.call, 'gamma', 0)
+                total_theta += getattr(self.long_straddle.call, 'theta', 0)
+                total_vega += getattr(self.long_straddle.call, 'vega', 0)
+            if self.long_straddle.put:
+                total_delta += self.long_straddle.put.delta
+                total_gamma += getattr(self.long_straddle.put, 'gamma', 0)
+                total_theta += getattr(self.long_straddle.put, 'theta', 0)
+                total_vega += getattr(self.long_straddle.put, 'vega', 0)
+
+        if self.short_strangle:
+            if self.short_strangle.call:
+                total_delta += self.short_strangle.call.delta
+                total_gamma -= getattr(self.short_strangle.call, 'gamma', 0)  # Short = negative gamma
+                total_theta -= getattr(self.short_strangle.call, 'theta', 0)  # Short = positive theta (earns)
+                total_vega -= getattr(self.short_strangle.call, 'vega', 0)    # Short = negative vega
+            if self.short_strangle.put:
+                total_delta += self.short_strangle.put.delta
+                total_gamma -= getattr(self.short_strangle.put, 'gamma', 0)
+                total_theta -= getattr(self.short_strangle.put, 'theta', 0)
+                total_vega -= getattr(self.short_strangle.put, 'vega', 0)
+
+        return {
+            "delta": total_delta,
+            "gamma": total_gamma,
+            "theta": total_theta,
+            "vega": total_vega
+        }
+
+    def log_daily_summary(self) -> bool:
+        """
+        Log daily summary to Google Sheets at end of trading day.
+
+        Includes P&L, Greeks, premium collected, and market data.
+
+        Returns:
+            bool: True if logged successfully
+        """
+        if not self.trade_logger:
+            return False
+
+        greeks = self.get_total_greeks()
+
+        # Calculate daily P&L
+        daily_pnl = self.metrics.total_pnl - self.metrics.daily_pnl_start
+
+        # Build summary data
+        summary = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "state": self.state.value,
+            "spy_open": self.metrics.spy_open,
+            "spy_close": self.current_underlying_price,
+            "spy_range": self.metrics.spy_range,
+            "vix_avg": self.metrics.vix_avg,
+            "vix_high": self.metrics.vix_high,
+            "total_delta": greeks["delta"],
+            "total_gamma": greeks["gamma"],
+            "total_theta": greeks["theta"],
+            "daily_pnl": daily_pnl,
+            "realized_pnl": self.metrics.realized_pnl,
+            "unrealized_pnl": self.metrics.unrealized_pnl,
+            "premium_collected": self.metrics.total_premium_collected,
+            "trades_count": 0,  # Could track if needed
+            "recenter_count": self.metrics.recenter_count,
+            "roll_count": self.metrics.roll_count,
+            "cumulative_pnl": self.metrics.total_pnl,
+            "pnl_eur": 0.0,
+            "notes": ""
+        }
+
+        # Add EUR conversion if available
+        if hasattr(self.trade_logger, 'currency_enabled') and self.trade_logger.currency_enabled:
+            try:
+                rate = self.client.get_fx_rate(
+                    self.trade_logger.base_currency,
+                    self.trade_logger.account_currency
+                )
+                if rate:
+                    summary["pnl_eur"] = daily_pnl * rate
+            except Exception as e:
+                logger.warning(f"Could not fetch FX rate for daily summary: {e}")
+
+        # Log to Google Sheets
+        self.trade_logger.log_daily_summary(summary)
+        logger.info(f"Daily summary logged: P&L ${daily_pnl:.2f}, Theta ${greeks['theta']:.2f}")
+
+        return True
+
+    def start_new_trading_day(self):
+        """
+        Initialize tracking for a new trading day.
+
+        Call this at market open or first check of the day.
+        """
+        self.metrics.reset_daily_tracking(
+            current_pnl=self.metrics.total_pnl,
+            spy_price=self.current_underlying_price or 0,
+            vix=self.current_vix or 0
+        )
+        logger.info(f"New trading day started. Opening P&L: ${self.metrics.total_pnl:.2f}")
+
+    def update_intraday_tracking(self):
+        """Update intraday high/low tracking."""
+        if self.current_underlying_price and self.current_vix:
+            self.metrics.update_daily_tracking(
+                spy_price=self.current_underlying_price,
+                vix=self.current_vix
+            )

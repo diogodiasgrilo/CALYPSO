@@ -15,11 +15,14 @@ Date: 2024
 
 import logging
 import json
+import smtplib
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from pathlib import Path
 import threading
 from queue import Queue
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -90,31 +93,23 @@ class TradeRecord:
         self.greeks = greeks or {}
 
     def to_list(self) -> List[Any]:
-        """Convert to list format for spreadsheet row (comprehensive)."""
+        """Convert to simplified list format for spreadsheet row.
+
+        Columns: Timestamp, Action, Type, Strike, Expiry, Days to Expiry, SPY Price, VIX, Premium ($), P&L ($), P&L (EUR), Notes
+        """
         return [
             self.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             self.action,
-            self.trade_reason or "N/A",
-            str(self.strike),
-            f"{self.price:.4f}",
             self.option_type or "N/A",
+            str(self.strike),
             self.expiry_date or "N/A",
             self.dte if self.dte is not None else "N/A",
-            self.quantity if self.quantity is not None else "N/A",
             f"{self.underlying_price:.2f}" if self.underlying_price else "N/A",
             f"{self.vix:.2f}" if self.vix else "N/A",
-            f"{self.delta:.4f}",
-            f"{self.total_delta:.4f}" if self.total_delta is not None else "N/A",
-            f"{self.greeks.get('gamma', 0):.4f}" if 'gamma' in self.greeks else "N/A",
-            f"{self.greeks.get('theta', 0):.4f}" if 'theta' in self.greeks else "N/A",
-            f"{self.greeks.get('vega', 0):.4f}" if 'vega' in self.greeks else "N/A",
             f"{self.premium_received:.2f}" if self.premium_received is not None else "N/A",
             f"{self.pnl:.2f}",
-            f"{self.realized_pnl:.2f}" if self.realized_pnl is not None else "N/A",
-            f"{self.unrealized_pnl:.2f}" if self.unrealized_pnl is not None else "N/A",
-            self.currency,
-            f"{self.exchange_rate:.6f}" if self.exchange_rate else "N/A",
-            f"{self.converted_pnl:.2f}" if self.converted_pnl is not None else "N/A"
+            f"{self.converted_pnl:.2f}" if self.converted_pnl is not None else "N/A",
+            self.trade_reason or ""
         ]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -235,12 +230,11 @@ class GoogleSheetsLogger:
                 self.spreadsheet = self.client.create(self.spreadsheet_name)
                 logger.info(f"Created new Google spreadsheet: {self.spreadsheet_name}")
 
-            # Initialize all worksheets
+            # Initialize all worksheets (4 tabs: Trades, Positions, Daily Summary, Safety Events)
             self._setup_trades_worksheet()
             self._setup_positions_worksheet()
             self._setup_daily_summary_worksheet()
             self._setup_safety_events_worksheet()
-            self._setup_greeks_worksheet()
 
             logger.info("All Google Sheets worksheets initialized successfully")
             return True
@@ -259,45 +253,41 @@ class GoogleSheetsLogger:
             return False
 
     def _setup_trades_worksheet(self):
-        """Setup the comprehensive Trades worksheet."""
+        """Setup the Trades worksheet with essential columns only."""
         try:
             import gspread
             try:
                 worksheet = self.spreadsheet.worksheet("Trades")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Trades", rows=10000, cols=25)
-                # Comprehensive trade headers
+                worksheet = self.spreadsheet.add_worksheet(title="Trades", rows=10000, cols=13)
+                # Essential trade headers only - what matters for the strategy
                 headers = [
-                    "Timestamp", "Action", "Reason", "Strike", "Price", "Type",
-                    "Expiry", "DTE", "Qty", "SPY Price", "VIX", "Delta",
-                    "Total Delta", "Gamma", "Theta", "Vega", "Premium",
-                    "P&L", "Realized P&L", "Unrealized P&L", "Currency",
-                    "FX Rate", "P&L (EUR)"
+                    "Timestamp", "Action", "Type", "Strike", "Expiry", "Days to Expiry",
+                    "SPY Price", "VIX", "Premium ($)", "P&L ($)", "P&L (EUR)", "Notes"
                 ]
                 worksheet.append_row(headers)
-                # Format header row (bold)
-                worksheet.format("A1:W1", {"textFormat": {"bold": True}})
-                logger.info("Created Trades worksheet with comprehensive headers")
+                worksheet.format("A1:L1", {"textFormat": {"bold": True}})
+                logger.info("Created Trades worksheet with essential headers")
 
             self.worksheets["Trades"] = worksheet
         except Exception as e:
             logger.error(f"Failed to setup Trades worksheet: {e}")
 
     def _setup_positions_worksheet(self):
-        """Setup the real-time Positions worksheet."""
+        """Setup the Positions worksheet with essential columns only."""
         try:
             import gspread
             try:
                 worksheet = self.spreadsheet.worksheet("Positions")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=15)
+                worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=11)
+                # Essential position info only
                 headers = [
-                    "Last Updated", "Position Type", "Strike", "Expiry", "DTE",
-                    "Quantity", "Entry Price", "Current Price", "Delta",
-                    "Gamma", "Theta", "Vega", "P&L", "P&L (EUR)", "Status"
+                    "Last Updated", "Type", "Strike", "Expiry", "Days to Expiry",
+                    "Entry Price", "Current Price", "P&L ($)", "P&L (EUR)", "Status"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:O1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:J1", {"textFormat": {"bold": True}})
                 logger.info("Created Positions worksheet")
 
             self.worksheets["Positions"] = worksheet
@@ -305,22 +295,21 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to setup Positions worksheet: {e}")
 
     def _setup_daily_summary_worksheet(self):
-        """Setup the Daily Summary worksheet."""
+        """Setup the Daily Summary worksheet with essential metrics."""
         try:
             import gspread
             try:
                 worksheet = self.spreadsheet.worksheet("Daily Summary")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=20)
+                worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=12)
+                # Essential daily metrics for the strategy
                 headers = [
-                    "Date", "Strategy State", "SPY Open", "SPY Close", "SPY Range",
-                    "VIX Avg", "VIX High", "Total Delta", "Total Gamma",
-                    "Total Theta", "Daily P&L", "Realized P&L", "Unrealized P&L",
-                    "Premium Collected", "Trades Count", "Recenter Count",
-                    "Roll Count", "Cumulative P&L", "P&L (EUR)", "Notes"
+                    "Date", "SPY Close", "VIX", "Theta Cost ($)",
+                    "Premium Collected ($)", "Daily P&L ($)", "Daily P&L (EUR)",
+                    "Cumulative P&L ($)", "Roll Count", "Recenter Count", "Notes"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:T1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:K1", {"textFormat": {"bold": True}})
                 logger.info("Created Daily Summary worksheet")
 
             self.worksheets["Daily Summary"] = worksheet
@@ -328,47 +317,25 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to setup Daily Summary worksheet: {e}")
 
     def _setup_safety_events_worksheet(self):
-        """Setup the Safety Events worksheet."""
+        """Setup the Safety Events worksheet for rolls, recenters, and emergencies."""
         try:
             import gspread
             try:
                 worksheet = self.spreadsheet.worksheet("Safety Events")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Safety Events", rows=1000, cols=12)
+                worksheet = self.spreadsheet.add_worksheet(title="Safety Events", rows=1000, cols=8)
+                # Essential safety/action events
                 headers = [
-                    "Timestamp", "Event Type", "Severity", "SPY Price",
-                    "Initial Strike", "Distance (%)", "VIX", "Action Taken",
-                    "Short Call Strike", "Short Put Strike", "Description", "Result"
+                    "Timestamp", "Event", "SPY Price", "VIX",
+                    "New Short Strikes", "Premium ($)", "Description", "Result"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:L1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:H1", {"textFormat": {"bold": True}})
                 logger.info("Created Safety Events worksheet")
 
             self.worksheets["Safety Events"] = worksheet
         except Exception as e:
             logger.error(f"Failed to setup Safety Events worksheet: {e}")
-
-    def _setup_greeks_worksheet(self):
-        """Setup the Greeks & Risk worksheet."""
-        try:
-            import gspread
-            try:
-                worksheet = self.spreadsheet.worksheet("Greeks & Risk")
-            except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Greeks & Risk", rows=10000, cols=15)
-                headers = [
-                    "Timestamp", "SPY Price", "VIX", "Long Delta", "Short Delta",
-                    "Total Delta", "Long Gamma", "Short Gamma", "Total Gamma",
-                    "Long Theta", "Short Theta", "Total Theta", "Long Vega",
-                    "Short Vega", "Total Vega"
-                ]
-                worksheet.append_row(headers)
-                worksheet.format("A1:O1", {"textFormat": {"bold": True}})
-                logger.info("Created Greeks & Risk worksheet")
-
-            self.worksheets["Greeks & Risk"] = worksheet
-        except Exception as e:
-            logger.error(f"Failed to setup Greeks & Risk worksheet: {e}")
 
     def log_trade(self, trade: TradeRecord) -> bool:
         """
@@ -391,6 +358,140 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to log trade to Google Sheets: {e}")
             return False
 
+    def check_position_logged(self, position_type: str, strike: float, expiry: str) -> bool:
+        """
+        Check if a position has already been logged to Google Sheets.
+
+        Args:
+            position_type: Type of position (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
+            strike: Strike price of the position
+            expiry: Expiry date string
+
+        Returns:
+            bool: True if position is already logged, False otherwise
+        """
+        if not self.enabled or "Trades" not in self.worksheets:
+            return False
+
+        try:
+            # Get all records from Trades worksheet
+            worksheet = self.worksheets["Trades"]
+            records = worksheet.get_all_records()
+
+            # Look for an OPEN action for this position that hasn't been closed
+            open_actions = [f"OPEN_{position_type}", f"[RECOVERED] OPEN_{position_type}"]
+
+            for record in records:
+                action = record.get("Action", "")
+                record_strike = str(record.get("Strike", ""))
+                record_expiry = str(record.get("Expiry", ""))
+
+                # Check if this is an open trade for this position
+                if any(open_action in action for open_action in open_actions):
+                    # Check if strike matches (handle formatting differences)
+                    try:
+                        if abs(float(record_strike) - strike) < 0.01:
+                            # Check if expiry matches
+                            if expiry in record_expiry or record_expiry in expiry:
+                                logger.debug(f"Found existing log for {position_type} @ ${strike} exp {expiry}")
+                                return True
+                    except (ValueError, TypeError):
+                        continue
+
+            return False
+
+        except Exception as e:
+            logger.warning(f"Error checking for existing position log: {e}")
+            return False
+
+    def log_recovered_position(
+        self,
+        position_type: str,
+        strike: Any,
+        expiry: str,
+        entry_price: float,
+        current_price: float,
+        quantity: int,
+        option_type: str = None,
+        call_strike: float = None,
+        put_strike: float = None,
+        underlying_price: float = None,
+        vix: float = None,
+        delta: float = None,
+        dte: int = None
+    ) -> bool:
+        """
+        Log a recovered position to Google Sheets.
+
+        This is called when the bot recovers positions on startup.
+        It logs the position with a [RECOVERED] prefix.
+
+        Args:
+            position_type: Type (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
+            strike: Strike price(s)
+            expiry: Expiry date
+            entry_price: Entry price of the position
+            current_price: Current price
+            quantity: Number of contracts
+            option_type: "Call", "Put", "Straddle", "Strangle"
+            call_strike: For strangles, the call strike
+            put_strike: For strangles, the put strike
+            underlying_price: Current SPY price
+            vix: Current VIX level
+            delta: Position delta
+            dte: Days to expiration
+
+        Returns:
+            bool: True if logged successfully
+        """
+        if not self.enabled or "Trades" not in self.worksheets:
+            return False
+
+        try:
+            # Format strike display
+            if call_strike and put_strike:
+                strike_display = f"C{call_strike}/P{put_strike}"
+            else:
+                strike_display = str(strike)
+
+            # Calculate DTE if not provided
+            if dte is None and expiry:
+                try:
+                    from datetime import datetime
+                    # Parse expiry (format: YYYYMMDD)
+                    expiry_date = datetime.strptime(str(expiry), "%Y%m%d")
+                    dte = (expiry_date - datetime.now()).days
+                except:
+                    dte = None
+
+            # Create trade record for recovery with all available fields
+            trade = TradeRecord(
+                action=f"[RECOVERED] OPEN_{position_type}",
+                strike=strike_display,
+                price=entry_price,
+                delta=delta or 0.0,
+                pnl=0.0,
+                option_type=option_type or position_type,
+                expiry_date=expiry,
+                quantity=quantity,
+                trade_reason="Position Recovery",
+                underlying_price=underlying_price,
+                vix=vix,
+                dte=dte,
+                total_delta=delta or 0.0,
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                premium_received=entry_price * quantity * 100 if position_type == "SHORT_STRANGLE" else None
+            )
+
+            self.worksheets["Trades"].append_row(trade.to_list())
+            logger.info(f"Logged recovered position to Google Sheets: {position_type} @ {strike_display}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to log recovered position: {e}")
+            return False
+
     def log_position_snapshot(self, positions: List[Dict[str, Any]]) -> bool:
         """
         Update the Positions worksheet with current position snapshot.
@@ -407,9 +508,15 @@ class GoogleSheetsLogger:
         try:
             # Clear existing data (keep headers)
             worksheet = self.worksheets["Positions"]
-            worksheet.delete_rows(2, worksheet.row_count)
+            # Only delete if there are rows beyond the header
+            if worksheet.row_count > 1:
+                try:
+                    worksheet.delete_rows(2, worksheet.row_count)
+                except Exception:
+                    pass  # Ignore if no rows to delete
 
-            # Add current positions
+            # Add current positions - simplified columns
+            # Columns: Last Updated, Type, Strike, Expiry, Days to Expiry, Entry Price, Current Price, P&L ($), P&L (EUR), Status
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for pos in positions:
                 row = [
@@ -418,13 +525,8 @@ class GoogleSheetsLogger:
                     pos.get("strike", "N/A"),
                     pos.get("expiry", "N/A"),
                     pos.get("dte", "N/A"),
-                    pos.get("quantity", "N/A"),
                     f"{pos.get('entry_price', 0):.4f}",
                     f"{pos.get('current_price', 0):.4f}",
-                    f"{pos.get('delta', 0):.4f}",
-                    f"{pos.get('gamma', 0):.4f}",
-                    f"{pos.get('theta', 0):.4f}",
-                    f"{pos.get('vega', 0):.4f}",
                     f"{pos.get('pnl', 0):.2f}",
                     f"{pos.get('pnl_eur', 0):.2f}",
                     pos.get("status", "Active")
@@ -437,9 +539,209 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to update position snapshot: {e}")
             return False
 
+    def log_recovered_positions_full(
+        self,
+        individual_positions: List[Dict[str, Any]],
+        underlying_price: float,
+        vix: float,
+        exchange_rate: float = None
+    ) -> bool:
+        """
+        Log all recovered positions to ALL relevant worksheets.
+
+        This logs:
+        1. Each individual option leg to the Trades tab
+        2. All positions to the Positions tab (current snapshot)
+        3. Initial Greeks snapshot to Greeks & Risk tab
+        4. Recovery event to Safety Events tab
+
+        Args:
+            individual_positions: List of individual option positions (4 legs typically)
+            underlying_price: Current SPY price
+            vix: Current VIX level
+            exchange_rate: Optional USD/EUR exchange rate
+
+        Returns:
+            bool: True if all logging succeeded
+        """
+        if not self.enabled:
+            return False
+
+        success = True
+        timestamp = datetime.now()
+
+        try:
+            # 1. Log each individual position to Trades tab
+            for pos in individual_positions:
+                # Calculate DTE and format expiry date
+                dte = None
+                expiry_formatted = pos.get("expiry", "N/A")
+                if pos.get("expiry"):
+                    try:
+                        expiry_date = datetime.strptime(str(pos["expiry"]), "%Y%m%d")
+                        dte = (expiry_date - datetime.now()).days
+                        # Format expiry as YYYY-MM-DD for display
+                        expiry_formatted = expiry_date.strftime("%Y-%m-%d")
+                    except:
+                        pass
+
+                # Build descriptive action: e.g., "OPEN_LONG_Call" or "OPEN_SHORT_Put"
+                position_type = pos.get("position_type", "UNKNOWN")  # LONG or SHORT
+                option_type = pos.get("option_type", "Unknown")      # Call or Put
+                action = f"[RECOVERED] OPEN_{position_type}_{option_type}"
+
+                # Build full type description: "Long Call", "Short Put", etc.
+                full_type = f"{position_type.capitalize()} {option_type}"
+
+                # Calculate premium:
+                # - LONG positions: premium PAID (DEBIT) = negative (money out)
+                # - SHORT positions: premium RECEIVED (CREDIT) = positive (money in)
+                # Formula: entry_price × qty × 100 (options are 100 shares per contract)
+                entry_price = pos.get("entry_price", 0)
+                current_price = pos.get("current_price", 0)
+                quantity = pos.get("quantity", 1)
+
+                base_premium = entry_price * quantity * 100
+                if position_type == "LONG":
+                    premium = -base_premium  # Debit (money paid out)
+                else:
+                    premium = base_premium   # Credit (money received)
+
+                # Calculate unrealized P&L:
+                # - LONG: profit when option price increases (current - entry)
+                # - SHORT: profit when option price decreases (entry - current)
+                # Multiply by quantity and 100 (contract multiplier)
+                if position_type == "LONG":
+                    unrealized_pnl = (current_price - entry_price) * quantity * 100
+                else:
+                    unrealized_pnl = (entry_price - current_price) * quantity * 100
+
+                # Convert to account currency if exchange rate available
+                converted_pnl = unrealized_pnl * exchange_rate if exchange_rate else None
+
+                trade = TradeRecord(
+                    action=action,
+                    strike=pos.get("strike", 0),
+                    price=entry_price,
+                    delta=pos.get("delta", 0),
+                    pnl=unrealized_pnl,  # Total P&L (at recovery, this is all unrealized)
+                    option_type=full_type,  # "Long Call", "Short Put", etc.
+                    expiry_date=expiry_formatted,  # YYYY-MM-DD format
+                    quantity=None,  # Not needed - each position is on its own line
+                    trade_reason="Position Recovery",
+                    underlying_price=underlying_price,
+                    vix=vix,
+                    dte=dte,
+                    total_delta=pos.get("delta", 0),
+                    realized_pnl=0.0,  # No realized P&L at recovery (positions still open)
+                    unrealized_pnl=unrealized_pnl,
+                    premium_received=premium,
+                    exchange_rate=exchange_rate,
+                    converted_pnl=converted_pnl,
+                    greeks={
+                        "gamma": pos.get("gamma", 0),
+                        "theta": pos.get("theta", 0),
+                        "vega": pos.get("vega", 0)
+                    }
+                )
+
+                if "Trades" in self.worksheets:
+                    self.worksheets["Trades"].append_row(trade.to_list())
+                    logger.info(f"Logged individual position to Trades: {position_type} {option_type} @ ${pos.get('strike')}")
+
+            # 2. Update Positions tab with current snapshot
+            positions_data = []
+            for pos in individual_positions:
+                dte = None
+                expiry_formatted = pos.get("expiry", "N/A")
+                if pos.get("expiry"):
+                    try:
+                        expiry_date = datetime.strptime(str(pos["expiry"]), "%Y%m%d")
+                        dte = (expiry_date - datetime.now()).days
+                        expiry_formatted = expiry_date.strftime("%Y-%m-%d")
+                    except:
+                        pass
+
+                # Format type as "Long Call", "Short Put", etc.
+                position_type = pos.get("position_type", "")
+                option_type = pos.get("option_type", "")
+                full_type = f"{position_type.capitalize()} {option_type}"
+
+                # Calculate unrealized P&L for Positions tab
+                entry_price = pos.get("entry_price", 0)
+                current_price = pos.get("current_price", 0)
+                quantity = pos.get("quantity", 1)
+
+                if position_type.upper() == "LONG":
+                    pos_pnl = (current_price - entry_price) * quantity * 100
+                else:
+                    pos_pnl = (entry_price - current_price) * quantity * 100
+
+                # Convert to EUR if exchange rate available
+                pos_pnl_eur = pos_pnl * exchange_rate if exchange_rate else 0.0
+
+                positions_data.append({
+                    "type": full_type,
+                    "strike": pos.get("strike", 0),
+                    "expiry": expiry_formatted,
+                    "dte": dte,
+                    "entry_price": entry_price,
+                    "current_price": current_price,
+                    "delta": pos.get("delta", 0),
+                    "gamma": pos.get("gamma", 0),
+                    "theta": pos.get("theta", 0),
+                    "vega": pos.get("vega", 0),
+                    "pnl": pos_pnl,
+                    "pnl_eur": pos_pnl_eur,
+                    "status": "Recovered"
+                })
+
+            self.log_position_snapshot(positions_data)
+
+            # 3. Log recovery event to Safety Events tab
+            # Columns: Timestamp, Event, SPY Price, VIX, New Short Strikes, Premium ($), Description, Result
+            if "Safety Events" in self.worksheets:
+                # Find strangle strikes for display
+                short_call_strike = 0
+                short_put_strike = 0
+                for p in individual_positions:
+                    if "SHORT" in p.get("position_type", ""):
+                        if "CALL" in p.get("option_type", "").upper():
+                            short_call_strike = p.get("strike", 0)
+                        elif "PUT" in p.get("option_type", "").upper():
+                            short_put_strike = p.get("strike", 0)
+
+                # Format short strikes
+                if short_call_strike and short_put_strike:
+                    new_strikes = f"C{short_call_strike}/P{short_put_strike}"
+                else:
+                    new_strikes = "N/A"
+
+                safety_row = [
+                    timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    "POSITION_RECOVERY",
+                    f"{underlying_price:.2f}",
+                    f"{vix:.2f}",
+                    new_strikes,
+                    "0.00",  # No new premium on recovery
+                    f"Recovered {len(individual_positions)} option positions from Saxo",
+                    "SUCCESS"
+                ]
+                self.worksheets["Safety Events"].append_row(safety_row)
+                logger.info("Logged recovery event to Safety Events")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Failed to log recovered positions to all sheets: {e}")
+            return False
+
     def log_daily_summary(self, summary: Dict[str, Any]) -> bool:
         """
         Log daily summary to Daily Summary worksheet.
+
+        Columns: Date, SPY Close, VIX, Theta Cost ($), Premium Collected ($),
+                 Daily P&L ($), Daily P&L (EUR), Cumulative P&L ($), Roll Count, Recenter Count, Notes
 
         Args:
             summary: Dictionary with daily metrics
@@ -453,24 +755,15 @@ class GoogleSheetsLogger:
         try:
             row = [
                 summary.get("date", datetime.now().strftime("%Y-%m-%d")),
-                summary.get("state", "N/A"),
-                f"{summary.get('spy_open', 0):.2f}",
                 f"{summary.get('spy_close', 0):.2f}",
-                f"{summary.get('spy_range', 0):.2f}",
-                f"{summary.get('vix_avg', 0):.2f}",
-                f"{summary.get('vix_high', 0):.2f}",
-                f"{summary.get('total_delta', 0):.4f}",
-                f"{summary.get('total_gamma', 0):.4f}",
-                f"{summary.get('total_theta', 0):.4f}",
-                f"{summary.get('daily_pnl', 0):.2f}",
-                f"{summary.get('realized_pnl', 0):.2f}",
-                f"{summary.get('unrealized_pnl', 0):.2f}",
+                f"{summary.get('vix', summary.get('vix_avg', 0)):.2f}",
+                f"{summary.get('theta_cost', summary.get('total_theta', 0)):.2f}",
                 f"{summary.get('premium_collected', 0):.2f}",
-                summary.get("trades_count", 0),
-                summary.get("recenter_count", 0),
-                summary.get("roll_count", 0),
+                f"{summary.get('daily_pnl', 0):.2f}",
+                f"{summary.get('daily_pnl_eur', summary.get('pnl_eur', 0)):.2f}",
                 f"{summary.get('cumulative_pnl', 0):.2f}",
-                f"{summary.get('pnl_eur', 0):.2f}",
+                summary.get("roll_count", 0),
+                summary.get("recenter_count", 0),
                 summary.get("notes", "")
             ]
             self.worksheets["Daily Summary"].append_row(row)
@@ -482,7 +775,9 @@ class GoogleSheetsLogger:
 
     def log_safety_event(self, event: Dict[str, Any]) -> bool:
         """
-        Log safety event (Fed filter, ITM risk, emergency exit).
+        Log safety event (Fed filter, ITM risk, emergency exit, roll, recenter).
+
+        Columns: Timestamp, Event, SPY Price, VIX, New Short Strikes, Premium ($), Description, Result
 
         Args:
             event: Dictionary with safety event details
@@ -494,17 +789,25 @@ class GoogleSheetsLogger:
             return False
 
         try:
+            # Format new short strikes if available
+            short_call = event.get("short_call_strike")
+            short_put = event.get("short_put_strike")
+            if short_call and short_put:
+                new_strikes = f"C{short_call}/P{short_put}"
+            elif short_call:
+                new_strikes = f"C{short_call}"
+            elif short_put:
+                new_strikes = f"P{short_put}"
+            else:
+                new_strikes = "N/A"
+
             row = [
                 event.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
                 event.get("event_type", "N/A"),
-                event.get("severity", "WARNING"),
                 f"{event.get('spy_price', 0):.2f}",
-                f"{event.get('initial_strike', 0):.2f}",
-                f"{event.get('distance_pct', 0):.2f}%",
                 f"{event.get('vix', 0):.2f}",
-                event.get("action_taken", "N/A"),
-                event.get("short_call_strike", "N/A"),
-                event.get("short_put_strike", "N/A"),
+                new_strikes,
+                f"{event.get('premium', event.get('premium_collected', 0)):.2f}",
                 event.get("description", ""),
                 event.get("result", "Pending")
             ]
@@ -513,44 +816,6 @@ class GoogleSheetsLogger:
             return True
         except Exception as e:
             logger.error(f"Failed to log safety event: {e}")
-            return False
-
-    def log_greeks(self, greeks: Dict[str, Any]) -> bool:
-        """
-        Log current Greeks snapshot to Greeks & Risk worksheet.
-
-        Args:
-            greeks: Dictionary with all Greeks values
-
-        Returns:
-            bool: True if logged successfully
-        """
-        if not self.enabled or "Greeks & Risk" not in self.worksheets:
-            return False
-
-        try:
-            row = [
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                f"{greeks.get('spy_price', 0):.2f}",
-                f"{greeks.get('vix', 0):.2f}",
-                f"{greeks.get('long_delta', 0):.4f}",
-                f"{greeks.get('short_delta', 0):.4f}",
-                f"{greeks.get('total_delta', 0):.4f}",
-                f"{greeks.get('long_gamma', 0):.4f}",
-                f"{greeks.get('short_gamma', 0):.4f}",
-                f"{greeks.get('total_gamma', 0):.4f}",
-                f"{greeks.get('long_theta', 0):.4f}",
-                f"{greeks.get('short_theta', 0):.4f}",
-                f"{greeks.get('total_theta', 0):.4f}",
-                f"{greeks.get('long_vega', 0):.4f}",
-                f"{greeks.get('short_vega', 0):.4f}",
-                f"{greeks.get('total_vega', 0):.4f}"
-            ]
-            self.worksheets["Greeks & Risk"].append_row(row)
-            logger.debug("Greeks logged to Google Sheets")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to log Greeks: {e}")
             return False
 
 
@@ -772,6 +1037,179 @@ class LocalFileLogger:
             return False
 
 
+class EmailAlerter:
+    """
+    Email alerting for critical safety events.
+
+    Uses SMTP to send email alerts when safety events occur.
+    Supports both simple SMTP and Gmail with app passwords.
+
+    Configuration (in email_alerts section of config):
+        enabled: bool - Enable/disable email alerts
+        smtp_server: str - SMTP server hostname
+        smtp_port: int - SMTP port (usually 587 for TLS)
+        sender_email: str - From email address
+        sender_password: str - SMTP password or app password
+        recipients: list[str] - List of recipient emails
+        use_tls: bool - Whether to use TLS (default True)
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        """
+        Initialize email alerter.
+
+        Args:
+            config: Full configuration dictionary
+        """
+        self.config = config.get("email_alerts", {})
+        self.enabled = self.config.get("enabled", False)
+
+        if self.enabled:
+            self.smtp_server = self.config.get("smtp_server", "smtp.gmail.com")
+            self.smtp_port = self.config.get("smtp_port", 587)
+            self.sender_email = self.config.get("sender_email")
+            self.sender_password = self.config.get("sender_password")
+            self.recipients = self.config.get("recipients", [])
+            self.use_tls = self.config.get("use_tls", True)
+
+            if not self.sender_email or not self.sender_password:
+                logger.error("Email alerter: Missing sender credentials - disabling")
+                self.enabled = False
+            elif not self.recipients:
+                logger.error("Email alerter: No recipients configured - disabling")
+                self.enabled = False
+            else:
+                logger.info(f"Email alerter initialized: {len(self.recipients)} recipient(s)")
+
+    def send_alert(self, subject: str, body: str, severity: str = "WARNING") -> bool:
+        """
+        Send an email alert.
+
+        Args:
+            subject: Email subject line
+            body: Email body (plain text)
+            severity: Alert severity for subject prefix
+
+        Returns:
+            bool: True if sent successfully
+        """
+        if not self.enabled:
+            return False
+
+        try:
+            # Create message
+            msg = MIMEMultipart()
+            msg["From"] = self.sender_email
+            msg["To"] = ", ".join(self.recipients)
+            msg["Subject"] = f"[CALYPSO {severity}] {subject}"
+
+            # Add timestamp and severity to body
+            full_body = f"""
+CALYPSO TRADING BOT ALERT
+========================
+Severity: {severity}
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+{body}
+
+---
+This is an automated alert from the Calypso Trading Bot.
+            """.strip()
+
+            msg.attach(MIMEText(full_body, "plain"))
+
+            # Connect and send
+            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+                if self.use_tls:
+                    server.starttls()
+                server.login(self.sender_email, self.sender_password)
+                server.send_message(msg)
+
+            logger.info(f"Email alert sent: {subject}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to send email alert: {e}")
+            return False
+
+    def send_safety_event_alert(self, event: Dict[str, Any]) -> bool:
+        """
+        Send alert for a safety event.
+
+        Args:
+            event: Safety event dictionary
+
+        Returns:
+            bool: True if sent successfully
+        """
+        event_type = event.get("event_type", "Unknown Event")
+        severity = event.get("severity", "WARNING")
+
+        subject = f"{event_type}"
+
+        body = f"""
+Safety Event Detected
+---------------------
+Event Type: {event_type}
+Severity: {severity}
+
+Market Data:
+- SPY Price: ${event.get('spy_price', 0):.2f}
+- VIX: {event.get('vix', 0):.2f}
+- Initial Strike: ${event.get('initial_strike', 0):.2f}
+- Distance: {event.get('distance_pct', 0):.2f}%
+
+Action Taken: {event.get('action_taken', 'N/A')}
+
+Description: {event.get('description', 'No details available')}
+
+Short Positions:
+- Call Strike: {event.get('short_call_strike', 'N/A')}
+- Put Strike: {event.get('short_put_strike', 'N/A')}
+        """.strip()
+
+        return self.send_alert(subject, body, severity)
+
+    def send_daily_summary(self, summary: Dict[str, Any]) -> bool:
+        """
+        Send daily P&L summary email.
+
+        Args:
+            summary: Daily summary data
+
+        Returns:
+            bool: True if sent successfully
+        """
+        subject = f"Daily Summary - P&L: ${summary.get('total_pnl', 0):.2f}"
+
+        body = f"""
+Daily Trading Summary
+=====================
+
+Date: {summary.get('date', datetime.now().strftime('%Y-%m-%d'))}
+
+Performance:
+- Total P&L: ${summary.get('total_pnl', 0):.2f}
+- Realized P&L: ${summary.get('realized_pnl', 0):.2f}
+- Unrealized P&L: ${summary.get('unrealized_pnl', 0):.2f}
+
+Positions:
+- Long Straddle Value: ${summary.get('long_straddle_value', 0):.2f}
+- Short Strangle Value: ${summary.get('short_strangle_value', 0):.2f}
+
+Activity:
+- Trades Today: {summary.get('trade_count', 0)}
+- Rolls: {summary.get('roll_count', 0)}
+- Recenters: {summary.get('recenter_count', 0)}
+
+Market:
+- SPY Close: ${summary.get('spy_close', 0):.2f}
+- VIX Close: {summary.get('vix_close', 0):.2f}
+        """.strip()
+
+        return self.send_alert(subject, body, "INFO")
+
+
 class TradeLoggerService:
     """
     Main trade logging service that aggregates all logging destinations.
@@ -815,6 +1253,9 @@ class TradeLoggerService:
         # Initialize Microsoft logger (optional)
         self.microsoft_logger = MicrosoftSheetsLogger(config)
 
+        # Initialize Email Alerter (optional)
+        self.email_alerter = EmailAlerter(config)
+
         # Asynchronous logging queue
         self.log_queue: Queue = Queue()
         self._stop_logging = False
@@ -827,6 +1268,7 @@ class TradeLoggerService:
         logger.info(f"  - Local logging: ENABLED")
         logger.info(f"  - Google Sheets: {'ENABLED' if self.google_logger.enabled else 'DISABLED'}")
         logger.info(f"  - Microsoft Excel: {'ENABLED' if self.microsoft_logger.enabled else 'DISABLED'}")
+        logger.info(f"  - Email Alerts: {'ENABLED' if self.email_alerter.enabled else 'DISABLED'}")
         logger.info(f"  - Currency Conversion: {'ENABLED' if self.currency_enabled else 'DISABLED'} ({self.base_currency} -> {self.account_currency})")
 
     def _start_log_thread(self):
@@ -1004,28 +1446,160 @@ class TradeLoggerService:
 
     def log_safety_event(self, event: Dict[str, Any]):
         """
-        Log safety event (Fed filter, ITM risk, emergency exit) to Google Sheets.
+        Log safety event (Fed filter, ITM risk, emergency exit).
+
+        Logs to:
+        - Google Sheets (if enabled)
+        - Email alert (if enabled)
+        - Console (always)
 
         Args:
             event: Dictionary with safety event details
         """
+        # Log to Google Sheets
         if self.google_logger.enabled:
             self.google_logger.log_safety_event(event)
+
+        # Send email alert for critical events
+        if self.email_alerter.enabled:
+            self.email_alerter.send_safety_event_alert(event)
 
         # Also log to console for visibility
         logger.warning(
             f"SAFETY EVENT: {event.get('event_type')} - {event.get('description')}"
         )
 
-    def log_greeks_snapshot(self, greeks: Dict[str, Any]):
+    def check_position_logged(self, position_type: str, strike: float, expiry: str) -> bool:
         """
-        Log current Greeks snapshot to Google Sheets.
+        Check if a position has already been logged to Google Sheets.
 
         Args:
-            greeks: Dictionary with all Greeks values
+            position_type: Type of position (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
+            strike: Strike price of the position
+            expiry: Expiry date string
+
+        Returns:
+            bool: True if position is already logged, False otherwise
         """
         if self.google_logger.enabled:
-            self.google_logger.log_greeks(greeks)
+            return self.google_logger.check_position_logged(position_type, strike, expiry)
+        return False
+
+    def log_recovered_position(
+        self,
+        position_type: str,
+        strike: Any,
+        expiry: str,
+        entry_price: float,
+        current_price: float,
+        quantity: int,
+        option_type: str = None,
+        call_strike: float = None,
+        put_strike: float = None,
+        underlying_price: float = None,
+        vix: float = None,
+        delta: float = None,
+        dte: int = None
+    ) -> bool:
+        """
+        Log a recovered position to all enabled logging destinations.
+
+        This is called when the bot recovers positions on startup.
+        It logs the position with a [RECOVERED] prefix.
+
+        Args:
+            position_type: Type (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
+            strike: Strike price(s)
+            expiry: Expiry date
+            entry_price: Entry price of the position
+            current_price: Current price
+            quantity: Number of contracts
+            option_type: "Call", "Put", "Straddle", "Strangle"
+            call_strike: For strangles, the call strike
+            put_strike: For strangles, the put strike
+            underlying_price: Current SPY price
+            vix: Current VIX level
+            delta: Position delta
+            dte: Days to expiration
+
+        Returns:
+            bool: True if logged successfully
+        """
+        success = True
+
+        # Log to Google Sheets
+        if self.google_logger.enabled:
+            gs_success = self.google_logger.log_recovered_position(
+                position_type=position_type,
+                strike=strike,
+                expiry=expiry,
+                entry_price=entry_price,
+                current_price=current_price,
+                quantity=quantity,
+                option_type=option_type,
+                call_strike=call_strike,
+                put_strike=put_strike,
+                underlying_price=underlying_price,
+                vix=vix,
+                delta=delta,
+                dte=dte
+            )
+            success = success and gs_success
+
+        # Log to local file as well
+        logger.info(
+            f"[RECOVERED] Position logged: {position_type} @ {strike}, "
+            f"Expiry: {expiry}, Qty: {quantity}"
+        )
+
+        return success
+
+    def log_recovered_positions_full(
+        self,
+        individual_positions: List[Dict[str, Any]],
+        underlying_price: float,
+        vix: float,
+        saxo_client=None
+    ) -> bool:
+        """
+        Log all recovered positions to ALL relevant worksheets.
+
+        This logs each individual option leg (4 typically) to:
+        - Trades tab: Each leg as separate trade entry
+        - Positions tab: Current snapshot of all legs
+        - Greeks & Risk tab: Delta summary
+        - Safety Events tab: Recovery event
+
+        Args:
+            individual_positions: List of individual option positions
+            underlying_price: Current SPY price
+            vix: Current VIX level
+            saxo_client: Optional SaxoClient for fetching FX rate
+
+        Returns:
+            bool: True if logging succeeded
+        """
+        # Fetch exchange rate if currency conversion is enabled
+        exchange_rate = None
+        if self.currency_enabled and saxo_client:
+            try:
+                exchange_rate = saxo_client.get_fx_rate(
+                    self.base_currency,
+                    self.account_currency
+                )
+                if exchange_rate:
+                    logger.info(f"Fetched FX rate for recovery logging: {self.base_currency}/{self.account_currency} = {exchange_rate:.6f}")
+            except Exception as e:
+                logger.warning(f"Could not fetch FX rate for recovery logging: {e}")
+
+        if self.google_logger.enabled:
+            return self.google_logger.log_recovered_positions_full(
+                individual_positions=individual_positions,
+                underlying_price=underlying_price,
+                vix=vix,
+                exchange_rate=exchange_rate
+            )
+        return False
 
     def shutdown(self):
         """Shutdown the logging service gracefully."""

@@ -203,9 +203,17 @@ class SaxoClient:
         # Price cache for subscription snapshots (UIC -> latest price data)
         self._price_cache: Dict[int, Dict] = {}
 
-        # Account information
-        self.account_key = config["account"].get("account_key")
-        self.client_key = config["account"].get("client_key")
+        # Account information - auto-select based on environment
+        account_config = config.get("account", {})
+        if self.environment in account_config and isinstance(account_config[self.environment], dict):
+            # New structure: account.sim / account.live
+            env_account = account_config[self.environment]
+            self.account_key = env_account.get("account_key")
+            self.client_key = env_account.get("client_key")
+        else:
+            # Legacy structure: account.account_key / account.client_key
+            self.account_key = account_config.get("account_key")
+            self.client_key = account_config.get("client_key")
 
         # Currency configuration (for FX rate lookups)
         self.currency_config = config.get("currency", {})
@@ -417,13 +425,46 @@ class SaxoClient:
 
     def _save_tokens_to_config(self):
         """
-        Save current access and refresh tokens back to config.json.
+        Save current access and refresh tokens.
 
+        Uses ConfigLoader to handle cloud (Secret Manager) vs local (file) storage.
         This allows tokens to persist between bot runs, avoiding the need
         to re-authenticate every time.
         """
         try:
-            # Read current config
+            # Try to use ConfigLoader if available (handles cloud vs local)
+            from src.config_loader import get_config_loader
+            loader = get_config_loader()
+
+            if loader:
+                # Use ConfigLoader's save_tokens method
+                token_expiry_str = self.token_expiry.isoformat() if self.token_expiry else None
+                success = loader.save_tokens(
+                    self.access_token or "",
+                    self.refresh_token or "",
+                    token_expiry_str
+                )
+                if success:
+                    logger.info("Tokens saved successfully via ConfigLoader")
+                    return
+                else:
+                    logger.warning("ConfigLoader save failed, falling back to direct file save")
+
+            # Fallback: Direct file save (for backwards compatibility)
+            self._save_tokens_to_file_direct()
+
+        except Exception as e:
+            logger.warning(f"Failed to save tokens: {e}")
+            # Try direct file save as last resort
+            self._save_tokens_to_file_direct()
+
+    def _save_tokens_to_file_direct(self):
+        """
+        Direct file save fallback for tokens.
+
+        Used when ConfigLoader is not available or fails.
+        """
+        try:
             with open("config/config.json", "r") as f:
                 config_data = json.load(f)
 
@@ -432,18 +473,16 @@ class SaxoClient:
             config_data["saxo_api"][env_key]["access_token"] = self.access_token or ""
             config_data["saxo_api"][env_key]["refresh_token"] = self.refresh_token or ""
 
-            # Calculate and save token expiry timestamp
             if self.token_expiry:
                 config_data["saxo_api"][env_key]["token_expiry"] = self.token_expiry.isoformat()
 
-            # Write back to file
             with open("config/config.json", "w") as f:
                 json.dump(config_data, f, indent=4)
 
-            logger.info("Tokens saved to config/config.json successfully")
+            logger.info("Tokens saved to config/config.json (direct write)")
 
         except Exception as e:
-            logger.warning(f"Failed to save tokens to config/config.json: {e}")
+            logger.error(f"Direct token save failed: {e}")
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """
@@ -1152,22 +1191,51 @@ class SaxoClient:
     # REST API METHODS - TRADING
     # =========================================================================
 
-    def get_positions(self) -> Optional[List[Dict]]:
+    def get_positions(self, include_greeks: bool = True) -> Optional[List[Dict]]:
         """
         Get all current positions for the account.
 
+        Args:
+            include_greeks: If True, request Greeks data (Delta, Gamma, Theta, Vega)
+                           for options positions. Default True.
+
         Returns:
-            list: List of position dictionaries.
+            list: List of position dictionaries with Greeks if available.
+
+        Note:
+            Greeks FieldGroup returns: Delta, Gamma, Theta, Vega, Rho, Phi,
+            TheoreticalPrice, MidVol, and currency-specific variants.
         """
         endpoint = f"/port/v1/positions"
+
+        # Build FieldGroups - always include base fields, optionally add Greeks
+        field_groups = ["DisplayAndFormat", "PositionBase", "PositionView"]
+        if include_greeks:
+            field_groups.append("Greeks")
+
         params = {
             "ClientKey": self.client_key,
-            "FieldGroups": "DisplayAndFormat,PositionBase,PositionView"
+            "FieldGroups": ",".join(field_groups)
         }
 
         response = self._make_request("GET", endpoint, params=params)
         if response and "Data" in response:
-            return response["Data"]
+            positions = response["Data"]
+
+            # Log if Greeks were returned for debugging
+            if include_greeks and positions:
+                for pos in positions:
+                    greeks = pos.get("Greeks", {})
+                    if greeks:
+                        symbol = pos.get("DisplayAndFormat", {}).get("Symbol", "Unknown")
+                        logger.debug(
+                            f"Greeks for {symbol}: Delta={greeks.get('Delta', 'N/A')}, "
+                            f"Gamma={greeks.get('Gamma', 'N/A')}, "
+                            f"Theta={greeks.get('Theta', 'N/A')}, "
+                            f"Vega={greeks.get('Vega', 'N/A')}"
+                        )
+
+            return positions
         return []
 
     def get_open_orders(self) -> Optional[List[Dict]]:

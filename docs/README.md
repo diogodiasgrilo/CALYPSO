@@ -15,6 +15,8 @@ docs/
 │   ├── PRICING_ANALYSIS.md
 │   ├── SUBSCRIPTION_ANALYSIS.md
 │   └── SAFETY_FEATURES_ADDED.md
+├── deployment/                      # Cloud deployment guides
+│   └── GCP_MIGRATION.md             # Google Cloud Platform deployment
 └── development/                     # Development history & implementation
     ├── CHANGES_LOG.md
     ├── SESSION_SUMMARY.md
@@ -37,6 +39,10 @@ docs/
 - **[PRICING_ANALYSIS.md](strategy/PRICING_ANALYSIS.md)** - Price feed analysis
 - **[SUBSCRIPTION_ANALYSIS.md](strategy/SUBSCRIPTION_ANALYSIS.md)** - Required market data subscriptions
 - **[SAFETY_FEATURES_ADDED.md](strategy/SAFETY_FEATURES_ADDED.md)** - Fed filter, ITM prevention, emergency exits
+
+### Cloud Deployment (`docs/deployment/`)
+
+- **[GCP_MIGRATION.md](deployment/GCP_MIGRATION.md)** - Complete guide for deploying to Google Cloud Platform (~$15/month)
 
 ### Development History (`docs/development/`)
 
