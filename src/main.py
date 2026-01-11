@@ -40,6 +40,7 @@ from typing import Optional
 from src.saxo_client import SaxoClient
 from src.strategy import DeltaNeutralStrategy, StrategyState
 from src.logger_service import TradeLoggerService, setup_logging
+from src.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration
 
 # Configure main logger
 logger = logging.getLogger(__name__)
@@ -266,6 +267,26 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     try:
         while not shutdown_requested:
             try:
+                # Check if market is open
+                if not is_market_open():
+                    market_status = get_market_status_message()
+                    trade_logger.log_event(market_status)
+
+                    # Calculate intelligent sleep duration
+                    sleep_time = calculate_sleep_duration(max_sleep=3600)  # Max 1 hour
+
+                    if sleep_time > 0:
+                        hours = sleep_time // 3600
+                        minutes = (sleep_time % 3600) // 60
+                        trade_logger.log_event(
+                            f"Sleeping for {hours}h {minutes}m. "
+                            f"Bot will wake up to recheck market status."
+                        )
+                        time.sleep(sleep_time)
+                    else:
+                        time.sleep(60)  # Recheck in 1 minute if close to market open
+                    continue
+
                 # Check circuit breaker
                 if client.is_circuit_open():
                     trade_logger.log_event("Circuit breaker is OPEN - waiting for cooldown...")
