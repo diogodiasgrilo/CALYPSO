@@ -102,8 +102,9 @@ def kill_existing_bot_instances() -> int:
 
     try:
         # Find all Python processes running main.py
+        # Use broader pattern to catch python, python3, and full paths
         result = subprocess.run(
-            ["pgrep", "-f", "python.*main.py"],
+            ["pgrep", "-f", "main.py"],
             capture_output=True,
             text=True
         )
@@ -459,19 +460,24 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                         hours = sleep_time // 3600
                         minutes = (sleep_time % 3600) // 60
                         trade_logger.log_event(
-                            f"Sleeping for {hours}h {minutes}m. "
-                            f"Bot will wake up to recheck market status."
+                            f"HEARTBEAT | Market closed - sleeping for {hours}h {minutes}m"
                         )
                         if not interruptible_sleep(sleep_time):
                             break  # Shutdown requested
                     else:
+                        trade_logger.log_event("HEARTBEAT | Market closed - rechecking in 60s")
                         if not interruptible_sleep(60):
                             break  # Shutdown requested
                     continue
 
                 # Check circuit breaker
                 if client.is_circuit_open():
-                    trade_logger.log_event("Circuit breaker is OPEN - waiting for cooldown...")
+                    cooldown_remaining = ""
+                    if client.circuit_breaker.cooldown_until:
+                        remaining_secs = (client.circuit_breaker.cooldown_until - datetime.now()).total_seconds()
+                        if remaining_secs > 0:
+                            cooldown_remaining = f" (~{int(remaining_secs)}s remaining)"
+                    trade_logger.log_event(f"HEARTBEAT | Circuit breaker OPEN - waiting for cooldown{cooldown_remaining}")
                     if not interruptible_sleep(check_interval):
                         break  # Shutdown requested
                     continue
@@ -556,6 +562,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                         last_dashboard_log_time = now
                     except Exception as e:
                         trade_logger.log_error(f"Dashboard logging error: {e}")
+
+                # Log bot heartbeat - this is the last message before sleeping
+                # Shows bot is alive and what state it's in
+                status = strategy.get_status_summary()
+                mode_prefix = "[DRY RUN] " if dry_run else ""
+                trade_logger.log_event(
+                    f"{mode_prefix}HEARTBEAT | State: {status['state']} | "
+                    f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
+                    f"Next check in {check_interval}s"
+                )
 
                 # Sleep until next check (interruptible for fast shutdown)
                 if not interruptible_sleep(check_interval):

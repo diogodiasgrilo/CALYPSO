@@ -193,6 +193,9 @@ class SaxoClient:
         # Circuit breaker for error handling
         self.circuit_breaker = CircuitBreakerState()
 
+        # Heartbeat tracking for debugging
+        self._heartbeat_count = 0
+
         # WebSocket connection state
         self.ws_connection: Optional[websocket.WebSocketApp] = None
         self.ws_thread: Optional[threading.Thread] = None
@@ -1717,7 +1720,11 @@ class SaxoClient:
                 
                 # heartbeat checks - still record success to keep circuit breaker happy
                 if "ReferenceId" in data and data["ReferenceId"] == "_heartbeat":
+                    self._heartbeat_count += 1
                     self._record_success()  # Heartbeat proves WebSocket is alive
+                    # Log every 10th heartbeat to confirm they're being received
+                    if self._heartbeat_count % 10 == 0:
+                        logger.debug(f"WebSocket heartbeat #{self._heartbeat_count} received - connection healthy")
                     return
 
                 self._handle_streaming_message(data)
@@ -1736,6 +1743,8 @@ class SaxoClient:
         def on_open(ws):
             logger.info("WebSocket connection established")
             self.is_streaming = True
+            # Reset circuit breaker on successful WebSocket connection
+            self._record_success()
             
         # FIXED: Surgical URL construction for Saxo Sim
         # 1. Clean the base URL

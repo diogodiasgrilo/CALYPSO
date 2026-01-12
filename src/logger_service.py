@@ -939,13 +939,28 @@ class GoogleSheetsLogger:
                 dte = None
                 expiry_formatted = pos.get("expiry", "N/A")
                 if pos.get("expiry"):
-                    try:
-                        expiry_date = datetime.strptime(str(pos["expiry"]), "%Y%m%d")
+                    expiry_str = str(pos["expiry"])
+                    expiry_date = None
+
+                    # Try multiple date formats
+                    date_formats = [
+                        "%Y%m%d",      # 20260331
+                        "%Y-%m-%d",    # 2026-03-31
+                        "%Y/%m/%d",    # 2026/03/31
+                    ]
+
+                    for fmt in date_formats:
+                        try:
+                            expiry_date = datetime.strptime(expiry_str[:10], fmt)
+                            break
+                        except ValueError:
+                            continue
+
+                    if expiry_date:
                         dte = (expiry_date - datetime.now()).days
-                        # Format expiry as YYYY-MM-DD for display
                         expiry_formatted = expiry_date.strftime("%Y-%m-%d")
-                    except:
-                        pass
+                    else:
+                        logger.warning(f"Could not parse expiry date: {expiry_str}")
 
                 # Build descriptive action: e.g., "OPEN_LONG_Call" or "OPEN_SHORT_Put"
                 position_type = pos.get("position_type", "UNKNOWN")  # LONG or SHORT
