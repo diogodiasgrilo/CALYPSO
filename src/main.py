@@ -343,7 +343,21 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
         {"uic": config["strategy"]["underlying_uic"], "asset_type": "Etf"},
         {"uic": config["strategy"]["vix_uic"], "asset_type": "StockIndex"} # Keep as StockIndex
     ]
-    
+
+    # Also subscribe to existing position option UICs for real-time quotes
+    # This ensures close operations have streaming data available
+    if strategy.long_straddle:
+        if strategy.long_straddle.call and strategy.long_straddle.call.uic:
+            subscriptions.append({"uic": strategy.long_straddle.call.uic, "asset_type": "StockOption"})
+        if strategy.long_straddle.put and strategy.long_straddle.put.uic:
+            subscriptions.append({"uic": strategy.long_straddle.put.uic, "asset_type": "StockOption"})
+
+    if strategy.short_strangle:
+        if strategy.short_strangle.call and strategy.short_strangle.call.uic:
+            subscriptions.append({"uic": strategy.short_strangle.call.uic, "asset_type": "StockOption"})
+        if strategy.short_strangle.put and strategy.short_strangle.put.uic:
+            subscriptions.append({"uic": strategy.short_strangle.put.uic, "asset_type": "StockOption"})
+
     trade_logger.log_event(f"Starting price streaming for {len(subscriptions)} instruments...")
 
     def price_update_handler(uic: int, data: dict):

@@ -759,7 +759,7 @@ class DeltaNeutralStrategy:
                 strike_str = saxo_match.group(5)
 
                 month = month_codes.get(month_code, '01')
-                expiry = f"20{year}{month}{day}"  # Format: 20260331
+                expiry = f"20{year}-{month}-{day}"  # Format: 2026-03-31 (match Saxo API format)
                 option_type = "Call" if cp == 'C' else "Put"
                 strike = float(strike_str)
 
@@ -1180,6 +1180,8 @@ class DeltaNeutralStrategy:
         call_option = atm_options["call"]
         put_option = atm_options["put"]
 
+        logger.info(f"Checking spreads for Call UIC: {call_option['uic']}, Put UIC: {put_option['uic']}")
+
         # Check bid-ask spreads
         call_spread_ok, call_spread = self.client.check_bid_ask_spread(
             call_option["uic"],
@@ -1383,16 +1385,36 @@ class DeltaNeutralStrategy:
             if not self.update_market_data():
                 return False
 
-        # Calculate expected weekly move
+        # First, get the weekly expiration to determine actual DTE
+        expirations = self.client.get_option_expirations(self.underlying_uic)
+        if not expirations:
+            logger.error("Failed to get option expirations")
+            return False
+
+        # Find actual DTE for weekly options (nearest Friday within 7 days)
+        from datetime import datetime
+        today = datetime.now().date()
+        weekly_dte = 7  # Default fallback
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry")
+            if exp_date_str:
+                exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                if 0 < dte <= 7:
+                    weekly_dte = dte
+                    logger.info(f"Found weekly expiration with {dte} DTE")
+                    break
+
+        # Calculate expected move using ACTUAL DTE, not hardcoded 7 days
         # Using VIX as a proxy for implied volatility
         iv = self.current_vix / 100  # Convert VIX to decimal
         expected_move = self.client.calculate_expected_move(
             self.current_underlying_price,
             iv,
-            days=7
+            days=weekly_dte  # Use actual DTE instead of hardcoded 7
         )
 
-        logger.info(f"Weekly expected move: ${expected_move:.2f} ({iv*100:.1f}% IV)")
+        logger.info(f"Expected move for {weekly_dte} DTE: ${expected_move:.2f} ({iv*100:.1f}% IV)")
 
         # Use middle of the multiplier range
         multiplier = (self.strangle_multiplier_min + self.strangle_multiplier_max) / 2
@@ -1662,10 +1684,14 @@ class DeltaNeutralStrategy:
         """
         Execute the 5-point recentering procedure.
 
-        This involves:
-        1. Closing the current long straddle
-        2. Opening a new ATM long straddle at the same expiration
-        3. Closing and resetting the weekly shorts
+        Per Brian Terry's strategy:
+        1. Close the current long straddle
+        2. Open a new ATM long straddle at the same expiration
+        3. KEEP existing short strangle (don't close it during recenter)
+
+        Short strangle is only rolled/adjusted:
+        - On Thursday/Friday (normal weekly roll)
+        - When a strike is challenged (defensive roll)
 
         Returns:
             bool: True if recenter successful, False otherwise.
@@ -1681,19 +1707,13 @@ class DeltaNeutralStrategy:
         if self.long_straddle and self.long_straddle.call:
             original_expiry = self.long_straddle.call.expiry
 
-        # Step 1: Close current short strangle
-        if self.short_strangle:
-            if not self.close_short_strangle():
-                logger.error("Failed to close short strangle during recenter")
-                return False
-
-        # Step 2: Close current long straddle
+        # Step 1: Close current long straddle
         if self.long_straddle:
             if not self.close_long_straddle():
                 logger.error("Failed to close long straddle during recenter")
                 return False
 
-        # Step 3: Open new ATM long straddle at same expiration
+        # Step 2: Open new ATM long straddle at same expiration
         # We need to find ATM options at the new price but same expiry
         if original_expiry:
             # Calculate DTE for the original expiry
@@ -1717,16 +1737,30 @@ class DeltaNeutralStrategy:
                 logger.error("Failed to find ATM options for recentered straddle")
                 return False
 
-        # Step 4: Enter new short strangle
-        if not self.enter_short_strangle():
-            logger.warning("Failed to enter new short strangle during recenter")
-            # Continue anyway, straddle is more important
+        # Step 3: Keep existing short strangle (DO NOT CLOSE)
+        # Short strangle will be rolled separately on Thursday/Friday or when challenged
+        if self.short_strangle:
+            logger.info("Keeping existing short strangle (will be rolled on schedule or if challenged)")
+        else:
+            # If we don't have a short strangle yet, try to enter one
+            logger.info("No existing short strangle - attempting to enter new one")
+            if not self.enter_short_strangle():
+                logger.warning("Failed to enter short strangle during recenter")
+                # Continue anyway, straddle is more important
 
         self.metrics.recenter_count += 1
 
+        # Set state based on current positions
+        if self.long_straddle and self.short_strangle:
+            self.state = StrategyState.FULL_POSITION
+        elif self.long_straddle:
+            self.state = StrategyState.LONG_STRADDLE_ACTIVE
+        else:
+            self.state = StrategyState.IDLE
+
         logger.info(
             f"Recenter complete. New strike: {self.initial_straddle_strike:.2f}, "
-            f"Total recenters: {self.metrics.recenter_count}"
+            f"Total recenters: {self.metrics.recenter_count}, State: {self.state.value}"
         )
 
         # Log trade
@@ -1896,7 +1930,7 @@ class DeltaNeutralStrategy:
         if not expiry_str:
             return False
 
-        expiry_date = datetime.strptime(expiry_str[:8], "%Y%m%d").date()
+        expiry_date = datetime.strptime(expiry_str[:10], "%Y-%m-%d").date()
         dte = (expiry_date - datetime.now().date()).days
 
         if self.exit_dte_min <= dte <= self.exit_dte_max:

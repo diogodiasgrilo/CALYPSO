@@ -744,8 +744,8 @@ class SaxoClient:
         """
         Get current quote for an instrument.
 
-        Uses /trade/v1/infoprices/list endpoint with AccountKey for proper
-        access in simulation environment.
+        First checks the streaming price cache for real-time data, then
+        falls back to /trade/v1/infoprices/list endpoint.
 
         Args:
             uic: Unique Instrument Code
@@ -754,6 +754,18 @@ class SaxoClient:
         Returns:
             dict: Quote data including Bid, Ask, LastTraded prices.
         """
+        # First check streaming cache for real-time data
+        uic_int = int(uic)
+        if uic_int in self._price_cache:
+            cached = self._price_cache[uic_int]
+            if cached and "Quote" in cached:
+                bid = cached["Quote"].get("Bid", 0)
+                ask = cached["Quote"].get("Ask", 0)
+                if bid > 0 and ask > 0:
+                    logger.debug(f"get_quote: Using cached streaming data for UIC {uic}")
+                    return cached
+
+        # Fallback to infoprices REST API
         # Use /infoprices/list with AccountKey - required for sim environment
         endpoint = "/trade/v1/infoprices/list"
         params = {
@@ -1305,6 +1317,9 @@ class SaxoClient:
         """
         Check if bid-ask spread is within acceptable threshold.
 
+        For StockOptions, uses streaming /trade/v1/prices endpoint for real-time
+        tradable quotes. Falls back to infoprices if streaming fails.
+
         Args:
             uic: Instrument UIC
             asset_type: Type of asset
@@ -1313,15 +1328,63 @@ class SaxoClient:
         Returns:
             tuple: (is_acceptable, spread_percent)
         """
-        quote = self.get_quote(uic, asset_type)
-        if not quote or "Quote" not in quote:
-            return False, 0.0
+        quote = None
+        bid = 0
+        ask = 0
 
-        bid = quote["Quote"].get("Bid", 0)
-        ask = quote["Quote"].get("Ask", 0)
+        # For options, prefer streaming quotes (real-time tradable prices)
+        if asset_type == "StockOption" and self.is_streaming:
+            logger.debug(f"Using streaming subscription for option UIC {uic}")
+            quote = self.get_streaming_option_quote(uic, max_wait_seconds=5.0)
 
-        if bid <= 0 or ask <= 0:
-            return False, 0.0
+            if quote and "Quote" in quote:
+                bid = quote["Quote"].get("Bid", 0)
+                ask = quote["Quote"].get("Ask", 0)
+
+                if bid > 0 and ask > 0:
+                    logger.info(f"Got streaming quote for UIC {uic}: Bid={bid:.2f}, Ask={ask:.2f}")
+                else:
+                    logger.warning(f"Streaming quote for UIC {uic} has invalid bid/ask: Bid={bid}, Ask={ask}")
+                    quote = None  # Fall through to infoprices
+
+        # Fallback to infoprices (or for non-options)
+        if not quote or bid <= 0 or ask <= 0:
+            logger.debug(f"Using infoprices fallback for UIC {uic}")
+
+            # Retry logic for pending quotes from infoprices
+            max_retries = 3
+            retry_delay = 2  # seconds
+
+            for attempt in range(max_retries):
+                quote = self.get_quote(uic, asset_type)
+                if not quote or "Quote" not in quote:
+                    logger.warning(f"No quote data for UIC {uic} (attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return False, 0.0
+
+                bid = quote["Quote"].get("Bid", 0)
+                ask = quote["Quote"].get("Ask", 0)
+                price_type_bid = quote["Quote"].get("PriceTypeBid", "")
+                price_type_ask = quote["Quote"].get("PriceTypeAsk", "")
+
+                # Check if quotes are pending
+                if (bid <= 0 or ask <= 0) and (price_type_bid == "Pending" or price_type_ask == "Pending"):
+                    logger.warning(f"Quotes pending for UIC {uic} (attempt {attempt + 1}/{max_retries}): Bid={bid}, Ask={ask}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"Waiting {retry_delay}s for quotes to become available...")
+                        time.sleep(retry_delay)
+                        continue
+                    return False, 0.0
+
+                # Check if bid/ask are valid
+                if bid <= 0 or ask <= 0:
+                    logger.warning(f"Invalid bid/ask for UIC {uic}: Bid={bid}, Ask={ask}, Quote={quote.get('Quote')}")
+                    return False, 0.0
+
+                # Valid quotes received, break retry loop
+                break
 
         mid = (bid + ask) / 2
         spread = ask - bid
@@ -1743,6 +1806,138 @@ class SaxoClient:
         self._make_request("DELETE", endpoint)
 
         logger.info("Price streaming stopped")
+
+    def subscribe_to_option(self, uic: int, callback: Callable[[int, Dict], None] = None) -> bool:
+        """
+        Subscribe to real-time price streaming for a specific option.
+
+        This uses /trade/v1/prices/subscriptions to get real-time tradable prices
+        instead of the indicative prices from /trade/v1/infoprices.
+
+        Args:
+            uic: The option's Unique Instrument Code
+            callback: Optional callback for price updates
+
+        Returns:
+            bool: True if subscription successful and we have valid quote data
+        """
+        if not self.is_streaming:
+            logger.warning("WebSocket not connected. Starting streaming first...")
+            # We need an existing streaming connection
+            return False
+
+        # Check if already subscribed
+        if uic in self._price_cache:
+            cached = self._price_cache[uic]
+            if cached and "Quote" in cached:
+                bid = cached["Quote"].get("Bid", 0)
+                ask = cached["Quote"].get("Ask", 0)
+                if bid > 0 and ask > 0:
+                    logger.debug(f"Option UIC {uic} already subscribed with valid quotes")
+                    return True
+
+        # Create subscription for this option
+        subscription_request = {
+            "ContextId": self.subscription_context_id,
+            "ReferenceId": f"opt_{uic}",
+            "Arguments": {
+                "AccountKey": self.account_key,
+                "Uic": int(uic),
+                "AssetType": "StockOption",
+                "FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo"]
+            }
+        }
+
+        endpoint = "/trade/v1/prices/subscriptions"
+        response = self._make_request("POST", endpoint, data=subscription_request)
+
+        if response and "Snapshot" in response:
+            snapshot = response["Snapshot"]
+            self._price_cache[uic] = snapshot
+
+            # Store callback if provided
+            if callback:
+                self.price_callbacks[uic] = callback
+
+            # Check if we got valid quote data
+            if "Quote" in snapshot:
+                bid = snapshot["Quote"].get("Bid", 0)
+                ask = snapshot["Quote"].get("Ask", 0)
+                if bid > 0 and ask > 0:
+                    logger.info(f"✓ Subscribed to option UIC {uic}: Bid={bid}, Ask={ask}")
+                    return True
+                else:
+                    # Quotes might be pending, wait a moment and check cache
+                    logger.info(f"Option UIC {uic} subscribed, waiting for quotes...")
+                    time.sleep(1)
+
+                    # Check if streaming updated the cache
+                    if uic in self._price_cache:
+                        cached = self._price_cache[uic]
+                        if "Quote" in cached:
+                            bid = cached["Quote"].get("Bid", 0)
+                            ask = cached["Quote"].get("Ask", 0)
+                            if bid > 0 and ask > 0:
+                                logger.info(f"✓ Option UIC {uic} quotes received: Bid={bid}, Ask={ask}")
+                                return True
+
+                    logger.warning(f"Option UIC {uic} subscribed but quotes still pending")
+                    return True  # Return True since subscription worked, quotes may come via stream
+
+            logger.warning(f"Option UIC {uic} subscribed but no Quote in snapshot")
+            return True  # Subscription worked, data may come via stream
+        else:
+            logger.error(f"✗ Failed to subscribe to option UIC {uic}")
+            return False
+
+    def get_streaming_option_quote(self, uic: int, max_wait_seconds: float = 3.0) -> Optional[Dict]:
+        """
+        Get option quote from streaming cache, subscribing if needed.
+
+        This is the preferred method for getting real-time tradable option quotes.
+        It uses the streaming /trade/v1/prices endpoint instead of infoprices.
+
+        Args:
+            uic: The option's Unique Instrument Code
+            max_wait_seconds: Maximum time to wait for quotes after subscribing
+
+        Returns:
+            dict: Quote data with Bid/Ask, or None if unavailable
+        """
+        # First check if we already have valid cached data
+        if uic in self._price_cache:
+            cached = self._price_cache[uic]
+            if cached and "Quote" in cached:
+                bid = cached["Quote"].get("Bid", 0)
+                ask = cached["Quote"].get("Ask", 0)
+                if bid > 0 and ask > 0:
+                    return cached
+
+        # Subscribe to the option if not already
+        if not self.subscribe_to_option(uic):
+            logger.warning(f"Could not subscribe to option UIC {uic}")
+            return None
+
+        # Wait for valid quotes to arrive via stream
+        start_time = time.time()
+        poll_interval = 0.5
+
+        while time.time() - start_time < max_wait_seconds:
+            if uic in self._price_cache:
+                cached = self._price_cache[uic]
+                if cached and "Quote" in cached:
+                    bid = cached["Quote"].get("Bid", 0)
+                    ask = cached["Quote"].get("Ask", 0)
+                    if bid > 0 and ask > 0:
+                        logger.debug(f"Got streaming quote for UIC {uic}: Bid={bid}, Ask={ask}")
+                        return cached
+
+            time.sleep(poll_interval)
+
+        logger.warning(f"Timeout waiting for streaming quote for UIC {uic}")
+
+        # Return whatever we have, even if quotes are 0
+        return self._price_cache.get(uic)
 
     # =========================================================================
     # UTILITY METHODS
