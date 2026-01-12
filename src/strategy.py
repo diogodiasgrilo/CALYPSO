@@ -1896,7 +1896,7 @@ class DeltaNeutralStrategy:
         if not expiry_str:
             return False
 
-        expiry_date = datetime.strptime(expiry_str[:10], "%Y-%m-%d").date()
+        expiry_date = datetime.strptime(expiry_str[:8], "%Y%m%d").date()
         dte = (expiry_date - datetime.now().date()).days
 
         if self.exit_dte_min <= dte <= self.exit_dte_max:
