@@ -1795,7 +1795,14 @@ class TradeLoggerService:
         price: float,
         delta: float,
         pnl: float,
-        saxo_client=None
+        saxo_client=None,
+        # Additional comprehensive tracking fields
+        underlying_price: Optional[float] = None,
+        vix: Optional[float] = None,
+        option_type: Optional[str] = None,
+        expiry_date: Optional[str] = None,
+        dte: Optional[int] = None,
+        premium_received: Optional[float] = None
     ):
         """
         Log a trade record to all enabled destinations with automatic currency conversion.
@@ -1810,6 +1817,12 @@ class TradeLoggerService:
             delta: Current delta
             pnl: Profit/Loss
             saxo_client: Optional SaxoClient instance for fetching FX rates
+            underlying_price: Current SPY price
+            vix: Current VIX level
+            option_type: Type of option (Call, Put, Straddle, Strangle)
+            expiry_date: Option expiration date
+            dte: Days to expiration
+            premium_received: Premium collected (for short positions)
         """
         # Get exchange rate and convert if enabled
         exchange_rate = None
@@ -1841,7 +1854,14 @@ class TradeLoggerService:
             currency=self.base_currency,
             account_currency=self.account_currency if self.currency_enabled else None,
             exchange_rate=exchange_rate,
-            converted_pnl=converted_pnl
+            converted_pnl=converted_pnl,
+            # Additional tracking fields
+            underlying_price=underlying_price,
+            vix=vix,
+            option_type=option_type,
+            expiry_date=expiry_date,
+            dte=dte,
+            premium_received=premium_received
         )
 
         # Add to queue for async processing

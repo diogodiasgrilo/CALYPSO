@@ -1290,7 +1290,13 @@ class DeltaNeutralStrategy:
                 price=call_price + put_price,
                 delta=0.0,  # ATM straddle is approximately delta neutral
                 pnl=0.0,
-                saxo_client=self.client
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Long Straddle",
+                expiry_date=call_option["expiry"],
+                dte=self._calculate_dte(call_option["expiry"]),
+                premium_received=None  # Buying, not receiving premium
             )
 
         return True
@@ -1350,7 +1356,8 @@ class DeltaNeutralStrategy:
             f"Exit value: ${exit_value:.2f}, P&L: ${realized_pnl:.2f}"
         )
 
-        # Log trade
+        # Log trade (capture expiry before we clear the position)
+        straddle_expiry = self.long_straddle.call.expiry if self.long_straddle.call else None
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
             self.trade_logger.log_trade(
@@ -1360,7 +1367,13 @@ class DeltaNeutralStrategy:
                        self.long_straddle.put.current_price),
                 delta=self.long_straddle.total_delta,
                 pnl=realized_pnl,
-                saxo_client=self.client
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Long Straddle",
+                expiry_date=straddle_expiry,
+                dte=self._calculate_dte(straddle_expiry) if straddle_expiry else None,
+                premium_received=None
             )
 
         self.long_straddle = None
@@ -1534,40 +1547,37 @@ class DeltaNeutralStrategy:
         # Log each leg individually to Trades tab for detailed premium tracking
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
-            roll_reason = "Weekly Roll" if self.metrics.roll_count > 0 else "Initial Entry"
 
             # Log Short Call
             self.trade_logger.log_trade(
-                action=f"{action_prefix}OPEN_SHORT_Call",
+                action=f"{action_prefix}OPEN_SHORT_CALL",
                 strike=call_option['strike'],
                 price=call_price,
                 delta=-0.15,  # Approximation for OTM call
                 pnl=0.0,
-                option_type="Short Call",
-                expiry_date=call_option['expiry'],
-                quantity=self.position_size,
-                trade_reason=roll_reason,
+                saxo_client=self.client,
                 underlying_price=self.current_underlying_price,
                 vix=self.current_vix,
-                premium_received=call_price * self.position_size * 100,
-                saxo_client=self.client
+                option_type="Short Call",
+                expiry_date=call_option['expiry'],
+                dte=self._calculate_dte(call_option['expiry']),
+                premium_received=call_price * self.position_size * 100
             )
 
             # Log Short Put
             self.trade_logger.log_trade(
-                action=f"{action_prefix}OPEN_SHORT_Put",
+                action=f"{action_prefix}OPEN_SHORT_PUT",
                 strike=put_option['strike'],
                 price=put_price,
                 delta=0.15,  # Approximation for OTM put
                 pnl=0.0,
-                option_type="Short Put",
-                expiry_date=put_option['expiry'],
-                quantity=self.position_size,
-                trade_reason=roll_reason,
+                saxo_client=self.client,
                 underlying_price=self.current_underlying_price,
                 vix=self.current_vix,
-                premium_received=put_price * self.position_size * 100,
-                saxo_client=self.client
+                option_type="Short Put",
+                expiry_date=put_option['expiry'],
+                dte=self._calculate_dte(put_option['expiry']),
+                premium_received=put_price * self.position_size * 100
             )
 
             logger.info(f"Logged short strangle legs to Trades: Call ${call_option['strike']} (+${call_price * 100:.2f}), Put ${put_option['strike']} (+${put_price * 100:.2f})")
@@ -1636,7 +1646,8 @@ class DeltaNeutralStrategy:
             f"Close cost: ${close_cost:.2f}, P&L: ${realized_pnl:.2f}"
         )
 
-        # Log trade
+        # Log trade (capture expiry before we clear the position)
+        strangle_expiry = self.short_strangle.call.expiry if self.short_strangle.call else None
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
             self.trade_logger.log_trade(
@@ -1645,7 +1656,13 @@ class DeltaNeutralStrategy:
                 price=close_cost / (self.position_size * 100),
                 delta=self.short_strangle.total_delta,
                 pnl=realized_pnl,
-                saxo_client=self.client
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Short Strangle",
+                expiry_date=strangle_expiry,
+                dte=self._calculate_dte(strangle_expiry) if strangle_expiry else None,
+                premium_received=premium_received
             )
 
         self.short_strangle = None
@@ -1764,6 +1781,7 @@ class DeltaNeutralStrategy:
         )
 
         # Log trade
+        straddle_expiry = self.long_straddle.call.expiry if self.long_straddle and self.long_straddle.call else None
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
             self.trade_logger.log_trade(
@@ -1772,7 +1790,13 @@ class DeltaNeutralStrategy:
                 price=self.current_underlying_price,
                 delta=self.get_total_delta(),
                 pnl=self.metrics.total_pnl,
-                saxo_client=self.client
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Recenter",
+                expiry_date=straddle_expiry,
+                dte=self._calculate_dte(straddle_expiry) if straddle_expiry else None,
+                premium_received=None
             )
 
         return True
@@ -1985,7 +2009,13 @@ class DeltaNeutralStrategy:
                     price=self.current_underlying_price,
                     delta=0.0,
                     pnl=self.metrics.total_pnl,
-                    saxo_client=self.client
+                    saxo_client=self.client,
+                    underlying_price=self.current_underlying_price,
+                    vix=self.current_vix,
+                    option_type="Exit All",
+                    expiry_date=None,
+                    dte=None,
+                    premium_received=None
                 )
 
         return success
@@ -2002,6 +2032,24 @@ class DeltaNeutralStrategy:
         if self.short_strangle:
             delta += self.short_strangle.total_delta
         return delta
+
+    def _calculate_dte(self, expiry_str: str) -> Optional[int]:
+        """
+        Calculate days to expiration from expiry string.
+
+        Args:
+            expiry_str: Expiry date string (YYYY-MM-DD format)
+
+        Returns:
+            int: Days to expiration, or None if parsing fails
+        """
+        if not expiry_str:
+            return None
+        try:
+            expiry_date = datetime.strptime(expiry_str[:10], "%Y-%m-%d").date()
+            return (expiry_date - datetime.now().date()).days
+        except (ValueError, TypeError):
+            return None
 
     def run_strategy_check(self) -> str:
         """
