@@ -519,6 +519,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                 # Periodic dashboard logging (every 15 min for Looker Studio)
                 if (now - last_dashboard_log_time).total_seconds() >= dashboard_log_interval:
                     try:
+                        # Refresh position prices before logging
+                        strategy.refresh_position_prices()
                         dashboard_metrics = strategy.get_dashboard_metrics()
                         environment = "SIM" if client.is_simulation else "LIVE"
 
@@ -528,6 +530,18 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                             saxo_client=client,
                             environment=environment
                         )
+
+                        # Log to Performance Metrics worksheet
+                        trade_logger.log_performance_metrics(
+                            period="15-min",
+                            metrics=dashboard_metrics,
+                            saxo_client=client
+                        )
+
+                        # Update Positions sheet with current prices/P&L
+                        positions = strategy.get_current_positions_for_sync()
+                        if positions:
+                            trade_logger.log_position_snapshot(positions)
 
                         # Log bot activity for live dashboard
                         trade_logger.log_bot_activity(
