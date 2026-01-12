@@ -318,6 +318,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     status_interval = 300  # Log status every 5 minutes
     last_daily_summary_date = None  # Track last daily summary logged
     trading_day_started = False  # Track if we've started tracking for today
+    last_dashboard_log_time = datetime.now()
+    dashboard_log_interval = 900  # Log dashboard metrics every 15 minutes
 
     try:
         while not shutdown_requested:
@@ -398,6 +400,33 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     status = strategy.get_status_summary()
                     trade_logger.log_status(status)
                     last_status_time = now
+
+                # Periodic dashboard logging (every 15 min for Looker Studio)
+                if (now - last_dashboard_log_time).total_seconds() >= dashboard_log_interval:
+                    try:
+                        dashboard_metrics = strategy.get_dashboard_metrics()
+                        environment = "SIM" if client.is_simulation else "LIVE"
+
+                        # Log to Account Summary worksheet
+                        trade_logger.log_account_summary(
+                            strategy_data=dashboard_metrics,
+                            saxo_client=client,
+                            environment=environment
+                        )
+
+                        # Log bot activity for live dashboard
+                        trade_logger.log_bot_activity(
+                            level="INFO",
+                            component="Strategy",
+                            message=f"Periodic update: Delta={dashboard_metrics['total_delta']:.4f}, P&L=${dashboard_metrics['total_pnl']:.2f}",
+                            spy_price=dashboard_metrics['spy_price'],
+                            vix=dashboard_metrics['vix'],
+                            flush=True
+                        )
+
+                        last_dashboard_log_time = now
+                    except Exception as e:
+                        trade_logger.log_error(f"Dashboard logging error: {e}")
 
                 # Sleep until next check (interruptible for fast shutdown)
                 if not interruptible_sleep(check_interval):

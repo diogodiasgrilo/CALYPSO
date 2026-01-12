@@ -192,6 +192,11 @@ class GoogleSheetsLogger:
         self.spreadsheet = None
         self.worksheets = {}  # Store all worksheets
 
+        # Bot logs buffer for batch writing
+        self._log_buffer = []
+        self._log_buffer_lock = threading.Lock()
+        self._last_log_flush = datetime.now()
+
         if self.enabled:
             self._initialize()
 
@@ -212,11 +217,27 @@ class GoogleSheetsLogger:
                 "https://www.googleapis.com/auth/drive"
             ]
 
-            # Load credentials from service account file
-            credentials = Credentials.from_service_account_file(
-                self.credentials_file,
-                scopes=scopes
-            )
+            # Check if running on GCP - load credentials from Secret Manager
+            from src.secret_manager import is_running_on_gcp, get_google_sheets_credentials
+
+            if is_running_on_gcp():
+                logger.info("Loading Google Sheets credentials from Secret Manager")
+                creds_data = get_google_sheets_credentials()
+                if creds_data:
+                    credentials = Credentials.from_service_account_info(
+                        creds_data,
+                        scopes=scopes
+                    )
+                else:
+                    logger.error("Failed to load Google Sheets credentials from Secret Manager")
+                    self.enabled = False
+                    return False
+            else:
+                # Load credentials from service account file (local development)
+                credentials = Credentials.from_service_account_file(
+                    self.credentials_file,
+                    scopes=scopes
+                )
 
             # Authorize and create client
             self.client = gspread.authorize(credentials)
@@ -230,13 +251,16 @@ class GoogleSheetsLogger:
                 self.spreadsheet = self.client.create(self.spreadsheet_name)
                 logger.info(f"Created new Google spreadsheet: {self.spreadsheet_name}")
 
-            # Initialize all worksheets (4 tabs: Trades, Positions, Daily Summary, Safety Events)
+            # Initialize all worksheets (7 tabs for comprehensive Looker dashboard)
             self._setup_trades_worksheet()
             self._setup_positions_worksheet()
             self._setup_daily_summary_worksheet()
             self._setup_safety_events_worksheet()
+            self._setup_bot_logs_worksheet()
+            self._setup_performance_metrics_worksheet()
+            self._setup_account_summary_worksheet()
 
-            logger.info("All Google Sheets worksheets initialized successfully")
+            logger.info("All Google Sheets worksheets initialized successfully (7 tabs)")
             return True
 
         except ImportError:
@@ -280,14 +304,15 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Positions")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=11)
-                # Essential position info only
+                worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=13)
+                # Essential position info + theta decay tracking
                 headers = [
                     "Last Updated", "Type", "Strike", "Expiry", "Days to Expiry",
-                    "Entry Price", "Current Price", "P&L ($)", "P&L (EUR)", "Status"
+                    "Entry Price", "Current Price", "P&L ($)", "P&L (EUR)",
+                    "Theta/Day ($)", "Weekly Theta ($)", "Status"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:J1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:L1", {"textFormat": {"bold": True}})
                 logger.info("Created Positions worksheet")
 
             self.worksheets["Positions"] = worksheet
@@ -337,6 +362,76 @@ class GoogleSheetsLogger:
         except Exception as e:
             logger.error(f"Failed to setup Safety Events worksheet: {e}")
 
+    def _setup_bot_logs_worksheet(self):
+        """Setup the Bot Logs worksheet for live activity stream (Looker dashboard)."""
+        try:
+            import gspread
+            try:
+                worksheet = self.spreadsheet.worksheet("Bot Logs")
+            except gspread.WorksheetNotFound:
+                worksheet = self.spreadsheet.add_worksheet(title="Bot Logs", rows=10000, cols=6)
+                # Live bot activity logs
+                headers = [
+                    "Timestamp", "Level", "Component", "Message", "SPY Price", "VIX"
+                ]
+                worksheet.append_row(headers)
+                worksheet.format("A1:F1", {"textFormat": {"bold": True}})
+                logger.info("Created Bot Logs worksheet")
+
+            self.worksheets["Bot Logs"] = worksheet
+        except Exception as e:
+            logger.error(f"Failed to setup Bot Logs worksheet: {e}")
+
+    def _setup_performance_metrics_worksheet(self):
+        """Setup the Performance Metrics worksheet for SPY strategy KPIs (Looker dashboard)."""
+        try:
+            import gspread
+            try:
+                worksheet = self.spreadsheet.worksheet("Performance Metrics")
+            except gspread.WorksheetNotFound:
+                worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=22)
+                # SPY Strategy-specific performance KPIs for investors
+                headers = [
+                    "Timestamp", "Period", "SPY Strategy P&L ($)", "SPY Strategy P&L (EUR)", "SPY Strategy P&L (%)",
+                    "Realized P&L ($)", "Unrealized P&L ($)", "Premium Collected ($)", "Theta Cost ($)",
+                    "Net Theta ($)", "Long Straddle P&L ($)", "Short Strangle P&L ($)",
+                    "Win Rate (%)", "Sharpe Ratio", "Max Drawdown ($)", "Max Drawdown (%)",
+                    "Trade Count", "Roll Count", "Recenter Count", "Avg Trade P&L ($)", "Best Trade ($)", "Worst Trade ($)"
+                ]
+                worksheet.append_row(headers)
+                worksheet.format("A1:V1", {"textFormat": {"bold": True}})
+                logger.info("Created Performance Metrics worksheet (SPY strategy only)")
+
+            self.worksheets["Performance Metrics"] = worksheet
+        except Exception as e:
+            logger.error(f"Failed to setup Performance Metrics worksheet: {e}")
+
+    def _setup_account_summary_worksheet(self):
+        """Setup the Account Summary worksheet for SPY strategy data (Looker dashboard)."""
+        try:
+            import gspread
+            try:
+                worksheet = self.spreadsheet.worksheet("Account Summary")
+            except gspread.WorksheetNotFound:
+                worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=18)
+                # SPY Strategy-specific account data (not full account)
+                headers = [
+                    "Timestamp", "SPY Price", "VIX",
+                    "Strategy Unrealized P&L ($)", "Strategy Unrealized P&L (EUR)",
+                    "Long Straddle Value ($)", "Short Strangle Value ($)",
+                    "Net Strategy Value ($)", "Strategy Margin Used ($)",
+                    "Total Delta", "Total Theta ($)", "Total Positions",
+                    "Long Call Strike", "Long Put Strike", "Short Call Strike", "Short Put Strike",
+                    "Exchange Rate", "Environment"
+                ]
+                worksheet.append_row(headers)
+                worksheet.format("A1:R1", {"textFormat": {"bold": True}})
+                logger.info("Created Account Summary worksheet (SPY strategy only)")
+
+            self.worksheets["Account Summary"] = worksheet
+        except Exception as e:
+            logger.error(f"Failed to setup Account Summary worksheet: {e}")
+
     def log_trade(self, trade: TradeRecord) -> bool:
         """
         Log a trade record to the Trades worksheet.
@@ -358,14 +453,45 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to log trade to Google Sheets: {e}")
             return False
 
+    def _normalize_expiry(self, expiry: str) -> str:
+        """
+        Normalize expiry date to YYYYMMDD format for comparison.
+
+        Handles formats: YYYYMMDD, YYYY-MM-DD, YYYY/MM/DD
+
+        Args:
+            expiry: Expiry date string in various formats
+
+        Returns:
+            str: Normalized expiry in YYYYMMDD format, or original if parse fails
+        """
+        if not expiry or expiry == "N/A":
+            return ""
+
+        expiry_str = str(expiry).strip()
+
+        # Already in YYYYMMDD format (8 digits)
+        if len(expiry_str) == 8 and expiry_str.isdigit():
+            return expiry_str
+
+        # Try YYYY-MM-DD format
+        if len(expiry_str) == 10 and "-" in expiry_str:
+            return expiry_str.replace("-", "")
+
+        # Try YYYY/MM/DD format
+        if len(expiry_str) == 10 and "/" in expiry_str:
+            return expiry_str.replace("/", "")
+
+        return expiry_str
+
     def check_position_logged(self, position_type: str, strike: float, expiry: str) -> bool:
         """
         Check if a position has already been logged to Google Sheets.
 
         Args:
-            position_type: Type of position (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
+            position_type: Type of position (e.g., "LONG", "SHORT")
             strike: Strike price of the position
-            expiry: Expiry date string
+            expiry: Expiry date string (any format: YYYYMMDD, YYYY-MM-DD, etc.)
 
         Returns:
             bool: True if position is already logged, False otherwise
@@ -378,21 +504,31 @@ class GoogleSheetsLogger:
             worksheet = self.worksheets["Trades"]
             records = worksheet.get_all_records()
 
-            # Look for an OPEN action for this position that hasn't been closed
-            open_actions = [f"OPEN_{position_type}", f"[RECOVERED] OPEN_{position_type}"]
+            # Normalize the expiry we're searching for
+            normalized_expiry = self._normalize_expiry(expiry)
+
+            # Look for an OPEN or RECOVERED action for this position
+            # position_type can be "LONG" or "SHORT"
+            # Action format in sheet: "[RECOVERED] OPEN_LONG_Call" or "OPEN_SHORT_Put"
+            search_patterns = [
+                f"OPEN_{position_type}",       # Matches "OPEN_LONG_Call", "OPEN_SHORT_Put"
+                f"[RECOVERED] OPEN_{position_type}"  # Matches recovered positions
+            ]
 
             for record in records:
                 action = record.get("Action", "")
                 record_strike = str(record.get("Strike", ""))
                 record_expiry = str(record.get("Expiry", ""))
 
-                # Check if this is an open trade for this position
-                if any(open_action in action for open_action in open_actions):
+                # Check if this is an open trade for this position type
+                if any(pattern in action for pattern in search_patterns):
                     # Check if strike matches (handle formatting differences)
                     try:
-                        if abs(float(record_strike) - strike) < 0.01:
-                            # Check if expiry matches
-                            if expiry in record_expiry or record_expiry in expiry:
+                        strike_val = float(record_strike)
+                        if abs(strike_val - strike) < 0.01:
+                            # Normalize record expiry and compare
+                            normalized_record_expiry = self._normalize_expiry(record_expiry)
+                            if normalized_expiry == normalized_record_expiry:
                                 logger.debug(f"Found existing log for {position_type} @ ${strike} exp {expiry}")
                                 return True
                     except (ValueError, TypeError):
@@ -402,6 +538,40 @@ class GoogleSheetsLogger:
 
         except Exception as e:
             logger.warning(f"Error checking for existing position log: {e}")
+            return False
+
+    def check_recovery_logged_today(self) -> bool:
+        """
+        Check if a position recovery event was already logged today.
+
+        This prevents duplicate POSITION_RECOVERY entries in Safety Events
+        when the bot restarts multiple times in the same day.
+
+        Returns:
+            bool: True if recovery already logged today, False otherwise
+        """
+        if not self.enabled or "Safety Events" not in self.worksheets:
+            return False
+
+        try:
+            worksheet = self.worksheets["Safety Events"]
+            records = worksheet.get_all_records()
+
+            today_str = datetime.now().strftime("%Y-%m-%d")
+
+            for record in records:
+                event_type = record.get("Event", "")
+                timestamp = str(record.get("Timestamp", ""))
+
+                # Check if this is a recovery event from today
+                if event_type == "POSITION_RECOVERY" and today_str in timestamp:
+                    logger.debug(f"Found existing recovery log for today: {timestamp}")
+                    return True
+
+            return False
+
+        except Exception as e:
+            logger.warning(f"Error checking for existing recovery log: {e}")
             return False
 
     def log_recovered_position(
@@ -497,7 +667,7 @@ class GoogleSheetsLogger:
         Update the Positions worksheet with current position snapshot.
 
         Args:
-            positions: List of position dictionaries
+            positions: List of position dictionaries with theta values
 
         Returns:
             bool: True if logged successfully
@@ -515,10 +685,27 @@ class GoogleSheetsLogger:
                 except Exception:
                     pass  # Ignore if no rows to delete
 
-            # Add current positions - simplified columns
-            # Columns: Last Updated, Type, Strike, Expiry, Days to Expiry, Entry Price, Current Price, P&L ($), P&L (EUR), Status
+            # Add current positions with theta decay columns
+            # Columns: Last Updated, Type, Strike, Expiry, Days to Expiry, Entry Price, Current Price,
+            #          P&L ($), P&L (EUR), Theta/Day ($), Weekly Theta ($), Status
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for pos in positions:
+                # Get theta value from Saxo (always negative from the API)
+                theta = pos.get("theta", 0)
+                position_type = pos.get("type", "").upper()
+
+                # For SHORT positions: flip the sign to show as positive (we GAIN from decay)
+                # For LONG positions: keep negative (we LOSE from decay)
+                # Multiply by 100 for contract multiplier
+                if "SHORT" in position_type:
+                    daily_theta = abs(theta) * 100  # Positive = income
+                else:
+                    daily_theta = theta * 100  # Negative = cost
+
+                # Weekly theta = daily theta × 5 trading days (Friday-to-Friday)
+                # This gives a consistent weekly total to compare against short premium collected
+                weekly_theta = daily_theta * 5
+
                 row = [
                     timestamp,
                     pos.get("type", "N/A"),
@@ -529,9 +716,17 @@ class GoogleSheetsLogger:
                     f"{pos.get('current_price', 0):.4f}",
                     f"{pos.get('pnl', 0):.2f}",
                     f"{pos.get('pnl_eur', 0):.2f}",
+                    f"{daily_theta:.2f}",
+                    f"{weekly_theta:.2f}",
                     pos.get("status", "Active")
                 ]
                 worksheet.append_row(row)
+
+            # Clear any bold formatting from data rows (row 2 onwards)
+            if len(positions) > 0:
+                last_row = worksheet.row_count
+                if last_row > 1:
+                    worksheet.format(f"A2:L{last_row}", {"textFormat": {"bold": False}})
 
             logger.debug(f"Updated position snapshot: {len(positions)} positions")
             return True
@@ -698,37 +893,42 @@ class GoogleSheetsLogger:
 
             self.log_position_snapshot(positions_data)
 
-            # 3. Log recovery event to Safety Events tab
+            # 3. Log recovery event to Safety Events tab (if not already logged today)
+            # This prevents duplicate recovery entries when bot restarts multiple times
             # Columns: Timestamp, Event, SPY Price, VIX, New Short Strikes, Premium ($), Description, Result
             if "Safety Events" in self.worksheets:
-                # Find strangle strikes for display
-                short_call_strike = 0
-                short_put_strike = 0
-                for p in individual_positions:
-                    if "SHORT" in p.get("position_type", ""):
-                        if "CALL" in p.get("option_type", "").upper():
-                            short_call_strike = p.get("strike", 0)
-                        elif "PUT" in p.get("option_type", "").upper():
-                            short_put_strike = p.get("strike", 0)
+                # Check if we already logged a recovery event today
+                if not self.check_recovery_logged_today():
+                    # Find strangle strikes for display
+                    short_call_strike = 0
+                    short_put_strike = 0
+                    for p in individual_positions:
+                        if "SHORT" in p.get("position_type", ""):
+                            if "CALL" in p.get("option_type", "").upper():
+                                short_call_strike = p.get("strike", 0)
+                            elif "PUT" in p.get("option_type", "").upper():
+                                short_put_strike = p.get("strike", 0)
 
-                # Format short strikes
-                if short_call_strike and short_put_strike:
-                    new_strikes = f"C{short_call_strike}/P{short_put_strike}"
+                    # Format short strikes
+                    if short_call_strike and short_put_strike:
+                        new_strikes = f"C{short_call_strike}/P{short_put_strike}"
+                    else:
+                        new_strikes = "N/A"
+
+                    safety_row = [
+                        timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                        "POSITION_RECOVERY",
+                        f"{underlying_price:.2f}",
+                        f"{vix:.2f}",
+                        new_strikes,
+                        "0.00",  # No new premium on recovery
+                        f"Recovered {len(individual_positions)} option positions from Saxo",
+                        "SUCCESS"
+                    ]
+                    self.worksheets["Safety Events"].append_row(safety_row)
+                    logger.info("Logged recovery event to Safety Events")
                 else:
-                    new_strikes = "N/A"
-
-                safety_row = [
-                    timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                    "POSITION_RECOVERY",
-                    f"{underlying_price:.2f}",
-                    f"{vix:.2f}",
-                    new_strikes,
-                    "0.00",  # No new premium on recovery
-                    f"Recovered {len(individual_positions)} option positions from Saxo",
-                    "SUCCESS"
-                ]
-                self.worksheets["Safety Events"].append_row(safety_row)
-                logger.info("Logged recovery event to Safety Events")
+                    logger.info("Recovery event already logged today - skipping Safety Events entry")
 
             return success
 
@@ -817,6 +1017,242 @@ class GoogleSheetsLogger:
         except Exception as e:
             logger.error(f"Failed to log safety event: {e}")
             return False
+
+    def log_bot_activity(
+        self,
+        level: str,
+        component: str,
+        message: str,
+        spy_price: float = None,
+        vix: float = None,
+        flush_immediately: bool = False
+    ) -> bool:
+        """
+        Log bot activity to the Bot Logs worksheet for live dashboard.
+
+        Uses buffering to batch writes every 30 seconds or when buffer is full.
+
+        Args:
+            level: Log level (INFO, WARNING, ERROR, DEBUG)
+            component: Component name (Strategy, SaxoClient, WebSocket, etc.)
+            message: Log message
+            spy_price: Optional current SPY price
+            vix: Optional current VIX value
+            flush_immediately: Force immediate write to sheet
+
+        Returns:
+            bool: True if logged/buffered successfully
+        """
+        if not self.enabled or "Bot Logs" not in self.worksheets:
+            return False
+
+        try:
+            row = [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                level,
+                component,
+                message[:500],  # Truncate long messages
+                f"{spy_price:.2f}" if spy_price else "",
+                f"{vix:.2f}" if vix else ""
+            ]
+
+            with self._log_buffer_lock:
+                self._log_buffer.append(row)
+
+                # Flush if buffer is large enough or enough time has passed
+                should_flush = (
+                    flush_immediately or
+                    len(self._log_buffer) >= 20 or
+                    (datetime.now() - self._last_log_flush).total_seconds() > 30
+                )
+
+                if should_flush:
+                    self._flush_log_buffer()
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to buffer bot log: {e}")
+            return False
+
+    def _flush_log_buffer(self):
+        """Flush the log buffer to Google Sheets (must hold lock)."""
+        if not self._log_buffer:
+            return
+
+        try:
+            worksheet = self.worksheets.get("Bot Logs")
+            if worksheet:
+                # Batch append all buffered rows
+                for row in self._log_buffer:
+                    worksheet.append_row(row)
+                self._log_buffer.clear()
+                self._last_log_flush = datetime.now()
+        except Exception as e:
+            logger.error(f"Failed to flush log buffer: {e}")
+
+    def log_performance_metrics(
+        self,
+        period: str,
+        metrics: Dict[str, Any],
+        exchange_rate: float = None
+    ) -> bool:
+        """
+        Log SPY strategy performance metrics for Looker dashboard.
+
+        This logs ONLY SPY strategy performance, not full account performance.
+
+        Args:
+            period: Period label (e.g., "Daily", "Weekly", "Monthly", "All-Time")
+            metrics: Dictionary with SPY strategy metrics:
+                - total_pnl: Total SPY strategy P&L
+                - realized_pnl: Realized P&L from closed SPY positions
+                - unrealized_pnl: Unrealized P&L from open SPY positions
+                - premium_collected: Premium from short strangles
+                - theta_cost: Theta decay cost (long positions)
+                - net_theta: Net theta (short theta - long theta)
+                - long_straddle_pnl: P&L from long straddle
+                - short_strangle_pnl: P&L from short strangle
+                - win_rate, sharpe_ratio, max_drawdown, etc.
+                - trade_count, roll_count, recenter_count
+                - starting_capital: For % calculation
+            exchange_rate: Optional USD/EUR exchange rate
+
+        Returns:
+            bool: True if logged successfully
+        """
+        if not self.enabled or "Performance Metrics" not in self.worksheets:
+            return False
+
+        try:
+            # Calculate EUR values if exchange rate provided
+            total_pnl = metrics.get("total_pnl", 0)
+            total_pnl_eur = total_pnl * exchange_rate if exchange_rate else 0
+
+            # Calculate percentage returns if starting capital provided
+            starting_capital = metrics.get("starting_capital", 0)
+            total_pnl_pct = (total_pnl / starting_capital * 100) if starting_capital else 0
+
+            row = [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                period,
+                f"{total_pnl:.2f}",
+                f"{total_pnl_eur:.2f}",
+                f"{total_pnl_pct:.2f}",
+                f"{metrics.get('realized_pnl', 0):.2f}",
+                f"{metrics.get('unrealized_pnl', 0):.2f}",
+                f"{metrics.get('premium_collected', 0):.2f}",
+                f"{metrics.get('theta_cost', 0):.2f}",
+                f"{metrics.get('net_theta', 0):.2f}",
+                f"{metrics.get('long_straddle_pnl', 0):.2f}",
+                f"{metrics.get('short_strangle_pnl', 0):.2f}",
+                f"{metrics.get('win_rate', 0):.1f}",
+                f"{metrics.get('sharpe_ratio', 0):.2f}",
+                f"{metrics.get('max_drawdown', 0):.2f}",
+                f"{metrics.get('max_drawdown_pct', 0):.2f}",
+                metrics.get("trade_count", 0),
+                metrics.get("roll_count", 0),
+                metrics.get("recenter_count", 0),
+                f"{metrics.get('avg_trade_pnl', 0):.2f}",
+                f"{metrics.get('best_trade', 0):.2f}",
+                f"{metrics.get('worst_trade', 0):.2f}"
+            ]
+            self.worksheets["Performance Metrics"].append_row(row)
+            logger.debug(f"SPY strategy performance metrics logged for period: {period}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to log performance metrics: {e}")
+            return False
+
+    def log_account_summary(
+        self,
+        strategy_data: Dict[str, Any],
+        exchange_rate: float = None,
+        environment: str = "LIVE"
+    ) -> bool:
+        """
+        Log SPY strategy account summary for Looker dashboard.
+
+        This logs ONLY SPY strategy-specific data, not the full Saxo account.
+
+        Args:
+            strategy_data: Strategy-specific data including:
+                - spy_price: Current SPY price
+                - vix: Current VIX value
+                - unrealized_pnl: SPY strategy unrealized P&L
+                - long_straddle_value: Value of long straddle
+                - short_strangle_value: Value of short strangle
+                - strategy_margin: Margin used by SPY positions
+                - total_delta: Total delta of SPY positions
+                - total_theta: Total theta of SPY positions
+                - position_count: Number of SPY option positions
+                - long_call_strike: Long call strike price
+                - long_put_strike: Long put strike price
+                - short_call_strike: Short call strike price
+                - short_put_strike: Short put strike price
+            exchange_rate: Optional USD/EUR exchange rate
+            environment: Trading environment (LIVE/SIM)
+
+        Returns:
+            bool: True if logged successfully
+        """
+        if not self.enabled or "Account Summary" not in self.worksheets:
+            return False
+
+        try:
+            # Extract strategy-specific fields
+            spy_price = strategy_data.get("spy_price", 0)
+            vix = strategy_data.get("vix", 0)
+            unrealized_pnl = strategy_data.get("unrealized_pnl", 0)
+            long_straddle_value = strategy_data.get("long_straddle_value", 0)
+            short_strangle_value = strategy_data.get("short_strangle_value", 0)
+            strategy_margin = strategy_data.get("strategy_margin", 0)
+            total_delta = strategy_data.get("total_delta", 0)
+            total_theta = strategy_data.get("total_theta", 0)
+            position_count = strategy_data.get("position_count", 0)
+
+            # Strike prices
+            long_call_strike = strategy_data.get("long_call_strike", 0)
+            long_put_strike = strategy_data.get("long_put_strike", 0)
+            short_call_strike = strategy_data.get("short_call_strike", 0)
+            short_put_strike = strategy_data.get("short_put_strike", 0)
+
+            # Calculate net strategy value
+            net_value = long_straddle_value + short_strangle_value
+
+            # Calculate EUR values
+            unrealized_pnl_eur = unrealized_pnl * exchange_rate if exchange_rate else 0
+
+            row = [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                f"{spy_price:.2f}",
+                f"{vix:.2f}" if vix else "N/A",
+                f"{unrealized_pnl:.2f}",
+                f"{unrealized_pnl_eur:.2f}",
+                f"{long_straddle_value:.2f}",
+                f"{short_strangle_value:.2f}",
+                f"{net_value:.2f}",
+                f"{strategy_margin:.2f}",
+                f"{total_delta:.4f}",
+                f"{total_theta:.2f}",
+                position_count,
+                f"{long_call_strike:.0f}" if long_call_strike else "N/A",
+                f"{long_put_strike:.0f}" if long_put_strike else "N/A",
+                f"{short_call_strike:.0f}" if short_call_strike else "N/A",
+                f"{short_put_strike:.0f}" if short_put_strike else "N/A",
+                f"{exchange_rate:.6f}" if exchange_rate else "N/A",
+                environment
+            ]
+            self.worksheets["Account Summary"].append_row(row)
+            logger.debug("SPY strategy account summary logged")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to log account summary: {e}")
+            return False
+
+    def flush_all_buffers(self):
+        """Flush all pending log buffers (call on shutdown)."""
+        with self._log_buffer_lock:
+            self._flush_log_buffer()
 
 
 class MicrosoftSheetsLogger:
@@ -1474,15 +1910,29 @@ class TradeLoggerService:
         Check if a position has already been logged to Google Sheets.
 
         Args:
-            position_type: Type of position (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
+            position_type: Type of position (e.g., "LONG", "SHORT")
             strike: Strike price of the position
-            expiry: Expiry date string
+            expiry: Expiry date string (any format: YYYYMMDD, YYYY-MM-DD, etc.)
 
         Returns:
             bool: True if position is already logged, False otherwise
         """
         if self.google_logger.enabled:
             return self.google_logger.check_position_logged(position_type, strike, expiry)
+        return False
+
+    def check_recovery_logged_today(self) -> bool:
+        """
+        Check if a position recovery event was already logged today.
+
+        This prevents duplicate POSITION_RECOVERY entries when
+        the bot restarts multiple times in the same day.
+
+        Returns:
+            bool: True if recovery already logged today, False otherwise
+        """
+        if self.google_logger.enabled:
+            return self.google_logger.check_recovery_logged_today()
         return False
 
     def log_recovered_position(
@@ -1601,9 +2051,124 @@ class TradeLoggerService:
             )
         return False
 
+    def log_bot_activity(
+        self,
+        level: str,
+        component: str,
+        message: str,
+        spy_price: float = None,
+        vix: float = None,
+        flush: bool = False
+    ):
+        """
+        Log bot activity for the live dashboard.
+
+        Args:
+            level: Log level (INFO, WARNING, ERROR, DEBUG)
+            component: Component name (Strategy, SaxoClient, etc.)
+            message: Log message
+            spy_price: Optional current SPY price
+            vix: Optional current VIX value
+            flush: Force immediate write
+        """
+        if self.google_logger.enabled:
+            self.google_logger.log_bot_activity(
+                level=level,
+                component=component,
+                message=message,
+                spy_price=spy_price,
+                vix=vix,
+                flush_immediately=flush
+            )
+
+    def log_performance_metrics(
+        self,
+        period: str,
+        metrics: Dict[str, Any],
+        saxo_client=None
+    ):
+        """
+        Log calculated performance metrics for the dashboard.
+
+        Args:
+            period: Period label (Daily, Weekly, Monthly, All-Time)
+            metrics: Performance metrics dictionary
+            saxo_client: Optional SaxoClient for FX rate
+        """
+        exchange_rate = None
+        if self.currency_enabled and saxo_client:
+            try:
+                exchange_rate = saxo_client.get_fx_rate(
+                    self.base_currency,
+                    self.account_currency
+                )
+            except Exception:
+                pass
+
+        if self.google_logger.enabled:
+            self.google_logger.log_performance_metrics(
+                period=period,
+                metrics=metrics,
+                exchange_rate=exchange_rate
+            )
+
+    def log_account_summary(
+        self,
+        strategy_data: Dict[str, Any],
+        saxo_client=None,
+        environment: str = "LIVE"
+    ):
+        """
+        Log SPY strategy account summary for the dashboard.
+
+        This logs ONLY SPY strategy data, not the full Saxo account balance.
+
+        Args:
+            strategy_data: Dictionary with SPY strategy-specific metrics:
+                - spy_price: Current SPY price
+                - vix: Current VIX value
+                - unrealized_pnl: Strategy unrealized P&L
+                - long_straddle_value: Long straddle current value
+                - short_strangle_value: Short strangle current value
+                - strategy_margin: Margin used by SPY positions
+                - total_delta: Total delta
+                - total_theta: Total theta (daily)
+                - position_count: Number of SPY positions
+                - long_call_strike, long_put_strike: Long strikes
+                - short_call_strike, short_put_strike: Short strikes
+            saxo_client: Optional SaxoClient for FX rate
+            environment: Trading environment (LIVE/SIM)
+        """
+        if not self.google_logger.enabled:
+            return
+
+        try:
+            # Get exchange rate if currency conversion enabled
+            exchange_rate = None
+            if self.currency_enabled and saxo_client:
+                try:
+                    exchange_rate = saxo_client.get_fx_rate(
+                        self.base_currency,
+                        self.account_currency
+                    )
+                except Exception:
+                    pass
+
+            self.google_logger.log_account_summary(
+                strategy_data=strategy_data,
+                exchange_rate=exchange_rate,
+                environment=environment
+            )
+        except Exception as e:
+            logger.error(f"Failed to log account summary: {e}")
+
     def shutdown(self):
         """Shutdown the logging service gracefully."""
         logger.info("Shutting down trade logger service...")
+
+        # Flush any pending bot logs
+        if self.google_logger.enabled:
+            self.google_logger.flush_all_buffers()
 
         # Stop the logging thread
         self._stop_logging = True

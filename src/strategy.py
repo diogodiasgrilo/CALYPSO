@@ -2019,6 +2019,130 @@ class DeltaNeutralStrategy:
 
         return summary
 
+    def get_dashboard_metrics(self) -> Dict[str, Any]:
+        """
+        Get comprehensive SPY strategy metrics for the Looker dashboard.
+
+        Returns all metrics needed for:
+        - Account Summary worksheet (strategy values, Greeks, strikes)
+        - Performance Metrics worksheet (P&L breakdown, KPIs)
+
+        Returns:
+            dict: Complete strategy metrics for dashboard logging
+        """
+        # Get total Greeks
+        greeks = self.get_total_greeks()
+
+        # Calculate position values
+        long_straddle_value = 0.0
+        short_strangle_value = 0.0
+        long_straddle_pnl = 0.0
+        short_strangle_pnl = 0.0
+
+        # Long straddle value and P&L
+        if self.long_straddle and self.long_straddle.is_complete:
+            if self.long_straddle.call:
+                call_value = self.long_straddle.call.current_price * 100  # Per contract
+                call_cost = self.long_straddle.call.entry_price * 100
+                long_straddle_value += call_value
+                long_straddle_pnl += (call_value - call_cost)
+            if self.long_straddle.put:
+                put_value = self.long_straddle.put.current_price * 100
+                put_cost = self.long_straddle.put.entry_price * 100
+                long_straddle_value += put_value
+                long_straddle_pnl += (put_value - put_cost)
+
+        # Short strangle value and P&L (negative value = we owe, positive P&L when value decreases)
+        if self.short_strangle and self.short_strangle.is_complete:
+            if self.short_strangle.call:
+                call_value = self.short_strangle.call.current_price * 100
+                call_premium = self.short_strangle.call.entry_price * 100
+                short_strangle_value -= call_value  # Liability
+                short_strangle_pnl += (call_premium - call_value)  # Profit when value drops
+            if self.short_strangle.put:
+                put_value = self.short_strangle.put.current_price * 100
+                put_premium = self.short_strangle.put.entry_price * 100
+                short_strangle_value -= put_value
+                short_strangle_pnl += (put_premium - put_value)
+
+        # Get strike prices
+        # Straddle uses initial_strike (same for call and put)
+        # Strangle uses call_strike and put_strike (different strikes)
+        long_call_strike = self.long_straddle.initial_strike if self.long_straddle else 0
+        long_put_strike = self.long_straddle.initial_strike if self.long_straddle else 0
+        short_call_strike = self.short_strangle.call_strike if self.short_strangle else 0
+        short_put_strike = self.short_strangle.put_strike if self.short_strangle else 0
+
+        # Count positions (4 legs when fully deployed)
+        position_count = 0
+        if self.long_straddle:
+            if self.long_straddle.call:
+                position_count += 1
+            if self.long_straddle.put:
+                position_count += 1
+        if self.short_strangle:
+            if self.short_strangle.call:
+                position_count += 1
+            if self.short_strangle.put:
+                position_count += 1
+
+        # Calculate theta (daily) - multiply by 100 for contract size
+        # Long theta is negative (costs us), Short theta is positive (earns us)
+        long_theta_cost = 0.0
+        short_theta_income = 0.0
+
+        if self.long_straddle:
+            if self.long_straddle.call:
+                long_theta_cost += abs(getattr(self.long_straddle.call, 'theta', 0)) * 100
+            if self.long_straddle.put:
+                long_theta_cost += abs(getattr(self.long_straddle.put, 'theta', 0)) * 100
+
+        if self.short_strangle:
+            if self.short_strangle.call:
+                short_theta_income += abs(getattr(self.short_strangle.call, 'theta', 0)) * 100
+            if self.short_strangle.put:
+                short_theta_income += abs(getattr(self.short_strangle.put, 'theta', 0)) * 100
+
+        net_theta = short_theta_income - long_theta_cost
+
+        return {
+            # Account Summary fields
+            "spy_price": self.current_underlying_price,
+            "vix": self.current_vix,
+            "unrealized_pnl": self.metrics.unrealized_pnl,
+            "long_straddle_value": long_straddle_value,
+            "short_strangle_value": short_strangle_value,
+            "strategy_margin": 0,  # Would need Saxo API call for margin
+            "total_delta": greeks["delta"],
+            "total_theta": net_theta,
+            "position_count": position_count,
+            "long_call_strike": long_call_strike,
+            "long_put_strike": long_put_strike,
+            "short_call_strike": short_call_strike,
+            "short_put_strike": short_put_strike,
+
+            # Performance Metrics fields
+            "total_pnl": self.metrics.total_pnl,
+            "realized_pnl": self.metrics.realized_pnl,
+            "premium_collected": self.metrics.total_premium_collected,
+            "theta_cost": long_theta_cost,
+            "net_theta": net_theta,
+            "long_straddle_pnl": long_straddle_pnl,
+            "short_strangle_pnl": short_strangle_pnl,
+            "trade_count": self.metrics.trade_count if hasattr(self.metrics, 'trade_count') else 0,
+            "roll_count": self.metrics.roll_count,
+            "recenter_count": self.metrics.recenter_count,
+
+            # Additional Greeks
+            "total_gamma": greeks["gamma"],
+            "total_vega": greeks["vega"],
+
+            # State info
+            "state": self.state.value,
+            "has_long_straddle": self.long_straddle is not None and self.long_straddle.is_complete,
+            "has_short_strangle": self.short_strangle is not None and self.short_strangle.is_complete,
+        }
+
     def get_total_greeks(self) -> Dict[str, float]:
         """
         Calculate total Greeks across all positions.
