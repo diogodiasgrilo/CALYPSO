@@ -246,6 +246,9 @@ class SaxoClient:
         This method checks for existing valid tokens first, then attempts
         to refresh if needed, or initiates a new OAuth flow if required.
 
+        After successful authentication, it upgrades the session to
+        FullTradingAndChat for real-time market data access.
+
         Returns:
             bool: True if authentication successful, False otherwise.
         """
@@ -254,17 +257,25 @@ class SaxoClient:
         # Check if we have a valid access token
         if self.access_token and self._is_token_valid():
             logger.info("Using existing valid access token")
+            # Upgrade session for real-time data
+            self._upgrade_session_for_realtime_data()
             return True
 
         # Try to refresh the token if we have a refresh token
         if self.refresh_token:
             logger.info("Attempting to refresh access token...")
             if self._refresh_access_token():
+                # Upgrade session for real-time data
+                self._upgrade_session_for_realtime_data()
                 return True
             logger.warning("Token refresh failed, initiating new OAuth flow")
 
         # Initiate new OAuth2 authorization flow
-        return self._oauth_authorization_flow()
+        success = self._oauth_authorization_flow()
+        if success:
+            # Upgrade session for real-time data
+            self._upgrade_session_for_realtime_data()
+        return success
 
     def _oauth_authorization_flow(self) -> bool:
         """
@@ -495,6 +506,79 @@ class SaxoClient:
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
+
+    def _upgrade_session_for_realtime_data(self) -> bool:
+        """
+        Upgrade session capabilities to FullTradingAndChat for real-time market data.
+
+        By default, Saxo OpenAPI sessions have TradeLevel=OrdersOnly which only
+        provides delayed market data (5-15 min). Upgrading to FullTradingAndChat
+        enables real-time prices from your account's market data subscriptions.
+
+        Note: Only one session per user can have FullTradingAndChat at a time.
+        Upgrading this session will demote other active sessions.
+
+        Returns:
+            bool: True if upgrade successful or already upgraded, False otherwise.
+        """
+        try:
+            # First, check current capabilities
+            response = requests.get(
+                f"{self.base_url}/root/v1/sessions/capabilities",
+                headers=self._get_auth_headers(),
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                caps = response.json()
+                current_trade_level = caps.get("TradeLevel", "Unknown")
+                current_data_level = caps.get("DataLevel", "Unknown")
+
+                logger.info(f"Current session: TradeLevel={current_trade_level}, DataLevel={current_data_level}")
+
+                # Already upgraded
+                if current_trade_level == "FullTradingAndChat":
+                    logger.info("Session already has FullTradingAndChat - real-time data enabled")
+                    return True
+
+            # Upgrade to FullTradingAndChat
+            logger.info("Upgrading session to FullTradingAndChat for real-time market data...")
+
+            upgrade_response = requests.patch(
+                f"{self.base_url}/root/v1/sessions/capabilities",
+                headers=self._get_auth_headers(),
+                json={"TradeLevel": "FullTradingAndChat"},
+                timeout=10
+            )
+
+            if upgrade_response.status_code == 202:
+                logger.info("Session upgraded to FullTradingAndChat - real-time data enabled!")
+
+                # Verify the upgrade (wait briefly for it to take effect)
+                time.sleep(1)
+                verify_response = requests.get(
+                    f"{self.base_url}/root/v1/sessions/capabilities",
+                    headers=self._get_auth_headers(),
+                    timeout=10
+                )
+                if verify_response.status_code == 200:
+                    new_caps = verify_response.json()
+                    logger.info(
+                        f"Verified: TradeLevel={new_caps.get('TradeLevel')}, "
+                        f"DataLevel={new_caps.get('DataLevel')}"
+                    )
+                return True
+            else:
+                logger.warning(
+                    f"Session upgrade returned {upgrade_response.status_code}: "
+                    f"{upgrade_response.text}"
+                )
+                return False
+
+        except Exception as e:
+            logger.warning(f"Failed to upgrade session for real-time data: {e}")
+            # Don't fail authentication just because upgrade failed
+            return False
 
     # =========================================================================
     # CIRCUIT BREAKER METHODS
@@ -1035,116 +1119,181 @@ class SaxoClient:
 
     def get_spy_price(self, spy_uic: int, symbol: str = "SPY") -> Optional[Dict]:
         """
-        Get SPY quote with external fallback for simulation NoAccess.
+        Get SPY quote from Saxo with Yahoo Finance as last resort fallback.
+
+        Priority:
+        1. Saxo real-time price (during market hours)
+        2. Saxo last traded price (after hours / market closed)
+        3. Yahoo Finance (only if Saxo completely fails)
 
         Args:
             spy_uic: SPY UIC
-            symbol: Symbol name for external feed
+            symbol: Symbol name for external feed fallback
 
         Returns:
             dict: Quote data with price information, or None if unavailable
         """
-        # Try Saxo API first
-        quote_data = self.get_quote(spy_uic, asset_type="Etf")
+        # Try Saxo API first with extended fields
+        endpoint = "/trade/v1/infoprices/list"
+        params = {
+            "AccountKey": self.account_key,
+            "Uics": str(spy_uic),
+            "AssetType": "Etf",
+            "FieldGroups": "DisplayAndFormat,Quote,PriceInfo,PriceInfoDetails"
+        }
 
-        if quote_data:
+        response = self._make_request("GET", endpoint, params=params)
+
+        if response and "Data" in response and len(response["Data"]) > 0:
+            quote_data = response["Data"][0]
             quote = quote_data.get("Quote", {})
+            price_info = quote_data.get("PriceInfo", {})
+            price_info_details = quote_data.get("PriceInfoDetails", {})
 
-            # Check if we have NoAccess
-            if quote.get("PriceTypeAsk") == "NoAccess" or quote.get("PriceTypeBid") == "NoAccess":
-                logger.warning(f"{symbol}: Saxo API returned NoAccess")
+            # Try to get price from various fields (handles both live and after-hours)
+            price = (
+                quote.get("Mid") or
+                quote.get("LastTraded") or
+                quote.get("Bid") or
+                quote.get("Ask") or
+                price_info_details.get("LastTraded") or
+                price_info.get("Last")
+            )
 
-                # Use external feed if enabled (simulation only)
-                if self.external_feed.enabled:
-                    logger.info(f"{symbol}: Using external price feed")
-                    external_price = self.external_feed.get_price(symbol)
+            if price:
+                # Ensure Mid/LastTraded are set for downstream code
+                if not quote.get("Mid"):
+                    quote_data["Quote"]["Mid"] = price
+                if not quote.get("LastTraded"):
+                    quote_data["Quote"]["LastTraded"] = price
 
-                    if external_price:
-                        # Inject external price into quote structure
-                        quote_data["Quote"]["Mid"] = external_price
-                        quote_data["Quote"]["LastTraded"] = external_price
-                        quote_data["Quote"]["_external_source"] = True
-                        logger.info(f"{symbol}: External price injected: ${external_price:.2f}")
-                        return quote_data
-                    else:
-                        logger.error(f"{symbol}: External feed also failed")
-                        return None
-            else:
-                # Normal Saxo price data
+                logger.debug(f"{symbol}: Saxo price ${price} (MarketState: {quote.get('MarketState', 'Unknown')})")
                 return quote_data
 
+            # Check if NoAccess (shouldn't happen with FullTradingAndChat, but handle it)
+            if quote.get("PriceTypeAsk") == "NoAccess" or quote.get("PriceTypeBid") == "NoAccess":
+                logger.warning(f"{symbol}: Saxo API returned NoAccess - falling back to Yahoo")
+            else:
+                logger.warning(f"{symbol}: Saxo returned no price data")
+
+        # Last resort: Yahoo Finance fallback
+        if self.external_feed.enabled:
+            logger.info(f"{symbol}: Using Yahoo Finance fallback")
+            external_price = self.external_feed.get_price(symbol)
+
+            if external_price:
+                # Create a quote structure with the external price
+                quote_data = {
+                    "Quote": {
+                        "Mid": external_price,
+                        "LastTraded": external_price,
+                        "_external_source": True
+                    },
+                    "DisplayAndFormat": {"Symbol": symbol}
+                }
+                logger.info(f"{symbol}: Yahoo price ${external_price:.2f}")
+                return quote_data
+
+        logger.error(f"{symbol}: All price sources failed")
         return None
 
     def get_vix_price(self, vix_uic: int) -> Optional[float]:
         """
-        Get current VIX price with fallback logic for NoAccess/After-hours.
+        Get VIX price from Saxo with Yahoo Finance as last resort fallback.
+
+        Priority:
+        1. Saxo price cache (from streaming subscription)
+        2. Saxo REST API (real-time or last traded)
+        3. Yahoo Finance (only if Saxo completely fails)
+
+        Args:
+            vix_uic: VIX UIC (typically 10606)
+
+        Returns:
+            float: VIX price, or None if all sources fail
         """
         # Ensure UIC is int for consistent cache lookup
         vix_uic = int(vix_uic)
-
-        # Debug: Show lookup details
         logger.debug(f"get_vix_price called: looking for UIC {vix_uic}")
 
         # 1. Check the price cache (from subscription snapshots)
         if vix_uic in self._price_cache:
             cached_data = self._price_cache[vix_uic]
-            price = None
-
-            # Structure 1: Standard Quote Block (Mid/LastTraded)
-            if "Quote" in cached_data and isinstance(cached_data["Quote"], dict):
-                quote = cached_data["Quote"]
-                if quote.get("PriceTypeAsk") == "NoAccess" or quote.get("PriceTypeBid") == "NoAccess":
-                    logger.debug(f"VIX UIC {vix_uic}: Quote block restricted (NoAccess).")
-                
-                price = quote.get("Mid") or quote.get("LastTraded") or quote.get("Ask") or quote.get("Bid")
-
-            # Structure 2 & 3: Top level or PriceInfo LastTraded
-            if price is None:
-                price = cached_data.get("LastTraded")
-            
-            if price is None and "PriceInfo" in cached_data and isinstance(cached_data["PriceInfo"], dict):
-                price = cached_data["PriceInfo"].get("LastTraded")
-
-            # [NEW] Structure 5: PriceInfo 'Last' Fallback
-            # This is the key for fixing your $0.00 issue
-            if price is None and "PriceInfo" in cached_data and isinstance(cached_data["PriceInfo"], dict):
-                price = cached_data["PriceInfo"].get("Last")
-                if price:
-                    logger.debug(f"VIX price retrieved from PriceInfo.Last: {price}")
-
+            price = self._extract_price_from_data(cached_data, "VIX cache")
             if price:
-                logger.debug(f"VIX price from cache: {price}")
-                return float(price)
+                return price
 
-        # 2. REST API Fallback
-        # If not in cache or cache missing price, try REST API
-        fallbacks = ["StockIndex", "CfdOnIndex", "Stock"]
-        for a_type in fallbacks:
-            try:
-                quote = self.get_quote(vix_uic, asset_type=a_type)
-                if quote:
-                    q_block = quote.get("Quote", {})
-                    p_info = quote.get("PriceInfo", {})
-                    
-                    # Check Quote block, then fallback to PriceInfo.Last
-                    price = q_block.get("Mid") or q_block.get("LastTraded") or p_info.get("Last")
-                    
-                    if price:
-                        logger.debug(f"VIX price from API: {price} (AssetType: {a_type})")
-                        return float(price)
-            except Exception as e:
-                logger.debug(f"VIX API fetch failed with {a_type}: {e}")
-                continue
+        # 2. REST API - Try Saxo with extended fields for index data
+        endpoint = "/trade/v1/infoprices/list"
+        params = {
+            "AccountKey": self.account_key,
+            "Uics": str(vix_uic),
+            "AssetType": "StockIndex",
+            "FieldGroups": "DisplayAndFormat,Quote,PriceInfo,PriceInfoDetails"
+        }
 
-        # 3. External Feed Fallback (only in simulation when Saxo has NoAccess)
+        response = self._make_request("GET", endpoint, params=params)
+
+        if response and "Data" in response and len(response["Data"]) > 0:
+            data = response["Data"][0]
+            price = self._extract_price_from_data(data, "VIX API")
+            if price:
+                return price
+
+        # 3. Last resort: Yahoo Finance fallback
         if self.external_feed.enabled:
-            logger.info("VIX: Saxo API returned NoAccess, using external price feed")
+            logger.info("VIX: Saxo failed, using Yahoo Finance fallback")
             external_price = self.external_feed.get_vix_price()
             if external_price:
-                logger.info(f"VIX price from external feed: {external_price}")
+                logger.info(f"VIX: Yahoo price {external_price}")
                 return external_price
 
-        logger.warning(f"VIX price not found for UIC {vix_uic} (Cache, API, and external feed failed)")
+        logger.error(f"VIX: All price sources failed for UIC {vix_uic}")
+        return None
+
+    def _extract_price_from_data(self, data: Dict, source: str) -> Optional[float]:
+        """
+        Extract price from Saxo quote data structure.
+
+        Handles various data structures returned by Saxo for different asset types
+        and market states (open, closed, after-hours).
+
+        Args:
+            data: Quote data dictionary from Saxo
+            source: Source name for logging
+
+        Returns:
+            float: Extracted price, or None if not found
+        """
+        price = None
+
+        # Try Quote block first (standard for tradable instruments)
+        if "Quote" in data and isinstance(data["Quote"], dict):
+            quote = data["Quote"]
+            price = (
+                quote.get("Mid") or
+                quote.get("LastTraded") or
+                quote.get("Bid") or
+                quote.get("Ask")
+            )
+
+        # Try PriceInfoDetails (used for indices like VIX)
+        if price is None and "PriceInfoDetails" in data:
+            price = data["PriceInfoDetails"].get("LastTraded")
+
+        # Try PriceInfo
+        if price is None and "PriceInfo" in data:
+            p_info = data["PriceInfo"]
+            price = p_info.get("LastTraded") or p_info.get("Last")
+
+        # Try top-level LastTraded
+        if price is None:
+            price = data.get("LastTraded")
+
+        if price:
+            logger.debug(f"{source}: price {price}")
+            return float(price)
+
         return None
 
     def check_bid_ask_spread(

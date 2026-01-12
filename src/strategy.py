@@ -23,6 +23,7 @@ Date: 2024
 """
 
 import logging
+import time
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, List, Any, Tuple
 from dataclasses import dataclass, field
@@ -893,6 +894,80 @@ class DeltaNeutralStrategy:
 
         except Exception as e:
             logger.error(f"Error updating market data: {e}")
+            return False
+
+    def refresh_position_prices(self) -> bool:
+        """
+        Refresh current prices for all option positions from Saxo API.
+
+        This is needed after position recovery when the market is closed
+        and current_price may not have been populated.
+
+        Returns:
+            bool: True if prices refreshed successfully
+        """
+        try:
+            # Get fresh positions from Saxo
+            positions = self.client.get_positions()
+            if not positions:
+                logger.warning("No positions returned from Saxo for price refresh")
+                return False
+
+            # Filter for SPY options only
+            spy_options = [p for p in positions if "SPY" in p.get("DisplayAndFormat", {}).get("Symbol", "")]
+
+            for pos in spy_options:
+                pos_view = pos.get("PositionView", {})
+                pos_base = pos.get("PositionBase", {})
+                symbol = pos.get("DisplayAndFormat", {}).get("Symbol", "")
+
+                # Get current price from position view
+                current_price = pos_view.get("CurrentPrice", 0) or pos_view.get("MarketValue", 0)
+                strike = pos_base.get("Strike", 0)
+
+                # Also try to get price from Greeks if available
+                if current_price == 0:
+                    # Try fetching individual option quote
+                    uic = pos_base.get("Uic")
+                    if uic:
+                        quote = self.client.get_quote(uic, asset_type="StockOption")
+                        if quote and "Quote" in quote:
+                            current_price = (
+                                quote["Quote"].get("Mid") or
+                                quote["Quote"].get("LastTraded") or
+                                quote["Quote"].get("Bid") or
+                                0
+                            )
+
+                if current_price == 0:
+                    logger.debug(f"Could not get current price for {symbol} (market may be closed)")
+                    continue
+
+                # Update the corresponding position in our strategy
+                # Match by UIC
+                uic = pos_base.get("Uic")
+
+                if self.long_straddle:
+                    if self.long_straddle.call and self.long_straddle.call.uic == uic:
+                        self.long_straddle.call.current_price = current_price
+                        logger.debug(f"Updated long call price: ${current_price:.4f}")
+                    if self.long_straddle.put and self.long_straddle.put.uic == uic:
+                        self.long_straddle.put.current_price = current_price
+                        logger.debug(f"Updated long put price: ${current_price:.4f}")
+
+                if self.short_strangle:
+                    if self.short_strangle.call and self.short_strangle.call.uic == uic:
+                        self.short_strangle.call.current_price = current_price
+                        logger.debug(f"Updated short call price: ${current_price:.4f}")
+                    if self.short_strangle.put and self.short_strangle.put.uic == uic:
+                        self.short_strangle.put.current_price = current_price
+                        logger.debug(f"Updated short put price: ${current_price:.4f}")
+
+            logger.info("Position prices refreshed from Saxo")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error refreshing position prices: {e}")
             return False
 
     def handle_price_update(self, uic: int, data: Dict):

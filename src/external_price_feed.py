@@ -2,15 +2,14 @@
 """
 External Price Feed Module
 
-Provides fallback price data from external sources (Yahoo Finance)
-for use in Saxo simulation environment where US equity data has NoAccess.
+Provides fallback price data from Yahoo Finance when Saxo API fails.
 
-Only used when:
-1. Environment is "sim"
-2. Saxo API returns NoAccess for the instrument
-3. External feeds are enabled in config
+This is a LAST RESORT fallback. The primary data source is Saxo's
+real-time feed via FullTradingAndChat session upgrade.
 
-For live trading, this module is NOT used.
+Fallback is used only when:
+1. Saxo API completely fails (network error, auth issue, etc.)
+2. Saxo returns NoAccess (rare with proper session upgrade)
 """
 
 import requests
@@ -25,10 +24,10 @@ logger = logging.getLogger(__name__)
 
 class ExternalPriceFeed:
     """
-    Fetches prices from external sources when Saxo returns NoAccess.
+    Yahoo Finance fallback for when Saxo API fails.
 
-    Currently supports:
-    - Yahoo Finance (free, 15-min delayed)
+    This is NOT the primary data source - Saxo real-time data is.
+    Only used as last resort when Saxo completely fails.
     """
 
     def __init__(self, enabled: bool = True):
@@ -36,19 +35,14 @@ class ExternalPriceFeed:
         Initialize external price feed.
 
         Args:
-            enabled: Whether to use external feeds (should be True only in sim)
+            enabled: Whether Yahoo Finance fallback is available
         """
         self.enabled = enabled
         self.cache = {}  # Cache prices to avoid rate limits
         self.cache_ttl = 60  # Cache for 60 seconds
 
         if self.enabled:
-            logger.warning("="*70)
-            logger.warning("EXTERNAL PRICE FEED ENABLED")
-            logger.warning("Using Yahoo Finance for SPY/VIX prices (15-min delayed)")
-            logger.warning("This is ONLY for simulation/testing purposes")
-            logger.warning("Real trading will use Saxo's live price feed")
-            logger.warning("="*70)
+            logger.debug("Yahoo Finance fallback enabled (used only if Saxo fails)")
 
     def get_price(self, symbol: str) -> Optional[float]:
         """

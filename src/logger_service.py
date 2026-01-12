@@ -1249,6 +1249,59 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to log account summary: {e}")
             return False
 
+    def should_log_initial_metrics(self, stale_minutes: int = 30) -> bool:
+        """
+        Check if initial metrics should be logged on startup.
+
+        Returns True if:
+        1. Account Summary worksheet is empty (no data rows), OR
+        2. The most recent entry is older than stale_minutes
+
+        Args:
+            stale_minutes: Number of minutes after which data is considered stale
+
+        Returns:
+            bool: True if initial metrics should be logged
+        """
+        if not self.enabled or "Account Summary" not in self.worksheets:
+            return False
+
+        try:
+            worksheet = self.worksheets["Account Summary"]
+            all_values = worksheet.get_all_values()
+
+            # If only header row exists (or empty), we need to log
+            if len(all_values) <= 1:
+                logger.info("Account Summary is empty - will log initial metrics")
+                return True
+
+            # Get the last row's timestamp (first column)
+            last_row = all_values[-1]
+            last_timestamp_str = last_row[0] if last_row else None
+
+            if not last_timestamp_str:
+                logger.info("No timestamp found in last row - will log initial metrics")
+                return True
+
+            # Parse the timestamp
+            try:
+                last_timestamp = datetime.strptime(last_timestamp_str, "%Y-%m-%d %H:%M:%S")
+                age_minutes = (datetime.now() - last_timestamp).total_seconds() / 60
+
+                if age_minutes > stale_minutes:
+                    logger.info(f"Last Account Summary entry is {age_minutes:.1f} minutes old (stale threshold: {stale_minutes}min) - will log initial metrics")
+                    return True
+                else:
+                    logger.info(f"Last Account Summary entry is {age_minutes:.1f} minutes old - data is fresh")
+                    return False
+            except ValueError as e:
+                logger.warning(f"Could not parse timestamp '{last_timestamp_str}': {e} - will log initial metrics")
+                return True
+
+        except Exception as e:
+            logger.error(f"Error checking if initial metrics needed: {e}")
+            return True  # Log on error to be safe
+
     def flush_all_buffers(self):
         """Flush all pending log buffers (call on shutdown)."""
         with self._log_buffer_lock:
@@ -2161,6 +2214,23 @@ class TradeLoggerService:
             )
         except Exception as e:
             logger.error(f"Failed to log account summary: {e}")
+
+    def should_log_initial_metrics(self, stale_minutes: int = 30) -> bool:
+        """
+        Check if initial dashboard metrics should be logged on startup.
+
+        Delegates to GoogleSheetsLogger to check if Account Summary
+        is empty or has stale data.
+
+        Args:
+            stale_minutes: Number of minutes after which data is considered stale
+
+        Returns:
+            bool: True if initial metrics should be logged
+        """
+        if self.google_logger.enabled:
+            return self.google_logger.should_log_initial_metrics(stale_minutes)
+        return False
 
     def shutdown(self):
         """Shutdown the logging service gracefully."""
