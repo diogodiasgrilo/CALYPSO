@@ -459,11 +459,28 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     if sleep_time > 0:
                         hours = sleep_time // 3600
                         minutes = (sleep_time % 3600) // 60
+
+                        # Disconnect WebSocket before sleeping to avoid timeout errors
+                        # Saxo closes idle connections anyway, so disconnect cleanly
+                        if client.is_streaming:
+                            client.stop_price_streaming()
+
+                        # Refresh token BEFORE sleeping to get fresh expiry
+                        # This ensures we have a full token lifetime after waking up
+                        client.authenticate()
+
+                        # Log heartbeat LAST, right before sleeping
                         trade_logger.log_event(
                             f"HEARTBEAT | Market closed - sleeping for {hours}h {minutes}m"
                         )
+
                         if not interruptible_sleep(sleep_time):
                             break  # Shutdown requested
+
+                        # Reconnect WebSocket after waking (will reconnect when market opens)
+                        if not shutdown_requested and not client.is_streaming:
+                            logger.debug("Reconnecting WebSocket after sleep")
+                            client.start_price_streaming(subscriptions, price_update_handler)
                     else:
                         trade_logger.log_event("HEARTBEAT | Market closed - rechecking in 60s")
                         if not interruptible_sleep(60):

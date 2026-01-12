@@ -1917,7 +1917,12 @@ class SaxoClient:
             logger.error(f"WebSocket error: {error}")
 
         def on_close(ws, close_status_code, close_msg):
-            logger.warning(f"WebSocket closed: {close_status_code} - {close_msg}")
+            # Only log warning if this was an unexpected close
+            if getattr(self, '_intentional_ws_close', False):
+                logger.debug("WebSocket closed (intentional)")
+                self._intentional_ws_close = False
+            else:
+                logger.warning(f"WebSocket closed unexpectedly: code={close_status_code}, reason={close_msg}")
             self.is_streaming = False
 
         def on_open(ws):
@@ -1984,6 +1989,7 @@ class SaxoClient:
 
     def stop_price_streaming(self):
         """Stop WebSocket streaming and clean up subscriptions."""
+        self._intentional_ws_close = True  # Flag to suppress warning in on_close
         if self.ws_connection:
             self.ws_connection.close()
             self.ws_connection = None
