@@ -1715,8 +1715,9 @@ class SaxoClient:
                     
                 data = json.loads(message)
                 
-                # heartbeat checks
+                # heartbeat checks - still record success to keep circuit breaker happy
                 if "ReferenceId" in data and data["ReferenceId"] == "_heartbeat":
+                    self._record_success()  # Heartbeat proves WebSocket is alive
                     return
 
                 self._handle_streaming_message(data)

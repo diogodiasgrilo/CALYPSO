@@ -33,6 +33,7 @@ import time
 import signal
 import argparse
 import logging
+import subprocess
 from datetime import datetime
 from typing import Optional
 
@@ -84,6 +85,57 @@ def interruptible_sleep(seconds: int, check_interval: int = 5) -> bool:
         time.sleep(min(check_interval, remaining))
         remaining -= check_interval
     return not shutdown_requested
+
+
+def kill_existing_bot_instances() -> int:
+    """
+    Find and kill any existing bot instances before starting a new one.
+
+    This prevents multiple bot instances from running simultaneously,
+    which could cause duplicate trades and circuit breaker issues.
+
+    Returns:
+        int: Number of processes killed
+    """
+    current_pid = os.getpid()
+    killed_count = 0
+
+    try:
+        # Find all Python processes running main.py
+        result = subprocess.run(
+            ["pgrep", "-f", "python.*main.py"],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+
+            for pid_str in pids:
+                try:
+                    pid = int(pid_str.strip())
+                    # Don't kill ourselves
+                    if pid != current_pid:
+                        logger.info(f"Found existing bot instance (PID: {pid}), terminating...")
+                        os.kill(pid, signal.SIGTERM)
+                        killed_count += 1
+                        # Give it a moment to shut down gracefully
+                        time.sleep(1)
+                except (ValueError, ProcessLookupError):
+                    pass  # Process already terminated or invalid PID
+
+        if killed_count > 0:
+            logger.info(f"Terminated {killed_count} existing bot instance(s)")
+            # Extra wait for graceful cleanup
+            time.sleep(2)
+
+    except FileNotFoundError:
+        # pgrep not available (Windows or unusual system)
+        logger.warning("pgrep not available - cannot check for existing instances")
+    except Exception as e:
+        logger.warning(f"Error checking for existing instances: {e}")
+
+    return killed_count
 
 
 def load_config(config_path: str = "config/config.json") -> dict:
@@ -655,6 +707,12 @@ Examples:
 
     # Print banner
     print_banner()
+
+    # Kill any existing bot instances before starting
+    # This prevents duplicate trades and circuit breaker issues from zombie processes
+    killed = kill_existing_bot_instances()
+    if killed > 0:
+        print(f"  Terminated {killed} existing bot instance(s)\n")
 
     try:
         # Load configuration (auto-detects cloud vs local)
