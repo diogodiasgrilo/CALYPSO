@@ -1079,21 +1079,25 @@ class DeltaNeutralStrategy:
         put_strike = self.short_strangle.put_strike
         price = self.current_underlying_price
 
-        # Check if shorts are ITM or very close
-        call_itm = price >= call_strike * 0.98  # Within 2% of strike
-        put_itm = price <= put_strike * 1.02    # Within 2% of strike
+        # Check if shorts are ITM or dangerously close (within $1 of strike)
+        # This is more precise than percentage-based - $1 buffer gives time to react
+        itm_buffer = 1.0  # dollars
+        call_itm = price >= (call_strike - itm_buffer)
+        put_itm = price <= (put_strike + itm_buffer)
 
         if call_itm:
+            distance = call_strike - price
             logger.critical(
-                f"SHORT CALL ITM RISK! Price ${price:.2f} at/above strike ${call_strike:.2f}. "
-                f"Immediate action required."
+                f"SHORT CALL ITM RISK! Price ${price:.2f} is ${distance:.2f} from "
+                f"strike ${call_strike:.2f}. Immediate action required."
             )
             return True
 
         if put_itm:
+            distance = price - put_strike
             logger.critical(
-                f"SHORT PUT ITM RISK! Price ${price:.2f} at/below strike ${put_strike:.2f}. "
-                f"Immediate action required."
+                f"SHORT PUT ITM RISK! Price ${price:.2f} is ${distance:.2f} from "
+                f"strike ${put_strike:.2f}. Immediate action required."
             )
             return True
 
