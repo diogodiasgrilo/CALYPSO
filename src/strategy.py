@@ -300,6 +300,7 @@ class DeltaNeutralStrategy:
         self.exit_dte_max = self.strategy_config["exit_dte_max"]
         self.strangle_multiplier_min = self.strategy_config["weekly_strangle_multiplier_min"]
         self.strangle_multiplier_max = self.strategy_config["weekly_strangle_multiplier_max"]
+        self.weekly_target_return_pct = self.strategy_config.get("weekly_target_return_percent", None)
         self.position_size = self.strategy_config["position_size"]
         self.max_spread_percent = self.strategy_config["max_bid_ask_spread_percent"]
         self.roll_days = self.strategy_config["roll_days"]
@@ -1418,7 +1419,8 @@ class DeltaNeutralStrategy:
         """
         Enter a weekly short strangle for income generation.
 
-        Sells OTM Call and Put at 1.5-2x the weekly expected move.
+        If weekly_target_return_percent is configured, finds strikes that meet
+        the target return. Otherwise uses multiplier on expected move.
 
         Returns:
             bool: True if strangle entered successfully, False otherwise.
@@ -1428,6 +1430,77 @@ class DeltaNeutralStrategy:
         if not self.current_underlying_price:
             if not self.update_market_data():
                 return False
+
+        # Check if we should use target return approach
+        if self.weekly_target_return_pct and self.weekly_target_return_pct > 0:
+            return self._enter_strangle_by_target_return()
+
+        # Otherwise use the multiplier approach
+        return self._enter_strangle_by_multiplier()
+
+    def _enter_strangle_by_target_return(self) -> bool:
+        """
+        Enter strangle based on target weekly return percentage.
+
+        Calculates required premium and finds furthest OTM strikes that meet it.
+        """
+        logger.info("=" * 60)
+        logger.info(f"TARGET RETURN MODE: Seeking {self.weekly_target_return_pct}% weekly return")
+        logger.info("=" * 60)
+
+        # Calculate margin requirement (approx 20% of notional)
+        margin_per_contract = self.current_underlying_price * 100 * 0.20
+
+        # Calculate target premium
+        target_premium = margin_per_contract * (self.weekly_target_return_pct / 100)
+
+        logger.info(f"SPY: ${self.current_underlying_price:.2f} | Margin estimate: ${margin_per_contract:.2f}")
+        logger.info(f"Target premium needed for {self.weekly_target_return_pct}%: ${target_premium:.2f}")
+
+        # Find strangle options by target premium
+        strangle_options = self.client.find_strangle_by_target_premium(
+            self.underlying_uic,
+            self.current_underlying_price,
+            target_premium,
+            weekly=True
+        )
+
+        if not strangle_options:
+            logger.error(f"FAILED: Cannot find strikes that provide ${target_premium:.2f} premium")
+            logger.warning(f"Consider lowering weekly_target_return_percent from {self.weekly_target_return_pct}%")
+            return False
+
+        call_option = strangle_options["call"]
+        put_option = strangle_options["put"]
+
+        # Log the actual premium we'll receive
+        actual_premium = strangle_options.get("total_premium", 0)
+        actual_return = (actual_premium / margin_per_contract) * 100 if margin_per_contract > 0 else 0
+
+        logger.info("-" * 60)
+        logger.info(f"STRIKES FOUND: Put ${put_option['strike']:.0f} / Call ${call_option['strike']:.0f}")
+        logger.info(f"PREMIUM: ${actual_premium:.2f} (target was ${target_premium:.2f})")
+        logger.info(f"ACTUAL RETURN: {actual_return:.2f}% (target was {self.weekly_target_return_pct}%)")
+        logger.info("-" * 60)
+
+        # Skip bid-ask check since we already have prices from find_strangle_by_target_premium
+        call_price = call_option.get("bid", 0)
+        put_price = put_option.get("bid", 0)
+
+        if call_price <= 0 or put_price <= 0:
+            logger.error("Invalid option prices")
+            return False
+
+        # Continue with order placement (same as multiplier approach)
+        return self._execute_strangle_order(call_option, put_option, call_price, put_price)
+
+    def _enter_strangle_by_multiplier(self) -> bool:
+        """
+        Enter strangle using expected move multiplier approach.
+
+        This is the original approach: calculate expected move from VIX and apply multiplier.
+        """
+        logger.info("Using expected move multiplier approach")
 
         # First, get the weekly expiration to determine actual DTE
         expirations = self.client.get_option_expirations(self.underlying_uic)
@@ -1458,7 +1531,7 @@ class DeltaNeutralStrategy:
             days=weekly_dte  # Use actual DTE instead of hardcoded 7
         )
 
-        logger.info(f"Expected move for {weekly_dte} DTE: ${expected_move:.2f} ({iv*100:.1f}% IV)")
+        logger.info(f"Weekly expected move: ${expected_move:.2f} ({iv*100:.1f}% IV)")
 
         # Use middle of the multiplier range
         multiplier = (self.strangle_multiplier_min + self.strangle_multiplier_max) / 2
@@ -1505,6 +1578,19 @@ class DeltaNeutralStrategy:
 
         call_price = call_quote["Quote"].get("Bid", 0)
         put_price = put_quote["Quote"].get("Bid", 0)
+
+        return self._execute_strangle_order(call_option, put_option, call_price, put_price)
+
+    def _execute_strangle_order(
+        self,
+        call_option: dict,
+        put_option: dict,
+        call_price: float,
+        put_price: float
+    ) -> bool:
+        """
+        Execute the strangle order (shared by both target return and multiplier approaches).
+        """
 
         # Place sell orders for strangle
         legs = [

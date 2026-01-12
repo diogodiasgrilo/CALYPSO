@@ -1132,6 +1132,186 @@ class SaxoClient:
             }
         }
 
+    def find_strangle_by_target_premium(
+        self,
+        underlying_uic: int,
+        underlying_price: float,
+        target_premium: float,
+        weekly: bool = True
+    ) -> Optional[Dict[str, Dict]]:
+        """
+        Find OTM options for a short strangle that meets target premium.
+
+        Instead of using expected move * multiplier, this finds the furthest OTM
+        strikes that still provide the target premium.
+
+        Args:
+            underlying_uic: UIC of the underlying
+            underlying_price: Current underlying price
+            target_premium: Target premium in dollars (total for both legs, per contract)
+            weekly: If True, find weekly options
+
+        Returns:
+            dict: Dictionary with 'call' and 'put' option data for strangle,
+                  or None if no valid combination found.
+        """
+        import time
+
+        expirations = self.get_option_expirations(underlying_uic)
+        if not expirations:
+            return None
+
+        # Find weekly expiration
+        today = datetime.now().date()
+        target_expiration = None
+        weekly_dte = 7
+
+        if weekly:
+            for exp_data in expirations:
+                exp_date_str = exp_data.get("Expiry")
+                if not exp_date_str:
+                    continue
+                exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+
+                if 0 < dte <= 7:
+                    target_expiration = exp_data
+                    weekly_dte = dte
+                    logger.info(f"Found weekly expiration: {exp_date_str} with {dte} DTE")
+                    break
+
+        if not target_expiration:
+            logger.warning("No suitable weekly expiration found")
+            return None
+
+        specific_options = target_expiration.get("SpecificOptions", [])
+        if not specific_options:
+            logger.error("No SpecificOptions in target expiration")
+            return None
+
+        # Filter to options within 5% of current price to reduce API calls
+        min_strike = underlying_price * 0.95
+        max_strike = underlying_price * 1.05
+
+        # Collect calls and puts with their prices
+        calls = []
+        puts = []
+
+        relevant_options = [
+            opt for opt in specific_options
+            if min_strike <= opt.get("StrikePrice", 0) <= max_strike
+        ]
+
+        logger.info(f"Fetching prices for {len(relevant_options)} options within 5% of underlying")
+
+        for i, option in enumerate(relevant_options):
+            strike = option.get("StrikePrice", 0)
+            uic = option.get("Uic")
+            put_call = option.get("PutCall")
+
+            if not uic or not strike:
+                continue
+
+            # Rate limiting
+            if i > 0 and i % 5 == 0:
+                time.sleep(0.3)
+
+            quote = self.get_quote(uic, "StockOption")
+            if not quote:
+                continue
+
+            bid = quote["Quote"].get("Bid", 0)
+            ask = quote["Quote"].get("Ask", 0)
+
+            if bid <= 0:  # Skip options with no bid
+                continue
+
+            option_data = {
+                "strike": strike,
+                "uic": uic,
+                "bid": bid,
+                "ask": ask,
+                "expiry": target_expiration.get("Expiry")
+            }
+
+            if put_call == "Call" and strike > underlying_price:
+                calls.append(option_data)
+            elif put_call == "Put" and strike < underlying_price:
+                puts.append(option_data)
+
+        if not calls or not puts:
+            logger.error("No valid OTM options found with prices")
+            return None
+
+        # Sort: calls ascending (closest to ATM first), puts descending (closest to ATM first)
+        calls.sort(key=lambda x: x["strike"])
+        puts.sort(key=lambda x: x["strike"], reverse=True)
+
+        # Find the furthest OTM combination that still meets target premium
+        best_combination = None
+
+        # Start from furthest OTM and move inward
+        for call in reversed(calls):
+            for put in reversed(puts):
+                total_premium = (call["bid"] + put["bid"]) * 100
+
+                if total_premium >= target_premium:
+                    call_distance = call["strike"] - underlying_price
+                    put_distance = underlying_price - put["strike"]
+                    min_distance = min(call_distance, put_distance)
+
+                    if best_combination is None or min_distance > best_combination["min_distance"]:
+                        best_combination = {
+                            "call": call,
+                            "put": put,
+                            "total_premium": total_premium,
+                            "min_distance": min_distance
+                        }
+
+        if not best_combination:
+            logger.warning(f"No strike combination meets target premium of ${target_premium:.2f}")
+            # Show what's available
+            if calls and puts:
+                max_premium = (calls[0]["bid"] + puts[0]["bid"]) * 100
+                logger.warning(f"Maximum available premium at tightest strikes: ${max_premium:.2f}")
+                logger.warning(f"Tightest strikes: Put ${puts[0]['strike']:.0f} / Call ${calls[0]['strike']:.0f}")
+            return None
+
+        call = best_combination["call"]
+        put = best_combination["put"]
+
+        # Calculate distances for logging
+        call_distance = call["strike"] - underlying_price
+        put_distance = underlying_price - put["strike"]
+        call_pct = (call_distance / underlying_price) * 100
+        put_pct = (put_distance / underlying_price) * 100
+
+        logger.info(f"Found strikes for target premium ${target_premium:.2f}:")
+        logger.info(f"  Call: ${call['strike']:.0f} (+${call_distance:.2f}, {call_pct:.2f}% OTM) bid=${call['bid']:.2f}")
+        logger.info(f"  Put:  ${put['strike']:.0f} (-${put_distance:.2f}, {put_pct:.2f}% OTM) bid=${put['bid']:.2f}")
+        logger.info(f"  Total premium: ${best_combination['total_premium']:.2f}")
+
+        return {
+            "call": {
+                "uic": call["uic"],
+                "strike": call["strike"],
+                "expiry": call["expiry"],
+                "option_type": "Call",
+                "bid": call["bid"],
+                "ask": call["ask"]
+            },
+            "put": {
+                "uic": put["uic"],
+                "strike": put["strike"],
+                "expiry": put["expiry"],
+                "option_type": "Put",
+                "bid": put["bid"],
+                "ask": put["ask"]
+            },
+            "total_premium": best_combination["total_premium"],
+            "target_premium": target_premium
+        }
+
     def get_spy_price(self, spy_uic: int, symbol: str = "SPY") -> Optional[Dict]:
         """
         Get SPY quote from Saxo with Yahoo Finance as last resort fallback.
