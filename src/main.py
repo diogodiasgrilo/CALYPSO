@@ -343,6 +343,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     else:
         trade_logger.log_event("No existing positions found - starting fresh")
 
+    # Sync Positions sheet with actual state (clears stale data, adds current positions)
+    strategy.sync_positions_sheet()
+
     # Log initial dashboard metrics on startup (for Looker dashboard)
     # Only logs if no data exists or if data is stale (bot was down for extended period)
     try:

@@ -1284,6 +1284,7 @@ class DeltaNeutralStrategy:
         # Log trade
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
+            dte = self._calculate_dte(call_option["expiry"])
             self.trade_logger.log_trade(
                 action=f"{action_prefix}OPEN_LONG_STRADDLE",
                 strike=call_option["strike"],
@@ -1295,9 +1296,35 @@ class DeltaNeutralStrategy:
                 vix=self.current_vix,
                 option_type="Long Straddle",
                 expiry_date=call_option["expiry"],
-                dte=self._calculate_dte(call_option["expiry"]),
+                dte=dte,
                 premium_received=None  # Buying, not receiving premium
             )
+
+            # Add positions to Positions sheet
+            self.trade_logger.add_position({
+                "type": "Long Call",
+                "strike": call_option["strike"],
+                "expiry": call_option["expiry"],
+                "dte": dte,
+                "entry_price": call_price,
+                "current_price": call_price,
+                "theta": -0.15,  # Approximate theta for ATM call
+                "pnl": 0.0,
+                "pnl_eur": 0.0,
+                "status": "Active"
+            })
+            self.trade_logger.add_position({
+                "type": "Long Put",
+                "strike": put_option["strike"],
+                "expiry": put_option["expiry"],
+                "dte": dte,
+                "entry_price": put_price,
+                "current_price": put_price,
+                "theta": -0.10,  # Approximate theta for ATM put
+                "pnl": 0.0,
+                "pnl_eur": 0.0,
+                "status": "Active"
+            })
 
         return True
 
@@ -1375,6 +1402,10 @@ class DeltaNeutralStrategy:
                 dte=self._calculate_dte(straddle_expiry) if straddle_expiry else None,
                 premium_received=None
             )
+
+            # Remove positions from Positions sheet
+            self.trade_logger.remove_position("Long Call", self.long_straddle.initial_strike)
+            self.trade_logger.remove_position("Long Put", self.long_straddle.initial_strike)
 
         self.long_straddle = None
         return True
@@ -1582,6 +1613,34 @@ class DeltaNeutralStrategy:
 
             logger.info(f"Logged short strangle legs to Trades: Call ${call_option['strike']} (+${call_price * 100:.2f}), Put ${put_option['strike']} (+${put_price * 100:.2f})")
 
+            # Add positions to Positions sheet
+            call_dte = self._calculate_dte(call_option['expiry'])
+            put_dte = self._calculate_dte(put_option['expiry'])
+            self.trade_logger.add_position({
+                "type": "Short Call",
+                "strike": call_option['strike'],
+                "expiry": call_option['expiry'],
+                "dte": call_dte,
+                "entry_price": call_price,
+                "current_price": call_price,
+                "theta": 0.30,  # Approximate theta for OTM short call (positive = income)
+                "pnl": 0.0,
+                "pnl_eur": 0.0,
+                "status": "Active"
+            })
+            self.trade_logger.add_position({
+                "type": "Short Put",
+                "strike": put_option['strike'],
+                "expiry": put_option['expiry'],
+                "dte": put_dte,
+                "entry_price": put_price,
+                "current_price": put_price,
+                "theta": 0.30,  # Approximate theta for OTM short put (positive = income)
+                "pnl": 0.0,
+                "pnl_eur": 0.0,
+                "status": "Active"
+            })
+
         return True
 
     def close_short_strangle(self) -> bool:
@@ -1646,13 +1705,15 @@ class DeltaNeutralStrategy:
             f"Close cost: ${close_cost:.2f}, P&L: ${realized_pnl:.2f}"
         )
 
-        # Log trade (capture expiry before we clear the position)
+        # Log trade (capture strikes/expiry before we clear the position)
         strangle_expiry = self.short_strangle.call.expiry if self.short_strangle.call else None
+        call_strike = self.short_strangle.call_strike
+        put_strike = self.short_strangle.put_strike
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
             self.trade_logger.log_trade(
                 action=f"{action_prefix}CLOSE_SHORT_STRANGLE",
-                strike=f"{self.short_strangle.put_strike}/{self.short_strangle.call_strike}",
+                strike=f"{put_strike}/{call_strike}",
                 price=close_cost / (self.position_size * 100),
                 delta=self.short_strangle.total_delta,
                 pnl=realized_pnl,
@@ -1664,6 +1725,10 @@ class DeltaNeutralStrategy:
                 dte=self._calculate_dte(strangle_expiry) if strangle_expiry else None,
                 premium_received=premium_received
             )
+
+            # Remove positions from Positions sheet
+            self.trade_logger.remove_position("Short Call", call_strike)
+            self.trade_logger.remove_position("Short Put", put_strike)
 
         self.short_strangle = None
         return True
@@ -2018,6 +2083,9 @@ class DeltaNeutralStrategy:
                     premium_received=None
                 )
 
+                # Clear all positions from Positions sheet
+                self.trade_logger.clear_all_positions()
+
         return success
 
     # =========================================================================
@@ -2050,6 +2118,88 @@ class DeltaNeutralStrategy:
             return (expiry_date - datetime.now().date()).days
         except (ValueError, TypeError):
             return None
+
+    def get_current_positions_for_sync(self) -> List[Dict[str, Any]]:
+        """
+        Get current positions in format suitable for Positions sheet sync.
+
+        Returns:
+            list: List of position dictionaries for the Positions sheet
+        """
+        positions = []
+
+        # Add long straddle legs
+        if self.long_straddle:
+            if self.long_straddle.call:
+                positions.append({
+                    "type": "Long Call",
+                    "strike": self.long_straddle.call.strike,
+                    "expiry": self.long_straddle.call.expiry,
+                    "dte": self._calculate_dte(self.long_straddle.call.expiry),
+                    "entry_price": self.long_straddle.call.entry_price,
+                    "current_price": self.long_straddle.call.current_price,
+                    "theta": getattr(self.long_straddle.call, 'theta', 0),
+                    "pnl": (self.long_straddle.call.current_price - self.long_straddle.call.entry_price) * 100,
+                    "pnl_eur": 0.0,
+                    "status": "Active"
+                })
+            if self.long_straddle.put:
+                positions.append({
+                    "type": "Long Put",
+                    "strike": self.long_straddle.put.strike,
+                    "expiry": self.long_straddle.put.expiry,
+                    "dte": self._calculate_dte(self.long_straddle.put.expiry),
+                    "entry_price": self.long_straddle.put.entry_price,
+                    "current_price": self.long_straddle.put.current_price,
+                    "theta": getattr(self.long_straddle.put, 'theta', 0),
+                    "pnl": (self.long_straddle.put.current_price - self.long_straddle.put.entry_price) * 100,
+                    "pnl_eur": 0.0,
+                    "status": "Active"
+                })
+
+        # Add short strangle legs
+        if self.short_strangle:
+            if self.short_strangle.call:
+                positions.append({
+                    "type": "Short Call",
+                    "strike": self.short_strangle.call.strike,
+                    "expiry": self.short_strangle.call.expiry,
+                    "dte": self._calculate_dte(self.short_strangle.call.expiry),
+                    "entry_price": self.short_strangle.call.entry_price,
+                    "current_price": self.short_strangle.call.current_price,
+                    "theta": getattr(self.short_strangle.call, 'theta', 0),
+                    "pnl": (self.short_strangle.call.entry_price - self.short_strangle.call.current_price) * 100,
+                    "pnl_eur": 0.0,
+                    "status": "Active"
+                })
+            if self.short_strangle.put:
+                positions.append({
+                    "type": "Short Put",
+                    "strike": self.short_strangle.put.strike,
+                    "expiry": self.short_strangle.put.expiry,
+                    "dte": self._calculate_dte(self.short_strangle.put.expiry),
+                    "entry_price": self.short_strangle.put.entry_price,
+                    "current_price": self.short_strangle.put.current_price,
+                    "theta": getattr(self.short_strangle.put, 'theta', 0),
+                    "pnl": (self.short_strangle.put.entry_price - self.short_strangle.put.current_price) * 100,
+                    "pnl_eur": 0.0,
+                    "status": "Active"
+                })
+
+        return positions
+
+    def sync_positions_sheet(self):
+        """
+        Sync the Positions sheet with current strategy positions.
+
+        Call this on startup to ensure the sheet reflects actual state.
+        """
+        if not self.trade_logger:
+            return
+
+        positions = self.get_current_positions_for_sync()
+        self.trade_logger.sync_positions_with_saxo(positions)
+        logger.info(f"Synced Positions sheet with {len(positions)} current positions")
 
     def run_strategy_check(self) -> str:
         """

@@ -734,6 +734,173 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to update position snapshot: {e}")
             return False
 
+    def add_position(self, position: Dict[str, Any]) -> bool:
+        """
+        Add a single position to the Positions worksheet.
+
+        Called when a new position is opened (straddle or strangle leg).
+
+        Args:
+            position: Position dictionary with fields:
+                - type: Position type (e.g., "Long Call", "Short Put")
+                - strike: Strike price
+                - expiry: Expiration date
+                - dte: Days to expiration
+                - entry_price: Entry price per share
+                - current_price: Current price per share
+                - theta: Daily theta value
+                - pnl: Current P&L
+                - pnl_eur: P&L in EUR (optional)
+
+        Returns:
+            bool: True if added successfully
+        """
+        if not self.enabled or "Positions" not in self.worksheets:
+            return False
+
+        try:
+            worksheet = self.worksheets["Positions"]
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Calculate theta display values
+            theta = position.get("theta", 0)
+            position_type = position.get("type", "").upper()
+
+            # For SHORT positions: show positive theta (we gain from decay)
+            # For LONG positions: show negative theta (we lose from decay)
+            if "SHORT" in position_type:
+                daily_theta = abs(theta) * 100
+            else:
+                daily_theta = theta * 100
+
+            weekly_theta = daily_theta * 5
+
+            row = [
+                timestamp,
+                position.get("type", "N/A"),
+                position.get("strike", "N/A"),
+                position.get("expiry", "N/A"),
+                position.get("dte", "N/A"),
+                f"{position.get('entry_price', 0):.4f}",
+                f"{position.get('current_price', 0):.4f}",
+                f"{position.get('pnl', 0):.2f}",
+                f"{position.get('pnl_eur', 0):.2f}",
+                f"{daily_theta:.2f}",
+                f"{weekly_theta:.2f}",
+                position.get("status", "Active")
+            ]
+            worksheet.append_row(row)
+            logger.debug(f"Added position to Positions sheet: {position.get('type')} @ {position.get('strike')}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add position: {e}")
+            return False
+
+    def remove_position(self, position_type: str, strike: float) -> bool:
+        """
+        Remove a position from the Positions worksheet.
+
+        Called when a position is closed.
+
+        Args:
+            position_type: Type of position (e.g., "Long Call", "Short Put")
+            strike: Strike price of the position
+
+        Returns:
+            bool: True if removed successfully
+        """
+        if not self.enabled or "Positions" not in self.worksheets:
+            return False
+
+        try:
+            worksheet = self.worksheets["Positions"]
+            records = worksheet.get_all_records()
+
+            # Find rows to delete (search from bottom to preserve indices)
+            rows_to_delete = []
+            for i, record in enumerate(records):
+                record_type = str(record.get("Type", "")).upper()
+                record_strike = record.get("Strike", "")
+
+                # Match position type and strike
+                if position_type.upper() in record_type:
+                    try:
+                        if float(record_strike) == float(strike):
+                            rows_to_delete.append(i + 2)  # +2 for header row and 0-indexing
+                    except (ValueError, TypeError):
+                        pass
+
+            # Delete rows from bottom to top to preserve indices
+            for row_num in sorted(rows_to_delete, reverse=True):
+                worksheet.delete_rows(row_num)
+                logger.debug(f"Removed position row {row_num}: {position_type} @ {strike}")
+
+            if rows_to_delete:
+                logger.info(f"Removed {len(rows_to_delete)} position(s) from Positions sheet: {position_type} @ {strike}")
+                return True
+            else:
+                logger.debug(f"No matching position found to remove: {position_type} @ {strike}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to remove position: {e}")
+            return False
+
+    def clear_all_positions(self) -> bool:
+        """
+        Clear all positions from the Positions worksheet.
+
+        Called when exiting all positions or during cleanup.
+
+        Returns:
+            bool: True if cleared successfully
+        """
+        if not self.enabled or "Positions" not in self.worksheets:
+            return False
+
+        try:
+            worksheet = self.worksheets["Positions"]
+            # Delete all rows except header
+            if worksheet.row_count > 1:
+                worksheet.delete_rows(2, worksheet.row_count)
+                logger.info("Cleared all positions from Positions sheet")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to clear positions: {e}")
+            return False
+
+    def sync_positions_with_saxo(self, saxo_positions: List[Dict[str, Any]]) -> bool:
+        """
+        Sync the Positions worksheet with actual Saxo positions.
+
+        Clears the sheet and repopulates with current Saxo positions.
+        Called on bot startup to ensure consistency.
+
+        Args:
+            saxo_positions: List of position dictionaries from Saxo
+
+        Returns:
+            bool: True if synced successfully
+        """
+        if not self.enabled or "Positions" not in self.worksheets:
+            return False
+
+        try:
+            # Clear existing positions
+            self.clear_all_positions()
+
+            # Add current Saxo positions
+            if saxo_positions:
+                for pos in saxo_positions:
+                    self.add_position(pos)
+                logger.info(f"Synced Positions sheet with {len(saxo_positions)} Saxo positions")
+            else:
+                logger.info("Synced Positions sheet - no active positions")
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to sync positions with Saxo: {e}")
+            return False
+
     def log_recovered_positions_full(
         self,
         individual_positions: List[Dict[str, Any]],
@@ -1942,6 +2109,53 @@ class TradeLoggerService:
         """
         if self.google_logger.enabled:
             self.google_logger.log_position_snapshot(positions)
+
+    def add_position(self, position: Dict[str, Any]):
+        """
+        Add a single position to the Positions sheet.
+
+        Called when opening a new position (straddle/strangle leg).
+
+        Args:
+            position: Position dictionary with type, strike, expiry, etc.
+        """
+        if self.google_logger.enabled:
+            self.google_logger.add_position(position)
+
+    def remove_position(self, position_type: str, strike: float):
+        """
+        Remove a position from the Positions sheet.
+
+        Called when closing a position.
+
+        Args:
+            position_type: Type of position (e.g., "Long Call", "Short Put")
+            strike: Strike price of the position
+        """
+        if self.google_logger.enabled:
+            self.google_logger.remove_position(position_type, strike)
+
+    def clear_all_positions(self):
+        """
+        Clear all positions from the Positions sheet.
+
+        Called when exiting all positions.
+        """
+        if self.google_logger.enabled:
+            self.google_logger.clear_all_positions()
+
+    def sync_positions_with_saxo(self, saxo_positions: List[Dict[str, Any]]):
+        """
+        Sync Positions sheet with actual Saxo positions.
+
+        Clears and repopulates with current positions.
+        Called on bot startup.
+
+        Args:
+            saxo_positions: List of position dictionaries from Saxo
+        """
+        if self.google_logger.enabled:
+            self.google_logger.sync_positions_with_saxo(saxo_positions)
 
     def log_daily_summary(self, summary: Dict[str, Any]):
         """
