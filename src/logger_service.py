@@ -389,7 +389,7 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Performance Metrics")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=26)
+                worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=27)
                 # SPY Strategy-specific performance KPIs for investors
                 headers = [
                     "Timestamp", "Period", "SPY Strategy P&L ($)", "SPY Strategy P&L (EUR)", "SPY Strategy P&L (%)",
@@ -397,7 +397,7 @@ class GoogleSheetsLogger:
                     "Net Theta ($)", "Long Straddle P&L ($)", "Short Strangle P&L ($)",
                     "Win Rate (%)", "Sharpe Ratio", "Max Drawdown ($)", "Max Drawdown (%)",
                     "Trade Count", "Roll Count", "Recenter Count", "Avg Trade P&L ($)", "Best Trade ($)", "Worst Trade ($)",
-                    "Accumulated Theta ($)", "Weekly Theta ($)", "Days Held", "Days to Expiry"
+                    "Est. Theta Earned ($)", "Weekly Theta Target ($)", "Daily Net Theta ($)", "Days Held", "Days to Expiry"
                 ]
                 worksheet.append_row(headers)
                 worksheet.format("A1:Z1", {"textFormat": {"bold": True}})
@@ -1344,8 +1344,9 @@ class GoogleSheetsLogger:
                 f"{metrics.get('best_trade', 0):.2f}",
                 f"{metrics.get('worst_trade', 0):.2f}",
                 # Theta accumulation tracking
-                f"{metrics.get('accumulated_theta_income', 0):.2f}",
-                f"{metrics.get('weekly_theta_income', 0):.2f}",
+                f"{metrics.get('estimated_theta_earned', 0):.2f}",  # net_theta × days_held
+                f"{metrics.get('weekly_theta_target', 0):.2f}",     # net_theta × 5 trading days
+                f"{metrics.get('daily_net_theta', 0):.2f}",         # Current daily rate
                 metrics.get("days_held", 0),
                 metrics.get("days_to_expiry", 0)
             ]

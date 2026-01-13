@@ -229,17 +229,10 @@ class StrategyMetrics:
     spy_low: float = 0.0
     vix_high: float = 0.0
     vix_samples: list = None
-    # Theta accumulation tracking
-    accumulated_theta_income: float = 0.0  # Cumulative net theta earned
-    last_theta_update_date: str = ""  # Last date theta was accumulated
-    daily_theta_samples: list = None  # List of (date, net_theta) for history
-
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.vix_samples is None:
             self.vix_samples = []
-        if self.daily_theta_samples is None:
-            self.daily_theta_samples = []
 
     def reset_daily_tracking(self, current_pnl: float, spy_price: float, vix: float):
         """Reset daily tracking at start of trading day."""
@@ -311,36 +304,6 @@ class StrategyMetrics:
         if self.trade_count == 0:
             return 0.0
         return self.total_trade_pnl / self.trade_count
-
-    def update_theta_accumulation(self, net_theta: float):
-        """
-        Update accumulated theta income based on current net theta.
-
-        Net theta is positive when short theta > long theta (earning from time decay).
-        This should be called once per day to track daily theta income.
-
-        Args:
-            net_theta: Net theta value (short theta - long theta) in dollars per day
-        """
-        from datetime import datetime
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        # Only accumulate once per day
-        if today != self.last_theta_update_date:
-            self.accumulated_theta_income += net_theta
-            self.last_theta_update_date = today
-            # Keep history for analysis (limit to 30 days)
-            self.daily_theta_samples.append((today, net_theta))
-            if len(self.daily_theta_samples) > 30:
-                self.daily_theta_samples.pop(0)
-
-    def get_weekly_theta_income(self) -> float:
-        """Calculate theta income for the current week from history."""
-        if not self.daily_theta_samples:
-            return 0.0
-        from datetime import datetime, timedelta
-        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-        return sum(theta for date, theta in self.daily_theta_samples if date >= week_ago)
 
 
 class DeltaNeutralStrategy:
@@ -2646,9 +2609,6 @@ class DeltaNeutralStrategy:
 
         net_theta = short_theta_income - long_theta_cost
 
-        # Update theta accumulation (once per day)
-        self.metrics.update_theta_accumulation(net_theta)
-
         # Update metrics with calculated unrealized P&L
         self.metrics.unrealized_pnl = long_straddle_pnl + short_strangle_pnl
 
@@ -2714,8 +2674,13 @@ class DeltaNeutralStrategy:
             "worst_trade": self.metrics.worst_trade_pnl,
 
             # Theta accumulation tracking
-            "accumulated_theta_income": self.metrics.accumulated_theta_income,
-            "weekly_theta_income": self.metrics.get_weekly_theta_income(),
+            # Estimated total theta earned = current daily net theta × days held since entry
+            # This gives a reasonable estimate even when bot restarts
+            "estimated_theta_earned": net_theta * (self.short_strangle.days_held if self.short_strangle else 0),
+            # Weekly theta target = current daily net theta × 5 trading days
+            "weekly_theta_target": net_theta * 5,
+            # Current daily net theta rate
+            "daily_net_theta": net_theta,
             "days_held": self.short_strangle.days_held if self.short_strangle else 0,
             "days_to_expiry": self.short_strangle.days_to_expiry if self.short_strangle else 0,
 
