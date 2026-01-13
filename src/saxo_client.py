@@ -242,7 +242,7 @@ class SaxoClient:
     # AUTHENTICATION METHODS
     # =========================================================================
 
-    def authenticate(self) -> bool:
+    def authenticate(self, force_refresh: bool = False) -> bool:
         """
         Perform OAuth2 authentication with Saxo Bank.
 
@@ -252,13 +252,17 @@ class SaxoClient:
         After successful authentication, it upgrades the session to
         FullTradingAndChat for real-time market data access.
 
+        Args:
+            force_refresh: If True, refresh the token even if current one is valid.
+                          Use this before long sleep periods to ensure fresh tokens.
+
         Returns:
             bool: True if authentication successful, False otherwise.
         """
         logger.info("Starting authentication process...")
 
-        # Check if we have a valid access token
-        if self.access_token and self._is_token_valid():
+        # Check if we have a valid access token (unless force_refresh is requested)
+        if self.access_token and self._is_token_valid() and not force_refresh:
             logger.info("Using existing valid access token")
             # Upgrade session for real-time data
             self._upgrade_session_for_realtime_data()
@@ -409,9 +413,9 @@ class SaxoClient:
                 expires_in = token_response.get("expires_in", 1200)
                 self.token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)
 
-                logger.info("Access token refreshed successfully")
+                logger.info(f"Access token refreshed successfully (expires in {expires_in//60} min)")
 
-                # Save tokens to config.json for persistence
+                # Save tokens to config/Secret Manager for persistence
                 self._save_tokens_to_config()
 
                 self._record_success()

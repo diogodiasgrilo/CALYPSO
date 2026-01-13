@@ -465,9 +465,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                         if client.is_streaming:
                             client.stop_price_streaming()
 
-                        # Refresh token BEFORE sleeping to get fresh expiry
+                        # Force refresh token BEFORE sleeping to get fresh expiry
                         # This ensures we have a full token lifetime after waking up
-                        client.authenticate()
+                        # force_refresh=True ensures we refresh even if current token is still valid
+                        client.authenticate(force_refresh=True)
 
                         # Log heartbeat LAST, right before sleeping
                         trade_logger.log_event(
