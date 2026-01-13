@@ -660,6 +660,9 @@ class DeltaNeutralStrategy:
 
             self.trade_logger.log_event("=" * 50)
 
+        # Load historical P&L from closed positions (only if not loaded from file)
+        self.load_historical_pnl_into_metrics()
+
         return True
 
     def _filter_spy_options(self, positions: List[Dict]) -> List[Dict]:
@@ -1041,6 +1044,117 @@ class DeltaNeutralStrategy:
         except Exception as e:
             logger.error(f"Error parsing option position {symbol}: {e}")
             return None
+
+    def calculate_historical_pnl(self) -> float:
+        """
+        Calculate realized P&L from closed SPY positions since the long straddle opened.
+
+        Queries Saxo API for all closed SPY option positions since the current
+        long straddle's entry date. This captures P&L from previous short strangle
+        rolls that occurred before the bot was restarted.
+
+        Returns:
+            float: Total realized P&L from closed short strangles, or 0.0 if none found.
+        """
+        if not self.long_straddle:
+            logger.info("No long straddle - cannot calculate historical P&L")
+            return 0.0
+
+        # Get the entry date of the current long straddle
+        straddle_entry_date = None
+        if self.long_straddle.call and self.long_straddle.call.entry_date:
+            straddle_entry_date = self.long_straddle.call.entry_date
+        elif self.long_straddle.put and self.long_straddle.put.entry_date:
+            straddle_entry_date = self.long_straddle.put.entry_date
+
+        if not straddle_entry_date:
+            logger.warning("Long straddle has no entry date - cannot calculate historical P&L")
+            return 0.0
+
+        # Parse date if it's a string
+        if isinstance(straddle_entry_date, str):
+            try:
+                straddle_entry_date = datetime.fromisoformat(straddle_entry_date.replace("Z", "+00:00"))
+            except ValueError:
+                # Try simpler format
+                try:
+                    straddle_entry_date = datetime.strptime(straddle_entry_date[:10], "%Y-%m-%d")
+                except ValueError:
+                    logger.error(f"Could not parse straddle entry date: {straddle_entry_date}")
+                    return 0.0
+
+        from_date = straddle_entry_date.strftime("%Y-%m-%d")
+        logger.info(f"Calculating historical P&L from closed positions since {from_date}")
+
+        # Get closed SPY positions from Saxo API
+        closed_positions = self.client.get_closed_spy_positions(from_date)
+        if not closed_positions:
+            logger.info("No closed SPY positions found since straddle opened")
+            return 0.0
+
+        # Calculate total P&L from closed short positions
+        # Short positions are identified by negative Amount or by strike != straddle strike
+        straddle_strike = self.long_straddle.initial_strike
+        total_pnl = 0.0
+        short_strangle_count = 0
+
+        for pos in closed_positions:
+            try:
+                # Get P&L - Saxo provides this directly
+                pnl = pos.get("ProfitLoss", 0) or pos.get("ClosedProfitLoss", 0) or 0
+
+                # Get position details
+                amount = pos.get("Amount", 0)
+                description = pos.get("Description", "") or pos.get("Symbol", "")
+
+                # Parse strike from description (e.g., "SPY Jan24 700 Call")
+                # We want to count SHORT positions (negative amount) that are NOT the straddle strike
+                if amount < 0:  # Short position
+                    # This was a short strangle leg
+                    total_pnl += pnl
+                    short_strangle_count += 1
+                    logger.debug(f"Closed short position: {description}, P&L: ${pnl:.2f}")
+
+            except Exception as e:
+                logger.warning(f"Error processing closed position: {e}")
+                continue
+
+        logger.info(f"Historical P&L from {short_strangle_count} closed short positions: ${total_pnl:.2f}")
+        return total_pnl
+
+    def load_historical_pnl_into_metrics(self) -> bool:
+        """
+        Load historical P&L from closed positions into the metrics.
+
+        This should be called after position recovery if metrics were not loaded
+        from file. It ensures that P&L from previous short strangle rolls is
+        captured even on fresh bot starts.
+
+        Returns:
+            bool: True if historical P&L was loaded, False otherwise.
+        """
+        # Only load if we didn't load from file (file has accurate cumulative data)
+        if self._metrics_loaded_from_file:
+            logger.info("Metrics loaded from file - skipping historical P&L query")
+            return False
+
+        historical_pnl = self.calculate_historical_pnl()
+
+        if historical_pnl != 0.0:
+            # Add historical P&L to realized P&L
+            self.metrics.realized_pnl += historical_pnl
+            logger.info(f"Added historical P&L to metrics: ${historical_pnl:.2f}")
+            logger.info(f"Total realized P&L now: ${self.metrics.realized_pnl:.2f}")
+        else:
+            logger.info("No historical P&L to add (no closed short positions found)")
+
+        # Always save metrics after querying historical P&L (even if 0)
+        # This prevents duplicate queries on subsequent restarts
+        if not self.dry_run:
+            self.metrics.save_to_file()
+            logger.info("Saved metrics to prevent duplicate historical P&L queries on restart")
+
+        return historical_pnl != 0.0
 
     # =========================================================================
     # MARKET DATA METHODS

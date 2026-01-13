@@ -2207,6 +2207,78 @@ class SaxoClient:
         }
         return self._make_request("GET", endpoint, params=params)
 
+    def get_closed_spy_positions(
+        self,
+        from_date: str,
+        to_date: str = None
+    ) -> Optional[List[Dict]]:
+        """
+        Get closed SPY option positions within a date range.
+
+        Uses the Saxo Client Services historical report endpoint to retrieve
+        all SPY option positions that were closed between the specified dates.
+
+        Args:
+            from_date: Start date in YYYY-MM-DD format
+            to_date: End date in YYYY-MM-DD format (defaults to today)
+
+        Returns:
+            List of closed SPY option position records, or None if request failed.
+            Each record includes:
+            - ClosedPositionId
+            - AssetType
+            - Uic
+            - Amount
+            - OpenPrice
+            - ClosePrice
+            - ProfitLoss (realized P&L)
+            - ExecutionTimeOpen
+            - ExecutionTimeClose
+            - Symbol/Description
+
+        Example:
+            >>> closed = client.get_closed_spy_positions("2025-12-26")
+            >>> for pos in closed:
+            ...     print(f"{pos['Symbol']}: P&L ${pos.get('ProfitLoss', 0):.2f}")
+        """
+        from datetime import datetime
+
+        if not to_date:
+            to_date = datetime.now().strftime("%Y-%m-%d")
+
+        # Endpoint: /cs/v1/reports/closedPositions/{ClientKey}/{FromDate}/{ToDate}
+        endpoint = f"/cs/v1/reports/closedPositions/{self.client_key}/{from_date}/{to_date}"
+
+        params = {
+            "AccountKey": self.account_key
+        }
+
+        try:
+            response = self._make_request("GET", endpoint, params=params)
+            positions = []
+
+            if response and "Data" in response:
+                positions = response["Data"]
+            elif response and isinstance(response, list):
+                positions = response
+
+            # Filter to only SPY stock options
+            spy_positions = []
+            for pos in positions:
+                # Check if it's a StockOption and contains SPY in the description/symbol
+                asset_type = pos.get("AssetType", "")
+                description = pos.get("Description", "") + pos.get("Symbol", "")
+
+                if asset_type == "StockOption" and "SPY" in description.upper():
+                    spy_positions.append(pos)
+
+            logger.info(f"Retrieved {len(spy_positions)} closed SPY positions from {from_date} to {to_date}")
+            return spy_positions
+
+        except Exception as e:
+            logger.error(f"Failed to get closed SPY positions: {e}")
+            return None
+
     def get_fx_rate(
         self,
         from_currency: str = "USD",
