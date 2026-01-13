@@ -104,11 +104,13 @@ class StraddlePosition:
         put: The put option position
         initial_strike: The strike price at entry
         entry_underlying_price: Underlying price when position was opened
+        entry_date: Date when the position was opened (for historical P&L tracking)
     """
     call: Optional[OptionPosition] = None
     put: Optional[OptionPosition] = None
     initial_strike: float = 0.0
     entry_underlying_price: float = 0.0
+    entry_date: str = ""  # Format: YYYY-MM-DD or ISO timestamp
 
     @property
     def is_complete(self) -> bool:
@@ -763,11 +765,15 @@ class DeltaNeutralStrategy:
                     vega=put_data.get("vega", 0)
                 )
 
+                # Get entry date from call or put position (use whichever has it)
+                straddle_entry_date = call_data.get("entry_date") or put_data.get("entry_date") or ""
+
                 self.long_straddle = StraddlePosition(
                     call=call_option,
                     put=put_option,
                     initial_strike=call_data["strike"],
-                    entry_underlying_price=call_data["strike"]  # Approximate
+                    entry_underlying_price=call_data["strike"],  # Approximate
+                    entry_date=straddle_entry_date
                 )
 
                 # Set the initial straddle strike for recentering logic
@@ -1023,6 +1029,9 @@ class DeltaNeutralStrategy:
             entry_price = pos_base.get("OpenPrice", 0) or pos_view.get("AverageOpenPrice", 0)
             current_price = pos_view.get("CurrentPrice", 0) or pos_view.get("MarketValue", 0)
 
+            # Get entry date from ExecutionTimeOpen (for historical P&L tracking)
+            entry_date = pos_base.get("ExecutionTimeOpen", "")
+
             logger.info(f"Position {symbol}: Entry=${entry_price:.4f}, Current=${current_price:.4f}")
 
             return {
@@ -1039,6 +1048,7 @@ class DeltaNeutralStrategy:
                 "gamma": gamma,
                 "theta": theta,
                 "vega": vega,
+                "entry_date": entry_date,
             }
 
         except Exception as e:
@@ -1061,11 +1071,7 @@ class DeltaNeutralStrategy:
             return 0.0
 
         # Get the entry date of the current long straddle
-        straddle_entry_date = None
-        if self.long_straddle.call and self.long_straddle.call.entry_date:
-            straddle_entry_date = self.long_straddle.call.entry_date
-        elif self.long_straddle.put and self.long_straddle.put.entry_date:
-            straddle_entry_date = self.long_straddle.put.entry_date
+        straddle_entry_date = self.long_straddle.entry_date
 
         if not straddle_entry_date:
             logger.warning("Long straddle has no entry date - cannot calculate historical P&L")
@@ -1580,7 +1586,8 @@ class DeltaNeutralStrategy:
                 delta=-0.5  # ATM put delta approximation
             ),
             initial_strike=call_option["strike"],
-            entry_underlying_price=self.current_underlying_price
+            entry_underlying_price=self.current_underlying_price,
+            entry_date=datetime.now().isoformat()
         )
 
         self.initial_straddle_strike = call_option["strike"]
@@ -1747,7 +1754,8 @@ class DeltaNeutralStrategy:
                 delta=-0.5  # ATM put delta approximation
             ),
             initial_strike=call_option["strike"],
-            entry_underlying_price=self.current_underlying_price
+            entry_underlying_price=self.current_underlying_price,
+            entry_date=datetime.now().isoformat()
         )
 
         self.initial_straddle_strike = call_option["strike"]
