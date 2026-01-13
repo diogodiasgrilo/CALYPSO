@@ -502,6 +502,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     continue
 
                 # Check connection timeout
+                # But first, reset the timestamp if we're about to do a successful iteration
+                # This prevents false triggers when WebSocket is quiet but bot is healthy
+                client.circuit_breaker.last_successful_connection = datetime.now()
+
                 if client.check_connection_timeout():
                     trade_logger.log_error("Connection timeout detected - circuit breaker activated")
                     if not interruptible_sleep(check_interval):
