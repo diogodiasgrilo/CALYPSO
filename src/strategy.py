@@ -1394,7 +1394,8 @@ class DeltaNeutralStrategy:
                 option_type="Long Straddle",
                 expiry_date=call_option["expiry"],
                 dte=dte,
-                premium_received=None  # Buying, not receiving premium
+                premium_received=None,  # Buying, not receiving premium
+                trade_reason="Initial Entry"
             )
 
             # Add positions to Positions sheet
@@ -1556,7 +1557,8 @@ class DeltaNeutralStrategy:
                 option_type="Long Straddle (Recenter)",
                 expiry_date=call_option["expiry"],
                 dte=dte,
-                premium_received=None
+                premium_received=None,
+                trade_reason="5-Point Recenter"
             )
 
         return True
@@ -1621,6 +1623,11 @@ class DeltaNeutralStrategy:
         straddle_expiry = self.long_straddle.call.expiry if self.long_straddle.call else None
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
+            # Determine trade reason based on current state
+            if self.state == StrategyState.RECENTERING:
+                reason = "5-Point Recenter"
+            else:
+                reason = "Exit"
             self.trade_logger.log_trade(
                 action=f"{action_prefix}CLOSE_LONG_STRADDLE",
                 strike=self.long_straddle.initial_strike,
@@ -1634,7 +1641,8 @@ class DeltaNeutralStrategy:
                 option_type="Long Straddle",
                 expiry_date=straddle_expiry,
                 dte=self._calculate_dte(straddle_expiry) if straddle_expiry else None,
-                premium_received=None
+                premium_received=None,
+                trade_reason=reason
             )
 
             # Remove positions from Positions sheet

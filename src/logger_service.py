@@ -2010,7 +2010,8 @@ class TradeLoggerService:
         option_type: Optional[str] = None,
         expiry_date: Optional[str] = None,
         dte: Optional[int] = None,
-        premium_received: Optional[float] = None
+        premium_received: Optional[float] = None,
+        trade_reason: Optional[str] = None
     ):
         """
         Log a trade record to all enabled destinations with automatic currency conversion.
@@ -2031,6 +2032,7 @@ class TradeLoggerService:
             expiry_date: Option expiration date
             dte: Days to expiration
             premium_received: Premium collected (for short positions)
+            trade_reason: Reason for trade (e.g., "5-Point Recenter", "Weekly Roll", "Exit")
         """
         # Get exchange rate and convert if enabled
         exchange_rate = None
@@ -2069,7 +2071,8 @@ class TradeLoggerService:
             option_type=option_type,
             expiry_date=expiry_date,
             dte=dte,
-            premium_received=premium_received
+            premium_received=premium_received,
+            trade_reason=trade_reason
         )
 
         # Add to queue for async processing
