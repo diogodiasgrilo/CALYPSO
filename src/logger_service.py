@@ -389,17 +389,18 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Performance Metrics")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=22)
+                worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=26)
                 # SPY Strategy-specific performance KPIs for investors
                 headers = [
                     "Timestamp", "Period", "SPY Strategy P&L ($)", "SPY Strategy P&L (EUR)", "SPY Strategy P&L (%)",
                     "Realized P&L ($)", "Unrealized P&L ($)", "Premium Collected ($)", "Theta Cost ($)",
                     "Net Theta ($)", "Long Straddle P&L ($)", "Short Strangle P&L ($)",
                     "Win Rate (%)", "Sharpe Ratio", "Max Drawdown ($)", "Max Drawdown (%)",
-                    "Trade Count", "Roll Count", "Recenter Count", "Avg Trade P&L ($)", "Best Trade ($)", "Worst Trade ($)"
+                    "Trade Count", "Roll Count", "Recenter Count", "Avg Trade P&L ($)", "Best Trade ($)", "Worst Trade ($)",
+                    "Accumulated Theta ($)", "Weekly Theta ($)", "Days Held", "Days to Expiry"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:V1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:Z1", {"textFormat": {"bold": True}})
                 logger.info("Created Performance Metrics worksheet (SPY strategy only)")
 
             self.worksheets["Performance Metrics"] = worksheet
@@ -1295,6 +1296,10 @@ class GoogleSheetsLogger:
                 - win_rate, sharpe_ratio, max_drawdown, etc.
                 - trade_count, roll_count, recenter_count
                 - starting_capital: For % calculation
+                - accumulated_theta_income: Cumulative net theta earned since position opened
+                - weekly_theta_income: Net theta earned in the past 7 days
+                - days_held: Days since short strangle was opened
+                - days_to_expiry: Days until short strangle expiration
             exchange_rate: Optional USD/EUR exchange rate
 
         Returns:
@@ -1337,10 +1342,22 @@ class GoogleSheetsLogger:
                 metrics.get("recenter_count", 0),
                 f"{metrics.get('avg_trade_pnl', 0):.2f}",
                 f"{metrics.get('best_trade', 0):.2f}",
-                f"{metrics.get('worst_trade', 0):.2f}"
+                f"{metrics.get('worst_trade', 0):.2f}",
+                # Theta accumulation tracking
+                f"{metrics.get('accumulated_theta_income', 0):.2f}",
+                f"{metrics.get('weekly_theta_income', 0):.2f}",
+                metrics.get("days_held", 0),
+                metrics.get("days_to_expiry", 0)
             ]
-            self.worksheets["Performance Metrics"].append_row(row)
-            logger.debug(f"SPY strategy performance metrics logged for period: {period}")
+            # Update row 2 (single row for current snapshot) instead of appending
+            worksheet = self.worksheets["Performance Metrics"]
+            if worksheet.row_count < 2:
+                # No data row exists yet, append it
+                worksheet.append_row(row)
+            else:
+                # Update existing row 2
+                worksheet.update(f"A2:Z2", [row])
+            logger.debug(f"SPY strategy performance metrics updated for period: {period}")
             return True
         except Exception as e:
             logger.error(f"Failed to log performance metrics: {e}")
@@ -1425,8 +1442,15 @@ class GoogleSheetsLogger:
                 f"{exchange_rate:.6f}" if exchange_rate else "N/A",
                 environment
             ]
-            self.worksheets["Account Summary"].append_row(row)
-            logger.debug("SPY strategy account summary logged")
+            # Update row 2 (single row for current snapshot) instead of appending
+            worksheet = self.worksheets["Account Summary"]
+            if worksheet.row_count < 2:
+                # No data row exists yet, append it
+                worksheet.append_row(row)
+            else:
+                # Update existing row 2
+                worksheet.update(f"A2:R2", [row])
+            logger.debug("SPY strategy account summary updated")
             return True
         except Exception as e:
             logger.error(f"Failed to log account summary: {e}")
