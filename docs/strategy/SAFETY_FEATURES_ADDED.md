@@ -189,7 +189,7 @@ Added to [config.json](config.json):
 | 30-60 DTE Exit | ✅ | Original |
 | 5-Point Recentering | ✅ | Original |
 | 1.5-2x Expected Move Strikes | ✅ | Original |
-| Thursday/Friday Rolling | ✅ | Original |
+| Friday Rolling | ✅ | Original |
 | Challenge Detection (50% rule) | ✅ | Original |
 | **Fed Meeting Filter** | ✅ | **NEW** |
 | **ITM Prevention** | ✅ | **NEW** |

@@ -9,7 +9,7 @@ Automated options trading bot implementing a delta-neutral income strategy on SP
 1. Buy ATM long straddle (90-120 DTE) when VIX < 18
 2. Sell weekly short strangles at 1.5-2x expected move
 3. Recenter if SPY moves 5+ points from initial strike
-4. Roll shorts on Thursday/Friday or if challenged
+4. Roll shorts on Friday or if challenged
 5. Exit when longs reach 30-60 DTE
 
 **Safety Mechanisms:**

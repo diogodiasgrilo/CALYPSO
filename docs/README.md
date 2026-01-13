@@ -60,7 +60,7 @@ The bot implements a **Delta Neutral Income Strategy**:
 1. ✅ **Entry:** Long ATM straddle (90-120 DTE) when VIX < 18
 2. ✅ **Income:** Sell weekly strangles at 1.5-2x expected move
 3. ✅ **Recentering:** Recenter longs if price moves 5+ points (keep same expiry)
-4. ✅ **Rolling:** Roll shorts on Thursday/Friday or if challenged
+4. ✅ **Rolling:** Roll shorts on Friday or if challenged
 5. ✅ **Exit:** Close all positions when longs reach 30-60 DTE
 6. ✅ **Safety Filters:**
    - Fed meeting blackout (2 days before FOMC)

@@ -38,8 +38,8 @@
         "exit_dte_min": 30,
         "exit_dte_max": 60,
         "_exit_note": "Exit entire position when DTE falls within this range",
-        "roll_days": ["Thursday", "Friday"],
-        "_roll_note": "Days to roll weekly shorts",
+        "roll_days": ["Friday"],
+        "_roll_note": "Day to roll weekly shorts (open new, close expiring)",
         "max_bid_ask_spread_percent": 0.5,
         "_spread_note": "Maximum acceptable bid-ask spread for slippage protection",
         "position_size": 1
