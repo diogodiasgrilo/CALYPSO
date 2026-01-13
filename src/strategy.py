@@ -822,6 +822,11 @@ class DeltaNeutralStrategy:
             if any([gamma, theta, vega]):
                 logger.info(f"Greeks for {symbol}: Delta={delta:.4f}, Gamma={gamma:.4f}, Theta={theta:.4f}, Vega={vega:.4f}")
 
+            entry_price = pos_base.get("OpenPrice", 0) or pos_view.get("AverageOpenPrice", 0)
+            current_price = pos_view.get("CurrentPrice", 0) or pos_view.get("MarketValue", 0)
+
+            logger.info(f"Position {symbol}: Entry=${entry_price:.4f}, Current=${current_price:.4f}")
+
             return {
                 "position_id": str(pos_base.get("PositionId", "")),
                 "uic": pos_base.get("Uic", 0),
@@ -830,8 +835,8 @@ class DeltaNeutralStrategy:
                 "expiry": str(expiry) if expiry else "",
                 "option_type": option_type,
                 "quantity": abs(pos_base.get("Amount", 0)),
-                "entry_price": pos_base.get("OpenPrice", 0) or pos_view.get("AverageOpenPrice", 0),
-                "current_price": pos_view.get("CurrentPrice", 0) or pos_view.get("MarketValue", 0),
+                "entry_price": entry_price,
+                "current_price": current_price,
                 "delta": delta,
                 "gamma": gamma,
                 "theta": theta,
@@ -2501,6 +2506,9 @@ class DeltaNeutralStrategy:
                 short_theta_income += abs(getattr(self.short_strangle.put, 'theta', 0)) * 100
 
         net_theta = short_theta_income - long_theta_cost
+
+        # Update metrics with calculated unrealized P&L
+        self.metrics.unrealized_pnl = long_straddle_pnl + short_strangle_pnl
 
         return {
             # Account Summary fields
