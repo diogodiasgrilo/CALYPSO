@@ -670,14 +670,15 @@ class DeltaNeutralStrategy:
                 # Set the initial straddle strike for recentering logic
                 self.initial_straddle_strike = call_data["strike"]
 
-                # Set metrics for recovered straddle (entry prices * 100 for contract value)
-                straddle_cost = (call_data["entry_price"] + put_data["entry_price"]) * 100
+                # Set metrics for recovered straddle (entry prices * 100 * quantity for total value)
+                qty = call_data["quantity"]  # Assuming call and put have same quantity
+                straddle_cost = (call_data["entry_price"] + put_data["entry_price"]) * 100 * qty
                 self.metrics.total_straddle_cost = straddle_cost
 
                 logger.info(
                     f"Recovered long straddle: Strike ${call_data['strike']:.2f}, "
                     f"Expiry {call_data['expiry']}, "
-                    f"Qty {call_data['quantity']}, Cost ${straddle_cost:.2f}"
+                    f"Qty {qty}, Cost ${straddle_cost:.2f}"
                 )
                 return True
 
@@ -791,14 +792,15 @@ class DeltaNeutralStrategy:
                     entry_date=entry_date
                 )
 
-                # Set metrics for recovered strangle (entry prices * 100 for contract value)
-                premium_collected = (call_data["entry_price"] + put_data["entry_price"]) * 100
+                # Set metrics for recovered strangle (entry prices * 100 * quantity for total value)
+                qty = call_data["quantity"]  # Assuming call and put have same quantity
+                premium_collected = (call_data["entry_price"] + put_data["entry_price"]) * 100 * qty
                 self.metrics.total_premium_collected = premium_collected
 
                 logger.info(
                     f"Recovered short strangle: Call ${call_data['strike']:.2f}, "
                     f"Put ${put_data['strike']:.2f}, Expiry {expiry}, Entry {entry_date}, "
-                    f"Premium ${premium_collected:.2f}"
+                    f"Qty {qty}, Premium ${premium_collected:.2f}"
                 )
                 return True
 
@@ -2543,29 +2545,33 @@ class DeltaNeutralStrategy:
         long_straddle_pnl = 0.0
         short_strangle_pnl = 0.0
 
-        # Long straddle value and P&L
+        # Long straddle value and P&L (multiply by quantity for multiple contracts)
         if self.long_straddle and self.long_straddle.is_complete:
             if self.long_straddle.call:
-                call_value = self.long_straddle.call.current_price * 100  # Per contract
-                call_cost = self.long_straddle.call.entry_price * 100
+                qty = self.long_straddle.call.quantity
+                call_value = self.long_straddle.call.current_price * 100 * qty
+                call_cost = self.long_straddle.call.entry_price * 100 * qty
                 long_straddle_value += call_value
                 long_straddle_pnl += (call_value - call_cost)
             if self.long_straddle.put:
-                put_value = self.long_straddle.put.current_price * 100
-                put_cost = self.long_straddle.put.entry_price * 100
+                qty = self.long_straddle.put.quantity
+                put_value = self.long_straddle.put.current_price * 100 * qty
+                put_cost = self.long_straddle.put.entry_price * 100 * qty
                 long_straddle_value += put_value
                 long_straddle_pnl += (put_value - put_cost)
 
         # Short strangle value and P&L (negative value = we owe, positive P&L when value decreases)
         if self.short_strangle and self.short_strangle.is_complete:
             if self.short_strangle.call:
-                call_value = self.short_strangle.call.current_price * 100
-                call_premium = self.short_strangle.call.entry_price * 100
+                qty = self.short_strangle.call.quantity
+                call_value = self.short_strangle.call.current_price * 100 * qty
+                call_premium = self.short_strangle.call.entry_price * 100 * qty
                 short_strangle_value -= call_value  # Liability
                 short_strangle_pnl += (call_premium - call_value)  # Profit when value drops
             if self.short_strangle.put:
-                put_value = self.short_strangle.put.current_price * 100
-                put_premium = self.short_strangle.put.entry_price * 100
+                qty = self.short_strangle.put.quantity
+                put_value = self.short_strangle.put.current_price * 100 * qty
+                put_premium = self.short_strangle.put.entry_price * 100 * qty
                 short_strangle_value -= put_value
                 short_strangle_pnl += (put_premium - put_value)
 
@@ -2590,22 +2596,26 @@ class DeltaNeutralStrategy:
             if self.short_strangle.put:
                 position_count += 1
 
-        # Calculate theta (daily) - multiply by 100 for contract size
+        # Calculate theta (daily) - multiply by 100 for contract size and by quantity
         # Long theta is negative (costs us), Short theta is positive (earns us)
         long_theta_cost = 0.0
         short_theta_income = 0.0
 
         if self.long_straddle:
             if self.long_straddle.call:
-                long_theta_cost += abs(getattr(self.long_straddle.call, 'theta', 0)) * 100
+                qty = self.long_straddle.call.quantity
+                long_theta_cost += abs(getattr(self.long_straddle.call, 'theta', 0)) * 100 * qty
             if self.long_straddle.put:
-                long_theta_cost += abs(getattr(self.long_straddle.put, 'theta', 0)) * 100
+                qty = self.long_straddle.put.quantity
+                long_theta_cost += abs(getattr(self.long_straddle.put, 'theta', 0)) * 100 * qty
 
         if self.short_strangle:
             if self.short_strangle.call:
-                short_theta_income += abs(getattr(self.short_strangle.call, 'theta', 0)) * 100
+                qty = self.short_strangle.call.quantity
+                short_theta_income += abs(getattr(self.short_strangle.call, 'theta', 0)) * 100 * qty
             if self.short_strangle.put:
-                short_theta_income += abs(getattr(self.short_strangle.put, 'theta', 0)) * 100
+                qty = self.short_strangle.put.quantity
+                short_theta_income += abs(getattr(self.short_strangle.put, 'theta', 0)) * 100 * qty
 
         net_theta = short_theta_income - long_theta_cost
 
