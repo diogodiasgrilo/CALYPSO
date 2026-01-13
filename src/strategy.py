@@ -1098,28 +1098,38 @@ class DeltaNeutralStrategy:
             logger.info("No closed SPY positions found since straddle opened")
             return 0.0
 
-        # Calculate total P&L from closed short positions
-        # Short positions are identified by negative Amount or by strike != straddle strike
-        straddle_strike = self.long_straddle.initial_strike
+        # Calculate total P&L from closed SHORT positions opened on/after straddle entry
+        # Saxo field names:
+        #   - Amount: negative for shorts
+        #   - PnLUSD: realized P&L in USD
+        #   - TradeDateOpen: when position was opened
+        #   - InstrumentDescription: option description
         total_pnl = 0.0
         short_strangle_count = 0
 
         for pos in closed_positions:
             try:
-                # Get P&L - Saxo provides this directly
-                pnl = pos.get("ProfitLoss", 0) or pos.get("ClosedProfitLoss", 0) or 0
-
-                # Get position details
                 amount = pos.get("Amount", 0)
-                description = pos.get("Description", "") or pos.get("Symbol", "")
+                trade_open_date = pos.get("TradeDateOpen", "")
 
-                # Parse strike from description (e.g., "SPY Jan24 700 Call")
-                # We want to count SHORT positions (negative amount) that are NOT the straddle strike
-                if amount < 0:  # Short position
-                    # This was a short strangle leg
-                    total_pnl += pnl
-                    short_strangle_count += 1
-                    logger.debug(f"Closed short position: {description}, P&L: ${pnl:.2f}")
+                # Only count SHORT positions (Amount < 0)
+                if amount >= 0:
+                    continue
+
+                # Only count positions opened ON OR AFTER the straddle entry date
+                # This excludes old short strangles from before the current straddle
+                if trade_open_date < from_date:
+                    logger.debug(f"Skipping short position opened before straddle: {pos.get('InstrumentDescription', '')}")
+                    continue
+
+                # Get P&L - Saxo uses PnLUSD for USD P&L
+                pnl = pos.get("PnLUSD") or pos.get("PnLAccountCurrency") or 0
+                description = pos.get("InstrumentDescription", "") or pos.get("InstrumentSymbol", "")
+                close_date = pos.get("TradeDateClose", "")
+
+                total_pnl += pnl
+                short_strangle_count += 1
+                logger.info(f"Historical short strangle: {description[:40]}, Open: {trade_open_date}, Close: {close_date}, P&L: ${pnl:.2f}")
 
             except Exception as e:
                 logger.warning(f"Error processing closed position: {e}")

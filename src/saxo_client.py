@@ -2262,14 +2262,17 @@ class SaxoClient:
             elif response and isinstance(response, list):
                 positions = response
 
+            logger.info(f"Total closed positions (all assets): {len(positions)}")
+
             # Filter to only SPY stock options
+            # Note: Saxo uses InstrumentDescription and InstrumentSymbol fields
             spy_positions = []
             for pos in positions:
-                # Check if it's a StockOption and contains SPY in the description/symbol
                 asset_type = pos.get("AssetType", "")
-                description = pos.get("Description", "") + pos.get("Symbol", "")
+                description = pos.get("InstrumentDescription", "") or ""
+                symbol = pos.get("InstrumentSymbol", "") or ""
 
-                if asset_type == "StockOption" and "SPY" in description.upper():
+                if asset_type == "StockOption" and ("SPY" in description.upper() or "SPY" in symbol.upper()):
                     spy_positions.append(pos)
 
             logger.info(f"Retrieved {len(spy_positions)} closed SPY positions from {from_date} to {to_date}")
