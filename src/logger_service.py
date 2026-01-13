@@ -1308,9 +1308,11 @@ class GoogleSheetsLogger:
             total_pnl = metrics.get("total_pnl", 0)
             total_pnl_eur = total_pnl * exchange_rate if exchange_rate else 0
 
-            # Calculate percentage returns if starting capital provided
-            starting_capital = metrics.get("starting_capital", 0)
-            total_pnl_pct = (total_pnl / starting_capital * 100) if starting_capital else 0
+            # Use pre-calculated pnl_percent if provided, otherwise calculate from starting_capital
+            total_pnl_pct = metrics.get("pnl_percent", 0)
+            if total_pnl_pct == 0:
+                starting_capital = metrics.get("starting_capital", 0)
+                total_pnl_pct = (total_pnl / starting_capital * 100) if starting_capital else 0
 
             row = [
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
