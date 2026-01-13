@@ -647,10 +647,14 @@ class DeltaNeutralStrategy:
                 # Set the initial straddle strike for recentering logic
                 self.initial_straddle_strike = call_data["strike"]
 
+                # Set metrics for recovered straddle (entry prices * 100 for contract value)
+                straddle_cost = (call_data["entry_price"] + put_data["entry_price"]) * 100
+                self.metrics.total_straddle_cost = straddle_cost
+
                 logger.info(
                     f"Recovered long straddle: Strike ${call_data['strike']:.2f}, "
                     f"Expiry {call_data['expiry']}, "
-                    f"Qty {call_data['quantity']}"
+                    f"Qty {call_data['quantity']}, Cost ${straddle_cost:.2f}"
                 )
                 return True
 
@@ -752,9 +756,13 @@ class DeltaNeutralStrategy:
                     expiry=expiry
                 )
 
+                # Set metrics for recovered strangle (entry prices * 100 for contract value)
+                premium_collected = (call_data["entry_price"] + put_data["entry_price"]) * 100
+                self.metrics.total_premium_collected = premium_collected
+
                 logger.info(
                     f"Recovered short strangle: Call ${call_data['strike']:.2f}, "
-                    f"Put ${put_data['strike']:.2f}, Expiry {expiry}"
+                    f"Put ${put_data['strike']:.2f}, Expiry {expiry}, Premium ${premium_collected:.2f}"
                 )
                 return True
 
@@ -2586,10 +2594,10 @@ class DeltaNeutralStrategy:
         initial_cost = self.metrics.total_straddle_cost or 1  # Avoid division by zero
         pnl_percent = (self.metrics.total_pnl / initial_cost * 100) if initial_cost > 0 else 0
 
-        # Calculate max drawdown percentage
+        # Calculate max drawdown percentage (relative to initial investment)
         max_dd_percent = 0.0
-        if self.metrics.peak_pnl > 0:
-            max_dd_percent = (self.metrics.max_drawdown / self.metrics.peak_pnl) * 100
+        if initial_cost > 0 and self.metrics.max_drawdown > 0:
+            max_dd_percent = (self.metrics.max_drawdown / initial_cost) * 100
 
         return {
             # Account Summary fields
