@@ -2266,9 +2266,17 @@ class DeltaNeutralStrategy:
         """
         positions = []
 
+        # Get FX rate for EUR conversion
+        fx_rate = 0.0
+        try:
+            fx_rate = self.client.get_fx_rate("USD", "EUR") or 0.0
+        except Exception:
+            pass
+
         # Add long straddle legs
         if self.long_straddle:
             if self.long_straddle.call:
+                pnl = (self.long_straddle.call.current_price - self.long_straddle.call.entry_price) * 100
                 positions.append({
                     "type": "Long Call",
                     "strike": self.long_straddle.call.strike,
@@ -2277,11 +2285,12 @@ class DeltaNeutralStrategy:
                     "entry_price": self.long_straddle.call.entry_price,
                     "current_price": self.long_straddle.call.current_price,
                     "theta": getattr(self.long_straddle.call, 'theta', 0),
-                    "pnl": (self.long_straddle.call.current_price - self.long_straddle.call.entry_price) * 100,
-                    "pnl_eur": 0.0,
+                    "pnl": pnl,
+                    "pnl_eur": pnl * fx_rate if fx_rate else 0.0,
                     "status": "Active"
                 })
             if self.long_straddle.put:
+                pnl = (self.long_straddle.put.current_price - self.long_straddle.put.entry_price) * 100
                 positions.append({
                     "type": "Long Put",
                     "strike": self.long_straddle.put.strike,
@@ -2290,14 +2299,15 @@ class DeltaNeutralStrategy:
                     "entry_price": self.long_straddle.put.entry_price,
                     "current_price": self.long_straddle.put.current_price,
                     "theta": getattr(self.long_straddle.put, 'theta', 0),
-                    "pnl": (self.long_straddle.put.current_price - self.long_straddle.put.entry_price) * 100,
-                    "pnl_eur": 0.0,
+                    "pnl": pnl,
+                    "pnl_eur": pnl * fx_rate if fx_rate else 0.0,
                     "status": "Active"
                 })
 
         # Add short strangle legs
         if self.short_strangle:
             if self.short_strangle.call:
+                pnl = (self.short_strangle.call.entry_price - self.short_strangle.call.current_price) * 100
                 positions.append({
                     "type": "Short Call",
                     "strike": self.short_strangle.call.strike,
@@ -2306,11 +2316,12 @@ class DeltaNeutralStrategy:
                     "entry_price": self.short_strangle.call.entry_price,
                     "current_price": self.short_strangle.call.current_price,
                     "theta": getattr(self.short_strangle.call, 'theta', 0),
-                    "pnl": (self.short_strangle.call.entry_price - self.short_strangle.call.current_price) * 100,
-                    "pnl_eur": 0.0,
+                    "pnl": pnl,
+                    "pnl_eur": pnl * fx_rate if fx_rate else 0.0,
                     "status": "Active"
                 })
             if self.short_strangle.put:
+                pnl = (self.short_strangle.put.entry_price - self.short_strangle.put.current_price) * 100
                 positions.append({
                     "type": "Short Put",
                     "strike": self.short_strangle.put.strike,
@@ -2319,8 +2330,8 @@ class DeltaNeutralStrategy:
                     "entry_price": self.short_strangle.put.entry_price,
                     "current_price": self.short_strangle.put.current_price,
                     "theta": getattr(self.short_strangle.put, 'theta', 0),
-                    "pnl": (self.short_strangle.put.entry_price - self.short_strangle.put.current_price) * 100,
-                    "pnl_eur": 0.0,
+                    "pnl": pnl,
+                    "pnl_eur": pnl * fx_rate if fx_rate else 0.0,
                     "status": "Active"
                 })
 

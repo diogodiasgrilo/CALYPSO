@@ -348,14 +348,14 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Safety Events")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Safety Events", rows=1000, cols=8)
+                worksheet = self.spreadsheet.add_worksheet(title="Safety Events", rows=1000, cols=7)
                 # Essential safety/action events
                 headers = [
                     "Timestamp", "Event", "SPY Price", "VIX",
-                    "New Short Strikes", "Premium ($)", "Description", "Result"
+                    "New Short Strikes", "Description", "Result"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:H1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:G1", {"textFormat": {"bold": True}})
                 logger.info("Created Safety Events worksheet")
 
             self.worksheets["Safety Events"] = worksheet
@@ -1103,7 +1103,6 @@ class GoogleSheetsLogger:
                         f"{underlying_price:.2f}",
                         f"{vix:.2f}",
                         new_strikes,
-                        "0.00",  # No new premium on recovery
                         f"Recovered {len(individual_positions)} option positions from Saxo",
                         "SUCCESS"
                     ]
@@ -1189,7 +1188,6 @@ class GoogleSheetsLogger:
                 f"{event.get('spy_price', 0):.2f}",
                 f"{event.get('vix', 0):.2f}",
                 new_strikes,
-                f"{event.get('premium', event.get('premium_collected', 0)):.2f}",
                 event.get("description", ""),
                 event.get("result", "Pending")
             ]
