@@ -270,10 +270,10 @@ class StrategyMetrics:
 
     @property
     def win_rate(self) -> float:
-        """Calculate win rate percentage."""
+        """Calculate win rate as decimal for Google Sheets (0.50 = 50%)."""
         if self.trade_count == 0:
             return 0.0
-        return (self.winning_trades / self.trade_count) * 100
+        return self.winning_trades / self.trade_count
 
     @property
     def avg_trade_pnl(self) -> float:
@@ -2590,14 +2590,14 @@ class DeltaNeutralStrategy:
         except Exception as e:
             logger.debug(f"Could not fetch margin from Saxo: {e}")
 
-        # Calculate P&L percentage (based on initial investment/margin)
+        # Calculate P&L percentage as decimal for Google Sheets (0.0404 = 4.04%)
         initial_cost = self.metrics.total_straddle_cost or 1  # Avoid division by zero
-        pnl_percent = (self.metrics.total_pnl / initial_cost * 100) if initial_cost > 0 else 0
+        pnl_percent = (self.metrics.total_pnl / initial_cost) if initial_cost > 0 else 0
 
-        # Calculate max drawdown percentage (relative to initial investment)
+        # Calculate max drawdown percentage as decimal (0.0404 = 4.04%)
         max_dd_percent = 0.0
         if initial_cost > 0 and self.metrics.max_drawdown > 0:
-            max_dd_percent = (self.metrics.max_drawdown / initial_cost) * 100
+            max_dd_percent = self.metrics.max_drawdown / initial_cost
 
         return {
             # Account Summary fields

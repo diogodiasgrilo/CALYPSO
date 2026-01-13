@@ -1309,17 +1309,18 @@ class GoogleSheetsLogger:
             total_pnl_eur = total_pnl * exchange_rate if exchange_rate else 0
 
             # Use pre-calculated pnl_percent if provided, otherwise calculate from starting_capital
+            # Value is decimal for Google Sheets percentage format (0.0404 = 4.04%)
             total_pnl_pct = metrics.get("pnl_percent", 0)
             if total_pnl_pct == 0:
                 starting_capital = metrics.get("starting_capital", 0)
-                total_pnl_pct = (total_pnl / starting_capital * 100) if starting_capital else 0
+                total_pnl_pct = (total_pnl / starting_capital) if starting_capital else 0
 
             row = [
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 period,
                 f"{total_pnl:.2f}",
                 f"{total_pnl_eur:.2f}",
-                f"{total_pnl_pct:.2f}",
+                f"{total_pnl_pct:.4f}",  # Decimal for percentage (0.0404 = 4.04%)
                 f"{metrics.get('realized_pnl', 0):.2f}",
                 f"{metrics.get('unrealized_pnl', 0):.2f}",
                 f"{metrics.get('premium_collected', 0):.2f}",
@@ -1327,10 +1328,10 @@ class GoogleSheetsLogger:
                 f"{metrics.get('net_theta', 0):.2f}",
                 f"{metrics.get('long_straddle_pnl', 0):.2f}",
                 f"{metrics.get('short_strangle_pnl', 0):.2f}",
-                f"{metrics.get('win_rate', 0):.1f}",
+                f"{metrics.get('win_rate', 0):.4f}",  # Decimal for percentage (0.50 = 50%)
                 f"{metrics.get('sharpe_ratio', 0):.2f}",
                 f"{metrics.get('max_drawdown', 0):.2f}",
-                f"{metrics.get('max_drawdown_pct', 0):.2f}",
+                f"{metrics.get('max_drawdown_pct', 0):.4f}",  # Decimal for percentage (0.0404 = 4.04%)
                 metrics.get("trade_count", 0),
                 metrics.get("roll_count", 0),
                 metrics.get("recenter_count", 0),
