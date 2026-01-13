@@ -15,7 +15,7 @@ Strategy Overview:
    - Close current Long Straddle
    - Open new ATM Long Straddle at same expiration
    - Reset Weekly Shorts
-4. Roll weekly shorts on Thursday/Friday
+4. Roll weekly shorts on Friday
 5. Exit entire trade when 30-60 DTE remains on Longs
 
 Author: Trading Bot Developer
@@ -772,12 +772,12 @@ class DeltaNeutralStrategy:
                     vega=put_data.get("vega", 0)
                 )
 
-                # Estimate entry date: weekly strangles opened ~7 days before expiry
-                # For recovery, calculate entry_date as (expiry - 7 days) or today if that's in the future
+                # Estimate entry date: weekly strangles opened on Friday (~6 days before Friday expiry)
+                # For recovery, calculate entry_date as (expiry - 6 days) or today if that's in the future
                 entry_date = datetime.now().strftime("%Y-%m-%d")
                 try:
                     expiry_date = datetime.strptime(expiry, "%Y-%m-%d")
-                    estimated_entry = expiry_date - timedelta(days=7)
+                    estimated_entry = expiry_date - timedelta(days=6)
                     if estimated_entry <= datetime.now():
                         entry_date = estimated_entry.strftime("%Y-%m-%d")
                 except ValueError:
@@ -1956,7 +1956,7 @@ class DeltaNeutralStrategy:
         3. KEEP existing short strangle (don't close it during recenter)
 
         Short strangle is only rolled/adjusted:
-        - On Thursday/Friday (normal weekly roll)
+        - On Friday (normal weekly roll)
         - When a strike is challenged (defensive roll)
 
         Returns:
@@ -2004,7 +2004,7 @@ class DeltaNeutralStrategy:
                 return False
 
         # Step 3: Keep existing short strangle (DO NOT CLOSE)
-        # Short strangle will be rolled separately on Thursday/Friday or when challenged
+        # Short strangle will be rolled separately on Friday or when challenged
         if self.short_strangle:
             logger.info("Keeping existing short strangle (will be rolled on schedule or if challenged)")
         else:
@@ -2058,7 +2058,7 @@ class DeltaNeutralStrategy:
         """
         Check if weekly shorts should be rolled.
 
-        Shorts should be rolled on Thursday/Friday or if challenged
+        Shorts should be rolled on Friday or if challenged
         (price approaching short strikes).
 
         Returns:

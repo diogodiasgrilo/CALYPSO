@@ -158,7 +158,7 @@ class ConfigLoader:
                 "weekly_strangle_multiplier_max": 2.0,
                 "exit_dte_min": 30,
                 "exit_dte_max": 60,
-                "roll_days": ["Thursday", "Friday"],
+                "roll_days": ["Friday"],
                 "max_bid_ask_spread_percent": 0.5,
                 "position_size": 1,
                 "fed_blackout_days": 2,

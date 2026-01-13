@@ -10,7 +10,7 @@ Strategy Summary:
 1. Buy ATM Long Straddle (90-120 DTE) when VIX < 18
 2. Sell weekly Short Strangles at 1.5-2x expected move
 3. Recenter if SPY moves 5 points from initial strike
-4. Roll weekly shorts on Thursday/Friday
+4. Roll weekly shorts on Friday
 5. Exit when 30-60 DTE remains on Longs
 
 Usage:
