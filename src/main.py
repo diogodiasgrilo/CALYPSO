@@ -347,51 +347,46 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     # Sync Positions sheet with actual state (clears stale data, adds current positions)
     strategy.sync_positions_sheet()
 
-    # Log initial dashboard metrics on startup (for Looker dashboard)
-    # Only logs if no data exists or if data is stale (bot was down for extended period)
+    # Log dashboard metrics on startup (always update on restart for fresh data)
     try:
-        should_log_initial = trade_logger.should_log_initial_metrics(stale_minutes=30)
-        if should_log_initial:
-            trade_logger.log_event("Logging initial dashboard metrics (no recent data found)...")
+        trade_logger.log_event("Logging dashboard metrics on startup...")
 
-            # Update market data first to ensure we have current prices
-            strategy.update_market_data()
+        # Update market data first to ensure we have current prices
+        strategy.update_market_data()
 
-            # Refresh position prices from Saxo (in case they weren't populated during recovery)
-            strategy.refresh_position_prices()
+        # Refresh position prices from Saxo (in case they weren't populated during recovery)
+        strategy.refresh_position_prices()
 
-            dashboard_metrics = strategy.get_dashboard_metrics()
-            environment = "SIM" if client.is_simulation else "LIVE"
+        dashboard_metrics = strategy.get_dashboard_metrics()
+        environment = "SIM" if client.is_simulation else "LIVE"
 
-            # Log to Account Summary worksheet
-            trade_logger.log_account_summary(
-                strategy_data=dashboard_metrics,
-                saxo_client=client,
-                environment=environment
-            )
+        # Log to Account Summary worksheet
+        trade_logger.log_account_summary(
+            strategy_data=dashboard_metrics,
+            saxo_client=client,
+            environment=environment
+        )
 
-            # Log initial performance metrics
-            trade_logger.log_performance_metrics(
-                period="Startup",
-                metrics=dashboard_metrics,
-                saxo_client=client
-            )
+        # Log initial performance metrics
+        trade_logger.log_performance_metrics(
+            period="Startup",
+            metrics=dashboard_metrics,
+            saxo_client=client
+        )
 
-            # Log bot startup activity
-            trade_logger.log_bot_activity(
-                level="INFO",
-                component="Main",
-                message=f"Bot started - State: {strategy.state.value}, Positions: {dashboard_metrics['position_count']}",
-                spy_price=dashboard_metrics['spy_price'],
-                vix=dashboard_metrics['vix'],
-                flush=True
-            )
+        # Log bot startup activity
+        trade_logger.log_bot_activity(
+            level="INFO",
+            component="Main",
+            message=f"Bot started - State: {strategy.state.value}, Positions: {dashboard_metrics['position_count']}",
+            spy_price=dashboard_metrics['spy_price'],
+            vix=dashboard_metrics['vix'],
+            flush=True
+        )
 
-            trade_logger.log_event("Initial dashboard metrics logged to Google Sheets")
-        else:
-            trade_logger.log_event("Recent dashboard data exists - skipping initial metrics log")
+        trade_logger.log_event("Dashboard metrics logged to Google Sheets")
     except Exception as e:
-        trade_logger.log_error(f"Failed to log initial dashboard metrics: {e}")
+        trade_logger.log_error(f"Failed to log dashboard metrics: {e}")
 
     # Start real-time price streaming
     # FIXED: Define full subscription details with correct AssetTypes to avoid 404 errors
