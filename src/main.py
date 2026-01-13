@@ -478,6 +478,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                         if not interruptible_sleep(sleep_time):
                             break  # Shutdown requested
 
+                        # Reset connection timeout after waking from sleep
+                        # This prevents false circuit breaker triggers from long sleep periods
+                        client.circuit_breaker.last_successful_connection = datetime.now()
+
                         # Reconnect WebSocket after waking (will reconnect when market opens)
                         if not shutdown_requested and not client.is_streaming:
                             logger.debug("Reconnecting WebSocket after sleep")
@@ -486,6 +490,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                         trade_logger.log_event("HEARTBEAT | Market closed - rechecking in 60s")
                         if not interruptible_sleep(60):
                             break  # Shutdown requested
+                        # Reset connection timeout after any sleep to prevent false triggers
+                        client.circuit_breaker.last_successful_connection = datetime.now()
                     continue
 
                 # Check circuit breaker
