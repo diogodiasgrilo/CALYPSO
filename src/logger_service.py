@@ -1357,7 +1357,7 @@ class GoogleSheetsLogger:
                 worksheet.append_row(row)
             else:
                 # Update existing row 2
-                worksheet.update(f"A2:Z2", [row])
+                worksheet.update(f"A2:AA2", [row])
             logger.debug(f"SPY strategy performance metrics updated for period: {period}")
             return True
         except Exception as e:
