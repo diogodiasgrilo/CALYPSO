@@ -449,11 +449,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     trade_logger.log_event(market_status)
 
                     # Calculate intelligent sleep duration
-                    sleep_time = calculate_sleep_duration(max_sleep=3600)  # Max 1 hour
+                    # Max 15 minutes to ensure token stays alive (Saxo tokens expire in 20 min)
+                    sleep_time = calculate_sleep_duration(max_sleep=900)
 
                     if sleep_time > 0:
-                        hours = sleep_time // 3600
-                        minutes = (sleep_time % 3600) // 60
+                        minutes = sleep_time // 60
 
                         # Disconnect WebSocket before sleeping to avoid timeout errors
                         # Saxo closes idle connections anyway, so disconnect cleanly
@@ -467,7 +467,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
 
                         # Log heartbeat LAST, right before sleeping
                         trade_logger.log_event(
-                            f"HEARTBEAT | Market closed - sleeping for {hours}h {minutes}m"
+                            f"HEARTBEAT | Market closed - sleeping for {minutes}m"
                         )
 
                         if not interruptible_sleep(sleep_time):
