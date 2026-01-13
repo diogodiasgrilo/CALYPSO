@@ -58,6 +58,9 @@ logs/
 bot_log*.txt
 *_trades.json
 
+# Data files (persistent state - machine specific)
+data/
+
 # Database files
 *.db
 *.sqlite

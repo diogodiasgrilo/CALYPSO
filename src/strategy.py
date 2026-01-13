@@ -22,7 +22,9 @@ Author: Trading Bot Developer
 Date: 2024
 """
 
+import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, List, Any, Tuple
@@ -30,6 +32,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from src.saxo_client import SaxoClient, BuySell, OrderType
+
+# Path for persistent metrics storage
+METRICS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "strategy_metrics.json")
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -305,6 +310,97 @@ class StrategyMetrics:
             return 0.0
         return self.total_trade_pnl / self.trade_count
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert metrics to dictionary for persistence."""
+        return {
+            "total_premium_collected": self.total_premium_collected,
+            "total_straddle_cost": self.total_straddle_cost,
+            "realized_pnl": self.realized_pnl,
+            "recenter_count": self.recenter_count,
+            "roll_count": self.roll_count,
+            "trade_count": self.trade_count,
+            "winning_trades": self.winning_trades,
+            "losing_trades": self.losing_trades,
+            "best_trade_pnl": self.best_trade_pnl,
+            "worst_trade_pnl": self.worst_trade_pnl,
+            "total_trade_pnl": self.total_trade_pnl,
+            "peak_pnl": self.peak_pnl,
+            "max_drawdown": self.max_drawdown,
+            "last_updated": datetime.now().isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "StrategyMetrics":
+        """Create StrategyMetrics from saved dictionary."""
+        metrics = cls()
+        metrics.total_premium_collected = data.get("total_premium_collected", 0.0)
+        metrics.total_straddle_cost = data.get("total_straddle_cost", 0.0)
+        metrics.realized_pnl = data.get("realized_pnl", 0.0)
+        metrics.recenter_count = data.get("recenter_count", 0)
+        metrics.roll_count = data.get("roll_count", 0)
+        metrics.trade_count = data.get("trade_count", 0)
+        metrics.winning_trades = data.get("winning_trades", 0)
+        metrics.losing_trades = data.get("losing_trades", 0)
+        metrics.best_trade_pnl = data.get("best_trade_pnl", 0.0)
+        metrics.worst_trade_pnl = data.get("worst_trade_pnl", 0.0)
+        metrics.total_trade_pnl = data.get("total_trade_pnl", 0.0)
+        metrics.peak_pnl = data.get("peak_pnl", 0.0)
+        metrics.max_drawdown = data.get("max_drawdown", 0.0)
+        return metrics
+
+    def save_to_file(self, filepath: str = None) -> bool:
+        """
+        Save metrics to JSON file for persistence across bot restarts.
+
+        Args:
+            filepath: Path to save file. Defaults to METRICS_FILE.
+
+        Returns:
+            True if save successful, False otherwise.
+        """
+        filepath = filepath or METRICS_FILE
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
+            with open(filepath, 'w') as f:
+                json.dump(self.to_dict(), f, indent=2)
+            logger.info(f"Saved strategy metrics to {filepath}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save metrics to {filepath}: {e}")
+            return False
+
+    @classmethod
+    def load_from_file(cls, filepath: str = None) -> Optional["StrategyMetrics"]:
+        """
+        Load metrics from JSON file.
+
+        Args:
+            filepath: Path to load from. Defaults to METRICS_FILE.
+
+        Returns:
+            StrategyMetrics instance if file exists, None otherwise.
+        """
+        filepath = filepath or METRICS_FILE
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+                metrics = cls.from_dict(data)
+                last_updated = data.get("last_updated", "unknown")
+                logger.info(f"Loaded strategy metrics from {filepath} (last updated: {last_updated})")
+                logger.info(f"  Realized P&L: ${metrics.realized_pnl:.2f}")
+                logger.info(f"  Total Premium Collected: ${metrics.total_premium_collected:.2f}")
+                logger.info(f"  Trade Count: {metrics.trade_count}, Win Rate: {metrics.win_rate*100:.1f}%")
+                return metrics
+            else:
+                logger.info(f"No saved metrics found at {filepath}, starting fresh")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to load metrics from {filepath}: {e}")
+            return None
+
 
 class DeltaNeutralStrategy:
     """
@@ -347,7 +443,11 @@ class DeltaNeutralStrategy:
         self.state = StrategyState.IDLE
         self.long_straddle: Optional[StraddlePosition] = None
         self.short_strangle: Optional[StranglePosition] = None
-        self.metrics = StrategyMetrics()
+
+        # Load persisted metrics or start fresh
+        saved_metrics = StrategyMetrics.load_from_file()
+        self.metrics = saved_metrics if saved_metrics else StrategyMetrics()
+        self._metrics_loaded_from_file = saved_metrics is not None
 
         # Underlying tracking
         self.underlying_uic = self.strategy_config["underlying_uic"]
@@ -671,9 +771,11 @@ class DeltaNeutralStrategy:
                 self.initial_straddle_strike = call_data["strike"]
 
                 # Set metrics for recovered straddle (entry prices * 100 * quantity for total value)
+                # Only set if not loaded from file (persisted values are more accurate)
                 qty = call_data["quantity"]  # Assuming call and put have same quantity
                 straddle_cost = (call_data["entry_price"] + put_data["entry_price"]) * 100 * qty
-                self.metrics.total_straddle_cost = straddle_cost
+                if not self._metrics_loaded_from_file:
+                    self.metrics.total_straddle_cost = straddle_cost
 
                 logger.info(
                     f"Recovered long straddle: Strike ${call_data['strike']:.2f}, "
@@ -793,9 +895,11 @@ class DeltaNeutralStrategy:
                 )
 
                 # Set metrics for recovered strangle (entry prices * 100 * quantity for total value)
+                # Only set if not loaded from file (persisted values include historical data)
                 qty = call_data["quantity"]  # Assuming call and put have same quantity
                 premium_collected = (call_data["entry_price"] + put_data["entry_price"]) * 100 * qty
-                self.metrics.total_premium_collected = premium_collected
+                if not self._metrics_loaded_from_file:
+                    self.metrics.total_premium_collected = premium_collected
 
                 logger.info(
                     f"Recovered short strangle: Call ${call_data['strike']:.2f}, "
@@ -1370,6 +1474,8 @@ class DeltaNeutralStrategy:
         # Update metrics
         straddle_cost = (call_price + put_price) * self.position_size * 100
         self.metrics.total_straddle_cost += straddle_cost
+        if not self.dry_run:
+            self.metrics.save_to_file()  # Persist metrics after entry
 
         self.state = StrategyState.LONG_STRADDLE_ACTIVE
 
@@ -1535,6 +1641,8 @@ class DeltaNeutralStrategy:
         # Update metrics
         straddle_cost = (call_price + put_price) * self.position_size * 100
         self.metrics.total_straddle_cost += straddle_cost
+        if not self.dry_run:
+            self.metrics.save_to_file()  # Persist metrics after entry
 
         logger.info(
             f"Long straddle entered (recenter): Strike {call_option['strike']}, "
@@ -1613,6 +1721,8 @@ class DeltaNeutralStrategy:
         realized_pnl = exit_value - entry_cost
         self.metrics.realized_pnl += realized_pnl
         self.metrics.record_trade(realized_pnl)
+        if not self.dry_run:
+            self.metrics.save_to_file()  # Persist metrics after trade
 
         logger.info(
             f"Long straddle closed. Entry cost: ${entry_cost:.2f}, "
@@ -1894,6 +2004,8 @@ class DeltaNeutralStrategy:
         # Update metrics
         premium = self.short_strangle.premium_collected
         self.metrics.total_premium_collected += premium
+        if not self.dry_run:
+            self.metrics.save_to_file()  # Persist metrics after entry
 
         self.state = StrategyState.FULL_POSITION
 
@@ -2027,6 +2139,8 @@ class DeltaNeutralStrategy:
         realized_pnl = premium_received - close_cost
         self.metrics.realized_pnl += realized_pnl
         self.metrics.record_trade(realized_pnl)
+        if not self.dry_run:
+            self.metrics.save_to_file()  # Persist metrics after trade
 
         logger.info(
             f"Short strangle closed. Premium: ${premium_received:.2f}, "
@@ -2159,6 +2273,8 @@ class DeltaNeutralStrategy:
                 # Continue anyway, straddle is more important
 
         self.metrics.recenter_count += 1
+        if not self.dry_run:
+            self.metrics.save_to_file()  # Persist metrics after recenter
 
         # Set state based on current positions
         if self.long_straddle and self.short_strangle:
@@ -2306,6 +2422,8 @@ class DeltaNeutralStrategy:
             logger.info(f"Put strike adjusted: {'+' if put_adjustment >= 0 else ''}{put_adjustment:.0f}")
 
         self.metrics.roll_count += 1
+        if not self.dry_run:
+            self.metrics.save_to_file()  # Persist metrics after roll
         self.state = StrategyState.FULL_POSITION
 
         logger.info(f"Weekly shorts rolled successfully. Total rolls: {self.metrics.roll_count}")
