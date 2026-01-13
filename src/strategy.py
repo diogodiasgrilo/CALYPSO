@@ -188,6 +188,16 @@ class StrategyMetrics:
     unrealized_pnl: float = 0.0
     recenter_count: int = 0
     roll_count: int = 0
+    # Trade tracking
+    trade_count: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    best_trade_pnl: float = 0.0
+    worst_trade_pnl: float = 0.0
+    total_trade_pnl: float = 0.0  # Sum of all closed trade P&L
+    # Drawdown tracking
+    peak_pnl: float = 0.0
+    max_drawdown: float = 0.0
     # Daily tracking
     daily_pnl_start: float = 0.0
     spy_open: float = 0.0
@@ -236,6 +246,41 @@ class StrategyMetrics:
     def total_pnl(self) -> float:
         """Calculate total P&L."""
         return self.realized_pnl + self.unrealized_pnl
+
+    def record_trade(self, pnl: float):
+        """Record a completed trade for statistics tracking."""
+        self.trade_count += 1
+        self.total_trade_pnl += pnl
+        if pnl > 0:
+            self.winning_trades += 1
+        else:
+            self.losing_trades += 1
+        if pnl > self.best_trade_pnl:
+            self.best_trade_pnl = pnl
+        if pnl < self.worst_trade_pnl:
+            self.worst_trade_pnl = pnl
+
+    def update_drawdown(self, current_pnl: float):
+        """Update peak P&L and max drawdown."""
+        if current_pnl > self.peak_pnl:
+            self.peak_pnl = current_pnl
+        drawdown = self.peak_pnl - current_pnl
+        if drawdown > self.max_drawdown:
+            self.max_drawdown = drawdown
+
+    @property
+    def win_rate(self) -> float:
+        """Calculate win rate percentage."""
+        if self.trade_count == 0:
+            return 0.0
+        return (self.winning_trades / self.trade_count) * 100
+
+    @property
+    def avg_trade_pnl(self) -> float:
+        """Calculate average P&L per trade."""
+        if self.trade_count == 0:
+            return 0.0
+        return self.total_trade_pnl / self.trade_count
 
 
 class DeltaNeutralStrategy:
@@ -1383,6 +1428,7 @@ class DeltaNeutralStrategy:
         exit_value = self.long_straddle.total_value
         realized_pnl = exit_value - entry_cost
         self.metrics.realized_pnl += realized_pnl
+        self.metrics.record_trade(realized_pnl)
 
         logger.info(
             f"Long straddle closed. Entry cost: ${entry_cost:.2f}, "
@@ -1790,6 +1836,7 @@ class DeltaNeutralStrategy:
 
         realized_pnl = premium_received - close_cost
         self.metrics.realized_pnl += realized_pnl
+        self.metrics.record_trade(realized_pnl)
 
         logger.info(
             f"Short strangle closed. Premium: ${premium_received:.2f}, "
@@ -2510,6 +2557,29 @@ class DeltaNeutralStrategy:
         # Update metrics with calculated unrealized P&L
         self.metrics.unrealized_pnl = long_straddle_pnl + short_strangle_pnl
 
+        # Update drawdown tracking
+        self.metrics.update_drawdown(self.metrics.total_pnl)
+
+        # Get margin from Saxo balance API
+        strategy_margin = 0.0
+        try:
+            balance = self.client.get_balance()
+            if balance:
+                # Use CostToClosePositions as a proxy for margin requirement
+                # This represents the cost to close all positions
+                strategy_margin = abs(balance.get("CostToClosePositions", 0))
+        except Exception as e:
+            logger.debug(f"Could not fetch margin from Saxo: {e}")
+
+        # Calculate P&L percentage (based on initial investment/margin)
+        initial_cost = self.metrics.total_straddle_cost or 1  # Avoid division by zero
+        pnl_percent = (self.metrics.total_pnl / initial_cost * 100) if initial_cost > 0 else 0
+
+        # Calculate max drawdown percentage
+        max_dd_percent = 0.0
+        if self.metrics.peak_pnl > 0:
+            max_dd_percent = (self.metrics.max_drawdown / self.metrics.peak_pnl) * 100
+
         return {
             # Account Summary fields
             "spy_price": self.current_underlying_price,
@@ -2517,7 +2587,7 @@ class DeltaNeutralStrategy:
             "unrealized_pnl": self.metrics.unrealized_pnl,
             "long_straddle_value": long_straddle_value,
             "short_strangle_value": short_strangle_value,
-            "strategy_margin": 0,  # Would need Saxo API call for margin
+            "strategy_margin": strategy_margin,
             "total_delta": greeks["delta"],
             "total_theta": net_theta,
             "position_count": position_count,
@@ -2534,9 +2604,19 @@ class DeltaNeutralStrategy:
             "net_theta": net_theta,
             "long_straddle_pnl": long_straddle_pnl,
             "short_strangle_pnl": short_strangle_pnl,
-            "trade_count": self.metrics.trade_count if hasattr(self.metrics, 'trade_count') else 0,
+            "trade_count": self.metrics.trade_count,
             "roll_count": self.metrics.roll_count,
             "recenter_count": self.metrics.recenter_count,
+
+            # New KPI fields
+            "pnl_percent": pnl_percent,
+            "win_rate": self.metrics.win_rate,
+            "sharpe_ratio": 0.0,  # TODO: implement if needed
+            "max_drawdown": self.metrics.max_drawdown,
+            "max_drawdown_pct": max_dd_percent,
+            "avg_trade_pnl": self.metrics.avg_trade_pnl,
+            "best_trade": self.metrics.best_trade_pnl,
+            "worst_trade": self.metrics.worst_trade_pnl,
 
             # Additional Greeks
             "total_gamma": greeks["gamma"],
