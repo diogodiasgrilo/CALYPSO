@@ -1425,6 +1425,142 @@ class DeltaNeutralStrategy:
 
         return True
 
+    def _enter_straddle_with_options(self, atm_options: dict) -> bool:
+        """
+        Enter a long straddle using pre-found ATM options.
+
+        Used during recenter to enter at the same expiry as the original straddle,
+        rather than using the config's 90-120 DTE range.
+
+        Args:
+            atm_options: Dict with 'call' and 'put' option data from find_atm_options
+
+        Returns:
+            bool: True if straddle entered successfully, False otherwise.
+        """
+        call_option = atm_options["call"]
+        put_option = atm_options["put"]
+
+        logger.info(f"Entering straddle with pre-found options: Call {call_option['strike']}, Put {put_option['strike']}")
+
+        # Check bid-ask spreads
+        call_spread_ok, call_spread = self.client.check_bid_ask_spread(
+            call_option["uic"],
+            "StockOption",
+            self.max_spread_percent
+        )
+        put_spread_ok, put_spread = self.client.check_bid_ask_spread(
+            put_option["uic"],
+            "StockOption",
+            self.max_spread_percent
+        )
+
+        if not call_spread_ok or not put_spread_ok:
+            logger.warning(
+                f"Bid-ask spread too wide. Call: {call_spread:.2f}%, Put: {put_spread:.2f}%"
+            )
+            return False
+
+        # Get current prices for the options
+        call_quote = self.client.get_quote(call_option["uic"], "StockOption")
+        put_quote = self.client.get_quote(put_option["uic"], "StockOption")
+
+        if not call_quote or not put_quote:
+            logger.error("Failed to get option quotes")
+            return False
+
+        call_price = call_quote["Quote"].get("Ask", 0)
+        put_price = put_quote["Quote"].get("Ask", 0)
+
+        # Place multi-leg order for the straddle
+        legs = [
+            {
+                "uic": call_option["uic"],
+                "asset_type": "StockOption",
+                "buy_sell": "Buy",
+                "amount": self.position_size
+            },
+            {
+                "uic": put_option["uic"],
+                "asset_type": "StockOption",
+                "buy_sell": "Buy",
+                "amount": self.position_size
+            }
+        ]
+
+        # In dry_run mode, simulate the order
+        if self.dry_run:
+            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
+            logger.info("[DRY RUN] Simulating long straddle order (no real order placed)")
+        else:
+            order_response = self.client.place_multi_leg_order(legs)
+
+        if not order_response:
+            logger.error("Failed to place straddle order")
+            return False
+
+        # Create straddle position object
+        self.long_straddle = StraddlePosition(
+            call=OptionPosition(
+                position_id=str(order_response.get("OrderId", "")) + "_call",
+                uic=call_option["uic"],
+                strike=call_option["strike"],
+                expiry=call_option["expiry"],
+                option_type="Call",
+                position_type=PositionType.LONG_CALL,
+                quantity=self.position_size,
+                entry_price=call_price,
+                current_price=call_price,
+                delta=0.5  # ATM call delta approximation
+            ),
+            put=OptionPosition(
+                position_id=str(order_response.get("OrderId", "")) + "_put",
+                uic=put_option["uic"],
+                strike=put_option["strike"],
+                expiry=put_option["expiry"],
+                option_type="Put",
+                position_type=PositionType.LONG_PUT,
+                quantity=self.position_size,
+                entry_price=put_price,
+                current_price=put_price,
+                delta=-0.5  # ATM put delta approximation
+            ),
+            initial_strike=call_option["strike"],
+            entry_underlying_price=self.current_underlying_price
+        )
+
+        self.initial_straddle_strike = call_option["strike"]
+
+        # Update metrics
+        straddle_cost = (call_price + put_price) * self.position_size * 100
+        self.metrics.total_straddle_cost += straddle_cost
+
+        logger.info(
+            f"Long straddle entered (recenter): Strike {call_option['strike']}, "
+            f"Expiry {call_option['expiry']}, Cost ${straddle_cost:.2f}"
+        )
+
+        # Log trade
+        if self.trade_logger:
+            action_prefix = "[SIMULATED] " if self.dry_run else ""
+            dte = self._calculate_dte(call_option["expiry"])
+            self.trade_logger.log_trade(
+                action=f"{action_prefix}OPEN_LONG_STRADDLE",
+                strike=call_option["strike"],
+                price=call_price + put_price,
+                delta=0.0,
+                pnl=0.0,
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Long Straddle (Recenter)",
+                expiry_date=call_option["expiry"],
+                dte=dte,
+                premium_received=None
+            )
+
+        return True
+
     def close_long_straddle(self) -> bool:
         """
         Close the current long straddle position.
@@ -1986,7 +2122,7 @@ class DeltaNeutralStrategy:
             expiry_date = datetime.strptime(original_expiry[:10], "%Y-%m-%d").date()
             dte = (expiry_date - datetime.now().date()).days
 
-            # Find new ATM options
+            # Find new ATM options at the SAME expiry (not the config's 90-120 DTE)
             atm_options = self.client.find_atm_options(
                 self.underlying_uic,
                 self.current_underlying_price,
@@ -1995,8 +2131,8 @@ class DeltaNeutralStrategy:
             )
 
             if atm_options:
-                # Enter new straddle (simplified - reusing enter method)
-                if not self.enter_long_straddle():
+                # Enter new straddle using the found options (not enter_long_straddle which uses config DTE)
+                if not self._enter_straddle_with_options(atm_options):
                     logger.error("Failed to enter new long straddle during recenter")
                     return False
             else:
