@@ -1021,7 +1021,8 @@ class SaxoClient:
         underlying_price: float,
         expected_move: float,
         multiplier: float = 1.5,
-        weekly: bool = True
+        weekly: bool = True,
+        for_roll: bool = False
     ) -> Optional[Dict[str, Dict]]:
         """
         Find OTM options for a short strangle at specified distance.
@@ -1032,6 +1033,8 @@ class SaxoClient:
             expected_move: Expected weekly move in dollars
             multiplier: Multiplier for the expected move (1.5-2.0x)
             weekly: If True, find weekly options
+            for_roll: If True, find next week's expiry (5-12 DTE) for rolling.
+                     If False, find current week's expiry (0-7 DTE) for initial entry.
 
         Returns:
             dict: Dictionary with 'call' and 'put' option data for strangle.
@@ -1040,23 +1043,39 @@ class SaxoClient:
         if not expirations:
             return None
 
-        # For weekly, find nearest Friday expiration
+        # For weekly, find appropriate Friday expiration based on context
         today = datetime.now().date()
         target_expiration = None
 
         if weekly:
-            # Find nearest Friday within 7 days
-            for exp_data in expirations:
-                exp_date_str = exp_data.get("Expiry")
-                if not exp_date_str:
-                    continue
-                exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
-                dte = (exp_date - today).days
+            # When rolling: find NEXT Friday (5-12 DTE) per Brian Terry's strategy
+            # When entering fresh: find CURRENT Friday (0-7 DTE)
+            if for_roll:
+                # Rolling shorts: look for next week's expiry (5-12 DTE)
+                for exp_data in expirations:
+                    exp_date_str = exp_data.get("Expiry")
+                    if not exp_date_str:
+                        continue
+                    exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
 
-                if 0 < dte <= 7:
-                    target_expiration = exp_data
-                    logger.info(f"Found weekly expiration: {exp_date_str} with {dte} DTE")
-                    break
+                    if 5 <= dte <= 12:
+                        target_expiration = exp_data
+                        logger.info(f"Found next weekly expiration for roll: {exp_date_str} with {dte} DTE")
+                        break
+            else:
+                # Initial entry: find nearest Friday within 7 days
+                for exp_data in expirations:
+                    exp_date_str = exp_data.get("Expiry")
+                    if not exp_date_str:
+                        continue
+                    exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+
+                    if 0 < dte <= 7:
+                        target_expiration = exp_data
+                        logger.info(f"Found weekly expiration: {exp_date_str} with {dte} DTE")
+                        break
 
         if not target_expiration:
             logger.warning("No suitable weekly expiration found")
@@ -1141,7 +1160,8 @@ class SaxoClient:
         underlying_uic: int,
         underlying_price: float,
         target_premium: float,
-        weekly: bool = True
+        weekly: bool = True,
+        for_roll: bool = False
     ) -> Optional[Dict[str, Dict]]:
         """
         Find OTM options for a short strangle that meets target premium.
@@ -1154,6 +1174,8 @@ class SaxoClient:
             underlying_price: Current underlying price
             target_premium: Target premium in dollars (total for both legs, per contract)
             weekly: If True, find weekly options
+            for_roll: If True, find next week's expiry (5-12 DTE) for rolling.
+                     If False, find current week's expiry (0-7 DTE) for initial entry.
 
         Returns:
             dict: Dictionary with 'call' and 'put' option data for strangle,
@@ -1165,24 +1187,40 @@ class SaxoClient:
         if not expirations:
             return None
 
-        # Find weekly expiration
+        # Find weekly expiration based on context (rolling vs initial entry)
         today = datetime.now().date()
         target_expiration = None
         weekly_dte = 7
 
         if weekly:
-            for exp_data in expirations:
-                exp_date_str = exp_data.get("Expiry")
-                if not exp_date_str:
-                    continue
-                exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
-                dte = (exp_date - today).days
+            if for_roll:
+                # Rolling shorts: look for next week's expiry (5-12 DTE)
+                for exp_data in expirations:
+                    exp_date_str = exp_data.get("Expiry")
+                    if not exp_date_str:
+                        continue
+                    exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
 
-                if 0 < dte <= 7:
-                    target_expiration = exp_data
-                    weekly_dte = dte
-                    logger.info(f"Found weekly expiration: {exp_date_str} with {dte} DTE")
-                    break
+                    if 5 <= dte <= 12:
+                        target_expiration = exp_data
+                        weekly_dte = dte
+                        logger.info(f"Found next weekly expiration for roll: {exp_date_str} with {dte} DTE")
+                        break
+            else:
+                # Initial entry: find nearest Friday within 7 days
+                for exp_data in expirations:
+                    exp_date_str = exp_data.get("Expiry")
+                    if not exp_date_str:
+                        continue
+                    exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+
+                    if 0 < dte <= 7:
+                        target_expiration = exp_data
+                        weekly_dte = dte
+                        logger.info(f"Found weekly expiration: {exp_date_str} with {dte} DTE")
+                        break
 
         if not target_expiration:
             logger.warning("No suitable weekly expiration found")
@@ -1807,6 +1845,237 @@ class SaxoClient:
 
         logger.error(f"Failed to cancel order {order_id}")
         return None
+
+    # =========================================================================
+    # SLIPPAGE PROTECTION METHODS
+    # =========================================================================
+
+    def get_order_status(self, order_id: str) -> Optional[Dict]:
+        """
+        Get the current status of an order.
+
+        Args:
+            order_id: The order ID to check
+
+        Returns:
+            dict: Order details including status, or None if not found.
+        """
+        endpoint = f"/port/v1/orders/{self.client_key}/{order_id}"
+
+        response = self._make_request("GET", endpoint)
+        if response:
+            return response
+
+        return None
+
+    def get_open_orders(self) -> List[Dict]:
+        """
+        Get all open orders for the account.
+
+        Returns:
+            list: List of open orders.
+        """
+        endpoint = f"/port/v1/orders/me"
+
+        response = self._make_request("GET", endpoint)
+        if response and "Data" in response:
+            return response["Data"]
+
+        return []
+
+    def place_limit_order_with_timeout(
+        self,
+        uic: int,
+        asset_type: str,
+        buy_sell: BuySell,
+        amount: int,
+        limit_price: float,
+        timeout_seconds: int = 60
+    ) -> Dict:
+        """
+        Place a limit order and wait for fill with timeout.
+
+        Per strategy spec: "Use Limit Orders only, and if a 'Recenter' or 'Roll'
+        isn't filled within 60 seconds, it should alert rather than chasing the price."
+
+        Args:
+            uic: Instrument UIC
+            asset_type: Type of asset
+            buy_sell: Buy or Sell direction
+            amount: Number of contracts
+            limit_price: Limit price for the order
+            timeout_seconds: Maximum time to wait for fill (default 60s)
+
+        Returns:
+            dict: {
+                "success": bool,
+                "filled": bool,
+                "order_id": str or None,
+                "message": str,
+                "fill_price": float or None
+            }
+        """
+        import time
+
+        logger.info(f"Placing LIMIT order with {timeout_seconds}s timeout")
+        logger.info(f"  {buy_sell.value} {amount} x UIC {uic} @ ${limit_price:.2f}")
+
+        # Place the limit order
+        order_response = self.place_order(
+            uic=uic,
+            asset_type=asset_type,
+            buy_sell=buy_sell,
+            amount=amount,
+            order_type=OrderType.LIMIT,
+            limit_price=limit_price,
+            duration_type="DayOrder"
+        )
+
+        if not order_response or "OrderId" not in order_response:
+            return {
+                "success": False,
+                "filled": False,
+                "order_id": None,
+                "message": "Failed to place limit order",
+                "fill_price": None
+            }
+
+        order_id = order_response["OrderId"]
+        logger.info(f"Limit order placed: {order_id}")
+
+        # Poll for fill status
+        start_time = time.time()
+        check_interval = 2  # Check every 2 seconds
+
+        while (time.time() - start_time) < timeout_seconds:
+            # Check order status
+            open_orders = self.get_open_orders()
+            order_still_open = any(o.get("OrderId") == order_id for o in open_orders)
+
+            if not order_still_open:
+                # Order is no longer open - assume filled
+                elapsed = time.time() - start_time
+                logger.info(f"✓ Limit order filled in {elapsed:.1f}s")
+                return {
+                    "success": True,
+                    "filled": True,
+                    "order_id": order_id,
+                    "message": f"Order filled in {elapsed:.1f}s",
+                    "fill_price": limit_price
+                }
+
+            time.sleep(check_interval)
+
+        # Timeout reached - order not filled
+        elapsed = time.time() - start_time
+        logger.warning(f"⚠ Limit order NOT filled after {elapsed:.1f}s - cancelling")
+
+        # Cancel the unfilled order
+        self.cancel_order(order_id)
+
+        return {
+            "success": False,
+            "filled": False,
+            "order_id": order_id,
+            "message": f"TIMEOUT: Order not filled within {timeout_seconds}s. Order cancelled. ALERT: Manual review required.",
+            "fill_price": None
+        }
+
+    def place_multi_leg_limit_order_with_timeout(
+        self,
+        legs: List[Dict],
+        total_limit_price: float,
+        timeout_seconds: int = 60
+    ) -> Dict:
+        """
+        Place a multi-leg limit order and wait for fill with timeout.
+
+        For straddles/strangles, this places the entire combo as a limit order.
+
+        Args:
+            legs: List of leg dictionaries with uic, asset_type, buy_sell, amount
+            total_limit_price: Total limit price for the combo
+            timeout_seconds: Maximum time to wait for fill (default 60s)
+
+        Returns:
+            dict: {
+                "success": bool,
+                "filled": bool,
+                "order_id": str or None,
+                "message": str
+            }
+        """
+        import time
+
+        logger.info(f"Placing multi-leg LIMIT order with {timeout_seconds}s timeout")
+        logger.info(f"  {len(legs)} legs @ total limit ${total_limit_price:.2f}")
+
+        endpoint = "/trade/v2/orders"
+
+        order_data = {
+            "AccountKey": self.account_key,
+            "OrderType": "Limit",
+            "OrderPrice": total_limit_price,
+            "OrderDuration": {
+                "DurationType": "DayOrder"
+            },
+            "ManualOrder": True,
+            "Orders": []
+        }
+
+        for leg in legs:
+            leg_order = {
+                "Uic": leg["uic"],
+                "AssetType": leg["asset_type"],
+                "BuySell": leg["buy_sell"],
+                "Amount": leg["amount"]
+            }
+            order_data["Orders"].append(leg_order)
+
+        response = self._make_request("POST", endpoint, data=order_data)
+
+        if not response or "OrderId" not in response:
+            return {
+                "success": False,
+                "filled": False,
+                "order_id": None,
+                "message": "Failed to place multi-leg limit order"
+            }
+
+        order_id = response["OrderId"]
+        logger.info(f"Multi-leg limit order placed: {order_id}")
+
+        # Poll for fill status
+        start_time = time.time()
+        check_interval = 2
+
+        while (time.time() - start_time) < timeout_seconds:
+            open_orders = self.get_open_orders()
+            order_still_open = any(o.get("OrderId") == order_id for o in open_orders)
+
+            if not order_still_open:
+                elapsed = time.time() - start_time
+                logger.info(f"✓ Multi-leg limit order filled in {elapsed:.1f}s")
+                return {
+                    "success": True,
+                    "filled": True,
+                    "order_id": order_id,
+                    "message": f"Order filled in {elapsed:.1f}s"
+                }
+
+            time.sleep(check_interval)
+
+        # Timeout - cancel
+        elapsed = time.time() - start_time
+        logger.warning(f"⚠ Multi-leg order NOT filled after {elapsed:.1f}s - cancelling")
+        self.cancel_order(order_id)
+
+        return {
+            "success": False,
+            "filled": False,
+            "order_id": order_id,
+            "message": f"TIMEOUT: Order not filled within {timeout_seconds}s. Order cancelled. ALERT: Manual review required."
+        }
 
     # =========================================================================
     # WEBSOCKET STREAMING METHODS (FIXED)

@@ -464,6 +464,7 @@ class DeltaNeutralStrategy:
         # Strategy parameters
         self.recenter_threshold = self.strategy_config["recenter_threshold_points"]
         self.max_vix = self.strategy_config["max_vix_entry"]
+        self.vix_defensive_threshold = self.strategy_config.get("vix_defensive_threshold", 25.0)
         self.min_dte = self.strategy_config["long_straddle_min_dte"]
         self.max_dte = self.strategy_config["long_straddle_max_dte"]
         self.exit_dte_min = self.strategy_config["exit_dte_min"]
@@ -474,12 +475,123 @@ class DeltaNeutralStrategy:
         self.position_size = self.strategy_config["position_size"]
         self.max_spread_percent = self.strategy_config["max_bid_ask_spread_percent"]
         self.roll_days = self.strategy_config["roll_days"]
+        self.order_timeout_seconds = self.strategy_config.get("order_timeout_seconds", 60)
 
         logger.info(f"DeltaNeutralStrategy initialized for {self.underlying_symbol}")
         logger.info(f"Recenter threshold: {self.recenter_threshold} points")
         logger.info(f"VIX entry threshold: < {self.max_vix}")
+        if self.weekly_target_return_pct and self.weekly_target_return_pct > 0:
+            logger.info(f"Target return mode ENABLED: {self.weekly_target_return_pct}% weekly")
+        else:
+            logger.info(f"Using multiplier mode: {self.strangle_multiplier_min}-{self.strangle_multiplier_max}x expected move")
         if self.dry_run:
             logger.warning("DRY RUN MODE - No real orders will be placed")
+        logger.info(f"Slippage protection: {self.order_timeout_seconds}s timeout on limit orders")
+
+    # =========================================================================
+    # SLIPPAGE PROTECTION - ORDER PLACEMENT WITH TIMEOUT
+    # =========================================================================
+
+    def _place_protected_multi_leg_order(
+        self,
+        legs: List[Dict],
+        total_limit_price: float,
+        order_description: str
+    ) -> Dict:
+        """
+        Place a multi-leg order with slippage protection.
+
+        Per strategy spec: "Use Limit Orders only, and if a 'Recenter' or 'Roll'
+        isn't filled within 60 seconds, it should alert rather than chasing the price."
+
+        Args:
+            legs: List of leg dictionaries with uic, asset_type, buy_sell, amount
+            total_limit_price: Limit price for the entire combo
+            order_description: Description for logging (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
+
+        Returns:
+            dict: {
+                "success": bool,
+                "filled": bool,
+                "order_id": str or None,
+                "message": str
+            }
+        """
+        logger.info(f"Placing {order_description} with slippage protection")
+        logger.info(f"  Limit price: ${total_limit_price:.2f}")
+        logger.info(f"  Timeout: {self.order_timeout_seconds}s")
+
+        # In dry_run mode, simulate success
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Simulating {order_description} order (no real order placed)")
+            return {
+                "success": True,
+                "filled": True,
+                "order_id": f"SIMULATED_{int(time.time())}",
+                "message": "[DRY RUN] Order simulated successfully"
+            }
+
+        # Use the slippage-protected order placement
+        result = self.client.place_multi_leg_limit_order_with_timeout(
+            legs=legs,
+            total_limit_price=total_limit_price,
+            timeout_seconds=self.order_timeout_seconds
+        )
+
+        if not result["filled"]:
+            # Order timed out - log alert
+            logger.critical(f"⚠️ SLIPPAGE ALERT: {order_description} NOT FILLED")
+            logger.critical(f"   {result['message']}")
+            logger.critical("   Manual intervention may be required!")
+
+            # Log safety event
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "SLIPPAGE_TIMEOUT",
+                    "severity": "CRITICAL",
+                    "spy_price": self.current_underlying_price,
+                    "initial_strike": self.initial_straddle_strike,
+                    "vix": self.current_vix,
+                    "action_taken": f"{order_description} order cancelled after timeout",
+                    "description": result['message'],
+                    "result": "FAILED"
+                })
+
+        return result
+
+    def _calculate_combo_limit_price(
+        self,
+        legs: List[Dict],
+        buy_sell_direction: str
+    ) -> float:
+        """
+        Calculate appropriate limit price for a multi-leg combo.
+
+        For buying (straddle): Use the ask prices (we pay)
+        For selling (strangle): Use the bid prices (we receive)
+
+        Args:
+            legs: List of leg dictionaries with uic
+            buy_sell_direction: "Buy" or "Sell" for the overall combo
+
+        Returns:
+            float: Total limit price for the combo
+        """
+        total_price = 0.0
+
+        for leg in legs:
+            quote = self.client.get_quote(leg["uic"], "StockOption")
+            if quote:
+                if buy_sell_direction == "Buy":
+                    # Buying: use ask price
+                    price = quote["Quote"].get("Ask", 0)
+                else:
+                    # Selling: use bid price
+                    price = quote["Quote"].get("Bid", 0)
+                total_price += price * 100  # Convert to dollar value
+
+        return total_price
 
     # =========================================================================
     # POSITION RECOVERY METHODS
@@ -1542,7 +1654,7 @@ class DeltaNeutralStrategy:
         call_price = call_quote["Quote"].get("Ask", 0)
         put_price = put_quote["Quote"].get("Ask", 0)
 
-        # Place multi-leg order for the straddle
+        # Place multi-leg order with slippage protection (limit orders + 60s timeout)
         legs = [
             {
                 "uic": call_option["uic"],
@@ -1558,16 +1670,21 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        # In dry_run mode, simulate the order
-        if self.dry_run:
-            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
-            logger.info("[DRY RUN] Simulating long straddle order (no real order placed)")
-        else:
-            order_response = self.client.place_multi_leg_order(legs)
+        # Calculate limit price (sum of ask prices for buying)
+        total_limit_price = (call_price + put_price) * 100 * self.position_size
 
-        if not order_response:
-            logger.error("Failed to place straddle order")
+        # Place order with slippage protection
+        order_result = self._place_protected_multi_leg_order(
+            legs=legs,
+            total_limit_price=total_limit_price,
+            order_description="LONG_STRADDLE_ENTRY"
+        )
+
+        if not order_result["filled"]:
+            logger.error("Failed to place straddle order - slippage protection triggered")
             return False
+
+        order_response = {"OrderId": order_result["order_id"]}
 
         # Create straddle position object
         self.long_straddle = StraddlePosition(
@@ -1710,7 +1827,8 @@ class DeltaNeutralStrategy:
         call_price = call_quote["Quote"].get("Ask", 0)
         put_price = put_quote["Quote"].get("Ask", 0)
 
-        # Place multi-leg order for the straddle
+        # Place multi-leg order with slippage protection (limit orders + 60s timeout)
+        # CRITICAL: Recenter must complete to maintain delta neutrality
         legs = [
             {
                 "uic": call_option["uic"],
@@ -1726,16 +1844,21 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        # In dry_run mode, simulate the order
-        if self.dry_run:
-            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
-            logger.info("[DRY RUN] Simulating long straddle order (no real order placed)")
-        else:
-            order_response = self.client.place_multi_leg_order(legs)
+        # Calculate limit price (sum of ask prices for buying)
+        total_limit_price = (call_price + put_price) * 100 * self.position_size
 
-        if not order_response:
-            logger.error("Failed to place straddle order")
+        # Place order with slippage protection
+        order_result = self._place_protected_multi_leg_order(
+            legs=legs,
+            total_limit_price=total_limit_price,
+            order_description="RECENTER_STRADDLE"
+        )
+
+        if not order_result["filled"]:
+            logger.error("CRITICAL: Failed to place recenter straddle - slippage protection triggered")
             return False
+
+        order_response = {"OrderId": order_result["order_id"]}
 
         # Create straddle position object
         self.long_straddle = StraddlePosition(
@@ -1805,7 +1928,7 @@ class DeltaNeutralStrategy:
 
     def close_long_straddle(self) -> bool:
         """
-        Close the current long straddle position.
+        Close the current long straddle position with slippage protection.
 
         Returns:
             bool: True if closed successfully, False otherwise.
@@ -1816,7 +1939,7 @@ class DeltaNeutralStrategy:
 
         logger.info("Closing long straddle...")
 
-        # Place sell orders for both legs
+        # Place sell orders for both legs with slippage protection
         legs = [
             {
                 "uic": self.long_straddle.call.uic,
@@ -1832,15 +1955,18 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        # In dry_run mode, simulate the order
-        if self.dry_run:
-            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
-            logger.info("[DRY RUN] Simulating close straddle order (no real order placed)")
-        else:
-            order_response = self.client.place_multi_leg_order(legs)
+        # Calculate limit price (sum of bid prices for selling)
+        total_limit_price = self._calculate_combo_limit_price(legs, "Sell")
 
-        if not order_response:
-            logger.error("Failed to close straddle")
+        # Place order with slippage protection
+        order_result = self._place_protected_multi_leg_order(
+            legs=legs,
+            total_limit_price=total_limit_price,
+            order_description="CLOSE_LONG_STRADDLE"
+        )
+
+        if not order_result["filled"]:
+            logger.error("Failed to close straddle - slippage protection triggered")
             return False
 
         # Calculate realized P&L
@@ -1898,17 +2024,44 @@ class DeltaNeutralStrategy:
     # SHORT STRANGLE METHODS
     # =========================================================================
 
-    def enter_short_strangle(self) -> bool:
+    def enter_short_strangle(self, for_roll: bool = False) -> bool:
         """
         Enter a weekly short strangle for income generation.
 
         If weekly_target_return_percent is configured, finds strikes that meet
         the target return. Otherwise uses multiplier on expected move.
 
+        Args:
+            for_roll: If True, this is for rolling shorts (look for next week's expiry).
+                     If False, this is initial entry (look for current week's expiry).
+
         Returns:
             bool: True if strangle entered successfully, False otherwise.
         """
         logger.info("Attempting to enter short strangle...")
+
+        # CRITICAL: VIX Defensive Mode Check
+        # Per strategy spec: "If the VIX spikes to 25 while a trade is open, the bot
+        # should be in Defensive Mode (stop selling new shorts)"
+        if self.current_vix and self.current_vix >= self.vix_defensive_threshold:
+            logger.warning(f"⚠️ VIX DEFENSIVE MODE ACTIVE - VIX at {self.current_vix:.2f} >= {self.vix_defensive_threshold}")
+            logger.warning("Refusing to sell new shorts - focus on managing existing positions")
+
+            # Log safety event
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "VIX_DEFENSIVE_MODE",
+                    "severity": "WARNING",
+                    "spy_price": self.current_underlying_price,
+                    "initial_strike": self.initial_straddle_strike,
+                    "vix": self.current_vix,
+                    "action_taken": "Blocked new short strangle entry - VIX too high",
+                    "description": f"VIX {self.current_vix:.2f} >= defensive threshold {self.vix_defensive_threshold}",
+                    "result": "BLOCKED"
+                })
+
+            return False
 
         if not self.current_underlying_price:
             if not self.update_market_data():
@@ -1916,16 +2069,19 @@ class DeltaNeutralStrategy:
 
         # Check if we should use target return approach
         if self.weekly_target_return_pct and self.weekly_target_return_pct > 0:
-            return self._enter_strangle_by_target_return()
+            return self._enter_strangle_by_target_return(for_roll=for_roll)
 
         # Otherwise use the multiplier approach
-        return self._enter_strangle_by_multiplier()
+        return self._enter_strangle_by_multiplier(for_roll=for_roll)
 
-    def _enter_strangle_by_target_return(self) -> bool:
+    def _enter_strangle_by_target_return(self, for_roll: bool = False) -> bool:
         """
         Enter strangle based on target weekly return percentage.
 
         Calculates required premium and finds furthest OTM strikes that meet it.
+
+        Args:
+            for_roll: If True, look for next week's expiry (rolling shorts).
         """
         logger.info("=" * 60)
         logger.info(f"TARGET RETURN MODE: Seeking {self.weekly_target_return_pct}% weekly return")
@@ -1945,7 +2101,8 @@ class DeltaNeutralStrategy:
             self.underlying_uic,
             self.current_underlying_price,
             target_premium,
-            weekly=True
+            weekly=True,
+            for_roll=for_roll
         )
 
         if not strangle_options:
@@ -1977,11 +2134,14 @@ class DeltaNeutralStrategy:
         # Continue with order placement (same as multiplier approach)
         return self._execute_strangle_order(call_option, put_option, call_price, put_price)
 
-    def _enter_strangle_by_multiplier(self) -> bool:
+    def _enter_strangle_by_multiplier(self, for_roll: bool = False) -> bool:
         """
         Enter strangle using expected move multiplier approach.
 
         This is the original approach: calculate expected move from VIX and apply multiplier.
+
+        Args:
+            for_roll: If True, look for next week's expiry (rolling shorts).
         """
         logger.info("Using expected move multiplier approach")
 
@@ -1991,16 +2151,22 @@ class DeltaNeutralStrategy:
             logger.error("Failed to get option expirations")
             return False
 
-        # Find actual DTE for weekly options (nearest Friday within 7 days)
+        # Find actual DTE for weekly options
+        # When rolling: look for next week (5-12 DTE)
+        # When entering fresh: look for current week (0-7 DTE)
         from datetime import datetime
         today = datetime.now().date()
         weekly_dte = 7  # Default fallback
+
+        dte_min = 5 if for_roll else 0
+        dte_max = 12 if for_roll else 7
+
         for exp_data in expirations:
             exp_date_str = exp_data.get("Expiry")
             if exp_date_str:
                 exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
                 dte = (exp_date - today).days
-                if 0 < dte <= 7:
+                if dte_min < dte <= dte_max:
                     weekly_dte = dte
                     logger.info(f"Found weekly expiration with {dte} DTE")
                     break
@@ -2025,7 +2191,8 @@ class DeltaNeutralStrategy:
             self.current_underlying_price,
             expected_move,
             multiplier,
-            weekly=True
+            weekly=True,
+            for_roll=for_roll
         )
 
         if not strangle_options:
@@ -2072,10 +2239,11 @@ class DeltaNeutralStrategy:
         put_price: float
     ) -> bool:
         """
-        Execute the strangle order (shared by both target return and multiplier approaches).
+        Execute the strangle order with slippage protection.
+        Shared by both target return and multiplier approaches.
         """
 
-        # Place sell orders for strangle
+        # Place sell orders for strangle with slippage protection
         legs = [
             {
                 "uic": call_option["uic"],
@@ -2091,16 +2259,21 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        # In dry_run mode, simulate the order
-        if self.dry_run:
-            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
-            logger.info("[DRY RUN] Simulating short strangle order (no real order placed)")
-        else:
-            order_response = self.client.place_multi_leg_order(legs)
+        # Calculate limit price (sum of bid prices for selling)
+        total_limit_price = (call_price + put_price) * 100 * self.position_size
 
-        if not order_response:
-            logger.error("Failed to place strangle order")
+        # Place order with slippage protection
+        order_result = self._place_protected_multi_leg_order(
+            legs=legs,
+            total_limit_price=total_limit_price,
+            order_description="SHORT_STRANGLE_ENTRY"
+        )
+
+        if not order_result["filled"]:
+            logger.error("Failed to place strangle order - slippage protection triggered")
             return False
+
+        order_response = {"OrderId": order_result["order_id"]}
 
         # Create strangle position object
         self.short_strangle = StranglePosition(
@@ -2216,7 +2389,7 @@ class DeltaNeutralStrategy:
 
     def close_short_strangle(self) -> bool:
         """
-        Close the current short strangle position.
+        Close the current short strangle position with slippage protection.
 
         Returns:
             bool: True if closed successfully, False otherwise.
@@ -2227,7 +2400,7 @@ class DeltaNeutralStrategy:
 
         logger.info("Closing short strangle...")
 
-        # Place buy orders to close
+        # Place buy orders to close with slippage protection
         legs = [
             {
                 "uic": self.short_strangle.call.uic,
@@ -2243,15 +2416,18 @@ class DeltaNeutralStrategy:
             }
         ]
 
-        # In dry_run mode, simulate the order
-        if self.dry_run:
-            order_response = {"OrderId": f"SIMULATED_{int(time.time())}"}
-            logger.info("[DRY RUN] Simulating close strangle order (no real order placed)")
-        else:
-            order_response = self.client.place_multi_leg_order(legs)
+        # Calculate limit price (sum of ask prices for buying back)
+        total_limit_price = self._calculate_combo_limit_price(legs, "Buy")
 
-        if not order_response:
-            logger.error("Failed to close strangle")
+        # Place order with slippage protection
+        order_result = self._place_protected_multi_leg_order(
+            legs=legs,
+            total_limit_price=total_limit_price,
+            order_description="CLOSE_SHORT_STRANGLE"
+        )
+
+        if not order_result["filled"]:
+            logger.error("Failed to close strangle - slippage protection triggered")
             return False
 
         # Calculate P&L
@@ -2457,33 +2633,48 @@ class DeltaNeutralStrategy:
             tuple: (should_roll: bool, challenged_side: str or None)
                    challenged_side is "call", "put", or None for scheduled roll
         """
-        # Check if it's a roll day
-        today = datetime.now().strftime("%A")
-        is_roll_day = today in self.roll_days
+        # Check if it's time to roll shorts
+        # Per spec: "Thursday 15:00 EST or Friday 10:00 EST"
+        now = datetime.now()
+        today = now.strftime("%A")
+        current_hour = now.hour
 
-        if is_roll_day:
-            logger.info(f"Today is {today} - roll day for weekly shorts")
+        is_roll_time = False
+
+        if today == "Thursday" and current_hour >= 15:
+            is_roll_time = True
+            logger.info(f"Thursday 3PM+ - scheduled roll time for weekly shorts")
+        elif today == "Friday" and current_hour >= 10:
+            is_roll_time = True
+            logger.info(f"Friday 10AM+ - scheduled roll time for weekly shorts")
+
+        if is_roll_time:
             return (True, None)  # Scheduled roll, no specific challenge
 
-        # Check if shorts are being challenged (price within 50% of strike distance)
+        # Check if shorts are being challenged
+        # Per spec: "within 0.5% of Short_Call_Strike or Short_Put_Strike"
         if self.short_strangle and self.current_underlying_price:
             call_strike = self.short_strangle.call_strike
             put_strike = self.short_strangle.put_strike
+            price = self.current_underlying_price
+
+            # Calculate 0.5% threshold for each strike
+            call_threshold = call_strike * 0.005  # 0.5% of call strike
+            put_threshold = put_strike * 0.005    # 0.5% of put strike
 
             # Distance from current price to strikes
-            call_distance = call_strike - self.current_underlying_price
-            put_distance = self.current_underlying_price - put_strike
+            call_distance = call_strike - price
+            put_distance = price - put_strike
 
-            # If price is within 50% of the distance to either strike, roll early
-            original_call_distance = call_strike - self.initial_straddle_strike
-            original_put_distance = self.initial_straddle_strike - put_strike
-
-            if call_distance < original_call_distance * 0.5:
-                logger.warning(f"Short call being challenged! Price ${self.current_underlying_price:.2f} approaching ${call_strike}")
+            # If price is within 0.5% of either strike, roll early
+            if call_distance <= call_threshold:
+                pct_from_strike = (call_distance / call_strike) * 100
+                logger.warning(f"Short call CHALLENGED! Price ${price:.2f} within {pct_from_strike:.2f}% of call strike ${call_strike:.2f}")
                 return (True, "call")
 
-            if put_distance < original_put_distance * 0.5:
-                logger.warning(f"Short put being challenged! Price ${self.current_underlying_price:.2f} approaching ${put_strike}")
+            if put_distance <= put_threshold:
+                pct_from_strike = (put_distance / put_strike) * 100
+                logger.warning(f"Short put CHALLENGED! Price ${price:.2f} within {pct_from_strike:.2f}% of put strike ${put_strike:.2f}")
                 return (True, "put")
 
         return (False, None)
@@ -2521,20 +2712,65 @@ class DeltaNeutralStrategy:
 
         self.state = StrategyState.ROLLING_SHORTS
 
-        # Close current shorts and capture P&L
+        # CRITICAL: Per spec "The roll must result in a Net Credit. Never roll for a debit"
+        # Step 1: Calculate cost to close current shorts
+        old_close_cost = 0.0
         if self.short_strangle:
-            # Get current value before closing
             old_premium = self.short_strangle.premium_collected
+
+            # Get current market prices for the shorts
+            call_quote = self.client.get_quote(self.short_strangle.call.uic, "StockOption")
+            put_quote = self.client.get_quote(self.short_strangle.put.uic, "StockOption")
+
+            if call_quote and put_quote:
+                call_ask = call_quote["Quote"].get("Ask", 0)
+                put_ask = put_quote["Quote"].get("Ask", 0)
+                old_close_cost = (call_ask + put_ask) * 100 * self.position_size
+                logger.info(f"Cost to close current shorts: ${old_close_cost:.2f}")
+            else:
+                logger.warning("Could not get quotes for current shorts - proceeding with roll")
+
+        # Step 2: Get quotes for new shorts BEFORE closing current ones
+        # This allows us to verify we'll get a net credit
+        logger.info("Fetching quotes for new shorts to verify net credit...")
+
+        # Temporarily enter new strangle to get quotes (without actually placing orders)
+        # We'll use the dry_run logic to simulate this
+        old_dry_run_state = self.dry_run
+        self.dry_run = True  # Temporarily enable dry run to get quotes only
+
+        new_shorts_success = self.enter_short_strangle(for_roll=True)
+        new_premium = self.short_strangle.premium_collected if self.short_strangle and new_shorts_success else 0
+
+        self.dry_run = old_dry_run_state  # Restore original dry run state
+
+        # Step 3: Calculate net credit
+        net_credit = new_premium - old_close_cost
+
+        logger.info(f"Roll P&L calculation:")
+        logger.info(f"  New premium: ${new_premium:.2f}")
+        logger.info(f"  Close cost: ${old_close_cost:.2f}")
+        logger.info(f"  Net credit: ${net_credit:.2f}")
+
+        # Step 4: Verify net credit constraint
+        if net_credit <= 0:
+            logger.critical(f"ROLL REJECTED: Net credit ${net_credit:.2f} is not positive (would be a debit)")
+            logger.critical("Per strategy spec: 'Never roll for a debit' - must close entire position")
+            self.state = StrategyState.FULL_POSITION
+            return False
+
+        logger.info(f"✓ Roll will result in net credit of ${net_credit:.2f} - proceeding")
+
+        # Step 5: Now actually close current shorts
+        if self.short_strangle:
             if not self.close_short_strangle():
                 logger.error("Failed to close shorts for rolling")
                 return False
 
-        # Enter new shorts for next week
-        # The enter_short_strangle() method uses CURRENT price to calculate strikes
-        # This naturally implements the "roll both sides" strategy:
-        # - Challenged side: moves further from current price
-        # - Unchallenged side: moves closer to current price (more credit)
-        if not self.enter_short_strangle():
+        # Step 6: Enter new shorts for next week (for real this time)
+        # CRITICAL: Pass for_roll=True to look for NEXT week's expiry (5-12 DTE)
+        # Per Brian Terry's strategy: "roll the date out one week"
+        if not self.enter_short_strangle(for_roll=True):
             logger.error("Failed to enter new shorts after rolling")
             return False
 
@@ -2584,7 +2820,7 @@ class DeltaNeutralStrategy:
         """
         Check if the entire trade should be exited.
 
-        Exit when 30-60 DTE remains on the long straddle.
+        Per spec: "If Long Straddle DTE < 60 days, close the entire position"
 
         Returns:
             bool: True if should exit, False otherwise.
@@ -2600,10 +2836,10 @@ class DeltaNeutralStrategy:
         expiry_date = datetime.strptime(expiry_str[:10], "%Y-%m-%d").date()
         dte = (expiry_date - datetime.now().date()).days
 
-        if self.exit_dte_min <= dte <= self.exit_dte_max:
+        # Exit when DTE drops below 60 days
+        if dte < 60:
             logger.info(
-                f"EXIT CONDITION MET: {dte} DTE on long straddle "
-                f"(threshold: {self.exit_dte_min}-{self.exit_dte_max} DTE)"
+                f"EXIT CONDITION MET: {dte} DTE on long straddle (threshold: < 60 DTE)"
             )
             return True
 
@@ -2845,9 +3081,15 @@ class DeltaNeutralStrategy:
                 action_taken = "VIX condition met, ready to enter"
 
         elif self.state == StrategyState.LONG_STRADDLE_ACTIVE:
-            # Try to add short strangle
-            if self.enter_short_strangle():
-                action_taken = "Added short strangle"
+            # CRITICAL: Check recenter FIRST before adding shorts
+            # Per strategy spec: "recenter_longs function always executes before checking for new short entry"
+            if self._check_recenter_condition():
+                if self.execute_recenter():
+                    action_taken = "Executed 5-point recenter (before adding shorts)"
+            else:
+                # Only try to add short strangle if no recenter needed
+                if self.enter_short_strangle():
+                    action_taken = "Added short strangle"
 
         elif self.state == StrategyState.FULL_POSITION:
             # Check exit condition first
@@ -2869,6 +3111,34 @@ class DeltaNeutralStrategy:
                             action_taken = f"Rolled weekly shorts ({challenged_side} challenged)"
                         else:
                             action_taken = "Rolled weekly shorts (scheduled)"
+                    else:
+                        # CRITICAL: Roll failed (likely due to debit or spread issues)
+                        # Per strategy spec: "If transaction_cost > premium_received,
+                        # signal a HARD_EXIT rather than digging a deeper hole"
+                        logger.critical("=" * 60)
+                        logger.critical("ROLL FAILED - Cannot roll for credit")
+                        logger.critical("Per strategy: HARD EXIT - closing entire position")
+                        logger.critical("=" * 60)
+
+                        if self.exit_all_positions():
+                            action_taken = "HARD EXIT - Roll failed (debit or no fill)"
+
+                            # Log safety event
+                            if self.trade_logger:
+                                self.trade_logger.log_safety_event({
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "event_type": "HARD_EXIT_ROLL_FAILED",
+                                    "severity": "CRITICAL",
+                                    "spy_price": self.current_underlying_price,
+                                    "initial_strike": self.initial_straddle_strike,
+                                    "vix": self.current_vix,
+                                    "action_taken": "Exited all positions - roll could not be done for credit",
+                                    "description": f"Challenged side: {challenged_side or 'scheduled'}. Position closed to prevent losses.",
+                                    "result": "HARD_EXIT"
+                                })
+                        else:
+                            action_taken = "CRITICAL: Roll failed AND exit failed - MANUAL INTERVENTION REQUIRED"
+                            logger.critical("⚠️ MANUAL INTERVENTION REQUIRED - Could not exit positions!")
 
         logger.info(f"Strategy check: {action_taken} | State: {self.state.value}")
 
