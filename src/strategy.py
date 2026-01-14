@@ -184,12 +184,13 @@ class StranglePosition:
 
     @property
     def days_to_expiry(self) -> int:
-        """Calculate days until expiration."""
+        """Calculate calendar days until expiration (not time-based)."""
         if not self.expiry:
             return 0
         try:
-            expiry_date = datetime.strptime(self.expiry, "%Y-%m-%d")
-            return max(0, (expiry_date - datetime.now()).days)
+            expiry_date = datetime.strptime(self.expiry, "%Y-%m-%d").date()
+            today = datetime.now().date()
+            return max(0, (expiry_date - today).days)
         except ValueError:
             return 0
 
@@ -1241,6 +1242,10 @@ class DeltaNeutralStrategy:
 
                 total_pnl += pnl
                 short_strangle_count += 1
+
+                # Record this trade in metrics for win rate, trade count, best/worst tracking
+                self.metrics.record_trade(pnl)
+
                 logger.info(f"Historical short strangle: {description[:40]}, Open: {trade_open_date}, Close: {close_date}, P&L: ${pnl:.2f}")
 
             except Exception as e:
@@ -3423,7 +3428,8 @@ class DeltaNeutralStrategy:
         if not self.trade_logger:
             return False
 
-        greeks = self.get_total_greeks()
+        # Use get_current_metrics() which calculates theta_cost correctly (scaled by 100 × qty)
+        metrics = self.get_current_metrics()
 
         # Calculate daily P&L
         daily_pnl = self.metrics.total_pnl - self.metrics.daily_pnl_start
@@ -3437,14 +3443,15 @@ class DeltaNeutralStrategy:
             "spy_range": self.metrics.spy_range,
             "vix_avg": self.metrics.vix_avg,
             "vix_high": self.metrics.vix_high,
-            "total_delta": greeks["delta"],
-            "total_gamma": greeks["gamma"],
-            "total_theta": greeks["theta"],
+            "total_delta": metrics.get("total_delta", 0),
+            "total_gamma": metrics.get("total_gamma", 0),
+            "total_theta": metrics.get("net_theta", 0),  # Use scaled net theta
+            "theta_cost": metrics.get("theta_cost", 0),  # Scaled theta cost from longs
             "daily_pnl": daily_pnl,
             "realized_pnl": self.metrics.realized_pnl,
             "unrealized_pnl": self.metrics.unrealized_pnl,
             "premium_collected": self.metrics.total_premium_collected,
-            "trades_count": 0,  # Could track if needed
+            "trades_count": self.metrics.trade_count,  # Use actual trade count
             "recenter_count": self.metrics.recenter_count,
             "roll_count": self.metrics.roll_count,
             "cumulative_pnl": self.metrics.total_pnl,
@@ -3466,7 +3473,7 @@ class DeltaNeutralStrategy:
 
         # Log to Google Sheets
         self.trade_logger.log_daily_summary(summary)
-        logger.info(f"Daily summary logged: P&L ${daily_pnl:.2f}, Theta ${greeks['theta']:.2f}")
+        logger.info(f"Daily summary logged: P&L ${daily_pnl:.2f}, Net Theta ${metrics.get('net_theta', 0):.2f}")
 
         return True
 
