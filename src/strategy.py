@@ -996,12 +996,12 @@ class DeltaNeutralStrategy:
                     vega=put_data.get("vega", 0)
                 )
 
-                # Estimate entry date: weekly strangles opened on Friday (~6 days before Friday expiry)
-                # For recovery, calculate entry_date as (expiry - 6 days) or today if that's in the future
+                # Estimate entry date: weekly strangles opened on Friday (7 days before Friday expiry)
+                # For recovery, calculate entry_date as (expiry - 7 days) or today if that's in the future
                 entry_date = datetime.now().strftime("%Y-%m-%d")
                 try:
                     expiry_date = datetime.strptime(expiry, "%Y-%m-%d")
-                    estimated_entry = expiry_date - timedelta(days=6)
+                    estimated_entry = expiry_date - timedelta(days=7)  # Previous Friday
                     if estimated_entry <= datetime.now():
                         entry_date = estimated_entry.strftime("%Y-%m-%d")
                 except ValueError:
