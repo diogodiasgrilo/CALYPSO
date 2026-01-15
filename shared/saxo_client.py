@@ -1956,7 +1956,8 @@ class SaxoClient:
                 "Uic": leg["uic"],
                 "AssetType": leg["asset_type"],
                 "BuySell": leg["buy_sell"],
-                "Amount": leg["amount"]
+                "Amount": leg["amount"],
+                "ManualOrder": True  # Required for live trading
             }
             order_data["Orders"].append(leg_order)
 
@@ -2196,7 +2197,8 @@ class SaxoClient:
                 "Uic": leg["uic"],
                 "AssetType": leg["asset_type"],
                 "BuySell": leg["buy_sell"],
-                "Amount": leg["amount"]
+                "Amount": leg["amount"],
+                "ManualOrder": True  # Required for live trading
             }
             order_data["Orders"].append(leg_order)
 
