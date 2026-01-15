@@ -195,6 +195,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
 
     last_status_time = datetime.now()
     status_interval = 60  # Log status every minute (more frequent for 0DTE)
+    last_bot_log_time = datetime.now()
+    bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour (3600 seconds)
     last_day = datetime.now().date()
 
     try:
@@ -249,7 +251,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     else:
                         trade_logger.log_event(action)
 
-                # Periodic status logging and Google Sheets updates
+                # Periodic status logging (every 60 seconds to terminal/file logs)
                 now = datetime.now()
                 if (now - last_status_time).total_seconds() >= status_interval:
                     status = strategy.get_status_summary()
@@ -262,16 +264,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     )
                     trade_logger.log_event(heartbeat_msg)
 
-                    # Log to Bot Logs worksheet
-                    trade_logger.log_bot_activity(
-                        level="INFO",
-                        component="IronFlyStrategy",
-                        message=f"State: {status['state']}, Trades: {status['trades_today']}, P&L: ${status['daily_pnl']:.2f}",
-                        spy_price=status['underlying_price'],
-                        vix=status['vix']
-                    )
-
-                    # Log Account Summary periodically
+                    # Log Account Summary periodically (every 60s for real-time dashboard)
                     strategy.log_account_summary()
 
                     # Log position if one is open
@@ -282,6 +275,18 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     strategy.log_performance_metrics()
 
                     last_status_time = now
+
+                # Hourly Bot Logs to Google Sheets (avoid flooding with hundreds of rows)
+                if (now - last_bot_log_time).total_seconds() >= bot_log_interval:
+                    status = strategy.get_status_summary()
+                    trade_logger.log_bot_activity(
+                        level="INFO",
+                        component="IronFlyStrategy",
+                        message=f"Hourly update: State={status['state']}, Trades={status['trades_today']}, P&L=${status['daily_pnl']:.2f}",
+                        spy_price=status['underlying_price'],
+                        vix=status['vix']
+                    )
+                    last_bot_log_time = now
 
                 # Sleep until next check (shorter for 0DTE - need fast reaction)
                 if not interruptible_sleep(check_interval):

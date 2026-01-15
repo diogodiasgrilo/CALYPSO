@@ -433,6 +433,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     trading_day_started = False  # Track if we've started tracking for today
     last_dashboard_log_time = datetime.now()
     dashboard_log_interval = 900  # Log dashboard metrics every 15 minutes
+    last_bot_log_time = datetime.now()
+    bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour (3600 seconds)
 
     try:
         while not shutdown_requested:
@@ -574,19 +576,25 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                         if positions:
                             trade_logger.log_position_snapshot(positions)
 
-                        # Log bot activity for live dashboard
+                        last_dashboard_log_time = now
+                    except Exception as e:
+                        trade_logger.log_error(f"Dashboard logging error: {e}")
+
+                # Hourly Bot Logs to Google Sheets (avoid flooding with hundreds of rows)
+                if (now - last_bot_log_time).total_seconds() >= bot_log_interval:
+                    try:
+                        dashboard_metrics = strategy.get_dashboard_metrics()
                         trade_logger.log_bot_activity(
                             level="INFO",
                             component="Strategy",
-                            message=f"Periodic update: Delta={dashboard_metrics['total_delta']:.4f}, P&L=${dashboard_metrics['total_pnl']:.2f}",
+                            message=f"Hourly update: Delta={dashboard_metrics['total_delta']:.4f}, P&L=${dashboard_metrics['total_pnl']:.2f}",
                             spy_price=dashboard_metrics['spy_price'],
                             vix=dashboard_metrics['vix'],
                             flush=True
                         )
-
-                        last_dashboard_log_time = now
+                        last_bot_log_time = now
                     except Exception as e:
-                        trade_logger.log_error(f"Dashboard logging error: {e}")
+                        trade_logger.log_error(f"Hourly bot log error: {e}")
 
                 # Log bot heartbeat - this is the last message before sleeping
                 # Shows bot is alive and what state it's in
