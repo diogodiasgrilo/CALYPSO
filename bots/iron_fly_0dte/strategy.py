@@ -659,10 +659,23 @@ class IronFlyStrategy:
                     self.current_price = quote.get('Quote', {}).get('Mid', self.current_price)
 
             # Get VIX (StockIndex type)
+            # VIX doesn't have Bid/Ask/Mid - use PriceInfo.High or calculate from High+Low
             if self.vix_uic:
                 vix_quote = self.client.get_quote(self.vix_uic, asset_type="StockIndex")
                 if vix_quote:
-                    self.current_vix = vix_quote.get('Quote', {}).get('Mid', self.current_vix)
+                    # First try Quote.Mid (for tradeable indices)
+                    mid = vix_quote.get('Quote', {}).get('Mid')
+                    if mid and mid > 0:
+                        self.current_vix = mid
+                    else:
+                        # Fall back to PriceInfo for non-tradeable indices like VIX
+                        price_info = vix_quote.get('PriceInfo', {})
+                        high = price_info.get('High', 0)
+                        low = price_info.get('Low', 0)
+                        if high > 0 and low > 0:
+                            # Use midpoint of day's range as proxy
+                            self.current_vix = (high + low) / 2
+                            logger.debug(f"VIX from PriceInfo: High={high}, Low={low}, Using={self.current_vix}")
         except Exception as e:
             logger.warning(f"Error updating market data: {e}")
 
