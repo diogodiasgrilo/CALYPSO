@@ -2154,24 +2154,36 @@ class DeltaNeutralStrategy:
             logger.error("Failed to get option expirations")
             return False
 
-        # Find the weekly expiration
+        # Find the next Friday expiration
+        # ALWAYS use next Friday - short strangles must have 7+ DTE
+        # This ensures we never enter short-dated positions that could get
+        # exercised before we can roll them
         today = datetime.now().date()
-        dte_min = 5 if for_roll else 0
-        dte_max = 12 if for_roll else 7
         weekly_exp = None
 
+        # Collect all Friday expirations with 7+ DTE
+        friday_candidates = []
         for exp_data in expirations:
             exp_date_str = exp_data.get("Expiry", "")[:10]
             if exp_date_str:
                 exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
                 dte = (exp_date - today).days
-                if dte_min < dte <= dte_max:
-                    weekly_exp = exp_data
-                    logger.info(f"Weekly Expiry: {exp_date_str} ({dte} DTE)")
-                    break
 
-        if not weekly_exp:
-            logger.error("Could not find weekly expiration")
+                # Check if this is a Friday (weekday() == 4)
+                if exp_date.weekday() != 4:
+                    continue
+
+                # Always use next Friday (7+ days out)
+                if dte >= 7:
+                    friday_candidates.append((dte, exp_date_str, exp_data))
+
+        # Sort by DTE to get the nearest Friday
+        if friday_candidates:
+            friday_candidates.sort(key=lambda x: x[0])
+            weekly_dte, weekly_expiry, weekly_exp = friday_candidates[0]
+            logger.info(f"Next Friday Expiry: {weekly_expiry} ({weekly_dte} DTE)")
+        else:
+            logger.error("Could not find next Friday expiration (7+ DTE)")
             return False
 
         # Collect all OTM options with their premiums
@@ -2227,172 +2239,239 @@ class DeltaNeutralStrategy:
         logger.info(f"Found {len(calls)} OTM calls, {len(puts)} OTM puts")
 
         # =====================================================================
-        # STEP 4: Find all combinations meeting minimum target
+        # STEP 4: Find optimal strikes with fallback logic
         # =====================================================================
-        combinations = []
-
-        for c in calls:
-            for p in puts:
-                gross = c["premium"] + p["premium"]
-                if gross < required_gross:
-                    continue  # Doesn't meet minimum target
-
-                net = gross - weekly_theta_cost - total_entry_fees
-                net_return = (net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
-                avg_mult = (c["mult"] + p["mult"]) / 2
-
-                combinations.append({
-                    "call": c,
-                    "put": p,
-                    "gross": gross,
-                    "net": net,
-                    "return": net_return,
-                    "avg_mult": avg_mult
-                })
-
-        if not combinations:
-            logger.error(f"No strike combinations meet the ${required_gross:.2f} gross requirement")
-            logger.warning(f"Consider lowering weekly_target_return_percent from {self.weekly_target_return_pct}%")
-            return False
-
-        # Sort by average multiplier (widest = safest first)
-        combinations.sort(key=lambda x: x["avg_mult"], reverse=True)
-
-        logger.info(f"Found {len(combinations)} combinations meeting target")
-
+        # Strategy:
+        # 1. Start at 1.0x minimum multiplier
+        # 2. Find combinations, apply 1.5x cap, optimize for safety
+        # 3. If no valid options found, progressively reduce minimum multiplier
+        # 4. Track which strikes were capped so we can reverse if needed
         # =====================================================================
-        # STEP 5: Apply 1.5x Expected Move Cap
-        # =====================================================================
-        max_mult = self.short_strangle_max_multiplier
 
-        # Start with the widest combination
-        best = combinations[0]
-        final_call = best["call"]
-        final_put = best["put"]
-
-        logger.info("-" * 60)
-        logger.info(f"Initial widest: Put ${final_put['strike']:.0f} ({final_put['mult']:.2f}x) / Call ${final_call['strike']:.0f} ({final_call['mult']:.2f}x)")
-
-        # Cap call if > max multiplier
-        if final_call["mult"] > max_mult:
-            call_at_cap = round(self.current_underlying_price + (expected_move * max_mult))
-            logger.info(f"Call at {final_call['mult']:.2f}x > {max_mult}x cap, pulling to ~${call_at_cap}")
-
-            # Find the closest available call at or below the cap
-            for c in calls:
-                if c["mult"] <= max_mult:
-                    final_call = c
-                    break
-
-        # Cap put if > max multiplier
-        if final_put["mult"] > max_mult:
-            put_at_cap = round(self.current_underlying_price - (expected_move * max_mult))
-            logger.info(f"Put at {final_put['mult']:.2f}x > {max_mult}x cap, pulling to ~${put_at_cap}")
-
-            # Find the closest available put at or below the cap
-            for p in puts:
-                if p["mult"] <= max_mult:
-                    final_put = p
-                    break
-
-        # =====================================================================
-        # STEP 6: Optimize - Push tighter strike OUT while staying >= 1% NET
-        # =====================================================================
-        current_gross = final_call["premium"] + final_put["premium"]
-        current_net = current_gross - weekly_theta_cost - total_entry_fees
-        current_return = (current_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
-
+        max_mult = self.short_strangle_max_multiplier  # 1.5x cap
         min_target_return = self.weekly_target_return_pct
 
-        if current_return > min_target_return:
-            logger.info(f"Current return {current_return:.2f}% > {min_target_return}% target, optimizing for safety...")
+        # Try progressively lower minimum multipliers until we find valid options
+        MIN_MULT_ATTEMPTS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
 
-            # Find which leg is tighter (lower multiplier = more risk)
-            if final_call["mult"] < final_put["mult"]:
-                tighter_side = "call"
-                logger.info(f"Call is tighter ({final_call['mult']:.2f}x vs put {final_put['mult']:.2f}x)")
-            else:
-                tighter_side = "put"
-                logger.info(f"Put is tighter ({final_put['mult']:.2f}x vs call {final_call['mult']:.2f}x)")
+        final_call = None
+        final_put = None
 
-            # Try pushing the tighter leg out until we hit target or max multiplier
-            if tighter_side == "put":
+        for min_mult_threshold in MIN_MULT_ATTEMPTS:
+            logger.info(f"Trying with MIN_MULTIPLIER = {min_mult_threshold}x...")
+
+            # Find all combinations meeting minimum requirements
+            combinations = []
+            for c in calls:
                 for p in puts:
-                    if p["mult"] > max_mult:
-                        continue  # Don't go past cap
-                    if p["strike"] >= final_put["strike"]:
-                        continue  # Only consider wider strikes
-
-                    test_gross = final_call["premium"] + p["premium"]
-                    test_net = test_gross - weekly_theta_cost - total_entry_fees
-                    test_return = (test_net / long_straddle_cost) * 100
-
-                    if test_return >= min_target_return:
-                        final_put = p
-                        logger.debug(f"  Put ${p['strike']:.0f} ({p['mult']:.2f}x): {test_return:.2f}% - OK")
-                    else:
-                        break
-
-            else:  # tighter_side == "call"
-                for c in calls:
-                    if c["mult"] > max_mult:
-                        continue
-                    if c["strike"] <= final_call["strike"]:
+                    if c["mult"] < min_mult_threshold or p["mult"] < min_mult_threshold:
                         continue
 
-                    test_gross = c["premium"] + final_put["premium"]
-                    test_net = test_gross - weekly_theta_cost - total_entry_fees
-                    test_return = (test_net / long_straddle_cost) * 100
+                    gross = c["premium"] + p["premium"]
+                    if gross < required_gross:
+                        continue
 
-                    if test_return >= min_target_return:
-                        final_call = c
-                        logger.debug(f"  Call ${c['strike']:.0f} ({c['mult']:.2f}x): {test_return:.2f}% - OK")
-                    else:
+                    net = gross - weekly_theta_cost - total_entry_fees
+                    net_return = (net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+                    min_mult = min(c["mult"], p["mult"])
+
+                    combinations.append({
+                        "call": c,
+                        "put": p,
+                        "gross": gross,
+                        "net": net,
+                        "return": net_return,
+                        "min_mult": min_mult
+                    })
+
+            if not combinations:
+                logger.info(f"  No combinations at {min_mult_threshold}x minimum")
+                continue
+
+            # Sort by minimum multiplier (widest/safest first)
+            combinations.sort(key=lambda x: x["min_mult"], reverse=True)
+            logger.info(f"  Found {len(combinations)} combinations")
+
+            # Start with the widest combination
+            best = combinations[0]
+            working_call = best["call"]
+            working_put = best["put"]
+
+            # Track original strikes before any capping
+            original_call = working_call
+            original_put = working_put
+            call_was_capped = False
+            put_was_capped = False
+
+            logger.info(f"  Widest: Put ${working_put['strike']:.0f} ({working_put['mult']:.2f}x) / Call ${working_call['strike']:.0f} ({working_call['mult']:.2f}x)")
+
+            # Apply 1.5x cap - track which sides were capped
+            # We want the option CLOSEST to 1.5x (but not over), so iterate from furthest to closest
+            if working_call["mult"] > max_mult:
+                call_was_capped = True
+                # Calls are sorted ascending (closest first), so reverse to check furthest first
+                for c in reversed(calls):
+                    if c["mult"] <= max_mult:
+                        working_call = c
+                        logger.info(f"  Call capped: ${original_call['strike']:.0f} ({original_call['mult']:.2f}x) -> ${working_call['strike']:.0f} ({working_call['mult']:.2f}x)")
                         break
 
-            # Try pushing the OTHER leg too if still above target
-            current_gross = final_call["premium"] + final_put["premium"]
+            if working_put["mult"] > max_mult:
+                put_was_capped = True
+                # Puts are sorted descending (closest first), so reverse to check furthest first
+                for p in reversed(puts):
+                    if p["mult"] <= max_mult:
+                        working_put = p
+                        logger.info(f"  Put capped: ${original_put['strike']:.0f} ({original_put['mult']:.2f}x) -> ${working_put['strike']:.0f} ({working_put['mult']:.2f}x)")
+                        break
+
+            # Optimize: Push tighter strike OUT while staying >= target
+            current_gross = working_call["premium"] + working_put["premium"]
             current_net = current_gross - weekly_theta_cost - total_entry_fees
-            current_return = (current_net / long_straddle_cost) * 100
+            current_return = (current_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+
+            # Track optimization changes
+            call_was_optimized = False
+            put_was_optimized = False
+            pre_opt_call = working_call
+            pre_opt_put = working_put
 
             if current_return > min_target_return:
-                other_side = "call" if tighter_side == "put" else "put"
-                logger.info(f"Still at {current_return:.2f}%, trying to push {other_side} out too...")
-
-                if other_side == "put":
-                    for p in puts:
-                        if p["mult"] > max_mult:
-                            continue
-                        if p["strike"] >= final_put["strike"]:
-                            continue
-
-                        test_gross = final_call["premium"] + p["premium"]
-                        test_net = test_gross - weekly_theta_cost - total_entry_fees
-                        test_return = (test_net / long_straddle_cost) * 100
-
-                        if test_return >= min_target_return:
-                            final_put = p
-                        else:
-                            break
-
-                else:  # other_side == "call"
+                # Find tighter side and push out
+                if working_call["mult"] < working_put["mult"]:
+                    # Call is tighter, try wider calls
                     for c in calls:
-                        if c["mult"] > max_mult:
+                        if c["mult"] > max_mult or c["strike"] <= working_call["strike"]:
                             continue
-                        if c["strike"] <= final_call["strike"]:
-                            continue
-
-                        test_gross = c["premium"] + final_put["premium"]
+                        test_gross = c["premium"] + working_put["premium"]
                         test_net = test_gross - weekly_theta_cost - total_entry_fees
                         test_return = (test_net / long_straddle_cost) * 100
-
                         if test_return >= min_target_return:
-                            final_call = c
+                            working_call = c
+                            call_was_optimized = True
                         else:
                             break
+                else:
+                    # Put is tighter, try wider puts
+                    for p in puts:
+                        if p["mult"] > max_mult or p["strike"] >= working_put["strike"]:
+                            continue
+                        test_gross = working_call["premium"] + p["premium"]
+                        test_net = test_gross - weekly_theta_cost - total_entry_fees
+                        test_return = (test_net / long_straddle_cost) * 100
+                        if test_return >= min_target_return:
+                            working_put = p
+                            put_was_optimized = True
+                        else:
+                            break
+
+                # Try pushing OTHER leg too
+                current_gross = working_call["premium"] + working_put["premium"]
+                current_net = current_gross - weekly_theta_cost - total_entry_fees
+                current_return = (current_net / long_straddle_cost) * 100
+
+                if current_return > min_target_return:
+                    if working_call["mult"] < working_put["mult"]:
+                        for c in calls:
+                            if c["mult"] > max_mult or c["strike"] <= working_call["strike"]:
+                                continue
+                            test_gross = c["premium"] + working_put["premium"]
+                            test_net = test_gross - weekly_theta_cost - total_entry_fees
+                            test_return = (test_net / long_straddle_cost) * 100
+                            if test_return >= min_target_return:
+                                working_call = c
+                                call_was_optimized = True
+                            else:
+                                break
+                    else:
+                        for p in puts:
+                            if p["mult"] > max_mult or p["strike"] >= working_put["strike"]:
+                                continue
+                            test_gross = working_call["premium"] + p["premium"]
+                            test_net = test_gross - weekly_theta_cost - total_entry_fees
+                            test_return = (test_net / long_straddle_cost) * 100
+                            if test_return >= min_target_return:
+                                working_put = p
+                                put_was_optimized = True
+                            else:
+                                break
+
+            # Now verify we can actually get quotes for these strikes
+            # If not, use fallback logic to reverse changes
+            call_quote = self.client.get_quote(working_call["uic"], "StockOption")
+            put_quote = self.client.get_quote(working_put["uic"], "StockOption")
+
+            if call_quote and put_quote:
+                # Check bid prices are still valid
+                call_bid = call_quote["Quote"].get("Bid", 0) or 0
+                put_bid = put_quote["Quote"].get("Bid", 0) or 0
+
+                if call_bid > 0 and put_bid > 0:
+                    # Update with fresh prices
+                    working_call["bid"] = call_bid
+                    working_call["premium"] = call_bid * 100 * self.position_size
+                    working_put["bid"] = put_bid
+                    working_put["premium"] = put_bid * 100 * self.position_size
+
+                    final_call = working_call
+                    final_put = working_put
+                    logger.info(f"  SUCCESS: Found valid options at {min_mult_threshold}x minimum")
+                    break
+
+            # Fallback: Reverse optimization changes first
+            logger.info(f"  Options unavailable, trying fallback...")
+
+            fallback_attempts = []
+
+            # 1. If call was optimized, try pre-optimization call
+            if call_was_optimized:
+                fallback_attempts.append((pre_opt_call, working_put, "reverse call optimization"))
+
+            # 2. If put was optimized, try pre-optimization put
+            if put_was_optimized:
+                fallback_attempts.append((working_call, pre_opt_put, "reverse put optimization"))
+
+            # 3. If call was capped, try original (wider) call
+            if call_was_capped:
+                fallback_attempts.append((original_call, working_put, "reverse call cap"))
+
+            # 4. If put was capped, try original (wider) put
+            if put_was_capped:
+                fallback_attempts.append((working_call, original_put, "reverse put cap"))
+
+            # 5. Try both original (pre-cap) strikes
+            if call_was_capped or put_was_capped:
+                fallback_attempts.append((original_call, original_put, "both original strikes"))
+
+            for fb_call, fb_put, fb_desc in fallback_attempts:
+                fb_call_quote = self.client.get_quote(fb_call["uic"], "StockOption")
+                fb_put_quote = self.client.get_quote(fb_put["uic"], "StockOption")
+
+                if fb_call_quote and fb_put_quote:
+                    fb_call_bid = fb_call_quote["Quote"].get("Bid", 0) or 0
+                    fb_put_bid = fb_put_quote["Quote"].get("Bid", 0) or 0
+
+                    if fb_call_bid > 0 and fb_put_bid > 0:
+                        fb_call["bid"] = fb_call_bid
+                        fb_call["premium"] = fb_call_bid * 100 * self.position_size
+                        fb_put["bid"] = fb_put_bid
+                        fb_put["premium"] = fb_put_bid * 100 * self.position_size
+
+                        final_call = fb_call
+                        final_put = fb_put
+                        logger.info(f"  FALLBACK SUCCESS: {fb_desc}")
+                        break
+
+            if final_call and final_put:
+                break
+
+        if not final_call or not final_put:
+            logger.error("No valid strike combinations found after all fallback attempts")
+            logger.error("Tried minimum multipliers: " + ", ".join([f"{m}x" for m in MIN_MULT_ATTEMPTS]))
+            return False
 
         # =====================================================================
-        # STEP 7: Calculate final P&L and log results
+        # STEP 5: Calculate final P&L and log results
         # =====================================================================
         final_gross = final_call["premium"] + final_put["premium"]
         final_net = final_gross - weekly_theta_cost - total_entry_fees
