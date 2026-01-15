@@ -339,6 +339,11 @@ class IronFlyStrategy:
         # Calibration mode: allow manual expected move override
         self.manual_expected_move = self.strategy_config.get("manual_expected_move", None)
 
+        # Filter configuration
+        self.filters_config = config.get("filters", {})
+        self.fed_meeting_blackout = self.filters_config.get("fed_meeting_blackout", True)
+        self.economic_calendar_check = self.filters_config.get("economic_calendar_check", True)
+
         # State
         self.state = IronFlyState.IDLE
         self.opening_range = OpeningRange()
@@ -357,6 +362,8 @@ class IronFlyStrategy:
         logger.info(f"  Entry time: {self.entry_time} EST")
         logger.info(f"  Max VIX: {self.max_vix}, Spike threshold: {self.vix_spike_threshold}%")
         logger.info(f"  Profit target: ${self.profit_target}, Max hold: {self.max_hold_minutes} min")
+        logger.info(f"  FOMC blackout: {'ENABLED' if self.fed_meeting_blackout else 'DISABLED'}")
+        logger.info(f"  Economic calendar check: {'ENABLED' if self.economic_calendar_check else 'DISABLED'}")
         if self.manual_expected_move:
             logger.info(f"  Manual expected move: {self.manual_expected_move} points (calibration mode)")
 
@@ -467,11 +474,31 @@ class IronFlyStrategy:
         Handle READY_TO_ENTER state - check filters and enter position.
 
         All filters are checked here before entry:
-        1. VIX level filter
-        2. VIX spike filter
-        3. Price-in-range filter
+        1. FOMC meeting filter (binary event - skip entire day)
+        2. Economic calendar filter (CPI/PPI/Jobs - skip entire day)
+        3. VIX level filter
+        4. VIX spike filter
+        5. Price-in-range filter
         """
-        # FILTER 1: VIX level check
+        # FILTER 1: FOMC Meeting check (highest priority - binary event)
+        fomc_ok, fomc_reason = self.check_fed_meeting_filter()
+        if not fomc_ok:
+            self.state = IronFlyState.DAILY_COMPLETE
+            self.trade_logger.log_event(f"FILTER BLOCKED: {fomc_reason}")
+            self._log_filter_event("FOMC_BLACKOUT", fomc_reason)
+            self._log_opening_range_to_sheets("SKIP", fomc_reason)
+            return f"Entry blocked - {fomc_reason}"
+
+        # FILTER 2: Economic calendar check (CPI, PPI, Jobs Report)
+        econ_ok, econ_reason = self.check_economic_calendar_filter()
+        if not econ_ok:
+            self.state = IronFlyState.DAILY_COMPLETE
+            self.trade_logger.log_event(f"FILTER BLOCKED: {econ_reason}")
+            self._log_filter_event("ECONOMIC_CALENDAR", econ_reason)
+            self._log_opening_range_to_sheets("SKIP", econ_reason)
+            return f"Entry blocked - {econ_reason}"
+
+        # FILTER 3: VIX level check
         if self.current_vix > self.max_vix:
             self.state = IronFlyState.DAILY_COMPLETE
             reason = f"VIX {self.current_vix:.2f} > {self.max_vix}"
@@ -480,7 +507,7 @@ class IronFlyStrategy:
             self._log_opening_range_to_sheets("SKIP", reason)
             return f"Entry blocked - VIX too high ({reason})"
 
-        # FILTER 2: VIX spike check
+        # FILTER 4: VIX spike check
         if self.opening_range.vix_spike_percent > self.vix_spike_threshold:
             self.state = IronFlyState.DAILY_COMPLETE
             reason = f"VIX spike {self.opening_range.vix_spike_percent:.1f}% > {self.vix_spike_threshold}%"
@@ -489,7 +516,7 @@ class IronFlyStrategy:
             self._log_opening_range_to_sheets("SKIP", reason)
             return f"Entry blocked - {reason}"
 
-        # FILTER 3: Price within opening range check
+        # FILTER 5: Price within opening range check (Trend Day detection)
         if not self.opening_range.is_price_in_range(self.current_price):
             self.state = IronFlyState.DAILY_COMPLETE
             reason = f"Price {self.current_price:.2f} outside range [{self.opening_range.low:.2f}-{self.opening_range.high:.2f}]"
@@ -814,6 +841,124 @@ class IronFlyStrategy:
             self.trade_logger.log_opening_range(data)
         except Exception as e:
             logger.warning(f"Failed to log opening range to sheets: {e}")
+
+    # =========================================================================
+    # PRE-TRADE FILTERS (FOMC / Economic Calendar)
+    # =========================================================================
+
+    def check_fed_meeting_filter(self) -> Tuple[bool, str]:
+        """
+        Check if today is an FOMC meeting day.
+
+        Per Doc Severson: "NEVER trade on FOMC or major economic data days"
+        The market will likely trend and blow past stops on Fed days.
+
+        Returns:
+            Tuple[bool, str]: (True if safe to trade, reason if blocked)
+        """
+        if not self.fed_meeting_blackout:
+            return (True, "")
+
+        # 2026 FOMC Meeting Dates (announcement days - typically 2:00 PM EST)
+        # Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+        fomc_dates_2026 = [
+            date(2026, 1, 29),   # Jan 28-29
+            date(2026, 3, 19),   # Mar 18-19
+            date(2026, 5, 7),    # May 6-7
+            date(2026, 6, 18),   # Jun 17-18
+            date(2026, 7, 30),   # Jul 29-30
+            date(2026, 9, 17),   # Sep 16-17
+            date(2026, 11, 5),   # Nov 4-5
+            date(2026, 12, 17),  # Dec 16-17
+        ]
+
+        today = get_us_market_time().date()
+
+        if today in fomc_dates_2026:
+            reason = f"FOMC meeting day ({today.strftime('%b %d')})"
+            logger.warning(f"FOMC BLACKOUT: {reason} - Entry blocked")
+            return (False, reason)
+
+        return (True, "")
+
+    def check_economic_calendar_filter(self) -> Tuple[bool, str]:
+        """
+        Check if today has major economic releases that could cause trending.
+
+        Per Doc Severson: "Never trade this on days with major economic data
+        (CPI, PPI, Jobs Report) as the market will likely trend and blow past stops."
+
+        Major releases typically at 8:30 AM EST - before our 10:00 AM entry.
+
+        Returns:
+            Tuple[bool, str]: (True if safe to trade, reason if blocked)
+        """
+        if not self.economic_calendar_check:
+            return (True, "")
+
+        # 2026 Major Economic Release Dates
+        # CPI (Consumer Price Index) - typically 2nd week of month
+        # PPI (Producer Price Index) - typically day after CPI
+        # Jobs Report (NFP) - first Friday of month
+        # These are high-impact events that cause market trending
+
+        # Note: Dates are approximate - update from BLS calendar:
+        # https://www.bls.gov/schedule/news_release/cpi.htm
+        # https://www.bls.gov/schedule/news_release/empsit.htm
+
+        major_economic_dates_2026 = {
+            # Jobs Reports (Non-Farm Payrolls) - First Friday each month
+            date(2026, 1, 3): "Jobs Report (NFP)",
+            date(2026, 2, 6): "Jobs Report (NFP)",
+            date(2026, 3, 6): "Jobs Report (NFP)",
+            date(2026, 4, 3): "Jobs Report (NFP)",
+            date(2026, 5, 1): "Jobs Report (NFP)",
+            date(2026, 6, 5): "Jobs Report (NFP)",
+            date(2026, 7, 3): "Jobs Report (NFP)",
+            date(2026, 8, 7): "Jobs Report (NFP)",
+            date(2026, 9, 4): "Jobs Report (NFP)",
+            date(2026, 10, 2): "Jobs Report (NFP)",
+            date(2026, 11, 6): "Jobs Report (NFP)",
+            date(2026, 12, 4): "Jobs Report (NFP)",
+
+            # CPI Releases (Consumer Price Index) - ~2nd week each month
+            date(2026, 1, 14): "CPI Release",
+            date(2026, 2, 11): "CPI Release",
+            date(2026, 3, 11): "CPI Release",
+            date(2026, 4, 14): "CPI Release",
+            date(2026, 5, 13): "CPI Release",
+            date(2026, 6, 10): "CPI Release",
+            date(2026, 7, 15): "CPI Release",
+            date(2026, 8, 12): "CPI Release",
+            date(2026, 9, 16): "CPI Release",
+            date(2026, 10, 14): "CPI Release",
+            date(2026, 11, 12): "CPI Release",
+            date(2026, 12, 9): "CPI Release",
+
+            # PPI Releases (Producer Price Index) - typically day after CPI
+            date(2026, 1, 15): "PPI Release",
+            date(2026, 2, 12): "PPI Release",
+            date(2026, 3, 12): "PPI Release",
+            date(2026, 4, 15): "PPI Release",
+            date(2026, 5, 14): "PPI Release",
+            date(2026, 6, 11): "PPI Release",
+            date(2026, 7, 16): "PPI Release",
+            date(2026, 8, 13): "PPI Release",
+            date(2026, 9, 17): "PPI Release",
+            date(2026, 10, 15): "PPI Release",
+            date(2026, 11, 13): "PPI Release",
+            date(2026, 12, 10): "PPI Release",
+        }
+
+        today = get_us_market_time().date()
+
+        if today in major_economic_dates_2026:
+            event = major_economic_dates_2026[today]
+            reason = f"Major economic event: {event}"
+            logger.warning(f"ECONOMIC CALENDAR BLACKOUT: {reason} - Entry blocked")
+            return (False, reason)
+
+        return (True, "")
 
     # =========================================================================
     # STATUS AND MONITORING
