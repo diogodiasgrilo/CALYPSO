@@ -17,7 +17,10 @@ Environment="PYTHONPATH=/opt/calypso"
 
 # Main command - runs the delta neutral bot
 # Cloud environment auto-detected, credentials loaded from Secret Manager
-ExecStart=/opt/calypso/.venv/bin/python -m bots.delta_neutral.main
+# --live: Use LIVE Saxo environment (real account)
+# --dry-run: Simulate trades without executing (safe testing mode)
+# Remove --dry-run when ready for real trading
+ExecStart=/opt/calypso/.venv/bin/python -m bots.delta_neutral.main --live --dry-run
 
 # Restart policy
 # Always restart on failure, with increasing delays
