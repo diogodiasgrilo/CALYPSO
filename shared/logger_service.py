@@ -259,8 +259,9 @@ class GoogleSheetsLogger:
             self._setup_bot_logs_worksheet()
             self._setup_performance_metrics_worksheet()
             self._setup_account_summary_worksheet()
+            self._setup_opening_range_worksheet()
 
-            logger.info("All Google Sheets worksheets initialized successfully (7 tabs)")
+            logger.info("All Google Sheets worksheets initialized successfully (8 tabs)")
             return True
 
         except ImportError:
@@ -432,6 +433,94 @@ class GoogleSheetsLogger:
             self.worksheets["Account Summary"] = worksheet
         except Exception as e:
             logger.error(f"Failed to setup Account Summary worksheet: {e}")
+
+    def _setup_opening_range_worksheet(self):
+        """Setup the Opening Range worksheet for Iron Fly 0DTE strategy monitoring."""
+        try:
+            import gspread
+            try:
+                worksheet = self.spreadsheet.worksheet("Opening Range")
+            except gspread.WorksheetNotFound:
+                worksheet = self.spreadsheet.add_worksheet(title="Opening Range", rows=1000, cols=18)
+                # Headers for opening range tracking (Iron Fly 0DTE)
+                headers = [
+                    "Date", "Start Time (EST)", "End Time (EST)",
+                    "Opening Price", "Range High", "Range Low", "Range Width",
+                    "Current Price", "Price in Range",
+                    "Opening VIX", "VIX High", "Current VIX", "VIX Spike %",
+                    "Expected Move", "Entry Decision", "Reason",
+                    "ATM Strike", "Wing Width"
+                ]
+                worksheet.append_row(headers)
+                worksheet.format("A1:R1", {"textFormat": {"bold": True}})
+                logger.info("Created Opening Range worksheet (Iron Fly 0DTE)")
+
+            self.worksheets["Opening Range"] = worksheet
+        except Exception as e:
+            logger.error(f"Failed to setup Opening Range worksheet: {e}")
+
+    def log_opening_range(self, data: Dict[str, Any]) -> bool:
+        """
+        Log opening range data for Iron Fly 0DTE strategy fact-checking.
+
+        Called when the opening range period completes (10:00 AM EST) to record
+        all the metrics used for entry decision.
+
+        Args:
+            data: Dictionary containing opening range metrics:
+                - date: Trading date (YYYY-MM-DD)
+                - start_time: When monitoring started (9:30 AM EST)
+                - end_time: When monitoring ended (10:00 AM EST)
+                - opening_price: Price at 9:30 AM
+                - range_high: Highest price during opening range
+                - range_low: Lowest price during opening range
+                - range_width: High - Low
+                - current_price: Price at 10:00 AM
+                - price_in_range: Boolean - is current price within range
+                - opening_vix: VIX at 9:30 AM
+                - vix_high: Highest VIX during opening range
+                - current_vix: VIX at 10:00 AM
+                - vix_spike_percent: (vix_high - opening_vix) / opening_vix * 100
+                - expected_move: Calculated expected move for wings
+                - entry_decision: "ENTER" or "SKIP"
+                - reason: Human-readable reason for decision
+                - atm_strike: Selected ATM strike (if entering)
+                - wing_width: Wing width (if entering)
+
+        Returns:
+            bool: True if logged successfully, False otherwise.
+        """
+        if not self.enabled or "Opening Range" not in self.worksheets:
+            return False
+
+        try:
+            row = [
+                data.get("date", ""),
+                data.get("start_time", ""),
+                data.get("end_time", ""),
+                f"{data.get('opening_price', 0):.2f}" if data.get('opening_price') else "",
+                f"{data.get('range_high', 0):.2f}" if data.get('range_high') else "",
+                f"{data.get('range_low', 0):.2f}" if data.get('range_low') else "",
+                f"{data.get('range_width', 0):.2f}" if data.get('range_width') else "",
+                f"{data.get('current_price', 0):.2f}" if data.get('current_price') else "",
+                "Yes" if data.get("price_in_range") else "No",
+                f"{data.get('opening_vix', 0):.2f}" if data.get('opening_vix') else "",
+                f"{data.get('vix_high', 0):.2f}" if data.get('vix_high') else "",
+                f"{data.get('current_vix', 0):.2f}" if data.get('current_vix') else "",
+                f"{data.get('vix_spike_percent', 0):.2f}%" if data.get('vix_spike_percent') is not None else "",
+                f"{data.get('expected_move', 0):.2f}" if data.get('expected_move') else "",
+                data.get("entry_decision", ""),
+                data.get("reason", ""),
+                f"{data.get('atm_strike', 0):.0f}" if data.get('atm_strike') else "",
+                f"{data.get('wing_width', 0):.0f}" if data.get('wing_width') else ""
+            ]
+
+            self.worksheets["Opening Range"].append_row(row)
+            logger.debug(f"Opening range logged to Google Sheets: {data.get('entry_decision', 'N/A')}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to log opening range to Google Sheets: {e}")
+            return False
 
     def log_trade(self, trade: TradeRecord) -> bool:
         """
@@ -2210,6 +2299,45 @@ class TradeLoggerService:
         """
         if self.google_logger.enabled:
             self.google_logger.log_daily_summary(summary)
+
+    def log_opening_range(self, data: Dict[str, Any]):
+        """
+        Log opening range data for Iron Fly 0DTE strategy fact-checking.
+
+        Called when the opening range period completes (10:00 AM EST) to record
+        all the metrics used for entry decision.
+
+        Args:
+            data: Dictionary containing opening range metrics:
+                - date: Trading date (YYYY-MM-DD)
+                - start_time: When monitoring started (9:30 AM EST)
+                - end_time: When monitoring ended (10:00 AM EST)
+                - opening_price: Price at 9:30 AM
+                - range_high: Highest price during opening range
+                - range_low: Lowest price during opening range
+                - range_width: High - Low
+                - current_price: Price at 10:00 AM
+                - price_in_range: Boolean - is current price within range
+                - opening_vix: VIX at 9:30 AM
+                - vix_high: Highest VIX during opening range
+                - current_vix: VIX at 10:00 AM
+                - vix_spike_percent: (vix_high - opening_vix) / opening_vix * 100
+                - expected_move: Calculated expected move for wings
+                - entry_decision: "ENTER" or "SKIP"
+                - reason: Human-readable reason for decision
+                - atm_strike: Selected ATM strike (if entering)
+                - wing_width: Wing width (if entering)
+        """
+        if self.google_logger.enabled:
+            self.google_logger.log_opening_range(data)
+
+        # Also log to console for visibility
+        logger.info(
+            f"OPENING RANGE: {data.get('entry_decision', 'N/A')} - "
+            f"Range: {data.get('range_low', 0):.2f}-{data.get('range_high', 0):.2f}, "
+            f"VIX: {data.get('current_vix', 0):.2f}, "
+            f"Reason: {data.get('reason', 'N/A')}"
+        )
 
     def log_safety_event(self, event: Dict[str, Any]):
         """

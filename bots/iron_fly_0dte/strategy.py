@@ -477,6 +477,7 @@ class IronFlyStrategy:
             reason = f"VIX {self.current_vix:.2f} > {self.max_vix}"
             self.trade_logger.log_event(f"FILTER BLOCKED: {reason}")
             self._log_filter_event("VIX_LEVEL", reason)
+            self._log_opening_range_to_sheets("SKIP", reason)
             return f"Entry blocked - VIX too high ({reason})"
 
         # FILTER 2: VIX spike check
@@ -485,6 +486,7 @@ class IronFlyStrategy:
             reason = f"VIX spike {self.opening_range.vix_spike_percent:.1f}% > {self.vix_spike_threshold}%"
             self.trade_logger.log_event(f"FILTER BLOCKED: {reason}")
             self._log_filter_event("VIX_SPIKE", reason)
+            self._log_opening_range_to_sheets("SKIP", reason)
             return f"Entry blocked - {reason}"
 
         # FILTER 3: Price within opening range check
@@ -493,6 +495,7 @@ class IronFlyStrategy:
             reason = f"Price {self.current_price:.2f} outside range [{self.opening_range.low:.2f}-{self.opening_range.high:.2f}]"
             self.trade_logger.log_event(f"FILTER BLOCKED: Trend Day - {reason}")
             self._log_filter_event("TREND_DAY", reason)
+            self._log_opening_range_to_sheets("SKIP", reason)
             return f"Entry blocked - Trend Day detected ({reason})"
 
         # All filters passed - enter position
@@ -571,6 +574,14 @@ class IronFlyStrategy:
         self.trade_logger.log_event(
             f"ENTERING IRON FLY: ATM={atm_strike}, Wings={lower_wing}/{upper_wing}, "
             f"Expected Move={expected_move:.2f}, {self.underlying_symbol}={self.current_price:.2f}"
+        )
+
+        # Log opening range data for fact-checking
+        self._log_opening_range_to_sheets(
+            "ENTER",
+            f"All filters passed - Entering Iron Fly at {atm_strike}",
+            atm_strike=atm_strike,
+            wing_width=expected_move
         )
 
         if self.dry_run:
@@ -754,6 +765,55 @@ class IronFlyStrategy:
         """Log a filter event to the safety events sheet."""
         # TODO: Log to Google Sheets Safety Events worksheet
         logger.info(f"Filter event: {event_type} - {description}")
+
+    def _log_opening_range_to_sheets(
+        self,
+        entry_decision: str,
+        reason: str,
+        atm_strike: float = None,
+        wing_width: float = None
+    ):
+        """
+        Log opening range data to Google Sheets for fact-checking.
+
+        Called when opening range period completes (10:00 AM EST) to record
+        all the metrics used for the entry decision.
+
+        Args:
+            entry_decision: "ENTER" or "SKIP"
+            reason: Human-readable reason for the decision
+            atm_strike: Selected ATM strike (if entering)
+            wing_width: Wing width / expected move (if entering)
+        """
+        current_time = get_us_market_time()
+
+        # Build opening range data dict
+        data = {
+            "date": current_time.strftime("%Y-%m-%d"),
+            "start_time": self.opening_range.start_time.strftime("%H:%M:%S") if self.opening_range.start_time else "",
+            "end_time": current_time.strftime("%H:%M:%S"),
+            "opening_price": self.opening_range.low if self.opening_range.low != float('inf') else 0,  # First price captured
+            "range_high": self.opening_range.high,
+            "range_low": self.opening_range.low if self.opening_range.low != float('inf') else 0,
+            "range_width": self.opening_range.range_width,
+            "current_price": self.current_price,
+            "price_in_range": self.opening_range.is_price_in_range(self.current_price),
+            "opening_vix": self.opening_range.opening_vix,
+            "vix_high": self.opening_range.vix_high,
+            "current_vix": self.current_vix,
+            "vix_spike_percent": self.opening_range.vix_spike_percent,
+            "expected_move": wing_width if wing_width else self._calculate_expected_move(),
+            "entry_decision": entry_decision,
+            "reason": reason,
+            "atm_strike": atm_strike,
+            "wing_width": wing_width
+        }
+
+        # Log to Google Sheets via trade logger
+        try:
+            self.trade_logger.log_opening_range(data)
+        except Exception as e:
+            logger.warning(f"Failed to log opening range to sheets: {e}")
 
     # =========================================================================
     # STATUS AND MONITORING
