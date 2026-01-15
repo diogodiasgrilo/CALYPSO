@@ -161,8 +161,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     vix_uic = config.get("strategy", {}).get("vix_uic", 10606)
 
     if underlying_uic:
-        # SPX is a StockIndex, SPY is an Etf
-        underlying_type = "StockIndex" if "SPX" in config.get("strategy", {}).get("underlying_symbol", "") else "Etf"
+        # Determine asset type from symbol:
+        # - US500.I is CfdOnIndex (tracks SPX)
+        # - SPY is Etf
+        # - SPX would be StockIndex
+        underlying_symbol = config.get("strategy", {}).get("underlying_symbol", "")
+        if "US500" in underlying_symbol or underlying_symbol.endswith(".I"):
+            underlying_type = "CfdOnIndex"
+        elif "SPX" in underlying_symbol:
+            underlying_type = "StockIndex"
+        else:
+            underlying_type = "Etf"
         subscriptions.append({"uic": underlying_uic, "asset_type": underlying_type})
 
     if vix_uic:
