@@ -471,13 +471,14 @@ class DeltaNeutralStrategy:
         self.recenter_threshold = self.strategy_config["recenter_threshold_points"]
         self.max_vix = self.strategy_config["max_vix_entry"]
         self.vix_defensive_threshold = self.strategy_config.get("vix_defensive_threshold", 25.0)
-        self.min_dte = self.strategy_config["long_straddle_min_dte"]
-        self.max_dte = self.strategy_config["long_straddle_max_dte"]
+        self.target_dte = self.strategy_config.get("long_straddle_target_dte", 120)
         self.exit_dte_min = self.strategy_config["exit_dte_min"]
         self.exit_dte_max = self.strategy_config["exit_dte_max"]
         self.strangle_multiplier_min = self.strategy_config["weekly_strangle_multiplier_min"]
         self.strangle_multiplier_max = self.strategy_config["weekly_strangle_multiplier_max"]
         self.weekly_target_return_pct = self.strategy_config.get("weekly_target_return_percent", None)
+        self.short_strangle_max_multiplier = self.strategy_config.get("short_strangle_max_multiplier", 1.5)
+        self.short_strangle_entry_fee_per_leg = self.strategy_config.get("short_strangle_entry_fee_per_leg", 2.0)
         self.position_size = self.strategy_config["position_size"]
         self.max_spread_percent = self.strategy_config["max_bid_ask_spread_percent"]
         self.roll_days = self.strategy_config["roll_days"]
@@ -1618,12 +1619,11 @@ class DeltaNeutralStrategy:
             logger.error("Failed to update market data before entry")
             return False
 
-        # Find ATM options
+        # Find ATM options - closest expiration to target DTE (120 days)
         atm_options = self.client.find_atm_options(
             self.underlying_uic,
             self.current_underlying_price,
-            self.min_dte,
-            self.max_dte
+            target_dte=self.target_dte
         )
 
         if not atm_options:
@@ -2086,63 +2086,353 @@ class DeltaNeutralStrategy:
 
     def _enter_strangle_by_target_return(self, for_roll: bool = False) -> bool:
         """
-        Enter strangle based on target weekly return percentage.
+        Enter strangle based on target NET weekly return percentage.
 
-        Calculates required premium and finds furthest OTM strikes that meet it.
+        NEW LOGIC (Brian Terry 1% NET of Long Straddle Cost):
+        1. Calculate target 1% NET of long straddle cost (not margin)
+        2. Find widest strikes that meet the minimum required gross premium
+        3. Cap any strike beyond 1.5x expected move back to 1.5x
+        4. Optimize: push tighter strikes OUT while staying >= 1% NET
+
+        Net Return = (Gross Premium - Theta Cost - Entry Fees) / Long Straddle Cost
 
         Args:
             for_roll: If True, look for next week's expiry (rolling shorts).
+
+        Returns:
+            bool: True if strangle entered successfully, False otherwise.
         """
-        logger.info("=" * 60)
-        logger.info(f"TARGET RETURN MODE: Seeking {self.weekly_target_return_pct}% weekly return")
-        logger.info("=" * 60)
+        logger.info("=" * 70)
+        logger.info(f"1% NET OF LONG STRADDLE COST MODE")
+        logger.info(f"Target: {self.weekly_target_return_pct}% NET | Max Multiplier: {self.short_strangle_max_multiplier}x")
+        logger.info("=" * 70)
 
-        # Calculate margin requirement (approx 20% of notional)
-        margin_per_contract = self.current_underlying_price * 100 * 0.20
+        # =====================================================================
+        # STEP 1: Calculate target based on LONG STRADDLE COST (not margin)
+        # =====================================================================
+        long_straddle_cost = self._get_long_straddle_cost()
+        if long_straddle_cost <= 0:
+            logger.error("Cannot determine long straddle cost - cannot calculate target")
+            return False
 
-        # Calculate target premium
-        target_premium = margin_per_contract * (self.weekly_target_return_pct / 100)
+        weekly_theta_cost = self._get_long_straddle_weekly_theta()
+        total_entry_fees = self.short_strangle_entry_fee_per_leg * 2 * self.position_size
 
-        logger.info(f"SPY: ${self.current_underlying_price:.2f} | Margin estimate: ${margin_per_contract:.2f}")
-        logger.info(f"Target premium needed for {self.weekly_target_return_pct}%: ${target_premium:.2f}")
+        # Target NET = 1% of long straddle cost
+        target_net = long_straddle_cost * (self.weekly_target_return_pct / 100)
 
-        # Find strangle options by target premium
-        strangle_options = self.client.find_strangle_by_target_premium(
+        # Required gross = target NET + theta + fees
+        required_gross = target_net + weekly_theta_cost + total_entry_fees
+
+        logger.info(f"SPY: ${self.current_underlying_price:.2f}")
+        logger.info(f"Long Straddle Cost: ${long_straddle_cost:,.2f}")
+        logger.info(f"Target NET ({self.weekly_target_return_pct}%): ${target_net:.2f}")
+        logger.info(f"Weekly Theta Cost: ${weekly_theta_cost:.2f}")
+        logger.info(f"Entry Fees: ${total_entry_fees:.2f}")
+        logger.info(f"REQUIRED GROSS PREMIUM: ${required_gross:.2f}")
+
+        # =====================================================================
+        # STEP 2: Get expected move from ATM straddle
+        # =====================================================================
+        expected_move = self.client.get_expected_move_from_straddle(
             self.underlying_uic,
             self.current_underlying_price,
-            target_premium,
-            weekly=True,
             for_roll=for_roll
         )
 
-        if not strangle_options:
-            logger.error(f"FAILED: Cannot find strikes that provide ${target_premium:.2f} premium")
+        if not expected_move:
+            logger.error("Failed to get expected move from straddle prices")
+            return False
+
+        logger.info(f"Expected Move: ±${expected_move:.2f} ({(expected_move/self.current_underlying_price)*100:.2f}%)")
+
+        # =====================================================================
+        # STEP 3: Scan all available strikes and collect premium data
+        # =====================================================================
+        expirations = self.client.get_option_expirations(self.underlying_uic)
+        if not expirations:
+            logger.error("Failed to get option expirations")
+            return False
+
+        # Find the weekly expiration
+        today = datetime.now().date()
+        dte_min = 5 if for_roll else 0
+        dte_max = 12 if for_roll else 7
+        weekly_exp = None
+
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry", "")[:10]
+            if exp_date_str:
+                exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                if dte_min < dte <= dte_max:
+                    weekly_exp = exp_data
+                    logger.info(f"Weekly Expiry: {exp_date_str} ({dte} DTE)")
+                    break
+
+        if not weekly_exp:
+            logger.error("Could not find weekly expiration")
+            return False
+
+        # Collect all OTM options with their premiums
+        calls = []
+        puts = []
+        specific_options = weekly_exp.get("SpecificOptions", [])
+
+        for opt in specific_options:
+            strike = opt.get("StrikePrice", 0)
+            uic = opt.get("Uic")
+            put_call = opt.get("PutCall")
+
+            # Only look at strikes within reasonable range (20 points)
+            if strike < self.current_underlying_price - 20 or strike > self.current_underlying_price + 20:
+                continue
+
+            quote = self.client.get_quote(uic, "StockOption")
+            if not quote:
+                continue
+
+            bid = quote["Quote"].get("Bid", 0) or 0
+            if bid <= 0:
+                continue
+
+            distance = abs(strike - self.current_underlying_price)
+            mult = distance / expected_move if expected_move > 0 else 0
+            premium = bid * 100 * self.position_size
+
+            data = {
+                "strike": strike,
+                "uic": uic,
+                "bid": bid,
+                "premium": premium,
+                "distance": distance,
+                "mult": mult,
+                "expiry": weekly_exp.get("Expiry", "")[:10]
+            }
+
+            if put_call == "Call" and strike > self.current_underlying_price:
+                calls.append(data)
+            elif put_call == "Put" and strike < self.current_underlying_price:
+                puts.append(data)
+
+        if not calls or not puts:
+            logger.error("Could not find sufficient OTM options")
+            return False
+
+        # Sort: calls by strike ascending (closest to furthest OTM)
+        # puts by strike descending (closest to furthest OTM)
+        calls.sort(key=lambda x: x["strike"])
+        puts.sort(key=lambda x: x["strike"], reverse=True)
+
+        logger.info(f"Found {len(calls)} OTM calls, {len(puts)} OTM puts")
+
+        # =====================================================================
+        # STEP 4: Find all combinations meeting minimum target
+        # =====================================================================
+        combinations = []
+
+        for c in calls:
+            for p in puts:
+                gross = c["premium"] + p["premium"]
+                if gross < required_gross:
+                    continue  # Doesn't meet minimum target
+
+                net = gross - weekly_theta_cost - total_entry_fees
+                net_return = (net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+                avg_mult = (c["mult"] + p["mult"]) / 2
+
+                combinations.append({
+                    "call": c,
+                    "put": p,
+                    "gross": gross,
+                    "net": net,
+                    "return": net_return,
+                    "avg_mult": avg_mult
+                })
+
+        if not combinations:
+            logger.error(f"No strike combinations meet the ${required_gross:.2f} gross requirement")
             logger.warning(f"Consider lowering weekly_target_return_percent from {self.weekly_target_return_pct}%")
             return False
 
-        call_option = strangle_options["call"]
-        put_option = strangle_options["put"]
+        # Sort by average multiplier (widest = safest first)
+        combinations.sort(key=lambda x: x["avg_mult"], reverse=True)
 
-        # Log the actual premium we'll receive
-        actual_premium = strangle_options.get("total_premium", 0)
-        actual_return = (actual_premium / margin_per_contract) * 100 if margin_per_contract > 0 else 0
+        logger.info(f"Found {len(combinations)} combinations meeting target")
+
+        # =====================================================================
+        # STEP 5: Apply 1.5x Expected Move Cap
+        # =====================================================================
+        max_mult = self.short_strangle_max_multiplier
+
+        # Start with the widest combination
+        best = combinations[0]
+        final_call = best["call"]
+        final_put = best["put"]
 
         logger.info("-" * 60)
-        logger.info(f"STRIKES FOUND: Put ${put_option['strike']:.0f} / Call ${call_option['strike']:.0f}")
-        logger.info(f"PREMIUM: ${actual_premium:.2f} (target was ${target_premium:.2f})")
-        logger.info(f"ACTUAL RETURN: {actual_return:.2f}% (target was {self.weekly_target_return_pct}%)")
-        logger.info("-" * 60)
+        logger.info(f"Initial widest: Put ${final_put['strike']:.0f} ({final_put['mult']:.2f}x) / Call ${final_call['strike']:.0f} ({final_call['mult']:.2f}x)")
 
-        # Skip bid-ask check since we already have prices from find_strangle_by_target_premium
-        call_price = call_option.get("bid", 0)
-        put_price = put_option.get("bid", 0)
+        # Cap call if > max multiplier
+        if final_call["mult"] > max_mult:
+            call_at_cap = round(self.current_underlying_price + (expected_move * max_mult))
+            logger.info(f"Call at {final_call['mult']:.2f}x > {max_mult}x cap, pulling to ~${call_at_cap}")
 
-        if call_price <= 0 or put_price <= 0:
-            logger.error("Invalid option prices")
-            return False
+            # Find the closest available call at or below the cap
+            for c in calls:
+                if c["mult"] <= max_mult:
+                    final_call = c
+                    break
 
-        # Continue with order placement (same as multiplier approach)
-        return self._execute_strangle_order(call_option, put_option, call_price, put_price)
+        # Cap put if > max multiplier
+        if final_put["mult"] > max_mult:
+            put_at_cap = round(self.current_underlying_price - (expected_move * max_mult))
+            logger.info(f"Put at {final_put['mult']:.2f}x > {max_mult}x cap, pulling to ~${put_at_cap}")
+
+            # Find the closest available put at or below the cap
+            for p in puts:
+                if p["mult"] <= max_mult:
+                    final_put = p
+                    break
+
+        # =====================================================================
+        # STEP 6: Optimize - Push tighter strike OUT while staying >= 1% NET
+        # =====================================================================
+        current_gross = final_call["premium"] + final_put["premium"]
+        current_net = current_gross - weekly_theta_cost - total_entry_fees
+        current_return = (current_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+
+        min_target_return = self.weekly_target_return_pct
+
+        if current_return > min_target_return:
+            logger.info(f"Current return {current_return:.2f}% > {min_target_return}% target, optimizing for safety...")
+
+            # Find which leg is tighter (lower multiplier = more risk)
+            if final_call["mult"] < final_put["mult"]:
+                tighter_side = "call"
+                logger.info(f"Call is tighter ({final_call['mult']:.2f}x vs put {final_put['mult']:.2f}x)")
+            else:
+                tighter_side = "put"
+                logger.info(f"Put is tighter ({final_put['mult']:.2f}x vs call {final_call['mult']:.2f}x)")
+
+            # Try pushing the tighter leg out until we hit target or max multiplier
+            if tighter_side == "put":
+                for p in puts:
+                    if p["mult"] > max_mult:
+                        continue  # Don't go past cap
+                    if p["strike"] >= final_put["strike"]:
+                        continue  # Only consider wider strikes
+
+                    test_gross = final_call["premium"] + p["premium"]
+                    test_net = test_gross - weekly_theta_cost - total_entry_fees
+                    test_return = (test_net / long_straddle_cost) * 100
+
+                    if test_return >= min_target_return:
+                        final_put = p
+                        logger.debug(f"  Put ${p['strike']:.0f} ({p['mult']:.2f}x): {test_return:.2f}% - OK")
+                    else:
+                        break
+
+            else:  # tighter_side == "call"
+                for c in calls:
+                    if c["mult"] > max_mult:
+                        continue
+                    if c["strike"] <= final_call["strike"]:
+                        continue
+
+                    test_gross = c["premium"] + final_put["premium"]
+                    test_net = test_gross - weekly_theta_cost - total_entry_fees
+                    test_return = (test_net / long_straddle_cost) * 100
+
+                    if test_return >= min_target_return:
+                        final_call = c
+                        logger.debug(f"  Call ${c['strike']:.0f} ({c['mult']:.2f}x): {test_return:.2f}% - OK")
+                    else:
+                        break
+
+            # Try pushing the OTHER leg too if still above target
+            current_gross = final_call["premium"] + final_put["premium"]
+            current_net = current_gross - weekly_theta_cost - total_entry_fees
+            current_return = (current_net / long_straddle_cost) * 100
+
+            if current_return > min_target_return:
+                other_side = "call" if tighter_side == "put" else "put"
+                logger.info(f"Still at {current_return:.2f}%, trying to push {other_side} out too...")
+
+                if other_side == "put":
+                    for p in puts:
+                        if p["mult"] > max_mult:
+                            continue
+                        if p["strike"] >= final_put["strike"]:
+                            continue
+
+                        test_gross = final_call["premium"] + p["premium"]
+                        test_net = test_gross - weekly_theta_cost - total_entry_fees
+                        test_return = (test_net / long_straddle_cost) * 100
+
+                        if test_return >= min_target_return:
+                            final_put = p
+                        else:
+                            break
+
+                else:  # other_side == "call"
+                    for c in calls:
+                        if c["mult"] > max_mult:
+                            continue
+                        if c["strike"] <= final_call["strike"]:
+                            continue
+
+                        test_gross = c["premium"] + final_put["premium"]
+                        test_net = test_gross - weekly_theta_cost - total_entry_fees
+                        test_return = (test_net / long_straddle_cost) * 100
+
+                        if test_return >= min_target_return:
+                            final_call = c
+                        else:
+                            break
+
+        # =====================================================================
+        # STEP 7: Calculate final P&L and log results
+        # =====================================================================
+        final_gross = final_call["premium"] + final_put["premium"]
+        final_net = final_gross - weekly_theta_cost - total_entry_fees
+        final_return = (final_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+
+        logger.info("=" * 70)
+        logger.info("FINAL STRIKE SELECTION")
+        logger.info("=" * 70)
+        logger.info(f"Short Put:  ${final_put['strike']:.0f} @ ${final_put['bid']:.2f} = ${final_put['premium']:.2f} ({final_put['mult']:.2f}x exp move)")
+        logger.info(f"Short Call: ${final_call['strike']:.0f} @ ${final_call['bid']:.2f} = ${final_call['premium']:.2f} ({final_call['mult']:.2f}x exp move)")
+        logger.info("-" * 70)
+        logger.info(f"Gross Premium:     +${final_gross:.2f}")
+        logger.info(f"Weekly Theta:      -${weekly_theta_cost:.2f}")
+        logger.info(f"Entry Fees:        -${total_entry_fees:.2f}")
+        logger.info(f"NET Premium:       +${final_net:.2f}")
+        logger.info(f"NET Return:        {final_return:.2f}% (target was {self.weekly_target_return_pct}%)")
+        logger.info(f"Profit Zone: ${final_put['strike']:.0f} - ${final_call['strike']:.0f} (${final_call['strike'] - final_put['strike']:.0f} points)")
+        logger.info("=" * 70)
+
+        # Check minimum return
+        if final_return < min_target_return:
+            logger.warning(f"Final return {final_return:.2f}% is below target {min_target_return}%")
+            logger.warning("Proceeding anyway - this is the best available after applying caps")
+
+        # Prepare option data for order execution
+        call_option = {
+            "uic": final_call["uic"],
+            "strike": final_call["strike"],
+            "expiry": final_call["expiry"],
+            "bid": final_call["bid"]
+        }
+        put_option = {
+            "uic": final_put["uic"],
+            "strike": final_put["strike"],
+            "expiry": final_put["expiry"],
+            "bid": final_put["bid"]
+        }
+
+        # Continue with order placement
+        return self._execute_strangle_order(call_option, put_option, final_call["bid"], final_put["bid"])
 
     def _enter_strangle_by_multiplier(self, for_roll: bool = False) -> bool:
         """
@@ -2181,16 +2471,18 @@ class DeltaNeutralStrategy:
                     logger.info(f"Found weekly expiration with {dte} DTE")
                     break
 
-        # Calculate expected move using ACTUAL DTE, not hardcoded 7 days
-        # Using VIX as a proxy for implied volatility
-        iv = self.current_vix / 100  # Convert VIX to decimal
-        expected_move = self.client.calculate_expected_move(
+        # Calculate expected move from ATM straddle price (accurate market-based calculation)
+        expected_move = self.client.get_expected_move_from_straddle(
+            self.underlying_uic,
             self.current_underlying_price,
-            iv,
-            days=weekly_dte  # Use actual DTE instead of hardcoded 7
+            for_roll=for_roll
         )
 
-        logger.info(f"Weekly expected move: ${expected_move:.2f} ({iv*100:.1f}% IV)")
+        if not expected_move:
+            logger.error("Failed to get expected move from straddle prices")
+            return False
+
+        logger.info(f"Weekly expected move from ATM straddle: ${expected_move:.2f}")
 
         # Use middle of the multiplier range
         multiplier = (self.strangle_multiplier_min + self.strangle_multiplier_max) / 2
@@ -2492,6 +2784,135 @@ class DeltaNeutralStrategy:
 
         self.short_strangle = None
         return True
+
+    # =========================================================================
+    # THETA CALCULATION FOR NET RETURN
+    # =========================================================================
+
+    def _get_long_straddle_weekly_theta(self) -> float:
+        """
+        Get the weekly theta cost of the long straddle position.
+
+        Theta represents daily decay, so we multiply by 7 for weekly cost.
+        This is used to calculate the NET return after accounting for
+        the cost of holding the long straddle hedge.
+
+        Returns:
+            float: Weekly theta cost in dollars (positive value = cost).
+                   Returns 0 if unable to get theta.
+        """
+        weekly_theta_cost = 0.0
+
+        # If we have an existing long straddle position, get its theta
+        if self.long_straddle:
+            call_theta = 0.0
+            put_theta = 0.0
+
+            # Try to get theta from Saxo API
+            if self.long_straddle.call and self.long_straddle.call.uic:
+                greeks = self.client.get_option_greeks(self.long_straddle.call.uic)
+                if greeks:
+                    # Theta is typically negative (decay), we want the absolute cost
+                    call_theta = abs(greeks.get("Theta", 0))
+                    logger.debug(f"Long call theta: {call_theta}")
+
+            if self.long_straddle.put and self.long_straddle.put.uic:
+                greeks = self.client.get_option_greeks(self.long_straddle.put.uic)
+                if greeks:
+                    put_theta = abs(greeks.get("Theta", 0))
+                    logger.debug(f"Long put theta: {put_theta}")
+
+            # Daily theta cost per contract (in dollars)
+            # Theta is per-share, multiply by 100 for per-contract
+            daily_theta_cost = (call_theta + put_theta) * 100 * self.position_size
+            weekly_theta_cost = daily_theta_cost * 7
+
+            logger.info(f"Long straddle theta: Call={call_theta:.4f}, Put={put_theta:.4f}")
+            logger.info(f"Daily theta cost: ${daily_theta_cost:.2f}, Weekly: ${weekly_theta_cost:.2f}")
+
+        else:
+            # No position yet - estimate theta for ATM options at target DTE
+            # This is used during initial entry when we don't have positions yet
+            logger.info("No existing long straddle - estimating theta for ATM options")
+
+            # Get ATM options at target DTE to estimate theta
+            atm_options = self.client.find_atm_options(
+                self.underlying_uic,
+                self.current_underlying_price,
+                target_dte=self.target_dte
+            )
+
+            if atm_options:
+                call_theta = 0.0
+                put_theta = 0.0
+
+                call_greeks = self.client.get_option_greeks(atm_options["call"]["uic"])
+                if call_greeks:
+                    call_theta = abs(call_greeks.get("Theta", 0))
+
+                put_greeks = self.client.get_option_greeks(atm_options["put"]["uic"])
+                if put_greeks:
+                    put_theta = abs(put_greeks.get("Theta", 0))
+
+                daily_theta_cost = (call_theta + put_theta) * 100 * self.position_size
+                weekly_theta_cost = daily_theta_cost * 7
+
+                logger.info(f"Estimated theta for {self.target_dte} DTE ATM options:")
+                logger.info(f"  Call theta: {call_theta:.4f}, Put theta: {put_theta:.4f}")
+                logger.info(f"  Daily cost: ${daily_theta_cost:.2f}, Weekly: ${weekly_theta_cost:.2f}")
+            else:
+                logger.warning("Could not estimate theta - using 0 (will underestimate required premium)")
+
+        return weekly_theta_cost
+
+    def _get_long_straddle_cost(self) -> float:
+        """
+        Get the total cost of the current long straddle position.
+
+        This is used as the base for calculating the 1% NET weekly return target.
+        Per Brian Terry's strategy, the target return is based on the long straddle
+        investment, not on margin requirements.
+
+        Returns:
+            float: Total long straddle cost in dollars.
+                   Returns 0 if no position exists or cost cannot be determined.
+        """
+        if self.long_straddle and self.long_straddle.call and self.long_straddle.put:
+            call_cost = self.long_straddle.call.entry_price * 100 * self.position_size
+            put_cost = self.long_straddle.put.entry_price * 100 * self.position_size
+            total_cost = call_cost + put_cost
+            logger.debug(f"Long straddle cost: Call ${call_cost:.2f} + Put ${put_cost:.2f} = ${total_cost:.2f}")
+            return total_cost
+
+        # Fallback to persisted metrics if position not loaded but cost was tracked
+        if self.metrics.total_straddle_cost > 0:
+            logger.debug(f"Using persisted straddle cost: ${self.metrics.total_straddle_cost:.2f}")
+            return self.metrics.total_straddle_cost
+
+        # If no position yet, estimate based on current ATM prices
+        if self.current_underlying_price:
+            atm_options = self.client.find_atm_options(
+                self.underlying_uic,
+                self.current_underlying_price,
+                target_dte=self.target_dte
+            )
+            if atm_options:
+                call_quote = self.client.get_quote(atm_options["call"]["uic"], "StockOption")
+                put_quote = self.client.get_quote(atm_options["put"]["uic"], "StockOption")
+
+                if call_quote and put_quote:
+                    call_mid = call_quote["Quote"].get("Mid") or (
+                        (call_quote["Quote"].get("Bid", 0) + call_quote["Quote"].get("Ask", 0)) / 2
+                    )
+                    put_mid = put_quote["Quote"].get("Mid") or (
+                        (put_quote["Quote"].get("Bid", 0) + put_quote["Quote"].get("Ask", 0)) / 2
+                    )
+                    estimated_cost = (call_mid + put_mid) * 100 * self.position_size
+                    logger.info(f"Estimated long straddle cost (no position): ${estimated_cost:.2f}")
+                    return estimated_cost
+
+        logger.warning("Could not determine long straddle cost")
+        return 0.0
 
     # =========================================================================
     # 5-POINT RECENTERING LOGIC

@@ -916,6 +916,38 @@ class SaxoClient:
             return response
         return None
 
+    def get_option_greeks(self, uic: int) -> Optional[Dict]:
+        """
+        Get Greeks (Delta, Gamma, Theta, Vega) for an option.
+
+        Args:
+            uic: Unique Instrument Code for the option
+
+        Returns:
+            dict: Greeks data including Theta, or None if not available.
+                  Example: {"Delta": 0.5, "Gamma": 0.02, "Theta": -0.15, "Vega": 0.25}
+        """
+        endpoint = "/trade/v1/infoprices"
+        params = {
+            "AccountKey": self.account_key,
+            "Uic": uic,
+            "AssetType": "StockOption",
+            "FieldGroups": "Quote,Greeks"
+        }
+
+        response = self._make_request("GET", endpoint, params=params)
+        if response:
+            greeks = response.get("Greeks", {})
+            if greeks:
+                logger.debug(
+                    f"Greeks for UIC {uic}: Delta={greeks.get('Delta', 'N/A')}, "
+                    f"Theta={greeks.get('Theta', 'N/A')}"
+                )
+                return greeks
+            else:
+                logger.warning(f"No Greeks returned for option UIC {uic}")
+        return None
+
     def get_option_root_id(self, underlying_uic: int) -> Optional[int]:
         """
         Get the OptionRootId for an underlying instrument.
@@ -1025,8 +1057,9 @@ class SaxoClient:
         self,
         underlying_uic: int,
         underlying_price: float,
-        target_dte_min: int,
-        target_dte_max: int
+        target_dte_min: int = None,
+        target_dte_max: int = None,
+        target_dte: int = None
     ) -> Optional[Dict[str, Dict]]:
         """
         Find ATM (At-The-Money) call and put options.
@@ -1034,8 +1067,10 @@ class SaxoClient:
         Args:
             underlying_uic: UIC of the underlying instrument
             underlying_price: Current price of the underlying
-            target_dte_min: Minimum days to expiration
-            target_dte_max: Maximum days to expiration
+            target_dte_min: Minimum days to expiration (range mode)
+            target_dte_max: Maximum days to expiration (range mode)
+            target_dte: Target DTE to find closest expiration to (closest mode)
+                        If provided, ignores min/max and finds closest available expiration
 
         Returns:
             dict: Dictionary with 'call' and 'put' option data.
@@ -1045,26 +1080,53 @@ class SaxoClient:
             logger.error("Failed to get option expirations")
             return None
 
-        # Find expiration within target DTE range
         today = datetime.now().date()
         target_expiration = None
 
-        for exp_data in expirations:
-            exp_date_str = exp_data.get("Expiry")
-            if not exp_date_str:
-                continue
+        if target_dte is not None:
+            # Closest mode: find expiration closest to target_dte
+            closest_diff = float('inf')
+            selected_dte = None
+            selected_date = None
 
-            exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
-            dte = (exp_date - today).days
+            for exp_data in expirations:
+                exp_date_str = exp_data.get("Expiry")
+                if not exp_date_str:
+                    continue
 
-            if target_dte_min <= dte <= target_dte_max:
-                target_expiration = exp_data
-                logger.info(f"Found expiration: {exp_date_str} with {dte} DTE")
-                break
+                exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                diff = abs(dte - target_dte)
 
-        if not target_expiration:
-            logger.warning(f"No expiration found within {target_dte_min}-{target_dte_max} DTE range")
-            return None
+                if diff < closest_diff:
+                    closest_diff = diff
+                    target_expiration = exp_data
+                    selected_dte = dte
+                    selected_date = exp_date_str
+
+            if target_expiration:
+                logger.info(f"Found closest expiration to {target_dte} DTE: {selected_date} with {selected_dte} DTE (diff: {closest_diff} days)")
+            else:
+                logger.warning(f"No expiration found close to {target_dte} DTE")
+                return None
+        else:
+            # Range mode: find first expiration within target DTE range
+            for exp_data in expirations:
+                exp_date_str = exp_data.get("Expiry")
+                if not exp_date_str:
+                    continue
+
+                exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+
+                if target_dte_min <= dte <= target_dte_max:
+                    target_expiration = exp_data
+                    logger.info(f"Found expiration: {exp_date_str} with {dte} DTE")
+                    break
+
+            if not target_expiration:
+                logger.warning(f"No expiration found within {target_dte_min}-{target_dte_max} DTE range")
+                return None
 
         # Get strikes for this expiration (SpecificOptions array, not "Strikes")
         specific_options = target_expiration.get("SpecificOptions", [])
@@ -2724,6 +2786,131 @@ class SaxoClient:
         logger.debug(f"FX Rate {from_currency}/{to_currency}: {rate:.6f}")
         return rate
 
+    def get_expected_move_from_straddle(
+        self,
+        underlying_uic: int,
+        underlying_price: float,
+        target_dte_min: int = 0,
+        target_dte_max: int = 7,
+        for_roll: bool = False
+    ) -> Optional[float]:
+        """
+        Get expected move by pricing the ATM straddle for a given expiration.
+
+        The ATM straddle price IS the market's expected move - this is the most
+        accurate way to calculate expected move as it uses actual option prices
+        rather than VIX or theoretical IV calculations.
+
+        Args:
+            underlying_uic: UIC of the underlying instrument
+            underlying_price: Current price of the underlying
+            target_dte_min: Minimum DTE for expiration search
+            target_dte_max: Maximum DTE for expiration search
+            for_roll: If True, look for next week's expiry (5-12 DTE)
+
+        Returns:
+            float: Expected move in dollars, or None if unable to calculate
+        """
+        # Get option expirations
+        expirations = self.get_option_expirations(underlying_uic)
+        if not expirations:
+            logger.error("Failed to get option expirations for expected move")
+            return None
+
+        # Find the target expiration
+        today = datetime.now().date()
+        target_expiration = None
+
+        if for_roll:
+            # Rolling: look for next week (5-12 DTE)
+            dte_min, dte_max = 5, 12
+        else:
+            # Normal: use provided range
+            dte_min, dte_max = target_dte_min, target_dte_max
+
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry")
+            if not exp_date_str:
+                continue
+            exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+
+            if dte_min <= dte <= dte_max:
+                target_expiration = exp_data
+                logger.info(f"Expected move: using expiration {exp_date_str[:10]} ({dte} DTE)")
+                break
+
+        if not target_expiration:
+            logger.warning(f"No expiration found for expected move ({dte_min}-{dte_max} DTE)")
+            return None
+
+        # Find ATM strike
+        specific_options = target_expiration.get("SpecificOptions", [])
+        if not specific_options:
+            logger.error("No options available at target expiration")
+            return None
+
+        # Find closest strike to current price
+        atm_strike = None
+        min_diff = float('inf')
+        for option in specific_options:
+            strike = option.get("StrikePrice", 0)
+            diff = abs(strike - underlying_price)
+            if diff < min_diff:
+                min_diff = diff
+                atm_strike = strike
+
+        if not atm_strike:
+            logger.error("Could not find ATM strike")
+            return None
+
+        # Get ATM call and put UICs
+        call_uic = None
+        put_uic = None
+        for option in specific_options:
+            if option.get("StrikePrice") == atm_strike:
+                if option.get("PutCall") == "Call":
+                    call_uic = option.get("Uic")
+                elif option.get("PutCall") == "Put":
+                    put_uic = option.get("Uic")
+
+        if not call_uic or not put_uic:
+            logger.error(f"Could not find ATM call/put at strike {atm_strike}")
+            return None
+
+        # Get quotes for ATM options
+        call_quote = self.get_quote(call_uic, "StockOption")
+        put_quote = self.get_quote(put_uic, "StockOption")
+
+        if not call_quote or not put_quote:
+            logger.error("Failed to get ATM option quotes")
+            return None
+
+        # Use mid prices
+        call_mid = call_quote.get("Quote", {}).get("Mid", 0)
+        put_mid = put_quote.get("Quote", {}).get("Mid", 0)
+
+        if call_mid <= 0 or put_mid <= 0:
+            # Fall back to bid/ask average
+            call_bid = call_quote.get("Quote", {}).get("Bid", 0)
+            call_ask = call_quote.get("Quote", {}).get("Ask", 0)
+            put_bid = put_quote.get("Quote", {}).get("Bid", 0)
+            put_ask = put_quote.get("Quote", {}).get("Ask", 0)
+            call_mid = (call_bid + call_ask) / 2 if call_bid > 0 and call_ask > 0 else 0
+            put_mid = (put_bid + put_ask) / 2 if put_bid > 0 and put_ask > 0 else 0
+
+        if call_mid <= 0 or put_mid <= 0:
+            logger.error("Invalid ATM option prices")
+            return None
+
+        # ATM straddle price = expected move
+        expected_move = call_mid + put_mid
+
+        logger.info(f"Expected move from ATM straddle: ${expected_move:.2f} "
+                    f"(Call ${call_mid:.2f} + Put ${put_mid:.2f} at strike {atm_strike})")
+
+        return expected_move
+
     def calculate_expected_move(
         self,
         underlying_price: float,
@@ -2731,7 +2918,10 @@ class SaxoClient:
         days: int = 7
     ) -> float:
         """
-        Calculate expected move based on implied volatility.
+        DEPRECATED: Calculate expected move based on implied volatility.
+
+        NOTE: This method uses a theoretical formula that may not match market prices.
+        Prefer get_expected_move_from_straddle() for accurate expected move.
 
         Uses the formula: Expected Move = Price * IV * sqrt(Days/365)
 
@@ -2744,5 +2934,6 @@ class SaxoClient:
             float: Expected move in dollars
         """
         import math
+        logger.warning("calculate_expected_move is deprecated - use get_expected_move_from_straddle instead")
         expected_move = underlying_price * iv * math.sqrt(days / 365)
         return expected_move

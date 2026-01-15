@@ -81,16 +81,27 @@ def main():
 
     print(f"Weekly Expiry: {weekly_expiry} ({weekly_dte} DTE)")
 
-    # Calculate expected move
-    iv = vix_value / 100  # VIX as decimal
-    expected_move = client.calculate_expected_move(spy_price, iv, days=weekly_dte)
+    # Calculate expected move from ATM straddle price (accurate market-based calculation)
+    expected_move = client.get_expected_move_from_straddle(
+        underlying_uic,
+        spy_price,
+        target_dte_min=0,
+        target_dte_max=7
+    )
+
+    if not expected_move:
+        # Fallback to VIX-based calculation if straddle not available
+        print("\nWARNING: Could not get expected move from ATM straddle, falling back to VIX")
+        iv = vix_value / 100
+        expected_move = client.calculate_expected_move(spy_price, iv, days=weekly_dte)
 
     print(f"\n{'='*60}")
     print(f"EXPECTED MOVE CALCULATION")
     print(f"{'='*60}")
-    print(f"IV (VIX): {vix_value:.2f}%")
+    print(f"Method: ATM Straddle Price (market-implied)")
+    print(f"VIX (for reference): {vix_value:.2f}%")
     print(f"Days: {weekly_dte}")
-    print(f"Expected Move: ${expected_move:.2f}")
+    print(f"Expected Move: ±${expected_move:.2f}")
 
     # Strategy uses 1.5-2.0x multiplier, middle = 1.75
     multiplier_min = config["strategy"].get("strangle_multiplier_min", 1.5)

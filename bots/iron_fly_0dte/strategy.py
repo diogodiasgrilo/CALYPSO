@@ -785,14 +785,14 @@ class IronFlyStrategy:
 
     def _calculate_expected_move(self) -> float:
         """
-        Calculate expected daily move based on VIX.
+        Calculate expected daily move from ATM straddle price.
 
-        Formula: Expected Move = Price * (VIX / sqrt(252)) / 100
-        For 0DTE, this gives us the expected range for the day.
+        The ATM 0DTE straddle price IS the market's expected move for the day.
+        This is more accurate than VIX-based calculations.
 
         Alternative methods (per Doc Severson):
         1. Use broker's "Expected Move" indicator if available
-        2. Use cost of ATM straddle as proxy
+        2. Use cost of ATM straddle as proxy (THIS IS WHAT WE DO)
         3. Manual calibration mode
 
         Returns:
@@ -803,8 +803,27 @@ class IronFlyStrategy:
             logger.info(f"Using manual expected move: {self.manual_expected_move}")
             return self._round_to_strike(self.manual_expected_move)
 
-        # Standard VIX-based calculation
-        # VIX represents annualized volatility, so divide by sqrt(252) for daily
+        # Get expected move from 0DTE ATM straddle price
+        expected_move = self.client.get_expected_move_from_straddle(
+            self.underlying_uic,
+            self.current_price,
+            target_dte_min=0,
+            target_dte_max=1  # 0DTE
+        )
+
+        if expected_move:
+            # Round to nearest strike increment
+            rounded_move = self._round_to_strike(expected_move)
+
+            # Minimum wing width of 5 points
+            if rounded_move < 5:
+                rounded_move = 5.0
+
+            logger.info(f"Expected move from 0DTE straddle: ${expected_move:.2f}, Rounded: ${rounded_move:.2f}")
+            return rounded_move
+
+        # Fallback to VIX-based calculation if straddle pricing fails
+        logger.warning("Could not get straddle price, falling back to VIX calculation")
         import math
         daily_vol = self.current_vix / math.sqrt(252)
         expected_move = self.current_price * (daily_vol / 100)
@@ -816,7 +835,7 @@ class IronFlyStrategy:
         if rounded_move < 5:
             rounded_move = 5.0
 
-        logger.debug(f"Expected move calculation: VIX={self.current_vix:.2f}, "
+        logger.debug(f"Fallback expected move: VIX={self.current_vix:.2f}, "
                      f"Daily vol={daily_vol:.4f}%, Raw={expected_move:.2f}, "
                      f"Rounded={rounded_move}")
 

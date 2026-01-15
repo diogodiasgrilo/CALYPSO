@@ -294,10 +294,16 @@ def main():
     print(f"  Actual return: {(total_premium / margin_per_contract) * 100:.2f}%")
     print(f"  Target was: {target_return_pct}%")
 
-    # Calculate expected move for comparison
-    iv = vix_value / 100
-    import math
-    expected_move = spy_price * iv * math.sqrt(weekly_dte / 365)
+    # Get expected move from ATM straddle price (accurate market-based calculation)
+    expected_move = client.get_expected_move_from_straddle(
+        underlying_uic,
+        spy_price,
+        for_roll=True  # Next week
+    )
+
+    if not expected_move:
+        print("WARNING: Could not get expected move from straddle")
+        expected_move = 5.0  # Fallback
 
     call_distance = call['strike'] - spy_price
     put_distance = spy_price - put['strike']
@@ -305,7 +311,7 @@ def main():
     print(f"\n{'='*70}")
     print(f"RISK ANALYSIS")
     print(f"{'='*70}")
-    print(f"  Expected move ({weekly_dte} DTE): ${expected_move:.2f}")
+    print(f"  Expected move ({weekly_dte} DTE, from ATM straddle): ${expected_move:.2f}")
     print(f"  Call is {call_distance / expected_move:.2f}x expected move away")
     print(f"  Put is {put_distance / expected_move:.2f}x expected move away")
     print(f"")
