@@ -29,6 +29,9 @@ import websocket
 # Import external price feed for simulation fallback
 from shared.external_price_feed import ExternalPriceFeed
 
+# Import token coordinator for multi-bot environments
+from shared.token_coordinator import get_token_coordinator, TokenCoordinator
+
 # Configure module logger
 logger = logging.getLogger(__name__)
 
@@ -226,6 +229,20 @@ class SaxoClient:
         external_feed_enabled = config.get("external_price_feed", {}).get("enabled", True)
         self.external_feed = ExternalPriceFeed(enabled=external_feed_enabled)
 
+        # Token coordinator for multi-bot environments
+        # Prevents race conditions when multiple bots share the same refresh token
+        self.token_coordinator = get_token_coordinator()
+
+        # Update coordinator cache with current tokens if we have them
+        if self.access_token and self.refresh_token:
+            self.token_coordinator.update_cache({
+                'access_token': self.access_token,
+                'refresh_token': self.refresh_token,
+                'token_expiry': self.token_expiry.isoformat() if self.token_expiry else None,
+                'app_key': self.app_key,
+                'app_secret': self.app_secret,
+            })
+
         logger.info(f"SaxoClient initialized in {self.environment} environment")
 
     @property
@@ -249,6 +266,9 @@ class SaxoClient:
         This method checks for existing valid tokens first, then attempts
         to refresh if needed, or initiates a new OAuth flow if required.
 
+        Uses TokenCoordinator to prevent race conditions in multi-bot environments
+        where multiple processes share the same refresh token.
+
         After successful authentication, it upgrades the session to
         FullTradingAndChat for real-time market data access.
 
@@ -261,6 +281,25 @@ class SaxoClient:
         """
         logger.info("Starting authentication process...")
 
+        # MULTI-BOT COORDINATION: Check coordinator cache first
+        # Another bot may have refreshed tokens since we started
+        cached_tokens = self.token_coordinator.get_cached_tokens()
+        if cached_tokens and not force_refresh:
+            # Check if cached tokens are newer than ours
+            cached_expiry_str = cached_tokens.get('token_expiry')
+            if cached_expiry_str:
+                try:
+                    cached_expiry = datetime.fromisoformat(cached_expiry_str.replace('Z', '+00:00'))
+                    # If cached tokens are valid and newer, use them
+                    if self.token_coordinator.is_token_valid(cached_tokens):
+                        if not self.token_expiry or cached_expiry > self.token_expiry:
+                            logger.info("Using fresher tokens from coordinator cache")
+                            self._apply_tokens_from_cache(cached_tokens)
+                            self._upgrade_session_for_realtime_data()
+                            return True
+                except (ValueError, TypeError):
+                    pass
+
         # Check if we have a valid access token (unless force_refresh is requested)
         if self.access_token and self._is_token_valid() and not force_refresh:
             logger.info("Using existing valid access token")
@@ -268,10 +307,10 @@ class SaxoClient:
             self._upgrade_session_for_realtime_data()
             return True
 
-        # Try to refresh the token if we have a refresh token
+        # Try to refresh the token using coordinator (with lock to prevent race conditions)
         if self.refresh_token:
             logger.info("Attempting to refresh access token...")
-            if self._refresh_access_token():
+            if self._coordinated_token_refresh():
                 # Upgrade session for real-time data
                 self._upgrade_session_for_realtime_data()
                 return True
@@ -283,6 +322,58 @@ class SaxoClient:
             # Upgrade session for real-time data
             self._upgrade_session_for_realtime_data()
         return success
+
+    def _apply_tokens_from_cache(self, cached_tokens: Dict[str, Any]):
+        """Apply tokens from coordinator cache to this client instance."""
+        self.access_token = cached_tokens.get('access_token')
+        self.refresh_token = cached_tokens.get('refresh_token')
+        expiry_str = cached_tokens.get('token_expiry')
+        if expiry_str:
+            try:
+                self.token_expiry = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+            except (ValueError, TypeError):
+                self.token_expiry = None
+
+    def _coordinated_token_refresh(self) -> bool:
+        """
+        Refresh tokens using coordinator to prevent race conditions.
+
+        This wraps the actual refresh in a file lock to ensure only one
+        bot process refreshes at a time. Other processes will pick up
+        the refreshed tokens from the cache.
+
+        Returns:
+            bool: True if refresh successful (by us or another process), False otherwise.
+        """
+        def do_refresh() -> Optional[Dict[str, Any]]:
+            """Actual refresh logic wrapped for coordinator."""
+            if self._refresh_access_token_internal():
+                return {
+                    'access_token': self.access_token,
+                    'refresh_token': self.refresh_token,
+                    'token_expiry': self.token_expiry.isoformat() if self.token_expiry else None,
+                    'app_key': self.app_key,
+                    'app_secret': self.app_secret,
+                }
+            return None
+
+        def save_to_secret_manager(tokens: Dict[str, Any]) -> bool:
+            """Save tokens to Secret Manager after refresh."""
+            self._save_tokens_to_config()
+            return True
+
+        # Use coordinator with lock
+        new_tokens = self.token_coordinator.refresh_with_lock(
+            do_refresh,
+            save_to_secret_manager
+        )
+
+        if new_tokens:
+            # Apply tokens (either from our refresh or from cache if another process refreshed)
+            self._apply_tokens_from_cache(new_tokens)
+            return True
+
+        return False
 
     def _oauth_authorization_flow(self) -> bool:
         """
@@ -386,7 +477,22 @@ class SaxoClient:
 
     def _refresh_access_token(self) -> bool:
         """
-        Refresh the access token using the refresh token.
+        Refresh the access token using coordinated approach.
+
+        This is the public method that uses TokenCoordinator to prevent
+        race conditions in multi-bot environments.
+
+        Returns:
+            bool: True if refresh successful, False otherwise.
+        """
+        return self._coordinated_token_refresh()
+
+    def _refresh_access_token_internal(self) -> bool:
+        """
+        Internal token refresh - performs actual API call.
+
+        Called by the coordinator with lock held. Do NOT call directly
+        from outside - use _refresh_access_token() or _coordinated_token_refresh().
 
         Returns:
             bool: True if refresh successful, False otherwise.
@@ -415,8 +521,8 @@ class SaxoClient:
 
                 logger.info(f"Access token refreshed successfully (expires in {expires_in//60} min)")
 
-                # Save tokens to config/Secret Manager for persistence
-                self._save_tokens_to_config()
+                # Note: Do NOT call _save_tokens_to_config() here
+                # The coordinator handles saving after successful refresh
 
                 self._record_success()
                 return True

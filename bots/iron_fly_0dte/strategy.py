@@ -652,15 +652,15 @@ class IronFlyStrategy:
     def update_market_data(self):
         """Update current price and VIX from market data."""
         try:
-            # Get underlying price
+            # Get underlying price (US500.I is CfdOnIndex)
             if self.underlying_uic:
-                quote = self.client.get_quote(self.underlying_uic)
+                quote = self.client.get_quote(self.underlying_uic, asset_type="CfdOnIndex")
                 if quote:
                     self.current_price = quote.get('Quote', {}).get('Mid', self.current_price)
 
-            # Get VIX
+            # Get VIX (StockIndex type)
             if self.vix_uic:
-                vix_quote = self.client.get_quote(self.vix_uic)
+                vix_quote = self.client.get_quote(self.vix_uic, asset_type="StockIndex")
                 if vix_quote:
                     self.current_vix = vix_quote.get('Quote', {}).get('Mid', self.current_vix)
         except Exception as e:
