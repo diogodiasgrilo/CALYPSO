@@ -3104,25 +3104,50 @@ class DeltaNeutralStrategy:
                     action_taken = "Executed 5-point recenter (before adding shorts)"
             else:
                 # Check if we're waiting for old shorts to expire (debit roll skip)
-                # Per Brian Terry: "You aren't rolling, you're starting a new weekly cycle"
+                # Per Brian Terry: "If you didn't roll on Thursday because of the debit,
+                # you check again on Friday morning (10:00 AM EST) or even Monday morning"
                 now_est = get_us_market_time()
                 today = now_est.date()
                 today_weekday = now_est.strftime("%A")
+                current_hour = now_est.hour
 
-                # If we closed shorts this week due to debit, wait until Monday
                 if self._shorts_closed_date:
-                    # Calculate when we can enter new shorts
-                    # If closed on Thursday/Friday, wait until Monday
-                    days_since_close = (today - self._shorts_closed_date).days
-                    if days_since_close < 3 and today_weekday not in ["Monday", "Tuesday", "Wednesday"]:
-                        logger.info(f"Waiting for new week to enter shorts (closed {self._shorts_closed_date}, today is {today_weekday})")
-                        action_taken = "Waiting for Monday to enter new shorts"
+                    # We skipped a roll due to debit - when can we try again?
+                    closed_weekday = self._shorts_closed_date.strftime("%A")
+
+                    # Per Brian Terry's "Wait for Premium" logic:
+                    # - If closed Thursday -> try again Friday 10AM EST
+                    # - If closed Friday -> wait until Monday
+                    # - Once current week expires, open fresh shorts for following Friday
+
+                    can_try_new_shorts = False
+
+                    if closed_weekday == "Thursday" and today_weekday == "Friday" and current_hour >= 10:
+                        # Closed Thursday, now it's Friday 10AM+ EST - try again
+                        logger.info("Thursday roll skipped - checking Friday 10AM EST for new shorts")
+                        can_try_new_shorts = True
+                    elif today_weekday in ["Monday", "Tuesday", "Wednesday"]:
+                        # New week - definitely can enter new shorts
+                        logger.info(f"New week ({today_weekday}) - ready to enter new shorts")
+                        can_try_new_shorts = True
+                    elif today > self._shorts_closed_date and today_weekday == "Monday":
+                        # Monday after the close
+                        can_try_new_shorts = True
                     else:
-                        # New week - clear the flag and enter new shorts
-                        logger.info(f"New week started - clearing shorts_closed_date flag")
+                        logger.info(f"Waiting for premium opportunity (closed {closed_weekday}, today is {today_weekday} {current_hour}:00 EST)")
+                        action_taken = "Waiting for Friday 10AM or Monday to enter new shorts"
+
+                    if can_try_new_shorts:
+                        # Clear the flag and try to enter new shorts
+                        logger.info("Attempting to enter fresh short strangle (new weekly cycle)")
                         self._shorts_closed_date = None
                         if self.enter_short_strangle(for_roll=False):
                             action_taken = "Added short strangle (new weekly cycle)"
+                        else:
+                            # Still can't get credit - set flag again and wait
+                            logger.warning("Still cannot enter for credit - will try Monday")
+                            self._shorts_closed_date = today
+                            action_taken = "New shorts still not viable - waiting for Monday"
                 else:
                     # Normal operation - add short strangle
                     # CRITICAL: If roll time, enter with next week's expiry directly
