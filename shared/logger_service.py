@@ -188,6 +188,10 @@ class GoogleSheetsLogger:
         self.credentials_file = self.config.get("credentials_file", "config/google_credentials.json")
         self.spreadsheet_name = self.config.get("spreadsheet_name", "Trading_Bot_Log")
 
+        # Optional worksheets - only created for specific strategies
+        # Opening Range is only needed for Iron Fly 0DTE strategy
+        self.include_opening_range = self.config.get("include_opening_range", False)
+
         self.client = None
         self.spreadsheet = None
         self.worksheets = {}  # Store all worksheets
@@ -259,9 +263,14 @@ class GoogleSheetsLogger:
             self._setup_bot_logs_worksheet()
             self._setup_performance_metrics_worksheet()
             self._setup_account_summary_worksheet()
-            self._setup_opening_range_worksheet()
 
-            logger.info("All Google Sheets worksheets initialized successfully (8 tabs)")
+            # Optional: Opening Range worksheet (only for Iron Fly 0DTE strategy)
+            tab_count = 7
+            if self.include_opening_range:
+                self._setup_opening_range_worksheet()
+                tab_count = 8
+
+            logger.info(f"All Google Sheets worksheets initialized successfully ({tab_count} tabs)")
             return True
 
         except ImportError:
