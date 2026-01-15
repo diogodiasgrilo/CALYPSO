@@ -19,6 +19,7 @@
     },
 
     "strategy": {
+        "name": "Delta Neutral (Brian Terry)",
         "underlying_symbol": "SPY",
         "underlying_uic": 36590,
         "_underlying_uic_note": "UIC for SPY:arcx (SPDR S&P 500 ETF Trust) - verified",

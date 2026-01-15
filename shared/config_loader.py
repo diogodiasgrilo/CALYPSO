@@ -3,10 +3,16 @@
 Config Loader Module
 
 Smart configuration loader that abstracts cloud vs local environment:
-- On GCP: Loads credentials from Secret Manager
-- Locally: Loads from config/config.json (supports both SIM and LIVE)
+- On GCP: Loads CREDENTIALS from Secret Manager, STRATEGY from bot's config.json
+- Locally: Loads everything from config.json (supports both SIM and LIVE)
 
-This ensures the same codebase works seamlessly in both environments.
+This ensures the same codebase works seamlessly in both environments,
+while allowing each bot to have its own strategy configuration.
+
+Multi-Bot Architecture:
+- Shared credentials (Saxo tokens, account keys) come from Secret Manager
+- Bot-specific settings (strategy, logging, google_sheets) come from config.json
+- Each bot has its own config: bots/<bot_name>/config/config.json
 """
 
 import os
@@ -23,19 +29,21 @@ _config_loader_instance: Optional['ConfigLoader'] = None
 
 class ConfigLoader:
     """
-    Smart configuration loader with cloud/local detection.
+    Smart configuration loader with cloud/local detection and multi-bot support.
 
     Usage:
-        loader = ConfigLoader()
+        # For a specific bot
+        loader = ConfigLoader("bots/delta_neutral/config/config.json")
         config = loader.load_config()
 
     On GCP:
-        - Credentials loaded from Secret Manager
+        - CREDENTIALS loaded from Secret Manager (shared across bots)
+        - STRATEGY/LOGGING/etc loaded from bot's config.json (bot-specific)
         - Always uses LIVE environment
         - Tokens persisted to Secret Manager after refresh
 
     Locally:
-        - Credentials loaded from config.json
+        - Everything loaded from bot's config.json
         - Supports both SIM and LIVE (use --live flag)
         - Tokens persisted to config.json after refresh
     """
@@ -45,7 +53,8 @@ class ConfigLoader:
         Initialize config loader.
 
         Args:
-            local_config_path: Path to local config file (used in local dev mode)
+            local_config_path: Path to bot's config file (used for strategy settings
+                               in both local and cloud modes)
         """
         self.local_config_path = local_config_path
         self._is_cloud = None
@@ -87,15 +96,23 @@ class ConfigLoader:
 
     def _load_cloud_config(self) -> Dict[str, Any]:
         """
-        Load configuration from GCP Secret Manager.
+        Load configuration for cloud environment (GCP).
+
+        HYBRID APPROACH:
+        - CREDENTIALS: Loaded from Secret Manager (shared across all bots)
+        - STRATEGY/SETTINGS: Loaded from bot's config.json (bot-specific)
+
+        This allows multiple bots to share Saxo credentials while having
+        their own strategy configurations.
 
         Always uses LIVE environment when running in cloud.
 
         Returns:
-            dict: Configuration assembled from secrets
+            dict: Configuration merged from secrets + local config
 
         Raises:
             ValueError: If required secrets are not found
+            FileNotFoundError: If bot's config.json doesn't exist
         """
         from shared.secret_manager import (
             get_saxo_credentials,
@@ -104,6 +121,30 @@ class ConfigLoader:
             get_email_config,
         )
 
+        logger.info("=" * 60)
+        logger.info("CLOUD ENVIRONMENT - HYBRID CONFIG LOADING")
+        logger.info("=" * 60)
+
+        # =====================================================================
+        # STEP 1: Load bot-specific settings from local config.json
+        # =====================================================================
+        if not os.path.exists(self.local_config_path):
+            raise FileNotFoundError(
+                f"Bot config file not found: {self.local_config_path}\n"
+                f"Each bot must have its own config.json with strategy settings.\n"
+                f"Copy the config.example.json to config.json and customize."
+            )
+
+        with open(self.local_config_path, "r") as f:
+            bot_config = json.load(f)
+
+        logger.info(f"Loaded bot-specific config from: {self.local_config_path}")
+        bot_name = bot_config.get("strategy", {}).get("name", "Unknown Bot")
+        logger.info(f"  Bot/Strategy: {bot_name}")
+
+        # =====================================================================
+        # STEP 2: Load shared credentials from Secret Manager
+        # =====================================================================
         # Get Saxo credentials (required)
         saxo_creds = get_saxo_credentials()
         if not saxo_creds:
@@ -128,10 +169,12 @@ class ConfigLoader:
         # Get email config (optional)
         email_config = get_email_config() or {"enabled": False}
 
-        # Build config structure (LIVE environment for cloud)
+        # =====================================================================
+        # STEP 3: Build merged config (credentials + bot-specific settings)
+        # =====================================================================
         config = {
+            # CREDENTIALS from Secret Manager (LIVE environment in cloud)
             "saxo_api": {
-                # Include both SIM and LIVE for compatibility, but cloud always uses LIVE
                 "sim": {},  # Empty - not used in cloud
                 "live": saxo_creds,
                 "environment": "live",  # Always live in cloud
@@ -145,63 +188,60 @@ class ConfigLoader:
                 "token_url_sim": "https://sim.logonvalidation.net/token",
                 "token_url_live": "https://live.logonvalidation.net/token"
             },
-            "strategy": {
-                "underlying_symbol": "SPY",
-                "underlying_uic": 36590,
-                "vix_symbol": "VIX",
-                "vix_uic": 10606,
-                "max_vix_entry": 18.0,
-                "long_straddle_min_dte": 90,
-                "long_straddle_max_dte": 120,
-                "recenter_threshold_points": 5.0,
-                "weekly_strangle_multiplier_min": 1.5,
-                "weekly_strangle_multiplier_max": 2.0,
-                "exit_dte_min": 30,
-                "exit_dte_max": 60,
-                "roll_days": ["Friday"],
-                "max_bid_ask_spread_percent": 0.5,
-                "position_size": 1,
-                "fed_blackout_days": 2,
-                "emergency_exit_percent": 5.0
-            },
-            "currency": {
-                "base_currency": "USD",
-                "account_currency": "EUR",
-                "eur_usd_uic": 21,
-                "enabled": True,
-                "cache_rate_seconds": 300
-            },
-            "circuit_breaker": {
+
+            # ACCOUNT from Secret Manager
+            "account": account_config,
+
+            # EMAIL from Secret Manager
+            "email_alerts": email_config,
+
+            # BOT-SPECIFIC settings from config.json
+            "strategy": bot_config.get("strategy", {}),
+            "circuit_breaker": bot_config.get("circuit_breaker", {
                 "max_consecutive_errors": 3,
                 "max_disconnection_seconds": 60,
                 "cooldown_minutes": 15
-            },
+            }),
+            "currency": bot_config.get("currency", {
+                "base_currency": "USD",
+                "account_currency": "EUR",
+                "enabled": True,
+                "cache_rate_seconds": 300
+            }),
+            "filters": bot_config.get("filters", {}),
+
+            # GOOGLE SHEETS: Credentials from Secret Manager, settings from config.json
             "google_sheets": {
-                "enabled": sheets_creds is not None,
+                "enabled": sheets_creds is not None and bot_config.get("google_sheets", {}).get("enabled", True),
                 "credentials_from_secret_manager": True,
-                "spreadsheet_name": "Calypso_Bot_Log",
-                "worksheet_name": "Trades"
+                "spreadsheet_name": bot_config.get("google_sheets", {}).get("spreadsheet_name", "Calypso_Bot_Log"),
+                "worksheet_name": bot_config.get("google_sheets", {}).get("worksheet_name", "Trades")
             },
-            "logging": {
+
+            # LOGGING from config.json (bot-specific log files)
+            "logging": bot_config.get("logging", {
                 "log_file": "/var/log/calypso/bot_log.txt",
                 "log_level": "INFO",
                 "console_output": True
-            },
-            "account": account_config,
-            "email_alerts": email_config,
-            "external_price_feed": {
-                "enabled": False,  # Not needed for LIVE with proper subscriptions
+            }),
+
+            # External price feed (usually disabled in cloud/LIVE)
+            "external_price_feed": bot_config.get("external_price_feed", {
+                "enabled": False,
                 "_note": "External feed disabled in cloud (LIVE mode)"
-            }
+            })
         }
 
         # Store sheets credentials for later use by GoogleSheetsLogger
         if sheets_creds:
             config["_google_sheets_credentials"] = sheets_creds
 
-        logger.info("Cloud configuration loaded successfully")
+        logger.info("=" * 60)
+        logger.info("CLOUD CONFIG LOADED SUCCESSFULLY")
+        logger.info("=" * 60)
         logger.info(f"  Environment: LIVE")
-        logger.info(f"  Google Sheets: {'Enabled' if sheets_creds else 'Disabled'}")
+        logger.info(f"  Strategy: {config['strategy'].get('name', config['strategy'].get('underlying_symbol', 'Unknown'))}")
+        logger.info(f"  Google Sheets: {config['google_sheets'].get('spreadsheet_name', 'N/A')}")
         logger.info(f"  Email Alerts: {'Enabled' if email_config.get('enabled') else 'Disabled'}")
 
         return config
