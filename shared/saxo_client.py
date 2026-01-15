@@ -27,7 +27,7 @@ import requests
 import websocket
 
 # Import external price feed for simulation fallback
-from src.external_price_feed import ExternalPriceFeed
+from shared.external_price_feed import ExternalPriceFeed
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -451,7 +451,7 @@ class SaxoClient:
         """
         try:
             # Try to use ConfigLoader if available (handles cloud vs local)
-            from src.config_loader import get_config_loader
+            from shared.config_loader import get_config_loader
             loader = get_config_loader()
 
             if loader:

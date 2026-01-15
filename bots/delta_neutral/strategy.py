@@ -31,10 +31,10 @@ from typing import Optional, Dict, List, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
-from src.saxo_client import SaxoClient, BuySell, OrderType
+from shared.saxo_client import SaxoClient, BuySell, OrderType
 
-# Path for persistent metrics storage
-METRICS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "strategy_metrics.json")
+# Path for persistent metrics storage (now in project root data/ folder)
+METRICS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "delta_neutral_metrics.json")
 
 # Configure module logger
 logger = logging.getLogger(__name__)

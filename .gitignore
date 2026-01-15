@@ -1,5 +1,6 @@
-# Delta Neutral Trading Bot - Git Ignore
-# =======================================
+# CALYPSO Trading Bots - Git Ignore
+# ==================================
+# Monorepo containing multiple trading bot strategies
 
 # Python
 __pycache__/
@@ -45,9 +46,15 @@ config/config.json
 config/config.*.json
 !config/config.example.json
 
+# Bot-specific configs (in bots/*/config/)
+bots/*/config/config.json
+bots/*/config/config.*.json
+!bots/*/config/config.example.json
+
 # Google credentials - NEVER COMMIT!
 config/google_credentials.json
 config/*credentials*.json
+bots/*/config/*credentials*.json
 *.pem
 *.key
 

@@ -218,7 +218,7 @@ class GoogleSheetsLogger:
             ]
 
             # Check if running on GCP - load credentials from Secret Manager
-            from src.secret_manager import is_running_on_gcp, get_google_sheets_credentials
+            from shared.secret_manager import is_running_on_gcp, get_google_sheets_credentials
 
             if is_running_on_gcp():
                 logger.info("Loading Google Sheets credentials from Secret Manager")

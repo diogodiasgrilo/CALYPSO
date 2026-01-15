@@ -38,18 +38,20 @@ from datetime import datetime
 from typing import Optional
 
 # Ensure project root is in path for imports when running as script
-# This allows both `python src/main.py` and `python -m src.main` to work
-_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This allows both `python bots/delta_neutral/main.py` and `python -m bots.delta_neutral.main` to work
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-# Import bot modules
-from src.saxo_client import SaxoClient
-from src.strategy import DeltaNeutralStrategy, StrategyState
-from src.logger_service import TradeLoggerService, setup_logging
-from src.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration
-from src.config_loader import ConfigLoader, get_config_loader
-from src.secret_manager import is_running_on_gcp
+# Import shared modules
+from shared.saxo_client import SaxoClient
+from shared.logger_service import TradeLoggerService, setup_logging
+from shared.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration
+from shared.config_loader import ConfigLoader, get_config_loader
+from shared.secret_manager import is_running_on_gcp
+
+# Import bot-specific strategy
+from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState
 
 # Configure main logger
 logger = logging.getLogger(__name__)
@@ -712,8 +714,8 @@ Examples:
 
     parser.add_argument(
         "--config", "-c",
-        default="config/config.json",
-        help="Path to configuration file (default: config/config.json)"
+        default="bots/delta_neutral/config/config.json",
+        help="Path to configuration file (default: bots/delta_neutral/config/config.json)"
     )
 
     parser.add_argument(

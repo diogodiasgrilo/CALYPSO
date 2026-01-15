@@ -55,7 +55,7 @@ class ConfigLoader:
     def is_cloud(self) -> bool:
         """Check if running on GCP."""
         if self._is_cloud is None:
-            from src.secret_manager import is_running_on_gcp
+            from shared.secret_manager import is_running_on_gcp
             self._is_cloud = is_running_on_gcp()
         return self._is_cloud
 
@@ -97,7 +97,7 @@ class ConfigLoader:
         Raises:
             ValueError: If required secrets are not found
         """
-        from src.secret_manager import (
+        from shared.secret_manager import (
             get_saxo_credentials,
             get_google_sheets_credentials,
             get_account_config,
@@ -269,7 +269,7 @@ class ConfigLoader:
         token_expiry: str
     ) -> bool:
         """Save tokens to GCP Secret Manager."""
-        from src.secret_manager import update_saxo_tokens
+        from shared.secret_manager import update_saxo_tokens
 
         success = update_saxo_tokens(access_token, refresh_token, token_expiry)
         if success:

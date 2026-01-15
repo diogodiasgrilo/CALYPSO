@@ -1,0 +1,47 @@
+[Unit]
+Description=Calypso Delta Neutral Trading Bot (Brian's Strategy)
+Documentation=https://github.com/your-repo/calypso
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+# Environment variables
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+
+# Main command - runs the delta neutral bot
+# Cloud environment auto-detected, credentials loaded from Secret Manager
+ExecStart=/opt/calypso/.venv/bin/python -m bots.delta_neutral.main
+
+# Restart policy
+# Always restart on failure, with increasing delays
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# Logging
+# Logs go to systemd journal, can be viewed with: journalctl -u delta_neutral
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-delta-neutral
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/calypso /opt/calypso/logs /opt/calypso/data
+
+# Resource limits
+# Prevent runaway memory usage
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

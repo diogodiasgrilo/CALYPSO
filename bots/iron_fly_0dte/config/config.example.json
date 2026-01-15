@@ -1,0 +1,130 @@
+{
+    "_comment": "0DTE Iron Fly Strategy Configuration (Doc Severson)",
+    "_strategy_source": "https://www.youtube.com/watch?v=ad27qIuhgQ4",
+
+    "saxo_api": {
+        "environment": "sim",
+        "app_key": "YOUR_SAXO_APP_KEY",
+        "app_secret": "YOUR_SAXO_APP_SECRET",
+        "access_token": "",
+        "refresh_token": "",
+        "token_expiry": null,
+        "base_url_sim": "https://gateway.saxobank.com/sim/openapi",
+        "base_url_live": "https://gateway.saxobank.com/openapi",
+        "streaming_url_sim": "wss://streaming.saxobank.com/sim/openapi/streamingws/connect",
+        "streaming_url_live": "wss://streaming.saxobank.com/openapi/streamingws/connect",
+        "redirect_uri": "http://localhost:8080/callback",
+        "auth_url": "https://sim.logonvalidation.net/authorize",
+        "token_url": "https://sim.logonvalidation.net/token",
+
+        "sim": {
+            "app_key": "YOUR_SIM_APP_KEY",
+            "app_secret": "YOUR_SIM_APP_SECRET"
+        },
+        "live": {
+            "app_key": "YOUR_LIVE_APP_KEY",
+            "app_secret": "YOUR_LIVE_APP_SECRET"
+        }
+    },
+
+    "strategy": {
+        "name": "0DTE Iron Fly (Doc Severson)",
+
+        "_underlying_comment": "SPX is primary. SPY/XSP acceptable for small accounts.",
+        "underlying_symbol": "SPX",
+        "underlying_uic": null,
+        "_underlying_uic_note": "Find SPX UIC via scripts/search_instruments.py",
+
+        "vix_symbol": "VIX.I",
+        "vix_uic": 10606,
+
+        "_entry_section": "=== ENTRY RULES ===",
+        "entry_time_est": "10:00",
+        "_entry_note": "Enter ONLY at 10:00 AM EST after opening range check",
+
+        "opening_range_minutes": 30,
+        "_opening_range_note": "Track high/low from 9:30-10:00 AM EST",
+
+        "_filter_section": "=== PRE-TRADE FILTERS ===",
+        "max_vix_entry": 20.0,
+        "_max_vix_note": "Abort if VIX > 20 (high volatility = trend days)",
+
+        "vix_spike_threshold_percent": 5.0,
+        "_vix_spike_note": "Abort if VIX spikes 5%+ during opening range",
+
+        "_structure_section": "=== IRON FLY STRUCTURE ===",
+        "strike_bias": "above",
+        "_strike_bias_note": "Use first strike ABOVE current price (put skew compensation)",
+
+        "wing_calculation": "expected_move",
+        "_wing_note": "Wings placed at daily expected move distance from ATM",
+
+        "manual_expected_move": null,
+        "_calibration_note": "Set to a number (e.g., 25) for manual calibration mode",
+
+        "_exit_section": "=== EXIT RULES ===",
+        "profit_target_per_contract": 75.0,
+        "_profit_note": "Target $50-$100 per contract. Doc targets $50-$100.",
+
+        "stop_loss_type": "wing_touch",
+        "_stop_note": "Exit IMMEDIATELY when SPX touches either wing (market order!)",
+
+        "max_hold_minutes": 60,
+        "_hold_note": "Exit if holding > 60 min. Doc's avg is 18 min.",
+
+        "_sizing_section": "=== POSITION SIZING ===",
+        "position_size": 1,
+        "_size_note": "Number of contracts per trade"
+    },
+
+    "filters": {
+        "check_opening_range": true,
+        "require_price_in_range": true,
+        "_range_note": "If price breaks opening range before 10AM = trend day, no trade",
+
+        "fed_meeting_blackout": false,
+        "_fed_note": "Consider avoiding FOMC days - high volatility",
+
+        "economic_calendar_check": false,
+        "_econ_note": "Consider avoiding major economic releases"
+    },
+
+    "google_sheets": {
+        "enabled": true,
+        "credentials_file": "config/google_credentials.json",
+        "spreadsheet_name": "Iron_Fly_0DTE_Log",
+        "_note": "Separate Google Sheet from Delta Neutral bot for Looker dashboards"
+    },
+
+    "logging": {
+        "log_file": "logs/iron_fly_bot.log",
+        "log_level": "INFO",
+        "console_output": true
+    },
+
+    "circuit_breaker": {
+        "max_consecutive_errors": 3,
+        "max_disconnection_seconds": 30,
+        "_note": "Shorter timeout for 0DTE - need fast reaction",
+        "cooldown_minutes": 5
+    },
+
+    "account": {
+        "sim": {
+            "account_key": "YOUR_SIM_ACCOUNT_KEY",
+            "client_key": "YOUR_SIM_CLIENT_KEY"
+        },
+        "live": {
+            "account_key": "YOUR_LIVE_ACCOUNT_KEY",
+            "client_key": "YOUR_LIVE_CLIENT_KEY"
+        }
+    },
+
+    "_risk_metrics": {
+        "risk_rating": "4/10 (Moderate)",
+        "win_rate_target": "85-95%",
+        "profit_factor_target": "> 2.0",
+        "max_loss_per_trade": "Width of wings - credit received",
+        "_example": "If wings are 30 points and credit is $20, max loss is $10 ($1000)"
+    }
+}

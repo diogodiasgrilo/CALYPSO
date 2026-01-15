@@ -11,8 +11,8 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.config_loader import ConfigLoader
-from src.saxo_client import SaxoClient
+from shared.config_loader import ConfigLoader
+from shared.saxo_client import SaxoClient
 
 
 def main():
