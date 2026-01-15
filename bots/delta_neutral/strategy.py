@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
+from shared.market_hours import get_us_market_time
 
 # Path for persistent metrics storage (now in project root data/ folder)
 METRICS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "delta_neutral_metrics.json")
@@ -461,6 +462,10 @@ class DeltaNeutralStrategy:
         self.current_underlying_price: float = 0.0
         self.current_vix: float = 0.0
         self.initial_straddle_strike: float = 0.0
+
+        # Track when shorts closed due to debit (wait for expiry before new shorts)
+        # Per Brian Terry: "You aren't rolling, you're starting a new weekly cycle"
+        self._shorts_closed_date: Optional[date] = None
 
         # Strategy parameters
         self.recenter_threshold = self.strategy_config["recenter_threshold_points"]
@@ -2631,7 +2636,7 @@ class DeltaNeutralStrategy:
         """
         Check if weekly shorts should be rolled.
 
-        Shorts should be rolled on Friday or if challenged
+        Shorts should be rolled on Thursday 3PM EST, Friday 10AM EST, or if challenged
         (price approaching short strikes).
 
         Returns:
@@ -2639,19 +2644,20 @@ class DeltaNeutralStrategy:
                    challenged_side is "call", "put", or None for scheduled roll
         """
         # Check if it's time to roll shorts
-        # Per spec: "Thursday 15:00 EST or Friday 10:00 EST"
-        now = datetime.now()
-        today = now.strftime("%A")
-        current_hour = now.hour
+        # Per Brian Terry: "Thursday 3PM EST or Friday 10AM EST"
+        # CRITICAL: Use US Eastern time, not server local time
+        now_est = get_us_market_time()
+        today = now_est.strftime("%A")
+        current_hour = now_est.hour
 
         is_roll_time = False
 
         if today == "Thursday" and current_hour >= 15:
             is_roll_time = True
-            logger.info(f"Thursday 3PM+ - scheduled roll time for weekly shorts")
+            logger.info(f"Thursday 3PM+ EST ({now_est.strftime('%H:%M')}) - scheduled roll time for weekly shorts")
         elif today == "Friday" and current_hour >= 10:
             is_roll_time = True
-            logger.info(f"Friday 10AM+ - scheduled roll time for weekly shorts")
+            logger.info(f"Friday 10AM+ EST ({now_est.strftime('%H:%M')}) - scheduled roll time for weekly shorts")
 
         if is_roll_time:
             return (True, None)  # Scheduled roll, no specific challenge
@@ -3076,7 +3082,12 @@ class DeltaNeutralStrategy:
             if self.enter_long_straddle():
                 action_taken = "Entered long straddle"
                 # Also try to enter short strangle
-                if self.enter_short_strangle():
+                # CRITICAL: If it's roll time (Thu 3PM+ or Fri 10AM+), enter with NEXT WEEK's
+                # expiry directly to avoid immediate roll triggering
+                should_roll, _ = self.should_roll_shorts()
+                if should_roll:
+                    logger.info("Roll time detected during entry - entering shorts with NEXT WEEK expiry")
+                if self.enter_short_strangle(for_roll=should_roll):
                     action_taken = "Entered long straddle and short strangle"
 
         elif self.state == StrategyState.WAITING_VIX:
@@ -3092,9 +3103,34 @@ class DeltaNeutralStrategy:
                 if self.execute_recenter():
                     action_taken = "Executed 5-point recenter (before adding shorts)"
             else:
-                # Only try to add short strangle if no recenter needed
-                if self.enter_short_strangle():
-                    action_taken = "Added short strangle"
+                # Check if we're waiting for old shorts to expire (debit roll skip)
+                # Per Brian Terry: "You aren't rolling, you're starting a new weekly cycle"
+                now_est = get_us_market_time()
+                today = now_est.date()
+                today_weekday = now_est.strftime("%A")
+
+                # If we closed shorts this week due to debit, wait until Monday
+                if self._shorts_closed_date:
+                    # Calculate when we can enter new shorts
+                    # If closed on Thursday/Friday, wait until Monday
+                    days_since_close = (today - self._shorts_closed_date).days
+                    if days_since_close < 3 and today_weekday not in ["Monday", "Tuesday", "Wednesday"]:
+                        logger.info(f"Waiting for new week to enter shorts (closed {self._shorts_closed_date}, today is {today_weekday})")
+                        action_taken = "Waiting for Monday to enter new shorts"
+                    else:
+                        # New week - clear the flag and enter new shorts
+                        logger.info(f"New week started - clearing shorts_closed_date flag")
+                        self._shorts_closed_date = None
+                        if self.enter_short_strangle(for_roll=False):
+                            action_taken = "Added short strangle (new weekly cycle)"
+                else:
+                    # Normal operation - add short strangle
+                    # CRITICAL: If roll time, enter with next week's expiry directly
+                    should_roll, _ = self.should_roll_shorts()
+                    if should_roll:
+                        logger.info("Roll time detected during entry - entering shorts with NEXT WEEK expiry")
+                    if self.enter_short_strangle(for_roll=should_roll):
+                        action_taken = "Added short strangle"
 
         elif self.state == StrategyState.FULL_POSITION:
             # Check exit condition first
@@ -3117,33 +3153,84 @@ class DeltaNeutralStrategy:
                         else:
                             action_taken = "Rolled weekly shorts (scheduled)"
                     else:
-                        # CRITICAL: Roll failed (likely due to debit or spread issues)
-                        # Per strategy spec: "If transaction_cost > premium_received,
-                        # signal a HARD_EXIT rather than digging a deeper hole"
-                        logger.critical("=" * 60)
-                        logger.critical("ROLL FAILED - Cannot roll for credit")
-                        logger.critical("Per strategy: HARD EXIT - closing entire position")
-                        logger.critical("=" * 60)
+                        # Roll failed (likely due to debit or spread issues)
+                        # CRITICAL DISTINCTION per Brian Terry:
+                        # - CHALLENGED + DEBIT: EXIT ALL (close longs + shorts, take profit on longs)
+                        # - UNCHALLENGED + DEBIT: Let shorts expire, open new shorts Friday/Monday
+                        if challenged_side:
+                            # CHALLENGED + DEBIT: Price threatening our shorts AND can't roll for credit
+                            # Per Brian Terry: "Close the entire position - your Long leg has likely
+                            # gained so much value that the entire position is already profitable"
+                            logger.critical("=" * 60)
+                            logger.critical(f"CHALLENGED ROLL FAILED - {challenged_side} side under pressure")
+                            logger.critical("Cannot roll for credit - EXITING ENTIRE POSITION")
+                            logger.critical("Per Brian Terry: Take profit on longs, cover shorts, reset")
+                            logger.critical("=" * 60)
 
-                        if self.exit_all_positions():
-                            action_taken = "HARD EXIT - Roll failed (debit or no fill)"
+                            if self.exit_all_positions():
+                                action_taken = f"HARD EXIT - Challenged roll failed ({challenged_side})"
 
-                            # Log safety event
+                                # Log safety event
+                                if self.trade_logger:
+                                    self.trade_logger.log_safety_event({
+                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "event_type": "HARD_EXIT_CHALLENGED_ROLL_FAILED",
+                                        "severity": "CRITICAL",
+                                        "spy_price": self.current_underlying_price,
+                                        "initial_strike": self.initial_straddle_strike,
+                                        "vix": self.current_vix,
+                                        "action_taken": "Exited all positions - challenged roll could not be done for credit",
+                                        "description": f"Challenged side: {challenged_side}. Longs likely profitable. Cycle complete.",
+                                        "result": "HARD_EXIT"
+                                    })
+                            else:
+                                action_taken = "CRITICAL: Challenged roll failed AND exit failed - MANUAL INTERVENTION REQUIRED"
+                                logger.critical("MANUAL INTERVENTION REQUIRED - Could not exit positions!")
+                        else:
+                            # UNCHALLENGED + DEBIT (scheduled roll on Thurs/Fri)
+                            # Per Brian Terry: "Let current shorts expire worthless, wait until
+                            # Friday/Monday to open new shorts - you aren't rolling, you're
+                            # starting a new weekly cycle with a clean net credit"
+                            logger.warning("=" * 60)
+                            logger.warning("SCHEDULED ROLL SKIPPED - Cannot roll for credit (low IV)")
+                            logger.warning("Shorts are NOT challenged - letting them expire worthless")
+                            logger.warning("Will open fresh shorts Friday/Monday for next week")
+                            logger.warning("=" * 60)
+
+                            # Close the current shorts for pennies (or let expire)
+                            # Then transition to LONG_STRADDLE_ACTIVE so bot enters new shorts next week
+                            now_est = get_us_market_time()
+                            if self.close_short_strangle():
+                                action_taken = "Closed shorts for pennies - will open new cycle next week"
+                                logger.info("Short strangle closed. Longs remain active.")
+                                # Clear short strangle reference
+                                self.short_strangle = None
+                                # Mark the date - won't enter new shorts until after this week's expiry
+                                self._shorts_closed_date = now_est.date()
+                                # Transition back to LONG_STRADDLE_ACTIVE
+                                # Bot will check _shorts_closed_date before entering new shorts
+                                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                                logger.info(f"State -> LONG_STRADDLE_ACTIVE (will enter new shorts Monday)")
+                            else:
+                                action_taken = "Letting shorts expire naturally - new cycle next week"
+                                # Mark the date anyway - shorts will expire worthless
+                                self._shorts_closed_date = now_est.date()
+                                # Even if close fails, shorts will expire worthless
+                                # Bot will detect no shorts and re-enter on Monday
+
+                            # Log as INFO event, not critical
                             if self.trade_logger:
                                 self.trade_logger.log_safety_event({
                                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    "event_type": "HARD_EXIT_ROLL_FAILED",
-                                    "severity": "CRITICAL",
+                                    "event_type": "SCHEDULED_ROLL_SKIPPED",
+                                    "severity": "INFO",
                                     "spy_price": self.current_underlying_price,
                                     "initial_strike": self.initial_straddle_strike,
                                     "vix": self.current_vix,
-                                    "action_taken": "Exited all positions - roll could not be done for credit",
-                                    "description": f"Challenged side: {challenged_side or 'scheduled'}. Position closed to prevent losses.",
-                                    "result": "HARD_EXIT"
+                                    "action_taken": "Letting shorts expire - low IV environment",
+                                    "description": "Scheduled roll resulted in debit. Shorts unchallenged and will expire worthless. New shorts will be opened Friday/Monday.",
+                                    "result": "SKIPPED"
                                 })
-                        else:
-                            action_taken = "CRITICAL: Roll failed AND exit failed - MANUAL INTERVENTION REQUIRED"
-                            logger.critical("⚠️ MANUAL INTERVENTION REQUIRED - Could not exit positions!")
 
         logger.info(f"Strategy check: {action_taken} | State: {self.state.value}")
 
