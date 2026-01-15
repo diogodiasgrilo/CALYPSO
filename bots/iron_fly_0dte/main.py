@@ -249,17 +249,38 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     else:
                         trade_logger.log_event(action)
 
-                # Periodic status logging
+                # Periodic status logging and Google Sheets updates
                 now = datetime.now()
                 if (now - last_status_time).total_seconds() >= status_interval:
                     status = strategy.get_status_summary()
                     mode_prefix = "[DRY RUN] " if dry_run else ""
-                    trade_logger.log_event(
+                    heartbeat_msg = (
                         f"{mode_prefix}HEARTBEAT | State: {status['state']} | "
                         f"{config.get('strategy', {}).get('underlying_symbol', 'SPX')}: {status['underlying_price']:.2f} | "
                         f"VIX: {status['vix']:.2f} | "
                         f"Trades: {status['trades_today']} | P&L: ${status['daily_pnl']:.2f}"
                     )
+                    trade_logger.log_event(heartbeat_msg)
+
+                    # Log to Bot Logs worksheet
+                    trade_logger.log_bot_activity(
+                        level="INFO",
+                        component="IronFlyStrategy",
+                        message=f"State: {status['state']}, Trades: {status['trades_today']}, P&L: ${status['daily_pnl']:.2f}",
+                        spy_price=status['underlying_price'],
+                        vix=status['vix']
+                    )
+
+                    # Log Account Summary periodically
+                    strategy.log_account_summary()
+
+                    # Log position if one is open
+                    if status.get('position_active'):
+                        strategy.log_position_to_sheets()
+
+                    # Log performance metrics
+                    strategy.log_performance_metrics()
+
                     last_status_time = now
 
                 # Sleep until next check (shorter for 0DTE - need fast reaction)

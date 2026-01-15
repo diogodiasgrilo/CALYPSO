@@ -632,6 +632,23 @@ class IronFlyStrategy:
             self.state = IronFlyState.POSITION_OPEN
             self.trades_today += 1
 
+            # Log the simulated trade to Google Sheets
+            self.trade_logger.log_trade(
+                action="[SIMULATED] OPEN_IRON_FLY",
+                strike=f"{lower_wing}/{atm_strike}/{upper_wing}",
+                price=simulated_credit / 100,  # Per-contract credit
+                delta=0.0,  # Iron Fly is delta neutral at entry
+                pnl=0.0,  # No P&L at entry
+                saxo_client=self.client,  # For currency conversion
+                underlying_price=self.current_price,
+                vix=self.current_vix,
+                option_type="Iron Fly",
+                expiry_date=datetime.now().strftime("%Y-%m-%d"),
+                dte=0,  # 0DTE
+                premium_received=simulated_credit,
+                trade_reason="All filters passed"
+            )
+
             return f"[DRY RUN] Entered Iron Fly at {atm_strike} with ${simulated_credit:.2f} credit"
 
         # TODO: Implement actual order placement via Saxo API
@@ -670,6 +687,23 @@ class IronFlyStrategy:
         self.daily_pnl += pnl
 
         if self.dry_run:
+            # Log the simulated close to Google Sheets
+            self.trade_logger.log_trade(
+                action=f"[SIMULATED] CLOSE_IRON_FLY_{reason}",
+                strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
+                price=self.position.credit_received / 100,  # Original credit per contract
+                delta=0.0,
+                pnl=pnl,
+                saxo_client=self.client,  # For currency conversion
+                underlying_price=self.current_price,
+                vix=self.current_vix,
+                option_type="Iron Fly",
+                expiry_date=self.position.expiry,
+                dte=0,
+                premium_received=self.position.credit_received,
+                trade_reason=description
+            )
+
             self.position = None
             self.state = IronFlyState.DAILY_COMPLETE
             return f"[DRY RUN] Closed position - {reason}: ${pnl:.2f} P&L in {hold_time} min"
@@ -789,9 +823,17 @@ class IronFlyStrategy:
         return rounded_move
 
     def _log_filter_event(self, event_type: str, description: str):
-        """Log a filter event to the safety events sheet."""
-        # TODO: Log to Google Sheets Safety Events worksheet
+        """Log a filter event to the Safety Events sheet."""
         logger.info(f"Filter event: {event_type} - {description}")
+
+        # Log to Safety Events worksheet
+        self.trade_logger.log_safety_event({
+            "event_type": f"IRON_FLY_{event_type}",
+            "spy_price": self.current_price,
+            "vix": self.current_vix,
+            "description": description,
+            "result": "Entry Blocked"
+        })
 
     def _log_opening_range_to_sheets(
         self,
@@ -1009,8 +1051,105 @@ class IronFlyStrategy:
                 self.current_vix = mid
         # TODO: Handle option price updates for position legs
 
+    def log_daily_summary(self):
+        """Log daily summary to Google Sheets at end of trading day."""
+        summary = {
+            "date": get_us_market_time().strftime("%Y-%m-%d"),
+            "spy_close": self.current_price,
+            "vix": self.current_vix,
+            "theta_cost": 0,  # Not applicable for 0DTE Iron Fly
+            "premium_collected": self.position.credit_received if self.position else 0,
+            "daily_pnl": self.daily_pnl,
+            "daily_pnl_eur": 0,  # Will be converted if currency enabled
+            "cumulative_pnl": self.daily_pnl,  # Single day strategy
+            "roll_count": 0,  # Not applicable
+            "recenter_count": 0,  # Not applicable
+            "notes": f"Iron Fly 0DTE - Trades: {self.trades_today}, State: {self.state.value}"
+        }
+        self.trade_logger.log_daily_summary(summary)
+        logger.info(f"Daily summary logged: P&L=${self.daily_pnl:.2f}, Trades={self.trades_today}")
+
+    def log_position_to_sheets(self):
+        """Log current position to Positions worksheet."""
+        if not self.position:
+            return
+
+        positions = [{
+            "type": "Iron Fly",
+            "strike": f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
+            "expiry": self.position.expiry,
+            "dte": 0,
+            "entry_price": self.position.credit_received / 100,
+            "current_price": self.position.credit_received / 100,  # Simplified - would need real quotes
+            "pnl": self.position.unrealized_pnl,
+            "theta": 0,  # Would need real greeks
+            "status": "OPEN"
+        }]
+        self.trade_logger.log_position_snapshot(positions)
+
+    def log_performance_metrics(self):
+        """Log performance metrics to Google Sheets."""
+        win_rate = 100.0 if self.trades_today > 0 and self.daily_pnl > 0 else 0.0
+
+        metrics = {
+            "total_pnl": self.daily_pnl,
+            "realized_pnl": self.daily_pnl,
+            "unrealized_pnl": 0,
+            "premium_collected": self.position.credit_received if self.position else 0,
+            "theta_cost": 0,
+            "net_theta": 0,
+            "long_straddle_pnl": 0,
+            "short_strangle_pnl": 0,
+            "win_rate": win_rate,
+            "sharpe_ratio": 0,
+            "max_drawdown": abs(min(0, self.daily_pnl)),
+            "max_drawdown_pct": 0,
+            "trade_count": self.trades_today,
+            "roll_count": 0,
+            "recenter_count": 0,
+            "avg_trade_pnl": self.daily_pnl / self.trades_today if self.trades_today > 0 else 0,
+            "best_trade": self.daily_pnl if self.daily_pnl > 0 else 0,
+            "worst_trade": self.daily_pnl if self.daily_pnl < 0 else 0,
+            "accumulated_theta_income": 0,
+            "weekly_theta_income": 0,
+            "days_held": 0,
+            "days_to_expiry": 0
+        }
+        self.trade_logger.log_performance_metrics(
+            period="Daily",
+            metrics=metrics,
+            saxo_client=self.client
+        )
+
+    def log_account_summary(self):
+        """Log account summary to Google Sheets."""
+        strategy_data = {
+            "spy_price": self.current_price,
+            "vix": self.current_vix,
+            "unrealized_pnl": self.position.unrealized_pnl if self.position else 0,
+            "long_straddle_value": 0,
+            "short_strangle_value": 0,
+            "strategy_margin": 0,
+            "total_delta": 0,  # Iron Fly is delta neutral
+            "total_theta": 0,
+            "position_count": 4 if self.position else 0,
+            "long_call_strike": self.position.upper_wing if self.position else None,
+            "long_put_strike": self.position.lower_wing if self.position else None,
+            "short_call_strike": self.position.atm_strike if self.position else None,
+            "short_put_strike": self.position.atm_strike if self.position else None
+        }
+        self.trade_logger.log_account_summary(
+            strategy_data=strategy_data,
+            saxo_client=self.client,
+            environment="LIVE" if not self.dry_run else "SIM"
+        )
+
     def reset_for_new_day(self):
         """Reset strategy state for a new trading day."""
+        # Log daily summary before resetting
+        if self.state == IronFlyState.DAILY_COMPLETE:
+            self.log_daily_summary()
+
         logger.info("Resetting strategy for new trading day")
         self.state = IronFlyState.IDLE
         self.opening_range = OpeningRange()
