@@ -1665,18 +1665,23 @@ class DeltaNeutralStrategy:
         put_price = put_quote["Quote"].get("Ask", 0)
 
         # Place multi-leg order with slippage protection (limit orders + 60s timeout)
+        # Each leg needs price and to_open_close for live trading
         legs = [
             {
                 "uic": call_option["uic"],
                 "asset_type": "StockOption",
                 "buy_sell": "Buy",
-                "amount": self.position_size
+                "amount": self.position_size,
+                "price": call_price * 100,  # Per contract price
+                "to_open_close": "ToOpen"
             },
             {
                 "uic": put_option["uic"],
                 "asset_type": "StockOption",
                 "buy_sell": "Buy",
-                "amount": self.position_size
+                "amount": self.position_size,
+                "price": put_price * 100,  # Per contract price
+                "to_open_close": "ToOpen"
             }
         ]
 
@@ -1844,13 +1849,17 @@ class DeltaNeutralStrategy:
                 "uic": call_option["uic"],
                 "asset_type": "StockOption",
                 "buy_sell": "Buy",
-                "amount": self.position_size
+                "amount": self.position_size,
+                "price": call_price * 100,
+                "to_open_close": "ToOpen"
             },
             {
                 "uic": put_option["uic"],
                 "asset_type": "StockOption",
                 "buy_sell": "Buy",
-                "amount": self.position_size
+                "amount": self.position_size,
+                "price": put_price * 100,
+                "to_open_close": "ToOpen"
             }
         ]
 
@@ -1949,19 +1958,29 @@ class DeltaNeutralStrategy:
 
         logger.info("Closing long straddle...")
 
+        # Get current prices for the legs
+        call_quote = self.client.get_quote(self.long_straddle.call.uic, "StockOption")
+        put_quote = self.client.get_quote(self.long_straddle.put.uic, "StockOption")
+        call_bid = call_quote["Quote"].get("Bid", 0) if call_quote else 0
+        put_bid = put_quote["Quote"].get("Bid", 0) if put_quote else 0
+
         # Place sell orders for both legs with slippage protection
         legs = [
             {
                 "uic": self.long_straddle.call.uic,
                 "asset_type": "StockOption",
                 "buy_sell": "Sell",
-                "amount": self.long_straddle.call.quantity
+                "amount": self.long_straddle.call.quantity,
+                "price": call_bid * 100,
+                "to_open_close": "ToClose"
             },
             {
                 "uic": self.long_straddle.put.uic,
                 "asset_type": "StockOption",
                 "buy_sell": "Sell",
-                "amount": self.long_straddle.put.quantity
+                "amount": self.long_straddle.put.quantity,
+                "price": put_bid * 100,
+                "to_open_close": "ToClose"
             }
         ]
 
@@ -2630,13 +2649,17 @@ class DeltaNeutralStrategy:
                 "uic": call_option["uic"],
                 "asset_type": "StockOption",
                 "buy_sell": "Sell",
-                "amount": self.position_size
+                "amount": self.position_size,
+                "price": call_price * 100,
+                "to_open_close": "ToOpen"  # Selling to open a short position
             },
             {
                 "uic": put_option["uic"],
                 "asset_type": "StockOption",
                 "buy_sell": "Sell",
-                "amount": self.position_size
+                "amount": self.position_size,
+                "price": put_price * 100,
+                "to_open_close": "ToOpen"  # Selling to open a short position
             }
         ]
 
@@ -2781,19 +2804,29 @@ class DeltaNeutralStrategy:
 
         logger.info("Closing short strangle...")
 
+        # Get current prices for the legs
+        call_quote = self.client.get_quote(self.short_strangle.call.uic, "StockOption")
+        put_quote = self.client.get_quote(self.short_strangle.put.uic, "StockOption")
+        call_ask = call_quote["Quote"].get("Ask", 0) if call_quote else 0
+        put_ask = put_quote["Quote"].get("Ask", 0) if put_quote else 0
+
         # Place buy orders to close with slippage protection
         legs = [
             {
                 "uic": self.short_strangle.call.uic,
                 "asset_type": "StockOption",
                 "buy_sell": "Buy",
-                "amount": self.short_strangle.call.quantity
+                "amount": self.short_strangle.call.quantity,
+                "price": call_ask * 100,
+                "to_open_close": "ToClose"
             },
             {
                 "uic": self.short_strangle.put.uic,
                 "asset_type": "StockOption",
                 "buy_sell": "Buy",
-                "amount": self.short_strangle.put.quantity
+                "amount": self.short_strangle.put.quantity,
+                "price": put_ask * 100,
+                "to_open_close": "ToClose"
             }
         ]
 

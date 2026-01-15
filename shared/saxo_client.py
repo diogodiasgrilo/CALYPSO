@@ -2192,12 +2192,21 @@ class SaxoClient:
             "Orders": []
         }
 
+        # For multi-leg orders, each leg needs complete order details for live trading
+        per_leg_price = total_limit_price / len(legs) if legs else 0
+
         for leg in legs:
             leg_order = {
                 "Uic": leg["uic"],
                 "AssetType": leg["asset_type"],
                 "BuySell": leg["buy_sell"],
                 "Amount": leg["amount"],
+                "OrderType": "Limit",
+                "OrderPrice": leg.get("price", per_leg_price),  # Use leg price if provided
+                "ToOpenClose": leg.get("to_open_close", "ToOpen"),
+                "OrderDuration": {
+                    "DurationType": "DayOrder"
+                },
                 "ManualOrder": True  # Required for live trading
             }
             order_data["Orders"].append(leg_order)
