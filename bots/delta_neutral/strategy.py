@@ -506,14 +506,17 @@ class DeltaNeutralStrategy:
         order_description: str
     ) -> Dict:
         """
-        Place a multi-leg order with slippage protection.
+        Place individual orders for each leg with slippage protection.
+
+        NOTE: Saxo Live API does not support multi-leg orders across different UICs.
+        This method places each leg as a separate limit order.
 
         Per strategy spec: "Use Limit Orders only, and if a 'Recenter' or 'Roll'
         isn't filled within 60 seconds, it should alert rather than chasing the price."
 
         Args:
-            legs: List of leg dictionaries with uic, asset_type, buy_sell, amount
-            total_limit_price: Limit price for the entire combo
+            legs: List of leg dictionaries with uic, asset_type, buy_sell, amount, price
+            total_limit_price: Total limit price (for logging only)
             order_description: Description for logging (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
 
         Returns:
@@ -524,9 +527,12 @@ class DeltaNeutralStrategy:
                 "message": str
             }
         """
-        logger.info(f"Placing {order_description} with slippage protection")
-        logger.info(f"  Limit price: ${total_limit_price:.2f}")
-        logger.info(f"  Timeout: {self.order_timeout_seconds}s")
+        from shared.saxo_client import BuySell
+
+        logger.info(f"Placing {order_description} as individual orders (Saxo Live requirement)")
+        logger.info(f"  Total limit price: ${total_limit_price:.2f}")
+        logger.info(f"  Legs: {len(legs)}")
+        logger.info(f"  Timeout per leg: {self.order_timeout_seconds}s")
 
         # In dry_run mode, simulate success
         if self.dry_run:
@@ -538,17 +544,52 @@ class DeltaNeutralStrategy:
                 "message": "[DRY RUN] Order simulated successfully"
             }
 
-        # Use the slippage-protected order placement
-        result = self.client.place_multi_leg_limit_order_with_timeout(
-            legs=legs,
-            total_limit_price=total_limit_price,
-            timeout_seconds=self.order_timeout_seconds
-        )
+        # Place each leg as an individual order
+        filled_orders = []
+        failed = False
+        failure_message = ""
 
-        if not result["filled"]:
-            # Order timed out - log alert
-            logger.critical(f"⚠️ SLIPPAGE ALERT: {order_description} NOT FILLED")
-            logger.critical(f"   {result['message']}")
+        for i, leg in enumerate(legs):
+            leg_uic = leg["uic"]
+            leg_asset_type = leg["asset_type"]
+            leg_buy_sell = BuySell.BUY if leg["buy_sell"] == "Buy" else BuySell.SELL
+            leg_amount = leg["amount"]
+            # Use per-leg price (already in per-share format, need to use raw price)
+            leg_price = leg.get("price", 0) / 100 if leg.get("price", 0) > 100 else leg.get("price", 0)
+
+            # Get fresh quote for accurate limit price
+            quote = self.client.get_quote(leg_uic, leg_asset_type)
+            if quote and "Quote" in quote:
+                if leg_buy_sell == BuySell.BUY:
+                    leg_price = quote["Quote"].get("Ask", leg_price) or leg_price
+                else:
+                    leg_price = quote["Quote"].get("Bid", leg_price) or leg_price
+
+            logger.info(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ ${leg_price:.2f}")
+
+            result = self.client.place_limit_order_with_timeout(
+                uic=leg_uic,
+                asset_type=leg_asset_type,
+                buy_sell=leg_buy_sell,
+                amount=leg_amount,
+                limit_price=leg_price,
+                timeout_seconds=self.order_timeout_seconds
+            )
+
+            if result["filled"]:
+                filled_orders.append(result["order_id"])
+                logger.info(f"  ✓ Leg {i+1} filled: {result['order_id']}")
+            else:
+                failed = True
+                failure_message = f"Leg {i+1} failed: {result['message']}"
+                logger.error(f"  ✗ {failure_message}")
+                break
+
+        if failed:
+            # Log alert for partial fill or failure
+            logger.critical(f"⚠️ SLIPPAGE ALERT: {order_description} NOT FULLY FILLED")
+            logger.critical(f"   {failure_message}")
+            logger.critical(f"   Filled legs: {len(filled_orders)}/{len(legs)}")
             logger.critical("   Manual intervention may be required!")
 
             # Log safety event
@@ -560,12 +601,26 @@ class DeltaNeutralStrategy:
                     "spy_price": self.current_underlying_price,
                     "initial_strike": self.initial_straddle_strike,
                     "vix": self.current_vix,
-                    "action_taken": f"{order_description} order cancelled after timeout",
-                    "description": result['message'],
-                    "result": "FAILED"
+                    "action_taken": f"{order_description} partially filled ({len(filled_orders)}/{len(legs)} legs)",
+                    "description": failure_message,
+                    "result": "PARTIAL_FILL" if filled_orders else "FAILED"
                 })
 
-        return result
+            return {
+                "success": False,
+                "filled": False,
+                "order_id": ",".join(filled_orders) if filled_orders else None,
+                "message": failure_message
+            }
+
+        # All legs filled successfully
+        logger.info(f"✓ All {len(legs)} legs filled for {order_description}")
+        return {
+            "success": True,
+            "filled": True,
+            "order_id": ",".join(filled_orders),
+            "message": f"All {len(legs)} legs filled successfully"
+        }
 
     def _calculate_combo_limit_price(
         self,
