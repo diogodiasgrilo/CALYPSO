@@ -467,6 +467,22 @@ class DeltaNeutralStrategy:
         # Per Brian Terry: "You aren't rolling, you're starting a new weekly cycle"
         self._shorts_closed_date: Optional[date] = None
 
+        # CIRCUIT BREAKER: Consecutive failure tracking to prevent death loops
+        # If we hit MAX_CONSECUTIVE_FAILURES, halt all trading
+        self._consecutive_failures: int = 0
+        self._max_consecutive_failures: int = 3
+        self._circuit_breaker_open: bool = False
+        self._circuit_breaker_reason: str = ""
+        self._last_failure_time: Optional[datetime] = None
+
+        # Track orphaned orders that couldn't be cancelled
+        self._orphaned_orders: List[str] = []
+
+        # ACTION COOLDOWN: Prevent rapid retry of same failed action
+        # Maps action_type -> last_attempt_time
+        self._action_cooldowns: Dict[str, datetime] = {}
+        self._cooldown_seconds: int = 300  # 5 minute cooldown after failed action
+
         # Strategy parameters
         self.recenter_threshold = self.strategy_config["recenter_threshold_points"]
         self.max_vix = self.strategy_config["max_vix_entry"]
@@ -494,6 +510,202 @@ class DeltaNeutralStrategy:
         if self.dry_run:
             logger.warning("DRY RUN MODE - No real orders will be placed")
         logger.info(f"Slippage protection: {self.order_timeout_seconds}s timeout on limit orders")
+
+    # =========================================================================
+    # CIRCUIT BREAKER - DEATH LOOP PREVENTION
+    # =========================================================================
+
+    def _increment_failure_count(self, reason: str) -> None:
+        """
+        Increment the consecutive failure count and check circuit breaker.
+
+        Called when an operation fails. If we hit MAX_CONSECUTIVE_FAILURES,
+        the circuit breaker opens and halts all trading.
+
+        Args:
+            reason: Description of the failure for logging
+        """
+        self._consecutive_failures += 1
+        self._last_failure_time = datetime.now()
+
+        logger.warning(f"⚠️ Operation failed: {reason}")
+        logger.warning(f"   Consecutive failures: {self._consecutive_failures}/{self._max_consecutive_failures}")
+
+        if self._consecutive_failures >= self._max_consecutive_failures:
+            self._open_circuit_breaker(reason)
+
+    def _reset_failure_count(self) -> None:
+        """Reset the consecutive failure count after a successful operation."""
+        if self._consecutive_failures > 0:
+            logger.info(f"✓ Resetting failure count (was {self._consecutive_failures})")
+            self._consecutive_failures = 0
+
+    def _open_circuit_breaker(self, reason: str) -> None:
+        """
+        Open the circuit breaker to halt all trading.
+
+        This is a CRITICAL safety mechanism. When open:
+        - No new orders will be placed
+        - No rolls or recenters will be attempted
+        - Manual intervention is required
+
+        Args:
+            reason: Description of why the circuit breaker opened
+        """
+        self._circuit_breaker_open = True
+        self._circuit_breaker_reason = reason
+
+        logger.critical("=" * 70)
+        logger.critical("🚨 CIRCUIT BREAKER OPEN - ALL TRADING HALTED 🚨")
+        logger.critical("=" * 70)
+        logger.critical(f"Reason: {reason}")
+        logger.critical(f"Consecutive failures: {self._consecutive_failures}")
+        logger.critical(f"Time: {datetime.now().isoformat()}")
+        logger.critical("")
+        logger.critical("MANUAL INTERVENTION REQUIRED:")
+        logger.critical("1. Check Saxo positions in SaxoTraderGO")
+        logger.critical("2. Verify no orphaned orders are pending")
+        logger.critical("3. Fix any position discrepancies")
+        logger.critical("4. Restart the bot to reset circuit breaker")
+        logger.critical("=" * 70)
+
+        # Log to trade logger if available
+        if self.trade_logger:
+            self.trade_logger.log_safety_event({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_type": "CIRCUIT_BREAKER_OPEN",
+                "severity": "CRITICAL",
+                "spy_price": self.current_underlying_price,
+                "initial_strike": self.initial_straddle_strike,
+                "vix": self.current_vix,
+                "action_taken": "TRADING HALTED",
+                "description": f"Circuit breaker opened after {self._consecutive_failures} consecutive failures. Reason: {reason}",
+                "result": "HALTED"
+            })
+
+    def _check_circuit_breaker(self) -> bool:
+        """
+        Check if the circuit breaker is open.
+
+        Returns:
+            bool: True if circuit breaker is open (trading should stop), False otherwise
+        """
+        if self._circuit_breaker_open:
+            logger.warning(f"🚨 Circuit breaker is OPEN - trading halted. Reason: {self._circuit_breaker_reason}")
+            return True
+        return False
+
+    def reset_circuit_breaker(self) -> None:
+        """
+        Manually reset the circuit breaker.
+
+        This should only be called after manual verification that:
+        1. All positions are correct in Saxo
+        2. No orphaned orders are pending
+        3. The issue that caused the failures has been resolved
+        """
+        if self._circuit_breaker_open:
+            logger.info("=" * 50)
+            logger.info("Circuit breaker manually reset")
+            logger.info(f"Previous reason: {self._circuit_breaker_reason}")
+            logger.info("=" * 50)
+
+        self._circuit_breaker_open = False
+        self._circuit_breaker_reason = ""
+        self._consecutive_failures = 0
+        self._orphaned_orders = []
+
+    def _add_orphaned_order(self, order_id: str) -> None:
+        """
+        Track an orphaned order that couldn't be cancelled.
+
+        Args:
+            order_id: The order ID that is still open on Saxo
+        """
+        if order_id and order_id not in self._orphaned_orders:
+            self._orphaned_orders.append(order_id)
+            logger.critical(f"⚠️ ORPHANED ORDER TRACKED: {order_id}")
+            logger.critical(f"   Total orphaned orders: {len(self._orphaned_orders)}")
+
+    def _check_for_orphaned_orders(self) -> bool:
+        """
+        Check Saxo for any orphaned orders before placing new ones.
+
+        Returns:
+            bool: True if orphaned orders were found (should not proceed), False if clean
+        """
+        if not self._orphaned_orders:
+            return False
+
+        logger.warning(f"⚠️ Checking for {len(self._orphaned_orders)} potential orphaned orders...")
+
+        open_orders = self.client.get_open_orders()
+        orphans_still_open = []
+
+        for order_id in self._orphaned_orders:
+            if any(o.get("OrderId") == order_id for o in open_orders):
+                orphans_still_open.append(order_id)
+                logger.critical(f"   ORPHAN STILL OPEN: {order_id}")
+
+        if orphans_still_open:
+            logger.critical(f"🚨 {len(orphans_still_open)} orphaned orders still pending on Saxo!")
+            logger.critical("   These MUST be cancelled manually before trading can continue")
+            self._open_circuit_breaker(f"Orphaned orders detected: {orphans_still_open}")
+            return True
+
+        # All orphans have been filled or cancelled
+        logger.info("✓ All tracked orphaned orders have been resolved")
+        self._orphaned_orders = []
+        return False
+
+    def _is_action_on_cooldown(self, action_type: str) -> bool:
+        """
+        Check if an action is on cooldown after a recent failure.
+
+        This prevents rapid retry loops where the bot keeps attempting
+        the same failed action every iteration.
+
+        Args:
+            action_type: Type of action (e.g., "recenter", "roll_shorts", "enter_shorts")
+
+        Returns:
+            bool: True if action is on cooldown and should be skipped, False if OK to proceed
+        """
+        if action_type not in self._action_cooldowns:
+            return False
+
+        last_attempt = self._action_cooldowns[action_type]
+        elapsed = (datetime.now() - last_attempt).total_seconds()
+
+        if elapsed < self._cooldown_seconds:
+            remaining = self._cooldown_seconds - elapsed
+            logger.info(f"⏳ Action '{action_type}' on cooldown for {remaining:.0f}s more (failed recently)")
+            return True
+
+        # Cooldown expired, remove from tracking
+        del self._action_cooldowns[action_type]
+        return False
+
+    def _set_action_cooldown(self, action_type: str) -> None:
+        """
+        Set a cooldown for an action after it fails.
+
+        Args:
+            action_type: Type of action that failed
+        """
+        self._action_cooldowns[action_type] = datetime.now()
+        logger.warning(f"⏳ Action '{action_type}' on {self._cooldown_seconds}s cooldown after failure")
+
+    def _clear_action_cooldown(self, action_type: str) -> None:
+        """
+        Clear cooldown for an action after it succeeds.
+
+        Args:
+            action_type: Type of action that succeeded
+        """
+        if action_type in self._action_cooldowns:
+            del self._action_cooldowns[action_type]
+            logger.info(f"✓ Cooldown cleared for '{action_type}' after success")
 
     # =========================================================================
     # SLIPPAGE PROTECTION - ORDER PLACEMENT WITH TIMEOUT
@@ -587,6 +799,20 @@ class DeltaNeutralStrategy:
                 failed = True
                 failure_message = f"Leg {i+1} failed: {result['message']}"
                 logger.error(f"  ✗ {failure_message}")
+
+                # CRITICAL: Check if cancel failed - this means order is STILL OPEN on Saxo
+                if result.get("cancel_failed"):
+                    orphaned_order_id = result.get("order_id")
+                    logger.critical(f"  🚨 CANCEL FAILED - Order {orphaned_order_id} is STILL OPEN on Saxo!")
+                    logger.critical("     This order MUST be cancelled manually before bot continues")
+
+                    # Track the orphaned order
+                    if orphaned_order_id:
+                        self._add_orphaned_order(orphaned_order_id)
+
+                    # Increment failure count - this is a serious issue
+                    self._increment_failure_count(f"cancel_failed_leg_{i+1}_{order_description}")
+
                 break
 
         if failed:
@@ -594,6 +820,17 @@ class DeltaNeutralStrategy:
             logger.critical(f"⚠️ SLIPPAGE ALERT: {order_description} NOT FULLY FILLED")
             logger.critical(f"   {failure_message}")
             logger.critical(f"   Filled legs: {len(filled_orders)}/{len(legs)}")
+
+            # CRITICAL: If we have partially filled legs, this is a serious state inconsistency
+            if filled_orders:
+                logger.critical("   ⚠️ PARTIAL FILL DETECTED - some legs filled, some did not!")
+                logger.critical("   The bot's position tracking may be inconsistent with Saxo")
+                logger.critical("   MANUAL VERIFICATION REQUIRED in SaxoTraderGO")
+
+                # Track the filled orders as potential orphans until we verify state
+                for filled_order_id in filled_orders:
+                    logger.warning(f"   Partially filled order tracked: {filled_order_id}")
+
             logger.critical("   Manual intervention may be required!")
 
             # Log safety event
@@ -610,15 +847,23 @@ class DeltaNeutralStrategy:
                     "result": "PARTIAL_FILL" if filled_orders else "FAILED"
                 })
 
+            # Increment failure count for any order failure
+            self._increment_failure_count(f"{order_description}_order_failed")
+
             return {
                 "success": False,
                 "filled": False,
                 "order_id": ",".join(filled_orders) if filled_orders else None,
-                "message": failure_message
+                "message": failure_message,
+                "partial_fill": len(filled_orders) > 0
             }
 
         # All legs filled successfully
         logger.info(f"✓ All {len(legs)} legs filled for {order_description}")
+
+        # Reset failure count on successful order
+        self._reset_failure_count()
+
         return {
             "success": True,
             "filled": True,
@@ -3208,10 +3453,17 @@ class DeltaNeutralStrategy:
         if self.long_straddle and self.long_straddle.call:
             original_expiry = self.long_straddle.call.expiry
 
+        # CRITICAL FIX: Save the previous state before RECENTERING
+        # If recenter fails, we need to restore the state to avoid being stuck
+        previous_state = StrategyState.FULL_POSITION if self.short_strangle else StrategyState.LONG_STRADDLE_ACTIVE
+
         # Step 1: Close current long straddle
         if self.long_straddle:
             if not self.close_long_straddle():
                 logger.error("Failed to close long straddle during recenter")
+                # CRITICAL FIX: Restore state before returning to avoid stuck RECENTERING
+                self.state = previous_state
+                self._increment_failure_count("recenter_close_failed")
                 return False
 
         # Step 2: Open new ATM long straddle at same expiration
@@ -3233,9 +3485,16 @@ class DeltaNeutralStrategy:
                 # Enter new straddle using the found options (not enter_long_straddle which uses config DTE)
                 if not self._enter_straddle_with_options(atm_options):
                     logger.error("Failed to enter new long straddle during recenter")
+                    # CRITICAL FIX: Restore state - we closed old straddle but couldn't open new one
+                    # This is serious - we have no long protection! Set to IDLE so bot re-enters
+                    self.state = StrategyState.IDLE
+                    self._increment_failure_count("recenter_enter_failed")
                     return False
             else:
                 logger.error("Failed to find ATM options for recentered straddle")
+                # CRITICAL FIX: Same as above
+                self.state = StrategyState.IDLE
+                self._increment_failure_count("recenter_find_options_failed")
                 return False
 
         # Step 3: Keep existing short strangle (DO NOT CLOSE)
@@ -3415,10 +3674,25 @@ class DeltaNeutralStrategy:
         # This allows us to verify we'll get a net credit
         logger.info("Fetching quotes for new shorts to verify net credit...")
 
-        # Get quotes for new strangle without placing orders or logging trades
-        # quote_only=True tells enter_short_strangle to only calculate premium
-        new_shorts_success = self.enter_short_strangle(for_roll=True, quote_only=True)
-        new_premium = self.short_strangle.premium_collected if self.short_strangle and new_shorts_success else 0
+        # CRITICAL FIX: Save the current short strangle before quote check
+        # The quote_only mode overwrites self.short_strangle with a temporary object
+        # which caused state pollution and death loops in the past
+        saved_short_strangle = self.short_strangle
+        new_premium = 0
+
+        # Use try-finally to GUARANTEE restoration even if exception occurs
+        try:
+            # Get quotes for new strangle without placing orders or logging trades
+            # quote_only=True tells enter_short_strangle to only calculate premium
+            new_shorts_success = self.enter_short_strangle(for_roll=True, quote_only=True)
+            new_premium = self.short_strangle.premium_collected if self.short_strangle and new_shorts_success else 0
+        except Exception as e:
+            logger.error(f"Exception during quote check: {e}")
+            new_shorts_success = False
+        finally:
+            # CRITICAL FIX: ALWAYS restore the REAL short strangle after quote check
+            # This prevents state pollution from quote-only data even on exceptions
+            self.short_strangle = saved_short_strangle
 
         # Step 3: Calculate net credit
         net_credit = new_premium - old_close_cost
@@ -3441,6 +3715,9 @@ class DeltaNeutralStrategy:
         if self.short_strangle:
             if not self.close_short_strangle():
                 logger.error("Failed to close shorts for rolling")
+                # CRITICAL FIX: Restore state to avoid stuck ROLLING_SHORTS
+                self.state = StrategyState.FULL_POSITION
+                self._increment_failure_count("roll_close_shorts_failed")
                 return False
 
         # Step 6: Enter new shorts for next week (for real this time)
@@ -3448,6 +3725,10 @@ class DeltaNeutralStrategy:
         # Per Brian Terry's strategy: "roll the date out one week"
         if not self.enter_short_strangle(for_roll=True):
             logger.error("Failed to enter new shorts after rolling")
+            # CRITICAL FIX: We closed old shorts but couldn't enter new ones
+            # Set to LONG_STRADDLE_ACTIVE so bot can retry short entry
+            self.state = StrategyState.LONG_STRADDLE_ACTIVE
+            self._increment_failure_count("roll_enter_shorts_failed")
             return False
 
         # Log the roll details
@@ -3541,12 +3822,14 @@ class DeltaNeutralStrategy:
             if not self.close_short_strangle():
                 logger.error("Failed to close short strangle during exit")
                 success = False
+                self._increment_failure_count("exit_close_shorts_failed")
 
         # Close long straddle
         if self.long_straddle:
             if not self.close_long_straddle():
                 logger.error("Failed to close long straddle during exit")
                 success = False
+                self._increment_failure_count("exit_close_straddle_failed")
 
         if success:
             self.state = StrategyState.IDLE
@@ -3575,6 +3858,21 @@ class DeltaNeutralStrategy:
 
                 # Clear all positions from Positions sheet
                 self.trade_logger.clear_all_positions()
+        else:
+            # CRITICAL FIX: Restore state based on what positions remain
+            # Don't leave in EXITING state which causes the bot to freeze
+            logger.warning("Exit incomplete - restoring state based on remaining positions")
+            if self.long_straddle and self.short_strangle:
+                self.state = StrategyState.FULL_POSITION
+            elif self.long_straddle:
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+            elif self.short_strangle:
+                # Unusual state - only shorts remain, force to IDLE to re-enter longs
+                logger.warning("Only shorts remain after failed exit - setting IDLE")
+                self.state = StrategyState.IDLE
+            else:
+                self.state = StrategyState.IDLE
+            logger.info(f"State restored to: {self.state.value}")
 
         return success
 
@@ -3714,32 +4012,72 @@ class DeltaNeutralStrategy:
         """
         action_taken = "No action"
 
-        # Check circuit breaker
+        # CRITICAL: Check strategy-level circuit breaker first
+        if self._check_circuit_breaker():
+            return f"🚨 CIRCUIT BREAKER OPEN - {self._circuit_breaker_reason}"
+
+        # Check Saxo client circuit breaker
         if self.client.is_circuit_open():
             return "Circuit breaker open - trading halted"
+
+        # CRITICAL: Check for orphaned orders before any trading
+        if self._check_for_orphaned_orders():
+            return "🚨 ORPHANED ORDERS DETECTED - Manual cancellation required"
 
         # Update market data
         if not self.update_market_data():
             return "Failed to update market data"
+
+        # CRITICAL: Handle stuck states (RECENTERING, EXITING, ROLLING_SHORTS)
+        # These states should only be transient - if we're stuck, something went wrong
+        if self.state in [StrategyState.RECENTERING, StrategyState.EXITING, StrategyState.ROLLING_SHORTS]:
+            logger.warning(f"⚠️ Bot found in transient state: {self.state.value}")
+            logger.warning("   This may indicate a previous operation failed")
+            logger.warning("   Attempting to recover based on current positions...")
+
+            # Check what positions we actually have on Saxo
+            self.recover_positions()
+
+            # Update state based on recovered positions
+            if self.long_straddle and self.short_strangle:
+                self.state = StrategyState.FULL_POSITION
+                logger.info("   Recovered to FULL_POSITION state")
+            elif self.long_straddle:
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                logger.info("   Recovered to LONG_STRADDLE_ACTIVE state")
+            else:
+                self.state = StrategyState.IDLE
+                logger.info("   Recovered to IDLE state")
+
+            return f"Recovered from stuck state ({self.state.value})"
 
         # PRIORITY SAFETY CHECKS (before normal logic)
         # Check for emergency exit condition (5%+ move)
         if self.check_emergency_exit_condition():
             logger.critical("EMERGENCY EXIT TRIGGERED - Closing all positions immediately")
             if self.exit_all_positions():
+                self._reset_failure_count()
                 return "EMERGENCY EXIT - Massive move detected"
             else:
+                self._increment_failure_count("emergency_exit_failed")
                 return "EMERGENCY EXIT FAILED - Manual intervention required"
 
         # Check for ITM risk on short options
         if self.check_shorts_itm_risk():
             logger.critical("ITM RISK DETECTED - Rolling shorts immediately")
             if self.roll_weekly_shorts():
+                self._reset_failure_count()
                 return "Emergency roll - shorts approaching ITM"
             else:
                 logger.critical("Failed to roll shorts at ITM risk - closing all positions")
                 if self.exit_all_positions():
+                    self._reset_failure_count()
                     return "Emergency exit - could not roll ITM shorts"
+                else:
+                    self._increment_failure_count("itm_risk_exit_failed")
+                    # CRITICAL FIX: Explicit return to prevent falling through to state machine
+                    # This was a gap that could cause repeated retries without proper tracking
+                    return "ITM RISK EXIT FAILED - Manual intervention required"
 
         # State machine logic
         if self.state == StrategyState.IDLE:
@@ -3765,8 +4103,15 @@ class DeltaNeutralStrategy:
             # CRITICAL: Check recenter FIRST before adding shorts
             # Per strategy spec: "recenter_longs function always executes before checking for new short entry"
             if self._check_recenter_condition():
-                if self.execute_recenter():
+                # Check cooldown before attempting recenter
+                if self._is_action_on_cooldown("recenter"):
+                    action_taken = "Recenter on cooldown after recent failure"
+                elif self.execute_recenter():
+                    self._clear_action_cooldown("recenter")
                     action_taken = "Executed 5-point recenter (before adding shorts)"
+                else:
+                    self._set_action_cooldown("recenter")
+                    action_taken = "Recenter failed - on cooldown"
             else:
                 # Check if we're waiting for old shorts to expire (debit roll skip)
                 # Per Brian Terry: "If you didn't roll on Thursday because of the debit,
@@ -3827,17 +4172,31 @@ class DeltaNeutralStrategy:
             if self.should_exit_trade():
                 if self.exit_all_positions():
                     action_taken = "Exited all positions (DTE threshold)"
+                else:
+                    self._set_action_cooldown("exit")
+                    action_taken = "Exit failed - on cooldown"
 
             # Check recenter condition
             elif self._check_recenter_condition():
-                if self.execute_recenter():
+                # Check cooldown before attempting recenter
+                if self._is_action_on_cooldown("recenter"):
+                    action_taken = "Recenter on cooldown after recent failure"
+                elif self.execute_recenter():
+                    self._clear_action_cooldown("recenter")
                     action_taken = "Executed 5-point recenter"
+                else:
+                    self._set_action_cooldown("recenter")
+                    action_taken = "Recenter failed - on cooldown"
 
             # Check roll condition
             else:
                 should_roll, challenged_side = self.should_roll_shorts()
                 if should_roll:
-                    if self.roll_weekly_shorts(challenged_side=challenged_side):
+                    # Check cooldown before attempting roll
+                    if self._is_action_on_cooldown("roll_shorts"):
+                        action_taken = "Roll shorts on cooldown after recent failure"
+                    elif self.roll_weekly_shorts(challenged_side=challenged_side):
+                        self._clear_action_cooldown("roll_shorts")
                         if challenged_side:
                             action_taken = f"Rolled weekly shorts ({challenged_side} challenged)"
                         else:
@@ -3874,6 +4233,7 @@ class DeltaNeutralStrategy:
                                         "result": "HARD_EXIT"
                                     })
                             else:
+                                self._set_action_cooldown("challenged_exit")
                                 action_taken = "CRITICAL: Challenged roll failed AND exit failed - MANUAL INTERVENTION REQUIRED"
                                 logger.critical("MANUAL INTERVENTION REQUIRED - Could not exit positions!")
                         else:
