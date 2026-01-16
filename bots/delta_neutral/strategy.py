@@ -565,7 +565,10 @@ class DeltaNeutralStrategy:
                 else:
                     leg_price = quote["Quote"].get("Bid", leg_price) or leg_price
 
-            logger.info(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ ${leg_price:.2f}")
+            # Get to_open_close from the leg data (default ToOpen)
+            leg_to_open_close = leg.get("to_open_close", "ToOpen")
+
+            logger.info(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ ${leg_price:.2f} ({leg_to_open_close})")
 
             result = self.client.place_limit_order_with_timeout(
                 uic=leg_uic,
@@ -573,7 +576,8 @@ class DeltaNeutralStrategy:
                 buy_sell=leg_buy_sell,
                 amount=leg_amount,
                 limit_price=leg_price,
-                timeout_seconds=self.order_timeout_seconds
+                timeout_seconds=self.order_timeout_seconds,
+                to_open_close=leg_to_open_close
             )
 
             if result["filled"]:

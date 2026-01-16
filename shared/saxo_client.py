@@ -1869,7 +1869,8 @@ class SaxoClient:
         amount: int,
         order_type: OrderType = OrderType.MARKET,
         limit_price: Optional[float] = None,
-        duration_type: str = "DayOrder"
+        duration_type: str = "DayOrder",
+        to_open_close: str = "ToOpen"
     ) -> Optional[Dict]:
         """
         Place a single order.
@@ -1882,6 +1883,7 @@ class SaxoClient:
             order_type: Type of order (Market, Limit, etc.)
             limit_price: Limit price for limit orders
             duration_type: Order duration (DayOrder, GoodTillCancel, etc.)
+            to_open_close: ToOpen or ToClose (required for options)
 
         Returns:
             dict: Order response with OrderId if successful.
@@ -1899,7 +1901,8 @@ class SaxoClient:
             "OrderDuration": {
                 "DurationType": duration_type
             },
-            "ManualOrder": True
+            "ManualOrder": True,
+            "ToOpenClose": to_open_close
         }
 
         if order_type == OrderType.LIMIT and limit_price:
@@ -2059,7 +2062,8 @@ class SaxoClient:
         buy_sell: BuySell,
         amount: int,
         limit_price: float,
-        timeout_seconds: int = 60
+        timeout_seconds: int = 60,
+        to_open_close: str = "ToOpen"
     ) -> Dict:
         """
         Place a limit order and wait for fill with timeout.
@@ -2074,6 +2078,7 @@ class SaxoClient:
             amount: Number of contracts
             limit_price: Limit price for the order
             timeout_seconds: Maximum time to wait for fill (default 60s)
+            to_open_close: ToOpen or ToClose (required for options)
 
         Returns:
             dict: {
@@ -2087,7 +2092,7 @@ class SaxoClient:
         import time
 
         logger.info(f"Placing LIMIT order with {timeout_seconds}s timeout")
-        logger.info(f"  {buy_sell.value} {amount} x UIC {uic} @ ${limit_price:.2f}")
+        logger.info(f"  {buy_sell.value} {amount} x UIC {uic} @ ${limit_price:.2f} ({to_open_close})")
 
         # Place the limit order
         order_response = self.place_order(
@@ -2097,7 +2102,8 @@ class SaxoClient:
             amount=amount,
             order_type=OrderType.LIMIT,
             limit_price=limit_price,
-            duration_type="DayOrder"
+            duration_type="DayOrder",
+            to_open_close=to_open_close
         )
 
         if not order_response or "OrderId" not in order_response:
