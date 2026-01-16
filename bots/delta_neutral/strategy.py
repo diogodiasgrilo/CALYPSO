@@ -4628,8 +4628,8 @@ class DeltaNeutralStrategy:
         if not self.trade_logger:
             return False
 
-        # Use get_current_metrics() which calculates theta_cost correctly (scaled by 100 × qty)
-        metrics = self.get_current_metrics()
+        # Use get_dashboard_metrics() which calculates theta_cost correctly (scaled by 100 × qty)
+        metrics = self.get_dashboard_metrics()
 
         # Calculate daily P&L
         daily_pnl = self.metrics.total_pnl - self.metrics.daily_pnl_start
