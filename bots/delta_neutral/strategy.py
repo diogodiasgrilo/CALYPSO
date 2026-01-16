@@ -4536,37 +4536,67 @@ class DeltaNeutralStrategy:
 
     def _get_theta_earned_or_estimate(self, current_net_theta: float) -> float:
         """
-        Get actual accumulated theta from Daily Summary, or fall back to estimate.
+        Get actual accumulated theta from Daily Summary, plus estimate for weekends.
 
-        This method tries to use actual logged daily theta values for accuracy.
-        Only sums theta since the current short strangle was entered (not previous weeks).
-        If no data is available (new position, bot restart, etc.), it falls back
-        to the estimate: current_net_theta × days_held.
+        This method:
+        1. Sums actual logged daily theta values from Daily Summary
+        2. Adds estimated theta for weekends/holidays (days without logging)
+
+        Weekend theta is real - options decay every calendar day. But we only log
+        on trading days, so we estimate weekend theta using the average daily rate.
 
         Args:
             current_net_theta: Current daily net theta rate
 
         Returns:
-            float: Accumulated theta earned (actual or estimated)
+            float: Accumulated theta earned (actual + weekend estimate)
         """
         days_held = self.short_strangle.days_held if self.short_strangle else 0
+
+        if days_held == 0:
+            # Same day entry - just return today's theta if we have a Daily Summary
+            if self.trade_logger and self.short_strangle:
+                try:
+                    entry_date = self.short_strangle.entry_date
+                    actual_theta = self.trade_logger.get_accumulated_theta_from_daily_summary(since_date=entry_date)
+                    if actual_theta is not None:
+                        return actual_theta
+                except Exception:
+                    pass
+            return 0.0
 
         # Try to get actual accumulated theta from Daily Summary
         if self.trade_logger and self.short_strangle:
             try:
-                # Get the date when current shorts were entered
-                # Only sum theta since that date (not previous weekly cycles)
                 entry_date = self.short_strangle.entry_date  # YYYY-MM-DD format
 
+                # Get actual theta from logged trading days
                 actual_theta = self.trade_logger.get_accumulated_theta_from_daily_summary(since_date=entry_date)
 
                 if actual_theta is not None:
-                    logger.debug(f"Using actual accumulated theta from logs (since {entry_date}): ${actual_theta:.2f}")
-                    return actual_theta
+                    # Count trading days logged vs calendar days held
+                    # Weekend/holiday theta = (calendar_days - trading_days) × avg_daily_theta
+                    trading_days_logged = self.trade_logger.get_daily_summary_count(since_date=entry_date)
+
+                    if trading_days_logged and trading_days_logged > 0:
+                        # Calculate average daily theta from actual logs
+                        avg_daily_theta = actual_theta / trading_days_logged
+                        # Estimate theta for non-trading days (weekends/holidays)
+                        non_trading_days = days_held - trading_days_logged
+                        weekend_theta = avg_daily_theta * non_trading_days if non_trading_days > 0 else 0
+
+                        total_theta = actual_theta + weekend_theta
+                        logger.debug(
+                            f"Theta earned: ${actual_theta:.2f} (logged) + ${weekend_theta:.2f} (weekend estimate) "
+                            f"= ${total_theta:.2f} total ({trading_days_logged} trading days, {non_trading_days} weekend days)"
+                        )
+                        return total_theta
+                    else:
+                        return actual_theta
             except Exception as e:
                 logger.debug(f"Could not get accumulated theta from logs: {e}")
 
-        # Fall back to estimate
+        # Fall back to pure estimate
         estimate = current_net_theta * days_held
         logger.debug(f"Using estimated theta: ${current_net_theta:.2f}/day × {days_held} days = ${estimate:.2f}")
         return estimate

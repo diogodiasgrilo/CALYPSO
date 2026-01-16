@@ -1325,6 +1325,52 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to get accumulated theta from Daily Summary: {e}")
             return None
 
+    def get_daily_summary_count(self, since_date: str = None) -> Optional[int]:
+        """
+        Count the number of Daily Summary entries since a given date.
+
+        Used to calculate how many trading days have been logged, so we can
+        estimate weekend theta (calendar days - trading days logged).
+
+        Args:
+            since_date: Optional date string (YYYY-MM-DD) to start counting from.
+
+        Returns:
+            int: Number of daily summary entries, or None if unable to read data
+        """
+        if not self.enabled or "Daily Summary" not in self.worksheets:
+            return None
+
+        try:
+            worksheet = self.worksheets["Daily Summary"]
+            all_data = worksheet.get_all_values()
+
+            if len(all_data) <= 1:  # Only headers or empty
+                return None
+
+            # Find date column index from header
+            headers = all_data[0]
+            date_col = headers.index("Date") if "Date" in headers else 0
+
+            count = 0
+            for row in all_data[1:]:  # Skip header
+                if len(row) <= date_col:
+                    continue
+
+                row_date = row[date_col] if date_col < len(row) else ""
+
+                # Skip if before since_date
+                if since_date and row_date < since_date:
+                    continue
+
+                count += 1
+
+            return count if count > 0 else None
+
+        except Exception as e:
+            logger.error(f"Failed to get daily summary count: {e}")
+            return None
+
     def log_safety_event(self, event: Dict[str, Any]) -> bool:
         """
         Log safety event (Fed filter, ITM risk, emergency exit, roll, recenter).
@@ -2399,6 +2445,20 @@ class TradeLoggerService:
         """
         if self.google_logger.enabled:
             return self.google_logger.get_accumulated_theta_from_daily_summary(since_date)
+        return None
+
+    def get_daily_summary_count(self, since_date: str = None) -> Optional[int]:
+        """
+        Get count of Daily Summary entries since a given date.
+
+        Args:
+            since_date: Optional date string (YYYY-MM-DD) to start counting from
+
+        Returns:
+            int: Number of daily summary entries, or None if unavailable
+        """
+        if self.google_logger.enabled:
+            return self.google_logger.get_daily_summary_count(since_date)
         return None
 
     def log_opening_range(self, data: Dict[str, Any]):
