@@ -1352,7 +1352,7 @@ class DeltaNeutralStrategy:
 
     def refresh_position_prices(self) -> bool:
         """
-        Refresh current prices for all option positions from Saxo API.
+        Refresh current prices and Greeks for all option positions from Saxo API.
 
         This is needed after position recovery when the market is closed
         and current_price may not have been populated.
@@ -1379,6 +1379,13 @@ class DeltaNeutralStrategy:
                 current_price = pos_view.get("CurrentPrice", 0) or pos_view.get("MarketValue", 0)
                 strike = pos_base.get("Strike", 0)
 
+                # Extract Greeks from the position data
+                greeks = pos.get("Greeks", {})
+                theta = greeks.get("InstrumentTheta") or greeks.get("Theta", 0)
+                delta = greeks.get("InstrumentDelta") or greeks.get("Delta") or pos_view.get("Delta", 0)
+                gamma = greeks.get("InstrumentGamma") or greeks.get("Gamma", 0)
+                vega = greeks.get("InstrumentVega") or greeks.get("Vega", 0)
+
                 # Also try to get price from Greeks if available
                 if current_price == 0:
                     # Try fetching individual option quote
@@ -1404,18 +1411,34 @@ class DeltaNeutralStrategy:
                 if self.long_straddle:
                     if self.long_straddle.call and self.long_straddle.call.uic == uic:
                         self.long_straddle.call.current_price = current_price
-                        logger.debug(f"Updated long call price: ${current_price:.4f}")
+                        self.long_straddle.call.theta = theta
+                        self.long_straddle.call.delta = delta
+                        self.long_straddle.call.gamma = gamma
+                        self.long_straddle.call.vega = vega
+                        logger.debug(f"Updated long call: price=${current_price:.4f}, theta={theta:.4f}")
                     if self.long_straddle.put and self.long_straddle.put.uic == uic:
                         self.long_straddle.put.current_price = current_price
-                        logger.debug(f"Updated long put price: ${current_price:.4f}")
+                        self.long_straddle.put.theta = theta
+                        self.long_straddle.put.delta = delta
+                        self.long_straddle.put.gamma = gamma
+                        self.long_straddle.put.vega = vega
+                        logger.debug(f"Updated long put: price=${current_price:.4f}, theta={theta:.4f}")
 
                 if self.short_strangle:
                     if self.short_strangle.call and self.short_strangle.call.uic == uic:
                         self.short_strangle.call.current_price = current_price
-                        logger.debug(f"Updated short call price: ${current_price:.4f}")
+                        self.short_strangle.call.theta = theta
+                        self.short_strangle.call.delta = delta
+                        self.short_strangle.call.gamma = gamma
+                        self.short_strangle.call.vega = vega
+                        logger.debug(f"Updated short call: price=${current_price:.4f}, theta={theta:.4f}")
                     if self.short_strangle.put and self.short_strangle.put.uic == uic:
                         self.short_strangle.put.current_price = current_price
-                        logger.debug(f"Updated short put price: ${current_price:.4f}")
+                        self.short_strangle.put.theta = theta
+                        self.short_strangle.put.delta = delta
+                        self.short_strangle.put.gamma = gamma
+                        self.short_strangle.put.vega = vega
+                        logger.debug(f"Updated short put: price=${current_price:.4f}, theta={theta:.4f}")
 
             logger.info("Position prices refreshed from Saxo")
             return True

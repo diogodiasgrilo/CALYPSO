@@ -1072,6 +1072,15 @@ class IronFlyStrategy:
 
     def log_daily_summary(self):
         """Log daily summary to Google Sheets at end of trading day."""
+        # Get EUR conversion rate
+        daily_pnl_eur = self.daily_pnl
+        try:
+            rate = self.client.get_usd_to_account_currency_rate()
+            if rate:
+                daily_pnl_eur = self.daily_pnl * rate
+        except Exception:
+            pass  # Keep USD value if conversion fails
+
         summary = {
             "date": get_us_market_time().strftime("%Y-%m-%d"),
             "spy_close": self.current_price,
@@ -1079,7 +1088,7 @@ class IronFlyStrategy:
             "theta_cost": 0,  # Not applicable for 0DTE Iron Fly
             "premium_collected": self.position.credit_received if self.position else 0,
             "daily_pnl": self.daily_pnl,
-            "daily_pnl_eur": 0,  # Will be converted if currency enabled
+            "daily_pnl_eur": daily_pnl_eur,
             "cumulative_pnl": self.daily_pnl,  # Single day strategy
             "roll_count": 0,  # Not applicable
             "recenter_count": 0,  # Not applicable
