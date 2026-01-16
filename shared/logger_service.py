@@ -2387,6 +2387,20 @@ class TradeLoggerService:
         if self.google_logger.enabled:
             self.google_logger.log_daily_summary(summary)
 
+    def get_accumulated_theta_from_daily_summary(self, since_date: str = None) -> Optional[float]:
+        """
+        Get accumulated theta from Daily Summary worksheet.
+
+        Args:
+            since_date: Optional date string (YYYY-MM-DD) to start summing from
+
+        Returns:
+            float: Sum of daily net theta values, or None if unavailable
+        """
+        if self.google_logger.enabled:
+            return self.google_logger.get_accumulated_theta_from_daily_summary(since_date)
+        return None
+
     def log_opening_range(self, data: Dict[str, Any]):
         """
         Log opening range data for Iron Fly 0DTE strategy fact-checking.
