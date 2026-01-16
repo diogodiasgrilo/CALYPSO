@@ -46,7 +46,7 @@ if _project_root not in sys.path:
 # Import shared modules
 from shared.saxo_client import SaxoClient
 from shared.logger_service import TradeLoggerService, setup_logging
-from shared.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration
+from shared.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration, is_weekend, is_market_holiday, get_us_market_time
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
 
@@ -441,9 +441,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
             try:
                 # Check if market is open
                 if not is_market_open():
-                    # If market just closed and we haven't logged today's summary, do it now
+                    # Log daily summary if:
+                    # 1. We haven't logged today's summary yet
+                    # 2. Today is a trading day (not weekend/holiday)
+                    # 3. It's after market close (4 PM ET)
+                    # This handles both normal market close AND bot restarts after hours
                     today = datetime.now().strftime("%Y-%m-%d")
-                    if trading_day_started and last_daily_summary_date != today:
+                    market_time = get_us_market_time()
+                    is_after_close = market_time.hour >= 16  # 4 PM ET or later
+                    is_trading_day = not is_weekend() and not is_market_holiday()
+
+                    if last_daily_summary_date != today and is_trading_day and is_after_close:
                         trade_logger.log_event("Market closed - logging daily summary...")
                         strategy.log_daily_summary()
                         last_daily_summary_date = today
