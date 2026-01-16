@@ -4460,6 +4460,18 @@ class DeltaNeutralStrategy:
         if initial_cost > 0 and self.metrics.max_drawdown > 0:
             max_dd_percent = self.metrics.max_drawdown / initial_cost
 
+        # Get individual deltas for short positions (for Account Summary)
+        short_call_delta = 0.0
+        short_put_delta = 0.0
+        if self.short_strangle:
+            if self.short_strangle.call:
+                # Delta is per contract, multiply by quantity for total delta exposure
+                qty = self.short_strangle.call.quantity
+                short_call_delta = getattr(self.short_strangle.call, 'delta', 0) * qty
+            if self.short_strangle.put:
+                qty = self.short_strangle.put.quantity
+                short_put_delta = getattr(self.short_strangle.put, 'delta', 0) * qty
+
         return {
             # Account Summary fields
             "spy_price": self.current_underlying_price,
@@ -4475,6 +4487,9 @@ class DeltaNeutralStrategy:
             "long_put_strike": long_put_strike,
             "short_call_strike": short_call_strike,
             "short_put_strike": short_put_strike,
+            # Individual short deltas for Account Summary
+            "short_call_delta": short_call_delta,
+            "short_put_delta": short_put_delta,
 
             # Performance Metrics fields
             "total_pnl": self.metrics.total_pnl,

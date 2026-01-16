@@ -425,19 +425,20 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Account Summary")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=18)
+                worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=20)
                 # SPY Strategy-specific account data (not full account)
                 headers = [
                     "Timestamp", "SPY Price", "VIX",
                     "Strategy Unrealized P&L ($)", "Strategy Unrealized P&L (EUR)",
                     "Long Straddle Value ($)", "Short Strangle Value ($)",
                     "Net Strategy Value ($)", "Strategy Margin Used ($)",
-                    "Total Delta", "Total Theta ($)", "Total Positions",
+                    "Total Delta", "Short Call Delta", "Short Put Delta",
+                    "Total Theta ($)", "Total Positions",
                     "Long Call Strike", "Long Put Strike", "Short Call Strike", "Short Put Strike",
                     "Exchange Rate", "Environment"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:R1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:T1", {"textFormat": {"bold": True}})
                 logger.info("Created Account Summary worksheet (SPY strategy only)")
 
             self.worksheets["Account Summary"] = worksheet
@@ -1580,6 +1581,10 @@ class GoogleSheetsLogger:
             total_theta = strategy_data.get("total_theta", 0)
             position_count = strategy_data.get("position_count", 0)
 
+            # Individual short deltas
+            short_call_delta = strategy_data.get("short_call_delta", 0)
+            short_put_delta = strategy_data.get("short_put_delta", 0)
+
             # Strike prices
             long_call_strike = strategy_data.get("long_call_strike", 0)
             long_put_strike = strategy_data.get("long_put_strike", 0)
@@ -1603,6 +1608,8 @@ class GoogleSheetsLogger:
                 f"{net_value:.2f}",
                 f"{strategy_margin:.2f}",
                 f"{total_delta:.4f}",
+                f"{short_call_delta:.4f}",  # Individual short call delta
+                f"{short_put_delta:.4f}",   # Individual short put delta
                 f"{total_theta:.2f}",
                 position_count,
                 f"{long_call_strike:.0f}" if long_call_strike else "N/A",
@@ -1618,8 +1625,8 @@ class GoogleSheetsLogger:
                 # No data row exists yet, append it
                 worksheet.append_row(row)
             else:
-                # Update existing row 2
-                worksheet.update(f"A2:R2", [row])
+                # Update existing row 2 (20 columns: A through T)
+                worksheet.update(f"A2:T2", [row])
             logger.debug("SPY strategy account summary updated")
             return True
         except Exception as e:
