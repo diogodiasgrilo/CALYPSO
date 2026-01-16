@@ -2008,9 +2008,12 @@ class SaxoClient:
         """
         endpoint = f"/trade/v2/orders/{order_id}"
 
+        # AccountKey is REQUIRED for order cancellation per Saxo API docs
+        params = {"AccountKey": self.account_key}
+
         logger.info(f"Cancelling order: {order_id}")
 
-        response = self._make_request("DELETE", endpoint)
+        response = self._make_request("DELETE", endpoint, params=params)
         if response is not None:
             logger.info(f"Order {order_id} cancelled successfully")
             return response
@@ -2145,14 +2148,45 @@ class SaxoClient:
         elapsed = time.time() - start_time
         logger.warning(f"⚠ Limit order NOT filled after {elapsed:.1f}s - cancelling")
 
-        # Cancel the unfilled order
-        self.cancel_order(order_id)
+        # Try to cancel the unfilled order with retry logic
+        cancel_success = False
+        for attempt in range(3):
+            cancel_result = self.cancel_order(order_id)
+            if cancel_result is not None:
+                cancel_success = True
+                break
+            logger.warning(f"Cancel attempt {attempt + 1}/3 failed, retrying...")
+            time.sleep(1)
+
+        # Verify cancellation by checking if order is still in open orders
+        time.sleep(1)  # Brief delay to let Saxo process the cancel
+        open_orders = self.get_open_orders()
+        order_still_open = any(o.get("OrderId") == order_id for o in open_orders)
+
+        if order_still_open:
+            # CRITICAL: Order is still open - cancel failed
+            # This is a serious issue that requires manual intervention
+            logger.critical(f"⚠️ CRITICAL: Order {order_id} is STILL OPEN after cancel attempts!")
+            logger.critical("Manual cancellation required in SaxoTraderGO before bot continues!")
+            return {
+                "success": False,
+                "filled": False,
+                "order_id": order_id,
+                "message": f"CRITICAL: Order {order_id} still open after timeout. Cancel failed. MANUAL CANCELLATION REQUIRED.",
+                "fill_price": None,
+                "cancel_failed": True  # Flag to indicate cancel failure
+            }
+
+        if not cancel_success:
+            # Cancel returned error but order is no longer in open orders
+            # It might have filled at the last moment or been rejected
+            logger.warning(f"Order {order_id} not found after cancel - may have filled or been rejected")
 
         return {
             "success": False,
             "filled": False,
             "order_id": order_id,
-            "message": f"TIMEOUT: Order not filled within {timeout_seconds}s. Order cancelled. ALERT: Manual review required.",
+            "message": f"TIMEOUT: Order not filled within {timeout_seconds}s. Order cancelled.",
             "fill_price": None
         }
 

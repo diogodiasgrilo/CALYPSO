@@ -2135,7 +2135,7 @@ class DeltaNeutralStrategy:
     # SHORT STRANGLE METHODS
     # =========================================================================
 
-    def enter_short_strangle(self, for_roll: bool = False) -> bool:
+    def enter_short_strangle(self, for_roll: bool = False, quote_only: bool = False) -> bool:
         """
         Enter a weekly short strangle for income generation.
 
@@ -2145,6 +2145,8 @@ class DeltaNeutralStrategy:
         Args:
             for_roll: If True, this is for rolling shorts (look for next week's expiry).
                      If False, this is initial entry (look for current week's expiry).
+            quote_only: If True, only fetch quotes to calculate premium (no orders, no logging).
+                       Used by roll_weekly_shorts to check if roll would result in net credit.
 
         Returns:
             bool: True if strangle entered successfully, False otherwise.
@@ -2180,12 +2182,12 @@ class DeltaNeutralStrategy:
 
         # Check if we should use target return approach
         if self.weekly_target_return_pct and self.weekly_target_return_pct > 0:
-            return self._enter_strangle_by_target_return(for_roll=for_roll)
+            return self._enter_strangle_by_target_return(for_roll=for_roll, quote_only=quote_only)
 
         # Otherwise use the multiplier approach
-        return self._enter_strangle_by_multiplier(for_roll=for_roll)
+        return self._enter_strangle_by_multiplier(for_roll=for_roll, quote_only=quote_only)
 
-    def _enter_strangle_by_target_return(self, for_roll: bool = False) -> bool:
+    def _enter_strangle_by_target_return(self, for_roll: bool = False, quote_only: bool = False) -> bool:
         """
         Enter strangle based on target NET weekly return percentage.
 
@@ -2199,6 +2201,7 @@ class DeltaNeutralStrategy:
 
         Args:
             for_roll: If True, look for next week's expiry (rolling shorts).
+            quote_only: If True, only calculate quotes/premium without placing orders or logging.
 
         Returns:
             bool: True if strangle entered successfully, False otherwise.
@@ -2611,10 +2614,10 @@ class DeltaNeutralStrategy:
             "bid": final_put["bid"]
         }
 
-        # Continue with order placement
-        return self._execute_strangle_order(call_option, put_option, final_call["bid"], final_put["bid"])
+        # Continue with order placement (or just quote calculation if quote_only)
+        return self._execute_strangle_order(call_option, put_option, final_call["bid"], final_put["bid"], quote_only=quote_only)
 
-    def _enter_strangle_by_multiplier(self, for_roll: bool = False) -> bool:
+    def _enter_strangle_by_multiplier(self, for_roll: bool = False, quote_only: bool = False) -> bool:
         """
         Enter strangle using expected move multiplier approach.
 
@@ -2622,6 +2625,7 @@ class DeltaNeutralStrategy:
 
         Args:
             for_roll: If True, look for next week's expiry (rolling shorts).
+            quote_only: If True, only calculate quotes/premium without placing orders or logging.
         """
         logger.info("Using expected move multiplier approach")
 
@@ -2711,19 +2715,59 @@ class DeltaNeutralStrategy:
         call_price = call_quote["Quote"].get("Bid", 0)
         put_price = put_quote["Quote"].get("Bid", 0)
 
-        return self._execute_strangle_order(call_option, put_option, call_price, put_price)
+        return self._execute_strangle_order(call_option, put_option, call_price, put_price, quote_only=quote_only)
 
     def _execute_strangle_order(
         self,
         call_option: dict,
         put_option: dict,
         call_price: float,
-        put_price: float
+        put_price: float,
+        quote_only: bool = False
     ) -> bool:
         """
         Execute the strangle order with slippage protection.
         Shared by both target return and multiplier approaches.
+
+        If quote_only=True, just updates the internal strangle position object
+        to calculate premium without placing orders or logging trades.
         """
+
+        # If quote_only, just create the position object to calculate premium
+        # Don't place orders, don't log trades, don't update metrics
+        if quote_only:
+            # Create temporary strangle position just for premium calculation
+            self.short_strangle = StranglePosition(
+                call=OptionPosition(
+                    position_id="QUOTE_ONLY_call",
+                    uic=call_option["uic"],
+                    strike=call_option["strike"],
+                    expiry=call_option["expiry"],
+                    option_type="Call",
+                    position_type=PositionType.SHORT_CALL,
+                    quantity=self.position_size,
+                    entry_price=call_price,
+                    current_price=call_price,
+                    delta=-0.15
+                ),
+                put=OptionPosition(
+                    position_id="QUOTE_ONLY_put",
+                    uic=put_option["uic"],
+                    strike=put_option["strike"],
+                    expiry=put_option["expiry"],
+                    option_type="Put",
+                    position_type=PositionType.SHORT_PUT,
+                    quantity=self.position_size,
+                    entry_price=put_price,
+                    current_price=put_price,
+                    delta=0.15
+                ),
+                call_strike=call_option["strike"],
+                put_strike=put_option["strike"],
+                expiry=call_option["expiry"]
+            )
+            # Return True to indicate quotes were successfully fetched
+            return True
 
         # Place sell orders for strangle with slippage protection
         legs = [
@@ -3275,6 +3319,17 @@ class DeltaNeutralStrategy:
             logger.info(f"Friday 10AM+ EST ({now_est.strftime('%H:%M')}) - scheduled roll time for weekly shorts")
 
         if is_roll_time:
+            # CRITICAL: Check if current shorts already have 7+ DTE (already rolled to next week)
+            # This prevents immediate re-rolling of shorts that were just entered with next week's expiry
+            if self.short_strangle and self.short_strangle.expiry:
+                try:
+                    expiry_date = datetime.strptime(self.short_strangle.expiry[:10], "%Y-%m-%d").date()
+                    dte = (expiry_date - now_est.date()).days
+                    if dte >= 7:
+                        logger.info(f"Shorts already have {dte} DTE (next week expiry) - no roll needed")
+                        return (False, None)
+                except (ValueError, TypeError):
+                    pass  # If we can't parse expiry, proceed with roll check
             return (True, None)  # Scheduled roll, no specific challenge
 
         # Check if shorts are being challenged
@@ -3360,15 +3415,10 @@ class DeltaNeutralStrategy:
         # This allows us to verify we'll get a net credit
         logger.info("Fetching quotes for new shorts to verify net credit...")
 
-        # Temporarily enter new strangle to get quotes (without actually placing orders)
-        # We'll use the dry_run logic to simulate this
-        old_dry_run_state = self.dry_run
-        self.dry_run = True  # Temporarily enable dry run to get quotes only
-
-        new_shorts_success = self.enter_short_strangle(for_roll=True)
+        # Get quotes for new strangle without placing orders or logging trades
+        # quote_only=True tells enter_short_strangle to only calculate premium
+        new_shorts_success = self.enter_short_strangle(for_roll=True, quote_only=True)
         new_premium = self.short_strangle.premium_collected if self.short_strangle and new_shorts_success else 0
-
-        self.dry_run = old_dry_run_state  # Restore original dry run state
 
         # Step 3: Calculate net credit
         net_credit = new_premium - old_close_cost
