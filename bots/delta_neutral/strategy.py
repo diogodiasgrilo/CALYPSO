@@ -4556,9 +4556,7 @@ class DeltaNeutralStrategy:
             try:
                 # Get the date when current shorts were entered
                 # Only sum theta since that date (not previous weekly cycles)
-                entry_date = None
-                if self.short_strangle.call and self.short_strangle.call.entry_time:
-                    entry_date = self.short_strangle.call.entry_time[:10]  # YYYY-MM-DD
+                entry_date = self.short_strangle.entry_date  # YYYY-MM-DD format
 
                 actual_theta = self.trade_logger.get_accumulated_theta_from_daily_summary(since_date=entry_date)
 
