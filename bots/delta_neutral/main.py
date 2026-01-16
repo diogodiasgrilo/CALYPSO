@@ -429,7 +429,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
 
     last_status_time = datetime.now()
     status_interval = 300  # Log status every 5 minutes
-    last_daily_summary_date = None  # Track last daily summary logged
+    last_daily_summary_date = None  # Track last daily summary logged (trading days only)
+    last_performance_metrics_date = None  # Track last performance metrics logged (every day)
     trading_day_started = False  # Track if we've started tracking for today
     last_dashboard_log_time = datetime.now()
     dashboard_log_interval = 900  # Log dashboard metrics every 15 minutes
@@ -441,28 +442,34 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
             try:
                 # Check if market is open
                 if not is_market_open():
-                    # Log daily summary if:
-                    # 1. We haven't logged today's summary yet
-                    # 2. Today is a trading day (not weekend/holiday)
-                    # 3. It's after market close (4 PM ET)
-                    # This handles both normal market close AND bot restarts after hours
+                    # Daily Summary & Performance Metrics: Update EVERY day (including weekends)
+                    # Theta decays every calendar day, so we log daily using last known theta
+                    # This ensures Cumulative Net Theta accurately tracks all days
                     today = datetime.now().strftime("%Y-%m-%d")
                     market_time = get_us_market_time()
                     is_after_close = market_time.hour >= 16  # 4 PM ET or later
                     is_trading_day = not is_weekend() and not is_market_holiday()
 
-                    if last_daily_summary_date != today and is_trading_day and is_after_close:
-                        trade_logger.log_event("Market closed - logging daily summary...")
+                    # Log Daily Summary every day (uses last known Net Theta on weekends)
+                    if last_daily_summary_date != today and is_after_close:
+                        day_type = "trading day" if is_trading_day else "weekend/holiday"
+                        trade_logger.log_event(f"Logging daily summary ({day_type})...")
                         strategy.log_daily_summary()
-                        # Also log Performance Metrics to capture the day's final state
+                        last_daily_summary_date = today
+                        if is_trading_day:
+                            trading_day_started = False
+
+                    # Log Performance Metrics every day
+                    if last_performance_metrics_date != today and is_after_close:
                         dashboard_metrics = strategy.get_dashboard_metrics()
+                        period = "End of Day" if is_trading_day else "Weekend/Holiday"
                         trade_logger.log_performance_metrics(
-                            period="End of Day",
+                            period=period,
                             metrics=dashboard_metrics,
                             saxo_client=client
                         )
-                        last_daily_summary_date = today
-                        trading_day_started = False
+                        last_performance_metrics_date = today
+                        trade_logger.log_event(f"Performance metrics updated ({period})")
 
                     market_status = get_market_status_message()
                     trade_logger.log_event(market_status)
