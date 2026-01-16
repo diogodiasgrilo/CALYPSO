@@ -4574,15 +4574,22 @@ class DeltaNeutralStrategy:
                 actual_theta = self.trade_logger.get_accumulated_theta_from_daily_summary(since_date=entry_date)
 
                 if actual_theta is not None:
-                    # Count trading days logged vs calendar days held
-                    # Weekend/holiday theta = (calendar_days - trading_days) × avg_daily_theta
+                    # Count trading days logged vs total calendar days
+                    # days_held = elapsed days (e.g., Fri entry -> Mon = 3)
+                    # But we need total days including entry day = days_held + 1
+                    # Example: Fri entry, Mon check
+                    #   - days_held = 3 (Fri->Sat->Sun->Mon)
+                    #   - total_calendar_days = 4 (Fri, Sat, Sun, Mon)
+                    #   - trading_days_logged = 2 (Fri, Mon)
+                    #   - weekend_days = 4 - 2 = 2 (Sat, Sun) ✓
                     trading_days_logged = self.trade_logger.get_daily_summary_count(since_date=entry_date)
+                    total_calendar_days = days_held + 1  # Include entry day
 
                     if trading_days_logged and trading_days_logged > 0:
                         # Calculate average daily theta from actual logs
                         avg_daily_theta = actual_theta / trading_days_logged
                         # Estimate theta for non-trading days (weekends/holidays)
-                        non_trading_days = days_held - trading_days_logged
+                        non_trading_days = total_calendar_days - trading_days_logged
                         weekend_theta = avg_daily_theta * non_trading_days if non_trading_days > 0 else 0
 
                         total_theta = actual_theta + weekend_theta
