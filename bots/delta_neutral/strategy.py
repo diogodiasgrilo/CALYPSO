@@ -4517,8 +4517,9 @@ class DeltaNeutralStrategy:
             # Try to get actual accumulated theta from Daily Summary logs first
             # Falls back to estimate (net_theta × days_held) if no data available
             "estimated_theta_earned": self._get_theta_earned_or_estimate(net_theta),
-            # Weekly theta target = current daily net theta × 5 trading days
-            "weekly_theta_target": net_theta * 5,
+            # Cumulative Net Theta = ALL-TIME sum of daily net theta from Daily Summary
+            # This never resets - tracks total theta earned across all positions
+            "cumulative_net_theta": self._get_cumulative_net_theta(),
             # Current daily net theta rate
             "daily_net_theta": net_theta,
             "days_held": self.short_strangle.days_held if self.short_strangle else 0,
@@ -4607,6 +4608,27 @@ class DeltaNeutralStrategy:
         estimate = current_net_theta * days_held
         logger.debug(f"Using estimated theta: ${current_net_theta:.2f}/day × {days_held} days = ${estimate:.2f}")
         return estimate
+
+    def _get_cumulative_net_theta(self) -> float:
+        """
+        Get ALL-TIME cumulative net theta from Daily Summary.
+
+        This is the sum of ALL daily net theta values ever logged - it never resets.
+        This tracks the total theta earned across all positions over time.
+
+        Returns:
+            float: Cumulative net theta (all-time), or 0.0 if unavailable
+        """
+        if not self.trade_logger:
+            return 0.0
+
+        try:
+            # Get all-time cumulative theta (no since_date filter)
+            cumulative = self.trade_logger.get_accumulated_theta_from_daily_summary(since_date=None)
+            return cumulative if cumulative is not None else 0.0
+        except Exception as e:
+            logger.debug(f"Could not get cumulative net theta: {e}")
+            return 0.0
 
     def get_total_greeks(self) -> Dict[str, float]:
         """

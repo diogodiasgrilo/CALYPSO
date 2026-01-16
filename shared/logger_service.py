@@ -400,18 +400,27 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Performance Metrics")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=27)
-                # SPY Strategy-specific performance KPIs for investors
+                worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=22)
+                # SPY Strategy-specific performance KPIs (cleaner structure)
+                # Reorganized: Meta | P&L | Theta | Position P&L | Stats | Counts
                 headers = [
-                    "Timestamp", "Period", "SPY Strategy P&L ($)", "SPY Strategy P&L (EUR)", "SPY Strategy P&L (%)",
-                    "Realized P&L ($)", "Unrealized P&L ($)", "Premium Collected ($)", "Theta Cost ($)",
-                    "Net Theta ($)", "Long Straddle P&L ($)", "Short Strangle P&L ($)",
-                    "Win Rate (%)", "Sharpe Ratio", "Max Drawdown ($)", "Max Drawdown (%)",
-                    "Trade Count", "Roll Count", "Recenter Count", "Avg Trade P&L ($)", "Best Trade ($)", "Worst Trade ($)",
-                    "Est. Theta Earned ($)", "Weekly Theta Target ($)", "Daily Net Theta ($)", "Days Held", "Days to Expiry"
+                    # Meta
+                    "Timestamp", "Period",
+                    # P&L (Total)
+                    "Total P&L ($)", "Total P&L (EUR)", "Total P&L (%)",
+                    "Realized P&L ($)", "Unrealized P&L ($)",
+                    # Theta Tracking (key KPI)
+                    "Daily Net Theta ($)", "Est. Theta Earned ($)", "Cumulative Net Theta ($)",
+                    # Position P&L
+                    "Long Straddle P&L ($)", "Short Strangle P&L ($)", "Premium Collected ($)",
+                    # Stats
+                    "Win Rate (%)", "Max Drawdown ($)", "Max Drawdown (%)",
+                    # Counts
+                    "Trade Count", "Roll Count", "Recenter Count",
+                    "Days Held", "Days to Expiry"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:Z1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:V1", {"textFormat": {"bold": True}})
                 logger.info("Created Performance Metrics worksheet (SPY strategy only)")
 
             self.worksheets["Performance Metrics"] = worksheet
@@ -425,20 +434,23 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Account Summary")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=20)
-                # SPY Strategy-specific account data (not full account)
+                worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=17)
+                # SPY Strategy position snapshot (cleaner structure)
+                # Reorganized: Market Data | Position Values | Greeks | Strikes | Meta
                 headers = [
+                    # Market Data
                     "Timestamp", "SPY Price", "VIX",
-                    "Strategy Unrealized P&L ($)", "Strategy Unrealized P&L (EUR)",
+                    # Position Values
                     "Long Straddle Value ($)", "Short Strangle Value ($)",
-                    "Net Strategy Value ($)", "Strategy Margin Used ($)",
-                    "Total Delta", "Short Call Delta", "Short Put Delta",
-                    "Total Theta ($)", "Total Positions",
+                    # Greeks
+                    "Total Delta", "Short Call Delta", "Short Put Delta", "Daily Net Theta ($)",
+                    # Strikes
                     "Long Call Strike", "Long Put Strike", "Short Call Strike", "Short Put Strike",
-                    "Exchange Rate", "Environment"
+                    # Meta
+                    "Margin Used ($)", "Exchange Rate", "Environment"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:T1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:Q1", {"textFormat": {"bold": True}})
                 logger.info("Created Account Summary worksheet (SPY strategy only)")
 
             self.worksheets["Account Summary"] = worksheet
@@ -1497,23 +1509,23 @@ class GoogleSheetsLogger:
         Log SPY strategy performance metrics for Looker dashboard.
 
         This logs ONLY SPY strategy performance, not full account performance.
+        Columns: Meta | P&L | Theta | Position P&L | Stats | Counts
 
         Args:
-            period: Period label (e.g., "Daily", "Weekly", "Monthly", "All-Time")
+            period: Period label (e.g., "Daily", "Weekly", "Monthly", "All-Time", "End of Day")
             metrics: Dictionary with SPY strategy metrics:
                 - total_pnl: Total SPY strategy P&L
                 - realized_pnl: Realized P&L from closed SPY positions
                 - unrealized_pnl: Unrealized P&L from open SPY positions
-                - premium_collected: Premium from short strangles
-                - theta_cost: Theta decay cost (long positions)
-                - net_theta: Net theta (short theta - long theta)
+                - daily_net_theta: Net theta per day (short - long)
+                - estimated_theta_earned: Theta earned since position opened
+                - cumulative_net_theta: All-time cumulative net theta (never resets)
                 - long_straddle_pnl: P&L from long straddle
                 - short_strangle_pnl: P&L from short strangle
-                - win_rate, sharpe_ratio, max_drawdown, etc.
+                - premium_collected: Premium from short strangles
+                - win_rate, max_drawdown, etc.
                 - trade_count, roll_count, recenter_count
                 - starting_capital: For % calculation
-                - accumulated_theta_income: Cumulative net theta earned since position opened
-                - weekly_theta_income: Net theta earned in the past 7 days
                 - days_held: Days since short strangle was opened
                 - days_to_expiry: Days until short strangle expiration
             exchange_rate: Optional USD/EUR exchange rate
@@ -1536,33 +1548,33 @@ class GoogleSheetsLogger:
                 starting_capital = metrics.get("starting_capital", 0)
                 total_pnl_pct = (total_pnl / starting_capital) if starting_capital else 0
 
+            # New cleaner row structure (21 columns)
             row = [
+                # Meta
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 period,
+                # P&L (Total)
                 f"{total_pnl:.2f}",
                 f"{total_pnl_eur:.2f}",
                 f"{total_pnl_pct:.4f}",  # Decimal for percentage (0.0404 = 4.04%)
                 f"{metrics.get('realized_pnl', 0):.2f}",
                 f"{metrics.get('unrealized_pnl', 0):.2f}",
-                f"{metrics.get('premium_collected', 0):.2f}",
-                f"{metrics.get('theta_cost', 0):.2f}",
-                f"{metrics.get('net_theta', 0):.2f}",
+                # Theta Tracking (key KPI)
+                f"{metrics.get('daily_net_theta', 0) or metrics.get('net_theta', 0):.2f}",
+                f"{metrics.get('estimated_theta_earned', 0):.2f}",
+                f"{metrics.get('cumulative_net_theta', 0):.2f}",  # All-time cumulative theta
+                # Position P&L
                 f"{metrics.get('long_straddle_pnl', 0):.2f}",
                 f"{metrics.get('short_strangle_pnl', 0):.2f}",
+                f"{metrics.get('premium_collected', 0):.2f}",
+                # Stats
                 f"{metrics.get('win_rate', 0):.4f}",  # Decimal for percentage (0.50 = 50%)
-                f"{metrics.get('sharpe_ratio', 0):.2f}",
                 f"{metrics.get('max_drawdown', 0):.2f}",
-                f"{metrics.get('max_drawdown_pct', 0):.4f}",  # Decimal for percentage (0.0404 = 4.04%)
+                f"{metrics.get('max_drawdown_pct', 0):.4f}",  # Decimal for percentage
+                # Counts
                 metrics.get("trade_count", 0),
                 metrics.get("roll_count", 0),
                 metrics.get("recenter_count", 0),
-                f"{metrics.get('avg_trade_pnl', 0):.2f}",
-                f"{metrics.get('best_trade', 0):.2f}",
-                f"{metrics.get('worst_trade', 0):.2f}",
-                # Theta accumulation tracking
-                f"{metrics.get('estimated_theta_earned', 0):.2f}",  # net_theta × days_held
-                f"{metrics.get('weekly_theta_target', 0):.2f}",     # net_theta × 5 trading days
-                f"{metrics.get('daily_net_theta', 0):.2f}",         # Current daily rate
                 metrics.get("days_held", 0),
                 metrics.get("days_to_expiry", 0)
             ]
@@ -1572,8 +1584,8 @@ class GoogleSheetsLogger:
                 # No data row exists yet, append it
                 worksheet.append_row(row)
             else:
-                # Update existing row 2
-                worksheet.update(f"A2:AA2", [row])
+                # Update existing row 2 (21 columns: A through U)
+                worksheet.update(f"A2:U2", [row])
             logger.debug(f"SPY strategy performance metrics updated for period: {period}")
             return True
         except Exception as e:
@@ -1590,22 +1602,23 @@ class GoogleSheetsLogger:
         Log SPY strategy account summary for Looker dashboard.
 
         This logs ONLY SPY strategy-specific data, not the full Saxo account.
+        Columns: Market Data | Position Values | Greeks | Strikes | Meta
 
         Args:
             strategy_data: Strategy-specific data including:
                 - spy_price: Current SPY price
                 - vix: Current VIX value
-                - unrealized_pnl: SPY strategy unrealized P&L
                 - long_straddle_value: Value of long straddle
                 - short_strangle_value: Value of short strangle
-                - strategy_margin: Margin used by SPY positions
                 - total_delta: Total delta of SPY positions
-                - total_theta: Total theta of SPY positions
-                - position_count: Number of SPY option positions
+                - short_call_delta: Short call delta
+                - short_put_delta: Short put delta
+                - daily_net_theta: Daily net theta (short - long)
                 - long_call_strike: Long call strike price
                 - long_put_strike: Long put strike price
                 - short_call_strike: Short call strike price
                 - short_put_strike: Short put strike price
+                - strategy_margin: Margin used by SPY positions
             exchange_rate: Optional USD/EUR exchange rate
             environment: Trading environment (LIVE/SIM)
 
@@ -1619,17 +1632,13 @@ class GoogleSheetsLogger:
             # Extract strategy-specific fields
             spy_price = strategy_data.get("spy_price", 0)
             vix = strategy_data.get("vix", 0)
-            unrealized_pnl = strategy_data.get("unrealized_pnl", 0)
             long_straddle_value = strategy_data.get("long_straddle_value", 0)
             short_strangle_value = strategy_data.get("short_strangle_value", 0)
-            strategy_margin = strategy_data.get("strategy_margin", 0)
             total_delta = strategy_data.get("total_delta", 0)
-            total_theta = strategy_data.get("total_theta", 0)
-            position_count = strategy_data.get("position_count", 0)
-
-            # Individual short deltas
             short_call_delta = strategy_data.get("short_call_delta", 0)
             short_put_delta = strategy_data.get("short_put_delta", 0)
+            daily_net_theta = strategy_data.get("daily_net_theta", 0) or strategy_data.get("net_theta", 0)
+            strategy_margin = strategy_data.get("strategy_margin", 0)
 
             # Strike prices
             long_call_strike = strategy_data.get("long_call_strike", 0)
@@ -1637,31 +1646,27 @@ class GoogleSheetsLogger:
             short_call_strike = strategy_data.get("short_call_strike", 0)
             short_put_strike = strategy_data.get("short_put_strike", 0)
 
-            # Calculate net strategy value
-            net_value = long_straddle_value + short_strangle_value
-
-            # Calculate EUR values
-            unrealized_pnl_eur = unrealized_pnl * exchange_rate if exchange_rate else 0
-
+            # New cleaner row structure (17 columns)
             row = [
+                # Market Data
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 f"{spy_price:.2f}",
                 f"{vix:.2f}" if vix else "N/A",
-                f"{unrealized_pnl:.2f}",
-                f"{unrealized_pnl_eur:.2f}",
+                # Position Values
                 f"{long_straddle_value:.2f}",
                 f"{short_strangle_value:.2f}",
-                f"{net_value:.2f}",
-                f"{strategy_margin:.2f}",
+                # Greeks
                 f"{total_delta:.4f}",
-                f"{short_call_delta:.4f}",  # Individual short call delta
-                f"{short_put_delta:.4f}",   # Individual short put delta
-                f"{total_theta:.2f}",
-                position_count,
+                f"{short_call_delta:.4f}",
+                f"{short_put_delta:.4f}",
+                f"{daily_net_theta:.2f}",
+                # Strikes
                 f"{long_call_strike:.0f}" if long_call_strike else "N/A",
                 f"{long_put_strike:.0f}" if long_put_strike else "N/A",
                 f"{short_call_strike:.0f}" if short_call_strike else "N/A",
                 f"{short_put_strike:.0f}" if short_put_strike else "N/A",
+                # Meta
+                f"{strategy_margin:.2f}",
                 f"{exchange_rate:.6f}" if exchange_rate else "N/A",
                 environment
             ]
@@ -1671,8 +1676,8 @@ class GoogleSheetsLogger:
                 # No data row exists yet, append it
                 worksheet.append_row(row)
             else:
-                # Update existing row 2 (20 columns: A through T)
-                worksheet.update(f"A2:T2", [row])
+                # Update existing row 2 (16 columns: A through P)
+                worksheet.update(f"A2:P2", [row])
             logger.debug("SPY strategy account summary updated")
             return True
         except Exception as e:
