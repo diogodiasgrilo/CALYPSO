@@ -1244,9 +1244,9 @@ class GoogleSheetsLogger:
             # This is the actual daily theta earned, not just theta cost
             net_theta = summary.get('total_theta', summary.get('net_theta', 0))
 
-            # Determine if rolled/recentered today (Yes or blank)
-            rolled_today = "Yes" if summary.get("rolled_today", False) else ""
-            recentered_today = "Yes" if summary.get("recentered_today", False) else ""
+            # Determine if rolled/recentered today (Yes or No)
+            rolled_today = "Yes" if summary.get("rolled_today", False) else "No"
+            recentered_today = "Yes" if summary.get("recentered_today", False) else "No"
 
             row = [
                 summary.get("date", datetime.now().strftime("%Y-%m-%d")),
