@@ -4635,14 +4635,17 @@ class DeltaNeutralStrategy:
         daily_pnl = self.metrics.total_pnl - self.metrics.daily_pnl_start
 
         # Build summary data
+        # Use vix_avg if available (tracked during market hours), otherwise fall back to current VIX
+        vix_value = self.metrics.vix_avg if self.metrics.vix_avg > 0 else (self.current_vix or 0)
+
         summary = {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "state": self.state.value,
             "spy_open": self.metrics.spy_open,
             "spy_close": self.current_underlying_price,
             "spy_range": self.metrics.spy_range,
-            "vix_avg": self.metrics.vix_avg,
-            "vix_high": self.metrics.vix_high,
+            "vix_avg": vix_value,  # Use current VIX as fallback if daily avg not available
+            "vix_high": self.metrics.vix_high if self.metrics.vix_high > 0 else (self.current_vix or 0),
             "total_delta": metrics.get("total_delta", 0),
             "total_gamma": metrics.get("total_gamma", 0),
             "total_theta": metrics.get("net_theta", 0),  # Use scaled net theta
