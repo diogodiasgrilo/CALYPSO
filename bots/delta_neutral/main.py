@@ -454,6 +454,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     if last_daily_summary_date != today and is_trading_day and is_after_close:
                         trade_logger.log_event("Market closed - logging daily summary...")
                         strategy.log_daily_summary()
+                        # Also log Performance Metrics to capture the day's final state
+                        dashboard_metrics = strategy.get_dashboard_metrics()
+                        trade_logger.log_performance_metrics(
+                            period="End of Day",
+                            metrics=dashboard_metrics,
+                            saxo_client=client
+                        )
                         last_daily_summary_date = today
                         trading_day_started = False
 
