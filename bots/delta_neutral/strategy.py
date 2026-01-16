@@ -238,6 +238,10 @@ class StrategyMetrics:
     spy_low: float = 0.0
     vix_high: float = 0.0
     vix_samples: list = None
+    # Daily roll/recenter tracking (reset each day)
+    daily_roll_count: int = 0
+    daily_recenter_count: int = 0
+
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.vix_samples is None:
@@ -251,6 +255,9 @@ class StrategyMetrics:
         self.spy_low = spy_price
         self.vix_high = vix
         self.vix_samples = [vix]
+        # Reset daily roll/recenter counts
+        self.daily_roll_count = 0
+        self.daily_recenter_count = 0
 
     def update_daily_tracking(self, spy_price: float, vix: float):
         """Update daily high/low tracking."""
@@ -3509,6 +3516,7 @@ class DeltaNeutralStrategy:
                 # Continue anyway, straddle is more important
 
         self.metrics.recenter_count += 1
+        self.metrics.daily_recenter_count += 1  # Track daily recenter
         if not self.dry_run:
             self.metrics.save_to_file()  # Persist metrics after recenter
 
@@ -3747,6 +3755,7 @@ class DeltaNeutralStrategy:
             logger.info(f"Put strike adjusted: {'+' if put_adjustment >= 0 else ''}{put_adjustment:.0f}")
 
         self.metrics.roll_count += 1
+        self.metrics.daily_roll_count += 1  # Track daily roll
         if not self.dry_run:
             self.metrics.save_to_file()  # Persist metrics after roll
         self.state = StrategyState.FULL_POSITION
@@ -4490,9 +4499,9 @@ class DeltaNeutralStrategy:
             "worst_trade": self.metrics.worst_trade_pnl,
 
             # Theta accumulation tracking
-            # Estimated total theta earned = current daily net theta × days held since entry
-            # This gives a reasonable estimate even when bot restarts
-            "estimated_theta_earned": net_theta * (self.short_strangle.days_held if self.short_strangle else 0),
+            # Try to get actual accumulated theta from Daily Summary logs first
+            # Falls back to estimate (net_theta × days_held) if no data available
+            "estimated_theta_earned": self._get_theta_earned_or_estimate(net_theta),
             # Weekly theta target = current daily net theta × 5 trading days
             "weekly_theta_target": net_theta * 5,
             # Current daily net theta rate
@@ -4509,6 +4518,45 @@ class DeltaNeutralStrategy:
             "has_long_straddle": self.long_straddle is not None and self.long_straddle.is_complete,
             "has_short_strangle": self.short_strangle is not None and self.short_strangle.is_complete,
         }
+
+    def _get_theta_earned_or_estimate(self, current_net_theta: float) -> float:
+        """
+        Get actual accumulated theta from Daily Summary, or fall back to estimate.
+
+        This method tries to use actual logged daily theta values for accuracy.
+        Only sums theta since the current short strangle was entered (not previous weeks).
+        If no data is available (new position, bot restart, etc.), it falls back
+        to the estimate: current_net_theta × days_held.
+
+        Args:
+            current_net_theta: Current daily net theta rate
+
+        Returns:
+            float: Accumulated theta earned (actual or estimated)
+        """
+        days_held = self.short_strangle.days_held if self.short_strangle else 0
+
+        # Try to get actual accumulated theta from Daily Summary
+        if self.trade_logger and self.short_strangle:
+            try:
+                # Get the date when current shorts were entered
+                # Only sum theta since that date (not previous weekly cycles)
+                entry_date = None
+                if self.short_strangle.call and self.short_strangle.call.entry_time:
+                    entry_date = self.short_strangle.call.entry_time[:10]  # YYYY-MM-DD
+
+                actual_theta = self.trade_logger.get_accumulated_theta_from_daily_summary(since_date=entry_date)
+
+                if actual_theta is not None:
+                    logger.debug(f"Using actual accumulated theta from logs (since {entry_date}): ${actual_theta:.2f}")
+                    return actual_theta
+            except Exception as e:
+                logger.debug(f"Could not get accumulated theta from logs: {e}")
+
+        # Fall back to estimate
+        estimate = current_net_theta * days_held
+        logger.debug(f"Using estimated theta: ${current_net_theta:.2f}/day × {days_held} days = ${estimate:.2f}")
+        return estimate
 
     def get_total_greeks(self) -> Dict[str, float]:
         """
@@ -4593,7 +4641,10 @@ class DeltaNeutralStrategy:
             "roll_count": self.metrics.roll_count,
             "cumulative_pnl": self.metrics.total_pnl,
             "pnl_eur": 0.0,
-            "notes": ""
+            "notes": "",
+            # Daily roll/recenter tracking for Daily Summary
+            "rolled_today": self.metrics.daily_roll_count > 0,
+            "recentered_today": self.metrics.daily_recenter_count > 0
         }
 
         # Add EUR conversion if available

@@ -336,15 +336,16 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Daily Summary")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=12)
+                worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=10)
                 # Essential daily metrics for the strategy
+                # Net Theta = Short theta income - Long theta cost (positive = earning theta)
                 headers = [
-                    "Date", "SPY Close", "VIX", "Theta Cost ($)",
-                    "Premium Collected ($)", "Daily P&L ($)", "Daily P&L (EUR)",
-                    "Cumulative P&L ($)", "Roll Count", "Recenter Count", "Notes"
+                    "Date", "SPY Close", "VIX", "Net Theta ($)",
+                    "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
+                    "Rolled Today", "Recentered Today", "Notes"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:K1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:J1", {"textFormat": {"bold": True}})
                 logger.info("Created Daily Summary worksheet")
 
             self.worksheets["Daily Summary"] = worksheet
@@ -1220,11 +1221,16 @@ class GoogleSheetsLogger:
         """
         Log daily summary to Daily Summary worksheet.
 
-        Columns: Date, SPY Close, VIX, Theta Cost ($), Premium Collected ($),
-                 Daily P&L ($), Daily P&L (EUR), Cumulative P&L ($), Roll Count, Recenter Count, Notes
+        Columns: Date, SPY Close, VIX, Net Theta ($), Daily P&L ($), Daily P&L (EUR),
+                 Cumulative P&L ($), Rolled Today, Recentered Today, Notes
+
+        Net Theta = Short theta income - Long theta cost (positive means earning theta daily)
 
         Args:
-            summary: Dictionary with daily metrics
+            summary: Dictionary with daily metrics including:
+                - total_theta or net_theta: Daily net theta earned
+                - rolled_today: Boolean if rolled today
+                - recentered_today: Boolean if recentered today
 
         Returns:
             bool: True if logged successfully
@@ -1233,25 +1239,90 @@ class GoogleSheetsLogger:
             return False
 
         try:
+            # Use net_theta (total_theta) which is short income - long cost
+            # This is the actual daily theta earned, not just theta cost
+            net_theta = summary.get('total_theta', summary.get('net_theta', 0))
+
+            # Determine if rolled/recentered today (Yes or blank)
+            rolled_today = "Yes" if summary.get("rolled_today", False) else ""
+            recentered_today = "Yes" if summary.get("recentered_today", False) else ""
+
             row = [
                 summary.get("date", datetime.now().strftime("%Y-%m-%d")),
                 f"{summary.get('spy_close', 0):.2f}",
                 f"{summary.get('vix', summary.get('vix_avg', 0)):.2f}",
-                f"{summary.get('theta_cost', summary.get('total_theta', 0)):.2f}",
-                f"{summary.get('premium_collected', 0):.2f}",
+                f"{net_theta:.2f}",  # Net Theta (positive = earning)
                 f"{summary.get('daily_pnl', 0):.2f}",
                 f"{summary.get('daily_pnl_eur', summary.get('pnl_eur', 0)):.2f}",
                 f"{summary.get('cumulative_pnl', 0):.2f}",
-                summary.get("roll_count", 0),
-                summary.get("recenter_count", 0),
+                rolled_today,
+                recentered_today,
                 summary.get("notes", "")
             ]
             self.worksheets["Daily Summary"].append_row(row)
-            logger.debug("Daily summary logged to Google Sheets")
+            logger.debug(f"Daily summary logged to Google Sheets (Net Theta: ${net_theta:.2f})")
             return True
         except Exception as e:
             logger.error(f"Failed to log daily summary: {e}")
             return False
+
+    def get_accumulated_theta_from_daily_summary(self, since_date: str = None) -> Optional[float]:
+        """
+        Calculate accumulated theta by summing actual daily net theta values from Daily Summary.
+
+        This provides accurate theta tracking instead of estimates (net_theta × days_held).
+
+        Args:
+            since_date: Optional date string (YYYY-MM-DD) to start summing from.
+                       If None, sums all available data.
+
+        Returns:
+            float: Sum of daily net theta values, or None if unable to read data
+        """
+        if not self.enabled or "Daily Summary" not in self.worksheets:
+            return None
+
+        try:
+            worksheet = self.worksheets["Daily Summary"]
+            # Get all data (Date is column A, Net Theta is column D)
+            all_data = worksheet.get_all_values()
+
+            if len(all_data) <= 1:  # Only headers or empty
+                return None
+
+            # Find column indices from header
+            headers = all_data[0]
+            date_col = headers.index("Date") if "Date" in headers else 0
+            theta_col = headers.index("Net Theta ($)") if "Net Theta ($)" in headers else 3
+
+            accumulated_theta = 0.0
+            rows_counted = 0
+
+            for row in all_data[1:]:  # Skip header
+                if len(row) <= theta_col:
+                    continue
+
+                row_date = row[date_col] if date_col < len(row) else ""
+                theta_str = row[theta_col] if theta_col < len(row) else "0"
+
+                # Skip if before since_date
+                if since_date and row_date < since_date:
+                    continue
+
+                # Parse theta value
+                try:
+                    theta_value = float(theta_str) if theta_str else 0.0
+                    accumulated_theta += theta_value
+                    rows_counted += 1
+                except (ValueError, TypeError):
+                    continue
+
+            logger.debug(f"Accumulated theta from {rows_counted} daily records: ${accumulated_theta:.2f}")
+            return accumulated_theta if rows_counted > 0 else None
+
+        except Exception as e:
+            logger.error(f"Failed to get accumulated theta from Daily Summary: {e}")
+            return None
 
     def log_safety_event(self, event: Dict[str, Any]) -> bool:
         """
