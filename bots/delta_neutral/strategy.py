@@ -4700,8 +4700,11 @@ class DeltaNeutralStrategy:
         est_theta_this_week = metrics.get("estimated_theta_earned", 0)
         cumulative_theta = metrics.get("cumulative_net_theta", 0)
 
+        # Use ET date for Daily Summary (not UTC)
+        et_date = get_us_market_time().strftime("%Y-%m-%d")
+
         summary = {
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": et_date,
             "state": self.state.value,
             "spy_open": self.metrics.spy_open,
             "spy_close": self.current_underlying_price,

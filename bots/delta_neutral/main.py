@@ -445,8 +445,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     # Daily Summary & Performance Metrics: Update EVERY day (including weekends)
                     # Theta decays every calendar day, so we log daily using last known theta
                     # This ensures Cumulative Net Theta accurately tracks all days
-                    today = datetime.now().strftime("%Y-%m-%d")
                     market_time = get_us_market_time()
+                    today = market_time.strftime("%Y-%m-%d")  # Use ET date, not UTC
                     is_after_close = market_time.hour >= 16  # 4 PM ET or later
                     is_trading_day = not is_weekend() and not is_market_holiday()
 
