@@ -4695,6 +4695,11 @@ class DeltaNeutralStrategy:
         # Use vix_avg if available (tracked during market hours), otherwise fall back to current VIX
         vix_value = self.metrics.vix_avg if self.metrics.vix_avg > 0 else (self.current_vix or 0)
 
+        # Get theta tracking values from dashboard metrics
+        net_theta = metrics.get("net_theta", 0)
+        est_theta_this_week = metrics.get("estimated_theta_earned", 0)
+        cumulative_theta = metrics.get("cumulative_net_theta", 0)
+
         summary = {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "state": self.state.value,
@@ -4705,8 +4710,10 @@ class DeltaNeutralStrategy:
             "vix_high": self.metrics.vix_high if self.metrics.vix_high > 0 else (self.current_vix or 0),
             "total_delta": metrics.get("total_delta", 0),
             "total_gamma": metrics.get("total_gamma", 0),
-            "total_theta": metrics.get("net_theta", 0),  # Use scaled net theta
+            "total_theta": net_theta,  # Use scaled net theta
             "theta_cost": metrics.get("theta_cost", 0),  # Scaled theta cost from longs
+            "est_theta_earned_this_week": est_theta_this_week,  # Est. Theta Earned This Week
+            "cumulative_net_theta": cumulative_theta,  # All-time cumulative net theta
             "daily_pnl": daily_pnl,
             "realized_pnl": self.metrics.realized_pnl,
             "unrealized_pnl": self.metrics.unrealized_pnl,

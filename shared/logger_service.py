@@ -336,16 +336,17 @@ class GoogleSheetsLogger:
             try:
                 worksheet = self.spreadsheet.worksheet("Daily Summary")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=10)
+                worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=12)
                 # Essential daily metrics for the strategy
                 # Net Theta = Short theta income - Long theta cost (positive = earning theta)
                 headers = [
                     "Date", "SPY Close", "VIX", "Net Theta ($)",
+                    "Est. Theta Earned This Week ($)", "Cumulative Net Theta ($)",
                     "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
                     "Rolled Today", "Recentered Today", "Notes"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:J1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:L1", {"textFormat": {"bold": True}})
                 logger.info("Created Daily Summary worksheet")
 
             self.worksheets["Daily Summary"] = worksheet
@@ -410,7 +411,7 @@ class GoogleSheetsLogger:
                     "Total P&L ($)", "Total P&L (EUR)", "Total P&L (%)",
                     "Realized P&L ($)", "Unrealized P&L ($)",
                     # Theta Tracking (key KPI)
-                    "Daily Net Theta ($)", "Est. Theta Earned ($)", "Cumulative Net Theta ($)",
+                    "Daily Net Theta ($)", "Est. Theta Earned This Week ($)", "Cumulative Net Theta ($)",
                     # Position P&L
                     "Long Straddle P&L ($)", "Short Strangle P&L ($)", "Premium Collected ($)",
                     # Stats
@@ -1234,7 +1235,8 @@ class GoogleSheetsLogger:
         """
         Log daily summary to Daily Summary worksheet.
 
-        Columns: Date, SPY Close, VIX, Net Theta ($), Daily P&L ($), Daily P&L (EUR),
+        Columns: Date, SPY Close, VIX, Net Theta ($), Est. Theta Earned This Week ($),
+                 Cumulative Net Theta ($), Daily P&L ($), Daily P&L (EUR),
                  Cumulative P&L ($), Rolled Today, Recentered Today, Notes
 
         Net Theta = Short theta income - Long theta cost (positive means earning theta daily)
@@ -1242,6 +1244,8 @@ class GoogleSheetsLogger:
         Args:
             summary: Dictionary with daily metrics including:
                 - total_theta or net_theta: Daily net theta earned
+                - est_theta_earned_this_week: Estimated theta earned this week
+                - cumulative_net_theta: All-time cumulative net theta
                 - rolled_today: Boolean if rolled today
                 - recentered_today: Boolean if recentered today
 
@@ -1265,6 +1269,8 @@ class GoogleSheetsLogger:
                 f"{summary.get('spy_close', 0):.2f}",
                 f"{summary.get('vix', summary.get('vix_avg', 0)):.2f}",
                 f"{net_theta:.2f}",  # Net Theta (positive = earning)
+                f"{summary.get('est_theta_earned_this_week', 0):.2f}",  # Est. Theta Earned This Week
+                f"{summary.get('cumulative_net_theta', 0):.2f}",  # Cumulative Net Theta (all-time)
                 f"{summary.get('daily_pnl', 0):.2f}",
                 f"{summary.get('daily_pnl_eur', summary.get('pnl_eur', 0)):.2f}",
                 f"{summary.get('cumulative_pnl', 0):.2f}",
