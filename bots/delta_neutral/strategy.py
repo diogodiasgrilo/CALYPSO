@@ -4375,19 +4375,19 @@ class DeltaNeutralStrategy:
                 long_straddle_value += put_value
                 long_straddle_pnl += (put_value - put_cost)
 
-        # Short strangle value and P&L (negative value = we owe, positive P&L when value decreases)
+        # Short strangle value and P&L (positive value = cost to close, positive P&L when value decreases)
         if self.short_strangle and self.short_strangle.is_complete:
             if self.short_strangle.call:
                 qty = self.short_strangle.call.quantity
                 call_value = self.short_strangle.call.current_price * 100 * qty
                 call_premium = self.short_strangle.call.entry_price * 100 * qty
-                short_strangle_value -= call_value  # Liability
+                short_strangle_value += call_value  # Cost to close (positive)
                 short_strangle_pnl += (call_premium - call_value)  # Profit when value drops
             if self.short_strangle.put:
                 qty = self.short_strangle.put.quantity
                 put_value = self.short_strangle.put.current_price * 100 * qty
                 put_premium = self.short_strangle.put.entry_price * 100 * qty
-                short_strangle_value -= put_value
+                short_strangle_value += put_value  # Cost to close (positive)
                 short_strangle_pnl += (put_premium - put_value)
 
         # Get strike prices
@@ -4461,16 +4461,17 @@ class DeltaNeutralStrategy:
             max_dd_percent = self.metrics.max_drawdown / initial_cost
 
         # Get individual deltas for short positions (for Account Summary)
+        # Show as positive values for cleaner Looker dashboard display
         short_call_delta = 0.0
         short_put_delta = 0.0
         if self.short_strangle:
             if self.short_strangle.call:
                 # Delta is per contract, multiply by quantity for total delta exposure
                 qty = self.short_strangle.call.quantity
-                short_call_delta = getattr(self.short_strangle.call, 'delta', 0) * qty
+                short_call_delta = abs(getattr(self.short_strangle.call, 'delta', 0)) * qty
             if self.short_strangle.put:
                 qty = self.short_strangle.put.quantity
-                short_put_delta = getattr(self.short_strangle.put, 'delta', 0) * qty
+                short_put_delta = abs(getattr(self.short_strangle.put, 'delta', 0)) * qty
 
         return {
             # Account Summary fields
