@@ -4445,6 +4445,10 @@ class DeltaNeutralStrategy:
         try:
             balance = self.client.get_balance()
             if balance:
+                # Log all balance fields for debugging
+                logger.info(f"Saxo Balance API response fields: {list(balance.keys())}")
+                logger.info(f"Saxo Balance API full response: {balance}")
+
                 # Try root level first, then nested InitialMargin object
                 margin = balance.get("MarginUsedByCurrentPositions", 0)
                 if margin == 0:
