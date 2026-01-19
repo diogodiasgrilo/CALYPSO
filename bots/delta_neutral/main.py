@@ -46,7 +46,7 @@ if _project_root not in sys.path:
 # Import shared modules
 from shared.saxo_client import SaxoClient
 from shared.logger_service import TradeLoggerService, setup_logging
-from shared.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration, is_weekend, is_market_holiday, get_us_market_time
+from shared.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration, is_weekend, is_market_holiday, get_us_market_time, get_holiday_name
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
 
@@ -451,9 +451,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     is_after_close = market_time.hour >= 16  # 4 PM ET or later
                     is_trading_day = not is_weekend() and not is_market_holiday()
 
-                    # Log Daily Summary every day (uses last known Net Theta on weekends)
+                    # Determine day type for logging
+                    holiday_name = get_holiday_name()
+                    if is_weekend():
+                        day_type = "weekend"
+                    elif holiday_name:
+                        day_type = f"holiday - {holiday_name}"
+                    else:
+                        day_type = "trading day"
+
+                    # Log Daily Summary every day (uses last known Net Theta on weekends/holidays)
                     if last_daily_summary_date != today and is_after_close:
-                        day_type = "trading day" if is_trading_day else "weekend/holiday"
                         trade_logger.log_event(f"Logging daily summary ({day_type})...")
                         strategy.log_daily_summary()
                         last_daily_summary_date = today
@@ -464,7 +472,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     if last_performance_metrics_date != today and is_after_close:
                         # Use safe metrics that correct for stale data when market is closed
                         dashboard_metrics = strategy.get_dashboard_metrics_safe()
-                        period = "End of Day" if is_trading_day else "Weekend/Holiday"
+                        period = "End of Day" if is_trading_day else day_type.title()
                         trade_logger.log_performance_metrics(
                             period=period,
                             metrics=dashboard_metrics,
@@ -494,8 +502,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                         client.authenticate(force_refresh=True)
 
                         # Log heartbeat LAST, right before sleeping
+                        reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
                         trade_logger.log_event(
-                            f"HEARTBEAT | Market closed - sleeping for {minutes}m"
+                            f"HEARTBEAT | Market closed {reason} - sleeping for {minutes}m"
                         )
 
                         if not interruptible_sleep(sleep_time):
@@ -510,7 +519,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                             logger.debug("Reconnecting WebSocket after sleep")
                             client.start_price_streaming(subscriptions, price_update_handler)
                     else:
-                        trade_logger.log_event("HEARTBEAT | Market closed - rechecking in 60s")
+                        reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
+                        trade_logger.log_event(f"HEARTBEAT | Market closed {reason} - rechecking in 60s")
                         if not interruptible_sleep(60):
                             break  # Shutdown requested
                         # Reset connection timeout after any sleep to prevent false triggers

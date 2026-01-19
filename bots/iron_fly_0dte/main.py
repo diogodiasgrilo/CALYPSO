@@ -44,7 +44,7 @@ if _project_root not in sys.path:
 # Import shared modules
 from shared.saxo_client import SaxoClient
 from shared.logger_service import TradeLoggerService, setup_logging
-from shared.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration
+from shared.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration, get_holiday_name
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
 
@@ -215,6 +215,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     market_status = get_market_status_message()
                     trade_logger.log_event(market_status)
 
+                    # Determine reason for closure (for heartbeat messages)
+                    from shared.market_hours import is_weekend
+                    holiday_name = get_holiday_name()
+                    if holiday_name:
+                        close_reason = f"({holiday_name})"
+                    elif is_weekend():
+                        close_reason = "(weekend)"
+                    else:
+                        close_reason = ""
+
                     # Calculate sleep duration (max 15 min to keep token alive)
                     sleep_time = calculate_sleep_duration(max_sleep=900)
 
@@ -228,7 +238,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         # Refresh token before sleeping
                         client.authenticate(force_refresh=True)
 
-                        trade_logger.log_event(f"HEARTBEAT | Market closed - sleeping for {minutes}m")
+                        trade_logger.log_event(f"HEARTBEAT | Market closed {close_reason} - sleeping for {minutes}m")
 
                         if not interruptible_sleep(sleep_time):
                             break
@@ -237,7 +247,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         if not shutdown_requested and subscriptions:
                             client.start_price_streaming(subscriptions, price_update_handler)
                     else:
-                        trade_logger.log_event("HEARTBEAT | Market closed - rechecking in 60s")
+                        trade_logger.log_event(f"HEARTBEAT | Market closed {close_reason} - rechecking in 60s")
                         if not interruptible_sleep(60):
                             break
                     continue
