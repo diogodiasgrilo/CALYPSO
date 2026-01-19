@@ -269,10 +269,15 @@ class GoogleSheetsLogger:
             self._setup_performance_metrics_worksheet()
             self._setup_account_summary_worksheet()
 
-            # Optional: Opening Range worksheet (only for Iron Fly 0DTE strategy)
+            # Optional: Strategy-specific worksheets
             tab_count = 7
             if self.include_opening_range:
+                # Opening Range worksheet (only for Iron Fly 0DTE strategy)
                 self._setup_opening_range_worksheet()
+                tab_count = 8
+            elif self.strategy_type == "rolling_put_diagonal":
+                # Campaigns worksheet (only for Rolling Put Diagonal strategy)
+                self._setup_campaigns_worksheet()
                 tab_count = 8
 
             logger.info(f"All Google Sheets worksheets initialized successfully ({tab_count} tabs)")
@@ -327,6 +332,14 @@ class GoogleSheetsLogger:
                         "Entry Credit", "Current Value", "P&L ($)", "P&L (EUR)",
                         "Hold Time (min)", "Distance to Wing ($)", "Status"
                     ]
+                elif self.strategy_type == "rolling_put_diagonal":
+                    # Rolling Put Diagonal: Long put protection + short put income
+                    worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=14)
+                    headers = [
+                        "Last Updated", "Position Type", "Strike", "Expiry", "Days to Expiry",
+                        "Delta", "Entry Price", "Current Price", "P&L ($)", "P&L (EUR)",
+                        "Campaign #", "Premium Collected", "Status"
+                    ]
                 else:
                     # Delta Neutral: Theta tracking for weekly positions
                     worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=13)
@@ -336,7 +349,7 @@ class GoogleSheetsLogger:
                         "Theta/Day ($)", "Weekly Theta ($)", "Status"
                     ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:L1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:N1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Positions worksheet ({self.strategy_type} format)")
 
             self.worksheets["Positions"] = worksheet
@@ -359,6 +372,15 @@ class GoogleSheetsLogger:
                         "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
                         "Total Trades", "Winning Trades", "Notes"
                     ]
+                elif self.strategy_type == "rolling_put_diagonal":
+                    # Rolling Put Diagonal: Daily income via short put rolls
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=14)
+                    headers = [
+                        "Date", "QQQ Close", "9 EMA", "MACD Histogram", "CCI",
+                        "Roll Type", "Short Premium ($)", "Campaign #",
+                        "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
+                        "Long Put Delta", "Entry Conditions Met", "Notes"
+                    ]
                 else:
                     # Delta Neutral: Theta tracking for weekly strategy
                     worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=12)
@@ -369,7 +391,7 @@ class GoogleSheetsLogger:
                         "Rolled Today", "Recentered Today", "Notes"
                     ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:L1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:N1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Daily Summary worksheet ({self.strategy_type} format)")
 
             self.worksheets["Daily Summary"] = worksheet
@@ -442,6 +464,24 @@ class GoogleSheetsLogger:
                         # Time tracking
                         "Avg Hold Time (min)", "Best Trade ($)", "Worst Trade ($)"
                     ]
+                elif self.strategy_type == "rolling_put_diagonal":
+                    # Rolling Put Diagonal: Campaign-based tracking with daily rolls
+                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=20)
+                    headers = [
+                        # Meta
+                        "Timestamp", "Period",
+                        # P&L (Total)
+                        "Total P&L ($)", "Total P&L (EUR)", "Total P&L (%)",
+                        "Realized P&L ($)", "Unrealized P&L ($)",
+                        # Premium Tracking (key KPI for RPD)
+                        "Total Premium Collected ($)", "Avg Daily Premium ($)",
+                        # Campaign Stats
+                        "Campaigns Completed", "Avg Campaign P&L ($)", "Best Campaign ($)", "Worst Campaign ($)",
+                        # Roll Stats
+                        "Total Rolls", "Vertical Rolls", "Horizontal Rolls",
+                        # Stats
+                        "Win Rate (%)", "Max Drawdown ($)", "Avg Campaign Days"
+                    ]
                 else:
                     # Delta Neutral: Weekly theta strategy - track theta, rolls
                     worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=22)
@@ -491,6 +531,21 @@ class GoogleSheetsLogger:
                         # Meta
                         "Exchange Rate", "Environment"
                     ]
+                elif self.strategy_type == "rolling_put_diagonal":
+                    # Rolling Put Diagonal: Put diagonal position snapshot
+                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=18)
+                    headers = [
+                        # Market Data
+                        "Timestamp", "QQQ Price", "9 EMA", "MACD Histogram", "CCI",
+                        # Long Put (Protection)
+                        "Long Put Strike", "Long Put Expiry", "Long Put DTE", "Long Put Delta",
+                        # Short Put (Income)
+                        "Short Put Strike", "Short Put Expiry", "Short Premium ($)",
+                        # Position Status
+                        "Campaign #", "Total Premium Collected ($)", "Unrealized P&L ($)",
+                        # Meta
+                        "State", "Exchange Rate"
+                    ]
                 else:
                     # Delta Neutral: Straddle + Strangle position snapshot
                     worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=17)
@@ -507,7 +562,7 @@ class GoogleSheetsLogger:
                         "Exchange Rate", "Environment"
                     ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:P1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:R1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Account Summary worksheet ({self.strategy_type} format)")
 
             self.worksheets["Account Summary"] = worksheet
@@ -538,6 +593,88 @@ class GoogleSheetsLogger:
             self.worksheets["Opening Range"] = worksheet
         except Exception as e:
             logger.error(f"Failed to setup Opening Range worksheet: {e}")
+
+    def _setup_campaigns_worksheet(self):
+        """Setup the Campaigns worksheet for Rolling Put Diagonal strategy campaign tracking."""
+        try:
+            import gspread
+            try:
+                worksheet = self.spreadsheet.worksheet("Campaigns")
+            except gspread.WorksheetNotFound:
+                worksheet = self.spreadsheet.add_worksheet(title="Campaigns", rows=1000, cols=16)
+                # Headers for campaign tracking (Rolling Put Diagonal)
+                headers = [
+                    "Campaign #", "Start Date", "End Date", "Duration (Days)",
+                    "Long Put Strike", "Long Put Entry", "Long Put Exit",
+                    "Total Rolls", "Vertical Rolls", "Horizontal Rolls",
+                    "Total Premium Collected ($)", "Long Put P&L ($)",
+                    "Net Campaign P&L ($)", "Net Campaign P&L (EUR)",
+                    "Close Reason", "Notes"
+                ]
+                worksheet.append_row(headers)
+                worksheet.format("A1:P1", {"textFormat": {"bold": True}})
+                logger.info("Created Campaigns worksheet (Rolling Put Diagonal)")
+
+            self.worksheets["Campaigns"] = worksheet
+        except Exception as e:
+            logger.error(f"Failed to setup Campaigns worksheet: {e}")
+
+    def log_campaign(self, data: Dict[str, Any]) -> bool:
+        """
+        Log a completed campaign for Rolling Put Diagonal strategy.
+
+        Called when a campaign ends (long put expires, event risk close, etc.).
+
+        Args:
+            data: Dictionary containing campaign data:
+                - campaign_number: Campaign identifier
+                - start_date: When campaign started
+                - end_date: When campaign ended
+                - duration_days: Total days in campaign
+                - long_put_strike: Strike of the long put
+                - long_put_entry: Entry price of long put
+                - long_put_exit: Exit price of long put
+                - total_rolls: Total number of short put rolls
+                - vertical_rolls: Number of vertical (ATM) rolls
+                - horizontal_rolls: Number of horizontal (same strike) rolls
+                - total_premium: Total premium collected from short puts
+                - long_put_pnl: P&L from long put (usually negative)
+                - net_pnl: Net campaign P&L (premium + long put P&L)
+                - net_pnl_eur: Net P&L in EUR
+                - close_reason: Why campaign ended (expiry, FOMC, earnings, etc.)
+                - notes: Additional notes
+
+        Returns:
+            bool: True if logged successfully, False otherwise
+        """
+        if not self.enabled or "Campaigns" not in self.worksheets:
+            return False
+
+        try:
+            row = [
+                data.get("campaign_number", ""),
+                data.get("start_date", ""),
+                data.get("end_date", ""),
+                data.get("duration_days", 0),
+                data.get("long_put_strike", ""),
+                data.get("long_put_entry", ""),
+                data.get("long_put_exit", ""),
+                data.get("total_rolls", 0),
+                data.get("vertical_rolls", 0),
+                data.get("horizontal_rolls", 0),
+                data.get("total_premium", 0),
+                data.get("long_put_pnl", 0),
+                data.get("net_pnl", 0),
+                data.get("net_pnl_eur", 0),
+                data.get("close_reason", ""),
+                data.get("notes", "")
+            ]
+            self.worksheets["Campaigns"].append_row(row)
+            logger.debug(f"Logged campaign {data.get('campaign_number')} to Google Sheets")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to log campaign to Google Sheets: {e}")
+            return False
 
     def log_opening_range(self, data: Dict[str, Any]) -> bool:
         """

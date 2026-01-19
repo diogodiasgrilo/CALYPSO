@@ -146,6 +146,8 @@ class DiagonalPosition:
         campaign_start_date: When this campaign started
         total_premium_collected: Sum of all premium from short puts
         roll_count: Number of times short put was rolled
+        vertical_roll_count: Number of vertical rolls (new ATM strike)
+        horizontal_roll_count: Number of horizontal rolls (same strike)
         last_roll_type: Type of last roll (vertical/horizontal)
     """
     long_put: Optional[PutPosition] = None
@@ -154,6 +156,8 @@ class DiagonalPosition:
     campaign_start_date: str = ""
     total_premium_collected: float = 0.0
     roll_count: int = 0
+    vertical_roll_count: int = 0
+    horizontal_roll_count: int = 0
     last_roll_type: Optional[RollType] = None
 
     @property
@@ -1017,17 +1021,19 @@ class RollingPutDiagonalStrategy:
 
             # Log to Google Sheets
             if self.trade_logger:
-                self.trade_logger.log_trade({
-                    "action": "ENTER_CAMPAIGN",
-                    "campaign_number": self.diagonal.campaign_number,
-                    "long_strike": long_put_data["strike"],
-                    "long_expiry": long_put_data["expiry"],
-                    "long_premium": long_result.get("fill_price", 0),
-                    "short_strike": short_put_data["strike"],
-                    "short_expiry": short_put_data["expiry"],
-                    "short_premium": short_result.get("fill_price", 0),
-                    "qqq_price": self.current_price,
-                })
+                self.trade_logger.log_trade(
+                    action="ENTER_CAMPAIGN",
+                    strike=f"{long_put_data['strike']}/{short_put_data['strike']}",
+                    price=long_result.get("fill_price", 0) - short_result.get("fill_price", 0),
+                    delta=long_put_data.get("delta", -0.33),
+                    pnl=0.0,
+                    saxo_client=self.client,
+                    underlying_price=self.current_price,
+                    option_type="Put Diagonal",
+                    expiry_date=long_put_data["expiry"],
+                    premium_received=short_result.get("fill_price", 0),
+                    trade_reason=f"Campaign #{self.diagonal.campaign_number}"
+                )
 
             return True
 
@@ -1160,12 +1166,13 @@ class RollingPutDiagonalStrategy:
                 )
                 self.diagonal.roll_count += 1
                 self.diagonal.last_roll_type = roll_type
-                self.metrics.roll_count += 1
-
                 if roll_type == RollType.VERTICAL:
+                    self.diagonal.vertical_roll_count += 1
                     self.metrics.vertical_rolls += 1
                 else:
+                    self.diagonal.horizontal_roll_count += 1
                     self.metrics.horizontal_rolls += 1
+                self.metrics.roll_count += 1
 
                 self.state = RPDState.POSITION_OPEN
                 self._reset_failure_count()
@@ -1198,13 +1205,14 @@ class RollingPutDiagonalStrategy:
             self.diagonal.roll_count += 1
             self.diagonal.last_roll_type = roll_type
             self.diagonal.total_premium_collected += sell_result.get("fill_price", 0) * 100
-            self.metrics.roll_count += 1
-            self.metrics.total_premium_collected += sell_result.get("fill_price", 0) * 100
-
             if roll_type == RollType.VERTICAL:
+                self.diagonal.vertical_roll_count += 1
                 self.metrics.vertical_rolls += 1
             else:
+                self.diagonal.horizontal_roll_count += 1
                 self.metrics.horizontal_rolls += 1
+            self.metrics.roll_count += 1
+            self.metrics.total_premium_collected += sell_result.get("fill_price", 0) * 100
 
             self.state = RPDState.POSITION_OPEN
             self._reset_failure_count()
@@ -1215,15 +1223,19 @@ class RollingPutDiagonalStrategy:
 
             # Log to Google Sheets
             if self.trade_logger:
-                self.trade_logger.log_trade({
-                    "action": f"ROLL_{roll_type.value.upper()}",
-                    "old_strike": old_short.strike,
-                    "new_strike": new_short_data["strike"],
-                    "new_expiry": next_expiry["expiry"][:10],
-                    "premium": sell_result.get("fill_price", 0),
-                    "roll_count": self.diagonal.roll_count,
-                    "qqq_price": self.current_price,
-                })
+                self.trade_logger.log_trade(
+                    action=f"ROLL_{roll_type.value.upper()}",
+                    strike=f"{old_short.strike}->{new_short_data['strike']}",
+                    price=sell_result.get("fill_price", 0) - buy_result.get("fill_price", 0),
+                    delta=-0.50,  # ATM put delta
+                    pnl=sell_result.get("fill_price", 0) - buy_result.get("fill_price", 0),
+                    saxo_client=self.client,
+                    underlying_price=self.current_price,
+                    option_type=f"Short Put Roll ({roll_type.value})",
+                    expiry_date=next_expiry["expiry"][:10],
+                    premium_received=sell_result.get("fill_price", 0),
+                    trade_reason=f"Roll #{self.diagonal.roll_count}"
+                )
 
             return True
 
@@ -1485,14 +1497,35 @@ class RollingPutDiagonalStrategy:
 
             # Log to Google Sheets
             if self.trade_logger:
-                self.trade_logger.log_trade({
-                    "action": "CLOSE_CAMPAIGN",
-                    "reason": reason,
+                self.trade_logger.log_trade(
+                    action="CLOSE_CAMPAIGN",
+                    strike=f"{self.diagonal.long_put.strike}/{self.diagonal.short_put.strike if self.diagonal.short_put else 'N/A'}",
+                    price=self.diagonal.total_premium_collected,
+                    delta=self.diagonal.long_put.delta if self.diagonal.long_put else 0,
+                    pnl=campaign_pnl,
+                    saxo_client=self.client,
+                    underlying_price=self.current_price,
+                    option_type="Campaign Close",
+                    expiry_date=self.diagonal.long_put.expiry if self.diagonal.long_put else None,
+                    premium_received=self.diagonal.total_premium_collected,
+                    trade_reason=f"{reason} - Campaign #{self.diagonal.campaign_number}, Rolls: {self.diagonal.roll_count}"
+                )
+                # Also log the campaign summary
+                self.trade_logger.log_campaign({
                     "campaign_number": self.diagonal.campaign_number,
-                    "campaign_pnl": campaign_pnl,
-                    "roll_count": self.diagonal.roll_count,
-                    "premium_collected": self.diagonal.total_premium_collected,
-                    "qqq_price": self.current_price,
+                    "start_date": self.diagonal.campaign_start_date,
+                    "end_date": datetime.now().strftime("%Y-%m-%d"),
+                    "duration_days": (datetime.now() - datetime.strptime(self.diagonal.campaign_start_date, "%Y-%m-%d")).days if self.diagonal.campaign_start_date else 0,
+                    "long_put_strike": self.diagonal.long_put.strike if self.diagonal.long_put else 0,
+                    "long_put_entry": self.diagonal.long_put.entry_price if self.diagonal.long_put else 0,
+                    "long_put_exit": long_pnl if 'long_pnl' in locals() else 0,
+                    "total_rolls": self.diagonal.roll_count,
+                    "vertical_rolls": self.diagonal.vertical_roll_count,
+                    "horizontal_rolls": self.diagonal.horizontal_roll_count,
+                    "total_premium": self.diagonal.total_premium_collected,
+                    "long_put_pnl": long_pnl if 'long_pnl' in locals() else 0,
+                    "net_pnl": campaign_pnl,
+                    "close_reason": reason,
                 })
 
             # Clear diagonal
