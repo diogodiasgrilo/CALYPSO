@@ -215,7 +215,9 @@ class ConfigLoader:
                 "enabled": sheets_creds is not None and bot_config.get("google_sheets", {}).get("enabled", True),
                 "credentials_from_secret_manager": True,
                 "spreadsheet_name": bot_config.get("google_sheets", {}).get("spreadsheet_name", "Calypso_Bot_Log"),
-                "worksheet_name": bot_config.get("google_sheets", {}).get("worksheet_name", "Trades")
+                "worksheet_name": bot_config.get("google_sheets", {}).get("worksheet_name", "Trades"),
+                "strategy_type": bot_config.get("google_sheets", {}).get("strategy_type", "delta_neutral"),
+                "include_opening_range": bot_config.get("google_sheets", {}).get("include_opening_range", False)
             },
 
             # LOGGING from config.json (bot-specific log files)
