@@ -359,7 +359,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
         # Refresh position prices from Saxo (in case they weren't populated during recovery)
         strategy.refresh_position_prices()
 
-        dashboard_metrics = strategy.get_dashboard_metrics()
+        # Use safe metrics that correct for stale data when market is closed
+        dashboard_metrics = strategy.get_dashboard_metrics_safe()
         environment = "SIM" if client.is_simulation else "LIVE"
 
         # Log to Account Summary worksheet
@@ -461,7 +462,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
 
                     # Log Performance Metrics every day
                     if last_performance_metrics_date != today and is_after_close:
-                        dashboard_metrics = strategy.get_dashboard_metrics()
+                        # Use safe metrics that correct for stale data when market is closed
+                        dashboard_metrics = strategy.get_dashboard_metrics_safe()
                         period = "End of Day" if is_trading_day else "Weekend/Holiday"
                         trade_logger.log_performance_metrics(
                             period=period,
@@ -576,7 +578,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     try:
                         # Refresh position prices before logging
                         strategy.refresh_position_prices()
-                        dashboard_metrics = strategy.get_dashboard_metrics()
+                        # Use safe metrics that correct for stale data when market is closed
+                        dashboard_metrics = strategy.get_dashboard_metrics_safe()
                         environment = "SIM" if client.is_simulation else "LIVE"
 
                         # Log to Account Summary worksheet
@@ -605,7 +608,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                 # Hourly Bot Logs to Google Sheets (avoid flooding with hundreds of rows)
                 if (now - last_bot_log_time).total_seconds() >= bot_log_interval:
                     try:
-                        dashboard_metrics = strategy.get_dashboard_metrics()
+                        # Use safe metrics for accurate P&L when market is closed
+                        dashboard_metrics = strategy.get_dashboard_metrics_safe()
                         trade_logger.log_bot_activity(
                             level="INFO",
                             component="Strategy",

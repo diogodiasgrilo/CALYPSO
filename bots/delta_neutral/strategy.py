@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
-from shared.market_hours import get_us_market_time, is_weekend, is_market_holiday
+from shared.market_hours import get_us_market_time, is_weekend, is_market_holiday, is_market_open
 
 # Path for persistent metrics storage (now in project root data/ folder)
 METRICS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "delta_neutral_metrics.json")
@@ -4534,6 +4534,64 @@ class DeltaNeutralStrategy:
             "has_long_straddle": self.long_straddle is not None and self.long_straddle.is_complete,
             "has_short_strangle": self.short_strangle is not None and self.short_strangle.is_complete,
         }
+
+    def get_dashboard_metrics_safe(self) -> Dict[str, Any]:
+        """
+        Get dashboard metrics with protection against stale data when market is closed.
+
+        When market is closed (weekends, holidays, pre/post-market), Saxo may return
+        stale or incorrect prices. This method uses last known P&L values from
+        Daily Summary to avoid incorrect metrics.
+
+        Returns:
+            dict: Dashboard metrics with corrected P&L values when market is closed
+        """
+        # Get live metrics first
+        metrics = self.get_dashboard_metrics()
+
+        # If market is open, use live values
+        if is_market_open():
+            return metrics
+
+        # Market is closed - use last known P&L from Daily Summary
+        if not self.trade_logger:
+            return metrics
+
+        last_summary = self.trade_logger.get_last_daily_summary()
+        if not last_summary:
+            logger.debug("No previous Daily Summary found, using live metrics")
+            return metrics
+
+        # Override P&L values with last known values
+        last_cumulative_pnl = last_summary.get("Cumulative P&L ($)", 0)
+        last_net_theta = last_summary.get("Net Theta ($)", 0)
+        last_cumulative_theta = last_summary.get("Cumulative Net Theta ($)", 0)
+
+        # Calculate if we need to add today's theta (if today hasn't been logged yet)
+        last_date = last_summary.get("Date", "")
+        today = get_us_market_time().strftime("%Y-%m-%d")
+
+        if last_date != today:
+            # Today hasn't been logged yet, add today's theta to cumulative
+            cumulative_theta = last_cumulative_theta + last_net_theta
+            # Est. theta earned this week also needs today's theta
+            last_est_theta_week = last_summary.get("Est. Theta Earned This Week ($)", 0)
+            est_theta_week = last_est_theta_week + last_net_theta
+        else:
+            # Today was already logged, use as-is
+            cumulative_theta = last_cumulative_theta
+            est_theta_week = last_summary.get("Est. Theta Earned This Week ($)", 0)
+
+        # Override with last known values
+        metrics["total_pnl"] = last_cumulative_pnl
+        metrics["unrealized_pnl"] = 0  # Can't calculate accurately when closed
+        metrics["net_theta"] = last_net_theta
+        metrics["daily_net_theta"] = last_net_theta
+        metrics["cumulative_net_theta"] = cumulative_theta
+        metrics["estimated_theta_earned"] = est_theta_week
+
+        logger.info(f"Market closed: using last known P&L=${last_cumulative_pnl:.2f}, Net Theta=${last_net_theta:.2f}")
+        return metrics
 
     def _get_theta_earned_or_estimate(self, current_net_theta: float) -> float:
         """
