@@ -4579,6 +4579,10 @@ class DeltaNeutralStrategy:
         metrics["cumulative_net_theta"] = cumulative_theta
         metrics["estimated_theta_earned"] = est_theta_week
 
+        # Recalculate pnl_percent using corrected total_pnl
+        initial_cost = self.metrics.total_straddle_cost or 1
+        metrics["pnl_percent"] = (last_cumulative_pnl / initial_cost) if initial_cost > 0 else 0
+
         logger.info(f"Market closed: using last known P&L=${last_cumulative_pnl:.2f}, Net Theta=${last_net_theta:.2f}")
         return metrics
 
