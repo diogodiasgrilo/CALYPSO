@@ -4445,9 +4445,8 @@ class DeltaNeutralStrategy:
         try:
             balance = self.client.get_balance()
             if balance:
-                # Use CostToClosePositions as a proxy for margin requirement
-                # This represents the cost to close all positions
-                strategy_margin = abs(balance.get("CostToClosePositions", 0))
+                # Use actual margin held for positions
+                strategy_margin = abs(balance.get("MarginUsedByCurrentPositions", 0))
         except Exception as e:
             logger.debug(f"Could not fetch margin from Saxo: {e}")
 
