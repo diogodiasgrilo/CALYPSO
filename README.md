@@ -26,32 +26,33 @@ Automated options trading platform implementing multiple strategies using the Sa
 ```
 calypso/
 ├── shared/                          # Shared infrastructure
-│   ├── saxo_client.py              # Saxo Bank API client
-│   ├── logger_service.py           # Google Sheets + logging
-│   ├── config_loader.py            # Config management
-│   ├── market_hours.py             # Market hours utilities
-│   ├── secret_manager.py           # GCP secrets
+│   ├── saxo_client.py              # Saxo Bank API client with WebSocket streaming
+│   ├── logger_service.py           # Strategy-aware Google Sheets logging
+│   ├── config_loader.py            # Config management (local + GCP)
+│   ├── market_hours.py             # Market hours + US holiday detection
+│   ├── secret_manager.py           # GCP Secret Manager integration
+│   ├── token_coordinator.py        # Multi-bot token sharing
 │   └── external_price_feed.py      # Yahoo Finance fallback
 │
 ├── bots/
-│   ├── delta_neutral/              # Brian's Strategy
+│   ├── delta_neutral/              # Brian's Strategy (SPY)
 │   │   ├── main.py                 # Entry point
 │   │   ├── strategy.py             # Strategy logic
 │   │   └── config/                 # Bot-specific config
 │   │
-│   └── iron_fly_0dte/              # Doc Severson's Strategy
+│   └── iron_fly_0dte/              # Doc Severson's Strategy (SPX)
 │       ├── main.py                 # Entry point
 │       ├── strategy.py             # Strategy logic
 │       └── config/                 # Bot-specific config
 │
 ├── deploy/                          # Deployment files
-│   ├── delta_neutral.service       # Systemd for bot 1
-│   ├── iron_fly_0dte.service       # Systemd for bot 2
-│   └── setup_vm.sh                 # GCP VM setup
+│   ├── delta_neutral.service       # Systemd for delta neutral bot
+│   ├── iron_fly_0dte.service       # Systemd for iron fly bot
+│   └── setup_vm.sh                 # GCP VM setup script
 │
 ├── docs/                            # Documentation
 ├── scripts/                         # Utility scripts
-├── data/                            # Persistent data
+├── data/                            # Persistent data (metrics, state)
 ├── logs/                            # Log files
 ├── requirements.txt                 # Dependencies
 └── README.md
@@ -140,7 +141,9 @@ These are automatically ignored by `.gitignore`.
 - Token persistence & auto-refresh
 - External price feed fallback (Yahoo Finance)
 - Multi-currency support (USD/EUR)
-- Google Sheets logging for Looker dashboards
+- Google Sheets logging with strategy-specific dashboards
+- US market holiday detection (all NYSE/NASDAQ holidays)
+- Intelligent sleep during market closures
 
 **Delta Neutral Bot:**
 - VIX-based entry filtering
@@ -148,13 +151,16 @@ These are automatically ignored by `.gitignore`.
 - Fed meeting blackout periods
 - ITM prevention for short options
 - Emergency exit on large moves
+- Theta tracking (daily/weekly/cumulative)
+- Position recovery on restart
 
 **Iron Fly Bot:**
 - Opening range filter (trend day detection)
 - VIX level and spike filters
 - Calibration mode for manual expected move
 - Fast exit on wing breach (stop loss)
-- Time-based exit
+- Time-based exit (max 60 min hold)
+- FOMC and economic calendar blackout options
 
 ## Requirements
 
@@ -171,5 +177,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 2.0.0
-**Last Updated:** 2025-01-15
+**Version:** 2.1.0
+**Last Updated:** 2026-01-19
