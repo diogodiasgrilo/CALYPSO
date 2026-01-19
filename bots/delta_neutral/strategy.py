@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
-from shared.market_hours import get_us_market_time
+from shared.market_hours import get_us_market_time, is_weekend, is_market_holiday
 
 # Path for persistent metrics storage (now in project root data/ folder)
 METRICS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "delta_neutral_metrics.json")
@@ -4678,6 +4678,8 @@ class DeltaNeutralStrategy:
         Log daily summary to Google Sheets at end of trading day.
 
         Includes P&L, Greeks, premium collected, and market data.
+        On weekends/holidays, uses last known values from the previous Daily Summary
+        to avoid incorrect recalculations from stale market data.
 
         Returns:
             bool: True if logged successfully
@@ -4685,68 +4687,118 @@ class DeltaNeutralStrategy:
         if not self.trade_logger:
             return False
 
-        # Use get_dashboard_metrics() which calculates theta_cost correctly (scaled by 100 × qty)
-        metrics = self.get_dashboard_metrics()
-
-        # Calculate daily P&L
-        daily_pnl = self.metrics.total_pnl - self.metrics.daily_pnl_start
-
-        # Build summary data
-        # Use vix_avg if available (tracked during market hours), otherwise fall back to current VIX
-        vix_value = self.metrics.vix_avg if self.metrics.vix_avg > 0 else (self.current_vix or 0)
-
-        # Get theta tracking values from dashboard metrics
-        net_theta = metrics.get("net_theta", 0)
-        est_theta_this_week = metrics.get("estimated_theta_earned", 0)
-        cumulative_theta = metrics.get("cumulative_net_theta", 0)
-
         # Use ET date for Daily Summary (not UTC)
         et_date = get_us_market_time().strftime("%Y-%m-%d")
+
+        # Check if this is a weekend or holiday
+        is_non_trading_day = is_weekend() or is_market_holiday()
+
+        if is_non_trading_day:
+            # On weekends/holidays, use last known values from previous Daily Summary
+            # This avoids incorrect P&L from stale/zero market data
+            last_summary = self.trade_logger.get_last_daily_summary()
+
+            if last_summary:
+                # Use last known Net Theta (theta doesn't change on non-trading days)
+                net_theta = last_summary.get("Net Theta ($)", 0)
+                # Use last known SPY/VIX (market is closed)
+                spy_close = last_summary.get("SPY Close", self.current_underlying_price or 0)
+                vix_value = last_summary.get("VIX", self.current_vix or 0)
+                # Use last known Cumulative P&L (no change on non-trading days)
+                cumulative_pnl = last_summary.get("Cumulative P&L ($)", 0)
+                # Daily P&L is 0 on non-trading days (no market activity)
+                daily_pnl = 0.0
+                daily_pnl_eur = 0.0
+
+                # Calculate Est. Theta Earned This Week: previous + today's theta
+                prev_est_theta_week = last_summary.get("Est. Theta Earned This Week ($)", 0)
+                est_theta_this_week = prev_est_theta_week + net_theta
+
+                # Calculate Cumulative Net Theta: previous + today's theta
+                prev_cumulative_theta = last_summary.get("Cumulative Net Theta ($)", 0)
+                cumulative_theta = prev_cumulative_theta + net_theta
+
+                logger.info(f"Weekend/holiday: using last known values (Net Theta=${net_theta:.2f}, Cumulative P&L=${cumulative_pnl:.2f})")
+            else:
+                # No previous data, fall back to current values
+                logger.warning("No previous Daily Summary found for weekend, using current values")
+                metrics = self.get_dashboard_metrics()
+                net_theta = metrics.get("net_theta", 0)
+                spy_close = self.current_underlying_price
+                vix_value = self.current_vix or 0
+                cumulative_pnl = self.metrics.total_pnl
+                daily_pnl = 0.0
+                daily_pnl_eur = 0.0
+                est_theta_this_week = metrics.get("estimated_theta_earned", 0)
+                cumulative_theta = metrics.get("cumulative_net_theta", 0) + net_theta
+        else:
+            # Trading day - use live calculated values
+            metrics = self.get_dashboard_metrics()
+
+            # Calculate daily P&L
+            daily_pnl = self.metrics.total_pnl - self.metrics.daily_pnl_start
+
+            # Use vix_avg if available (tracked during market hours), otherwise fall back to current VIX
+            vix_value = self.metrics.vix_avg if self.metrics.vix_avg > 0 else (self.current_vix or 0)
+
+            # Get theta tracking values from dashboard metrics
+            net_theta = metrics.get("net_theta", 0)
+            spy_close = self.current_underlying_price
+            cumulative_pnl = self.metrics.total_pnl
+
+            # Est. Theta Earned This Week from dashboard metrics
+            est_theta_this_week = metrics.get("estimated_theta_earned", 0)
+
+            # Cumulative Net Theta = sum from Daily Summary + today's theta
+            # (dashboard returns sum of previous rows, we add today's)
+            cumulative_theta = metrics.get("cumulative_net_theta", 0) + net_theta
+
+            # EUR conversion for daily P&L
+            daily_pnl_eur = 0.0
+            if hasattr(self.trade_logger, 'currency_enabled') and self.trade_logger.currency_enabled:
+                try:
+                    rate = self.client.get_fx_rate(
+                        self.trade_logger.base_currency,
+                        self.trade_logger.account_currency
+                    )
+                    if rate:
+                        daily_pnl_eur = daily_pnl * rate
+                except Exception as e:
+                    logger.warning(f"Could not fetch FX rate for daily summary: {e}")
 
         summary = {
             "date": et_date,
             "state": self.state.value,
-            "spy_open": self.metrics.spy_open,
-            "spy_close": self.current_underlying_price,
-            "spy_range": self.metrics.spy_range,
-            "vix_avg": vix_value,  # Use current VIX as fallback if daily avg not available
-            "vix_high": self.metrics.vix_high if self.metrics.vix_high > 0 else (self.current_vix or 0),
-            "total_delta": metrics.get("total_delta", 0),
-            "total_gamma": metrics.get("total_gamma", 0),
-            "total_theta": net_theta,  # Use scaled net theta
-            "theta_cost": metrics.get("theta_cost", 0),  # Scaled theta cost from longs
-            "est_theta_earned_this_week": est_theta_this_week,  # Est. Theta Earned This Week
-            "cumulative_net_theta": cumulative_theta,  # All-time cumulative net theta
+            "spy_open": self.metrics.spy_open if not is_non_trading_day else spy_close,
+            "spy_close": spy_close,
+            "spy_range": self.metrics.spy_range if not is_non_trading_day else 0,
+            "vix_avg": vix_value,
+            "vix_high": self.metrics.vix_high if self.metrics.vix_high > 0 and not is_non_trading_day else vix_value,
+            "total_delta": 0 if is_non_trading_day else self.get_dashboard_metrics().get("total_delta", 0),
+            "total_gamma": 0 if is_non_trading_day else self.get_dashboard_metrics().get("total_gamma", 0),
+            "total_theta": net_theta,
+            "theta_cost": 0 if is_non_trading_day else self.get_dashboard_metrics().get("theta_cost", 0),
+            "est_theta_earned_this_week": est_theta_this_week,
+            "cumulative_net_theta": cumulative_theta,
             "daily_pnl": daily_pnl,
             "realized_pnl": self.metrics.realized_pnl,
-            "unrealized_pnl": self.metrics.unrealized_pnl,
+            "unrealized_pnl": self.metrics.unrealized_pnl if not is_non_trading_day else 0,
             "premium_collected": self.metrics.total_premium_collected,
-            "trades_count": self.metrics.trade_count,  # Use actual trade count
+            "trades_count": self.metrics.trade_count,
             "recenter_count": self.metrics.recenter_count,
             "roll_count": self.metrics.roll_count,
-            "cumulative_pnl": self.metrics.total_pnl,
-            "pnl_eur": 0.0,
-            "notes": "",
+            "cumulative_pnl": cumulative_pnl,
+            "pnl_eur": daily_pnl_eur,
+            "notes": "Weekend/Holiday" if is_non_trading_day else "",
             # Daily roll/recenter tracking for Daily Summary
-            "rolled_today": self.metrics.daily_roll_count > 0,
-            "recentered_today": self.metrics.daily_recenter_count > 0
+            "rolled_today": False if is_non_trading_day else self.metrics.daily_roll_count > 0,
+            "recentered_today": False if is_non_trading_day else self.metrics.daily_recenter_count > 0
         }
-
-        # Add EUR conversion if available
-        if hasattr(self.trade_logger, 'currency_enabled') and self.trade_logger.currency_enabled:
-            try:
-                rate = self.client.get_fx_rate(
-                    self.trade_logger.base_currency,
-                    self.trade_logger.account_currency
-                )
-                if rate:
-                    summary["pnl_eur"] = daily_pnl * rate
-            except Exception as e:
-                logger.warning(f"Could not fetch FX rate for daily summary: {e}")
 
         # Log to Google Sheets
         self.trade_logger.log_daily_summary(summary)
-        logger.info(f"Daily summary logged: P&L ${daily_pnl:.2f}, Net Theta ${metrics.get('net_theta', 0):.2f}")
+        day_type = "weekend/holiday" if is_non_trading_day else "trading day"
+        logger.info(f"Daily summary logged ({day_type}): P&L ${daily_pnl:.2f}, Net Theta ${net_theta:.2f}")
 
         return True
 

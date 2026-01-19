@@ -1389,6 +1389,54 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to get daily summary count: {e}")
             return None
 
+    def get_last_daily_summary(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent Daily Summary row.
+
+        Used to retrieve last known values for weekend/holiday logging,
+        where we want to use Friday's values instead of recalculating.
+
+        Returns:
+            dict: Last Daily Summary row as a dictionary, or None if unavailable
+        """
+        if not self.enabled or "Daily Summary" not in self.worksheets:
+            return None
+
+        try:
+            worksheet = self.worksheets["Daily Summary"]
+            all_data = worksheet.get_all_values()
+
+            if len(all_data) <= 1:  # Only headers or empty
+                return None
+
+            headers = all_data[0]
+            last_row = all_data[-1]  # Get the last row
+
+            # Convert to dictionary
+            result = {}
+            for i, header in enumerate(headers):
+                if i < len(last_row):
+                    value = last_row[i]
+                    # Try to convert numeric values
+                    try:
+                        if '.' in value:
+                            result[header] = float(value)
+                        elif value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+                            result[header] = int(value)
+                        else:
+                            result[header] = value
+                    except (ValueError, AttributeError):
+                        result[header] = value
+                else:
+                    result[header] = None
+
+            logger.debug(f"Retrieved last Daily Summary row: date={result.get('Date')}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get last Daily Summary: {e}")
+            return None
+
     def log_safety_event(self, event: Dict[str, Any]) -> bool:
         """
         Log safety event (Fed filter, ITM risk, emergency exit, roll, recenter).
@@ -2470,6 +2518,19 @@ class TradeLoggerService:
         """
         if self.google_logger.enabled:
             return self.google_logger.get_daily_summary_count(since_date)
+        return None
+
+    def get_last_daily_summary(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent Daily Summary row.
+
+        Used to retrieve last known values for weekend/holiday logging.
+
+        Returns:
+            dict: Last Daily Summary row as a dictionary, or None if unavailable
+        """
+        if self.google_logger.enabled:
+            return self.google_logger.get_last_daily_summary()
         return None
 
     def log_opening_range(self, data: Dict[str, Any]):
