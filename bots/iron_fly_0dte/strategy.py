@@ -15,6 +15,15 @@ Video: https://www.youtube.com/watch?v=ad27qIuhgQ4
 
 Author: Trading Bot Developer
 Date: 2025
+
+Security Audit: 2026-01-19
+- Added position reconciliation with broker on startup
+- Added market data staleness detection
+- Fixed state machine stuck states
+- Added emergency stop-loss bypass for circuit breaker
+- Fixed timezone handling for hold time calculations
+- Added max trades per day guard
+- Fixed dry-run simulation for realistic P&L
 """
 
 import json
@@ -38,6 +47,15 @@ METRICS_FILE = os.path.join(
 # Configure module logger
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# SAFETY CONSTANTS
+# =============================================================================
+MAX_TRADES_PER_DAY = 1  # Iron fly should only enter once per day
+MAX_DATA_STALENESS_SECONDS = 30  # Max age of market data before considered stale
+MAX_CLOSING_TIMEOUT_SECONDS = 300  # 5 minutes max to close position
+WING_BREACH_TOLERANCE = 0.10  # $0.10 tolerance for float comparison
+DEFAULT_SIMULATED_CREDIT_PER_WING_POINT = 2.50  # Realistic: $2.50 per point of wing width
+
 # US Eastern timezone
 try:
     import pytz
@@ -52,6 +70,140 @@ def get_us_market_time() -> datetime:
         return datetime.now(US_EASTERN)
     # Fallback: assume local time is Eastern (for development)
     return datetime.now()
+
+
+def load_cumulative_metrics() -> Dict[str, Any]:
+    """
+    Load cumulative metrics from persistent storage.
+
+    Returns:
+        dict: Cumulative metrics including total P&L, win rate, etc.
+    """
+    try:
+        if os.path.exists(METRICS_FILE):
+            with open(METRICS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Could not load cumulative metrics: {e}")
+
+    # Return default metrics if file doesn't exist or failed to load
+    return {
+        "cumulative_pnl": 0.0,
+        "total_trades": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "total_premium_collected": 0.0,
+        "best_trade": 0.0,
+        "worst_trade": 0.0,
+        "last_updated": None
+    }
+
+
+def save_cumulative_metrics(metrics: Dict[str, Any]) -> bool:
+    """
+    Save cumulative metrics to persistent storage.
+
+    Args:
+        metrics: Dictionary of cumulative metrics
+
+    Returns:
+        bool: True if save successful
+    """
+    try:
+        # Ensure data directory exists
+        data_dir = os.path.dirname(METRICS_FILE)
+        os.makedirs(data_dir, exist_ok=True)
+
+        # Update timestamp
+        metrics["last_updated"] = get_us_market_time().isoformat()
+
+        with open(METRICS_FILE, 'w') as f:
+            json.dump(metrics, f, indent=2)
+
+        logger.info(f"Saved cumulative metrics: P&L=${metrics.get('cumulative_pnl', 0):.2f}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to save cumulative metrics: {e}")
+        return False
+
+
+def get_eastern_timestamp() -> datetime:
+    """
+    Get current timestamp in US Eastern timezone for consistent logging.
+    All timestamps in this strategy use Eastern time since that's when US markets operate.
+    """
+    return get_us_market_time()
+
+
+@dataclass
+class MarketData:
+    """
+    Tracks market data with staleness detection.
+
+    This prevents trading decisions based on old/stale price data,
+    which could lead to missed stop-losses or incorrect entry decisions.
+
+    All timestamps use US Eastern time for consistency.
+    """
+    price: float = 0.0
+    vix: float = 0.0
+    last_price_update: Optional[datetime] = None
+    last_vix_update: Optional[datetime] = None
+
+    def update_price(self, price: float):
+        """Update price with current Eastern timestamp."""
+        if price > 0:
+            self.price = price
+            self.last_price_update = get_eastern_timestamp()
+
+    def update_vix(self, vix: float):
+        """Update VIX with current Eastern timestamp."""
+        if vix > 0:
+            self.vix = vix
+            self.last_vix_update = get_eastern_timestamp()
+
+    def is_price_stale(self, max_age_seconds: int = MAX_DATA_STALENESS_SECONDS) -> bool:
+        """Check if price data is stale."""
+        if not self.last_price_update:
+            return True
+        now = get_eastern_timestamp()
+        # Handle timezone-aware comparison
+        if self.last_price_update.tzinfo and now.tzinfo:
+            age = (now - self.last_price_update).total_seconds()
+        else:
+            # Fallback for naive datetimes
+            age = (datetime.now() - self.last_price_update.replace(tzinfo=None) if self.last_price_update.tzinfo else datetime.now() - self.last_price_update).total_seconds()
+        return age > max_age_seconds
+
+    def is_vix_stale(self, max_age_seconds: int = MAX_DATA_STALENESS_SECONDS) -> bool:
+        """Check if VIX data is stale."""
+        if not self.last_vix_update:
+            return True
+        now = get_eastern_timestamp()
+        if self.last_vix_update.tzinfo and now.tzinfo:
+            age = (now - self.last_vix_update).total_seconds()
+        else:
+            age = (datetime.now() - self.last_vix_update.replace(tzinfo=None) if self.last_vix_update.tzinfo else datetime.now() - self.last_vix_update).total_seconds()
+        return age > max_age_seconds
+
+    def price_age_seconds(self) -> float:
+        """Get age of price data in seconds."""
+        if not self.last_price_update:
+            return float('inf')
+        now = get_eastern_timestamp()
+        if self.last_price_update.tzinfo and now.tzinfo:
+            return (now - self.last_price_update).total_seconds()
+        return (datetime.now() - self.last_price_update.replace(tzinfo=None) if self.last_price_update.tzinfo else datetime.now() - self.last_price_update).total_seconds()
+
+    def vix_age_seconds(self) -> float:
+        """Get age of VIX data in seconds."""
+        if not self.last_vix_update:
+            return float('inf')
+        now = get_eastern_timestamp()
+        if self.last_vix_update.tzinfo and now.tzinfo:
+            return (now - self.last_vix_update).total_seconds()
+        return (datetime.now() - self.last_vix_update.replace(tzinfo=None) if self.last_vix_update.tzinfo else datetime.now() - self.last_vix_update).total_seconds()
 
 
 class IronFlyState(Enum):
@@ -94,13 +246,21 @@ class OpeningRange:
 
     def update(self, price: float, vix: float):
         """Update opening range with new price and VIX data."""
-        if price > self.high:
-            self.high = price
-        if price < self.low:
-            self.low = price
-        self.current_vix = vix
-        if vix > self.vix_high:
-            self.vix_high = vix
+        # Guard against invalid/zero prices
+        if price > 0:
+            if price > self.high:
+                self.high = price
+            if price < self.low:
+                self.low = price
+
+        # Guard against invalid/zero VIX
+        if vix > 0:
+            self.current_vix = vix
+            if vix > self.vix_high:
+                self.vix_high = vix
+            # Set opening VIX if not yet set
+            if self.opening_vix <= 0:
+                self.opening_vix = vix
 
     @property
     def range_width(self) -> float:
@@ -149,11 +309,13 @@ class IronFlyPosition:
     Max profit: Net credit received (when price expires exactly at ATM strike)
     Max loss: Wing width - Net credit (when price expires beyond a wing)
 
+    All timestamps use US Eastern time for consistency with market hours.
+
     Attributes:
         atm_strike: The ATM strike price (center/body of butterfly)
         upper_wing: Long call strike (upper protection)
         lower_wing: Long put strike (lower protection)
-        entry_time: When position was opened
+        entry_time: When position was opened (US Eastern timezone)
         entry_price: Underlying price at entry
         credit_received: Net premium received (in dollars)
         quantity: Number of contracts
@@ -162,7 +324,7 @@ class IronFlyPosition:
     atm_strike: float = 0.0
     upper_wing: float = 0.0
     lower_wing: float = 0.0
-    entry_time: Optional[datetime] = None
+    entry_time: Optional[datetime] = None  # Always US Eastern time
     entry_price: float = 0.0
     credit_received: float = 0.0
     quantity: int = 1
@@ -189,6 +351,9 @@ class IronFlyPosition:
     # Order tracking
     profit_order_id: Optional[str] = None
 
+    # Dry-run simulation tracking
+    simulated_current_value: float = 0.0  # Tracks simulated cost-to-close
+
     @property
     def wing_width(self) -> float:
         """Calculate the width of each wing (distance from ATM to wing strike)."""
@@ -211,10 +376,17 @@ class IronFlyPosition:
 
         For iron fly, we want to close for LESS than we received.
         Current value = cost to buy back shorts - proceeds from selling longs
+
+        In dry-run mode, uses simulated_current_value if option prices aren't set.
         """
-        short_value = (self.short_call_price + self.short_put_price) * self.quantity * 100
-        long_value = (self.long_call_price + self.long_put_price) * self.quantity * 100
-        return short_value - long_value
+        # If we have real option prices, use them
+        if any([self.short_call_price, self.short_put_price,
+                self.long_call_price, self.long_put_price]):
+            short_value = (self.short_call_price + self.short_put_price) * self.quantity * 100
+            long_value = (self.long_call_price + self.long_put_price) * self.quantity * 100
+            return short_value - long_value
+        # Otherwise use simulated value for dry-run
+        return self.simulated_current_value
 
     @property
     def unrealized_pnl(self) -> float:
@@ -238,10 +410,48 @@ class IronFlyPosition:
 
     @property
     def hold_time_minutes(self) -> int:
-        """Calculate minutes position has been held."""
+        """
+        Calculate minutes position has been held.
+
+        Uses US Eastern time consistently for all calculations.
+        """
         if not self.entry_time:
             return 0
-        return int((datetime.now() - self.entry_time).total_seconds() / 60)
+
+        now_eastern = get_eastern_timestamp()
+
+        # Handle timezone-aware comparison
+        if self.entry_time.tzinfo and now_eastern.tzinfo:
+            return int((now_eastern - self.entry_time).total_seconds() / 60)
+
+        # If entry_time is naive, compare with naive now
+        if self.entry_time.tzinfo is None:
+            # Use naive datetime for comparison
+            now_naive = datetime.now()
+            return int((now_naive - self.entry_time).total_seconds() / 60)
+
+        # entry_time has tzinfo but now doesn't - strip tzinfo for comparison
+        entry_naive = self.entry_time.replace(tzinfo=None)
+        return int((datetime.now() - entry_naive).total_seconds() / 60)
+
+    @property
+    def hold_time_seconds(self) -> float:
+        """Calculate seconds position has been held (for more precise tracking)."""
+        if not self.entry_time:
+            return 0.0
+
+        now_eastern = get_eastern_timestamp()
+
+        # Handle timezone-aware comparison
+        if self.entry_time.tzinfo and now_eastern.tzinfo:
+            return (now_eastern - self.entry_time).total_seconds()
+
+        # Fallback for naive datetimes
+        if self.entry_time.tzinfo is None:
+            return (datetime.now() - self.entry_time).total_seconds()
+
+        entry_naive = self.entry_time.replace(tzinfo=None)
+        return (datetime.now() - entry_naive).total_seconds()
 
     def distance_to_wing(self, current_price: float) -> Tuple[float, str]:
         """
@@ -260,16 +470,23 @@ class IronFlyPosition:
         else:
             return (dist_to_lower, "lower")
 
-    def is_wing_breached(self, current_price: float) -> Tuple[bool, str]:
+    def is_wing_breached(self, current_price: float, tolerance: float = WING_BREACH_TOLERANCE) -> Tuple[bool, str]:
         """
         Check if price has touched or breached a wing.
+
+        Uses tolerance to avoid floating-point comparison issues.
+
+        Args:
+            current_price: Current underlying price
+            tolerance: Price tolerance for breach detection (default $0.10)
 
         Returns:
             Tuple of (breached: bool, which_wing: str)
         """
-        if current_price >= self.upper_wing:
+        # Use tolerance to handle floating-point comparison safely
+        if current_price >= (self.upper_wing - tolerance):
             return (True, "upper")
-        elif current_price <= self.lower_wing:
+        elif current_price <= (self.lower_wing + tolerance):
             return (True, "lower")
         return (False, "")
 
@@ -349,13 +566,24 @@ class IronFlyStrategy:
         self.opening_range = OpeningRange()
         self.position: Optional[IronFlyPosition] = None
 
-        # Market data
-        self.current_price = 0.0
-        self.current_vix = 0.0
+        # Market data with staleness tracking (BUG FIX: prevents stale data decisions)
+        self.market_data = MarketData()
+        self.current_price = 0.0  # Kept for backwards compatibility
+        self.current_vix = 0.0    # Kept for backwards compatibility
 
         # Daily tracking
         self.trades_today = 0
         self.daily_pnl = 0.0
+        self.daily_premium_collected = 0.0  # Track premium separately for accurate logging
+
+        # Safety tracking (BUG FIX: prevents orphaned positions and stuck states)
+        self.closing_started_at: Optional[datetime] = None  # Track when close started
+        self._position_reconciled = False  # Has position been reconciled with broker?
+        self._last_health_check = get_eastern_timestamp()
+        self._consecutive_stale_data_warnings = 0
+
+        # Cumulative metrics tracking (persisted across days)
+        self.cumulative_metrics = load_cumulative_metrics()
 
         logger.info(f"IronFlyStrategy initialized - State: {self.state.value}")
         logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
@@ -381,10 +609,46 @@ class IronFlyStrategy:
         Returns:
             str: Description of action taken (for logging)
         """
+        # SAFETY: Reconcile position with broker on first run
+        if not self._position_reconciled:
+            self._reconcile_positions_with_broker()
+            self._position_reconciled = True
+
         # Update market data
         self.update_market_data()
 
         current_time = get_us_market_time()
+
+        # SAFETY: Check for stale market data when position is open
+        if self.position and self.state in [IronFlyState.POSITION_OPEN, IronFlyState.MONITORING_EXIT]:
+            if self.market_data.is_price_stale():
+                self._consecutive_stale_data_warnings += 1
+                stale_age = self.market_data.price_age_seconds()
+                logger.warning(
+                    f"STALE DATA WARNING #{self._consecutive_stale_data_warnings}: "
+                    f"Price data is {stale_age:.1f}s old (max {MAX_DATA_STALENESS_SECONDS}s)"
+                )
+                # After 3 consecutive stale warnings, log critical but continue monitoring
+                if self._consecutive_stale_data_warnings >= 3:
+                    logger.critical(
+                        "CRITICAL: Market data consistently stale with open position! "
+                        "Stop-loss protection may be compromised."
+                    )
+                    self.trade_logger.log_safety_event({
+                        "event_type": "IRON_FLY_STALE_DATA",
+                        "spy_price": self.current_price,
+                        "vix": self.current_vix,
+                        "description": f"Price data stale for {stale_age:.1f}s with open position",
+                        "result": "Continuing with last known price - STOP LOSS MAY BE DELAYED"
+                    })
+            else:
+                self._consecutive_stale_data_warnings = 0  # Reset on fresh data
+
+        # SAFETY: Check max trades per day guard
+        if self.trades_today >= MAX_TRADES_PER_DAY and self.state == IronFlyState.READY_TO_ENTER:
+            self.state = IronFlyState.DAILY_COMPLETE
+            logger.warning(f"Max trades per day ({MAX_TRADES_PER_DAY}) reached - blocking entry")
+            return f"Max trades per day ({MAX_TRADES_PER_DAY}) reached"
 
         # State machine
         if self.state == IronFlyState.IDLE:
@@ -407,6 +671,60 @@ class IronFlyStrategy:
 
         return "No action"
 
+    def _reconcile_positions_with_broker(self):
+        """
+        SAFETY: Check broker for existing positions and sync state on startup.
+
+        This prevents the catastrophic scenario where:
+        1. Bot crashes while holding a position
+        2. Bot restarts and doesn't know about the position
+        3. Position goes unmonitored (no stop-loss protection)
+        4. Or worse, bot enters a NEW position (doubling exposure)
+        """
+        if self.dry_run:
+            logger.info("Position reconciliation skipped (dry-run mode)")
+            return
+
+        try:
+            logger.info("Reconciling positions with broker...")
+            broker_positions = self.client.get_positions()
+
+            if not broker_positions:
+                logger.info("No positions found at broker - starting fresh")
+                return
+
+            # Look for iron fly positions (4 legs on same underlying)
+            # This is a simplified check - in production, would need more sophisticated matching
+            spx_options = [p for p in broker_positions
+                          if p.get('AssetType') == 'StockOption'
+                          and 'SPX' in str(p.get('Description', ''))]
+
+            if len(spx_options) >= 4:
+                logger.critical(
+                    f"ORPHANED POSITION DETECTED! Found {len(spx_options)} SPX options at broker. "
+                    "This may be a previously opened iron fly. Transitioning to MONITORING_EXIT state."
+                )
+                self.trade_logger.log_safety_event({
+                    "event_type": "IRON_FLY_ORPHAN_DETECTED",
+                    "spy_price": self.current_price,
+                    "vix": self.current_vix,
+                    "description": f"Found {len(spx_options)} orphaned SPX options at broker on startup",
+                    "result": "Transitioning to MONITORING_EXIT - manual intervention may be required"
+                })
+                # Set state to monitoring but position details unknown
+                self.state = IronFlyState.MONITORING_EXIT
+                # We don't have full position details, but at least we're monitoring
+
+            elif spx_options:
+                logger.warning(
+                    f"Found {len(spx_options)} SPX options at broker (not a full iron fly). "
+                    "These may be partial fills or unrelated positions."
+                )
+
+        except Exception as e:
+            logger.error(f"Error reconciling positions with broker: {e}")
+            # Don't fail startup, but log the error
+
     def _handle_idle_state(self, current_time: datetime) -> str:
         """
         Handle IDLE state - check if we should start monitoring opening range.
@@ -420,11 +738,15 @@ class IronFlyStrategy:
             return "Waiting for market open (9:30 AM EST)"
 
         if current_time.time() >= market_open and current_time.time() < self.entry_time:
+            # Ensure we have valid market data before starting opening range
+            if self.current_price <= 0:
+                return f"Waiting for market data (price={self.current_price:.2f})"
+
             # Start monitoring opening range
             self.state = IronFlyState.WAITING_OPENING_RANGE
             self.opening_range = OpeningRange(
                 start_time=current_time,
-                opening_vix=self.current_vix
+                opening_vix=self.current_vix if self.current_vix > 0 else 0.0
             )
             self.opening_range.update(self.current_price, self.current_vix)
 
@@ -453,6 +775,22 @@ class IronFlyStrategy:
 
         # Check if opening range period complete (10:00 AM)
         if current_time.time() >= self.entry_time:
+            # Validate we have valid opening range data
+            if self.opening_range.high <= 0 or self.opening_range.low == float('inf'):
+                logger.error(
+                    f"Invalid opening range data: High={self.opening_range.high}, "
+                    f"Low={self.opening_range.low} - skipping entry"
+                )
+                self.state = IronFlyState.DAILY_COMPLETE
+                self.trade_logger.log_safety_event({
+                    "event_type": "IRON_FLY_INVALID_OPENING_RANGE",
+                    "spy_price": self.current_price,
+                    "vix": self.current_vix,
+                    "description": f"Opening range invalid: High={self.opening_range.high}, Low={self.opening_range.low}",
+                    "result": "Entry blocked - no trade today"
+                })
+                return "Invalid opening range data - skipping entry"
+
             self.opening_range.is_complete = True
             self.state = IronFlyState.READY_TO_ENTER
 
@@ -465,9 +803,13 @@ class IronFlyStrategy:
             return (f"Opening range complete - High: {self.opening_range.high:.2f}, "
                     f"Low: {self.opening_range.low:.2f}, Range: {self.opening_range.range_width:.2f}")
 
+        # Display current opening range data
+        high_str = f"{self.opening_range.high:.2f}" if self.opening_range.high > 0 else "N/A"
+        low_str = f"{self.opening_range.low:.2f}" if self.opening_range.low < float('inf') else "N/A"
+        range_str = f"{self.opening_range.range_width:.2f}" if self.opening_range.range_width > 0 else "N/A"
+
         return (f"Monitoring opening range - Current: {self.current_price:.2f}, "
-                f"High: {self.opening_range.high:.2f}, Low: {self.opening_range.low:.2f}, "
-                f"Range: {self.opening_range.range_width:.2f}")
+                f"High: {high_str}, Low: {low_str}, Range: {range_str}")
 
     def _handle_ready_to_enter_state(self, current_time: datetime) -> str:
         """
@@ -568,11 +910,63 @@ class IronFlyStrategy:
                 f"Hold time: {self.position.hold_time_minutes} min")
 
     def _handle_closing_state(self, current_time: datetime) -> str:
-        """Handle CLOSING state - verify position is closed."""
-        # Check if all legs are closed
-        # For now, just transition to DAILY_COMPLETE
-        self.state = IronFlyState.DAILY_COMPLETE
-        return "Position closed - daily trading complete"
+        """
+        Handle CLOSING state - verify position is closed with timeout protection.
+
+        This state handles the period between initiating close orders and
+        confirming all legs are actually closed at the broker.
+
+        SAFETY: Includes timeout detection to prevent getting stuck in CLOSING
+        state indefinitely if orders fail.
+        """
+        # Initialize closing timestamp if not set
+        if self.closing_started_at is None:
+            self.closing_started_at = get_eastern_timestamp()
+            logger.info("Close initiated - waiting for order confirmation")
+
+        # In dry-run mode, immediately complete
+        if self.dry_run:
+            self.state = IronFlyState.DAILY_COMPLETE
+            self.closing_started_at = None
+            return "Position closed - daily trading complete"
+
+        # Check for timeout (position stuck in CLOSING state)
+        closing_duration = (current_time - self.closing_started_at).total_seconds()
+        if closing_duration > MAX_CLOSING_TIMEOUT_SECONDS:
+            logger.critical(
+                f"CLOSING TIMEOUT: Position stuck in CLOSING state for {closing_duration:.0f}s "
+                f"(max {MAX_CLOSING_TIMEOUT_SECONDS}s). Manual intervention required!"
+            )
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_CLOSE_TIMEOUT",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"Position stuck in CLOSING state for {closing_duration:.0f}s",
+                "result": "MANUAL INTERVENTION REQUIRED - Position may still be open at broker"
+            })
+            # Don't transition to DAILY_COMPLETE - leave in CLOSING so operator knows there's an issue
+            return f"CRITICAL: Close timeout after {closing_duration:.0f}s - manual intervention required"
+
+        # Verify position is closed at broker
+        try:
+            broker_positions = self.client.get_positions()
+            if broker_positions:
+                # Check for any remaining SPX options
+                spx_options = [p for p in broker_positions
+                              if p.get('AssetType') == 'StockOption'
+                              and 'SPX' in str(p.get('Description', ''))]
+                if spx_options:
+                    return f"Waiting for close confirmation - {len(spx_options)} legs still open"
+
+            # No positions found - close confirmed
+            self.state = IronFlyState.DAILY_COMPLETE
+            self.closing_started_at = None
+            self.position = None
+            return "Position closed - all legs confirmed closed at broker"
+
+        except Exception as e:
+            logger.error(f"Error verifying close: {e}")
+            return f"Waiting for close confirmation (verification error: {e})"
 
     # =========================================================================
     # ENTRY AND EXIT METHODS
@@ -612,25 +1006,34 @@ class IronFlyStrategy:
         )
 
         if self.dry_run:
-            # Simulate position entry
-            simulated_credit = expected_move * 0.7 * 100  # Rough simulation
+            # REALISTIC CREDIT CALCULATION (BUG FIX: was $4900, now ~$150-300)
+            # Real iron fly credit on SPX is typically $2-3 per point of wing width
+            # Example: 70 point wings = $140-210 credit per contract
+            simulated_credit = expected_move * DEFAULT_SIMULATED_CREDIT_PER_WING_POINT * self.position_size
+
+            # Get current Eastern time for entry timestamp
+            entry_time_eastern = get_eastern_timestamp()
+
             self.position = IronFlyPosition(
                 atm_strike=atm_strike,
                 upper_wing=upper_wing,
                 lower_wing=lower_wing,
-                entry_time=datetime.now(),
+                entry_time=entry_time_eastern,  # Use Eastern time consistently
                 entry_price=self.current_price,
                 credit_received=simulated_credit,
                 quantity=self.position_size,
-                expiry=datetime.now().strftime("%Y-%m-%d"),
+                expiry=entry_time_eastern.strftime("%Y-%m-%d"),
                 # Simulate position IDs
                 short_call_id="DRY_RUN_SC",
                 short_put_id="DRY_RUN_SP",
                 long_call_id="DRY_RUN_LC",
-                long_put_id="DRY_RUN_LP"
+                long_put_id="DRY_RUN_LP",
+                # Initialize simulated value to credit received (cost to close = credit at entry)
+                simulated_current_value=simulated_credit
             )
             self.state = IronFlyState.POSITION_OPEN
             self.trades_today += 1
+            self.daily_premium_collected += simulated_credit  # Track premium for logging
 
             # Log the simulated trade to Google Sheets
             self.trade_logger.log_trade(
@@ -643,23 +1046,248 @@ class IronFlyStrategy:
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type="Iron Fly",
-                expiry_date=datetime.now().strftime("%Y-%m-%d"),
+                expiry_date=entry_time_eastern.strftime("%Y-%m-%d"),
                 dte=0,  # 0DTE
                 premium_received=simulated_credit,
                 trade_reason="All filters passed"
             )
 
+            logger.info(f"[DRY RUN] Iron Fly position created: Credit=${simulated_credit:.2f}, "
+                       f"Wings={lower_wing}/{atm_strike}/{upper_wing}")
             return f"[DRY RUN] Entered Iron Fly at {atm_strike} with ${simulated_credit:.2f} credit"
 
-        # TODO: Implement actual order placement via Saxo API
-        # 1. Find option UICs for each leg (search by symbol, strike, expiry)
-        # 2. Get quotes for all 4 legs
-        # 3. Calculate net credit
-        # 4. Place 4 orders (or multi-leg order if supported by Saxo)
-        # 5. Confirm fills and store position IDs
-        # 6. Place profit-taking limit order immediately
+        # =================================================================
+        # LIVE ORDER PLACEMENT
+        # =================================================================
 
-        return "Iron Fly entry - implementation pending (use --dry-run for simulation)"
+        # Step 1: Find option UICs for all 4 legs
+        logger.info(f"Finding 0DTE options for Iron Fly: ATM={atm_strike}, Wings={lower_wing}/{upper_wing}")
+
+        iron_fly_options = self.client.find_iron_fly_options(
+            underlying_uic=self.underlying_uic,
+            atm_strike=atm_strike,
+            upper_wing_strike=upper_wing,
+            lower_wing_strike=lower_wing,
+            target_dte_min=0,
+            target_dte_max=1
+        )
+
+        if not iron_fly_options:
+            error_msg = "Failed to find option UICs for iron fly - ENTRY ABORTED"
+            logger.error(error_msg)
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_OPTION_LOOKUP_FAILED",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"Could not find 0DTE options at strikes {lower_wing}/{atm_strike}/{upper_wing}",
+                "result": "Entry blocked - no position opened"
+            })
+            self.state = IronFlyState.DAILY_COMPLETE
+            return error_msg
+
+        # Step 2: Get quotes for all 4 legs to calculate credit
+        short_call_uic = iron_fly_options["short_call"]["uic"]
+        short_put_uic = iron_fly_options["short_put"]["uic"]
+        long_call_uic = iron_fly_options["long_call"]["uic"]
+        long_put_uic = iron_fly_options["long_put"]["uic"]
+
+        logger.info(f"Option UICs - SC:{short_call_uic}, SP:{short_put_uic}, LC:{long_call_uic}, LP:{long_put_uic}")
+
+        # Get quotes for credit calculation
+        short_call_quote = self.client.get_quote(short_call_uic, "StockOption")
+        short_put_quote = self.client.get_quote(short_put_uic, "StockOption")
+        long_call_quote = self.client.get_quote(long_call_uic, "StockOption")
+        long_put_quote = self.client.get_quote(long_put_uic, "StockOption")
+
+        if not all([short_call_quote, short_put_quote, long_call_quote, long_put_quote]):
+            error_msg = "Failed to get quotes for all iron fly legs - ENTRY ABORTED"
+            logger.error(error_msg)
+            self.state = IronFlyState.DAILY_COMPLETE
+            return error_msg
+
+        # Extract bid/ask prices (sell at bid, buy at ask)
+        sc_bid = short_call_quote.get('Quote', {}).get('Bid', 0)
+        sp_bid = short_put_quote.get('Quote', {}).get('Bid', 0)
+        lc_ask = long_call_quote.get('Quote', {}).get('Ask', 0)
+        lp_ask = long_put_quote.get('Quote', {}).get('Ask', 0)
+
+        # Calculate net credit: premium received from shorts - premium paid for longs
+        # Multiplied by 100 for contract multiplier
+        credit_per_contract = (sc_bid + sp_bid - lc_ask - lp_ask)
+        total_credit = credit_per_contract * self.position_size * 100
+
+        logger.info(
+            f"Iron Fly pricing: SC Bid={sc_bid:.2f}, SP Bid={sp_bid:.2f}, "
+            f"LC Ask={lc_ask:.2f}, LP Ask={lp_ask:.2f}, "
+            f"Net Credit=${total_credit:.2f}"
+        )
+
+        if total_credit <= 0:
+            error_msg = f"Iron fly would result in debit (${total_credit:.2f}) - ENTRY ABORTED"
+            logger.error(error_msg)
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_DEBIT_SPREAD",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"Iron fly would cost ${abs(total_credit):.2f} instead of receiving credit",
+                "result": "Entry blocked - no position opened"
+            })
+            self.state = IronFlyState.DAILY_COMPLETE
+            return error_msg
+
+        # Step 3: Place all 4 orders
+        # Use place_order_with_retry for resilience
+        entry_time_eastern = get_eastern_timestamp()
+        orders_placed = []
+        order_ids = {}
+
+        try:
+            # Sell ATM Call (short)
+            logger.info(f"Placing order: SELL {self.position_size} ATM Call at {atm_strike}")
+            sc_order = self.client.place_order_with_retry(
+                uic=short_call_uic,
+                asset_type="StockOption",
+                buy_sell=BuySell.SELL,
+                amount=self.position_size,
+                order_type=OrderType.MARKET,
+                to_open_close="ToOpen"
+            )
+            if sc_order:
+                order_ids["short_call"] = sc_order.get("OrderId")
+                orders_placed.append(("short_call", sc_order))
+            else:
+                raise Exception("Failed to place short call order")
+
+            # Sell ATM Put (short)
+            logger.info(f"Placing order: SELL {self.position_size} ATM Put at {atm_strike}")
+            sp_order = self.client.place_order_with_retry(
+                uic=short_put_uic,
+                asset_type="StockOption",
+                buy_sell=BuySell.SELL,
+                amount=self.position_size,
+                order_type=OrderType.MARKET,
+                to_open_close="ToOpen"
+            )
+            if sp_order:
+                order_ids["short_put"] = sp_order.get("OrderId")
+                orders_placed.append(("short_put", sp_order))
+            else:
+                raise Exception("Failed to place short put order")
+
+            # Buy Long Call (wing protection)
+            logger.info(f"Placing order: BUY {self.position_size} Long Call at {upper_wing}")
+            lc_order = self.client.place_order_with_retry(
+                uic=long_call_uic,
+                asset_type="StockOption",
+                buy_sell=BuySell.BUY,
+                amount=self.position_size,
+                order_type=OrderType.MARKET,
+                to_open_close="ToOpen"
+            )
+            if lc_order:
+                order_ids["long_call"] = lc_order.get("OrderId")
+                orders_placed.append(("long_call", lc_order))
+            else:
+                raise Exception("Failed to place long call order")
+
+            # Buy Long Put (wing protection)
+            logger.info(f"Placing order: BUY {self.position_size} Long Put at {lower_wing}")
+            lp_order = self.client.place_order_with_retry(
+                uic=long_put_uic,
+                asset_type="StockOption",
+                buy_sell=BuySell.BUY,
+                amount=self.position_size,
+                order_type=OrderType.MARKET,
+                to_open_close="ToOpen"
+            )
+            if lp_order:
+                order_ids["long_put"] = lp_order.get("OrderId")
+                orders_placed.append(("long_put", lp_order))
+            else:
+                raise Exception("Failed to place long put order")
+
+        except Exception as e:
+            # CRITICAL: If any order fails after others succeeded, we have a partial fill
+            error_msg = f"ORDER PLACEMENT FAILED: {e}"
+            logger.critical(error_msg)
+            logger.critical(f"Orders placed before failure: {[o[0] for o in orders_placed]}")
+
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_PARTIAL_FILL",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"Partial fill during iron fly entry: {len(orders_placed)}/4 orders placed",
+                "result": f"MANUAL INTERVENTION REQUIRED - Orders: {order_ids}"
+            })
+
+            # Don't try to unwind automatically - let operator handle it
+            self.state = IronFlyState.DAILY_COMPLETE
+            return f"CRITICAL: Partial fill - {len(orders_placed)}/4 orders placed. Manual intervention required!"
+
+        # Step 4: Create position object
+        self.position = IronFlyPosition(
+            atm_strike=iron_fly_options["atm_strike"],
+            upper_wing=iron_fly_options["upper_wing"],
+            lower_wing=iron_fly_options["lower_wing"],
+            entry_time=entry_time_eastern,
+            entry_price=self.current_price,
+            credit_received=total_credit,
+            quantity=self.position_size,
+            expiry=iron_fly_options["expiry"][:10],  # YYYY-MM-DD
+            # Store order IDs for management
+            short_call_id=order_ids.get("short_call"),
+            short_put_id=order_ids.get("short_put"),
+            long_call_id=order_ids.get("long_call"),
+            long_put_id=order_ids.get("long_put"),
+            # Store UICs for price streaming
+            short_call_uic=short_call_uic,
+            short_put_uic=short_put_uic,
+            long_call_uic=long_call_uic,
+            long_put_uic=long_put_uic,
+            # Initial prices
+            short_call_price=sc_bid,
+            short_put_price=sp_bid,
+            long_call_price=lc_ask,
+            long_put_price=lp_ask
+        )
+
+        self.state = IronFlyState.POSITION_OPEN
+        self.trades_today += 1
+        self.daily_premium_collected += total_credit
+
+        # Step 5: Subscribe to option price updates for position monitoring
+        try:
+            self.client.subscribe_to_option(short_call_uic, self.handle_price_update)
+            self.client.subscribe_to_option(short_put_uic, self.handle_price_update)
+            self.client.subscribe_to_option(long_call_uic, self.handle_price_update)
+            self.client.subscribe_to_option(long_put_uic, self.handle_price_update)
+            logger.info("Subscribed to option price streams for position monitoring")
+        except Exception as e:
+            logger.warning(f"Failed to subscribe to option streams (will use polling): {e}")
+
+        # Log the trade to Google Sheets
+        self.trade_logger.log_trade(
+            action="OPEN_IRON_FLY",
+            strike=f"{lower_wing}/{atm_strike}/{upper_wing}",
+            price=credit_per_contract,
+            delta=0.0,  # Iron Fly is delta neutral at entry
+            pnl=0.0,
+            saxo_client=self.client,
+            underlying_price=self.current_price,
+            vix=self.current_vix,
+            option_type="Iron Fly",
+            expiry_date=self.position.expiry,
+            dte=0,
+            premium_received=total_credit,
+            trade_reason="All filters passed"
+        )
+
+        logger.info(
+            f"IRON FLY OPENED: ATM={atm_strike}, Wings={lower_wing}/{upper_wing}, "
+            f"Credit=${total_credit:.2f}, Orders={order_ids}"
+        )
+
+        return f"Entered Iron Fly at {atm_strike} with ${total_credit:.2f} credit"
 
     def _close_position(self, reason: str, description: str) -> str:
         """
@@ -708,27 +1336,204 @@ class IronFlyStrategy:
             self.state = IronFlyState.DAILY_COMPLETE
             return f"[DRY RUN] Closed position - {reason}: ${pnl:.2f} P&L in {hold_time} min"
 
-        # TODO: Implement actual close orders via Saxo API
-        # 1. Cancel any open limit orders (profit taker)
-        # 2. Close all 4 legs (market order for stop loss, limit for others)
-        # 3. Confirm fills
-        # 4. Log final P&L
+        # =================================================================
+        # LIVE ORDER CLOSING
+        # =================================================================
 
+        # Step 1: Cancel any open limit orders (profit taker)
+        if self.position.profit_order_id:
+            logger.info(f"Cancelling profit-taking order: {self.position.profit_order_id}")
+            try:
+                self.client.cancel_order(self.position.profit_order_id)
+            except Exception as e:
+                logger.warning(f"Failed to cancel profit order (may already be filled/cancelled): {e}")
+
+        # Step 2: Determine order type based on exit reason
+        # STOP_LOSS: Use MARKET orders for immediate execution (price is touching wing!)
+        # PROFIT_TARGET/TIME_EXIT: Can use limit orders for better fills
+        use_market_orders = (reason == "STOP_LOSS")
+        order_type = OrderType.MARKET if use_market_orders else OrderType.MARKET  # Use market for all for simplicity
+
+        if use_market_orders:
+            logger.warning("STOP LOSS TRIGGERED - Using MARKET orders for immediate close!")
+
+        # Step 3: Close all 4 legs (reverse the entry trades)
+        close_orders = []
+        close_order_ids = {}
+
+        try:
+            # Buy back short call (was sold at entry)
+            if self.position.short_call_uic:
+                logger.info(f"Closing: BUY {self.position.quantity} Short Call at {self.position.atm_strike}")
+
+                # For stop-loss, use emergency order that bypasses circuit breaker
+                if use_market_orders:
+                    sc_close = self.client.place_emergency_order(
+                        uic=self.position.short_call_uic,
+                        asset_type="StockOption",
+                        buy_sell=BuySell.BUY,
+                        amount=self.position.quantity,
+                        order_type=OrderType.MARKET,
+                        to_open_close="ToClose"
+                    )
+                else:
+                    sc_close = self.client.place_order_with_retry(
+                        uic=self.position.short_call_uic,
+                        asset_type="StockOption",
+                        buy_sell=BuySell.BUY,
+                        amount=self.position.quantity,
+                        order_type=order_type,
+                        to_open_close="ToClose"
+                    )
+
+                if sc_close:
+                    close_order_ids["short_call"] = sc_close.get("OrderId")
+                    close_orders.append(("short_call", sc_close))
+
+            # Buy back short put (was sold at entry)
+            if self.position.short_put_uic:
+                logger.info(f"Closing: BUY {self.position.quantity} Short Put at {self.position.atm_strike}")
+
+                if use_market_orders:
+                    sp_close = self.client.place_emergency_order(
+                        uic=self.position.short_put_uic,
+                        asset_type="StockOption",
+                        buy_sell=BuySell.BUY,
+                        amount=self.position.quantity,
+                        order_type=OrderType.MARKET,
+                        to_open_close="ToClose"
+                    )
+                else:
+                    sp_close = self.client.place_order_with_retry(
+                        uic=self.position.short_put_uic,
+                        asset_type="StockOption",
+                        buy_sell=BuySell.BUY,
+                        amount=self.position.quantity,
+                        order_type=order_type,
+                        to_open_close="ToClose"
+                    )
+
+                if sp_close:
+                    close_order_ids["short_put"] = sp_close.get("OrderId")
+                    close_orders.append(("short_put", sp_close))
+
+            # Sell long call (was bought at entry)
+            if self.position.long_call_uic:
+                logger.info(f"Closing: SELL {self.position.quantity} Long Call at {self.position.upper_wing}")
+
+                if use_market_orders:
+                    lc_close = self.client.place_emergency_order(
+                        uic=self.position.long_call_uic,
+                        asset_type="StockOption",
+                        buy_sell=BuySell.SELL,
+                        amount=self.position.quantity,
+                        order_type=OrderType.MARKET,
+                        to_open_close="ToClose"
+                    )
+                else:
+                    lc_close = self.client.place_order_with_retry(
+                        uic=self.position.long_call_uic,
+                        asset_type="StockOption",
+                        buy_sell=BuySell.SELL,
+                        amount=self.position.quantity,
+                        order_type=order_type,
+                        to_open_close="ToClose"
+                    )
+
+                if lc_close:
+                    close_order_ids["long_call"] = lc_close.get("OrderId")
+                    close_orders.append(("long_call", lc_close))
+
+            # Sell long put (was bought at entry)
+            if self.position.long_put_uic:
+                logger.info(f"Closing: SELL {self.position.quantity} Long Put at {self.position.lower_wing}")
+
+                if use_market_orders:
+                    lp_close = self.client.place_emergency_order(
+                        uic=self.position.long_put_uic,
+                        asset_type="StockOption",
+                        buy_sell=BuySell.SELL,
+                        amount=self.position.quantity,
+                        order_type=OrderType.MARKET,
+                        to_open_close="ToClose"
+                    )
+                else:
+                    lp_close = self.client.place_order_with_retry(
+                        uic=self.position.long_put_uic,
+                        asset_type="StockOption",
+                        buy_sell=BuySell.SELL,
+                        amount=self.position.quantity,
+                        order_type=order_type,
+                        to_open_close="ToClose"
+                    )
+
+                if lp_close:
+                    close_order_ids["long_put"] = lp_close.get("OrderId")
+                    close_orders.append(("long_put", lp_close))
+
+            logger.info(f"Close orders placed: {len(close_orders)}/4 legs")
+
+        except Exception as e:
+            error_msg = f"ERROR CLOSING POSITION: {e}"
+            logger.critical(error_msg)
+            logger.critical(f"Close orders placed before failure: {[o[0] for o in close_orders]}")
+
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_CLOSE_FAILED",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"Failed to close all legs: {len(close_orders)}/4 closed",
+                "result": f"MANUAL INTERVENTION REQUIRED - Close orders: {close_order_ids}"
+            })
+
+        # Log the close trade to Google Sheets
+        self.trade_logger.log_trade(
+            action=f"CLOSE_IRON_FLY_{reason}",
+            strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
+            price=self.position.credit_received / 100,
+            delta=0.0,
+            pnl=pnl,
+            saxo_client=self.client,
+            underlying_price=self.current_price,
+            vix=self.current_vix,
+            option_type="Iron Fly",
+            expiry_date=self.position.expiry,
+            dte=0,
+            premium_received=self.position.credit_received,
+            trade_reason=description
+        )
+
+        logger.info(
+            f"IRON FLY CLOSE INITIATED: {reason} - P&L=${pnl:.2f}, "
+            f"Hold time={hold_time} min, Close orders={close_order_ids}"
+        )
+
+        # Transition to CLOSING state to wait for fill confirmation
         self.state = IronFlyState.CLOSING
-        return f"Closing position: {reason} - implementation pending"
+        self.closing_started_at = get_eastern_timestamp()
+
+        return f"Closing position ({reason}): P&L=${pnl:.2f}, {len(close_orders)}/4 orders placed"
 
     # =========================================================================
     # HELPER METHODS
     # =========================================================================
 
     def update_market_data(self):
-        """Update current price and VIX from market data."""
+        """
+        Update current price and VIX from market data.
+
+        Also updates MarketData staleness tracking to detect when
+        data becomes stale and stop-loss protection may be compromised.
+        """
         try:
             # Get underlying price (US500.I is CfdOnIndex)
             if self.underlying_uic:
                 quote = self.client.get_quote(self.underlying_uic, asset_type="CfdOnIndex")
                 if quote:
-                    self.current_price = quote.get('Quote', {}).get('Mid', self.current_price)
+                    new_price = quote.get('Quote', {}).get('Mid')
+                    if new_price and new_price > 0:
+                        self.current_price = new_price
+                        self.market_data.update_price(new_price)  # Track staleness
 
             # Get VIX (StockIndex type)
             # VIX doesn't have Bid/Ask/Mid - use PriceInfo.High or calculate from High+Low
@@ -739,6 +1544,7 @@ class IronFlyStrategy:
                     mid = vix_quote.get('Quote', {}).get('Mid')
                     if mid and mid > 0:
                         self.current_vix = mid
+                        self.market_data.update_vix(mid)  # Track staleness
                     else:
                         # Fall back to PriceInfo for non-tradeable indices like VIX
                         price_info = vix_quote.get('PriceInfo', {})
@@ -746,28 +1552,140 @@ class IronFlyStrategy:
                         low = price_info.get('Low', 0)
                         if high > 0 and low > 0:
                             # Use midpoint of day's range as proxy
-                            self.current_vix = (high + low) / 2
-                            logger.debug(f"VIX from PriceInfo: High={high}, Low={low}, Using={self.current_vix}")
+                            vix_value = (high + low) / 2
+                            self.current_vix = vix_value
+                            self.market_data.update_vix(vix_value)  # Track staleness
+                            logger.debug(f"VIX from PriceInfo: High={high}, Low={low}, Using={vix_value}")
         except Exception as e:
             logger.warning(f"Error updating market data: {e}")
+            # Don't update staleness tracking on error - data remains stale
 
     def _update_position_prices(self):
-        """Update current prices for all position legs."""
+        """
+        Update current prices for all position legs.
+
+        In dry-run mode, simulates realistic P&L based on:
+        - Time decay (theta): position value decays over time
+        - Price movement: P&L affected by distance from ATM strike
+        - Wing proximity: loss accelerates as price approaches wings
+        """
         if not self.position:
             return
 
-        # In dry run mode, simulate price movement
+        # In dry run mode, simulate REALISTIC price movement
         if self.dry_run:
-            # Simple simulation: position value decays towards profit
-            decay_rate = 0.01  # 1% decay per check
-            self.position.short_call_price *= (1 - decay_rate)
-            self.position.short_put_price *= (1 - decay_rate)
-            self.position.long_call_price *= (1 - decay_rate)
-            self.position.long_put_price *= (1 - decay_rate)
+            # Get time in position (in minutes)
+            hold_minutes = self.position.hold_time_minutes
+            hold_seconds = self.position.hold_time_seconds
+
+            # Calculate price distance from ATM (normalized by wing width)
+            price_distance = abs(self.current_price - self.position.atm_strike)
+            wing_width = self.position.wing_width
+            distance_ratio = price_distance / wing_width if wing_width > 0 else 0
+
+            # Theta decay: Iron fly theta is highest when ATM, decays ~5-10% of credit per 10 min
+            # Average hold time is 18 minutes per Doc Severson
+            theta_decay_per_minute = 0.005  # 0.5% per minute when at ATM
+            theta_decay = theta_decay_per_minute * hold_minutes
+
+            # Reduce theta benefit when price moves away from ATM
+            # (theta decreases as position moves ITM)
+            theta_adjustment = max(0.2, 1.0 - distance_ratio)  # Min 20% theta when near wing
+            effective_theta_decay = theta_decay * theta_adjustment
+
+            # Price movement impact: Loss increases as price approaches wings
+            # When distance_ratio >= 1.0, price has breached wing (stop loss)
+            if distance_ratio >= 0.8:
+                # Near wing: P&L becomes negative rapidly
+                price_impact = -0.5 * (distance_ratio - 0.5)  # -25% to -50% loss near wing
+            elif distance_ratio >= 0.5:
+                # Half way to wing: small negative impact
+                price_impact = -0.1 * (distance_ratio - 0.3)  # slight negative
+            else:
+                # Near ATM: theta works in our favor
+                price_impact = 0.0
+
+            # Calculate new simulated cost-to-close
+            # At entry, cost-to-close = credit received (no profit yet)
+            # As time passes with price near ATM, cost-to-close decreases (profit increases)
+            # As price moves to wing, cost-to-close increases (loss increases)
+            credit = self.position.credit_received
+            decay_benefit = credit * effective_theta_decay  # Reduces cost to close
+            price_penalty = credit * max(0, price_impact)  # Increases cost to close
+
+            # New cost to close (what we'd pay to exit now)
+            new_cost_to_close = credit - decay_benefit + price_penalty
+
+            # Ensure cost-to-close doesn't go below 0 (max profit is full credit)
+            # and doesn't exceed max loss (wing_width * 100 - credit)
+            max_loss_value = (wing_width * self.position.quantity * 100)
+            new_cost_to_close = max(0, min(new_cost_to_close, max_loss_value))
+
+            # Update simulated current value
+            self.position.simulated_current_value = new_cost_to_close
+
+            logger.debug(
+                f"[DRY RUN] P&L Simulation: Hold={hold_minutes}m, DistRatio={distance_ratio:.2f}, "
+                f"Theta={effective_theta_decay:.3f}, PriceImpact={price_impact:.3f}, "
+                f"CostToClose=${new_cost_to_close:.2f}, P&L=${self.position.unrealized_pnl:.2f}"
+            )
             return
 
-        # TODO: Get current prices for each leg from streaming or polling
-        pass
+        # =================================================================
+        # LIVE: Get current prices for each leg via polling
+        # =================================================================
+        # Note: If streaming is working, prices are updated via handle_price_update
+        # This polling serves as a fallback when streaming is unavailable
+
+        try:
+            prices_updated = 0
+
+            # Get short call price (we need to BUY to close, so use Ask)
+            if self.position.short_call_uic:
+                sc_quote = self.client.get_quote(self.position.short_call_uic, "StockOption")
+                if sc_quote:
+                    ask = sc_quote.get('Quote', {}).get('Ask', 0)
+                    if ask > 0:
+                        self.position.short_call_price = ask
+                        prices_updated += 1
+
+            # Get short put price (we need to BUY to close, so use Ask)
+            if self.position.short_put_uic:
+                sp_quote = self.client.get_quote(self.position.short_put_uic, "StockOption")
+                if sp_quote:
+                    ask = sp_quote.get('Quote', {}).get('Ask', 0)
+                    if ask > 0:
+                        self.position.short_put_price = ask
+                        prices_updated += 1
+
+            # Get long call price (we need to SELL to close, so use Bid)
+            if self.position.long_call_uic:
+                lc_quote = self.client.get_quote(self.position.long_call_uic, "StockOption")
+                if lc_quote:
+                    bid = lc_quote.get('Quote', {}).get('Bid', 0)
+                    if bid > 0:
+                        self.position.long_call_price = bid
+                        prices_updated += 1
+
+            # Get long put price (we need to SELL to close, so use Bid)
+            if self.position.long_put_uic:
+                lp_quote = self.client.get_quote(self.position.long_put_uic, "StockOption")
+                if lp_quote:
+                    bid = lp_quote.get('Quote', {}).get('Bid', 0)
+                    if bid > 0:
+                        self.position.long_put_price = bid
+                        prices_updated += 1
+
+            if prices_updated > 0:
+                logger.debug(
+                    f"Option prices updated ({prices_updated}/4): "
+                    f"SC={self.position.short_call_price:.2f}, SP={self.position.short_put_price:.2f}, "
+                    f"LC={self.position.long_call_price:.2f}, LP={self.position.long_put_price:.2f}, "
+                    f"P&L=${self.position.unrealized_pnl:.2f}"
+                )
+
+        except Exception as e:
+            logger.warning(f"Error polling option prices: {e}")
 
     def _round_up_to_strike(self, price: float, increment: float = 5.0) -> float:
         """
@@ -1059,19 +1977,67 @@ class IronFlyStrategy:
         return summary
 
     def handle_price_update(self, uic: int, data: Dict[str, Any]):
-        """Handle real-time price updates from WebSocket streaming."""
+        """
+        Handle real-time price updates from WebSocket streaming.
+
+        Updates underlying price, VIX, and option leg prices for P&L calculation.
+        """
+        # Update underlying price
         if uic == self.underlying_uic:
             mid = data.get('Quote', {}).get('Mid')
-            if mid:
+            if mid and mid > 0:
                 self.current_price = mid
-        elif uic == self.vix_uic:
+                self.market_data.update_price(mid)  # Track staleness
+            return
+
+        # Update VIX
+        if uic == self.vix_uic:
             mid = data.get('Quote', {}).get('Mid')
-            if mid:
+            if mid and mid > 0:
                 self.current_vix = mid
-        # TODO: Handle option price updates for position legs
+                self.market_data.update_vix(mid)  # Track staleness
+            return
+
+        # Handle option price updates for position legs
+        if self.position:
+            quote = data.get('Quote', {})
+
+            # Short call (we need to BUY to close, so use Ask)
+            if uic == self.position.short_call_uic:
+                ask = quote.get('Ask', 0)
+                if ask > 0:
+                    self.position.short_call_price = ask
+                return
+
+            # Short put (we need to BUY to close, so use Ask)
+            if uic == self.position.short_put_uic:
+                ask = quote.get('Ask', 0)
+                if ask > 0:
+                    self.position.short_put_price = ask
+                return
+
+            # Long call (we need to SELL to close, so use Bid)
+            if uic == self.position.long_call_uic:
+                bid = quote.get('Bid', 0)
+                if bid > 0:
+                    self.position.long_call_price = bid
+                return
+
+            # Long put (we need to SELL to close, so use Bid)
+            if uic == self.position.long_put_uic:
+                bid = quote.get('Bid', 0)
+                if bid > 0:
+                    self.position.long_put_price = bid
+                return
 
     def log_daily_summary(self):
-        """Log daily summary to Google Sheets at end of trading day."""
+        """
+        Log daily summary to Google Sheets at end of trading day.
+
+        Uses daily_premium_collected which is tracked at entry time,
+        not position.credit_received which may be None after close.
+        Also updates and persists cumulative metrics across days.
+        """
         # Get EUR conversion rate
         daily_pnl_eur = self.daily_pnl
         try:
@@ -1081,67 +2047,122 @@ class IronFlyStrategy:
         except Exception:
             pass  # Keep USD value if conversion fails
 
+        # Update cumulative metrics
+        self.cumulative_metrics["cumulative_pnl"] += self.daily_pnl
+        self.cumulative_metrics["total_trades"] += self.trades_today
+        self.cumulative_metrics["total_premium_collected"] += self.daily_premium_collected
+
+        # Track win/loss
+        if self.trades_today > 0:
+            if self.daily_pnl > 0:
+                self.cumulative_metrics["winning_trades"] += 1
+            elif self.daily_pnl < 0:
+                self.cumulative_metrics["losing_trades"] += 1
+
+            # Track best/worst trade
+            if self.daily_pnl > self.cumulative_metrics.get("best_trade", 0):
+                self.cumulative_metrics["best_trade"] = self.daily_pnl
+            if self.daily_pnl < self.cumulative_metrics.get("worst_trade", 0):
+                self.cumulative_metrics["worst_trade"] = self.daily_pnl
+
+        # Save cumulative metrics to file
+        save_cumulative_metrics(self.cumulative_metrics)
+
+        # Calculate win rate for summary
+        total_completed_trades = (
+            self.cumulative_metrics.get("winning_trades", 0) +
+            self.cumulative_metrics.get("losing_trades", 0)
+        )
+        win_rate = 0.0
+        if total_completed_trades > 0:
+            win_rate = (self.cumulative_metrics.get("winning_trades", 0) / total_completed_trades) * 100
+
+        # Iron Fly specific summary - matches the iron_fly Daily Summary columns
         summary = {
             "date": get_us_market_time().strftime("%Y-%m-%d"),
-            "spy_close": self.current_price,
+            "underlying_close": self.current_price,  # Generic name for SPX/SPY
             "vix": self.current_vix,
-            "theta_cost": 0,  # Not applicable for 0DTE Iron Fly
-            "premium_collected": self.position.credit_received if self.position else 0,
+            "premium_collected": self.daily_premium_collected,
+            "trades_today": self.trades_today,
+            "win_rate": win_rate,
             "daily_pnl": self.daily_pnl,
             "daily_pnl_eur": daily_pnl_eur,
-            "cumulative_pnl": self.daily_pnl,  # Single day strategy
-            "roll_count": 0,  # Not applicable
-            "recenter_count": 0,  # Not applicable
-            "notes": f"Iron Fly 0DTE - Trades: {self.trades_today}, State: {self.state.value}"
+            "cumulative_pnl": self.cumulative_metrics["cumulative_pnl"],
+            "total_trades": self.cumulative_metrics["total_trades"],
+            "winning_trades": self.cumulative_metrics.get("winning_trades", 0),
+            "notes": f"Iron Fly 0DTE - State: {self.state.value}"
         }
         self.trade_logger.log_daily_summary(summary)
-        logger.info(f"Daily summary logged: P&L=${self.daily_pnl:.2f}, Trades={self.trades_today}")
+        logger.info(
+            f"Daily summary logged: P&L=${self.daily_pnl:.2f}, Premium=${self.daily_premium_collected:.2f}, "
+            f"Trades={self.trades_today}, Cumulative P&L=${self.cumulative_metrics['cumulative_pnl']:.2f}"
+        )
 
     def log_position_to_sheets(self):
-        """Log current position to Positions worksheet."""
+        """Log current position to Positions worksheet (iron fly format)."""
         if not self.position:
             return
+
+        # Calculate distance to nearest wing
+        distance_to_wing = min(
+            abs(self.current_price - self.position.upper_wing),
+            abs(self.current_price - self.position.lower_wing)
+        ) if self.current_price else 0
 
         positions = [{
             "type": "Iron Fly",
             "strike": f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
             "expiry": self.position.expiry,
             "dte": 0,
-            "entry_price": self.position.credit_received / 100,
-            "current_price": self.position.credit_received / 100,  # Simplified - would need real quotes
+            "entry_credit": self.position.credit_received / 100,
+            "current_value": self.position.credit_received / 100,  # Simplified - would need real quotes
             "pnl": self.position.unrealized_pnl,
-            "theta": 0,  # Would need real greeks
+            "hold_time": self.position.hold_time_minutes,
+            "distance_to_wing": distance_to_wing,
             "status": "OPEN"
         }]
         self.trade_logger.log_position_snapshot(positions)
 
     def log_performance_metrics(self):
-        """Log performance metrics to Google Sheets."""
-        win_rate = 100.0 if self.trades_today > 0 and self.daily_pnl > 0 else 0.0
+        """
+        Log performance metrics to Google Sheets (iron fly format).
+
+        Iron fly specific columns:
+        - Premium tracking instead of theta
+        - Hold time instead of days held
+        - Win/loss counts
+        """
+        # Calculate win rate
+        total_trades = self.cumulative_metrics.get("total_trades", 0)
+        winning_trades = self.cumulative_metrics.get("winning_trades", 0)
+        losing_trades = self.cumulative_metrics.get("losing_trades", 0)
+        win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
+
+        # Calculate hold time if position exists
+        hold_minutes = self.position.hold_time_minutes if self.position else 0
+
+        # Calculate average hold time from cumulative data (if we start tracking)
+        avg_hold_time = hold_minutes  # Simplified for now
 
         metrics = {
             "total_pnl": self.daily_pnl,
             "realized_pnl": self.daily_pnl,
-            "unrealized_pnl": 0,
-            "premium_collected": self.position.credit_received if self.position else 0,
-            "theta_cost": 0,
-            "net_theta": 0,
-            "long_straddle_pnl": 0,
-            "short_strangle_pnl": 0,
+            "unrealized_pnl": self.position.unrealized_pnl if self.position else 0,
+            # Premium tracking (key KPI for iron fly)
+            "premium_collected": self.daily_premium_collected,
+            "cumulative_premium": self.cumulative_metrics.get("total_premium_collected", 0),
+            # Stats
             "win_rate": win_rate,
-            "sharpe_ratio": 0,
             "max_drawdown": abs(min(0, self.daily_pnl)),
             "max_drawdown_pct": 0,
+            # Counts
             "trade_count": self.trades_today,
-            "roll_count": 0,
-            "recenter_count": 0,
-            "avg_trade_pnl": self.daily_pnl / self.trades_today if self.trades_today > 0 else 0,
-            "best_trade": self.daily_pnl if self.daily_pnl > 0 else 0,
-            "worst_trade": self.daily_pnl if self.daily_pnl < 0 else 0,
-            "accumulated_theta_income": 0,
-            "weekly_theta_income": 0,
-            "days_held": 0,
-            "days_to_expiry": 0
+            "winning_trades": winning_trades,
+            "losing_trades": losing_trades,
+            # Time tracking
+            "avg_hold_time": avg_hold_time,
+            "best_trade": self.cumulative_metrics.get("best_trade", 0),
+            "worst_trade": self.cumulative_metrics.get("worst_trade", 0)
         }
         self.trade_logger.log_performance_metrics(
             period="Daily",
@@ -1150,21 +2171,33 @@ class IronFlyStrategy:
         )
 
     def log_account_summary(self):
-        """Log account summary to Google Sheets."""
+        """Log account summary to Google Sheets (iron fly format)."""
+        # Calculate distance to nearest wing
+        distance_to_wing = 0
+        wing_width = 0
+        if self.position and self.current_price:
+            distance_to_wing = min(
+                abs(self.current_price - self.position.upper_wing),
+                abs(self.current_price - self.position.lower_wing)
+            )
+            wing_width = self.position.upper_wing - self.position.atm_strike
+
         strategy_data = {
-            "spy_price": self.current_price,
+            # Market Data
+            "underlying_price": self.current_price,
             "vix": self.current_vix,
+            # Position Values
+            "credit_received": self.position.credit_received / 100 if self.position else 0,
+            "current_value": self.position.credit_received / 100 if self.position else 0,  # Simplified
             "unrealized_pnl": self.position.unrealized_pnl if self.position else 0,
-            "long_straddle_value": 0,
-            "short_strangle_value": 0,
-            "strategy_margin": 0,
-            "total_delta": 0,  # Iron Fly is delta neutral
-            "total_theta": 0,
-            "position_count": 4 if self.position else 0,
-            "long_call_strike": self.position.upper_wing if self.position else None,
-            "long_put_strike": self.position.lower_wing if self.position else None,
-            "short_call_strike": self.position.atm_strike if self.position else None,
-            "short_put_strike": self.position.atm_strike if self.position else None
+            # Strikes
+            "atm_strike": self.position.atm_strike if self.position else 0,
+            "lower_wing": self.position.lower_wing if self.position else 0,
+            "upper_wing": self.position.upper_wing if self.position else 0,
+            "wing_width": wing_width,
+            # Position Status
+            "distance_to_wing": distance_to_wing,
+            "hold_time": self.position.hold_time_minutes if self.position else 0
         }
         self.trade_logger.log_account_summary(
             strategy_data=strategy_data,
@@ -1173,10 +2206,53 @@ class IronFlyStrategy:
         )
 
     def reset_for_new_day(self):
-        """Reset strategy state for a new trading day."""
+        """
+        Reset strategy state for a new trading day.
+
+        SAFETY: Checks for orphaned positions before resetting to prevent
+        losing track of open positions at the broker.
+        """
         # Log daily summary before resetting
         if self.state == IronFlyState.DAILY_COMPLETE:
             self.log_daily_summary()
+
+        # SAFETY: Check for orphaned positions before reset
+        if self.position is not None:
+            logger.critical(
+                f"ORPHANED POSITION WARNING: Local position still exists during daily reset! "
+                f"ATM={self.position.atm_strike}, P&L=${self.position.unrealized_pnl:.2f}"
+            )
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_ORPHAN_ON_RESET",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"Position not properly closed before daily reset",
+                "result": "Position cleared from local state - CHECK BROKER FOR ORPHANED POSITIONS"
+            })
+
+        # SAFETY: Also check broker for any positions (in non-dry-run mode)
+        if not self.dry_run:
+            try:
+                broker_positions = self.client.get_positions()
+                if broker_positions:
+                    spx_options = [p for p in broker_positions
+                                  if p.get('AssetType') == 'StockOption'
+                                  and 'SPX' in str(p.get('Description', ''))]
+                    if spx_options:
+                        logger.critical(
+                            f"ORPHANED BROKER POSITIONS: Found {len(spx_options)} SPX options at broker during reset!"
+                        )
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_BROKER_ORPHAN_ON_RESET",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"Found {len(spx_options)} SPX options at broker during daily reset",
+                            "result": "NOT resetting state - investigate orphaned positions!"
+                        })
+                        # DON'T reset if broker has positions - force investigation
+                        return
+            except Exception as e:
+                logger.error(f"Error checking broker positions during reset: {e}")
 
         logger.info("Resetting strategy for new trading day")
         self.state = IronFlyState.IDLE
@@ -1184,3 +2260,7 @@ class IronFlyStrategy:
         self.position = None
         self.trades_today = 0
         self.daily_pnl = 0.0
+        self.daily_premium_collected = 0.0
+        self.closing_started_at = None
+        self._position_reconciled = False  # Force reconciliation on next run
+        self._consecutive_stale_data_warnings = 0

@@ -198,6 +198,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour (3600 seconds)
     last_day = datetime.now().date()
+    consecutive_errors = 0  # Track consecutive errors for health monitoring
 
     try:
         while not shutdown_requested:
@@ -243,6 +244,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
 
                 # Run strategy check
                 action = strategy.run_strategy_check()
+
+                # Reset consecutive errors on successful check
+                consecutive_errors = 0
 
                 # Log action if something happened
                 if action != "No action" and "Waiting" not in action and "Monitoring" not in action:
@@ -297,7 +301,27 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                 break
 
             except Exception as e:
-                trade_logger.log_error(f"Error in main loop: {e}", exception=e)
+                consecutive_errors += 1
+                trade_logger.log_error(f"Error in main loop (#{consecutive_errors}): {e}", exception=e)
+
+                # SAFETY: Log critical if too many consecutive errors
+                if consecutive_errors >= 5:
+                    trade_logger.log_safety_event({
+                        "event_type": "IRON_FLY_CONSECUTIVE_ERRORS",
+                        "spy_price": strategy.current_price if strategy else 0,
+                        "vix": strategy.current_vix if strategy else 0,
+                        "description": f"Main loop has {consecutive_errors} consecutive errors",
+                        "result": "Continuing but system may be unstable"
+                    })
+                    logger.critical(f"CRITICAL: {consecutive_errors} consecutive errors in main loop!")
+
+                # Don't continue if we have an open position and errors
+                if strategy and strategy.position and consecutive_errors >= 3:
+                    logger.critical(
+                        "CRITICAL: Multiple errors with open position! "
+                        "Stop-loss protection may be compromised!"
+                    )
+
                 if not interruptible_sleep(check_interval):
                     break
 
@@ -316,12 +340,23 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
         trade_logger.log_event(f"Final Status: State={status['state']}, "
                                f"Trades={status['trades_today']}, P&L=${status['daily_pnl']:.2f}")
 
-        # Warning about open positions
+        # Warning about open positions with option to close
         if status.get('position_active'):
+            logger.critical(
+                "CRITICAL: Bot shutting down with ACTIVE POSITION! "
+                f"ATM={status.get('atm_strike')}, P&L=${status.get('unrealized_pnl', 0):.2f}"
+            )
             trade_logger.log_event(
                 "WARNING: Bot shutting down with ACTIVE POSITION! "
                 "Position will remain open. Manual intervention may be required."
             )
+            trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_SHUTDOWN_WITH_POSITION",
+                "spy_price": status.get('underlying_price', 0),
+                "vix": status.get('vix', 0),
+                "description": f"Bot shutdown with active position: ATM={status.get('atm_strike')}",
+                "result": "Position left open - MANUAL INTERVENTION REQUIRED"
+            })
 
         trade_logger.log_event("Shutdown complete.")
 

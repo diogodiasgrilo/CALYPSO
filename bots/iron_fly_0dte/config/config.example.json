@@ -93,6 +93,8 @@
         "enabled": true,
         "credentials_file": "config/google_credentials.json",
         "spreadsheet_name": "Iron_Fly_0DTE_Log",
+        "strategy_type": "iron_fly",
+        "include_opening_range": true,
         "_note": "Separate Google Sheet from Delta Neutral bot for Looker dashboards"
     },
 

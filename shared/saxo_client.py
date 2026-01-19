@@ -1323,6 +1323,181 @@ class SaxoClient:
             }
         }
 
+    def find_iron_fly_options(
+        self,
+        underlying_uic: int,
+        atm_strike: float,
+        upper_wing_strike: float,
+        lower_wing_strike: float,
+        target_dte_min: int = 0,
+        target_dte_max: int = 1
+    ) -> Optional[Dict[str, Dict]]:
+        """
+        Find all 4 options for an Iron Fly (Iron Butterfly) position.
+
+        Iron Fly Structure:
+        - Short ATM Call (sell)
+        - Short ATM Put (sell)
+        - Long OTM Call at upper wing (buy for protection)
+        - Long OTM Put at lower wing (buy for protection)
+
+        Args:
+            underlying_uic: UIC of the underlying instrument
+            atm_strike: ATM strike price for short straddle (call + put at same strike)
+            upper_wing_strike: Strike for long call (above ATM)
+            lower_wing_strike: Strike for long put (below ATM)
+            target_dte_min: Minimum days to expiration (0 for 0DTE)
+            target_dte_max: Maximum days to expiration (1 for 0DTE)
+
+        Returns:
+            dict: Dictionary with 'short_call', 'short_put', 'long_call', 'long_put' option data,
+                  or None if any leg cannot be found.
+        """
+        expirations = self.get_option_expirations(underlying_uic)
+        if not expirations:
+            logger.error("Failed to get option expirations for iron fly")
+            return None
+
+        # Find appropriate expiration (0DTE for iron fly)
+        today = datetime.now().date()
+        target_expiration = None
+
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry")
+            if not exp_date_str:
+                continue
+
+            exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+
+            if target_dte_min <= dte <= target_dte_max:
+                target_expiration = exp_data
+                logger.info(f"Found 0DTE expiration for iron fly: {exp_date_str} with {dte} DTE")
+                break
+
+        if not target_expiration:
+            logger.warning(f"No expiration found within {target_dte_min}-{target_dte_max} DTE range for iron fly")
+            return None
+
+        # Get all options for this expiration
+        specific_options = target_expiration.get("SpecificOptions", [])
+
+        if not specific_options:
+            logger.error("No SpecificOptions in target expiration for iron fly")
+            return None
+
+        # Find UICs for all 4 legs
+        short_call_uic = None  # ATM Call (sell)
+        short_put_uic = None   # ATM Put (sell)
+        long_call_uic = None   # OTM Call at upper wing (buy)
+        long_put_uic = None    # OTM Put at lower wing (buy)
+
+        # Build strike -> options mapping for efficient lookup
+        calls_by_strike = {}
+        puts_by_strike = {}
+
+        for option in specific_options:
+            strike = option.get("StrikePrice", 0)
+            uic = option.get("Uic")
+            put_call = option.get("PutCall")
+
+            if put_call == "Call":
+                calls_by_strike[strike] = uic
+            elif put_call == "Put":
+                puts_by_strike[strike] = uic
+
+        # Find ATM options (short straddle at same strike)
+        if atm_strike in calls_by_strike:
+            short_call_uic = calls_by_strike[atm_strike]
+        else:
+            # Find closest call strike to ATM
+            closest_strike = min(calls_by_strike.keys(), key=lambda x: abs(x - atm_strike), default=None)
+            if closest_strike:
+                short_call_uic = calls_by_strike[closest_strike]
+                logger.warning(f"ATM call strike {atm_strike} not found, using closest: {closest_strike}")
+                atm_strike = closest_strike  # Update for consistency
+
+        if atm_strike in puts_by_strike:
+            short_put_uic = puts_by_strike[atm_strike]
+        else:
+            # Find closest put strike to ATM
+            closest_strike = min(puts_by_strike.keys(), key=lambda x: abs(x - atm_strike), default=None)
+            if closest_strike:
+                short_put_uic = puts_by_strike[closest_strike]
+                logger.warning(f"ATM put strike {atm_strike} not found, using closest: {closest_strike}")
+
+        # Find wing options (long positions for protection)
+        if upper_wing_strike in calls_by_strike:
+            long_call_uic = calls_by_strike[upper_wing_strike]
+        else:
+            # Find closest call strike to upper wing
+            closest_strike = min(calls_by_strike.keys(), key=lambda x: abs(x - upper_wing_strike), default=None)
+            if closest_strike:
+                long_call_uic = calls_by_strike[closest_strike]
+                logger.warning(f"Upper wing strike {upper_wing_strike} not found, using closest: {closest_strike}")
+                upper_wing_strike = closest_strike
+
+        if lower_wing_strike in puts_by_strike:
+            long_put_uic = puts_by_strike[lower_wing_strike]
+        else:
+            # Find closest put strike to lower wing
+            closest_strike = min(puts_by_strike.keys(), key=lambda x: abs(x - lower_wing_strike), default=None)
+            if closest_strike:
+                long_put_uic = puts_by_strike[closest_strike]
+                logger.warning(f"Lower wing strike {lower_wing_strike} not found, using closest: {closest_strike}")
+                lower_wing_strike = closest_strike
+
+        # Verify all legs found
+        if not all([short_call_uic, short_put_uic, long_call_uic, long_put_uic]):
+            logger.error(
+                f"Failed to find all iron fly legs. "
+                f"Short Call: {short_call_uic}, Short Put: {short_put_uic}, "
+                f"Long Call: {long_call_uic}, Long Put: {long_put_uic}"
+            )
+            return None
+
+        expiry_str = target_expiration.get("Expiry")
+
+        logger.info(
+            f"Iron fly options found: ATM={atm_strike}, Upper={upper_wing_strike}, Lower={lower_wing_strike}, "
+            f"Expiry={expiry_str}"
+        )
+
+        return {
+            "short_call": {
+                "uic": short_call_uic,
+                "strike": atm_strike,
+                "expiry": expiry_str,
+                "option_type": "Call",
+                "position_type": "short"
+            },
+            "short_put": {
+                "uic": short_put_uic,
+                "strike": atm_strike,
+                "expiry": expiry_str,
+                "option_type": "Put",
+                "position_type": "short"
+            },
+            "long_call": {
+                "uic": long_call_uic,
+                "strike": upper_wing_strike,
+                "expiry": expiry_str,
+                "option_type": "Call",
+                "position_type": "long"
+            },
+            "long_put": {
+                "uic": long_put_uic,
+                "strike": lower_wing_strike,
+                "expiry": expiry_str,
+                "option_type": "Put",
+                "position_type": "long"
+            },
+            "expiry": expiry_str,
+            "atm_strike": atm_strike,
+            "upper_wing": upper_wing_strike,
+            "lower_wing": lower_wing_strike
+        }
+
     def find_strangle_by_target_premium(
         self,
         underlying_uic: int,
@@ -2019,6 +2194,189 @@ class SaxoClient:
             return response
 
         logger.error(f"Failed to cancel order {order_id}")
+        return None
+
+    # =========================================================================
+    # EMERGENCY STOP-LOSS METHODS (BYPASS CIRCUIT BREAKER)
+    # =========================================================================
+
+    def place_emergency_order(
+        self,
+        uic: int,
+        asset_type: str,
+        buy_sell: BuySell,
+        amount: int,
+        order_type: OrderType = OrderType.MARKET,
+        to_open_close: str = "ToClose",
+        max_retries: int = 3
+    ) -> Optional[Dict]:
+        """
+        Place an emergency stop-loss order, BYPASSING the circuit breaker.
+
+        This method should ONLY be used for protective stop-loss orders that
+        MUST be placed even when the circuit breaker is open due to API errors.
+
+        SAFETY: This bypasses circuit breaker protection because a stop-loss
+        order is more important than preventing additional API load during
+        an outage. We'd rather risk API errors than leave a position unprotected.
+
+        Args:
+            uic: Instrument UIC
+            asset_type: Type of asset
+            buy_sell: Buy or Sell direction
+            amount: Number of contracts/shares
+            order_type: Type of order (default Market for stop-loss)
+            to_open_close: ToOpen or ToClose (default ToClose for exits)
+            max_retries: Number of retry attempts
+
+        Returns:
+            dict: Order response with OrderId if successful, None otherwise.
+        """
+        endpoint = "/trade/v2/orders"
+
+        order_data = {
+            "AccountKey": self.account_key,
+            "Uic": uic,
+            "AssetType": asset_type,
+            "BuySell": buy_sell.value,
+            "Amount": amount,
+            "OrderType": order_type.value,
+            "OrderRelation": "StandAlone",
+            "OrderDuration": {"DurationType": "DayOrder"},
+            "ManualOrder": True,
+            "ToOpenClose": to_open_close
+        }
+
+        logger.warning(
+            f"EMERGENCY ORDER (bypassing circuit breaker): "
+            f"{buy_sell.value} {amount} x UIC {uic}"
+        )
+
+        # Retry loop with exponential backoff
+        for attempt in range(max_retries):
+            try:
+                # BYPASS circuit breaker - call API directly
+                response = self._make_emergency_request("POST", endpoint, data=order_data)
+                if response:
+                    logger.info(f"EMERGENCY order placed successfully: {response.get('OrderId')}")
+                    return response
+
+                logger.warning(f"Emergency order attempt {attempt + 1}/{max_retries} failed")
+
+            except Exception as e:
+                logger.error(f"Emergency order attempt {attempt + 1}/{max_retries} error: {e}")
+
+            # Exponential backoff: 1s, 2s, 4s
+            if attempt < max_retries - 1:
+                import time
+                backoff = 2 ** attempt
+                logger.info(f"Retrying emergency order in {backoff}s...")
+                time.sleep(backoff)
+
+        logger.critical(f"EMERGENCY ORDER FAILED after {max_retries} attempts!")
+        return None
+
+    def _make_emergency_request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict] = None,
+        data: Optional[Dict] = None
+    ) -> Optional[Dict]:
+        """
+        Make an API request WITHOUT circuit breaker protection.
+
+        This is used only for emergency stop-loss orders that must go through
+        even when the circuit breaker is open.
+        """
+        import requests
+
+        # Ensure token is valid (but don't fail if auth fails)
+        if not self._is_token_valid():
+            self.authenticate()
+
+        url = f"{self.base_url}{endpoint}"
+
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=self._get_auth_headers(),
+                params=params,
+                json=data,
+                timeout=30
+            )
+
+            if response.status_code in [200, 201, 202]:
+                return response.json() if response.text else {}
+            elif response.status_code == 204:
+                return {}
+            else:
+                logger.error(f"Emergency request failed: {response.status_code} - {response.text}")
+                return None
+
+        except requests.exceptions.Timeout:
+            logger.error(f"Emergency request timeout for {endpoint}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Emergency request error for {endpoint}: {e}")
+            return None
+
+    def place_order_with_retry(
+        self,
+        uic: int,
+        asset_type: str,
+        buy_sell: BuySell,
+        amount: int,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: Optional[float] = None,
+        duration_type: str = "DayOrder",
+        to_open_close: str = "ToOpen",
+        max_retries: int = 3
+    ) -> Optional[Dict]:
+        """
+        Place an order with automatic retry on failure.
+
+        This provides resilience against transient network issues or
+        temporary API unavailability.
+
+        Args:
+            uic: Instrument UIC
+            asset_type: Type of asset
+            buy_sell: Buy or Sell direction
+            amount: Number of contracts/shares
+            order_type: Type of order
+            limit_price: Limit price for limit orders
+            duration_type: Order duration
+            to_open_close: ToOpen or ToClose
+            max_retries: Maximum retry attempts
+
+        Returns:
+            dict: Order response with OrderId if successful, None otherwise.
+        """
+        for attempt in range(max_retries):
+            result = self.place_order(
+                uic=uic,
+                asset_type=asset_type,
+                buy_sell=buy_sell,
+                amount=amount,
+                order_type=order_type,
+                limit_price=limit_price,
+                duration_type=duration_type,
+                to_open_close=to_open_close
+            )
+
+            if result:
+                return result
+
+            logger.warning(f"Order attempt {attempt + 1}/{max_retries} failed, retrying...")
+
+            if attempt < max_retries - 1:
+                import time
+                backoff = 2 ** attempt  # 1s, 2s, 4s
+                time.sleep(backoff)
+
+        logger.error(f"Order failed after {max_retries} attempts")
         return None
 
     # =========================================================================
