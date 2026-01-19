@@ -4440,25 +4440,6 @@ class DeltaNeutralStrategy:
         # Update drawdown tracking
         self.metrics.update_drawdown(self.metrics.total_pnl)
 
-        # Get margin from Saxo balance API
-        strategy_margin = 0.0
-        try:
-            balance = self.client.get_balance()
-            if balance:
-                # Log all balance fields for debugging
-                logger.info(f"Saxo Balance API response fields: {list(balance.keys())}")
-                logger.info(f"Saxo Balance API full response: {balance}")
-
-                # Try root level first, then nested InitialMargin object
-                margin = balance.get("MarginUsedByCurrentPositions", 0)
-                if margin == 0:
-                    # Try nested in InitialMargin
-                    initial_margin = balance.get("InitialMargin", {})
-                    margin = initial_margin.get("MarginUsedByCurrentPositions", 0)
-                strategy_margin = abs(margin) if margin else 0
-        except Exception as e:
-            logger.debug(f"Could not fetch margin from Saxo: {e}")
-
         # Calculate P&L percentage as decimal for Google Sheets (0.0404 = 4.04%)
         initial_cost = self.metrics.total_straddle_cost or 1  # Avoid division by zero
         pnl_percent = (self.metrics.total_pnl / initial_cost) if initial_cost > 0 else 0
@@ -4488,7 +4469,6 @@ class DeltaNeutralStrategy:
             "unrealized_pnl": self.metrics.unrealized_pnl,
             "long_straddle_value": long_straddle_value,
             "short_strangle_value": short_strangle_value,
-            "strategy_margin": strategy_margin,
             "total_delta": greeks["delta"],
             "total_theta": net_theta,
             "position_count": position_count,

@@ -448,10 +448,10 @@ class GoogleSheetsLogger:
                     # Strikes
                     "Long Call Strike", "Long Put Strike", "Short Call Strike", "Short Put Strike",
                     # Meta
-                    "Margin Used ($)", "Exchange Rate", "Environment"
+                    "Exchange Rate", "Environment"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:Q1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:P1", {"textFormat": {"bold": True}})
                 logger.info("Created Account Summary worksheet (SPY strategy only)")
 
             self.worksheets["Account Summary"] = worksheet
@@ -1672,7 +1672,6 @@ class GoogleSheetsLogger:
                 - long_put_strike: Long put strike price
                 - short_call_strike: Short call strike price
                 - short_put_strike: Short put strike price
-                - strategy_margin: Margin used by SPY positions
             exchange_rate: Optional USD/EUR exchange rate
             environment: Trading environment (LIVE/SIM)
 
@@ -1692,7 +1691,6 @@ class GoogleSheetsLogger:
             short_call_delta = strategy_data.get("short_call_delta", 0)
             short_put_delta = strategy_data.get("short_put_delta", 0)
             daily_net_theta = strategy_data.get("daily_net_theta", 0) or strategy_data.get("net_theta", 0)
-            strategy_margin = strategy_data.get("strategy_margin", 0)
 
             # Strike prices
             long_call_strike = strategy_data.get("long_call_strike", 0)
@@ -1700,7 +1698,7 @@ class GoogleSheetsLogger:
             short_call_strike = strategy_data.get("short_call_strike", 0)
             short_put_strike = strategy_data.get("short_put_strike", 0)
 
-            # New cleaner row structure (17 columns)
+            # Row structure (15 columns)
             row = [
                 # Market Data
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1720,7 +1718,6 @@ class GoogleSheetsLogger:
                 f"{short_call_strike:.0f}" if short_call_strike else "N/A",
                 f"{short_put_strike:.0f}" if short_put_strike else "N/A",
                 # Meta
-                f"{strategy_margin:.2f}",
                 f"{exchange_rate:.6f}" if exchange_rate else "N/A",
                 environment
             ]
@@ -1730,8 +1727,8 @@ class GoogleSheetsLogger:
                 # No data row exists yet, append it
                 worksheet.append_row(row)
             else:
-                # Update existing row 2 (16 columns: A through P)
-                worksheet.update(f"A2:P2", [row])
+                # Update existing row 2 (15 columns: A through O)
+                worksheet.update(f"A2:O2", [row])
             logger.debug("SPY strategy account summary updated")
             return True
         except Exception as e:
