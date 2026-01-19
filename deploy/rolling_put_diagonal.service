@@ -1,0 +1,50 @@
+[Unit]
+Description=Calypso Rolling Put Diagonal Trading Bot (Bill Belt's Strategy on QQQ)
+Documentation=https://github.com/your-repo/calypso
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+# Environment variables
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+
+# Main command - runs the rolling put diagonal bot
+# Cloud environment auto-detected, credentials loaded from Secret Manager
+# --live: Use LIVE Saxo environment (real account)
+# --dry-run: Simulate trades without executing (safe testing mode)
+# Remove --dry-run when ready for real trading
+ExecStart=/opt/calypso/.venv/bin/python -m bots.rolling_put_diagonal.main --live --dry-run
+
+# Restart policy
+# Always restart on failure, with increasing delays
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# Logging
+# Logs go to systemd journal, can be viewed with: journalctl -u rolling_put_diagonal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-rpd
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/calypso /opt/calypso/logs /opt/calypso/data
+
+# Resource limits
+# Prevent runaway memory usage
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

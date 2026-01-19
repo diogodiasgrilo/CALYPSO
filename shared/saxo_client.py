@@ -3346,3 +3346,338 @@ class SaxoClient:
         logger.warning("calculate_expected_move is deprecated - use get_expected_move_from_straddle instead")
         expected_move = underlying_price * iv * math.sqrt(days / 365)
         return expected_move
+
+    # =========================================================================
+    # CHART DATA METHODS (for technical indicators)
+    # =========================================================================
+
+    def get_chart_data(
+        self,
+        uic: int,
+        asset_type: str = "Stock",
+        horizon: int = 60,
+        count: int = 50,
+        field_groups: str = "ChartInfo,Data"
+    ) -> Optional[Dict]:
+        """
+        Get historical OHLC chart data for an instrument.
+
+        Uses the Saxo Chart API to fetch historical price bars.
+        Useful for calculating technical indicators like EMA, MACD, CCI.
+
+        Args:
+            uic: UIC of the instrument
+            asset_type: Asset type (Stock, Etf, StockIndex, etc.)
+            horizon: Time horizon for each bar in MINUTES:
+                     1 = 1 minute, 5 = 5 minutes, 60 = 1 hour, 1440 = 1 day
+            count: Number of bars to fetch (max 1200)
+            field_groups: Data fields to include
+
+        Returns:
+            dict: Chart data including OHLC bars, or None if failed.
+                  Structure: {
+                      "ChartInfo": {...},
+                      "Data": [
+                          {"Time": "...", "Open": ..., "High": ..., "Low": ..., "Close": ...},
+                          ...
+                      ]
+                  }
+        """
+        endpoint = f"/chart/v1/charts"
+        params = {
+            "Uic": uic,
+            "AssetType": asset_type,
+            "Horizon": horizon,
+            "Count": count,
+            "FieldGroups": field_groups
+        }
+
+        try:
+            result = self._make_request("GET", endpoint, params=params)
+            if result and "Data" in result:
+                logger.debug(f"Got {len(result['Data'])} chart bars for UIC {uic}")
+                return result
+            logger.warning(f"No chart data returned for UIC {uic}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get chart data for UIC {uic}: {e}")
+            return None
+
+    def get_daily_ohlc(
+        self,
+        uic: int,
+        asset_type: str = "Stock",
+        days: int = 50
+    ) -> Optional[List[Dict]]:
+        """
+        Get daily OHLC bars for an instrument.
+
+        Convenience method for get_chart_data with daily horizon.
+
+        Args:
+            uic: UIC of the instrument
+            asset_type: Asset type
+            days: Number of days of data to fetch
+
+        Returns:
+            list: List of OHLC bars [{Time, Open, High, Low, Close}, ...]
+                  or None if failed.
+        """
+        result = self.get_chart_data(
+            uic=uic,
+            asset_type=asset_type,
+            horizon=1440,  # 1440 minutes = 1 day
+            count=days
+        )
+
+        if result and "Data" in result:
+            return result["Data"]
+        return None
+
+    # =========================================================================
+    # DELTA-BASED OPTION FINDING
+    # =========================================================================
+
+    def find_put_by_delta(
+        self,
+        underlying_uic: int,
+        underlying_price: float,
+        target_delta: float,
+        target_dte: int,
+        delta_tolerance: float = 0.05
+    ) -> Optional[Dict]:
+        """
+        Find a put option with a specific target delta.
+
+        Used for strategies that require specific delta positioning,
+        such as the Rolling Put Diagonal (33 delta long put).
+
+        Args:
+            underlying_uic: UIC of the underlying instrument
+            underlying_price: Current price of the underlying
+            target_delta: Target delta (negative for puts, e.g., -0.33)
+                          Will be converted to absolute value for comparison.
+            target_dte: Target days to expiration
+            delta_tolerance: Acceptable deviation from target delta (default 0.05)
+
+        Returns:
+            dict: Put option data with UIC, strike, expiry, delta, or None if not found.
+                  Structure: {
+                      "uic": int,
+                      "strike": float,
+                      "expiry": str,
+                      "delta": float,
+                      "dte": int,
+                      "option_type": "Put"
+                  }
+        """
+        # Ensure target_delta is positive for comparison
+        target_delta_abs = abs(target_delta)
+
+        expirations = self.get_option_expirations(underlying_uic)
+        if not expirations:
+            logger.error("Failed to get option expirations")
+            return None
+
+        # Find closest expiration to target DTE
+        today = datetime.now().date()
+        target_expiration = None
+        selected_dte = None
+        closest_diff = float('inf')
+
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry")
+            if not exp_date_str:
+                continue
+
+            exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+            diff = abs(dte - target_dte)
+
+            if diff < closest_diff:
+                closest_diff = diff
+                target_expiration = exp_data
+                selected_dte = dte
+
+        if not target_expiration:
+            logger.warning(f"No expiration found close to {target_dte} DTE")
+            return None
+
+        logger.info(f"Using expiration with {selected_dte} DTE (target: {target_dte})")
+
+        # Get all puts for this expiration
+        specific_options = target_expiration.get("SpecificOptions", [])
+        if not specific_options:
+            logger.error("No SpecificOptions in target expiration")
+            return None
+
+        # Filter to puts only
+        puts = [opt for opt in specific_options if opt.get("PutCall") == "Put"]
+        if not puts:
+            logger.error("No puts found in expiration")
+            return None
+
+        # For each put, get the Greeks and find the one closest to target delta
+        best_match = None
+        best_delta_diff = float('inf')
+
+        for put in puts:
+            put_uic = put.get("Uic")
+            strike = put.get("StrikePrice")
+
+            if not put_uic:
+                continue
+
+            # Get Greeks for this option
+            greeks = self.get_option_greeks(put_uic)
+            if not greeks:
+                continue
+
+            delta = greeks.get("Delta", 0)
+            delta_abs = abs(delta)
+
+            # Check if this delta is within tolerance and closer to target
+            delta_diff = abs(delta_abs - target_delta_abs)
+            if delta_diff <= delta_tolerance and delta_diff < best_delta_diff:
+                best_delta_diff = delta_diff
+                best_match = {
+                    "uic": put_uic,
+                    "strike": strike,
+                    "expiry": target_expiration.get("Expiry"),
+                    "delta": delta,
+                    "theta": greeks.get("Theta", 0),
+                    "gamma": greeks.get("Gamma", 0),
+                    "vega": greeks.get("Vega", 0),
+                    "dte": selected_dte,
+                    "option_type": "Put"
+                }
+
+        if best_match:
+            logger.info(f"Found put at strike {best_match['strike']} with delta {best_match['delta']:.3f} "
+                        f"(target: {-target_delta_abs:.3f}, diff: {best_delta_diff:.3f})")
+            return best_match
+        else:
+            logger.warning(f"No put found with delta close to {-target_delta_abs:.3f} "
+                          f"(tolerance: {delta_tolerance})")
+            return None
+
+    def find_next_trading_day_expiry(
+        self,
+        underlying_uic: int
+    ) -> Optional[Dict]:
+        """
+        Find the next trading day's expiration (1 DTE options).
+
+        Used for strategies that sell daily options like the Rolling Put Diagonal.
+
+        Args:
+            underlying_uic: UIC of the underlying instrument
+
+        Returns:
+            dict: Expiration data with expiry date and available strikes, or None.
+                  Structure: {
+                      "expiry": str,
+                      "dte": int,
+                      "options": list  # SpecificOptions from the expiration
+                  }
+        """
+        expirations = self.get_option_expirations(underlying_uic)
+        if not expirations:
+            logger.error("Failed to get option expirations")
+            return None
+
+        today = datetime.now().date()
+
+        # Find the first expiration that is 1 or more days away
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry")
+            if not exp_date_str:
+                continue
+
+            exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+
+            # We want 1 DTE (tomorrow) or 2 DTE (day after) for next trading day
+            if dte >= 1:
+                logger.info(f"Found next trading day expiry: {exp_date_str} ({dte} DTE)")
+                return {
+                    "expiry": exp_date_str,
+                    "dte": dte,
+                    "options": exp_data.get("SpecificOptions", [])
+                }
+
+        logger.warning("No next trading day expiration found")
+        return None
+
+    def find_atm_put_for_expiry(
+        self,
+        underlying_uic: int,
+        underlying_price: float,
+        expiry_date: str
+    ) -> Optional[Dict]:
+        """
+        Find the ATM put for a specific expiry date.
+
+        Used for selling daily ATM puts in strategies like Rolling Put Diagonal.
+
+        Args:
+            underlying_uic: UIC of the underlying instrument
+            underlying_price: Current price of the underlying
+            expiry_date: Target expiry date string (e.g., "2026-01-20T00:00:00Z")
+
+        Returns:
+            dict: ATM put data with UIC, strike, expiry, or None if not found.
+        """
+        expirations = self.get_option_expirations(underlying_uic)
+        if not expirations:
+            return None
+
+        # Find the matching expiration
+        target_expiration = None
+        target_date = expiry_date[:10]  # Just the date part
+
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry", "")
+            if exp_date_str[:10] == target_date:
+                target_expiration = exp_data
+                break
+
+        if not target_expiration:
+            logger.error(f"No expiration found matching {target_date}")
+            return None
+
+        # Find ATM strike
+        specific_options = target_expiration.get("SpecificOptions", [])
+        if not specific_options:
+            return None
+
+        # Find strike closest to underlying price
+        atm_strike = None
+        min_diff = float('inf')
+
+        for option in specific_options:
+            strike = option.get("StrikePrice", 0)
+            diff = abs(strike - underlying_price)
+            if diff < min_diff:
+                min_diff = diff
+                atm_strike = strike
+
+        if atm_strike is None:
+            return None
+
+        # Find the put at ATM strike
+        for option in specific_options:
+            if option.get("StrikePrice") == atm_strike and option.get("PutCall") == "Put":
+                today = datetime.now().date()
+                exp_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+
+                return {
+                    "uic": option.get("Uic"),
+                    "strike": atm_strike,
+                    "expiry": target_expiration.get("Expiry"),
+                    "dte": dte,
+                    "option_type": "Put"
+                }
+
+        return None
