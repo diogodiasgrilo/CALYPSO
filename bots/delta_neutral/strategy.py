@@ -4445,8 +4445,13 @@ class DeltaNeutralStrategy:
         try:
             balance = self.client.get_balance()
             if balance:
-                # Use actual margin held for positions
-                strategy_margin = abs(balance.get("MarginUsedByCurrentPositions", 0))
+                # Try root level first, then nested InitialMargin object
+                margin = balance.get("MarginUsedByCurrentPositions", 0)
+                if margin == 0:
+                    # Try nested in InitialMargin
+                    initial_margin = balance.get("InitialMargin", {})
+                    margin = initial_margin.get("MarginUsedByCurrentPositions", 0)
+                strategy_margin = abs(margin) if margin else 0
         except Exception as e:
             logger.debug(f"Could not fetch margin from Saxo: {e}")
 
