@@ -24,6 +24,8 @@ from queue import Queue
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+from shared.market_hours import get_us_market_time
+
 # Configure module logger
 logger = logging.getLogger(__name__)
 
@@ -2236,7 +2238,7 @@ class LocalFileLogger:
         self._setup_logging()
 
     def _setup_logging(self):
-        """Configure the Python logging module."""
+        """Configure the Python logging module with Eastern Time timestamps."""
         # Get the root logger
         root_logger = logging.getLogger()
         root_logger.setLevel(getattr(logging, self.log_level))
@@ -2244,8 +2246,17 @@ class LocalFileLogger:
         # Clear existing handlers
         root_logger.handlers.clear()
 
-        # Create formatter
-        formatter = logging.Formatter(
+        # Create custom formatter that uses Eastern Time (NYSE standard)
+        class ETFormatter(logging.Formatter):
+            """Custom formatter that uses Eastern Time for all timestamps."""
+            def formatTime(self, record, datefmt=None):
+                # Convert to Eastern Time
+                et_time = get_us_market_time()
+                if datefmt:
+                    return et_time.strftime(datefmt)
+                return et_time.strftime("%Y-%m-%d %H:%M:%S")
+
+        formatter = ETFormatter(
             "%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
@@ -2565,7 +2576,8 @@ class TradeLoggerService:
             metrics: Optional dict of key metrics to display (e.g., {"P&L": 17.00, "Theta": 14.50})
         """
         try:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Use Eastern Time for all timestamps (NYSE standard)
+            timestamp = get_us_market_time().strftime("%Y-%m-%d %H:%M:%S ET")
 
             # Format metrics if provided
             metrics_str = ""

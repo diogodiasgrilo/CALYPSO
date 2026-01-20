@@ -10,7 +10,7 @@
 
 echo ""
 echo "=========================================="
-echo "  CALYPSO BOT STATUS - $(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "  CALYPSO BOT STATUS - $(TZ='America/New_York' date '+%Y-%m-%d %H:%M:%S ET')"
 echo "=========================================="
 echo ""
 
