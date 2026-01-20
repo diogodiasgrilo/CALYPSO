@@ -2594,6 +2594,94 @@ class TradeLoggerService:
         except Exception as e:
             logger.error(f"Failed to write to monitor log: {e}")
 
+    def _auto_forward_to_monitor(self, message: str, level: str = "INFO"):
+        """
+        Automatically forward important events to the shared monitor log.
+
+        This method parses log messages and extracts key events to display
+        in the combined monitor log. It detects:
+        - HEARTBEAT messages (with state, prices)
+        - Market status (OPEN/CLOSED)
+        - Trade actions (ACTION:, [DRY RUN] ACTION:)
+        - Position recovery
+        - Errors and warnings
+        - Shutdown events
+
+        Args:
+            message: The log message to check
+            level: Log level (used to detect errors/warnings)
+        """
+        msg_upper = message.upper()
+
+        # Skip debug-level noise
+        if level.upper() == "DEBUG":
+            return
+
+        # HEARTBEAT messages - extract key info
+        if "HEARTBEAT" in msg_upper:
+            # Parse heartbeat: "HEARTBEAT | State: FullPosition | SPY: $593.21 | VIX: 15.2 | Next check in 60s"
+            # or: "HEARTBEAT | Market closed (weekend) - sleeping for 15m"
+            if "MARKET CLOSED" in msg_upper:
+                # Market closed heartbeat
+                self.log_monitor("HEARTBEAT", message.split("HEARTBEAT |")[-1].strip() if "HEARTBEAT |" in message else message)
+            else:
+                # Active trading heartbeat - extract metrics
+                metrics = {}
+                parts = message.split("|")
+                for part in parts:
+                    part = part.strip()
+                    if part.startswith("State:"):
+                        state = part.replace("State:", "").strip()
+                        metrics["State"] = state
+                    elif part.startswith("SPY:") or part.startswith("$"):
+                        metrics["SPY"] = part.replace("SPY:", "").strip()
+                    elif part.startswith("VIX:"):
+                        metrics["VIX"] = part.replace("VIX:", "").strip()
+                    # Handle US500/QQQ for other bots
+                    elif "US500" in part.upper() or "QQQ" in part.upper():
+                        metrics["Price"] = part.strip()
+
+                if metrics:
+                    self.log_monitor("HEARTBEAT", "Active", metrics)
+
+        # Market status messages
+        elif "MARKET CLOSED" in msg_upper or "🔴" in message:
+            # Extract just the key part: "🔴 Market CLOSED (Pre-market) | Opens in 4h 8m"
+            self.log_monitor("MARKET", message[:80])
+
+        elif "MARKET OPEN" in msg_upper or "🟢" in message:
+            self.log_monitor("MARKET", message[:80])
+
+        # Trade actions
+        elif "ACTION:" in msg_upper:
+            # Parse: "ACTION: Sold weekly strangle" or "[DRY RUN] ACTION: Would sell..."
+            action_part = message.split("ACTION:")[-1].strip() if "ACTION:" in message else message
+            status = "DRY_RUN" if "[DRY RUN]" in message else "TRADE"
+            self.log_monitor(status, action_part[:60])
+
+        # Position recovery
+        elif "POSITION RECOVERY" in msg_upper or "RECOVERED" in msg_upper:
+            self.log_monitor("RECOVERY", message[:60])
+
+        # Daily summary logging
+        elif "DAILY SUMMARY" in msg_upper or "PERFORMANCE METRICS" in msg_upper:
+            self.log_monitor("SUMMARY", message[:60])
+
+        # Errors and warnings (always forward)
+        elif level.upper() in ("ERROR", "CRITICAL"):
+            self.log_monitor("ERROR", message[:80])
+
+        elif level.upper() == "WARNING":
+            self.log_monitor("WARNING", message[:80])
+
+        # Shutdown events
+        elif "SHUTDOWN" in msg_upper or "SHUTTING DOWN" in msg_upper:
+            self.log_monitor("SHUTDOWN", message[:60])
+
+        # Bot starting
+        elif "BOT STARTING" in msg_upper or "TRADING BOT STARTING" in msg_upper:
+            self.log_monitor("STARTED", message[:60])
+
     def _process_log_queue(self):
         """Process trades from the logging queue."""
         while not self._stop_logging:
@@ -2698,9 +2786,75 @@ class TradeLoggerService:
         # Add to queue for async processing
         self.log_queue.put(trade)
 
+        # Forward trade to monitor log for combined visibility
+        self._forward_trade_to_monitor(action, strike, price, pnl, premium_received, option_type)
+
+    def _forward_trade_to_monitor(
+        self,
+        action: str,
+        strike: Any,
+        price: float,
+        pnl: float,
+        premium_received: Optional[float],
+        option_type: Optional[str]
+    ):
+        """
+        Forward trade events to the shared monitor log.
+
+        Creates a concise summary of the trade for the combined log.
+
+        Args:
+            action: Trade action (e.g., "OPEN_LONG_STRADDLE")
+            strike: Strike price(s)
+            price: Execution price
+            pnl: Profit/Loss
+            premium_received: Premium collected (for shorts)
+            option_type: Type of option
+        """
+        try:
+            # Format strike - can be float, int, or string like "684/700"
+            if isinstance(strike, (int, float)):
+                strike_str = f"${strike:.0f}"
+            else:
+                strike_str = str(strike)
+
+            # Build metrics dict
+            metrics = {"Strike": strike_str}
+
+            if price and price > 0:
+                metrics["Price"] = f"${price:.2f}"
+
+            if premium_received and premium_received > 0:
+                metrics["Premium"] = f"${premium_received:.2f}"
+
+            if pnl != 0:
+                metrics["P&L"] = f"${pnl:.2f}"
+
+            # Determine status based on action
+            if "[SIMULATED]" in action or "[DRY RUN]" in action:
+                status = "DRY_RUN"
+                action_clean = action.replace("[SIMULATED]", "").replace("[DRY RUN]", "").strip()
+            else:
+                status = "TRADE"
+                action_clean = action
+
+            # Create human-readable message
+            if option_type:
+                message = f"{action_clean} - {option_type}"
+            else:
+                message = action_clean
+
+            self.log_monitor(status, message[:50], metrics)
+
+        except Exception as e:
+            logger.debug(f"Failed to forward trade to monitor log: {e}")
+
     def log_event(self, message: str, level: str = "INFO"):
         """
         Log a general event message.
+
+        Automatically forwards important events to the shared monitor log
+        based on keywords in the message.
 
         Args:
             message: The message to log
@@ -2709,9 +2863,15 @@ class TradeLoggerService:
         log_func = getattr(logger, level.lower(), logger.info)
         log_func(message)
 
+        # Auto-forward important events to monitor log
+        # This allows `tail -f logs/monitor.log` to show key events from all bots
+        self._auto_forward_to_monitor(message, level)
+
     def log_error(self, message: str, exception: Optional[Exception] = None):
         """
         Log an error message.
+
+        Automatically forwards to the shared monitor log.
 
         Args:
             message: Error description
@@ -2719,8 +2879,10 @@ class TradeLoggerService:
         """
         if exception:
             logger.error(f"{message}: {exception}", exc_info=True)
+            self.log_monitor("ERROR", f"{message}: {exception}"[:80])
         else:
             logger.error(message)
+            self.log_monitor("ERROR", message[:80])
 
     def log_status(self, status: Dict[str, Any]):
         """
