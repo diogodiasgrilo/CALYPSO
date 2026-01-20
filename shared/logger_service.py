@@ -2492,14 +2492,16 @@ class TradeLoggerService:
         log_queue: Queue for asynchronous logging
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], bot_name: Optional[str] = None):
         """
         Initialize the trade logging service.
 
         Args:
             config: Full configuration dictionary
+            bot_name: Name of the bot for monitor log identification (e.g., "DELTA_NEUTRAL")
         """
         self.config = config
+        self.bot_name = bot_name or "UNKNOWN"
 
         # Currency configuration
         self.currency_config = config.get("currency", {})
@@ -2519,6 +2521,10 @@ class TradeLoggerService:
         # Initialize Email Alerter (optional)
         self.email_alerter = EmailAlerter(config)
 
+        # Initialize shared monitor log file (for multi-bot monitoring)
+        self.monitor_log_file = Path("logs/monitor.log")
+        self.monitor_log_file.parent.mkdir(parents=True, exist_ok=True)
+
         # Asynchronous logging queue
         self.log_queue: Queue = Queue()
         self._stop_logging = False
@@ -2533,12 +2539,48 @@ class TradeLoggerService:
         logger.info(f"  - Microsoft Excel: {'ENABLED' if self.microsoft_logger.enabled else 'DISABLED'}")
         logger.info(f"  - Email Alerts: {'ENABLED' if self.email_alerter.enabled else 'DISABLED'}")
         logger.info(f"  - Currency Conversion: {'ENABLED' if self.currency_enabled else 'DISABLED'} ({self.base_currency} -> {self.account_currency})")
+        logger.info(f"  - Monitor Log: ENABLED (logs/monitor.log)")
+
+        # Log bot startup to monitor log
+        self.log_monitor("STARTED", "Bot initialized")
 
     def _start_log_thread(self):
         """Start the background logging thread."""
         self._log_thread = threading.Thread(target=self._process_log_queue, daemon=True)
         self._log_thread.start()
         logger.debug("Logging thread started")
+
+    def log_monitor(self, status: str, message: str, metrics: Optional[Dict[str, Any]] = None):
+        """
+        Write a condensed status line to the shared monitor log.
+
+        This log is designed for monitoring all bots at once via:
+            tail -f logs/monitor.log
+
+        Format: TIMESTAMP | BOT_NAME | STATUS | MESSAGE | METRICS
+
+        Args:
+            status: Short status code (e.g., "STARTED", "HEARTBEAT", "TRADE", "ERROR", "STOPPED")
+            message: Brief description
+            metrics: Optional dict of key metrics to display (e.g., {"P&L": 17.00, "Theta": 14.50})
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Format metrics if provided
+            metrics_str = ""
+            if metrics:
+                metrics_str = " | " + " | ".join(f"{k}: {v}" for k, v in metrics.items())
+
+            # Build log line
+            log_line = f"{timestamp} | {self.bot_name:<20} | {status:<10} | {message}{metrics_str}\n"
+
+            # Append to monitor log file (thread-safe via file system)
+            with open(self.monitor_log_file, "a", encoding="utf-8") as f:
+                f.write(log_line)
+
+        except Exception as e:
+            logger.error(f"Failed to write to monitor log: {e}")
 
     def _process_log_queue(self):
         """Process trades from the logging queue."""
@@ -3178,14 +3220,15 @@ class TradeLoggerService:
 
 
 # Convenience function for quick logging setup
-def setup_logging(config: Dict[str, Any]) -> TradeLoggerService:
+def setup_logging(config: Dict[str, Any], bot_name: Optional[str] = None) -> TradeLoggerService:
     """
     Quick setup function for the trade logging service.
 
     Args:
         config: Configuration dictionary
+        bot_name: Name of the bot for monitor log identification (e.g., "DELTA_NEUTRAL")
 
     Returns:
         TradeLoggerService: Initialized logging service
     """
-    return TradeLoggerService(config)
+    return TradeLoggerService(config, bot_name=bot_name)

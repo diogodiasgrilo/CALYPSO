@@ -243,7 +243,7 @@ def list_accounts(config: dict):
         config: Configuration dictionary
     """
     # Initialize logging (required for SaxoClient)
-    setup_logging(config)
+    setup_logging(config, bot_name="DELTA_NEUTRAL")
 
     # Initialize Saxo client
     client = SaxoClient(config)
@@ -316,7 +316,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     global shutdown_requested
 
     # Initialize logging service
-    trade_logger = setup_logging(config)
+    trade_logger = setup_logging(config, bot_name="DELTA_NEUTRAL")
     trade_logger.log_event("=" * 60)
     trade_logger.log_event("TRADING BOT STARTING")
     trade_logger.log_event(f"Mode: {'DRY RUN (Simulation)' if dry_run else 'LIVE TRADING'}")
@@ -695,7 +695,7 @@ def show_status(config: dict):
         config: Configuration dictionary
     """
     # Initialize logging
-    trade_logger = setup_logging(config)
+    trade_logger = setup_logging(config, bot_name="DELTA_NEUTRAL")
 
     # Initialize client
     client = SaxoClient(config)

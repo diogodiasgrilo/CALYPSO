@@ -241,7 +241,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     global shutdown_requested
 
     # Initialize logging service
-    trade_logger = setup_logging(config)
+    trade_logger = setup_logging(config, bot_name="ROLLING_PUT_DIAGONAL")
     trade_logger.log_event("=" * 60)
     trade_logger.log_event("ROLLING PUT DIAGONAL BOT STARTING")
     trade_logger.log_event(f"Mode: {'DRY RUN (Simulation)' if dry_run else 'LIVE TRADING'}")
@@ -418,7 +418,7 @@ def show_status(config: dict):
     print("=" * 60)
 
     # Initialize client
-    setup_logging(config)
+    setup_logging(config, bot_name="ROLLING_PUT_DIAGONAL")
     client = SaxoClient(config)
 
     print("\nAuthenticating...")
