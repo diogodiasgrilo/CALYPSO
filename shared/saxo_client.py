@@ -874,7 +874,9 @@ class SaxoClient:
             if cached and "Quote" in cached:
                 bid = cached["Quote"].get("Bid", 0)
                 ask = cached["Quote"].get("Ask", 0)
-                if bid > 0 and ask > 0:
+                mid = cached["Quote"].get("Mid", 0)
+                # Accept cache if we have Bid/Ask OR just Mid (for CFDs/indices like US500.I)
+                if (bid > 0 and ask > 0) or mid > 0:
                     logger.debug(f"get_quote: Using cached streaming data for UIC {uic}")
                     return cached
 

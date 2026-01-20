@@ -56,6 +56,13 @@ MAX_CLOSING_TIMEOUT_SECONDS = 300  # 5 minutes max to close position
 WING_BREACH_TOLERANCE = 0.10  # $0.10 tolerance for float comparison
 DEFAULT_SIMULATED_CREDIT_PER_WING_POINT = 2.50  # Realistic: $2.50 per point of wing width
 
+# Order execution safety constants (matching Delta Neutral bot)
+DEFAULT_ORDER_TIMEOUT_SECONDS = 60  # Default timeout for limit orders
+EMERGENCY_ORDER_TIMEOUT_SECONDS = 30  # Shorter timeout for emergency situations
+EMERGENCY_SLIPPAGE_PERCENT = 5.0  # 5% slippage tolerance in emergency mode
+MAX_CONSECUTIVE_FAILURES = 5  # Trigger circuit breaker after this many failures
+CIRCUIT_BREAKER_COOLDOWN_MINUTES = 5  # Cooldown period when circuit breaker opens
+
 # US Eastern timezone
 try:
     import pytz
@@ -582,6 +589,20 @@ class IronFlyStrategy:
         self._last_health_check = get_eastern_timestamp()
         self._consecutive_stale_data_warnings = 0
 
+        # Circuit breaker tracking (matching Delta Neutral bot safety features)
+        self._consecutive_failures = 0
+        self._circuit_breaker_open = False
+        self._circuit_breaker_reason = ""
+        self._circuit_breaker_opened_at: Optional[datetime] = None
+
+        # Order execution safety tracking
+        self._orphaned_orders: List[Dict] = []  # Track orders that may need cleanup
+        self._pending_order_ids: List[str] = []  # Track orders awaiting fill
+        self._filled_orders: Dict[str, Dict] = {}  # Track filled orders by ID
+        self.order_timeout_seconds = self.strategy_config.get(
+            "order_timeout_seconds", DEFAULT_ORDER_TIMEOUT_SECONDS
+        )
+
         # Cumulative metrics tracking (persisted across days)
         self.cumulative_metrics = load_cumulative_metrics()
 
@@ -594,6 +615,369 @@ class IronFlyStrategy:
         logger.info(f"  Economic calendar check: {'ENABLED' if self.economic_calendar_check else 'DISABLED'}")
         if self.manual_expected_move:
             logger.info(f"  Manual expected move: {self.manual_expected_move} points (calibration mode)")
+
+    # =========================================================================
+    # CIRCUIT BREAKER METHODS (Safety feature from Delta Neutral bot)
+    # =========================================================================
+
+    def _increment_failure_count(self, reason: str) -> None:
+        """Increment consecutive failure counter and open circuit breaker if threshold reached."""
+        self._consecutive_failures += 1
+        logger.warning(f"Order failure #{self._consecutive_failures}: {reason}")
+
+        if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            self._open_circuit_breaker(reason)
+
+    def _reset_failure_count(self) -> None:
+        """Reset failure counter after successful operation."""
+        if self._consecutive_failures > 0:
+            logger.info(f"Resetting failure count (was {self._consecutive_failures})")
+            self._consecutive_failures = 0
+
+    def _open_circuit_breaker(self, reason: str) -> None:
+        """Open circuit breaker to prevent further order attempts."""
+        self._circuit_breaker_open = True
+        self._circuit_breaker_reason = reason
+        self._circuit_breaker_opened_at = get_eastern_timestamp()
+
+        logger.critical(
+            f"CIRCUIT BREAKER OPENED: {reason} "
+            f"(after {self._consecutive_failures} consecutive failures)"
+        )
+
+        self.trade_logger.log_safety_event({
+            "event_type": "IRON_FLY_CIRCUIT_BREAKER_OPEN",
+            "spy_price": self.current_price,
+            "vix": self.current_vix,
+            "description": f"Circuit breaker opened: {reason}",
+            "consecutive_failures": self._consecutive_failures,
+            "result": "Trading halted - manual intervention required"
+        })
+
+    def _check_circuit_breaker(self) -> bool:
+        """
+        Check if circuit breaker allows trading.
+
+        Returns:
+            bool: True if trading allowed, False if blocked
+        """
+        if not self._circuit_breaker_open:
+            return True
+
+        # Check if cooldown period has passed
+        if self._circuit_breaker_opened_at:
+            elapsed = (get_eastern_timestamp() - self._circuit_breaker_opened_at).total_seconds()
+            cooldown_seconds = CIRCUIT_BREAKER_COOLDOWN_MINUTES * 60
+
+            if elapsed >= cooldown_seconds:
+                logger.info(
+                    f"Circuit breaker cooldown complete ({elapsed:.0f}s elapsed). "
+                    "Resetting for retry."
+                )
+                self._circuit_breaker_open = False
+                self._circuit_breaker_reason = ""
+                self._circuit_breaker_opened_at = None
+                self._consecutive_failures = 0
+                return True
+
+            logger.warning(
+                f"Circuit breaker still open: {self._circuit_breaker_reason} "
+                f"({cooldown_seconds - elapsed:.0f}s remaining in cooldown)"
+            )
+
+        return False
+
+    # =========================================================================
+    # ORDER SAFETY METHODS (Safety feature from Delta Neutral bot)
+    # =========================================================================
+
+    def _add_orphaned_order(self, order_info: Dict) -> None:
+        """Track a potentially orphaned order for later cleanup."""
+        self._orphaned_orders.append({
+            **order_info,
+            "timestamp": get_eastern_timestamp().isoformat(),
+            "status": "potentially_orphaned"
+        })
+        logger.warning(f"Added orphaned order to tracking: {order_info.get('order_id', 'unknown')}")
+
+    def _check_for_orphaned_orders(self) -> None:
+        """Check and attempt to clean up any tracked orphaned orders."""
+        if not self._orphaned_orders:
+            return
+
+        logger.info(f"Checking {len(self._orphaned_orders)} potentially orphaned orders...")
+
+        for order in self._orphaned_orders[:]:  # Iterate over copy
+            order_id = order.get("order_id")
+            if not order_id:
+                self._orphaned_orders.remove(order)
+                continue
+
+            try:
+                # Check if order is still active
+                order_status = self.client.get_order_status(order_id)
+
+                if order_status.get("status") in ["Filled", "Cancelled", "Rejected"]:
+                    logger.info(f"Orphaned order {order_id} is {order_status.get('status')} - removing from tracking")
+                    self._orphaned_orders.remove(order)
+                elif order_status.get("status") in ["Working", "Pending"]:
+                    logger.warning(f"Orphaned order {order_id} still active - attempting cancel")
+                    try:
+                        self.client.cancel_order(order_id)
+                        order["status"] = "cancelled"
+                        self._orphaned_orders.remove(order)
+                        logger.info(f"Successfully cancelled orphaned order {order_id}")
+                    except Exception as cancel_err:
+                        logger.error(f"Failed to cancel orphaned order {order_id}: {cancel_err}")
+            except Exception as e:
+                logger.error(f"Error checking orphaned order {order_id}: {e}")
+
+    def _place_limit_order_with_timeout(
+        self,
+        uic: int,
+        amount: int,
+        direction: BuySell,
+        limit_price: float,
+        timeout_seconds: Optional[int] = None,
+        emergency_mode: bool = False
+    ) -> Optional[Dict]:
+        """
+        Place a limit order with timeout and fill verification.
+
+        This is the safe order placement method that:
+        1. Places a limit order
+        2. Waits for fill with timeout
+        3. Cancels and retries if not filled
+        4. Tracks orphaned orders
+
+        Args:
+            uic: Instrument UIC
+            amount: Number of contracts
+            direction: BuySell.Buy or BuySell.Sell
+            limit_price: Limit price for the order
+            timeout_seconds: How long to wait for fill (default from config)
+            emergency_mode: If True, use emergency timeout and slippage
+
+        Returns:
+            Dict with order details if filled, None if failed
+        """
+        if timeout_seconds is None:
+            timeout_seconds = EMERGENCY_ORDER_TIMEOUT_SECONDS if emergency_mode else self.order_timeout_seconds
+
+        # Apply slippage in emergency mode
+        if emergency_mode:
+            slippage = limit_price * (EMERGENCY_SLIPPAGE_PERCENT / 100)
+            if direction == BuySell.Buy:
+                limit_price = limit_price + slippage  # Pay more to buy
+            else:
+                limit_price = limit_price - slippage  # Accept less to sell
+            logger.warning(f"Emergency mode: adjusted limit price with {EMERGENCY_SLIPPAGE_PERCENT}% slippage to {limit_price:.2f}")
+
+        logger.info(
+            f"Placing limit order: {direction.value} {amount}x UIC {uic} @ {limit_price:.2f} "
+            f"(timeout: {timeout_seconds}s, emergency: {emergency_mode})"
+        )
+
+        try:
+            # Place the limit order
+            order_result = self.client.place_order(
+                uic=uic,
+                amount=amount,
+                direction=direction,
+                order_type=OrderType.Limit,
+                limit_price=limit_price
+            )
+
+            if not order_result or "OrderId" not in order_result:
+                logger.error(f"Failed to place limit order: {order_result}")
+                self._increment_failure_count("Order placement failed - no OrderId returned")
+                return None
+
+            order_id = order_result["OrderId"]
+            self._pending_order_ids.append(order_id)
+
+            # Wait for fill with polling
+            start_time = time.time()
+            poll_interval = 2  # Check every 2 seconds
+
+            while time.time() - start_time < timeout_seconds:
+                try:
+                    order_status = self.client.get_order_status(order_id)
+                    status = order_status.get("status", "Unknown")
+
+                    if status == "Filled":
+                        logger.info(f"Order {order_id} filled successfully")
+                        self._pending_order_ids.remove(order_id)
+                        self._filled_orders[order_id] = order_status
+                        self._reset_failure_count()
+                        return order_status
+
+                    elif status in ["Cancelled", "Rejected"]:
+                        logger.warning(f"Order {order_id} was {status}")
+                        self._pending_order_ids.remove(order_id)
+                        self._increment_failure_count(f"Order {status}")
+                        return None
+
+                    # Still working, wait and check again
+                    time.sleep(poll_interval)
+
+                except Exception as poll_err:
+                    logger.error(f"Error polling order status: {poll_err}")
+                    time.sleep(poll_interval)
+
+            # Timeout reached - cancel the order
+            logger.warning(f"Order {order_id} timeout after {timeout_seconds}s - cancelling")
+
+            try:
+                self.client.cancel_order(order_id)
+                self._pending_order_ids.remove(order_id)
+                logger.info(f"Cancelled timed-out order {order_id}")
+            except Exception as cancel_err:
+                logger.error(f"Failed to cancel order {order_id}: {cancel_err}")
+                # Track as potentially orphaned
+                self._add_orphaned_order({
+                    "order_id": order_id,
+                    "uic": uic,
+                    "direction": direction.value,
+                    "amount": amount,
+                    "limit_price": limit_price,
+                    "reason": "timeout_cancel_failed"
+                })
+
+            self._increment_failure_count("Order timeout")
+            return None
+
+        except Exception as e:
+            logger.error(f"Exception placing limit order: {e}")
+            self._increment_failure_count(f"Order exception: {str(e)}")
+            return None
+
+    def _verify_order_fill(
+        self,
+        order_id: str,
+        leg_name: str,
+        timeout_seconds: int = 30
+    ) -> Tuple[bool, Optional[Dict]]:
+        """
+        Verify that a market order has been filled.
+
+        For market orders, this should be fast, but we still verify to catch
+        any edge cases (partial fills, rejections, etc.)
+
+        Args:
+            order_id: The order ID to verify
+            leg_name: Name of the leg (for logging)
+            timeout_seconds: How long to wait for fill confirmation
+
+        Returns:
+            Tuple of (success: bool, fill_details: Optional[Dict])
+        """
+        logger.info(f"Verifying fill for {leg_name} order {order_id}...")
+
+        start_time = time.time()
+        poll_interval = 1  # Check every 1 second for market orders (should be fast)
+
+        while time.time() - start_time < timeout_seconds:
+            try:
+                order_status = self.client.get_order_status(order_id)
+                status = order_status.get("status", "Unknown")
+
+                if status == "Filled":
+                    fill_price = order_status.get("fill_price", 0)
+                    logger.info(f"✓ {leg_name} order {order_id} FILLED at {fill_price}")
+                    return True, order_status
+
+                elif status in ["Cancelled", "Rejected"]:
+                    logger.error(f"✗ {leg_name} order {order_id} was {status}")
+                    return False, order_status
+
+                elif status == "PartiallyFilled":
+                    filled_qty = order_status.get("filled_quantity", 0)
+                    total_qty = order_status.get("total_quantity", 0)
+                    logger.warning(f"⚠ {leg_name} order {order_id} partially filled: {filled_qty}/{total_qty}")
+                    # Continue waiting for full fill
+                    time.sleep(poll_interval)
+
+                else:
+                    # Still working/pending
+                    time.sleep(poll_interval)
+
+            except Exception as e:
+                logger.error(f"Error checking {leg_name} order status: {e}")
+                time.sleep(poll_interval)
+
+        # Timeout - order didn't fill in time
+        logger.error(f"✗ {leg_name} order {order_id} timed out after {timeout_seconds}s")
+        return False, None
+
+    def _place_iron_fly_leg_with_verification(
+        self,
+        uic: int,
+        direction: BuySell,
+        amount: int,
+        leg_name: str,
+        strike: float
+    ) -> Tuple[bool, Optional[str], Optional[Dict]]:
+        """
+        Place a single Iron Fly leg with fill verification.
+
+        Args:
+            uic: Instrument UIC
+            direction: BuySell.BUY or BuySell.SELL
+            amount: Number of contracts
+            leg_name: Name for logging (e.g., "short_call")
+            strike: Strike price for logging
+
+        Returns:
+            Tuple of (success: bool, order_id: Optional[str], fill_details: Optional[Dict])
+        """
+        logger.info(f"Placing {leg_name}: {direction.value} {amount}x at strike {strike}")
+
+        try:
+            order_result = self.client.place_order_with_retry(
+                uic=uic,
+                asset_type="StockOption",
+                buy_sell=direction,
+                amount=amount,
+                order_type=OrderType.MARKET,
+                to_open_close="ToOpen"
+            )
+
+            if not order_result:
+                logger.error(f"Failed to place {leg_name} order - no result returned")
+                self._increment_failure_count(f"{leg_name} order placement failed")
+                return False, None, None
+
+            order_id = order_result.get("OrderId")
+            if not order_id:
+                logger.error(f"Failed to place {leg_name} order - no OrderId in response")
+                self._increment_failure_count(f"{leg_name} order has no OrderId")
+                return False, None, None
+
+            # Verify the fill
+            filled, fill_details = self._verify_order_fill(order_id, leg_name)
+
+            if filled:
+                self._reset_failure_count()
+                return True, order_id, fill_details
+            else:
+                # Order was placed but not filled - track as orphaned
+                self._add_orphaned_order({
+                    "order_id": order_id,
+                    "leg_name": leg_name,
+                    "uic": uic,
+                    "direction": direction.value,
+                    "amount": amount,
+                    "strike": strike,
+                    "reason": "fill_verification_failed"
+                })
+                self._increment_failure_count(f"{leg_name} fill verification failed")
+                return False, order_id, fill_details
+
+        except Exception as e:
+            logger.error(f"Exception placing {leg_name}: {e}")
+            self._increment_failure_count(f"{leg_name} exception: {str(e)}")
+            return False, None, None
 
     # =========================================================================
     # CORE STRATEGY METHODS
@@ -612,7 +996,13 @@ class IronFlyStrategy:
         # SAFETY: Reconcile position with broker on first run
         if not self._position_reconciled:
             self._reconcile_positions_with_broker()
+            self._check_for_orphaned_orders()  # Clean up any orphaned orders
             self._position_reconciled = True
+
+        # SAFETY: Check circuit breaker before allowing new trades
+        if not self._check_circuit_breaker():
+            if self.state == IronFlyState.READY_TO_ENTER:
+                return f"Circuit breaker open: {self._circuit_breaker_reason}"
 
         # Update market data
         self.update_market_data()
@@ -840,7 +1230,7 @@ class IronFlyStrategy:
             self._log_opening_range_to_sheets("SKIP", econ_reason)
             return f"Entry blocked - {econ_reason}"
 
-        # FILTER 3: VIX level check
+        # FILTER 3: VIX level check (current VIX and high during opening range)
         if self.current_vix > self.max_vix:
             self.state = IronFlyState.DAILY_COMPLETE
             reason = f"VIX {self.current_vix:.2f} > {self.max_vix}"
@@ -848,6 +1238,16 @@ class IronFlyStrategy:
             self._log_filter_event("VIX_LEVEL", reason)
             self._log_opening_range_to_sheets("SKIP", reason)
             return f"Entry blocked - VIX too high ({reason})"
+
+        # FILTER 3b: VIX exceeded max during opening range (safety check)
+        # If VIX breached the threshold at any point during 9:30-10:00, skip entry
+        if self.opening_range.vix_high > self.max_vix:
+            self.state = IronFlyState.DAILY_COMPLETE
+            reason = f"VIX peaked at {self.opening_range.vix_high:.2f} during opening range (max: {self.max_vix})"
+            self.trade_logger.log_event(f"FILTER BLOCKED: {reason}")
+            self._log_filter_event("VIX_HIGH_DURING_RANGE", reason)
+            self._log_opening_range_to_sheets("SKIP", reason)
+            return f"Entry blocked - VIX exceeded threshold during opening range ({reason})"
 
         # FILTER 4: VIX spike check
         if self.opening_range.vix_spike_percent > self.vix_spike_threshold:
@@ -1135,94 +1535,114 @@ class IronFlyStrategy:
             self.state = IronFlyState.DAILY_COMPLETE
             return error_msg
 
-        # Step 3: Place all 4 orders
-        # Use place_order_with_retry for resilience
+        # Step 3: Place all 4 orders with fill verification
+        # Each leg is placed and verified before proceeding to the next
         entry_time_eastern = get_eastern_timestamp()
         orders_placed = []
         order_ids = {}
+        fill_details = {}
+
+        # Check circuit breaker before attempting entry
+        if not self._check_circuit_breaker():
+            error_msg = f"Circuit breaker open - entry blocked: {self._circuit_breaker_reason}"
+            logger.error(error_msg)
+            self.state = IronFlyState.DAILY_COMPLETE
+            return error_msg
 
         try:
-            # Sell ATM Call (short)
-            logger.info(f"Placing order: SELL {self.position_size} ATM Call at {atm_strike}")
-            sc_order = self.client.place_order_with_retry(
+            # Leg 1: Sell ATM Call (short)
+            sc_success, sc_order_id, sc_fill = self._place_iron_fly_leg_with_verification(
                 uic=short_call_uic,
-                asset_type="StockOption",
-                buy_sell=BuySell.SELL,
+                direction=BuySell.SELL,
                 amount=self.position_size,
-                order_type=OrderType.MARKET,
-                to_open_close="ToOpen"
+                leg_name="short_call",
+                strike=atm_strike
             )
-            if sc_order:
-                order_ids["short_call"] = sc_order.get("OrderId")
-                orders_placed.append(("short_call", sc_order))
+            if sc_success and sc_order_id:
+                order_ids["short_call"] = sc_order_id
+                fill_details["short_call"] = sc_fill
+                orders_placed.append("short_call")
             else:
-                raise Exception("Failed to place short call order")
+                raise Exception("Failed to place/verify short call order")
 
-            # Sell ATM Put (short)
-            logger.info(f"Placing order: SELL {self.position_size} ATM Put at {atm_strike}")
-            sp_order = self.client.place_order_with_retry(
+            # Leg 2: Sell ATM Put (short)
+            sp_success, sp_order_id, sp_fill = self._place_iron_fly_leg_with_verification(
                 uic=short_put_uic,
-                asset_type="StockOption",
-                buy_sell=BuySell.SELL,
+                direction=BuySell.SELL,
                 amount=self.position_size,
-                order_type=OrderType.MARKET,
-                to_open_close="ToOpen"
+                leg_name="short_put",
+                strike=atm_strike
             )
-            if sp_order:
-                order_ids["short_put"] = sp_order.get("OrderId")
-                orders_placed.append(("short_put", sp_order))
+            if sp_success and sp_order_id:
+                order_ids["short_put"] = sp_order_id
+                fill_details["short_put"] = sp_fill
+                orders_placed.append("short_put")
             else:
-                raise Exception("Failed to place short put order")
+                raise Exception("Failed to place/verify short put order")
 
-            # Buy Long Call (wing protection)
-            logger.info(f"Placing order: BUY {self.position_size} Long Call at {upper_wing}")
-            lc_order = self.client.place_order_with_retry(
+            # Leg 3: Buy Long Call (wing protection)
+            lc_success, lc_order_id, lc_fill = self._place_iron_fly_leg_with_verification(
                 uic=long_call_uic,
-                asset_type="StockOption",
-                buy_sell=BuySell.BUY,
+                direction=BuySell.BUY,
                 amount=self.position_size,
-                order_type=OrderType.MARKET,
-                to_open_close="ToOpen"
+                leg_name="long_call",
+                strike=upper_wing
             )
-            if lc_order:
-                order_ids["long_call"] = lc_order.get("OrderId")
-                orders_placed.append(("long_call", lc_order))
+            if lc_success and lc_order_id:
+                order_ids["long_call"] = lc_order_id
+                fill_details["long_call"] = lc_fill
+                orders_placed.append("long_call")
             else:
-                raise Exception("Failed to place long call order")
+                raise Exception("Failed to place/verify long call order")
 
-            # Buy Long Put (wing protection)
-            logger.info(f"Placing order: BUY {self.position_size} Long Put at {lower_wing}")
-            lp_order = self.client.place_order_with_retry(
+            # Leg 4: Buy Long Put (wing protection)
+            lp_success, lp_order_id, lp_fill = self._place_iron_fly_leg_with_verification(
                 uic=long_put_uic,
-                asset_type="StockOption",
-                buy_sell=BuySell.BUY,
+                direction=BuySell.BUY,
                 amount=self.position_size,
-                order_type=OrderType.MARKET,
-                to_open_close="ToOpen"
+                leg_name="long_put",
+                strike=lower_wing
             )
-            if lp_order:
-                order_ids["long_put"] = lp_order.get("OrderId")
-                orders_placed.append(("long_put", lp_order))
+            if lp_success and lp_order_id:
+                order_ids["long_put"] = lp_order_id
+                fill_details["long_put"] = lp_fill
+                orders_placed.append("long_put")
             else:
-                raise Exception("Failed to place long put order")
+                raise Exception("Failed to place/verify long put order")
+
+            # All 4 legs successfully placed and verified!
+            logger.info(f"All 4 Iron Fly legs placed and verified: {order_ids}")
 
         except Exception as e:
             # CRITICAL: If any order fails after others succeeded, we have a partial fill
-            error_msg = f"ORDER PLACEMENT FAILED: {e}"
+            error_msg = f"ORDER PLACEMENT/VERIFICATION FAILED: {e}"
             logger.critical(error_msg)
-            logger.critical(f"Orders placed before failure: {[o[0] for o in orders_placed]}")
+            logger.critical(f"Orders placed before failure: {orders_placed}")
+
+            # Track the partially placed orders as orphaned for cleanup
+            for leg_name in orders_placed:
+                if leg_name in order_ids:
+                    self._add_orphaned_order({
+                        "order_id": order_ids[leg_name],
+                        "leg_name": leg_name,
+                        "reason": "partial_iron_fly_entry"
+                    })
 
             self.trade_logger.log_safety_event({
                 "event_type": "IRON_FLY_PARTIAL_FILL",
                 "spy_price": self.current_price,
                 "vix": self.current_vix,
-                "description": f"Partial fill during iron fly entry: {len(orders_placed)}/4 orders placed",
-                "result": f"MANUAL INTERVENTION REQUIRED - Orders: {order_ids}"
+                "description": f"Partial fill during iron fly entry: {len(orders_placed)}/4 legs verified",
+                "result": f"MANUAL INTERVENTION REQUIRED - Orders: {order_ids}",
+                "orders_placed": orders_placed,
+                "order_ids": order_ids
             })
 
-            # Don't try to unwind automatically - let operator handle it
+            # Open circuit breaker to prevent further entry attempts today
+            self._open_circuit_breaker(f"Partial fill: {len(orders_placed)}/4 legs")
+
             self.state = IronFlyState.DAILY_COMPLETE
-            return f"CRITICAL: Partial fill - {len(orders_placed)}/4 orders placed. Manual intervention required!"
+            return f"CRITICAL: Partial fill - {len(orders_placed)}/4 legs verified. Manual intervention required!"
 
         # Step 4: Create position object
         self.position = IronFlyPosition(

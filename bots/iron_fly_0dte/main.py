@@ -299,6 +299,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                                 break
                     continue
 
+                # CRITICAL: Check and reconnect WebSocket if it dropped during market hours
+                # This can happen due to Saxo closing idle connections or network issues
+                if subscriptions and not client.is_streaming:
+                    trade_logger.log_event("WebSocket disconnected during market hours - reconnecting...")
+                    try:
+                        streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
+                        if streaming_started:
+                            trade_logger.log_event("WebSocket reconnected successfully")
+                        else:
+                            trade_logger.log_event("Warning: WebSocket reconnection failed - using REST polling fallback")
+                    except Exception as e:
+                        trade_logger.log_error(f"WebSocket reconnection error: {e}")
+
                 # Run strategy check
                 action = strategy.run_strategy_check()
 
