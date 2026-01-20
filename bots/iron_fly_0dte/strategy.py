@@ -1230,7 +1230,7 @@ class IronFlyStrategy:
             self._log_opening_range_to_sheets("SKIP", econ_reason)
             return f"Entry blocked - {econ_reason}"
 
-        # FILTER 3: VIX level check (current VIX and high during opening range)
+        # FILTER 3: VIX level check (at entry time)
         if self.current_vix > self.max_vix:
             self.state = IronFlyState.DAILY_COMPLETE
             reason = f"VIX {self.current_vix:.2f} > {self.max_vix}"
@@ -1238,16 +1238,6 @@ class IronFlyStrategy:
             self._log_filter_event("VIX_LEVEL", reason)
             self._log_opening_range_to_sheets("SKIP", reason)
             return f"Entry blocked - VIX too high ({reason})"
-
-        # FILTER 3b: VIX exceeded max during opening range (safety check)
-        # If VIX breached the threshold at any point during 9:30-10:00, skip entry
-        if self.opening_range.vix_high > self.max_vix:
-            self.state = IronFlyState.DAILY_COMPLETE
-            reason = f"VIX peaked at {self.opening_range.vix_high:.2f} during opening range (max: {self.max_vix})"
-            self.trade_logger.log_event(f"FILTER BLOCKED: {reason}")
-            self._log_filter_event("VIX_HIGH_DURING_RANGE", reason)
-            self._log_opening_range_to_sheets("SKIP", reason)
-            return f"Entry blocked - VIX exceeded threshold during opening range ({reason})"
 
         # FILTER 4: VIX spike check
         if self.opening_range.vix_spike_percent > self.vix_spike_threshold:
