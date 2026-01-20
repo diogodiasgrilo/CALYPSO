@@ -244,7 +244,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     trade_logger.log_event(market_status)
 
                     # Determine reason for closure (for heartbeat messages)
-                    from shared.market_hours import is_weekend
+                    from shared.market_hours import is_weekend, get_us_market_time
                     holiday_name = get_holiday_name()
                     if holiday_name:
                         close_reason = f"({holiday_name})"
@@ -255,6 +255,18 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
 
                     # Calculate sleep duration (max 15 min to keep token alive)
                     sleep_time = calculate_sleep_duration(max_sleep=900)
+
+                    # IRON FLY SPECIFIC: Wake up at exactly 9:30 AM for opening range tracking
+                    # If we're in pre-market (before 9:30 AM), calculate exact time until 9:30
+                    now_et = get_us_market_time()
+                    market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+
+                    if now_et < market_open_time and now_et.weekday() < 5 and not holiday_name:
+                        # We're in pre-market on a trading day - wake at exactly 9:30 AM
+                        seconds_until_open = (market_open_time - now_et).total_seconds()
+                        if seconds_until_open > 0 and seconds_until_open < sleep_time:
+                            sleep_time = int(seconds_until_open)
+                            trade_logger.log_event(f"Pre-market: will wake at exactly 9:30 AM for opening range ({sleep_time}s)")
 
                     if sleep_time > 0:
                         minutes = sleep_time // 60
