@@ -27,7 +27,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, date
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -922,6 +922,9 @@ class DeltaNeutralStrategy:
         This method queries Saxo for open SPY option positions and reconstructs
         the strategy state. Essential for bot restarts and GCP VM recovery.
 
+        CRITICAL: This method now detects orphaned positions (positions that don't
+        form valid straddle/strangle pairs) and blocks trading until resolved.
+
         Returns:
             bool: True if positions were recovered, False if starting fresh
         """
@@ -957,25 +960,71 @@ class DeltaNeutralStrategy:
         logger.info(f"Long positions: {len(long_positions)}, Short positions: {len(short_positions)}")
 
         # Try to reconstruct long straddle (long call + long put at same strike)
-        straddle_recovered = self._recover_long_straddle(long_positions)
+        straddle_recovered, straddle_used_positions = self._recover_long_straddle_with_tracking(long_positions)
 
         # Try to reconstruct short strangle (short call + short put at different strikes)
-        strangle_recovered = self._recover_short_strangle(short_positions)
+        strangle_recovered, strangle_used_positions = self._recover_short_strangle_with_tracking(short_positions)
+
+        # CRITICAL: Detect orphaned positions (positions not part of valid pairs)
+        orphaned_positions = self._detect_orphaned_positions(
+            long_positions, short_positions,
+            straddle_used_positions, strangle_used_positions
+        )
+
+        if orphaned_positions:
+            self._handle_orphaned_positions(orphaned_positions)
 
         # Determine strategy state based on recovered positions
+        # LEG-BY-LEG: Check if positions are complete or partial
+        straddle_complete = self.long_straddle and self.long_straddle.is_complete
+        strangle_complete = self.short_strangle and self.short_strangle.is_complete
+
         if straddle_recovered and strangle_recovered:
-            self.state = StrategyState.FULL_POSITION
-            logger.info("RECOVERED: Full position (long straddle + short strangle)")
+            if straddle_complete and strangle_complete:
+                self.state = StrategyState.FULL_POSITION
+                logger.info("RECOVERED: Full position (long straddle + short strangle) - ALL LEGS COMPLETE")
+            elif straddle_complete:
+                # Straddle complete, strangle partial - need to add missing strangle leg
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                missing = "CALL" if self.needs_strangle_call() else "PUT"
+                logger.warning(f"RECOVERED: Straddle complete, strangle PARTIAL (missing {missing}) - will complete")
+            else:
+                # Both partial - unusual but handle it
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                logger.warning("RECOVERED: PARTIAL positions - will attempt to complete")
         elif straddle_recovered:
-            self.state = StrategyState.LONG_STRADDLE_ACTIVE
-            logger.info("RECOVERED: Long straddle active (no short strangle)")
+            if straddle_complete:
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                logger.info("RECOVERED: Long straddle active (complete, no short strangle)")
+            else:
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                missing = "CALL" if self.needs_straddle_call() else "PUT"
+                logger.warning(f"RECOVERED: PARTIAL long straddle (missing {missing}) - will complete")
         elif strangle_recovered:
             # Unusual state - short strangle without long straddle
-            self.state = StrategyState.FULL_POSITION
-            logger.warning("RECOVERED: Short strangle without long straddle (unusual)")
+            if strangle_complete:
+                self.state = StrategyState.FULL_POSITION
+                logger.warning("RECOVERED: Short strangle without long straddle (unusual) - COMPLETE")
+            else:
+                self.state = StrategyState.FULL_POSITION
+                missing = "CALL" if self.needs_strangle_call() else "PUT"
+                logger.warning(f"RECOVERED: PARTIAL short strangle (missing {missing}) without long straddle")
         else:
             logger.info("Could not reconstruct strategy positions - starting fresh")
             return False
+
+        # Log partial position details if any
+        if self.long_straddle and not self.long_straddle.is_complete:
+            if self.long_straddle.call:
+                logger.info(f"  -> Has CALL: ${self.long_straddle.call.strike:.0f}")
+            if self.long_straddle.put:
+                logger.info(f"  -> Has PUT: ${self.long_straddle.put.strike:.0f}")
+
+        if self.short_strangle and not self.short_strangle.is_complete:
+            if self.short_strangle.call:
+                logger.info(f"  -> Has Short CALL: ${self.short_strangle.call.strike:.0f}")
+            if self.short_strangle.put:
+                logger.info(f"  -> Has Short PUT: ${self.short_strangle.put.strike:.0f}")
 
         # Fetch current market data for logging
         self.update_market_data()
@@ -1348,6 +1397,687 @@ class DeltaNeutralStrategy:
                 return True
 
         return False
+
+    def _recover_long_straddle_with_tracking(self, long_positions: List[Dict]) -> Tuple[bool, Set[str]]:
+        """
+        Recover long straddle and track which positions were used.
+
+        LEG-BY-LEG RECOVERY: Now handles partial straddles (only call OR only put).
+        If only one leg exists, we still create a StraddlePosition with that leg
+        so the bot knows it needs to add the missing leg.
+
+        Returns:
+            Tuple of (success, set of position IDs that were used)
+        """
+        used_position_ids = set()
+
+        if len(long_positions) < 1:
+            return False, used_position_ids
+
+        # Parse positions into call/put groups by strike and expiry
+        calls_by_strike = {}
+        puts_by_strike = {}
+
+        for pos in long_positions:
+            parsed = self._parse_option_position(pos)
+            if not parsed:
+                continue
+
+            key = (parsed["strike"], parsed["expiry"])
+
+            if parsed["option_type"] == "Call":
+                calls_by_strike[key] = parsed
+            elif parsed["option_type"] == "Put":
+                puts_by_strike[key] = parsed
+
+        # Find matching call/put pairs (same strike and expiry)
+        for key, call_data in calls_by_strike.items():
+            if key in puts_by_strike:
+                put_data = puts_by_strike[key]
+
+                # Track which positions were used
+                used_position_ids.add(call_data["position_id"])
+                used_position_ids.add(put_data["position_id"])
+
+                # Found a complete straddle! Create the position objects with Greeks
+                call_option = OptionPosition(
+                    position_id=call_data["position_id"],
+                    uic=call_data["uic"],
+                    strike=call_data["strike"],
+                    expiry=call_data["expiry"],
+                    option_type="Call",
+                    position_type=PositionType.LONG_CALL,
+                    quantity=call_data["quantity"],
+                    entry_price=call_data["entry_price"],
+                    current_price=call_data["current_price"],
+                    delta=call_data.get("delta", 0.5),
+                    gamma=call_data.get("gamma", 0),
+                    theta=call_data.get("theta", 0),
+                    vega=call_data.get("vega", 0)
+                )
+
+                put_option = OptionPosition(
+                    position_id=put_data["position_id"],
+                    uic=put_data["uic"],
+                    strike=put_data["strike"],
+                    expiry=put_data["expiry"],
+                    option_type="Put",
+                    position_type=PositionType.LONG_PUT,
+                    quantity=put_data["quantity"],
+                    entry_price=put_data["entry_price"],
+                    current_price=put_data["current_price"],
+                    delta=put_data.get("delta", -0.5),
+                    gamma=put_data.get("gamma", 0),
+                    theta=put_data.get("theta", 0),
+                    vega=put_data.get("vega", 0)
+                )
+
+                # Estimate entry date from expiry (long options are typically 90-120 DTE)
+                straddle_entry_date = datetime.now().strftime("%Y-%m-%d")
+                try:
+                    expiry_date = datetime.strptime(call_data["expiry"], "%Y-%m-%d")
+                    estimated_entry = expiry_date - timedelta(days=90)
+                    if estimated_entry <= datetime.now():
+                        straddle_entry_date = estimated_entry.strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+
+                self.long_straddle = StraddlePosition(
+                    call=call_option,
+                    put=put_option,
+                    initial_strike=call_data["strike"],
+                    entry_underlying_price=call_data["strike"],
+                    entry_date=straddle_entry_date
+                )
+
+                self.initial_straddle_strike = call_data["strike"]
+
+                qty = call_data["quantity"]
+                straddle_cost = (call_data["entry_price"] + put_data["entry_price"]) * 100 * qty
+                if not self._metrics_loaded_from_file:
+                    self.metrics.total_straddle_cost = straddle_cost
+
+                logger.info(
+                    f"Recovered long straddle (COMPLETE): Strike ${call_data['strike']:.2f}, "
+                    f"Expiry {call_data['expiry']}, Qty {qty}, Cost ${straddle_cost:.2f}"
+                )
+                return True, used_position_ids
+
+        # =====================================================================
+        # LEG-BY-LEG RECOVERY: Handle partial straddle (only call OR only put)
+        # This is critical for recovering from partial fills or failed operations
+        # =====================================================================
+
+        # If we have a call without matching put, create partial straddle
+        if calls_by_strike and not puts_by_strike:
+            # Take the first call (there should only be one in normal operation)
+            key, call_data = next(iter(calls_by_strike.items()))
+            used_position_ids.add(call_data["position_id"])
+
+            call_option = OptionPosition(
+                position_id=call_data["position_id"],
+                uic=call_data["uic"],
+                strike=call_data["strike"],
+                expiry=call_data["expiry"],
+                option_type="Call",
+                position_type=PositionType.LONG_CALL,
+                quantity=call_data["quantity"],
+                entry_price=call_data["entry_price"],
+                current_price=call_data["current_price"],
+                delta=call_data.get("delta", 0.5),
+                gamma=call_data.get("gamma", 0),
+                theta=call_data.get("theta", 0),
+                vega=call_data.get("vega", 0)
+            )
+
+            self.long_straddle = StraddlePosition(
+                call=call_option,
+                put=None,  # Missing put leg
+                initial_strike=call_data["strike"],
+                entry_underlying_price=call_data["strike"],
+                entry_date=datetime.now().strftime("%Y-%m-%d")
+            )
+
+            self.initial_straddle_strike = call_data["strike"]
+
+            logger.warning(
+                f"Recovered PARTIAL long straddle (CALL ONLY): Strike ${call_data['strike']:.2f}, "
+                f"Expiry {call_data['expiry']} - MISSING PUT LEG"
+            )
+            return True, used_position_ids
+
+        # If we have a put without matching call, create partial straddle
+        if puts_by_strike and not calls_by_strike:
+            # Take the first put
+            key, put_data = next(iter(puts_by_strike.items()))
+            used_position_ids.add(put_data["position_id"])
+
+            put_option = OptionPosition(
+                position_id=put_data["position_id"],
+                uic=put_data["uic"],
+                strike=put_data["strike"],
+                expiry=put_data["expiry"],
+                option_type="Put",
+                position_type=PositionType.LONG_PUT,
+                quantity=put_data["quantity"],
+                entry_price=put_data["entry_price"],
+                current_price=put_data["current_price"],
+                delta=put_data.get("delta", -0.5),
+                gamma=put_data.get("gamma", 0),
+                theta=put_data.get("theta", 0),
+                vega=put_data.get("vega", 0)
+            )
+
+            self.long_straddle = StraddlePosition(
+                call=None,  # Missing call leg
+                put=put_option,
+                initial_strike=put_data["strike"],
+                entry_underlying_price=put_data["strike"],
+                entry_date=datetime.now().strftime("%Y-%m-%d")
+            )
+
+            self.initial_straddle_strike = put_data["strike"]
+
+            logger.warning(
+                f"Recovered PARTIAL long straddle (PUT ONLY): Strike ${put_data['strike']:.2f}, "
+                f"Expiry {put_data['expiry']} - MISSING CALL LEG"
+            )
+            return True, used_position_ids
+
+        # Check for unmatched single legs (call at one strike, put at different strike)
+        # This is an unusual case but we should handle it
+        if calls_by_strike or puts_by_strike:
+            logger.warning(
+                f"Found unmatched long positions: {len(calls_by_strike)} calls, {len(puts_by_strike)} puts"
+            )
+            # Take whichever leg exists and treat as partial
+            if calls_by_strike:
+                key, call_data = next(iter(calls_by_strike.items()))
+                used_position_ids.add(call_data["position_id"])
+
+                call_option = OptionPosition(
+                    position_id=call_data["position_id"],
+                    uic=call_data["uic"],
+                    strike=call_data["strike"],
+                    expiry=call_data["expiry"],
+                    option_type="Call",
+                    position_type=PositionType.LONG_CALL,
+                    quantity=call_data["quantity"],
+                    entry_price=call_data["entry_price"],
+                    current_price=call_data["current_price"],
+                    delta=call_data.get("delta", 0.5),
+                    gamma=call_data.get("gamma", 0),
+                    theta=call_data.get("theta", 0),
+                    vega=call_data.get("vega", 0)
+                )
+
+                self.long_straddle = StraddlePosition(
+                    call=call_option,
+                    put=None,
+                    initial_strike=call_data["strike"],
+                    entry_underlying_price=call_data["strike"],
+                    entry_date=datetime.now().strftime("%Y-%m-%d")
+                )
+
+                self.initial_straddle_strike = call_data["strike"]
+
+                logger.warning(
+                    f"Recovered PARTIAL straddle from unmatched CALL: Strike ${call_data['strike']:.2f}"
+                )
+                return True, used_position_ids
+
+        return False, used_position_ids
+
+    def _recover_short_strangle_with_tracking(self, short_positions: List[Dict]) -> Tuple[bool, Set[str]]:
+        """
+        Recover short strangle and track which positions were used.
+
+        LEG-BY-LEG RECOVERY: Now handles partial strangles (only call OR only put).
+        If only one leg exists, we still create a StranglePosition with that leg
+        so the bot knows it needs to add the missing leg.
+
+        Returns:
+            Tuple of (success, set of position IDs that were used)
+        """
+        used_position_ids = set()
+
+        if len(short_positions) < 1:
+            return False, used_position_ids
+
+        # Parse positions into call/put groups by expiry
+        calls_by_expiry = {}
+        puts_by_expiry = {}
+
+        for pos in short_positions:
+            parsed = self._parse_option_position(pos)
+            if not parsed:
+                continue
+
+            expiry = parsed["expiry"]
+
+            if parsed["option_type"] == "Call":
+                if expiry not in calls_by_expiry:
+                    calls_by_expiry[expiry] = []
+                calls_by_expiry[expiry].append(parsed)
+            elif parsed["option_type"] == "Put":
+                if expiry not in puts_by_expiry:
+                    puts_by_expiry[expiry] = []
+                puts_by_expiry[expiry].append(parsed)
+
+        # Find matching call/put pairs (same expiry, different strikes)
+        for expiry, calls in calls_by_expiry.items():
+            if expiry in puts_by_expiry:
+                puts = puts_by_expiry[expiry]
+
+                call_data = calls[0]
+                put_data = puts[0]
+
+                if call_data["strike"] <= put_data["strike"]:
+                    logger.warning(
+                        f"Short positions don't form valid strangle: "
+                        f"Call ${call_data['strike']}, Put ${put_data['strike']}"
+                    )
+                    continue
+
+                # Track which positions were used
+                used_position_ids.add(call_data["position_id"])
+                used_position_ids.add(put_data["position_id"])
+
+                call_option = OptionPosition(
+                    position_id=call_data["position_id"],
+                    uic=call_data["uic"],
+                    strike=call_data["strike"],
+                    expiry=call_data["expiry"],
+                    option_type="Call",
+                    position_type=PositionType.SHORT_CALL,
+                    quantity=call_data["quantity"],
+                    entry_price=call_data["entry_price"],
+                    current_price=call_data["current_price"],
+                    delta=call_data.get("delta", -0.15),
+                    gamma=call_data.get("gamma", 0),
+                    theta=call_data.get("theta", 0),
+                    vega=call_data.get("vega", 0)
+                )
+
+                put_option = OptionPosition(
+                    position_id=put_data["position_id"],
+                    uic=put_data["uic"],
+                    strike=put_data["strike"],
+                    expiry=put_data["expiry"],
+                    option_type="Put",
+                    position_type=PositionType.SHORT_PUT,
+                    quantity=put_data["quantity"],
+                    entry_price=put_data["entry_price"],
+                    current_price=put_data["current_price"],
+                    delta=put_data.get("delta", 0.15),
+                    gamma=put_data.get("gamma", 0),
+                    theta=put_data.get("theta", 0),
+                    vega=put_data.get("vega", 0)
+                )
+
+                entry_date = datetime.now().strftime("%Y-%m-%d")
+                try:
+                    expiry_date = datetime.strptime(expiry, "%Y-%m-%d")
+                    estimated_entry = expiry_date - timedelta(days=7)
+                    if estimated_entry <= datetime.now():
+                        entry_date = estimated_entry.strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+
+                self.short_strangle = StranglePosition(
+                    call=call_option,
+                    put=put_option,
+                    call_strike=call_data["strike"],
+                    put_strike=put_data["strike"],
+                    expiry=expiry,
+                    entry_date=entry_date
+                )
+
+                qty = call_data["quantity"]
+                premium_collected = (call_data["entry_price"] + put_data["entry_price"]) * 100 * qty
+                if not self._metrics_loaded_from_file:
+                    self.metrics.total_premium_collected = premium_collected
+
+                logger.info(
+                    f"Recovered short strangle (COMPLETE): Call ${call_data['strike']:.2f}, "
+                    f"Put ${put_data['strike']:.2f}, Expiry {expiry}, Entry {entry_date}, "
+                    f"Qty {qty}, Premium ${premium_collected:.2f}"
+                )
+                return True, used_position_ids
+
+        # =====================================================================
+        # LEG-BY-LEG RECOVERY: Handle partial strangle (only call OR only put)
+        # This is critical for recovering from partial fills or failed operations
+        # =====================================================================
+
+        # Collect all parsed short positions
+        all_calls = []
+        all_puts = []
+        for expiry, calls in calls_by_expiry.items():
+            all_calls.extend(calls)
+        for expiry, puts in puts_by_expiry.items():
+            all_puts.extend(puts)
+
+        # If we have only short call(s), create partial strangle
+        if all_calls and not all_puts:
+            call_data = all_calls[0]  # Take the first one
+            used_position_ids.add(call_data["position_id"])
+
+            call_option = OptionPosition(
+                position_id=call_data["position_id"],
+                uic=call_data["uic"],
+                strike=call_data["strike"],
+                expiry=call_data["expiry"],
+                option_type="Call",
+                position_type=PositionType.SHORT_CALL,
+                quantity=call_data["quantity"],
+                entry_price=call_data["entry_price"],
+                current_price=call_data["current_price"],
+                delta=call_data.get("delta", -0.15),
+                gamma=call_data.get("gamma", 0),
+                theta=call_data.get("theta", 0),
+                vega=call_data.get("vega", 0)
+            )
+
+            self.short_strangle = StranglePosition(
+                call=call_option,
+                put=None,  # Missing put leg
+                call_strike=call_data["strike"],
+                put_strike=0.0,  # Unknown until we add the put
+                expiry=call_data["expiry"],
+                entry_date=datetime.now().strftime("%Y-%m-%d")
+            )
+
+            logger.warning(
+                f"Recovered PARTIAL short strangle (CALL ONLY): Strike ${call_data['strike']:.2f}, "
+                f"Expiry {call_data['expiry']} - MISSING PUT LEG"
+            )
+            return True, used_position_ids
+
+        # If we have only short put(s), create partial strangle
+        if all_puts and not all_calls:
+            put_data = all_puts[0]  # Take the first one
+            used_position_ids.add(put_data["position_id"])
+
+            put_option = OptionPosition(
+                position_id=put_data["position_id"],
+                uic=put_data["uic"],
+                strike=put_data["strike"],
+                expiry=put_data["expiry"],
+                option_type="Put",
+                position_type=PositionType.SHORT_PUT,
+                quantity=put_data["quantity"],
+                entry_price=put_data["entry_price"],
+                current_price=put_data["current_price"],
+                delta=put_data.get("delta", 0.15),
+                gamma=put_data.get("gamma", 0),
+                theta=put_data.get("theta", 0),
+                vega=put_data.get("vega", 0)
+            )
+
+            self.short_strangle = StranglePosition(
+                call=None,  # Missing call leg
+                put=put_option,
+                call_strike=0.0,  # Unknown until we add the call
+                put_strike=put_data["strike"],
+                expiry=put_data["expiry"],
+                entry_date=datetime.now().strftime("%Y-%m-%d")
+            )
+
+            logger.warning(
+                f"Recovered PARTIAL short strangle (PUT ONLY): Strike ${put_data['strike']:.2f}, "
+                f"Expiry {put_data['expiry']} - MISSING CALL LEG"
+            )
+            return True, used_position_ids
+
+        # If we have both calls and puts but they don't match (different expiries)
+        # This is unusual but we should handle it - take whichever has the closest expiry
+        if all_calls or all_puts:
+            logger.warning(
+                f"Found unmatched short positions: {len(all_calls)} calls, {len(all_puts)} puts"
+            )
+            # Prefer puts since that's what typically fails in the scenario we saw
+            if all_puts:
+                put_data = all_puts[0]
+                used_position_ids.add(put_data["position_id"])
+
+                put_option = OptionPosition(
+                    position_id=put_data["position_id"],
+                    uic=put_data["uic"],
+                    strike=put_data["strike"],
+                    expiry=put_data["expiry"],
+                    option_type="Put",
+                    position_type=PositionType.SHORT_PUT,
+                    quantity=put_data["quantity"],
+                    entry_price=put_data["entry_price"],
+                    current_price=put_data["current_price"],
+                    delta=put_data.get("delta", 0.15),
+                    gamma=put_data.get("gamma", 0),
+                    theta=put_data.get("theta", 0),
+                    vega=put_data.get("vega", 0)
+                )
+
+                self.short_strangle = StranglePosition(
+                    call=None,
+                    put=put_option,
+                    call_strike=0.0,
+                    put_strike=put_data["strike"],
+                    expiry=put_data["expiry"],
+                    entry_date=datetime.now().strftime("%Y-%m-%d")
+                )
+
+                logger.warning(
+                    f"Recovered PARTIAL strangle from unmatched PUT: Strike ${put_data['strike']:.2f}"
+                )
+                return True, used_position_ids
+
+        return False, used_position_ids
+
+    def _detect_orphaned_positions(
+        self,
+        long_positions: List[Dict],
+        short_positions: List[Dict],
+        straddle_used: Set[str],
+        strangle_used: Set[str]
+    ) -> List[Dict]:
+        """
+        Detect orphaned positions that weren't matched into valid pairs.
+
+        An orphaned position is a position that exists on Saxo but wasn't
+        incorporated into either the long straddle or short strangle.
+
+        This is CRITICAL for detecting partial fills, failed exits, and
+        other edge cases that could leave the account in an inconsistent state.
+
+        Args:
+            long_positions: All long option positions from Saxo
+            short_positions: All short option positions from Saxo
+            straddle_used: Position IDs used in the recovered straddle
+            strangle_used: Position IDs used in the recovered strangle
+
+        Returns:
+            List of orphaned position dictionaries with parsed details
+        """
+        orphaned = []
+        all_used = straddle_used | strangle_used
+
+        # Check all positions
+        for pos in long_positions + short_positions:
+            parsed = self._parse_option_position(pos)
+            if not parsed:
+                continue
+
+            if parsed["position_id"] not in all_used:
+                # This position wasn't matched - it's orphaned!
+                pos_type = "LONG" if parsed["quantity"] > 0 else "SHORT"
+                orphaned.append({
+                    **parsed,
+                    "position_type_str": pos_type,
+                    "raw_position": pos
+                })
+                logger.warning(
+                    f"ORPHANED POSITION DETECTED: {pos_type} {parsed['option_type']} "
+                    f"${parsed['strike']:.2f} exp {parsed['expiry']} "
+                    f"(position_id: {parsed['position_id']})"
+                )
+
+        return orphaned
+
+    def _handle_orphaned_positions(self, orphaned_positions: List[Dict]) -> None:
+        """
+        Handle orphaned positions by blocking trading and alerting.
+
+        When orphaned positions are detected, this method:
+        1. Sets a flag to block all new position entries
+        2. Logs critical warnings
+        3. Records to Safety Events in Google Sheets
+        4. Stores orphan details for display in status
+
+        Args:
+            orphaned_positions: List of orphaned position details
+        """
+        # Store orphaned positions for status display and blocking logic
+        self._orphaned_positions = orphaned_positions
+
+        # Log critical warnings
+        logger.critical("=" * 70)
+        logger.critical("🚨 ORPHANED POSITIONS DETECTED - TRADING BLOCKED 🚨")
+        logger.critical("=" * 70)
+        logger.critical(f"Found {len(orphaned_positions)} position(s) not part of valid strategy pairs:")
+
+        for orphan in orphaned_positions:
+            logger.critical(
+                f"  - {orphan['position_type_str']} {orphan['option_type']} "
+                f"${orphan['strike']:.2f} exp {orphan['expiry']} "
+                f"(UIC: {orphan['uic']}, Entry: ${orphan['entry_price']:.2f})"
+            )
+
+        logger.critical("")
+        logger.critical("MANUAL ACTION REQUIRED:")
+        logger.critical("  1. Review positions in Saxo platform")
+        logger.critical("  2. Close orphaned position(s) manually")
+        logger.critical("  3. Restart the bot")
+        logger.critical("")
+        logger.critical("The bot will NOT enter new positions until orphans are resolved.")
+        logger.critical("=" * 70)
+
+        # Log to trade logger
+        if self.trade_logger:
+            self.trade_logger.log_event("🚨" * 20)
+            self.trade_logger.log_event("CRITICAL: ORPHANED POSITIONS DETECTED")
+            self.trade_logger.log_event(f"Count: {len(orphaned_positions)}")
+
+            for orphan in orphaned_positions:
+                self.trade_logger.log_event(
+                    f"  ORPHAN: {orphan['position_type_str']} {orphan['option_type']} "
+                    f"${orphan['strike']:.2f} exp {orphan['expiry']}"
+                )
+
+            self.trade_logger.log_event("TRADING BLOCKED - Manual intervention required")
+            self.trade_logger.log_event("🚨" * 20)
+
+            # Log to Safety Events sheet
+            self.trade_logger.log_safety_event({
+                "event_type": "ORPHANED_POSITIONS_DETECTED",
+                "spy_price": self.current_underlying_price,
+                "vix": self.current_vix,
+                "description": f"Found {len(orphaned_positions)} orphaned position(s) during recovery",
+                "result": "TRADING BLOCKED - Manual intervention required",
+                "details": "; ".join([
+                    f"{o['position_type_str']} {o['option_type']} ${o['strike']:.2f}"
+                    for o in orphaned_positions
+                ])
+            })
+
+    def has_orphaned_positions(self) -> bool:
+        """Check if there are any orphaned positions blocking trading."""
+        return hasattr(self, '_orphaned_positions') and len(self._orphaned_positions) > 0
+
+    def get_orphaned_positions(self) -> List[Dict]:
+        """Get list of orphaned positions, if any."""
+        return getattr(self, '_orphaned_positions', [])
+
+    def has_pending_retry(self) -> bool:
+        """
+        Check if there's a pending operation that needs fast retry.
+
+        Returns True if:
+        - We have partial positions that need completing (missing legs)
+        - We have a long straddle but no short strangle (incomplete position)
+        - We have consecutive failures that need immediate retry
+        - We're in a transient state (recentering, rolling, etc.)
+        """
+        # Check for partial straddle (missing one leg)
+        if self.long_straddle and not self.long_straddle.is_complete:
+            logger.info("Fast retry needed: Partial straddle detected")
+            return True
+
+        # Check for partial strangle (missing one leg)
+        if self.short_strangle and not self.short_strangle.is_complete:
+            logger.info("Fast retry needed: Partial strangle detected")
+            return True
+
+        # Check for incomplete position (straddle without strangle)
+        if self.long_straddle and not self.short_strangle:
+            # Only trigger fast retry if we're not just waiting for entry time
+            if self.state == StrategyState.LONG_STRADDLE_ACTIVE:
+                return True
+
+        # Check for recent failures
+        if hasattr(self, '_consecutive_failures') and self._consecutive_failures > 0:
+            return True
+
+        # Check for transient states
+        if self.state in [StrategyState.RECENTERING, StrategyState.ROLLING_SHORTS, StrategyState.EXITING]:
+            return True
+
+        return False
+
+    # =========================================================================
+    # LEG-BY-LEG POSITION MANAGEMENT HELPERS
+    # =========================================================================
+
+    def needs_straddle_call(self) -> bool:
+        """Check if we need to add a call leg to the straddle."""
+        if not self.long_straddle:
+            return False
+        return self.long_straddle.call is None
+
+    def needs_straddle_put(self) -> bool:
+        """Check if we need to add a put leg to the straddle."""
+        if not self.long_straddle:
+            return False
+        return self.long_straddle.put is None
+
+    def needs_strangle_call(self) -> bool:
+        """Check if we need to add a call leg to the strangle."""
+        if not self.short_strangle:
+            return False
+        return self.short_strangle.call is None
+
+    def needs_strangle_put(self) -> bool:
+        """Check if we need to add a put leg to the strangle."""
+        if not self.short_strangle:
+            return False
+        return self.short_strangle.put is None
+
+    def get_missing_legs_summary(self) -> str:
+        """Get a human-readable summary of missing legs."""
+        missing = []
+        if self.needs_straddle_call():
+            strike = self.long_straddle.initial_strike
+            missing.append(f"Straddle CALL @${strike:.0f}")
+        if self.needs_straddle_put():
+            strike = self.long_straddle.initial_strike
+            missing.append(f"Straddle PUT @${strike:.0f}")
+        if self.needs_strangle_call():
+            missing.append("Strangle CALL (need to find strike)")
+        if self.needs_strangle_put():
+            missing.append("Strangle PUT (need to find strike)")
+
+        if missing:
+            return "Missing: " + ", ".join(missing)
+        return "All legs complete"
 
     def _parse_option_position(self, pos: Dict) -> Optional[Dict]:
         """
@@ -1932,9 +2662,28 @@ class DeltaNeutralStrategy:
         Buys 1 ATM Call and 1 ATM Put with 90-120 DTE.
         Only enters if VIX < 18.
 
+        LEG-BY-LEG: If we already have one leg (from partial fill), this will
+        only add the missing leg instead of placing a new 2-leg order.
+
         Returns:
             bool: True if straddle entered successfully, False otherwise.
         """
+        # =====================================================================
+        # LEG-BY-LEG CHECK: If we already have a partial straddle, add missing leg
+        # =====================================================================
+        if self.long_straddle and not self.long_straddle.is_complete:
+            missing_leg = "call" if self.needs_straddle_call() else "put"
+            existing_leg = "put" if self.needs_straddle_call() else "call"
+            existing_strike = self.long_straddle.put.strike if existing_leg == "put" else self.long_straddle.call.strike
+            existing_expiry = self.long_straddle.put.expiry if existing_leg == "put" else self.long_straddle.call.expiry
+
+            logger.info("=" * 70)
+            logger.info(f"⚡ LEG-BY-LEG MODE: Adding missing {missing_leg.upper()} leg to straddle")
+            logger.info(f"   Existing {existing_leg}: ${existing_strike:.0f} exp {existing_expiry}")
+            logger.info("=" * 70)
+
+            return self._add_missing_straddle_leg()
+
         logger.info("Attempting to enter long straddle...")
 
         # Check VIX condition
@@ -2394,6 +3143,9 @@ class DeltaNeutralStrategy:
         If weekly_target_return_percent is configured, finds strikes that meet
         the target return. Otherwise uses multiplier on expected move.
 
+        LEG-BY-LEG: If we already have one leg (from partial fill), this will
+        only add the missing leg instead of placing a new 2-leg order.
+
         Args:
             for_roll: If True, this is for rolling shorts (look for next week's expiry).
                      If False, this is initial entry (look for current week's expiry).
@@ -2403,6 +3155,27 @@ class DeltaNeutralStrategy:
         Returns:
             bool: True if strangle entered successfully, False otherwise.
         """
+        # =====================================================================
+        # LEG-BY-LEG CHECK: If we already have a partial strangle, add missing leg
+        # =====================================================================
+        if self.short_strangle and not self.short_strangle.is_complete:
+            missing_leg = "call" if self.needs_strangle_call() else "put"
+            existing_leg = "put" if self.needs_strangle_call() else "call"
+            existing_strike = self.short_strangle.put_strike if existing_leg == "put" else self.short_strangle.call_strike
+            existing_expiry = self.short_strangle.expiry
+
+            logger.info("=" * 70)
+            logger.info(f"⚡ LEG-BY-LEG MODE: Adding missing {missing_leg.upper()} leg")
+            logger.info(f"   Existing {existing_leg}: ${existing_strike:.0f} exp {existing_expiry}")
+            logger.info("=" * 70)
+
+            # Don't do quote_only for partial recovery - we need to actually complete the position
+            if quote_only:
+                logger.info("Quote-only mode - skipping partial position completion")
+                return False
+
+            return self._add_missing_strangle_leg(for_roll=for_roll)
+
         logger.info("Attempting to enter short strangle...")
 
         # CRITICAL: VIX Defensive Mode Check
@@ -3167,6 +3940,500 @@ class DeltaNeutralStrategy:
                 "status": "Active"
             })
 
+        return True
+
+    def _add_missing_strangle_leg(self, for_roll: bool = False) -> bool:
+        """
+        Add the missing leg to an incomplete strangle position.
+
+        This is called when we have a partial strangle (only call OR only put)
+        from a previous partial fill or failed operation. Instead of entering
+        a full 2-leg strangle, we only add the missing leg.
+
+        Args:
+            for_roll: If True, use next week's expiry. If False, use existing expiry.
+
+        Returns:
+            bool: True if missing leg was added successfully, False otherwise.
+        """
+        # COOLDOWN CHECK: Prevent rapid retry of failed add_missing_leg operations
+        if self._is_action_on_cooldown("add_missing_leg"):
+            logger.info("⏳ add_missing_leg on cooldown - skipping")
+            return False
+
+        if not self.short_strangle:
+            logger.error("No strangle position to complete")
+            return False
+
+        if self.short_strangle.is_complete:
+            logger.info("Strangle already complete - no missing leg to add")
+            return True
+
+        # Determine which leg is missing
+        need_call = self.short_strangle.call is None
+        need_put = self.short_strangle.put is None
+
+        if need_call and need_put:
+            logger.error("Both legs missing - this shouldn't happen, use normal entry")
+            return False
+
+        # Get existing leg details
+        existing_leg = self.short_strangle.put if need_call else self.short_strangle.call
+        existing_expiry = self.short_strangle.expiry
+
+        logger.info(f"Adding missing {'CALL' if need_call else 'PUT'} leg")
+        logger.info(f"Existing leg: {'PUT' if need_call else 'CALL'} ${existing_leg.strike:.0f} exp {existing_expiry}")
+
+        # Update market data
+        if not self.current_underlying_price:
+            if not self.update_market_data():
+                return False
+
+        # CRITICAL: VIX Defensive Mode Check
+        if self.current_vix and self.current_vix >= self.vix_defensive_threshold:
+            logger.warning(f"⚠️ VIX DEFENSIVE MODE - Cannot add missing leg at VIX {self.current_vix:.2f}")
+            return False
+
+        # Find the strike for the missing leg based on existing strategy parameters
+        # We need to find an appropriate OTM option that matches our strategy
+        expected_move = self.client.get_expected_move_from_straddle(
+            self.underlying_uic,
+            self.current_underlying_price,
+            for_roll=for_roll
+        )
+
+        if not expected_move:
+            logger.error("Failed to get expected move")
+            return False
+
+        # Calculate target strike based on multiplier
+        multiplier = self.short_strangle_multiplier or 1.5
+        target_distance = expected_move * multiplier
+
+        if need_call:
+            # Need OTM call - strike above current price
+            target_strike = self.current_underlying_price + target_distance
+            logger.info(f"Target CALL strike: ${target_strike:.0f} ({multiplier}x expected move of ${expected_move:.2f})")
+        else:
+            # Need OTM put - strike below current price
+            target_strike = self.current_underlying_price - target_distance
+            logger.info(f"Target PUT strike: ${target_strike:.0f} ({multiplier}x expected move of ${expected_move:.2f})")
+
+        # Get option expirations to find the right option
+        expirations = self.client.get_option_expirations(self.underlying_uic)
+        if not expirations:
+            logger.error("Failed to get option expirations")
+            return False
+
+        # Find options for the existing expiry (or next Friday if for_roll)
+        target_expiry = existing_expiry
+        if for_roll:
+            # Find next Friday
+            today = datetime.now().date()
+            for exp_data in expirations:
+                exp_date_str = exp_data.get("Expiry", "")[:10]
+                if exp_date_str:
+                    exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+                    if exp_date.weekday() == 4 and dte >= 7:  # Friday with 7+ DTE
+                        target_expiry = exp_date_str
+                        break
+
+        logger.info(f"Looking for options with expiry: {target_expiry}")
+
+        # Find the matching expiration data
+        target_exp_data = None
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry", "")[:10]
+            if exp_date_str == target_expiry:
+                target_exp_data = exp_data
+                break
+
+        if not target_exp_data:
+            logger.error(f"Could not find expiration data for {target_expiry}")
+            return False
+
+        # Find the best matching strike
+        specific_options = target_exp_data.get("SpecificOptions", [])
+        best_option = None
+        best_distance = float('inf')
+
+        for opt in specific_options:
+            strike = opt.get("StrikePrice", 0)
+            uic = opt.get("Uic")
+            put_call = opt.get("PutCall")
+
+            # Check if this is the type we need
+            if need_call and put_call != "Call":
+                continue
+            if need_put and put_call != "Put":
+                continue
+
+            # Check OTM
+            if need_call and strike <= self.current_underlying_price:
+                continue
+            if need_put and strike >= self.current_underlying_price:
+                continue
+
+            # Find closest to target strike
+            distance = abs(strike - target_strike)
+            if distance < best_distance:
+                best_distance = distance
+                best_option = {
+                    "uic": uic,
+                    "strike": strike,
+                    "expiry": target_expiry,
+                    "put_call": put_call
+                }
+
+        if not best_option:
+            logger.error(f"Could not find suitable {'call' if need_call else 'put'} option")
+            return False
+
+        # Get quote for the option
+        quote = self.client.get_quote(best_option["uic"], "StockOption")
+        if not quote:
+            logger.error("Failed to get quote for missing leg option")
+            return False
+
+        bid = quote["Quote"].get("Bid", 0) or 0
+        if bid <= 0:
+            logger.error("No valid bid for missing leg option")
+            return False
+
+        logger.info(f"Selected: {'CALL' if need_call else 'PUT'} ${best_option['strike']:.0f} @ ${bid:.2f}")
+
+        # Place single leg order
+        leg = {
+            "uic": best_option["uic"],
+            "asset_type": "StockOption",
+            "buy_sell": "Sell",
+            "amount": self.position_size,
+            "price": bid * 100,
+            "to_open_close": "ToOpen"
+        }
+
+        # Place order with slippage protection (single leg)
+        order_result = self._place_protected_multi_leg_order(
+            legs=[leg],
+            total_limit_price=bid * 100 * self.position_size,
+            order_description=f"ADD_MISSING_{'CALL' if need_call else 'PUT'}"
+        )
+
+        if not order_result["filled"]:
+            logger.error(f"Failed to add missing {'call' if need_call else 'put'} leg")
+            # Set cooldown to prevent rapid retries that could cause loops
+            self._set_action_cooldown("add_missing_leg")
+            self._increment_failure_count(f"add_missing_{'call' if need_call else 'put'}_leg")
+            return False
+
+        # Success - clear cooldown and reset failure count
+        self._clear_action_cooldown("add_missing_leg")
+        self._reset_failure_count()
+
+        # Create the new leg position
+        new_leg = OptionPosition(
+            position_id=str(order_result.get("order_id", "")) + f"_{'call' if need_call else 'put'}",
+            uic=best_option["uic"],
+            strike=best_option["strike"],
+            expiry=best_option["expiry"],
+            option_type="Call" if need_call else "Put",
+            position_type=PositionType.SHORT_CALL if need_call else PositionType.SHORT_PUT,
+            quantity=self.position_size,
+            entry_price=bid,
+            current_price=bid,
+            delta=-0.15 if need_call else 0.15
+        )
+
+        # Update the strangle position
+        if need_call:
+            self.short_strangle.call = new_leg
+            self.short_strangle.call_strike = best_option["strike"]
+        else:
+            self.short_strangle.put = new_leg
+            self.short_strangle.put_strike = best_option["strike"]
+
+        # Update metrics
+        premium = bid * self.position_size * 100
+        self.metrics.total_premium_collected += premium
+        if not self.dry_run:
+            self.metrics.save_to_file()
+
+        # Update state if now complete
+        if self.short_strangle.is_complete:
+            self.state = StrategyState.FULL_POSITION
+            logger.info(f"✅ Strangle now COMPLETE: Put ${self.short_strangle.put_strike:.0f} / Call ${self.short_strangle.call_strike:.0f}")
+
+        # Log trade
+        if self.trade_logger:
+            action_prefix = "[SIMULATED] " if self.dry_run else ""
+            self.trade_logger.log_trade(
+                action=f"{action_prefix}ADD_MISSING_SHORT_{'CALL' if need_call else 'PUT'}",
+                strike=best_option['strike'],
+                price=bid,
+                delta=-0.15 if need_call else 0.15,
+                pnl=0.0,
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type=f"Short {'Call' if need_call else 'Put'} (completing partial)",
+                expiry_date=best_option['expiry'],
+                dte=self._calculate_dte(best_option['expiry']),
+                premium_received=premium
+            )
+
+            # Add position to Positions sheet
+            self.trade_logger.add_position({
+                "type": f"Short {'Call' if need_call else 'Put'}",
+                "strike": best_option['strike'],
+                "expiry": best_option['expiry'],
+                "dte": self._calculate_dte(best_option['expiry']),
+                "entry_price": bid,
+                "current_price": bid,
+                "theta": 0.30,
+                "pnl": 0.0,
+                "pnl_eur": 0.0,
+                "status": "Active"
+            })
+
+            # Log safety event
+            self.trade_logger.log_safety_event({
+                "event_type": "PARTIAL_POSITION_COMPLETED",
+                "spy_price": self.current_underlying_price,
+                "vix": self.current_vix,
+                "description": f"Added missing {'call' if need_call else 'put'} leg to complete strangle",
+                "result": "SUCCESS",
+                "details": f"Added Short {'Call' if need_call else 'Put'} ${best_option['strike']:.0f} @ ${bid:.2f}"
+            })
+
+        logger.info(f"✅ Successfully added missing {'CALL' if need_call else 'PUT'} leg: ${best_option['strike']:.0f}")
+        return True
+
+    def _add_missing_straddle_leg(self) -> bool:
+        """
+        Add the missing leg to an incomplete straddle position.
+
+        This is called when we have a partial straddle (only call OR only put)
+        from a previous partial fill or failed operation. Instead of entering
+        a full 2-leg straddle, we only add the missing leg.
+
+        Returns:
+            bool: True if missing leg was added successfully, False otherwise.
+        """
+        # COOLDOWN CHECK: Prevent rapid retry of failed add_missing_leg operations
+        if self._is_action_on_cooldown("add_missing_straddle_leg"):
+            logger.info("⏳ add_missing_straddle_leg on cooldown - skipping")
+            return False
+
+        if not self.long_straddle:
+            logger.error("No straddle position to complete")
+            return False
+
+        if self.long_straddle.is_complete:
+            logger.info("Straddle already complete - no missing leg to add")
+            return True
+
+        # Determine which leg is missing
+        need_call = self.long_straddle.call is None
+        need_put = self.long_straddle.put is None
+
+        if need_call and need_put:
+            logger.error("Both legs missing - this shouldn't happen, use normal entry")
+            return False
+
+        # Get existing leg details
+        existing_leg = self.long_straddle.put if need_call else self.long_straddle.call
+        existing_strike = existing_leg.strike
+        existing_expiry = existing_leg.expiry
+
+        logger.info(f"Adding missing {'CALL' if need_call else 'PUT'} leg to straddle")
+        logger.info(f"Existing leg: {'PUT' if need_call else 'CALL'} ${existing_strike:.0f} exp {existing_expiry}")
+
+        # Update market data
+        if not self.current_underlying_price:
+            if not self.update_market_data():
+                return False
+
+        # Check VIX condition - same as full straddle entry
+        if not self.check_vix_entry_condition():
+            logger.warning("VIX condition not met for adding straddle leg")
+            return False
+
+        # For straddle, we want to match the existing strike (ATM straddle has same strike for call and put)
+        target_strike = existing_strike
+
+        logger.info(f"Looking for matching {'CALL' if need_call else 'PUT'} at strike ${target_strike:.0f}")
+
+        # Get option expirations to find the right option
+        expirations = self.client.get_option_expirations(self.underlying_uic)
+        if not expirations:
+            logger.error("Failed to get option expirations")
+            self._set_action_cooldown("add_missing_straddle_leg")
+            return False
+
+        # Find the matching expiration data
+        target_exp_data = None
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry", "")[:10]
+            if exp_date_str == existing_expiry:
+                target_exp_data = exp_data
+                break
+
+        if not target_exp_data:
+            logger.error(f"Could not find expiration data for {existing_expiry}")
+            self._set_action_cooldown("add_missing_straddle_leg")
+            return False
+
+        # Find the matching option at the same strike
+        specific_options = target_exp_data.get("SpecificOptions", [])
+        matching_option = None
+
+        for opt in specific_options:
+            strike = opt.get("StrikePrice", 0)
+            uic = opt.get("Uic")
+            put_call = opt.get("PutCall")
+
+            # Check if this is the type we need at the matching strike
+            if need_call and put_call == "Call" and abs(strike - target_strike) < 0.01:
+                matching_option = {
+                    "uic": uic,
+                    "strike": strike,
+                    "expiry": existing_expiry,
+                    "put_call": put_call
+                }
+                break
+            if need_put and put_call == "Put" and abs(strike - target_strike) < 0.01:
+                matching_option = {
+                    "uic": uic,
+                    "strike": strike,
+                    "expiry": existing_expiry,
+                    "put_call": put_call
+                }
+                break
+
+        if not matching_option:
+            logger.error(f"Could not find matching {'call' if need_call else 'put'} at strike ${target_strike:.0f}")
+            self._set_action_cooldown("add_missing_straddle_leg")
+            return False
+
+        # Get quote for the option
+        quote = self.client.get_quote(matching_option["uic"], "StockOption")
+        if not quote:
+            logger.error("Failed to get quote for missing straddle leg option")
+            self._set_action_cooldown("add_missing_straddle_leg")
+            return False
+
+        # For buying, we use the Ask price
+        ask = quote["Quote"].get("Ask", 0) or 0
+        if ask <= 0:
+            logger.error("No valid ask for missing straddle leg option")
+            self._set_action_cooldown("add_missing_straddle_leg")
+            return False
+
+        logger.info(f"Selected: {'CALL' if need_call else 'PUT'} ${matching_option['strike']:.0f} @ ${ask:.2f}")
+
+        # Place single leg order (buying the missing leg)
+        leg = {
+            "uic": matching_option["uic"],
+            "asset_type": "StockOption",
+            "buy_sell": "Buy",
+            "amount": self.position_size,
+            "price": ask * 100,
+            "to_open_close": "ToOpen"
+        }
+
+        # Place order with slippage protection (single leg)
+        order_result = self._place_protected_multi_leg_order(
+            legs=[leg],
+            total_limit_price=ask * 100 * self.position_size,
+            order_description=f"ADD_MISSING_STRADDLE_{'CALL' if need_call else 'PUT'}"
+        )
+
+        if not order_result["filled"]:
+            logger.error(f"Failed to add missing {'call' if need_call else 'put'} straddle leg")
+            # Set cooldown to prevent rapid retries that could cause loops
+            self._set_action_cooldown("add_missing_straddle_leg")
+            self._increment_failure_count(f"add_missing_straddle_{'call' if need_call else 'put'}_leg")
+            return False
+
+        # Success - clear cooldown and reset failure count
+        self._clear_action_cooldown("add_missing_straddle_leg")
+        self._reset_failure_count()
+
+        # Create the new leg position
+        new_leg = OptionPosition(
+            position_id=str(order_result.get("order_id", "")) + f"_{'call' if need_call else 'put'}",
+            uic=matching_option["uic"],
+            strike=matching_option["strike"],
+            expiry=matching_option["expiry"],
+            option_type="Call" if need_call else "Put",
+            position_type=PositionType.LONG_CALL if need_call else PositionType.LONG_PUT,
+            quantity=self.position_size,
+            entry_price=ask,
+            current_price=ask,
+            delta=0.5 if need_call else -0.5  # ATM delta approximation
+        )
+
+        # Update the straddle position
+        if need_call:
+            self.long_straddle.call = new_leg
+        else:
+            self.long_straddle.put = new_leg
+
+        # Update metrics
+        leg_cost = ask * self.position_size * 100
+        self.metrics.total_straddle_cost += leg_cost
+        if not self.dry_run:
+            self.metrics.save_to_file()
+
+        # Update state if now complete
+        if self.long_straddle.is_complete:
+            self.state = StrategyState.LONG_STRADDLE_ACTIVE
+            logger.info(f"✅ Straddle now COMPLETE: Call & Put @ ${self.long_straddle.initial_strike:.0f}")
+
+        # Log trade
+        if self.trade_logger:
+            action_prefix = "[SIMULATED] " if self.dry_run else ""
+            self.trade_logger.log_trade(
+                action=f"{action_prefix}ADD_MISSING_LONG_{'CALL' if need_call else 'PUT'}",
+                strike=matching_option['strike'],
+                price=ask,
+                delta=0.5 if need_call else -0.5,
+                pnl=0.0,
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type=f"Long {'Call' if need_call else 'Put'} (completing partial straddle)",
+                expiry_date=matching_option['expiry'],
+                dte=self._calculate_dte(matching_option['expiry']),
+                premium_paid=leg_cost
+            )
+
+            # Add position to Positions sheet
+            self.trade_logger.add_position({
+                "type": f"Long {'Call' if need_call else 'Put'}",
+                "strike": matching_option['strike'],
+                "expiry": matching_option['expiry'],
+                "dte": self._calculate_dte(matching_option['expiry']),
+                "entry_price": ask,
+                "current_price": ask,
+                "theta": -0.10,  # Negative theta for long options
+                "pnl": 0.0,
+                "pnl_eur": 0.0,
+                "status": "Active"
+            })
+
+            # Log safety event
+            self.trade_logger.log_safety_event({
+                "event_type": "PARTIAL_STRADDLE_COMPLETED",
+                "spy_price": self.current_underlying_price,
+                "vix": self.current_vix,
+                "description": f"Added missing {'call' if need_call else 'put'} leg to complete straddle",
+                "result": "SUCCESS",
+                "details": f"Added Long {'Call' if need_call else 'Put'} ${matching_option['strike']:.0f} @ ${ask:.2f}"
+            })
+
+        logger.info(f"✅ Successfully added missing straddle {'CALL' if need_call else 'PUT'} leg: ${matching_option['strike']:.0f}")
         return True
 
     def close_short_strangle(self) -> bool:
@@ -4032,6 +5299,30 @@ class DeltaNeutralStrategy:
         # CRITICAL: Check for orphaned orders before any trading
         if self._check_for_orphaned_orders():
             return "🚨 ORPHANED ORDERS DETECTED - Manual cancellation required"
+
+        # Check for orphaned positions that weren't recovered into strategy structures
+        # Note: With leg-by-leg recovery, partial positions (1 leg of strangle) are now
+        # recovered into the strategy. True orphans are positions that don't fit at all.
+        if self.has_orphaned_positions():
+            orphans = self.get_orphaned_positions()
+            orphan_summary = ", ".join([
+                f"{o['position_type_str']} {o['option_type']} ${o['strike']:.0f}"
+                for o in orphans
+            ])
+            logger.critical(f"🚨 ORPHANED POSITIONS: {orphan_summary}")
+            return f"🚨 ORPHANED POSITIONS BLOCKING TRADING: {orphan_summary}"
+
+        # Check for partial positions that need completing (not blocking, but informative)
+        partial_info = []
+        if self.long_straddle and not self.long_straddle.is_complete:
+            missing = "CALL" if self.needs_straddle_call() else "PUT"
+            partial_info.append(f"Straddle missing {missing}")
+        if self.short_strangle and not self.short_strangle.is_complete:
+            missing = "CALL" if self.needs_strangle_call() else "PUT"
+            partial_info.append(f"Strangle missing {missing}")
+
+        if partial_info:
+            logger.info(f"⚡ PARTIAL POSITIONS: {', '.join(partial_info)} - will attempt to complete")
 
         # Update market data
         if not self.update_market_data():

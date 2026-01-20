@@ -636,15 +636,37 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                 # Shows bot is alive and what state it's in
                 status = strategy.get_status_summary()
                 mode_prefix = "[DRY RUN] " if dry_run else ""
-                trade_logger.log_event(
-                    f"{mode_prefix}HEARTBEAT | State: {status['state']} | "
-                    f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
-                    f"Next check in {check_interval}s"
+
+                # CRITICAL: If action indicates a failure that needs immediate retry,
+                # use a much shorter interval to avoid leaving positions in bad state
+                needs_immediate_retry = (
+                    "FAILED" in action.upper() or
+                    "failed" in action.lower() or
+                    "SLIPPAGE" in action.upper() or
+                    "TIMEOUT" in action.upper() or
+                    strategy.has_pending_retry()
                 )
 
-                # Sleep until next check (interruptible for fast shutdown)
-                if not interruptible_sleep(check_interval):
-                    break  # Shutdown requested
+                if needs_immediate_retry:
+                    # Use 5-second interval for quick retry
+                    retry_interval = 5
+                    trade_logger.log_event(
+                        f"{mode_prefix}⚡ FAST RETRY | State: {status['state']} | "
+                        f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
+                        f"Next check in {retry_interval}s (quick retry mode)"
+                    )
+                    if not interruptible_sleep(retry_interval):
+                        break  # Shutdown requested
+                else:
+                    trade_logger.log_event(
+                        f"{mode_prefix}HEARTBEAT | State: {status['state']} | "
+                        f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
+                        f"Next check in {check_interval}s"
+                    )
+
+                    # Sleep until next check (interruptible for fast shutdown)
+                    if not interruptible_sleep(check_interval):
+                        break  # Shutdown requested
 
             except KeyboardInterrupt:
                 # This should be caught by signal handler, but just in case
