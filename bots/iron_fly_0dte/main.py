@@ -287,9 +287,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         if not shutdown_requested and subscriptions:
                             client.start_price_streaming(subscriptions, price_update_handler)
                     else:
-                        trade_logger.log_event(f"HEARTBEAT | Market closed {close_reason} - rechecking in 60s")
-                        if not interruptible_sleep(60):
-                            break
+                        # IRON FLY SPECIFIC: Within 5 min of 9:30 AM, use fast interval to catch market open exactly
+                        seconds_until_930 = (market_open_time - now_et).total_seconds()
+                        if 0 < seconds_until_930 <= 300:
+                            trade_logger.log_event(f"Pre-market: {int(seconds_until_930)}s until 9:30 AM - using fast {check_interval}s interval")
+                            if not interruptible_sleep(check_interval):
+                                break
+                        else:
+                            trade_logger.log_event(f"HEARTBEAT | Market closed {close_reason} - rechecking in 60s")
+                            if not interruptible_sleep(60):
+                                break
                     continue
 
                 # Run strategy check
