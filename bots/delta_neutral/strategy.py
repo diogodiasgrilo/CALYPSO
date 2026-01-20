@@ -476,8 +476,10 @@ class DeltaNeutralStrategy:
 
         # CIRCUIT BREAKER: Consecutive failure tracking to prevent death loops
         # If we hit MAX_CONSECUTIVE_FAILURES, halt all trading
+        # Configurable via config.json circuit_breaker.max_consecutive_errors (default: 5)
         self._consecutive_failures: int = 0
-        self._max_consecutive_failures: int = 3
+        circuit_breaker_config = config.get("circuit_breaker", {})
+        self._max_consecutive_failures: int = circuit_breaker_config.get("max_consecutive_errors", 5)
         self._circuit_breaker_open: bool = False
         self._circuit_breaker_reason: str = ""
         self._last_failure_time: Optional[datetime] = None
@@ -487,8 +489,9 @@ class DeltaNeutralStrategy:
 
         # ACTION COOLDOWN: Prevent rapid retry of same failed action
         # Maps action_type -> last_attempt_time
+        # Configurable via config.json circuit_breaker.cooldown_minutes (default: 5)
         self._action_cooldowns: Dict[str, datetime] = {}
-        self._cooldown_seconds: int = 300  # 5 minute cooldown after failed action
+        self._cooldown_seconds: int = circuit_breaker_config.get("cooldown_minutes", 5) * 60
 
         # Strategy parameters
         self.recenter_threshold = self.strategy_config["recenter_threshold_points"]
@@ -517,6 +520,7 @@ class DeltaNeutralStrategy:
         if self.dry_run:
             logger.warning("DRY RUN MODE - No real orders will be placed")
         logger.info(f"Slippage protection: {self.order_timeout_seconds}s timeout on limit orders")
+        logger.info(f"Circuit breaker: {self._max_consecutive_failures} failures, {self._cooldown_seconds}s cooldown")
 
     # =========================================================================
     # CIRCUIT BREAKER - DEATH LOOP PREVENTION
@@ -556,9 +560,20 @@ class DeltaNeutralStrategy:
         - No rolls or recenters will be attempted
         - Manual intervention is required
 
+        IMPORTANT: Before halting, this method attempts to close any unsafe positions
+        to avoid leaving the account with uncovered risk.
+
         Args:
             reason: Description of why the circuit breaker opened
         """
+        logger.critical("=" * 70)
+        logger.critical("🚨 CIRCUIT BREAKER TRIGGERED 🚨")
+        logger.critical("=" * 70)
+        logger.critical(f"Reason: {reason}")
+
+        # CRITICAL: Before halting, check if we have unsafe positions that need emergency closure
+        emergency_actions = self._emergency_position_check()
+
         self._circuit_breaker_open = True
         self._circuit_breaker_reason = reason
 
@@ -568,6 +583,7 @@ class DeltaNeutralStrategy:
         logger.critical(f"Reason: {reason}")
         logger.critical(f"Consecutive failures: {self._consecutive_failures}")
         logger.critical(f"Time: {datetime.now().isoformat()}")
+        logger.critical(f"Emergency actions taken: {emergency_actions}")
         logger.critical("")
         logger.critical("MANUAL INTERVENTION REQUIRED:")
         logger.critical("1. Check Saxo positions in SaxoTraderGO")
@@ -585,10 +601,377 @@ class DeltaNeutralStrategy:
                 "spy_price": self.current_underlying_price,
                 "initial_strike": self.initial_straddle_strike,
                 "vix": self.current_vix,
-                "action_taken": "TRADING HALTED",
+                "action_taken": f"TRADING HALTED. Emergency actions: {emergency_actions}",
                 "description": f"Circuit breaker opened after {self._consecutive_failures} consecutive failures. Reason: {reason}",
                 "result": "HALTED"
             })
+
+    def _emergency_position_check(self) -> str:
+        """
+        Check for unsafe positions and attempt emergency closure before circuit breaker halts.
+
+        This is called BEFORE the circuit breaker fully opens to protect against:
+        1. Naked short positions (incomplete strangle without straddle protection)
+        2. Incomplete straddle with complete strangle (shorts not fully protected)
+        3. Mismatched positions (1 long + 1 short that don't protect each other)
+
+        The key insight is:
+        - Complete long straddle (call + put at same strike) = protected, can keep
+        - Incomplete strangle with complete straddle = close the naked short
+        - Incomplete straddle with any shorts = close ALL positions (unsafe)
+        - Only shorts with no longs = close ALL shorts immediately
+
+        Returns:
+            str: Description of actions taken
+        """
+        actions = []
+
+        logger.critical("🔍 EMERGENCY POSITION CHECK - Analyzing risk exposure...")
+
+        straddle_complete = self.long_straddle and self.long_straddle.is_complete
+        strangle_complete = self.short_strangle and self.short_strangle.is_complete
+        has_partial_straddle = self.long_straddle and not self.long_straddle.is_complete
+        has_partial_strangle = self.short_strangle and not self.short_strangle.is_complete
+
+        # Log current state
+        logger.critical(f"   Straddle: {'COMPLETE' if straddle_complete else 'PARTIAL' if has_partial_straddle else 'NONE'}")
+        logger.critical(f"   Strangle: {'COMPLETE' if strangle_complete else 'PARTIAL' if has_partial_strangle else 'NONE'}")
+
+        # SCENARIO 1: Incomplete strangle with complete straddle
+        # The naked short is risky but the straddle provides some hedge
+        # Close ONLY the naked short leg, keep everything else
+        if has_partial_strangle and straddle_complete:
+            logger.critical("⚠️ SCENARIO 1: Partial strangle with complete straddle")
+            logger.critical("   Action: Close the naked short leg, keep straddle intact")
+
+            if self._close_partial_strangle_emergency():
+                actions.append("Closed naked short leg (partial strangle)")
+            else:
+                actions.append("FAILED to close naked short leg - MANUAL INTERVENTION REQUIRED")
+
+        # SCENARIO 2: Incomplete straddle with ANY shorts (complete or partial strangle)
+        # This is VERY DANGEROUS - shorts are not fully protected
+        # Close ALL positions
+        elif has_partial_straddle and (strangle_complete or has_partial_strangle):
+            logger.critical("🚨 SCENARIO 2: Partial straddle with shorts - VERY DANGEROUS")
+            logger.critical("   Action: Close ALL positions (shorts not protected)")
+
+            if self._emergency_close_all():
+                actions.append("CLOSED ALL POSITIONS (incomplete straddle with shorts)")
+            else:
+                actions.append("FAILED to close all positions - MANUAL INTERVENTION REQUIRED")
+
+        # SCENARIO 3: Only shorts exist with no longs at all
+        # Close all shorts immediately
+        elif (strangle_complete or has_partial_strangle) and not self.long_straddle:
+            logger.critical("🚨 SCENARIO 3: Short positions with NO long protection")
+            logger.critical("   Action: Close ALL short positions")
+
+            if self._close_short_strangle_emergency():
+                actions.append("Closed all short positions (no long protection)")
+            else:
+                actions.append("FAILED to close shorts - MANUAL INTERVENTION REQUIRED")
+
+        # SCENARIO 4: Complete straddle with complete strangle (or no strangle)
+        # This is the safest state - keep everything
+        elif straddle_complete:
+            logger.critical("✅ SCENARIO 4: Complete straddle - positions are protected")
+            actions.append("No emergency action needed - positions protected")
+
+        # SCENARIO 5: Only partial straddle, no shorts
+        # Long options have limited risk (only lose premium), keep them
+        elif has_partial_straddle and not self.short_strangle:
+            logger.critical("⚠️ SCENARIO 5: Partial straddle only, no shorts")
+            logger.critical("   Action: Keep long position (limited risk)")
+            actions.append("Kept partial straddle (limited downside risk)")
+
+        # SCENARIO 6: No positions at all
+        else:
+            logger.critical("✅ SCENARIO 6: No positions - nothing to protect")
+            actions.append("No positions to protect")
+
+        return "; ".join(actions) if actions else "No action taken"
+
+    def _close_partial_strangle_emergency(self) -> bool:
+        """
+        Emergency closure of a partial strangle (single naked short leg).
+
+        This is called during circuit breaker activation to close any
+        unprotected short position.
+
+        Returns:
+            bool: True if successfully closed, False otherwise
+        """
+        if not self.short_strangle:
+            return True  # Nothing to close
+
+        if self.short_strangle.is_complete:
+            logger.warning("Strangle is complete - use close_short_strangle instead")
+            return False
+
+        # Determine which leg exists (the naked short)
+        naked_leg = self.short_strangle.call if self.short_strangle.call else self.short_strangle.put
+        if not naked_leg:
+            return True  # No leg to close
+
+        leg_type = "CALL" if self.short_strangle.call else "PUT"
+        logger.critical(f"🚨 EMERGENCY: Closing naked short {leg_type} at ${naked_leg.strike:.0f}")
+
+        try:
+            # Get current ask price for buying back
+            quote = self.client.get_quote(naked_leg.uic, "StockOption")
+            if not quote:
+                logger.error("Failed to get quote for emergency closure")
+                return False
+
+            ask = quote["Quote"].get("Ask", 0) or 0
+            if ask <= 0:
+                logger.error("No valid ask price for emergency closure")
+                return False
+
+            # Place buy order to close the short
+            leg = {
+                "uic": naked_leg.uic,
+                "asset_type": "StockOption",
+                "buy_sell": "Buy",
+                "amount": naked_leg.quantity,
+                "price": ask * 100,
+                "to_open_close": "ToClose"
+            }
+
+            # Use MARKET-like execution for emergency (higher slippage tolerance)
+            order_result = self._place_protected_multi_leg_order(
+                legs=[leg],
+                total_limit_price=ask * 100 * naked_leg.quantity * 1.05,  # 5% slippage tolerance
+                order_description=f"EMERGENCY_CLOSE_NAKED_{leg_type}"
+            )
+
+            if order_result["filled"]:
+                logger.critical(f"✅ Emergency closed naked short {leg_type}")
+
+                # Log to Google Sheets
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "EMERGENCY_CLOSE_NAKED_SHORT",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "description": f"Emergency closed naked short {leg_type} at ${naked_leg.strike:.0f}",
+                        "result": "SUCCESS",
+                        "details": f"Bought back at ${ask:.2f}"
+                    })
+
+                # Clear the strangle position
+                self.short_strangle = None
+                return True
+            else:
+                logger.error(f"Emergency closure FAILED for naked short {leg_type}")
+                return False
+
+        except Exception as e:
+            logger.exception(f"Exception during emergency closure: {e}")
+            return False
+
+    def _close_short_strangle_emergency(self) -> bool:
+        """
+        Emergency closure of all short positions (complete or partial strangle).
+
+        This is called when we have shorts but no long protection at all.
+
+        Returns:
+            bool: True if successfully closed, False otherwise
+        """
+        if not self.short_strangle:
+            return True  # Nothing to close
+
+        logger.critical("🚨 EMERGENCY: Closing ALL short positions")
+
+        try:
+            legs = []
+            leg_descriptions = []
+
+            # Close call if exists
+            if self.short_strangle.call:
+                quote = self.client.get_quote(self.short_strangle.call.uic, "StockOption")
+                ask = quote["Quote"].get("Ask", 0) if quote else 0
+                if ask > 0:
+                    legs.append({
+                        "uic": self.short_strangle.call.uic,
+                        "asset_type": "StockOption",
+                        "buy_sell": "Buy",
+                        "amount": self.short_strangle.call.quantity,
+                        "price": ask * 100,
+                        "to_open_close": "ToClose"
+                    })
+                    leg_descriptions.append(f"Short Call ${self.short_strangle.call.strike:.0f}")
+
+            # Close put if exists
+            if self.short_strangle.put:
+                quote = self.client.get_quote(self.short_strangle.put.uic, "StockOption")
+                ask = quote["Quote"].get("Ask", 0) if quote else 0
+                if ask > 0:
+                    legs.append({
+                        "uic": self.short_strangle.put.uic,
+                        "asset_type": "StockOption",
+                        "buy_sell": "Buy",
+                        "amount": self.short_strangle.put.quantity,
+                        "price": ask * 100,
+                        "to_open_close": "ToClose"
+                    })
+                    leg_descriptions.append(f"Short Put ${self.short_strangle.put.strike:.0f}")
+
+            if not legs:
+                logger.error("No valid prices for emergency short closure")
+                return False
+
+            # Calculate total with 5% emergency slippage tolerance
+            total_price = sum(leg["price"] * leg["amount"] for leg in legs) * 1.05
+
+            order_result = self._place_protected_multi_leg_order(
+                legs=legs,
+                total_limit_price=total_price,
+                order_description="EMERGENCY_CLOSE_ALL_SHORTS"
+            )
+
+            if order_result["filled"]:
+                logger.critical(f"✅ Emergency closed all shorts: {', '.join(leg_descriptions)}")
+
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "EMERGENCY_CLOSE_ALL_SHORTS",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "description": f"Emergency closed: {', '.join(leg_descriptions)}",
+                        "result": "SUCCESS"
+                    })
+
+                self.short_strangle = None
+                return True
+            else:
+                logger.error("Emergency closure of all shorts FAILED")
+                return False
+
+        except Exception as e:
+            logger.exception(f"Exception during emergency short closure: {e}")
+            return False
+
+    def _emergency_close_all(self) -> bool:
+        """
+        Emergency closure of ALL positions (straddle and strangle).
+
+        This is the nuclear option - called when we have an incomplete straddle
+        with any short positions, meaning the shorts are not fully protected.
+
+        Returns:
+            bool: True if successfully closed all, False otherwise
+        """
+        logger.critical("🚨🚨🚨 EMERGENCY: Closing ALL positions 🚨🚨🚨")
+
+        success = True
+
+        # Close shorts first (higher risk)
+        if self.short_strangle:
+            if not self._close_short_strangle_emergency():
+                logger.error("Failed to close shorts in emergency")
+                success = False
+
+        # Close partial straddle (longs) - they have limited risk but close anyway
+        if self.long_straddle:
+            if not self._close_partial_straddle_emergency():
+                logger.error("Failed to close longs in emergency")
+                success = False
+
+        if success:
+            self.state = StrategyState.NO_POSITION
+            logger.critical("✅ All positions closed in emergency")
+        else:
+            logger.critical("❌ Some positions may still be open - MANUAL CHECK REQUIRED")
+
+        return success
+
+    def _close_partial_straddle_emergency(self) -> bool:
+        """
+        Emergency closure of a partial straddle (single long leg).
+
+        Long options have limited risk (you can only lose the premium paid),
+        but we close them anyway during emergency to have a clean slate.
+
+        Returns:
+            bool: True if successfully closed, False otherwise
+        """
+        if not self.long_straddle:
+            return True  # Nothing to close
+
+        logger.critical("🚨 EMERGENCY: Closing long straddle position(s)")
+
+        try:
+            legs = []
+            leg_descriptions = []
+
+            # Close call if exists
+            if self.long_straddle.call:
+                quote = self.client.get_quote(self.long_straddle.call.uic, "StockOption")
+                bid = quote["Quote"].get("Bid", 0) if quote else 0
+                if bid > 0:
+                    legs.append({
+                        "uic": self.long_straddle.call.uic,
+                        "asset_type": "StockOption",
+                        "buy_sell": "Sell",
+                        "amount": self.long_straddle.call.quantity,
+                        "price": bid * 100,
+                        "to_open_close": "ToClose"
+                    })
+                    leg_descriptions.append(f"Long Call ${self.long_straddle.call.strike:.0f}")
+
+            # Close put if exists
+            if self.long_straddle.put:
+                quote = self.client.get_quote(self.long_straddle.put.uic, "StockOption")
+                bid = quote["Quote"].get("Bid", 0) if quote else 0
+                if bid > 0:
+                    legs.append({
+                        "uic": self.long_straddle.put.uic,
+                        "asset_type": "StockOption",
+                        "buy_sell": "Sell",
+                        "amount": self.long_straddle.put.quantity,
+                        "price": bid * 100,
+                        "to_open_close": "ToClose"
+                    })
+                    leg_descriptions.append(f"Long Put ${self.long_straddle.put.strike:.0f}")
+
+            if not legs:
+                logger.error("No valid prices for emergency straddle closure")
+                return False
+
+            # Calculate total with 5% emergency slippage tolerance (less for selling)
+            total_price = sum(leg["price"] * leg["amount"] for leg in legs) * 0.95
+
+            order_result = self._place_protected_multi_leg_order(
+                legs=legs,
+                total_limit_price=total_price,
+                order_description="EMERGENCY_CLOSE_STRADDLE"
+            )
+
+            if order_result["filled"]:
+                logger.critical(f"✅ Emergency closed straddle: {', '.join(leg_descriptions)}")
+
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "EMERGENCY_CLOSE_STRADDLE",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "description": f"Emergency closed: {', '.join(leg_descriptions)}",
+                        "result": "SUCCESS"
+                    })
+
+                self.long_straddle = None
+                self.initial_straddle_strike = None
+                return True
+            else:
+                logger.error("Emergency closure of straddle FAILED")
+                return False
+
+        except Exception as e:
+            logger.exception(f"Exception during emergency straddle closure: {e}")
+            return False
 
     def _check_circuit_breaker(self) -> bool:
         """
