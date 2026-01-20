@@ -1025,6 +1025,36 @@ class GoogleSheetsLogger:
                     last_row = worksheet.row_count
                     if last_row > 1:
                         worksheet.format(f"A2:L{last_row}", {"textFormat": {"bold": False}})
+
+            elif self.strategy_type == "rolling_put_diagonal":
+                # Rolling Put Diagonal: Campaign-based tracking with premium collection
+                # Columns: Last Updated, Position Type, Strike, Expiry, Days to Expiry, Delta,
+                #          Entry Price, Current Price, P&L ($), P&L (EUR), Campaign #,
+                #          Premium Collected, Status
+                for pos in positions:
+                    row = [
+                        timestamp,
+                        pos.get("type", "N/A"),
+                        pos.get("strike", "N/A"),
+                        pos.get("expiry", "N/A"),
+                        pos.get("dte", "N/A"),
+                        f"{pos.get('delta', 0):.4f}",
+                        f"{pos.get('entry_price', 0):.4f}",
+                        f"{pos.get('current_price', 0):.4f}",
+                        f"{pos.get('pnl', 0):.2f}",
+                        f"{pos.get('pnl_eur', pos.get('pnl', 0)):.2f}",  # P&L (EUR)
+                        pos.get("campaign_number", "N/A"),
+                        f"{pos.get('premium_collected', 0):.2f}",
+                        pos.get("status", "Active")
+                    ]
+                    worksheet.append_row(row)
+
+                # Clear any bold formatting from data rows (row 2 onwards)
+                if len(positions) > 0:
+                    last_row = worksheet.row_count
+                    if last_row > 1:
+                        worksheet.format(f"A2:M{last_row}", {"textFormat": {"bold": False}})
+
             else:
                 # Delta Neutral: Theta tracking for weekly positions
                 # Columns: Last Updated, Type, Strike, Expiry, Days to Expiry, Entry Price, Current Price,

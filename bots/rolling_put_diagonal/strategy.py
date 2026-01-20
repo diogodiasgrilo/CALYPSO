@@ -1959,11 +1959,20 @@ class RollingPutDiagonalStrategy:
         Rolling Put Diagonal specific columns:
         - Position Type (Long Put / Short Put)
         - Strike, Expiry, DTE, Delta
-        - Entry Price, Current Price, P&L
+        - Entry Price, Current Price, P&L ($), P&L (EUR)
         - Campaign #, Premium Collected, Status
         """
         if not self.trade_logger or not self.diagonal:
             return
+
+        # Get EUR conversion rate
+        eur_rate = 1.0
+        try:
+            rate = self.client.get_usd_to_account_currency_rate()
+            if rate:
+                eur_rate = rate
+        except Exception:
+            pass
 
         positions = []
 
@@ -1982,6 +1991,7 @@ class RollingPutDiagonalStrategy:
                 "entry_price": self.diagonal.long_put.entry_price or 0,
                 "current_price": self.diagonal.long_put.current_price or 0,
                 "pnl": long_pnl,
+                "pnl_eur": long_pnl * eur_rate,
                 "campaign_number": self.diagonal.campaign_number,
                 "premium_collected": 0,  # Long put doesn't collect premium
                 "status": "OPEN"
@@ -2003,6 +2013,7 @@ class RollingPutDiagonalStrategy:
                 "entry_price": self.diagonal.short_put.entry_price or 0,
                 "current_price": self.diagonal.short_put.current_price or 0,
                 "pnl": short_pnl,
+                "pnl_eur": short_pnl * eur_rate,
                 "campaign_number": self.diagonal.campaign_number,
                 "premium_collected": self.diagonal.total_premium_collected,
                 "status": "OPEN"

@@ -284,41 +284,40 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     trade_logger.log_event(get_market_status_message())
     trade_logger.log_event(get_event_status_message())
 
-    # Log dashboard metrics on startup if stale (ensures fresh data on restart)
-    if trade_logger.should_log_initial_metrics(stale_minutes=30):
-        try:
-            trade_logger.log_event("Logging dashboard metrics on startup (stale or missing)...")
+    # Log dashboard metrics on startup (always update on restart for fresh data)
+    try:
+        trade_logger.log_event("Logging dashboard metrics on startup...")
 
-            # Log Account Summary
-            strategy.log_account_summary()
+        # Log Account Summary
+        strategy.log_account_summary()
 
-            # Log Position snapshot if we have an active diagonal
-            status = strategy.get_status_summary()
-            if status.get('position'):
-                strategy.log_position_to_sheets()
+        # Log Position snapshot if we have an active diagonal
+        status = strategy.get_status_summary()
+        if status.get('position'):
+            strategy.log_position_to_sheets()
 
-            # Log Performance Metrics
-            strategy.log_performance_metrics()
+        # Log Performance Metrics
+        strategy.log_performance_metrics()
 
-            # Log bot startup activity
-            trade_logger.log_bot_activity(
-                level="INFO",
-                component="Main",
-                message=f"Bot started - State: {status['state']}, Campaign: #{status['campaign_count']}",
-                spy_price=status['qqq_price'],  # RPD uses QQQ
-                vix=0,  # RPD doesn't track VIX
-                flush=True
-            )
+        # Log bot startup activity (always - so we know when bot started)
+        trade_logger.log_bot_activity(
+            level="INFO",
+            component="Main",
+            message=f"Bot started - State: {status['state']}, Campaign: #{status['campaign_count']}",
+            spy_price=status['qqq_price'],  # RPD uses QQQ
+            vix=0,  # RPD doesn't track VIX
+            flush=True
+        )
 
-            trade_logger.log_event("Dashboard metrics logged to Google Sheets")
-        except Exception as e:
-            trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
+        trade_logger.log_event("Dashboard metrics logged to Google Sheets")
+    except Exception as e:
+        trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
 
     # Track daily activities
     last_daily_reset = None
     last_dashboard_log = None
     dashboard_interval = 900  # 15 minutes
-    last_bot_log_time = datetime.now()
+    last_bot_log_time = get_us_market_time()  # Use ET market time for consistency when traveling
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
 
     # Main loop
@@ -400,7 +399,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
             last_dashboard_log = current_minute
 
         # Hourly Bot Logs to Google Sheets (avoid flooding with hundreds of rows)
-        if (now.hour * 60 + now.minute - last_bot_log_time.hour * 60 - last_bot_log_time.minute) >= 60 or (now.date() != last_bot_log_time.date()):
+        if (now - last_bot_log_time).total_seconds() >= bot_log_interval:
             try:
                 status = strategy.get_status_summary()
                 trade_logger.log_bot_activity(

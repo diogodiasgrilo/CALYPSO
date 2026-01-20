@@ -155,34 +155,33 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     # Initialize strategy
     strategy = IronFlyStrategy(client, config, trade_logger, dry_run=dry_run)
 
-    # Log dashboard metrics on startup if stale (ensures fresh data on restart)
-    if trade_logger.should_log_initial_metrics(stale_minutes=30):
-        try:
-            trade_logger.log_event("Logging dashboard metrics on startup (stale or missing)...")
+    # Log dashboard metrics on startup (always update on restart for fresh data)
+    try:
+        trade_logger.log_event("Logging dashboard metrics on startup...")
 
-            # Update market data first
-            strategy.update_market_data()
+        # Update market data first
+        strategy.update_market_data()
 
-            # Log Account Summary
-            strategy.log_account_summary()
+        # Log Account Summary
+        strategy.log_account_summary()
 
-            # Log Performance Metrics
-            strategy.log_performance_metrics()
+        # Log Performance Metrics
+        strategy.log_performance_metrics()
 
-            # Log bot startup activity
-            status = strategy.get_status_summary()
-            trade_logger.log_bot_activity(
-                level="INFO",
-                component="Main",
-                message=f"Bot started - State: {status['state']}, Trades today: {status['trades_today']}",
-                spy_price=status['underlying_price'],
-                vix=status['vix'],
-                flush=True
-            )
+        # Log bot startup activity (always - so we know when bot started)
+        status = strategy.get_status_summary()
+        trade_logger.log_bot_activity(
+            level="INFO",
+            component="Main",
+            message=f"Bot started - State: {status['state']}, Trades today: {status['trades_today']}",
+            spy_price=status['underlying_price'],
+            vix=status['vix'],
+            flush=True
+        )
 
-            trade_logger.log_event("Dashboard metrics logged to Google Sheets")
-        except Exception as e:
-            trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
+        trade_logger.log_event("Dashboard metrics logged to Google Sheets")
+    except Exception as e:
+        trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
 
     # Start real-time price streaming for underlying and VIX
     subscriptions = []
@@ -321,15 +320,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
 
                 # Hourly Bot Logs to Google Sheets (avoid flooding with hundreds of rows)
                 if (now - last_bot_log_time).total_seconds() >= bot_log_interval:
-                    status = strategy.get_status_summary()
-                    trade_logger.log_bot_activity(
-                        level="INFO",
-                        component="IronFlyStrategy",
-                        message=f"Hourly update: State={status['state']}, Trades={status['trades_today']}, P&L=${status['daily_pnl']:.2f}",
-                        spy_price=status['underlying_price'],
-                        vix=status['vix']
-                    )
-                    last_bot_log_time = now
+                    try:
+                        status = strategy.get_status_summary()
+                        trade_logger.log_bot_activity(
+                            level="INFO",
+                            component="IronFlyStrategy",
+                            message=f"Hourly update: State={status['state']}, Trades={status['trades_today']}, P&L=${status['daily_pnl']:.2f}",
+                            spy_price=status['underlying_price'],
+                            vix=status['vix'],
+                            flush=True
+                        )
+                        last_bot_log_time = now
+                    except Exception as e:
+                        trade_logger.log_error(f"Hourly bot log error: {e}")
 
                 # Sleep until next check (shorter for 0DTE - need fast reaction)
                 if not interruptible_sleep(check_interval):
