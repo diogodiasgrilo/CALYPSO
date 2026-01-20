@@ -304,7 +304,7 @@ def list_accounts(config: dict):
     print("=" * 80 + "\n")
 
 
-def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
+def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     """
     Run the main trading bot loop.
 
