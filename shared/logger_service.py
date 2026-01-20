@@ -2226,8 +2226,12 @@ class LocalFileLogger:
         self.log_level = self.config.get("log_level", "INFO")
         self.console_output = self.config.get("console_output", True)
 
+        # Ensure log directory exists
+        log_dir = Path(self.log_file).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+
         # Separate file for trade records in JSON format
-        self.trade_log_file = self.log_file.replace(".txt", "_trades.json")
+        self.trade_log_file = str(log_dir / "trades.json")
 
         self._setup_logging()
 
