@@ -1,63 +1,69 @@
-# scripts/ - Utility and Test Scripts
+# Utility Scripts
 
-This directory contains helper scripts for development, testing, and instrument discovery.
+Helper scripts for development, testing, and VM management.
 
-## Directory Structure
+---
 
+## VM Status Script
+
+### `bot_status.sh`
+Quick status overview of all 3 bots on the VM.
+
+```bash
+# On VM:
+/opt/calypso/scripts/bot_status.sh
 ```
-scripts/
-├── search/     # Instrument search utilities
-└── tests/      # Test and validation scripts
-```
+
+Shows:
+- Service status (running/stopped) for each bot
+- Memory usage
+- Last log entry from each bot
+- Recent entries from monitor log
+
+---
 
 ## Search Scripts (`scripts/search/`)
 
 Tools for finding UICs (Unique Instrument Codes) in the Saxo API:
 
-- **`find_spy_uic.py`** - Find the UIC for SPY ETF
-- **`find_vix.py`** - Find the UIC for VIX index
-- **`find_strategy_uics.py`** - Find all required UICs for the strategy
-- **`search_instruments.py`** - General instrument search tool
-- **`search_sp500_alternatives.py`** - Find S&P 500 related instruments
+| Script | Purpose |
+|--------|---------|
+| `find_spy_uic.py` | Find UIC for SPY ETF |
+| `find_vix.py` | Find UIC for VIX index |
+| `find_strategy_uics.py` | Find all required UICs |
+| `search_instruments.py` | General instrument search |
 
-### Usage Example
+### Usage
 ```bash
 python scripts/search/find_spy_uic.py
-python scripts/search/find_vix.py
+python scripts/search/search_instruments.py --query "QQQ"
 ```
+
+---
 
 ## Test Scripts (`scripts/tests/`)
 
-Scripts for testing API connectivity and data retrieval:
+Scripts for testing API connectivity:
 
-- **`test_spy_price.py`** - Test SPY price fetching
-- **`test_spy_quote.py`** - Test SPY quote retrieval
-- **`test_spy_asset_types.py`** - Test different asset type queries
-- **`test_live_with_external_feed.py`** - Test external Yahoo Finance fallback
+| Script | Purpose |
+|--------|---------|
+| `test_spy_price.py` | Test SPY price fetching |
+| `test_spy_quote.py` | Test SPY quote retrieval |
+| `test_live_with_external_feed.py` | Test Yahoo Finance fallback |
 
-### Usage Example
+### Usage
 ```bash
 python scripts/tests/test_spy_price.py
-python scripts/tests/test_live_with_external_feed.py
 ```
 
-## When to Use These Scripts
+---
 
-### Search Scripts
-- Setting up a new instrument or strategy
-- Verifying UIC codes before adding to config
-- Exploring available instruments on Saxo
-- Finding alternative tickers
+## Notes
 
-### Test Scripts
-- Troubleshooting price feed issues
-- Verifying API connectivity
-- Testing authentication
-- Validating external feed fallback
-- During development of new features
+- Run all scripts from the project root directory
+- These are for development/testing only, not during live trading
+- Search scripts require valid Saxo API credentials in config
 
-## Note
+---
 
-These scripts are for **development and testing only**. They are not part of the main trading bot and should not be run during live trading.
-
-All scripts assume they're being run from the project root directory.
+**Last Updated:** 2026-01-20

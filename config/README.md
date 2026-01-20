@@ -1,139 +1,195 @@
-# config/ - Configuration Files
+# Configuration Reference
 
-This directory contains shared configuration templates. Each bot has its own `config/` directory with bot-specific settings.
+Each bot has its own configuration file in `bots/{bot_name}/config/config.json`.
+
+---
 
 ## Directory Structure
 
 ```
+bots/
+├── delta_neutral/config/
+│   ├── config.json              # Active config (NEVER COMMIT)
+│   └── config.example.json      # Template
+├── iron_fly_0dte/config/
+│   ├── config.json
+│   └── config.example.json
+└── rolling_put_diagonal/config/
+    ├── config.json
+    └── config.example.json
+
 config/
-├── README.md                    # This file
-└── (shared templates if any)
-
-bots/delta_neutral/config/
-├── config.json                  # Active config (NEVER COMMIT)
-├── config.example.json          # Template
-└── google_credentials.json      # Google API creds (NEVER COMMIT)
-
-bots/iron_fly_0dte/config/
-├── config.json                  # Active config (NEVER COMMIT)
-├── config.example.json          # Template
-└── google_credentials.json      # Google API creds (NEVER COMMIT)
+└── google_credentials.json      # Shared Google API creds (NEVER COMMIT)
 ```
+
+---
 
 ## Setup
 
-### Delta Neutral Bot
-
 ```bash
+# For each bot you want to run:
 cd bots/delta_neutral/config
 cp config.example.json config.json
 # Edit config.json with your credentials
 ```
 
-### Iron Fly Bot
+---
 
-```bash
-cd bots/iron_fly_0dte/config
-cp config.example.json config.json
-# Edit config.json with your credentials
-```
+## Common Configuration Sections
 
-## Configuration Reference
-
-### Saxo API Section (Both Bots)
+### Saxo API (All Bots)
 
 ```json
 {
   "saxo_api": {
-    "environment": "sim",           // "sim" or "live"
+    "environment": "live",
     "sim": {
       "app_key": "YOUR_SIM_KEY",
-      "app_secret": "YOUR_SIM_SECRET"
+      "app_secret": "YOUR_SIM_SECRET",
+      "access_token": "",
+      "refresh_token": "",
+      "token_expiry": ""
     },
     "live": {
       "app_key": "YOUR_LIVE_KEY",
-      "app_secret": "YOUR_LIVE_SECRET"
-    }
+      "app_secret": "YOUR_LIVE_SECRET",
+      "access_token": "",
+      "refresh_token": "",
+      "token_expiry": ""
+    },
+    "base_url_sim": "https://gateway.saxobank.com/sim/openapi",
+    "base_url_live": "https://gateway.saxobank.com/openapi"
   }
 }
 ```
 
-### Google Sheets Section
+### Google Sheets (All Bots)
 
 ```json
 {
   "google_sheets": {
     "enabled": true,
     "credentials_file": "config/google_credentials.json",
-    "spreadsheet_name": "Your_Spreadsheet_Name",
-    "strategy_type": "delta_neutral",    // or "iron_fly"
-    "include_opening_range": false       // true for iron_fly only
+    "spreadsheet_name": "Calypso_Bot_Log",
+    "worksheet_name": "Trades"
   }
 }
 ```
 
-**Strategy Types:**
-- `delta_neutral` - Creates worksheets for theta tracking, straddle/strangle P&L
-- `iron_fly` - Creates worksheets for 0DTE metrics, opening range tracking
-
-### Delta Neutral Strategy Parameters
-
-```json
-{
-  "strategy": {
-    "max_vix_entry": 18.0,              // Only enter when VIX < 18
-    "long_straddle_min_dte": 90,        // Min DTE for long straddle
-    "long_straddle_max_dte": 120,       // Max DTE for long straddle
-    "recenter_threshold_points": 5.0,   // Recenter on 5-point move
-    "exit_dte_min": 30,                 // Exit window start
-    "exit_dte_max": 60,                 // Exit window end
-    "fed_blackout_days": 2,             // Days before FOMC to avoid
-    "emergency_exit_percent": 5.0       // Hard exit threshold
-  }
-}
-```
-
-### Iron Fly Strategy Parameters
-
-```json
-{
-  "strategy": {
-    "underlying_symbol": "SPX",         // SPX for index options
-    "entry_time_est": "10:00",          // Enter at 10:00 AM EST
-    "opening_range_minutes": 30,        // Track 9:30-10:00 range
-    "max_vix_entry": 20.0,              // Only enter when VIX < 20
-    "vix_spike_threshold_percent": 5.0, // Abort on VIX spike
-    "profit_target_per_contract": 75.0, // Target $75/contract
-    "max_hold_minutes": 60,             // Exit after 60 min
-    "stop_loss_type": "wing_touch"      // Exit on wing breach
-  }
-}
-```
-
-### Circuit Breaker (Both Bots)
+### Circuit Breaker (All Bots)
 
 ```json
 {
   "circuit_breaker": {
-    "max_consecutive_errors": 3,        // Errors before halt
-    "max_disconnection_seconds": 60,    // Disconnection tolerance
-    "cooldown_minutes": 15              // Cooldown period
+    "max_consecutive_errors": 3,
+    "max_disconnection_seconds": 60,
+    "cooldown_minutes": 15
   }
 }
 ```
 
+### Currency Conversion (All Bots)
+
+```json
+{
+  "currency": {
+    "base_currency": "USD",
+    "account_currency": "EUR",
+    "eur_usd_uic": 21,
+    "enabled": true,
+    "cache_rate_seconds": 300
+  }
+}
+```
+
+---
+
+## Bot-Specific Configuration
+
+### Delta Neutral Strategy
+
+```json
+{
+  "strategy": {
+    "underlying_symbol": "SPY",
+    "underlying_uic": 36590,
+    "vix_symbol": "VIX",
+    "vix_uic": 10606,
+    "max_vix_entry": 18.0,
+    "vix_defensive_threshold": 25.0,
+    "long_straddle_min_dte": 90,
+    "long_straddle_max_dte": 120,
+    "recenter_threshold_points": 5.0,
+    "weekly_target_return_percent": 1.0,
+    "exit_dte_min": 30,
+    "exit_dte_max": 60,
+    "roll_days": ["Friday"],
+    "max_bid_ask_spread_percent": 15,
+    "order_timeout_seconds": 60,
+    "position_size": 1,
+    "fed_blackout_days": 2,
+    "emergency_exit_percent": 5.0
+  }
+}
+```
+
+### Iron Fly 0DTE Strategy
+
+```json
+{
+  "strategy": {
+    "underlying_symbol": "US500.I",
+    "underlying_uic": 4913,
+    "vix_symbol": "VIX",
+    "vix_uic": 10606,
+    "entry_time_est": "10:00",
+    "opening_range_minutes": 30,
+    "max_vix_entry": 20.0,
+    "vix_spike_threshold_percent": 5.0,
+    "profit_target_per_contract": 75.0,
+    "max_hold_minutes": 60,
+    "stop_loss_type": "wing_touch",
+    "position_size": 1
+  }
+}
+```
+
+### Rolling Put Diagonal Strategy
+
+```json
+{
+  "strategy": {
+    "underlying_symbol": "QQQ",
+    "underlying_uic": 4328771,
+    "long_put_dte": 14,
+    "long_put_delta": -0.33,
+    "short_put_dte": 1,
+    "short_put_delta": -0.50,
+    "position_size": 1
+  }
+}
+```
+
+---
+
 ## Security
 
-⚠️ **NEVER commit these files to git:**
-- `config.json` - Contains API keys
-- `google_credentials.json` - Contains Google API credentials
+**NEVER commit these files to git:**
+- `bots/*/config/config.json` - Contains API keys
+- `config/google_credentials.json` - Google API credentials
 
-These files are automatically ignored by `.gitignore`.
+These are automatically ignored by `.gitignore`.
+
+---
 
 ## GCP Deployment
 
-When running on GCP, credentials are loaded from Secret Manager:
-- Saxo API credentials from `saxo-api-credentials`
-- Google Sheets credentials from `google-sheets-credentials`
+On GCP, sensitive credentials are loaded from Secret Manager:
+- `calypso-saxo-credentials` - Saxo API tokens
+- `calypso-google-sheets-credentials` - Google Sheets credentials
 
-Bot-specific settings (strategy parameters, spreadsheet names) still come from each bot's `config.json`.
+Bot-specific settings (strategy parameters) still come from each bot's `config.json`.
+
+---
+
+**Last Updated:** 2026-01-20

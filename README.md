@@ -1,128 +1,201 @@
-# CALYPSO - Trading Bot Platform
+# CALYPSO - Automated Options Trading Platform
 
-Automated options trading platform implementing multiple strategies using the Saxo Bank OpenAPI.
+Multi-strategy options trading platform using Saxo Bank API, running on Google Cloud VM.
+
+**Repository:** https://github.com/diogodiasgrilo/CALYPSO
+
+---
 
 ## Trading Strategies
 
-### 1. Delta Neutral Strategy (Brian's Strategy)
-**Long Straddle + Weekly Short Strangles** with 5-point recentering on SPY:
+### 1. Delta Neutral (SPY)
+**Long Straddle + Weekly Short Strangles** with 5-point recentering:
 - Buy ATM long straddle (90-120 DTE) when VIX < 18
 - Sell weekly short strangles at 1.5-2x expected move
 - Recenter if SPY moves 5+ points from initial strike
 - Roll shorts on Friday or if challenged
 - Exit when longs reach 30-60 DTE
 
-### 2. 0DTE Iron Fly Strategy (Doc Severson's Strategy)
-**0DTE Iron Butterfly** with opening range filter on SPX:
-- Monitor opening range (9:30-10:00 AM EST)
+### 2. Iron Fly 0DTE (S&P 500)
+**0DTE Iron Butterfly** with opening range filter:
+- Monitor opening range (9:30-10:00 AM ET)
 - Enter at 10:00 AM if VIX < 20 and price within range
 - Sell ATM iron butterfly with wings at expected move
-- Take profit at $50-$100 per contract
+- Take profit at $75 per contract
 - Stop loss when price touches wing strikes
-- Average hold time: 18 minutes
+- Max hold time: 60 minutes
+
+### 3. Rolling Put Diagonal (QQQ)
+**Bill Belt's Rolling Put Diagonal** strategy:
+- Buy long put (14 DTE, -0.33 delta)
+- Sell short put (1 DTE, ATM)
+- Roll short put daily for income
+- Roll long put when approaching expiry
+
+---
 
 ## Project Structure
 
 ```
 calypso/
-├── shared/                          # Shared infrastructure
-│   ├── saxo_client.py              # Saxo Bank API client with WebSocket streaming
-│   ├── logger_service.py           # Strategy-aware Google Sheets logging
-│   ├── config_loader.py            # Config management (local + GCP)
-│   ├── market_hours.py             # Market hours + US holiday detection
-│   ├── secret_manager.py           # GCP Secret Manager integration
-│   ├── token_coordinator.py        # Multi-bot token sharing
-│   └── external_price_feed.py      # Yahoo Finance fallback
-│
 ├── bots/
-│   ├── delta_neutral/              # Brian's Strategy (SPY)
-│   │   ├── main.py                 # Entry point
-│   │   ├── strategy.py             # Strategy logic
-│   │   └── config/                 # Bot-specific config
-│   │
-│   └── iron_fly_0dte/              # Doc Severson's Strategy (SPX)
-│       ├── main.py                 # Entry point
-│       ├── strategy.py             # Strategy logic
-│       └── config/                 # Bot-specific config
-│
-├── deploy/                          # Deployment files
-│   ├── delta_neutral.service       # Systemd for delta neutral bot
-│   ├── iron_fly_0dte.service       # Systemd for iron fly bot
-│   └── setup_vm.sh                 # GCP VM setup script
-│
-├── docs/                            # Documentation
-├── scripts/                         # Utility scripts
-├── data/                            # Persistent data (metrics, state)
-├── logs/                            # Log files
-├── requirements.txt                 # Dependencies
-└── README.md
+│   ├── delta_neutral/           # SPY strategy
+│   │   ├── main.py
+│   │   ├── strategy.py
+│   │   └── config/config.json
+│   ├── iron_fly_0dte/           # S&P 500 0DTE strategy
+│   │   ├── main.py
+│   │   ├── strategy.py
+│   │   └── config/config.json
+│   └── rolling_put_diagonal/    # QQQ strategy
+│       ├── main.py
+│       ├── strategy.py
+│       └── config/config.json
+├── shared/                      # Shared infrastructure
+│   ├── saxo_client.py          # Saxo Bank API client
+│   ├── logger_service.py       # Logging + Google Sheets
+│   ├── market_hours.py         # Market hours + holidays
+│   ├── token_coordinator.py    # Multi-bot token sharing
+│   └── config_loader.py        # Config management
+├── scripts/                     # Utility scripts
+├── logs/                        # Log files (per bot)
+├── data/                        # Persistent metrics
+└── docs/                        # Documentation
 ```
 
-## Quick Start
+---
+
+## Quick Start (Local Development)
 
 ### 1. Install Dependencies
-
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ### 2. Configure
-
 ```bash
-# Delta Neutral Bot
+# Copy example config for each bot you want to run
 cp bots/delta_neutral/config/config.example.json bots/delta_neutral/config/config.json
-# Edit with your Saxo API credentials
-
-# Iron Fly Bot
-cp bots/iron_fly_0dte/config/config.example.json bots/iron_fly_0dte/config/config.json
 # Edit with your Saxo API credentials
 ```
 
 ### 3. Run
-
 ```bash
-# Delta Neutral Bot
-python -m bots.delta_neutral.main --dry-run        # Simulation mode
-python -m bots.delta_neutral.main --live           # Live trading
-python -m bots.delta_neutral.main --status         # Check status
+# Dry run (simulation - no real trades)
+python -m bots.delta_neutral.main --live --dry-run
 
-# Iron Fly Bot
-python -m bots.iron_fly_0dte.main --dry-run        # Simulation mode
-python -m bots.iron_fly_0dte.main --live           # Live trading
-python -m bots.iron_fly_0dte.main --calibrate 25   # Manual expected move
+# Live trading (real money)
+python -m bots.delta_neutral.main --live
+
+# Check status only
+python -m bots.delta_neutral.main --status
 ```
+
+---
 
 ## GCP VM Deployment
 
-Both bots can run as separate systemd services on the same VM:
+All 3 bots run as systemd services on a single GCP VM (`calypso-bot`, zone `us-east1-b`).
 
+### SSH Access
 ```bash
-# Install services
-sudo cp deploy/delta_neutral.service /etc/systemd/system/
-sudo cp deploy/iron_fly_0dte.service /etc/systemd/system/
-sudo systemctl daemon-reload
+gcloud compute ssh calypso-bot --zone=us-east1-b
+```
 
-# Start Delta Neutral
-sudo systemctl enable delta_neutral
+### Bot Management
+```bash
+# Start/stop/restart individual bots
 sudo systemctl start delta_neutral
+sudo systemctl stop iron_fly_0dte
+sudo systemctl restart rolling_put_diagonal
 
-# Start Iron Fly
-sudo systemctl enable iron_fly_0dte
-sudo systemctl start iron_fly_0dte
+# Start/stop ALL bots
+sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal
+sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal
 
-# View logs
+# Emergency kill (immediate)
+sudo systemctl kill -s SIGKILL delta_neutral
+```
+
+### View Logs
+```bash
+# Combined monitor log (all bots)
+tail -f /opt/calypso/logs/monitor.log
+
+# Individual bot logs
 sudo journalctl -u delta_neutral -f
 sudo journalctl -u iron_fly_0dte -f
+sudo journalctl -u rolling_put_diagonal -f
+
+# Quick status check
+/opt/calypso/scripts/bot_status.sh
 ```
+
+### Deploy Updates
+```bash
+cd /opt/calypso
+sudo -u calypso git pull
+sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal
+```
+
+---
+
+## Log Files
+
+All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
+
+| Log | Location | Description |
+|-----|----------|-------------|
+| Combined Monitor | `logs/monitor.log` | Key events from all bots |
+| Delta Neutral | `logs/delta_neutral/bot.log` | Full logs for DN bot |
+| Iron Fly 0DTE | `logs/iron_fly_0dte/bot.log` | Full logs for IF bot |
+| Rolling Put Diagonal | `logs/rolling_put_diagonal/bot.log` | Full logs for RPD bot |
+
+---
 
 ## Documentation
 
-- **[Quick Start Guide](docs/QUICK_START.md)** - Detailed setup instructions
-- **[Google Sheets Logging](docs/GOOGLE_SHEETS_QUICK_START.md)** - Trade logging setup
-- **[VM Operations](docs/VM_OPERATIONS.md)** - GCP VM management
-- **[Configuration Guide](config/README.md)** - Configuration reference
+- **[VM Commands Reference](docs/VM_COMMANDS.md)** - Complete VM command reference
+- **[Google Sheets Setup](docs/GOOGLE_SHEETS.md)** - Trade logging setup
+- **[Deployment Guide](docs/DEPLOYMENT.md)** - GCP deployment instructions
+- **[Configuration Reference](config/README.md)** - Config file reference
+
+---
+
+## Features
+
+**Shared Infrastructure:**
+- WebSocket real-time price streaming from Saxo
+- Circuit breaker for error handling
+- Token persistence & auto-refresh
+- Multi-bot token coordination
+- External price feed fallback (Yahoo Finance)
+- Multi-currency support (USD/EUR conversion)
+- Google Sheets logging with strategy-specific dashboards
+- US market holiday detection (all NYSE holidays)
+- Intelligent sleep during market closures
+
+**Safety Features:**
+- Fed meeting blackout periods (2 days before FOMC)
+- ITM prevention for short options
+- Emergency exit on large moves (5%+)
+- VIX-based entry filtering
+- Position recovery on restart
+
+---
+
+## Requirements
+
+- Python 3.8+
+- Saxo Bank account with API access
+- Required market data subscriptions:
+  - NYSE (AMEX and ARCA), Bats - Level 1
+  - CBOE Indices - Level 1
+  - OPRA Options Data
+
+---
 
 ## Security
 
@@ -133,43 +206,7 @@ sudo journalctl -u iron_fly_0dte -f
 
 These are automatically ignored by `.gitignore`.
 
-## Features
-
-**Shared Infrastructure:**
-- WebSocket real-time price streaming
-- Circuit breaker for error handling
-- Token persistence & auto-refresh
-- External price feed fallback (Yahoo Finance)
-- Multi-currency support (USD/EUR)
-- Google Sheets logging with strategy-specific dashboards
-- US market holiday detection (all NYSE/NASDAQ holidays)
-- Intelligent sleep during market closures
-
-**Delta Neutral Bot:**
-- VIX-based entry filtering
-- Automatic recentering on price moves
-- Fed meeting blackout periods
-- ITM prevention for short options
-- Emergency exit on large moves
-- Theta tracking (daily/weekly/cumulative)
-- Position recovery on restart
-
-**Iron Fly Bot:**
-- Opening range filter (trend day detection)
-- VIX level and spike filters
-- Calibration mode for manual expected move
-- Fast exit on wing breach (stop loss)
-- Time-based exit (max 60 min hold)
-- FOMC and economic calendar blackout options
-
-## Requirements
-
-- Python 3.8+
-- Saxo Bank account with API access
-- Required subscriptions:
-  - NYSE (AMEX and ARCA), Bats - Level 1
-  - CBOE Indices - Level 1
-  - OPRA Options Data
+---
 
 ## Disclaimer
 
@@ -177,5 +214,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 2.1.0
-**Last Updated:** 2026-01-19
+**Version:** 3.0.0
+**Last Updated:** 2026-01-20
