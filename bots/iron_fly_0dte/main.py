@@ -318,12 +318,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                 # Reset consecutive errors on successful check
                 consecutive_errors = 0
 
-                # Log action if something happened
+                # Log action if something happened (but not repetitive "waiting" messages)
                 if action != "No action" and "Waiting" not in action and "Monitoring" not in action:
-                    if dry_run:
-                        trade_logger.log_event(f"[DRY RUN] {action}")
-                    else:
-                        trade_logger.log_event(action)
+                    # Don't spam "Daily trading complete" every 5 seconds
+                    if "Daily trading complete" not in action:
+                        if dry_run:
+                            trade_logger.log_event(f"[DRY RUN] {action}")
+                        else:
+                            trade_logger.log_event(action)
 
                 # Periodic status logging (every 60 seconds to terminal/file logs)
                 now = datetime.now()
@@ -366,9 +368,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     except Exception as e:
                         trade_logger.log_error(f"Hourly bot log error: {e}")
 
-                # Sleep until next check (shorter for 0DTE - need fast reaction)
-                if not interruptible_sleep(check_interval):
-                    break
+                # Sleep until next check
+                # Use longer interval when daily trading is complete (no need to check every 5s)
+                status = strategy.get_status_summary()
+                if status['state'] == 'DailyComplete':
+                    # Daily trading done - just check every 60s until market close
+                    if not interruptible_sleep(60):
+                        break
+                else:
+                    # Active trading - use fast 5s interval for 0DTE reactions
+                    if not interruptible_sleep(check_interval):
+                        break
 
             except KeyboardInterrupt:
                 shutdown_requested = True
