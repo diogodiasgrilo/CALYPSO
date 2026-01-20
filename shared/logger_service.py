@@ -1464,6 +1464,11 @@ class GoogleSheetsLogger:
             Columns: Date, Underlying Close, VIX, Premium Collected ($), Trades Today, Win Rate (%),
                      Daily P&L ($), Daily P&L (EUR), Cumulative P&L ($), Total Trades, Winning Trades, Notes
 
+        For Rolling Put Diagonal strategy:
+            Columns: Date, QQQ Close, 9 EMA, MACD Histogram, CCI, Roll Type, Short Premium ($),
+                     Campaign #, Daily P&L ($), Daily P&L (EUR), Cumulative P&L ($),
+                     Long Put Delta, Entry Conditions Met, Notes
+
         For Delta Neutral strategy:
             Columns: Date, SPY Close, VIX, Net Theta ($), Est. Theta Earned This Week ($),
                      Cumulative Net Theta ($), Daily P&L ($), Daily P&L (EUR),
@@ -1496,6 +1501,25 @@ class GoogleSheetsLogger:
                     summary.get("notes", "")
                 ]
                 logger.debug(f"Daily summary logged to Google Sheets (Premium: ${summary.get('premium_collected', 0):.2f})")
+            elif self.strategy_type == "rolling_put_diagonal":
+                # Rolling Put Diagonal: Campaign/roll-based tracking with technical indicators
+                row = [
+                    summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    f"{summary.get('qqq_close', 0):.2f}",
+                    f"{summary.get('ema_9', 0):.2f}",
+                    f"{summary.get('macd_histogram', 0):.4f}",
+                    f"{summary.get('cci', 0):.2f}",
+                    summary.get('roll_type', ''),
+                    f"{summary.get('short_premium', 0):.2f}",
+                    str(summary.get('campaign_number', 0)),
+                    f"{summary.get('daily_pnl', 0):.2f}",
+                    f"{summary.get('daily_pnl_eur', 0):.2f}",
+                    f"{summary.get('cumulative_pnl', 0):.2f}",
+                    f"{summary.get('long_put_delta', 0):.3f}",
+                    summary.get('entry_conditions_met', 'No'),
+                    summary.get("notes", "")
+                ]
+                logger.debug(f"Daily summary logged to Google Sheets (Campaign: #{summary.get('campaign_number', 0)})")
             else:
                 # Delta Neutral: Theta-based tracking
                 net_theta = summary.get('total_theta', summary.get('net_theta', 0))
@@ -1862,6 +1886,41 @@ class GoogleSheetsLogger:
                     f"{metrics.get('worst_trade', 0):.2f}"
                 ]
                 col_range = "A2:R2"  # 18 columns
+            elif self.strategy_type == "rolling_put_diagonal":
+                # Rolling Put Diagonal: Campaign-based tracking with daily rolls
+                # Columns: Timestamp, Period, Total P&L ($), Total P&L (EUR), Total P&L (%),
+                #          Realized P&L ($), Unrealized P&L ($), Total Premium Collected ($), Avg Daily Premium ($),
+                #          Campaigns Completed, Avg Campaign P&L ($), Best Campaign ($), Worst Campaign ($),
+                #          Total Rolls, Vertical Rolls, Horizontal Rolls,
+                #          Win Rate (%), Max Drawdown ($), Avg Campaign Days
+                row = [
+                    # Meta
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    period,
+                    # P&L (Total)
+                    f"{total_pnl:.2f}",
+                    f"{total_pnl_eur:.2f}",
+                    f"{total_pnl_pct:.4f}",
+                    f"{metrics.get('realized_pnl', 0):.2f}",
+                    f"{metrics.get('unrealized_pnl', 0):.2f}",
+                    # Premium Tracking
+                    f"{metrics.get('total_premium_collected', 0):.2f}",
+                    f"{metrics.get('avg_daily_premium', 0):.2f}",
+                    # Campaign Stats
+                    metrics.get("campaigns_completed", 0),
+                    f"{metrics.get('avg_campaign_pnl', 0):.2f}",
+                    f"{metrics.get('best_campaign', 0):.2f}",
+                    f"{metrics.get('worst_campaign', 0):.2f}",
+                    # Roll Stats
+                    metrics.get("total_rolls", 0),
+                    metrics.get("vertical_rolls", 0),
+                    metrics.get("horizontal_rolls", 0),
+                    # Stats
+                    f"{metrics.get('win_rate', 0):.4f}",
+                    f"{metrics.get('max_drawdown', 0):.2f}",
+                    metrics.get("avg_campaign_days", 0)
+                ]
+                col_range = "A2:T2"  # 20 columns
             else:
                 # Delta Neutral: Weekly theta strategy - track theta, rolls
                 row = [
@@ -1970,6 +2029,54 @@ class GoogleSheetsLogger:
                     environment
                 ]
                 col_range = "A2:N2"  # 14 columns
+            elif self.strategy_type == "rolling_put_diagonal":
+                # Rolling Put Diagonal: Put diagonal position snapshot with technical indicators
+                # Columns: Timestamp, QQQ Price, 9 EMA, MACD Histogram, CCI,
+                #          Long Put Strike, Long Put Expiry, Long Put DTE, Long Put Delta,
+                #          Short Put Strike, Short Put Expiry, Short Premium ($),
+                #          Campaign #, Total Premium Collected ($), Unrealized P&L ($),
+                #          State, Exchange Rate
+                qqq_price = strategy_data.get("qqq_price", 0)
+                ema_9 = strategy_data.get("ema_9", 0)
+                macd = strategy_data.get("macd_histogram", 0)
+                cci = strategy_data.get("cci", 0)
+                long_put_strike = strategy_data.get("long_put_strike", 0)
+                long_put_expiry = strategy_data.get("long_put_expiry", "")
+                long_put_dte = strategy_data.get("long_put_dte", 0)
+                long_put_delta = strategy_data.get("long_put_delta", 0)
+                short_put_strike = strategy_data.get("short_put_strike", 0)
+                short_put_expiry = strategy_data.get("short_put_expiry", "")
+                short_premium = strategy_data.get("short_premium", 0)
+                campaign_number = strategy_data.get("campaign_number", 0)
+                total_premium = strategy_data.get("total_premium_collected", 0)
+                unrealized_pnl = strategy_data.get("unrealized_pnl", 0)
+                state = strategy_data.get("state", "Unknown")
+
+                row = [
+                    # Market Data + Indicators
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    f"{qqq_price:.2f}",
+                    f"{ema_9:.2f}" if ema_9 else "N/A",
+                    f"{macd:.4f}" if macd else "N/A",
+                    f"{cci:.2f}" if cci else "N/A",
+                    # Long Put (Protection)
+                    f"{long_put_strike:.0f}" if long_put_strike else "N/A",
+                    long_put_expiry[:10] if long_put_expiry else "N/A",
+                    str(long_put_dte) if long_put_dte else "N/A",
+                    f"{long_put_delta:.3f}" if long_put_delta else "N/A",
+                    # Short Put (Income)
+                    f"{short_put_strike:.0f}" if short_put_strike else "N/A",
+                    short_put_expiry[:10] if short_put_expiry else "N/A",
+                    f"{short_premium:.2f}",
+                    # Position Status
+                    str(campaign_number) if campaign_number else "0",
+                    f"{total_premium:.2f}",
+                    f"{unrealized_pnl:.2f}",
+                    # Meta
+                    state,
+                    f"{exchange_rate:.6f}" if exchange_rate else "N/A"
+                ]
+                col_range = "A2:Q2"  # 17 columns
             else:
                 # Delta Neutral: Straddle + Strangle position snapshot
                 spy_price = strategy_data.get("spy_price", 0)
@@ -3071,6 +3178,41 @@ class TradeLoggerService:
             f"Range: {data.get('range_low', 0):.2f}-{data.get('range_high', 0):.2f}, "
             f"VIX: {data.get('current_vix', 0):.2f}, "
             f"Reason: {data.get('reason', 'N/A')}"
+        )
+
+    def log_campaign(self, data: Dict[str, Any]):
+        """
+        Log a completed campaign for Rolling Put Diagonal strategy.
+
+        Called when a campaign ends (long put expires, event risk close, etc.).
+
+        Args:
+            data: Dictionary containing campaign data:
+                - campaign_number: Campaign identifier
+                - start_date: When campaign started
+                - end_date: When campaign ended
+                - duration_days: Total days in campaign
+                - long_put_strike: Strike of the long put
+                - long_put_entry: Entry price of long put
+                - long_put_exit: Exit price of long put
+                - total_rolls: Total number of short put rolls
+                - vertical_rolls: Number of vertical (ATM) rolls
+                - horizontal_rolls: Number of horizontal (same strike) rolls
+                - total_premium: Total premium collected from short puts
+                - long_put_pnl: P&L from long put (usually negative)
+                - net_pnl: Net campaign P&L (premium + long put P&L)
+                - close_reason: Why campaign ended
+        """
+        if self.google_logger.enabled:
+            self.google_logger.log_campaign(data)
+
+        # Also log to console for visibility
+        logger.info(
+            f"CAMPAIGN CLOSED: #{data.get('campaign_number', 'N/A')} - "
+            f"Rolls: {data.get('total_rolls', 0)}, "
+            f"Premium: ${data.get('total_premium', 0):.2f}, "
+            f"Net P&L: ${data.get('net_pnl', 0):.2f}, "
+            f"Reason: {data.get('close_reason', 'N/A')}"
         )
 
     def log_safety_event(self, event: Dict[str, Any]):

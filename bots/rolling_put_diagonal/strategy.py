@@ -951,6 +951,22 @@ class RollingPutDiagonalStrategy:
                     campaign_start_date=datetime.now().strftime("%Y-%m-%d"),
                 )
 
+                # Log the simulated trade to Google Sheets
+                if self.trade_logger:
+                    self.trade_logger.log_trade(
+                        action="[SIMULATED] ENTER_CAMPAIGN",
+                        strike=f"{long_put_data['strike']}/{short_put_data['strike']}",
+                        price=0.0,  # Unknown in dry run
+                        delta=long_put_data.get("delta", -0.33),
+                        pnl=0.0,
+                        saxo_client=self.client,
+                        underlying_price=self.current_price,
+                        option_type="Put Diagonal",
+                        expiry_date=long_put_data["expiry"],
+                        premium_received=0.0,  # Unknown in dry run
+                        trade_reason=f"[DRY RUN] Campaign #{self.diagonal.campaign_number}"
+                    )
+
                 self.state = RPDState.POSITION_OPEN
                 self._reset_failure_count()
                 return True
@@ -1158,6 +1174,7 @@ class RollingPutDiagonalStrategy:
                            f"expiry {next_expiry['expiry'][:10]}")
 
                 # Update diagonal in dry run
+                old_strike = old_short.strike
                 self.diagonal.short_put = PutPosition(
                     uic=new_short_data["uic"],
                     strike=new_short_data["strike"],
@@ -1173,6 +1190,22 @@ class RollingPutDiagonalStrategy:
                     self.diagonal.horizontal_roll_count += 1
                     self.metrics.horizontal_rolls += 1
                 self.metrics.roll_count += 1
+
+                # Log the simulated roll to Google Sheets
+                if self.trade_logger:
+                    self.trade_logger.log_trade(
+                        action=f"[SIMULATED] ROLL_{roll_type.value.upper()}",
+                        strike=f"{old_strike}->{new_short_data['strike']}",
+                        price=0.0,  # Unknown in dry run
+                        delta=0.0,
+                        pnl=0.0,
+                        saxo_client=self.client,
+                        underlying_price=self.current_price,
+                        option_type="Short Put Roll",
+                        expiry_date=next_expiry["expiry"],
+                        premium_received=0.0,  # Unknown in dry run
+                        trade_reason=f"[DRY RUN] {roll_type.value} roll #{self.diagonal.roll_count}"
+                    )
 
                 self.state = RPDState.POSITION_OPEN
                 self._reset_failure_count()
@@ -1329,8 +1362,26 @@ class RollingPutDiagonalStrategy:
 
             if self.dry_run:
                 logger.info(f"[DRY RUN] Would roll long from ${old_long.strike} to ${new_long_data['strike']}")
+                old_strike = old_long.strike
                 self.diagonal.long_put.strike = new_long_data["strike"]
                 self.diagonal.long_put.delta = new_long_data["delta"]
+
+                # Log the simulated long roll to Google Sheets
+                if self.trade_logger:
+                    self.trade_logger.log_trade(
+                        action="[SIMULATED] ROLL_LONG_UP",
+                        strike=f"{old_strike}->{new_long_data['strike']}",
+                        price=0.0,  # Unknown in dry run
+                        delta=new_long_data["delta"],
+                        pnl=0.0,
+                        saxo_client=self.client,
+                        underlying_price=self.current_price,
+                        option_type="Long Put Roll",
+                        expiry_date=new_long_data.get("expiry", ""),
+                        premium_received=0.0,
+                        trade_reason=f"[DRY RUN] Long delta too low ({old_long.delta:.3f})"
+                    )
+
                 self.state = RPDState.POSITION_OPEN
                 return True
 
@@ -1497,8 +1548,9 @@ class RollingPutDiagonalStrategy:
 
             # Log to Google Sheets
             if self.trade_logger:
+                action_prefix = "[SIMULATED] " if self.dry_run else ""
                 self.trade_logger.log_trade(
-                    action="CLOSE_CAMPAIGN",
+                    action=f"{action_prefix}CLOSE_CAMPAIGN",
                     strike=f"{self.diagonal.long_put.strike}/{self.diagonal.short_put.strike if self.diagonal.short_put else 'N/A'}",
                     price=self.diagonal.total_premium_collected,
                     delta=self.diagonal.long_put.delta if self.diagonal.long_put else 0,
@@ -1828,3 +1880,257 @@ class RollingPutDiagonalStrategy:
             }
 
         return summary
+
+    # =========================================================================
+    # GOOGLE SHEETS LOGGING METHODS
+    # =========================================================================
+
+    def log_daily_summary(self):
+        """
+        Log daily summary to Google Sheets Daily Summary tab.
+
+        Rolling Put Diagonal specific columns:
+        - QQQ Close, 9 EMA, MACD Histogram, CCI (technical indicators)
+        - Roll Type, Short Premium, Campaign #
+        - Daily P&L, Cumulative P&L
+        - Long Put Delta, Entry Conditions Met
+        """
+        if not self.trade_logger:
+            return
+
+        # Get EUR conversion rate
+        daily_pnl = self.metrics.realized_pnl  # Today's realized P&L
+        daily_pnl_eur = daily_pnl
+        try:
+            rate = self.client.get_usd_to_account_currency_rate()
+            if rate:
+                daily_pnl_eur = daily_pnl * rate
+        except Exception:
+            pass
+
+        # Determine today's roll type (if any)
+        roll_type = ""
+        if self.diagonal and self.diagonal.last_roll_type:
+            roll_type = self.diagonal.last_roll_type.value
+
+        # Get today's short premium (from current campaign)
+        short_premium = 0.0
+        if self.diagonal:
+            short_premium = self.diagonal.total_premium_collected
+
+        # Get long put delta
+        long_delta = 0.0
+        if self.diagonal and self.diagonal.long_put:
+            long_delta = self.diagonal.long_put.delta or 0.0
+
+        # Entry conditions from indicators
+        entry_conditions_met = False
+        if self.indicators:
+            entry_conditions_met = self.indicators.entry_conditions_met
+
+        # Rolling Put Diagonal specific summary - matches the rolling_put_diagonal Daily Summary columns
+        summary = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "qqq_close": self.current_price,  # QQQ Close
+            "ema_9": self.indicators.ema_9 if self.indicators else 0,
+            "macd_histogram": self.indicators.macd_histogram if self.indicators else 0,
+            "cci": self.indicators.cci if self.indicators else 0,
+            "roll_type": roll_type,
+            "short_premium": short_premium,
+            "campaign_number": self.diagonal.campaign_number if self.diagonal else 0,
+            "daily_pnl": daily_pnl,
+            "daily_pnl_eur": daily_pnl_eur,
+            "cumulative_pnl": self.metrics.total_pnl,
+            "long_put_delta": long_delta,
+            "entry_conditions_met": "Yes" if entry_conditions_met else "No",
+            "notes": f"RPD - State: {self.state.value}, Rolls: {self.metrics.roll_count}"
+        }
+
+        self.trade_logger.log_daily_summary(summary)
+        logger.info(
+            f"Daily summary logged: QQQ=${self.current_price:.2f}, "
+            f"Rolls={self.metrics.roll_count}, P&L=${self.metrics.total_pnl:.2f}"
+        )
+
+    def log_position_to_sheets(self):
+        """
+        Log current positions to Google Sheets Positions tab.
+
+        Rolling Put Diagonal specific columns:
+        - Position Type (Long Put / Short Put)
+        - Strike, Expiry, DTE, Delta
+        - Entry Price, Current Price, P&L
+        - Campaign #, Premium Collected, Status
+        """
+        if not self.trade_logger or not self.diagonal:
+            return
+
+        positions = []
+
+        # Long Put position
+        if self.diagonal.long_put:
+            long_pnl = 0.0
+            if self.diagonal.long_put.current_price and self.diagonal.long_put.entry_price:
+                long_pnl = (self.diagonal.long_put.current_price - self.diagonal.long_put.entry_price) * 100
+
+            positions.append({
+                "type": "Long Put (Protection)",
+                "strike": self.diagonal.long_put.strike,
+                "expiry": self.diagonal.long_put.expiry,
+                "dte": self.diagonal.long_dte,
+                "delta": self.diagonal.long_put.delta or 0,
+                "entry_price": self.diagonal.long_put.entry_price or 0,
+                "current_price": self.diagonal.long_put.current_price or 0,
+                "pnl": long_pnl,
+                "campaign_number": self.diagonal.campaign_number,
+                "premium_collected": 0,  # Long put doesn't collect premium
+                "status": "OPEN"
+            })
+
+        # Short Put position
+        if self.diagonal.short_put:
+            short_pnl = 0.0
+            if self.diagonal.short_put.current_price and self.diagonal.short_put.entry_price:
+                # Short position: profit when price decreases
+                short_pnl = (self.diagonal.short_put.entry_price - self.diagonal.short_put.current_price) * 100
+
+            positions.append({
+                "type": "Short Put (Income)",
+                "strike": self.diagonal.short_put.strike,
+                "expiry": self.diagonal.short_put.expiry,
+                "dte": self.diagonal.short_dte,
+                "delta": -0.50,  # ATM put is approximately -0.50 delta
+                "entry_price": self.diagonal.short_put.entry_price or 0,
+                "current_price": self.diagonal.short_put.current_price or 0,
+                "pnl": short_pnl,
+                "campaign_number": self.diagonal.campaign_number,
+                "premium_collected": self.diagonal.total_premium_collected,
+                "status": "OPEN"
+            })
+
+        if positions:
+            self.trade_logger.log_position_snapshot(positions)
+
+    def log_performance_metrics(self):
+        """
+        Log performance metrics to Google Sheets Performance Metrics tab.
+
+        Rolling Put Diagonal specific columns:
+        - Total P&L, Realized/Unrealized
+        - Total Premium Collected, Avg Daily Premium
+        - Campaigns Completed, Avg Campaign P&L, Best/Worst Campaign
+        - Total Rolls, Vertical Rolls, Horizontal Rolls
+        - Win Rate, Max Drawdown, Avg Campaign Days
+        """
+        if not self.trade_logger:
+            return
+
+        # Calculate campaign stats
+        campaigns_completed = self.metrics.campaign_count
+        avg_campaign_pnl = 0.0
+        if campaigns_completed > 0:
+            avg_campaign_pnl = self.metrics.realized_pnl / campaigns_completed
+
+        # Calculate average daily premium
+        avg_daily_premium = 0.0
+        if self.metrics.roll_count > 0:
+            avg_daily_premium = self.metrics.total_premium_collected / self.metrics.roll_count
+
+        # Calculate win rate
+        winning_campaigns = self.metrics.winning_campaigns if hasattr(self.metrics, 'winning_campaigns') else 0
+        losing_campaigns = self.metrics.losing_campaigns if hasattr(self.metrics, 'losing_campaigns') else 0
+        total_settled = winning_campaigns + losing_campaigns
+        win_rate = (winning_campaigns / total_settled * 100) if total_settled > 0 else 0.0
+
+        # Unrealized P&L from current position
+        unrealized_pnl = 0.0
+        if self.diagonal:
+            if self.diagonal.long_put and self.diagonal.long_put.current_price:
+                unrealized_pnl += (self.diagonal.long_put.current_price - (self.diagonal.long_put.entry_price or 0)) * 100
+            if self.diagonal.short_put and self.diagonal.short_put.current_price:
+                unrealized_pnl += ((self.diagonal.short_put.entry_price or 0) - self.diagonal.short_put.current_price) * 100
+
+        metrics = {
+            # P&L
+            "total_pnl": self.metrics.total_pnl,
+            "realized_pnl": self.metrics.realized_pnl,
+            "unrealized_pnl": unrealized_pnl,
+            # Premium Tracking
+            "total_premium_collected": self.metrics.total_premium_collected,
+            "avg_daily_premium": avg_daily_premium,
+            # Campaign Stats
+            "campaigns_completed": campaigns_completed,
+            "avg_campaign_pnl": avg_campaign_pnl,
+            "best_campaign": self.metrics.best_campaign if hasattr(self.metrics, 'best_campaign') else 0,
+            "worst_campaign": self.metrics.worst_campaign if hasattr(self.metrics, 'worst_campaign') else 0,
+            # Roll Stats
+            "total_rolls": self.metrics.roll_count,
+            "vertical_rolls": self.metrics.vertical_rolls,
+            "horizontal_rolls": self.metrics.horizontal_rolls,
+            # Stats
+            "win_rate": win_rate,
+            "max_drawdown": self.metrics.max_drawdown if hasattr(self.metrics, 'max_drawdown') else 0,
+            "avg_campaign_days": self.metrics.avg_campaign_days if hasattr(self.metrics, 'avg_campaign_days') else 0
+        }
+
+        self.trade_logger.log_performance_metrics(
+            period="Daily",
+            metrics=metrics,
+            saxo_client=self.client
+        )
+
+    def log_account_summary(self):
+        """
+        Log account summary to Google Sheets Account Summary tab.
+
+        Rolling Put Diagonal specific columns:
+        - QQQ Price, 9 EMA, MACD Histogram, CCI (market data + indicators)
+        - Long Put: Strike, Expiry, DTE, Delta
+        - Short Put: Strike, Expiry, Premium
+        - Campaign #, Total Premium Collected, Unrealized P&L
+        - State, Exchange Rate
+        """
+        if not self.trade_logger:
+            return
+
+        # Calculate unrealized P&L
+        unrealized_pnl = 0.0
+        if self.diagonal:
+            if self.diagonal.long_put and self.diagonal.long_put.current_price:
+                unrealized_pnl += (self.diagonal.long_put.current_price - (self.diagonal.long_put.entry_price or 0)) * 100
+            if self.diagonal.short_put and self.diagonal.short_put.current_price:
+                unrealized_pnl += ((self.diagonal.short_put.entry_price or 0) - self.diagonal.short_put.current_price) * 100
+
+        # Short premium for current position
+        short_premium = 0.0
+        if self.diagonal and self.diagonal.short_put:
+            short_premium = self.diagonal.short_put.entry_price or 0
+
+        strategy_data = {
+            # Market Data + Indicators
+            "qqq_price": self.current_price,
+            "ema_9": self.indicators.ema_9 if self.indicators else 0,
+            "macd_histogram": self.indicators.macd_histogram if self.indicators else 0,
+            "cci": self.indicators.cci if self.indicators else 0,
+            # Long Put (Protection)
+            "long_put_strike": self.diagonal.long_put.strike if self.diagonal and self.diagonal.long_put else 0,
+            "long_put_expiry": self.diagonal.long_put.expiry if self.diagonal and self.diagonal.long_put else "",
+            "long_put_dte": self.diagonal.long_dte if self.diagonal else 0,
+            "long_put_delta": self.diagonal.long_put.delta if self.diagonal and self.diagonal.long_put else 0,
+            # Short Put (Income)
+            "short_put_strike": self.diagonal.short_put.strike if self.diagonal and self.diagonal.short_put else 0,
+            "short_put_expiry": self.diagonal.short_put.expiry if self.diagonal and self.diagonal.short_put else "",
+            "short_premium": short_premium,
+            # Position Status
+            "campaign_number": self.diagonal.campaign_number if self.diagonal else 0,
+            "total_premium_collected": self.diagonal.total_premium_collected if self.diagonal else 0,
+            "unrealized_pnl": unrealized_pnl,
+            # Meta
+            "state": self.state.value
+        }
+
+        self.trade_logger.log_account_summary(
+            strategy_data=strategy_data,
+            saxo_client=self.client,
+            environment="LIVE" if not self.dry_run else "SIM"
+        )

@@ -284,10 +284,42 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     trade_logger.log_event(get_market_status_message())
     trade_logger.log_event(get_event_status_message())
 
+    # Log dashboard metrics on startup if stale (ensures fresh data on restart)
+    if trade_logger.should_log_initial_metrics(stale_minutes=30):
+        try:
+            trade_logger.log_event("Logging dashboard metrics on startup (stale or missing)...")
+
+            # Log Account Summary
+            strategy.log_account_summary()
+
+            # Log Position snapshot if we have an active diagonal
+            status = strategy.get_status_summary()
+            if status.get('position'):
+                strategy.log_position_to_sheets()
+
+            # Log Performance Metrics
+            strategy.log_performance_metrics()
+
+            # Log bot startup activity
+            trade_logger.log_bot_activity(
+                level="INFO",
+                component="Main",
+                message=f"Bot started - State: {status['state']}, Campaign: #{status['campaign_count']}",
+                spy_price=status['qqq_price'],  # RPD uses QQQ
+                vix=0,  # RPD doesn't track VIX
+                flush=True
+            )
+
+            trade_logger.log_event("Dashboard metrics logged to Google Sheets")
+        except Exception as e:
+            trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
+
     # Track daily activities
     last_daily_reset = None
     last_dashboard_log = None
     dashboard_interval = 900  # 15 minutes
+    last_bot_log_time = datetime.now()
+    bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
 
     # Main loop
     iteration = 0
@@ -340,12 +372,48 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
             logger.error(f"Error in strategy iteration: {e}")
             trade_logger.log_error(f"Strategy error: {e}")
 
-        # Dashboard logging (every 15 minutes)
+        # Google Sheets logging (every 15 minutes for dashboard)
         current_minute = now.hour * 60 + now.minute
         if last_dashboard_log is None or (current_minute - last_dashboard_log) >= 15:
             status = strategy.get_status_summary()
-            log_dashboard(trade_logger, strategy, status)
+
+            # Log heartbeat message
+            heartbeat_msg = (
+                f"HEARTBEAT | State: {status['state']} | "
+                f"QQQ: ${status['qqq_price']:.2f} | "
+                f"Campaigns: {status['campaign_count']} | "
+                f"Rolls: {status['roll_count']} | "
+                f"P&L: ${status['total_pnl']:.2f}"
+            )
+            trade_logger.log_event(heartbeat_msg)
+
+            # Log Account Summary (real-time position snapshot for Looker dashboard)
+            strategy.log_account_summary()
+
+            # Log Position snapshot if we have an active diagonal
+            if status.get('position'):
+                strategy.log_position_to_sheets()
+
+            # Log Performance Metrics
+            strategy.log_performance_metrics()
+
             last_dashboard_log = current_minute
+
+        # Hourly Bot Logs to Google Sheets (avoid flooding with hundreds of rows)
+        if (now.hour * 60 + now.minute - last_bot_log_time.hour * 60 - last_bot_log_time.minute) >= 60 or (now.date() != last_bot_log_time.date()):
+            try:
+                status = strategy.get_status_summary()
+                trade_logger.log_bot_activity(
+                    level="INFO",
+                    component="Strategy",
+                    message=f"Hourly update: State={status['state']}, Campaigns={status['campaign_count']}, P&L=${status['total_pnl']:.2f}",
+                    spy_price=status['qqq_price'],  # RPD uses QQQ
+                    vix=0,  # RPD doesn't track VIX
+                    flush=True
+                )
+                last_bot_log_time = now
+            except Exception as e:
+                trade_logger.log_error(f"Hourly bot log error: {e}")
 
         # Token refresh before long sleep
         if client.token_expiry:
@@ -363,6 +431,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     trade_logger.log_event("BOT SHUTTING DOWN")
     trade_logger.log_event("=" * 60)
 
+    # Log final daily summary to Google Sheets
+    strategy.log_daily_summary()
+    trade_logger.log_event("Daily summary logged")
+
     # Save metrics
     strategy.metrics.save_to_file()
     trade_logger.log_event("Metrics saved")
@@ -374,41 +446,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     trade_logger.log_event(f"Campaigns: {status['campaign_count']}")
     trade_logger.log_event(f"Rolls: {status['roll_count']}")
 
+    # Shutdown logger (flush buffers, stop background thread)
+    trade_logger.shutdown()
+
     trade_logger.log_event("Shutdown complete")
-
-
-def log_dashboard(trade_logger, strategy, status: dict):
-    """Log dashboard status to Google Sheets."""
-    try:
-        if trade_logger and hasattr(trade_logger, 'log_dashboard'):
-            dashboard_data = {
-                "timestamp": datetime.now().isoformat(),
-                "state": status.get("state", "Unknown"),
-                "qqq_price": status.get("qqq_price", 0),
-                "ema_9": status.get("ema_9", 0),
-                "total_pnl": status.get("total_pnl", 0),
-                "campaign_count": status.get("campaign_count", 0),
-                "roll_count": status.get("roll_count", 0),
-                "dry_run": status.get("dry_run", False),
-                "circuit_breaker": status.get("circuit_breaker", False),
-            }
-
-            # Add position info if available
-            if "position" in status:
-                pos = status["position"]
-                dashboard_data["long_strike"] = pos.get("long_strike")
-                dashboard_data["long_dte"] = pos.get("long_dte")
-                dashboard_data["short_strike"] = pos.get("short_strike")
-                dashboard_data["short_dte"] = pos.get("short_dte")
-
-            # Add indicator info if available
-            if "indicators" in status:
-                ind = status["indicators"]
-                dashboard_data["entry_conditions_met"] = ind.get("entry_conditions_met", False)
-
-            trade_logger.log_dashboard(dashboard_data)
-    except Exception as e:
-        logger.debug(f"Dashboard logging error: {e}")
 
 
 def show_status(config: dict):

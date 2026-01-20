@@ -155,6 +155,35 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     # Initialize strategy
     strategy = IronFlyStrategy(client, config, trade_logger, dry_run=dry_run)
 
+    # Log dashboard metrics on startup if stale (ensures fresh data on restart)
+    if trade_logger.should_log_initial_metrics(stale_minutes=30):
+        try:
+            trade_logger.log_event("Logging dashboard metrics on startup (stale or missing)...")
+
+            # Update market data first
+            strategy.update_market_data()
+
+            # Log Account Summary
+            strategy.log_account_summary()
+
+            # Log Performance Metrics
+            strategy.log_performance_metrics()
+
+            # Log bot startup activity
+            status = strategy.get_status_summary()
+            trade_logger.log_bot_activity(
+                level="INFO",
+                component="Main",
+                message=f"Bot started - State: {status['state']}, Trades today: {status['trades_today']}",
+                spy_price=status['underlying_price'],
+                vix=status['vix'],
+                flush=True
+            )
+
+            trade_logger.log_event("Dashboard metrics logged to Google Sheets")
+        except Exception as e:
+            trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
+
     # Start real-time price streaming for underlying and VIX
     subscriptions = []
     underlying_uic = config.get("strategy", {}).get("underlying_uic")
@@ -367,6 +396,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                 "description": f"Bot shutdown with active position: ATM={status.get('atm_strike')}",
                 "result": "Position left open - MANUAL INTERVENTION REQUIRED"
             })
+
+        # Shutdown logger (flush buffers, stop background thread)
+        trade_logger.shutdown()
 
         trade_logger.log_event("Shutdown complete.")
 
