@@ -1105,7 +1105,8 @@ class DeltaNeutralStrategy:
         self,
         legs: List[Dict],
         total_limit_price: float,
-        order_description: str
+        order_description: str,
+        emergency_mode: bool = False
     ) -> Dict:
         """
         Place individual orders for each leg with slippage protection.
@@ -1120,6 +1121,8 @@ class DeltaNeutralStrategy:
             legs: List of leg dictionaries with uic, asset_type, buy_sell, amount, price
             total_limit_price: Total limit price (for logging only)
             order_description: Description for logging (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
+            emergency_mode: If True, use aggressive pricing with 5% slippage tolerance
+                           and shorter 30s timeout for urgent situations.
 
         Returns:
             dict: {
@@ -1131,10 +1134,17 @@ class DeltaNeutralStrategy:
         """
         from shared.saxo_client import BuySell
 
-        logger.info(f"Placing {order_description} as individual orders (Saxo Live requirement)")
+        # Adjust timeout and slippage for emergency mode
+        timeout = 30 if emergency_mode else self.order_timeout_seconds
+        slippage_pct = 5.0 if emergency_mode else 0.0  # 5% slippage tolerance in emergency
+
+        mode_str = "🚨 EMERGENCY" if emergency_mode else ""
+        logger.info(f"Placing {mode_str} {order_description} as individual orders (Saxo Live requirement)")
         logger.info(f"  Total limit price: ${total_limit_price:.2f}")
         logger.info(f"  Legs: {len(legs)}")
-        logger.info(f"  Timeout per leg: {self.order_timeout_seconds}s")
+        logger.info(f"  Timeout per leg: {timeout}s")
+        if emergency_mode:
+            logger.warning(f"  ⚡ Emergency mode: {slippage_pct}% slippage tolerance")
 
         # In dry_run mode, simulate success
         if self.dry_run:
@@ -1167,6 +1177,16 @@ class DeltaNeutralStrategy:
                 else:
                     leg_price = quote["Quote"].get("Bid", leg_price) or leg_price
 
+            # Apply emergency slippage if in emergency mode
+            if emergency_mode and slippage_pct > 0:
+                if leg_buy_sell == BuySell.BUY:
+                    # For buying back shorts, pay MORE to ensure fill
+                    leg_price = leg_price * (1 + slippage_pct / 100)
+                else:
+                    # For selling, accept LESS to ensure fill
+                    leg_price = leg_price * (1 - slippage_pct / 100)
+                leg_price = round(leg_price, 2)
+
             # Get to_open_close from the leg data (default ToOpen)
             leg_to_open_close = leg.get("to_open_close", "ToOpen")
 
@@ -1178,7 +1198,7 @@ class DeltaNeutralStrategy:
                 buy_sell=leg_buy_sell,
                 amount=leg_amount,
                 limit_price=leg_price,
-                timeout_seconds=self.order_timeout_seconds,
+                timeout_seconds=timeout,
                 to_open_close=leg_to_open_close
             )
 
@@ -3411,9 +3431,12 @@ class DeltaNeutralStrategy:
 
         return True
 
-    def close_long_straddle(self) -> bool:
+    def close_long_straddle(self, emergency_mode: bool = False) -> bool:
         """
         Close the current long straddle position with slippage protection.
+
+        Args:
+            emergency_mode: If True, use aggressive pricing for faster fills.
 
         Returns:
             bool: True if closed successfully, False otherwise.
@@ -3422,7 +3445,10 @@ class DeltaNeutralStrategy:
             logger.warning("No complete long straddle to close")
             return False
 
-        logger.info("Closing long straddle...")
+        if emergency_mode:
+            logger.warning("🚨 EMERGENCY MODE: Closing long straddle with aggressive pricing")
+        else:
+            logger.info("Closing long straddle...")
 
         # Get current prices for the legs
         call_quote = self.client.get_quote(self.long_straddle.call.uic, "StockOption")
@@ -3453,11 +3479,13 @@ class DeltaNeutralStrategy:
         # Calculate limit price (sum of bid prices for selling)
         total_limit_price = self._calculate_combo_limit_price(legs, "Sell")
 
-        # Place order with slippage protection
+        # Place order with slippage protection (emergency mode uses aggressive pricing)
+        order_description = "EMERGENCY_CLOSE_LONG_STRADDLE" if emergency_mode else "CLOSE_LONG_STRADDLE"
         order_result = self._place_protected_multi_leg_order(
             legs=legs,
             total_limit_price=total_limit_price,
-            order_description="CLOSE_LONG_STRADDLE"
+            order_description=order_description,
+            emergency_mode=emergency_mode
         )
 
         if not order_result["filled"]:
@@ -4819,9 +4847,13 @@ class DeltaNeutralStrategy:
         logger.info(f"✅ Successfully added missing straddle {'CALL' if need_call else 'PUT'} leg: ${matching_option['strike']:.0f}")
         return True
 
-    def close_short_strangle(self) -> bool:
+    def close_short_strangle(self, emergency_mode: bool = False) -> bool:
         """
         Close the current short strangle position with slippage protection.
+
+        Args:
+            emergency_mode: If True, use aggressive pricing and shorter timeouts
+                           for urgent situations (ITM risk, circuit breaker).
 
         Returns:
             bool: True if closed successfully, False otherwise.
@@ -4830,7 +4862,10 @@ class DeltaNeutralStrategy:
             logger.warning("No complete short strangle to close")
             return False
 
-        logger.info("Closing short strangle...")
+        if emergency_mode:
+            logger.warning("🚨 EMERGENCY MODE: Closing short strangle with aggressive pricing")
+        else:
+            logger.info("Closing short strangle...")
 
         # Get current prices for the legs
         call_quote = self.client.get_quote(self.short_strangle.call.uic, "StockOption")
@@ -4861,11 +4896,13 @@ class DeltaNeutralStrategy:
         # Calculate limit price (sum of ask prices for buying back)
         total_limit_price = self._calculate_combo_limit_price(legs, "Buy")
 
-        # Place order with slippage protection
+        # Place order with slippage protection (emergency mode uses aggressive pricing)
+        order_description = "EMERGENCY_CLOSE_SHORT_STRANGLE" if emergency_mode else "CLOSE_SHORT_STRANGLE"
         order_result = self._place_protected_multi_leg_order(
             legs=legs,
             total_limit_price=total_limit_price,
-            order_description="CLOSE_SHORT_STRANGLE"
+            order_description=order_description,
+            emergency_mode=emergency_mode
         )
 
         if not order_result["filled"]:
@@ -5277,7 +5314,7 @@ class DeltaNeutralStrategy:
 
         return (False, None)
 
-    def roll_weekly_shorts(self, challenged_side: str = None) -> bool:
+    def roll_weekly_shorts(self, challenged_side: str = None, emergency_mode: bool = False) -> bool:
         """
         Roll the weekly short strangle to the next week.
 
@@ -5289,12 +5326,17 @@ class DeltaNeutralStrategy:
 
         Args:
             challenged_side: "call" or "put" if rolling due to challenge, None for regular roll
+            emergency_mode: If True, use aggressive pricing for closing shorts (ITM risk scenario)
 
         Returns:
             bool: True if roll successful, False otherwise.
         """
-        logger.info("=" * 50)
-        logger.info("ROLLING WEEKLY SHORTS")
+        if emergency_mode:
+            logger.warning("=" * 50)
+            logger.warning("🚨 EMERGENCY ROLLING WEEKLY SHORTS (aggressive pricing)")
+        else:
+            logger.info("=" * 50)
+            logger.info("ROLLING WEEKLY SHORTS")
 
         old_call_strike = None
         old_put_strike = None
@@ -5370,8 +5412,9 @@ class DeltaNeutralStrategy:
         logger.info(f"✓ Roll will result in net credit of ${net_credit:.2f} - proceeding")
 
         # Step 5: Now actually close current shorts
+        # Use emergency mode for aggressive pricing when rolling due to ITM risk
         if self.short_strangle:
-            if not self.close_short_strangle():
+            if not self.close_short_strangle(emergency_mode=emergency_mode):
                 logger.error("Failed to close shorts for rolling")
                 # CRITICAL FIX: Restore state to avoid stuck ROLLING_SHORTS
                 self.state = StrategyState.FULL_POSITION
@@ -5461,31 +5504,39 @@ class DeltaNeutralStrategy:
 
         return False
 
-    def exit_all_positions(self) -> bool:
+    def exit_all_positions(self, emergency_mode: bool = False) -> bool:
         """
         Exit all positions and close the trade.
+
+        Args:
+            emergency_mode: If True, use aggressive pricing for faster fills (ITM risk, etc.)
 
         Returns:
             bool: True if exit successful, False otherwise.
         """
-        logger.info("=" * 50)
-        logger.info("EXITING ALL POSITIONS")
-        logger.info("=" * 50)
+        if emergency_mode:
+            logger.warning("=" * 50)
+            logger.warning("🚨 EMERGENCY EXITING ALL POSITIONS (aggressive pricing)")
+            logger.warning("=" * 50)
+        else:
+            logger.info("=" * 50)
+            logger.info("EXITING ALL POSITIONS")
+            logger.info("=" * 50)
 
         self.state = StrategyState.EXITING
 
         success = True
 
-        # Close short strangle first
+        # Close short strangle first (use emergency mode if urgent)
         if self.short_strangle:
-            if not self.close_short_strangle():
+            if not self.close_short_strangle(emergency_mode=emergency_mode):
                 logger.error("Failed to close short strangle during exit")
                 success = False
                 self._increment_failure_count("exit_close_shorts_failed")
 
-        # Close long straddle
+        # Close long straddle (use emergency mode if urgent)
         if self.long_straddle:
-            if not self.close_long_straddle():
+            if not self.close_long_straddle(emergency_mode=emergency_mode):
                 logger.error("Failed to close long straddle during exit")
                 success = False
                 self._increment_failure_count("exit_close_straddle_failed")
@@ -5747,13 +5798,14 @@ class DeltaNeutralStrategy:
 
         # Check for ITM risk on short options
         if self.check_shorts_itm_risk():
-            logger.critical("ITM RISK DETECTED - Rolling shorts immediately")
-            if self.roll_weekly_shorts():
+            logger.critical("ITM RISK DETECTED - Rolling shorts immediately with EMERGENCY MODE")
+            # Use emergency_mode=True for aggressive pricing and shorter timeouts
+            if self.roll_weekly_shorts(emergency_mode=True):
                 self._reset_failure_count()
                 return "Emergency roll - shorts approaching ITM"
             else:
-                logger.critical("Failed to roll shorts at ITM risk - closing all positions")
-                if self.exit_all_positions():
+                logger.critical("Failed to roll shorts at ITM risk - closing all positions with EMERGENCY MODE")
+                if self.exit_all_positions(emergency_mode=True):
                     self._reset_failure_count()
                     return "Emergency exit - could not roll ITM shorts"
                 else:

@@ -2548,6 +2548,162 @@ class SaxoClient:
             "fill_price": None
         }
 
+    def place_market_order_immediate(
+        self,
+        uic: int,
+        asset_type: str,
+        buy_sell: BuySell,
+        amount: int,
+        to_open_close: str = "ToOpen"
+    ) -> Dict:
+        """
+        Place a MARKET order for immediate fill.
+
+        Use this for emergency situations (ITM risk, circuit breaker closure)
+        where we need guaranteed execution over price.
+
+        IMPORTANT: Market orders on options can have significant slippage!
+        Only use for urgent risk management scenarios.
+
+        Args:
+            uic: Instrument UIC
+            asset_type: Type of asset
+            buy_sell: Buy or Sell direction
+            amount: Number of contracts
+            to_open_close: ToOpen or ToClose (required for options)
+
+        Returns:
+            dict: {
+                "success": bool,
+                "filled": bool,
+                "order_id": str or None,
+                "message": str,
+                "fill_price": float or None (unknown for market orders)
+            }
+        """
+        logger.warning(f"🚨 EMERGENCY MARKET ORDER: {buy_sell.value} {amount} x UIC {uic}")
+        logger.warning("   Market orders execute immediately but may have significant slippage!")
+
+        # Place market order
+        order_response = self.place_order(
+            uic=uic,
+            asset_type=asset_type,
+            buy_sell=buy_sell,
+            amount=amount,
+            order_type=OrderType.MARKET,
+            duration_type="DayOrder",
+            to_open_close=to_open_close
+        )
+
+        if not order_response or "OrderId" not in order_response:
+            return {
+                "success": False,
+                "filled": False,
+                "order_id": None,
+                "message": "Failed to place market order",
+                "fill_price": None
+            }
+
+        order_id = order_response["OrderId"]
+
+        # Market orders should fill immediately, but verify
+        import time
+        time.sleep(1)  # Brief delay to let order process
+
+        # Check if order is still open (shouldn't be for market order)
+        open_orders = self.get_open_orders()
+        order_still_open = any(o.get("OrderId") == order_id for o in open_orders)
+
+        if order_still_open:
+            # Very unusual for market order - might be a halt or issue
+            logger.error(f"⚠ Market order {order_id} still open after 1s - unusual!")
+            return {
+                "success": True,
+                "filled": False,
+                "order_id": order_id,
+                "message": "Market order placed but may not have filled yet",
+                "fill_price": None
+            }
+
+        logger.info(f"✓ Market order {order_id} executed")
+        return {
+            "success": True,
+            "filled": True,
+            "order_id": order_id,
+            "message": "Market order executed",
+            "fill_price": None  # Unknown, would need to check trade history
+        }
+
+    def place_aggressive_limit_order(
+        self,
+        uic: int,
+        asset_type: str,
+        buy_sell: BuySell,
+        amount: int,
+        to_open_close: str = "ToOpen",
+        slippage_percent: float = 5.0,
+        timeout_seconds: int = 30
+    ) -> Dict:
+        """
+        Place an aggressive limit order that crosses the spread.
+
+        This provides better fill probability than regular limit orders
+        while still having some price protection (unlike market orders).
+
+        For BUYS: Use Ask + slippage%
+        For SELLS: Use Bid - slippage%
+
+        Args:
+            uic: Instrument UIC
+            asset_type: Type of asset
+            buy_sell: Buy or Sell direction
+            amount: Number of contracts
+            to_open_close: ToOpen or ToClose
+            slippage_percent: How much above Ask (buys) or below Bid (sells) to place limit
+            timeout_seconds: Shorter timeout since we're being aggressive (default 30s)
+
+        Returns:
+            dict: Same as place_limit_order_with_timeout
+        """
+        # Get current quote
+        quote = self.get_quote(uic, asset_type)
+        if not quote or "Quote" not in quote:
+            logger.error(f"Failed to get quote for UIC {uic}")
+            return {
+                "success": False,
+                "filled": False,
+                "order_id": None,
+                "message": "Failed to get quote for aggressive limit",
+                "fill_price": None
+            }
+
+        bid = quote["Quote"].get("Bid", 0) or 0
+        ask = quote["Quote"].get("Ask", 0) or 0
+
+        if buy_sell == BuySell.BUY:
+            # For buys, we want to pay MORE to ensure fill
+            aggressive_price = ask * (1 + slippage_percent / 100)
+            logger.info(f"Aggressive BUY: Ask ${ask:.2f} + {slippage_percent}% = ${aggressive_price:.2f}")
+        else:
+            # For sells, we want to accept LESS to ensure fill
+            aggressive_price = bid * (1 - slippage_percent / 100)
+            logger.info(f"Aggressive SELL: Bid ${bid:.2f} - {slippage_percent}% = ${aggressive_price:.2f}")
+
+        # Round to 2 decimal places
+        aggressive_price = round(aggressive_price, 2)
+
+        logger.warning(f"⚡ AGGRESSIVE LIMIT ORDER: {buy_sell.value} {amount} x UIC {uic} @ ${aggressive_price:.2f}")
+
+        return self.place_limit_order_with_timeout(
+            uic=uic,
+            asset_type=asset_type,
+            buy_sell=buy_sell,
+            amount=amount,
+            limit_price=aggressive_price,
+            timeout_seconds=timeout_seconds,
+            to_open_close=to_open_close
+        )
+
     def place_multi_leg_limit_order_with_timeout(
         self,
         legs: List[Dict],
