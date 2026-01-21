@@ -784,7 +784,6 @@ class RollingPutDiagonalStrategy:
                     prices=closes,
                     highs=highs,
                     lows=lows,
-                    current_price=self.current_price,
                     ema_period=self.indicator_config.get("ema_period", 9),
                     macd_fast=self.indicator_config.get("macd_fast", 12),
                     macd_slow=self.indicator_config.get("macd_slow", 26),
