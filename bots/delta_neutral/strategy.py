@@ -6729,16 +6729,18 @@ class DeltaNeutralStrategy:
         days_held = self.short_strangle.days_held if self.short_strangle else 0
 
         if days_held == 0:
-            # Same day entry - just return today's theta if we have a Daily Summary
+            # Same day entry - return today's theta (we earn theta from day 1)
+            # Check if there's already logged data first
             if self.trade_logger and self.short_strangle:
                 try:
                     entry_date = self.short_strangle.entry_date
                     actual_theta = self.trade_logger.get_accumulated_theta_from_daily_summary(since_date=entry_date)
-                    if actual_theta is not None:
+                    if actual_theta is not None and actual_theta > 0:
                         return actual_theta
                 except Exception:
                     pass
-            return 0.0
+            # No logged data yet - return current day's theta
+            return current_net_theta
 
         # Try to get actual accumulated theta from Daily Summary
         if self.trade_logger and self.short_strangle:
