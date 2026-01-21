@@ -5373,12 +5373,44 @@ class DeltaNeutralStrategy:
         - On Friday (normal weekly roll)
         - When a strike is challenged (defensive roll)
 
+        IMPORTANT: VIX Check Logic
+        - If we have shorts: MUST enter new straddle to cover them (no VIX check)
+        - If we DON'T have shorts: Check VIX first - this is essentially a fresh entry
+
         Returns:
             bool: True if recenter successful, False otherwise.
         """
         logger.info("=" * 50)
         logger.info("EXECUTING 5-POINT RECENTER")
         logger.info("=" * 50)
+
+        # VIX CHECK: If we don't have shorts, this is essentially a fresh entry decision
+        # We should check VIX before committing to a new straddle
+        if not self.short_strangle:
+            logger.info("No short strangle present - checking VIX before recenter")
+            if not self.check_vix_entry_condition():
+                logger.warning("=" * 50)
+                logger.warning("RECENTER BLOCKED - VIX TOO HIGH")
+                logger.warning(f"VIX: {self.current_vix:.2f} >= threshold {self.max_vix}")
+                logger.warning("Without shorts to cover, this would be a fresh entry at high IV")
+                logger.warning("Setting state to WAITING_VIX - will retry when VIX drops")
+                logger.warning("=" * 50)
+                self.state = StrategyState.WAITING_VIX
+
+                # Log safety event
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "event_type": "RECENTER_BLOCKED_HIGH_VIX",
+                        "severity": "INFO",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "vix_threshold": self.max_vix,
+                        "action_taken": "Recenter blocked - VIX too high for fresh entry",
+                        "description": "No shorts present, so recenter would be a fresh entry. Waiting for VIX < 18."
+                    })
+
+                return False
 
         self.state = StrategyState.RECENTERING
 
@@ -6071,21 +6103,41 @@ class DeltaNeutralStrategy:
                 return "EMERGENCY EXIT FAILED - Manual intervention required"
 
         # Check for ITM risk on short options
+        # NEW APPROACH: Close shorts only, then let state machine handle the rest
+        # This allows proper VIX checking before re-entering any positions
         if self.check_shorts_itm_risk():
-            logger.critical("ITM RISK DETECTED - Rolling shorts immediately with EMERGENCY MODE")
-            # Use emergency_mode=True for aggressive pricing and shorter timeouts
-            if self.roll_weekly_shorts(emergency_mode=True):
+            logger.critical("ITM RISK DETECTED - Closing shorts for safety")
+            logger.critical("Will check VIX before re-entering any new positions")
+
+            # Close shorts only (not the entire position)
+            if self.close_short_strangle(emergency_mode=True):
                 self._reset_failure_count()
-                return "Emergency roll - shorts approaching ITM"
+                self.short_strangle = None
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+
+                # Log safety event
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "event_type": "ITM_RISK_SHORTS_CLOSED",
+                        "severity": "WARNING",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "action_taken": "Closed shorts due to ITM risk - will check VIX before new entries",
+                        "description": "Shorts closed, longs remain. State machine will handle recenter/VIX check."
+                    })
+
+                logger.info("Shorts closed. State machine will now check recenter condition and VIX.")
+                # Don't return here - let the state machine continue to check recenter/VIX
+                # This allows the flow: close shorts → check recenter → check VIX → enter new positions
             else:
-                logger.critical("Failed to roll shorts at ITM risk - closing all positions with EMERGENCY MODE")
+                # Failed to close shorts - this is dangerous, try to exit all
+                logger.critical("Failed to close shorts at ITM risk - attempting full exit with EMERGENCY MODE")
                 if self.exit_all_positions(emergency_mode=True):
                     self._reset_failure_count()
-                    return "Emergency exit - could not roll ITM shorts"
+                    return "Emergency exit - could not close ITM shorts"
                 else:
                     self._increment_failure_count("itm_risk_exit_failed")
-                    # CRITICAL FIX: Explicit return to prevent falling through to state machine
-                    # This was a gap that could cause repeated retries without proper tracking
                     return "ITM RISK EXIT FAILED - Manual intervention required"
 
         # State machine logic
