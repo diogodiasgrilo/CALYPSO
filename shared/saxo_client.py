@@ -3377,7 +3377,8 @@ class SaxoClient:
         target_dte_min: int = 0,
         target_dte_max: int = 7,
         for_roll: bool = False,
-        option_root_uic: int = None
+        option_root_uic: int = None,
+        option_asset_type: str = "StockOption"
     ) -> Optional[float]:
         """
         Get expected move by pricing the ATM straddle for a given expiration.
@@ -3465,8 +3466,8 @@ class SaxoClient:
             return None
 
         # Get quotes for ATM options
-        call_quote = self.get_quote(call_uic, "StockOption")
-        put_quote = self.get_quote(put_uic, "StockOption")
+        call_quote = self.get_quote(call_uic, option_asset_type)
+        put_quote = self.get_quote(put_uic, option_asset_type)
 
         if not call_quote or not put_quote:
             logger.error("Failed to get ATM option quotes")

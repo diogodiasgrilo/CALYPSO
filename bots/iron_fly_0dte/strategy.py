@@ -553,8 +553,10 @@ class IronFlyStrategy:
         # Options UIC for SPXW
         self.options_uic = self.strategy_config.get("options_uic", 128)
 
-        # Entry parameters
-        self.entry_time = dt_time(10, 0)  # 10:00 AM EST
+        # Entry parameters - parse from config (format: "HH:MM")
+        entry_time_str = self.strategy_config.get("entry_time_est", "10:00")
+        entry_parts = entry_time_str.split(":")
+        self.entry_time = dt_time(int(entry_parts[0]), int(entry_parts[1]))
         self.max_vix = self.strategy_config.get("max_vix_entry", 20.0)
         self.vix_spike_threshold = self.strategy_config.get("vix_spike_threshold_percent", 5.0)
 
@@ -2148,7 +2150,8 @@ class IronFlyStrategy:
             self.current_price,
             target_dte_min=0,
             target_dte_max=1,  # 0DTE
-            option_root_uic=self.options_uic  # SPXW UIC 128 for StockIndexOptions
+            option_root_uic=self.options_uic,  # SPXW UIC 128 for StockIndexOptions
+            option_asset_type="StockIndexOption"
         )
 
         if expected_move:
