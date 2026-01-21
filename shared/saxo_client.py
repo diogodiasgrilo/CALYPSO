@@ -1026,22 +1026,35 @@ class SaxoClient:
         logger.error(f"Failed to get option chain for OptionRootId {option_root_id}")
         return None
 
-    def get_option_expirations(self, underlying_uic: int) -> Optional[List[Dict]]:
+    def get_option_expirations(self, underlying_uic: int, option_root_uic: int = None) -> Optional[List[Dict]]:
         """
         Get available option expiration dates for an underlying.
 
-        Internally calls get_option_root_id() then get_option_chain()
-        to handle the two-step API process.
+        For StockOptions (e.g., SPY): Uses underlying_uic to find OptionRootId
+        For StockIndexOptions (e.g., SPXW): Use option_root_uic directly (the UIC IS the OptionRootId)
 
         Args:
             underlying_uic: UIC of the underlying instrument
+            option_root_uic: Optional UIC of the option root (for StockIndexOptions like SPXW)
 
         Returns:
             list: OptionSpace array with expiry information and strikes
         """
-        # Step 1: Get OptionRootId
+        # For StockIndexOptions, try using the option_root_uic directly first
+        if option_root_uic:
+            option_chain = self.get_option_chain(option_root_uic)
+            if option_chain and "OptionSpace" in option_chain:
+                logger.info(f"Got option chain directly for OptionRootUIC {option_root_uic}")
+                return option_chain["OptionSpace"]
+
+        # Step 1: Get OptionRootId from underlying
         option_root_id = self.get_option_root_id(underlying_uic)
         if not option_root_id:
+            # For StockIndexOptions, try the underlying_uic directly as it may BE the OptionRootId
+            logger.info(f"Trying underlying_uic {underlying_uic} directly as OptionRootId (StockIndexOption)")
+            option_chain = self.get_option_chain(underlying_uic)
+            if option_chain and "OptionSpace" in option_chain:
+                return option_chain["OptionSpace"]
             logger.error(f"Could not find OptionRootId for UIC {underlying_uic}")
             return None
 
@@ -1332,7 +1345,8 @@ class SaxoClient:
         upper_wing_strike: float,
         lower_wing_strike: float,
         target_dte_min: int = 0,
-        target_dte_max: int = 1
+        target_dte_max: int = 1,
+        option_root_uic: int = None
     ) -> Optional[Dict[str, Dict]]:
         """
         Find all 4 options for an Iron Fly (Iron Butterfly) position.
@@ -1350,12 +1364,13 @@ class SaxoClient:
             lower_wing_strike: Strike for long put (below ATM)
             target_dte_min: Minimum days to expiration (0 for 0DTE)
             target_dte_max: Maximum days to expiration (1 for 0DTE)
+            option_root_uic: Optional UIC of the option root (for StockIndexOptions like SPXW)
 
         Returns:
             dict: Dictionary with 'short_call', 'short_put', 'long_call', 'long_put' option data,
                   or None if any leg cannot be found.
         """
-        expirations = self.get_option_expirations(underlying_uic)
+        expirations = self.get_option_expirations(underlying_uic, option_root_uic=option_root_uic)
         if not expirations:
             logger.error("Failed to get option expirations for iron fly")
             return None

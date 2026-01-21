@@ -1462,7 +1462,8 @@ class IronFlyStrategy:
             upper_wing_strike=upper_wing,
             lower_wing_strike=lower_wing,
             target_dte_min=0,
-            target_dte_max=1
+            target_dte_max=1,
+            option_root_uic=self.options_uic  # SPXW UIC 128 for StockIndexOptions
         )
 
         if not iron_fly_options:
