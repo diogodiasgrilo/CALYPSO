@@ -323,12 +323,24 @@ class StrategyMetrics:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert metrics to dictionary for persistence."""
+        from shared.market_hours import get_us_market_time
         return {
             "total_premium_collected": self.total_premium_collected,
             "total_straddle_cost": self.total_straddle_cost,
             "realized_pnl": self.realized_pnl,
             "recenter_count": self.recenter_count,
             "roll_count": self.roll_count,
+            # Daily metrics (only valid for same trading day)
+            "daily_recenter_count": self.daily_recenter_count,
+            "daily_roll_count": self.daily_roll_count,
+            "daily_pnl_start": self.daily_pnl_start,
+            "spy_open": self.spy_open,
+            "spy_high": self.spy_high,
+            "spy_low": self.spy_low,
+            "vix_high": self.vix_high,
+            "vix_samples": self.vix_samples if self.vix_samples else [],
+            "daily_metrics_date": get_us_market_time().strftime("%Y-%m-%d"),
+            # Trade tracking
             "trade_count": self.trade_count,
             "winning_trades": self.winning_trades,
             "losing_trades": self.losing_trades,
@@ -343,12 +355,29 @@ class StrategyMetrics:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "StrategyMetrics":
         """Create StrategyMetrics from saved dictionary."""
+        from shared.market_hours import get_us_market_time
         metrics = cls()
         metrics.total_premium_collected = data.get("total_premium_collected", 0.0)
         metrics.total_straddle_cost = data.get("total_straddle_cost", 0.0)
         metrics.realized_pnl = data.get("realized_pnl", 0.0)
         metrics.recenter_count = data.get("recenter_count", 0)
         metrics.roll_count = data.get("roll_count", 0)
+
+        # Only restore daily metrics if they're from today (same trading day)
+        # This ensures daily tracking resets properly on new days
+        saved_date = data.get("daily_metrics_date", data.get("daily_counts_date", ""))
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        if saved_date == today:
+            metrics.daily_recenter_count = data.get("daily_recenter_count", 0)
+            metrics.daily_roll_count = data.get("daily_roll_count", 0)
+            metrics.daily_pnl_start = data.get("daily_pnl_start", 0.0)
+            metrics.spy_open = data.get("spy_open", 0.0)
+            metrics.spy_high = data.get("spy_high", 0.0)
+            metrics.spy_low = data.get("spy_low", 0.0)
+            metrics.vix_high = data.get("vix_high", 0.0)
+            metrics.vix_samples = data.get("vix_samples", [])
+        # else: daily metrics stay at default (new day - will be initialized at market open)
+
         metrics.trade_count = data.get("trade_count", 0)
         metrics.winning_trades = data.get("winning_trades", 0)
         metrics.losing_trades = data.get("losing_trades", 0)
