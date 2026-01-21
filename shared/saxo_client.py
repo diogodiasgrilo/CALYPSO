@@ -3376,7 +3376,8 @@ class SaxoClient:
         underlying_price: float,
         target_dte_min: int = 0,
         target_dte_max: int = 7,
-        for_roll: bool = False
+        for_roll: bool = False,
+        option_root_uic: int = None
     ) -> Optional[float]:
         """
         Get expected move by pricing the ATM straddle for a given expiration.
@@ -3391,12 +3392,13 @@ class SaxoClient:
             target_dte_min: Minimum DTE for expiration search
             target_dte_max: Maximum DTE for expiration search
             for_roll: If True, look for next week's expiry (5-12 DTE)
+            option_root_uic: Optional UIC of the option root (for StockIndexOptions like SPXW)
 
         Returns:
             float: Expected move in dollars, or None if unable to calculate
         """
         # Get option expirations
-        expirations = self.get_option_expirations(underlying_uic)
+        expirations = self.get_option_expirations(underlying_uic, option_root_uic=option_root_uic)
         if not expirations:
             logger.error("Failed to get option expirations for expected move")
             return None

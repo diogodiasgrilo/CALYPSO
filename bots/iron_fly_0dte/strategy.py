@@ -2147,7 +2147,8 @@ class IronFlyStrategy:
             self.underlying_uic,
             self.current_price,
             target_dte_min=0,
-            target_dte_max=1  # 0DTE
+            target_dte_max=1,  # 0DTE
+            option_root_uic=self.options_uic  # SPXW UIC 128 for StockIndexOptions
         )
 
         if expected_move:
