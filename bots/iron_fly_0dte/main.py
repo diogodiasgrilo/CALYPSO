@@ -305,6 +305,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                 if subscriptions and not client.is_streaming:
                     trade_logger.log_event("WebSocket disconnected during market hours - reconnecting...")
                     try:
+                        # First, clean up any stale subscriptions on Saxo's side
+                        # This prevents "Subscription Key already in use" errors
+                        client.stop_price_streaming()
+                        time.sleep(1)  # Brief pause before reconnecting
+
                         streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
                         if streaming_started:
                             trade_logger.log_event("WebSocket reconnected successfully")

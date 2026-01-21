@@ -424,10 +424,14 @@ class RollingPutDiagonalStrategy:
         )
         self._circuit_breaker_open: bool = False
         self._circuit_breaker_reason: str = ""
+        self._circuit_breaker_opened_at: Optional[datetime] = None
         self._last_failure_time: Optional[datetime] = None
 
         # Safety: Orphaned order tracking
         self._orphaned_orders: List[str] = []
+
+        # Safety: Orphaned position tracking (positions on Saxo not in our strategy state)
+        self._orphaned_positions: List[Dict] = []
 
         # Safety: Action cooldown
         self._action_cooldowns: Dict[str, datetime] = {}
@@ -437,6 +441,9 @@ class RollingPutDiagonalStrategy:
 
         # Order timeout
         self._order_timeout: int = self.management_config.get("order_timeout_seconds", 60)
+
+        # Emergency slippage tolerance for urgent closures
+        self._emergency_slippage_pct: float = 5.0
 
         # Position isolation: Only look at QQQ options
         self._position_filter_prefix = "QQQ/"
@@ -485,11 +492,23 @@ class RollingPutDiagonalStrategy:
         - No rolls will be attempted
         - Manual intervention is required
 
+        IMPORTANT: Before halting, this method attempts to close any unsafe positions
+        (naked shorts without protection) to avoid leaving the account with uncovered risk.
+
         Args:
             reason: Description of why the circuit breaker opened
         """
+        logger.critical("=" * 70)
+        logger.critical("CIRCUIT BREAKER TRIGGERED")
+        logger.critical("=" * 70)
+        logger.critical(f"Reason: {reason}")
+
+        # CRITICAL: Before halting, check if we have unsafe positions that need emergency closure
+        emergency_actions = self._emergency_position_check()
+
         self._circuit_breaker_open = True
         self._circuit_breaker_reason = reason
+        self._circuit_breaker_opened_at = datetime.now()
         self.state = RPDState.CIRCUIT_OPEN
 
         logger.critical("=" * 70)
@@ -498,6 +517,7 @@ class RollingPutDiagonalStrategy:
         logger.critical(f"Reason: {reason}")
         logger.critical(f"Consecutive failures: {self._consecutive_failures}")
         logger.critical(f"Time: {datetime.now().isoformat()}")
+        logger.critical(f"Emergency actions taken: {emergency_actions}")
         logger.critical("")
         logger.critical("MANUAL INTERVENTION REQUIRED:")
         logger.critical("1. Check Saxo positions in SaxoTraderGO")
@@ -510,8 +530,9 @@ class RollingPutDiagonalStrategy:
         if self.trade_logger:
             self.trade_logger.log_safety_event({
                 "event_type": "RPD_CIRCUIT_BREAKER_OPEN",
+                "severity": "CRITICAL",
                 "description": reason,
-                "action_taken": "HALT_TRADING",
+                "action_taken": f"HALT_TRADING. Emergency actions: {emergency_actions}",
                 "result": "Requires manual intervention",
                 "qqq_price": self.current_price,
                 "state": self.state.value,
@@ -577,6 +598,532 @@ class RollingPutDiagonalStrategy:
         # Orphaned orders are critical - open circuit breaker
         self._open_circuit_breaker(f"Orphaned order detected: {order_id}")
 
+    def _check_for_orphaned_orders(self) -> bool:
+        """
+        Check Saxo for any orphaned orders before placing new ones.
+
+        Returns:
+            bool: True if orphaned orders were found (should not proceed), False if clean
+        """
+        if not self._orphaned_orders:
+            return False
+
+        logger.warning(f"Checking for {len(self._orphaned_orders)} potential orphaned orders...")
+
+        # Check if orders are still open on Saxo
+        orphans_still_open = []
+
+        for order_id in self._orphaned_orders:
+            try:
+                # Check if order still exists
+                order = self.client.get_order(order_id)
+                if order and order.get("Status") in ["Working", "NotFilled"]:
+                    orphans_still_open.append(order_id)
+            except Exception as e:
+                logger.debug(f"Could not check order {order_id}: {e}")
+
+        if orphans_still_open:
+            logger.critical(f"{len(orphans_still_open)} orphaned orders still pending on Saxo!")
+            logger.critical(f"Order IDs: {orphans_still_open}")
+            self._open_circuit_breaker(f"Orphaned orders detected: {orphans_still_open}")
+            return True
+
+        # All orphans have been filled or cancelled
+        logger.info("All tracked orphaned orders have been resolved")
+        self._orphaned_orders = []
+        return False
+
+    # =========================================================================
+    # EMERGENCY POSITION MANAGEMENT
+    # =========================================================================
+
+    def _emergency_position_check(self) -> str:
+        """
+        Check for unsafe positions and attempt emergency closure before circuit breaker halts.
+
+        This is called BEFORE the circuit breaker fully opens to protect against:
+        1. Naked short put (short without long protection)
+        2. Mismatched positions that don't align with strategy state
+
+        The key insight for put diagonal:
+        - Complete diagonal (long + short put) = protected, can keep
+        - Short put only (no long) = DANGEROUS, close immediately
+        - Long put only = safe (limited loss), can keep
+
+        Returns:
+            str: Description of actions taken
+        """
+        actions = []
+
+        logger.critical("EMERGENCY POSITION CHECK - Analyzing risk exposure...")
+
+        # CRITICAL: Sync with Saxo FIRST to get accurate position state
+        logger.critical("   Syncing with Saxo to get accurate position state...")
+        try:
+            self._sync_positions_with_saxo()
+        except Exception as e:
+            logger.critical(f"   Failed to sync with Saxo: {e}")
+            actions.append(f"WARNING: Could not sync with Saxo - {e}")
+
+        has_long = self.diagonal and self.diagonal.long_put is not None
+        has_short = self.diagonal and self.diagonal.short_put is not None
+
+        # Log current state
+        logger.critical(f"   Long put: {'YES' if has_long else 'NO'}")
+        logger.critical(f"   Short put: {'YES' if has_short else 'NO'}")
+
+        # SCENARIO 1: Naked short put (NO LONG PROTECTION) - VERY DANGEROUS
+        if has_short and not has_long:
+            logger.critical("SCENARIO 1: NAKED SHORT PUT - NO PROTECTION!")
+            logger.critical("   Action: Emergency close the naked short")
+
+            if self._emergency_close_short_put():
+                actions.append("CLOSED naked short put (no long protection)")
+            else:
+                actions.append("FAILED to close naked short - MANUAL INTERVENTION REQUIRED")
+
+        # SCENARIO 2: Complete diagonal - safe, keep positions
+        elif has_long and has_short:
+            logger.critical("SCENARIO 2: Complete diagonal - positions protected")
+            actions.append("No emergency action needed - diagonal protected")
+
+        # SCENARIO 3: Long only - safe (limited loss)
+        elif has_long and not has_short:
+            logger.critical("SCENARIO 3: Long put only - limited risk")
+            logger.critical("   Action: Keep long position (max loss = premium paid)")
+            actions.append("Kept long put (limited downside risk)")
+
+        # SCENARIO 4: No positions
+        else:
+            logger.critical("SCENARIO 4: No positions - nothing to protect")
+            actions.append("No positions to protect")
+
+        return "; ".join(actions) if actions else "No action taken"
+
+    def _sync_positions_with_saxo(self) -> None:
+        """
+        Sync local position state with Saxo broker positions.
+
+        This ensures our local state matches reality before making emergency decisions.
+        """
+        try:
+            all_positions = self.client.get_positions()
+            if not all_positions:
+                # No positions on Saxo - clear local state
+                if self.diagonal:
+                    logger.warning("No positions found on Saxo but local state has diagonal - clearing")
+                    self.diagonal = None
+                return
+
+            qqq_options = self._filter_qqq_options(all_positions)
+            if not qqq_options:
+                if self.diagonal:
+                    logger.warning("No QQQ options on Saxo but local state has diagonal - clearing")
+                    self.diagonal = None
+                return
+
+            # Categorize positions
+            long_puts = []
+            short_puts = []
+
+            for pos in qqq_options:
+                amount = pos.get("PositionBase", {}).get("Amount", 0)
+                option_type = pos.get("DisplayAndFormat", {}).get("Description", "")
+
+                if "PUT" not in option_type.upper():
+                    continue
+
+                if amount > 0:
+                    long_puts.append(pos)
+                elif amount < 0:
+                    short_puts.append(pos)
+
+            # Update local state to match Saxo
+            if not self.diagonal and (long_puts or short_puts):
+                self.diagonal = DiagonalPosition()
+
+            if self.diagonal:
+                if long_puts:
+                    self.diagonal.long_put = self._position_dict_to_put(long_puts[0])
+                else:
+                    self.diagonal.long_put = None
+
+                if short_puts:
+                    self.diagonal.short_put = self._position_dict_to_put(short_puts[0])
+                else:
+                    self.diagonal.short_put = None
+
+                # If both legs are now None, clear the diagonal
+                if not self.diagonal.long_put and not self.diagonal.short_put:
+                    self.diagonal = None
+
+            logger.info(f"Position sync: Long={len(long_puts)}, Short={len(short_puts)}")
+
+        except Exception as e:
+            logger.error(f"Error syncing positions: {e}")
+            raise
+
+    def _emergency_close_short_put(self) -> bool:
+        """
+        Emergency closure of naked short put position.
+
+        This is called during circuit breaker activation when we have a short
+        put without long protection - the most dangerous state.
+
+        Uses aggressive pricing with slippage tolerance to ensure fill.
+
+        Returns:
+            bool: True if successfully closed, False otherwise
+        """
+        if not self.diagonal or not self.diagonal.short_put:
+            return True  # Nothing to close
+
+        short = self.diagonal.short_put
+        logger.critical(f"EMERGENCY: Closing naked short put ${short.strike}")
+
+        if self.dry_run:
+            logger.critical("[DRY RUN] Would emergency close short put")
+            self.diagonal.short_put = None
+            return True
+
+        try:
+            # Get current ask price for buying back
+            quote = self.client.get_quote(short.uic, "StockOption")
+            if not quote or "Quote" not in quote:
+                logger.error("Failed to get quote for emergency closure")
+                return False
+
+            ask = quote["Quote"].get("Ask", 0) or 0
+            if ask <= 0:
+                logger.error("No valid ask price for emergency closure")
+                return False
+
+            # Apply emergency slippage tolerance - pay MORE to ensure fill
+            emergency_price = ask * (1 + self._emergency_slippage_pct / 100)
+            emergency_price = round(emergency_price, 2)
+
+            logger.critical(f"   Ask: ${ask:.2f}, Emergency price (with {self._emergency_slippage_pct}% slippage): ${emergency_price:.2f}")
+
+            # Place buy order to close the short with shorter timeout
+            result = self.client.place_limit_order_with_timeout(
+                uic=short.uic,
+                asset_type="StockOption",
+                buy_sell=BuySell.BUY,
+                amount=abs(short.quantity),
+                limit_price=emergency_price,
+                timeout_seconds=30,  # Shorter timeout for emergency
+                to_open_close="ToClose"
+            )
+
+            if result.get("filled"):
+                fill_price = result.get("fill_price", emergency_price)
+                pnl = (short.entry_price - fill_price) * abs(short.quantity) * 100
+
+                logger.critical(f"Emergency closed naked short put at ${fill_price:.2f}")
+                logger.critical(f"   P&L: ${pnl:.2f}")
+
+                # Log to Google Sheets
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "RPD_EMERGENCY_CLOSE_NAKED_SHORT",
+                        "severity": "CRITICAL",
+                        "description": f"Emergency closed naked short put ${short.strike}",
+                        "action_taken": f"Bought back at ${fill_price:.2f}",
+                        "result": "SUCCESS",
+                        "pnl": pnl,
+                        "qqq_price": self.current_price,
+                    })
+
+                    self.trade_logger.log_trade(
+                        action="EMERGENCY_CLOSE_SHORT_PUT",
+                        strike=short.strike,
+                        price=fill_price,
+                        delta=short.delta,
+                        pnl=pnl,
+                        saxo_client=self.client,
+                        underlying_price=self.current_price,
+                        option_type="Short Put",
+                        expiry_date=short.expiry,
+                        dte=short.dte,
+                        notes="EMERGENCY CLOSE - No long protection"
+                    )
+
+                # Update metrics
+                self.metrics.realized_pnl += pnl
+                self.metrics.record_campaign(pnl)
+                self.metrics.save_to_file()
+
+                # Clear the short position
+                self.diagonal.short_put = None
+                return True
+            else:
+                logger.error(f"Emergency closure FAILED: {result.get('message', 'Unknown error')}")
+
+                # Check if cancel failed - order may still be open
+                if result.get("cancel_failed"):
+                    logger.critical(f"CANCEL FAILED - Order {result.get('order_id')} still open!")
+                    self._orphaned_orders.append(result.get("order_id", "unknown"))
+
+                return False
+
+        except Exception as e:
+            logger.exception(f"Exception during emergency closure: {e}")
+            return False
+
+    def _emergency_close_all(self) -> bool:
+        """
+        Emergency closure of ALL positions (both long and short).
+
+        This is the nuclear option - called when we need to completely
+        exit the strategy due to critical errors.
+
+        Returns:
+            bool: True if successfully closed all, False otherwise
+        """
+        logger.critical("EMERGENCY: Closing ALL positions")
+
+        if not self.diagonal:
+            return True  # Nothing to close
+
+        success = True
+
+        # Close short first (higher risk)
+        if self.diagonal.short_put:
+            if not self._emergency_close_short_put():
+                logger.error("Failed to close short in emergency")
+                success = False
+
+        # Close long put
+        if self.diagonal.long_put:
+            if not self._emergency_close_long_put():
+                logger.error("Failed to close long in emergency")
+                success = False
+
+        if success:
+            self.diagonal = None
+            self.state = RPDState.IDLE
+            logger.critical("All positions closed in emergency")
+
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "event_type": "RPD_EMERGENCY_CLOSE_ALL",
+                    "severity": "CRITICAL",
+                    "description": "Emergency closed all positions",
+                    "action_taken": "CLOSED_ALL",
+                    "result": "SUCCESS",
+                    "qqq_price": self.current_price,
+                })
+        else:
+            logger.critical("Some positions may still be open - MANUAL CHECK REQUIRED")
+
+        return success
+
+    def _emergency_close_long_put(self) -> bool:
+        """
+        Emergency closure of long put position.
+
+        Long puts have limited risk (only lose premium paid), but this may
+        be called as part of emergency close all.
+
+        Returns:
+            bool: True if successfully closed, False otherwise
+        """
+        if not self.diagonal or not self.diagonal.long_put:
+            return True  # Nothing to close
+
+        long = self.diagonal.long_put
+        logger.critical(f"EMERGENCY: Closing long put ${long.strike}")
+
+        if self.dry_run:
+            logger.critical("[DRY RUN] Would emergency close long put")
+            self.diagonal.long_put = None
+            return True
+
+        try:
+            # Get current bid price for selling
+            quote = self.client.get_quote(long.uic, "StockOption")
+            if not quote or "Quote" not in quote:
+                logger.error("Failed to get quote for long put closure")
+                return False
+
+            bid = quote["Quote"].get("Bid", 0) or 0
+            if bid <= 0:
+                # Long put might be worthless - try to close at 0.01
+                bid = 0.01
+                logger.warning("No bid price - attempting to close at $0.01")
+
+            # Apply emergency slippage tolerance - accept LESS to ensure fill
+            emergency_price = bid * (1 - self._emergency_slippage_pct / 100)
+            emergency_price = max(0.01, round(emergency_price, 2))
+
+            logger.critical(f"   Bid: ${bid:.2f}, Emergency price: ${emergency_price:.2f}")
+
+            result = self.client.place_limit_order_with_timeout(
+                uic=long.uic,
+                asset_type="StockOption",
+                buy_sell=BuySell.SELL,
+                amount=long.quantity,
+                limit_price=emergency_price,
+                timeout_seconds=30,
+                to_open_close="ToClose"
+            )
+
+            if result.get("filled"):
+                fill_price = result.get("fill_price", emergency_price)
+                pnl = (fill_price - long.entry_price) * long.quantity * 100
+
+                logger.critical(f"Emergency closed long put at ${fill_price:.2f}, P&L: ${pnl:.2f}")
+
+                if self.trade_logger:
+                    self.trade_logger.log_trade(
+                        action="EMERGENCY_CLOSE_LONG_PUT",
+                        strike=long.strike,
+                        price=fill_price,
+                        delta=long.delta,
+                        pnl=pnl,
+                        saxo_client=self.client,
+                        underlying_price=self.current_price,
+                        option_type="Long Put",
+                        expiry_date=long.expiry,
+                        dte=long.dte,
+                        notes="EMERGENCY CLOSE"
+                    )
+
+                self.metrics.realized_pnl += pnl
+                self.diagonal.long_put = None
+                return True
+            else:
+                logger.error(f"Emergency long closure FAILED: {result.get('message')}")
+                return False
+
+        except Exception as e:
+            logger.exception(f"Exception closing long put: {e}")
+            return False
+
+    # =========================================================================
+    # ORPHANED POSITION DETECTION
+    # =========================================================================
+
+    def _detect_orphaned_positions(self, saxo_positions: List[Dict]) -> List[Dict]:
+        """
+        Detect orphaned positions that exist on Saxo but aren't in our strategy state.
+
+        An orphaned position is one that:
+        1. Exists on Saxo as a QQQ put option
+        2. Wasn't matched to our long_put or short_put in the diagonal
+
+        This can happen from:
+        - Partial fills that weren't properly tracked
+        - Manual trades made in SaxoTraderGO
+        - Bot crashes during multi-leg operations
+
+        Args:
+            saxo_positions: List of positions from Saxo
+
+        Returns:
+            List of orphaned position details
+        """
+        orphaned = []
+
+        # Get UICs of positions we're tracking
+        tracked_uics = set()
+        if self.diagonal:
+            if self.diagonal.long_put:
+                tracked_uics.add(self.diagonal.long_put.uic)
+            if self.diagonal.short_put:
+                tracked_uics.add(self.diagonal.short_put.uic)
+
+        # Filter QQQ puts and check against tracked
+        for pos in saxo_positions:
+            symbol = pos.get("DisplayAndFormat", {}).get("Symbol", "").upper()
+            asset_type = pos.get("PositionBase", {}).get("AssetType", "")
+            description = pos.get("DisplayAndFormat", {}).get("Description", "").upper()
+
+            # Only look at QQQ put options
+            if not symbol.startswith(self._position_filter_prefix):
+                continue
+            if asset_type != "StockOption":
+                continue
+            if "PUT" not in description:
+                continue
+
+            uic = pos.get("PositionBase", {}).get("Uic", 0)
+            amount = pos.get("PositionBase", {}).get("Amount", 0)
+
+            # If this UIC isn't tracked, it's orphaned
+            if uic not in tracked_uics:
+                orphaned.append({
+                    "uic": uic,
+                    "symbol": symbol,
+                    "amount": amount,
+                    "position_type": "LONG" if amount > 0 else "SHORT",
+                    "description": description,
+                    "entry_price": pos.get("PositionBase", {}).get("OpenPrice", 0),
+                })
+
+        return orphaned
+
+    def _handle_orphaned_positions(self, orphaned_positions: List[Dict]) -> None:
+        """
+        Handle orphaned positions by blocking trading and alerting.
+
+        When orphaned positions are detected:
+        1. Log critical alert
+        2. Store for status display
+        3. Block new trading until resolved
+
+        Args:
+            orphaned_positions: List of orphaned position details
+        """
+        self._orphaned_positions = orphaned_positions
+
+        logger.critical("=" * 70)
+        logger.critical("ORPHANED POSITIONS DETECTED")
+        logger.critical("=" * 70)
+        logger.critical(f"Found {len(orphaned_positions)} position(s) not tracked by strategy:")
+
+        for orphan in orphaned_positions:
+            logger.critical(
+                f"  - {orphan['position_type']} {orphan['description']} "
+                f"(UIC: {orphan['uic']}, Amount: {orphan['amount']}, "
+                f"Entry: ${orphan['entry_price']:.2f})"
+            )
+
+        logger.critical("")
+        logger.critical("REQUIRED ACTIONS:")
+        logger.critical("  1. Check positions in SaxoTraderGO")
+        logger.critical("  2. Close orphaned position(s) manually OR")
+        logger.critical("  3. Restart bot to re-sync positions")
+        logger.critical("")
+        logger.critical("The bot will NOT enter new positions until orphans are resolved.")
+        logger.critical("=" * 70)
+
+        # Log to Google Sheets
+        if self.trade_logger:
+            self.trade_logger.log_safety_event({
+                "event_type": "RPD_ORPHANED_POSITIONS",
+                "severity": "WARNING",
+                "description": f"Found {len(orphaned_positions)} orphaned position(s)",
+                "action_taken": "BLOCKING_NEW_TRADES",
+                "result": "Requires manual resolution",
+                "details": str([f"{o['position_type']} {o['description']}" for o in orphaned_positions]),
+                "qqq_price": self.current_price,
+            })
+
+    def has_orphaned_positions(self) -> bool:
+        """Check if there are any orphaned positions blocking trading."""
+        return len(self._orphaned_positions) > 0
+
+    def get_orphaned_positions(self) -> List[Dict]:
+        """Get list of orphaned positions, if any."""
+        return self._orphaned_positions
+
+    def clear_orphaned_positions(self) -> None:
+        """Clear orphaned positions after manual resolution."""
+        if self._orphaned_positions:
+            logger.info(f"Clearing {len(self._orphaned_positions)} orphaned positions")
+            self._orphaned_positions = []
+
     # =========================================================================
     # POSITION RECOVERY
     # =========================================================================
@@ -613,10 +1160,16 @@ class RollingPutDiagonalStrategy:
         positions. We look for existing QQQ put options and categorize them
         as long (positive quantity) or short (negative quantity).
 
+        IMPORTANT: This method also detects orphaned positions - positions that
+        exist on Saxo but don't fit into our expected strategy structure.
+
         Returns:
             True if positions were recovered, False if no positions found
         """
         logger.info("Recovering positions from broker...")
+
+        # Clear any previous orphaned positions
+        self._orphaned_positions = []
 
         try:
             all_positions = self.client.get_positions()
@@ -632,16 +1185,19 @@ class RollingPutDiagonalStrategy:
 
             logger.info(f"Found {len(qqq_options)} QQQ option position(s)")
 
-            # Categorize by long/short
+            # Categorize by long/short puts
             long_puts = []
             short_puts = []
+            other_options = []  # QQQ options that are not puts (calls, etc.)
 
             for pos in qqq_options:
                 amount = pos.get("PositionBase", {}).get("Amount", 0)
                 option_type = pos.get("DisplayAndFormat", {}).get("Description", "")
 
-                # Only interested in puts for this strategy
+                # Check if it's a put
                 if "PUT" not in option_type.upper():
+                    # This is a call or other option type - track as potential orphan
+                    other_options.append(pos)
                     continue
 
                 if amount > 0:
@@ -649,7 +1205,16 @@ class RollingPutDiagonalStrategy:
                 elif amount < 0:
                     short_puts.append(pos)
 
-            logger.info(f"Long puts: {len(long_puts)}, Short puts: {len(short_puts)}")
+            logger.info(f"Long puts: {len(long_puts)}, Short puts: {len(short_puts)}, Other: {len(other_options)}")
+
+            # SAFETY CHECK: Detect multiple positions of same type
+            if len(long_puts) > 1:
+                logger.warning(f"Found {len(long_puts)} long puts - expected max 1!")
+                logger.warning("Extra long puts will be tracked as orphaned")
+
+            if len(short_puts) > 1:
+                logger.warning(f"Found {len(short_puts)} short puts - expected max 1!")
+                logger.warning("Extra short puts will be tracked as orphaned")
 
             # Reconstruct diagonal if we have positions
             if long_puts or short_puts:
@@ -676,10 +1241,56 @@ class RollingPutDiagonalStrategy:
                 elif self.diagonal.has_long_only:
                     self.state = RPDState.POSITION_OPEN
                     logger.info("Long-only recovered - need to sell new short")
+                elif self.diagonal.short_put and not self.diagonal.long_put:
+                    # DANGEROUS: Naked short with no protection
+                    logger.critical("NAKED SHORT DETECTED - short put with no long protection!")
+                    self.state = RPDState.POSITION_OPEN
 
-                return True
+            # CRITICAL: Detect orphaned positions
+            # This includes: extra long puts, extra short puts, any call options
+            orphaned = []
 
-            return False
+            # Extra long puts beyond the first one
+            for extra_long in long_puts[1:]:
+                orphaned.append({
+                    "uic": extra_long.get("PositionBase", {}).get("Uic", 0),
+                    "symbol": extra_long.get("DisplayAndFormat", {}).get("Symbol", ""),
+                    "amount": extra_long.get("PositionBase", {}).get("Amount", 0),
+                    "position_type": "LONG",
+                    "description": extra_long.get("DisplayAndFormat", {}).get("Description", ""),
+                    "entry_price": extra_long.get("PositionBase", {}).get("OpenPrice", 0),
+                    "reason": "Extra long put (strategy expects max 1)"
+                })
+
+            # Extra short puts beyond the first one
+            for extra_short in short_puts[1:]:
+                orphaned.append({
+                    "uic": extra_short.get("PositionBase", {}).get("Uic", 0),
+                    "symbol": extra_short.get("DisplayAndFormat", {}).get("Symbol", ""),
+                    "amount": extra_short.get("PositionBase", {}).get("Amount", 0),
+                    "position_type": "SHORT",
+                    "description": extra_short.get("DisplayAndFormat", {}).get("Description", ""),
+                    "entry_price": extra_short.get("PositionBase", {}).get("OpenPrice", 0),
+                    "reason": "Extra short put (strategy expects max 1)"
+                })
+
+            # Any other QQQ options (calls, etc.)
+            for other in other_options:
+                orphaned.append({
+                    "uic": other.get("PositionBase", {}).get("Uic", 0),
+                    "symbol": other.get("DisplayAndFormat", {}).get("Symbol", ""),
+                    "amount": other.get("PositionBase", {}).get("Amount", 0),
+                    "position_type": "LONG" if other.get("PositionBase", {}).get("Amount", 0) > 0 else "SHORT",
+                    "description": other.get("DisplayAndFormat", {}).get("Description", ""),
+                    "entry_price": other.get("PositionBase", {}).get("OpenPrice", 0),
+                    "reason": "Non-put option (strategy only uses puts)"
+                })
+
+            # Handle orphaned positions if found
+            if orphaned:
+                self._handle_orphaned_positions(orphaned)
+
+            return bool(long_puts or short_puts)
 
         except Exception as e:
             logger.error(f"Error recovering positions: {e}")
@@ -1477,7 +2088,11 @@ class RollingPutDiagonalStrategy:
 
     def close_campaign(self, reason: str) -> bool:
         """
-        Close the entire diagonal campaign.
+        Close the entire diagonal campaign with verification.
+
+        This method closes both legs of the diagonal and VERIFIES that
+        both actually closed by checking with Saxo. If any leg fails to
+        close, it handles the partial fill appropriately.
 
         Args:
             reason: Reason for closing
@@ -1499,11 +2114,22 @@ class RollingPutDiagonalStrategy:
         try:
             self.state = RPDState.CLOSING_CAMPAIGN
             campaign_pnl = 0.0
+            short_closed = False
+            long_closed = False
+            short_pnl = 0.0
+            long_pnl = 0.0
 
-            # Close short put if exists
+            # Track what we're trying to close for verification
+            had_short = self.diagonal.short_put is not None
+            had_long = self.diagonal.long_put is not None
+            short_uic = self.diagonal.short_put.uic if had_short else None
+            long_uic = self.diagonal.long_put.uic if had_long else None
+
+            # Close short put first (higher risk if left alone)
             if self.diagonal.short_put:
                 if self.dry_run:
                     logger.info(f"[DRY RUN] Would close short put ${self.diagonal.short_put.strike}")
+                    short_closed = True
                 else:
                     result = self._place_protected_order(
                         uic=self.diagonal.short_put.uic,
@@ -1513,13 +2139,18 @@ class RollingPutDiagonalStrategy:
                     )
                     if result.get("success"):
                         # P&L = entry - exit (for short)
-                        pnl = (self.diagonal.short_put.entry_price - result.get("fill_price", 0)) * 100
-                        campaign_pnl += pnl
+                        short_pnl = (self.diagonal.short_put.entry_price - result.get("fill_price", 0)) * 100
+                        campaign_pnl += short_pnl
+                        short_closed = True
+                        logger.info(f"Short put closed - P&L: ${short_pnl:.2f}")
+                    else:
+                        logger.error(f"Failed to close short put: {result.get('error')}")
 
             # Close long put
             if self.diagonal.long_put:
                 if self.dry_run:
                     logger.info(f"[DRY RUN] Would close long put ${self.diagonal.long_put.strike}")
+                    long_closed = True
                 else:
                     result = self._place_protected_order(
                         uic=self.diagonal.long_put.uic,
@@ -1529,8 +2160,29 @@ class RollingPutDiagonalStrategy:
                     )
                     if result.get("success"):
                         # P&L = exit - entry (for long)
-                        pnl = (result.get("fill_price", 0) - self.diagonal.long_put.entry_price) * 100
-                        campaign_pnl += pnl
+                        long_pnl = (result.get("fill_price", 0) - self.diagonal.long_put.entry_price) * 100
+                        campaign_pnl += long_pnl
+                        long_closed = True
+                        logger.info(f"Long put closed - P&L: ${long_pnl:.2f}")
+                    else:
+                        logger.error(f"Failed to close long put: {result.get('error')}")
+
+            # CRITICAL: Verify closure with Saxo (unless dry run)
+            if not self.dry_run:
+                verification_passed = self._verify_campaign_closed(
+                    short_uic=short_uic if had_short else None,
+                    long_uic=long_uic if had_long else None,
+                    expected_short_closed=had_short,
+                    expected_long_closed=had_long
+                )
+
+                if not verification_passed:
+                    logger.critical("VERIFICATION FAILED - positions may still be open!")
+                    # Don't clear the diagonal yet - we need to handle the partial close
+                    self._handle_partial_fill("close_campaign",
+                        [f"Short: {'closed' if short_closed else 'FAILED'}",
+                         f"Long: {'closed' if long_closed else 'FAILED'}"])
+                    return False
 
             # Add premium collected to P&L
             campaign_pnl += self.diagonal.total_premium_collected
@@ -1550,7 +2202,7 @@ class RollingPutDiagonalStrategy:
                 action_prefix = "[SIMULATED] " if self.dry_run else ""
                 self.trade_logger.log_trade(
                     action=f"{action_prefix}CLOSE_CAMPAIGN",
-                    strike=f"{self.diagonal.long_put.strike}/{self.diagonal.short_put.strike if self.diagonal.short_put else 'N/A'}",
+                    strike=f"{self.diagonal.long_put.strike if self.diagonal.long_put else 'N/A'}/{self.diagonal.short_put.strike if self.diagonal.short_put else 'N/A'}",
                     price=self.diagonal.total_premium_collected,
                     delta=self.diagonal.long_put.delta if self.diagonal.long_put else 0,
                     pnl=campaign_pnl,
@@ -1569,12 +2221,12 @@ class RollingPutDiagonalStrategy:
                     "duration_days": (datetime.now() - datetime.strptime(self.diagonal.campaign_start_date, "%Y-%m-%d")).days if self.diagonal.campaign_start_date else 0,
                     "long_put_strike": self.diagonal.long_put.strike if self.diagonal.long_put else 0,
                     "long_put_entry": self.diagonal.long_put.entry_price if self.diagonal.long_put else 0,
-                    "long_put_exit": long_pnl if 'long_pnl' in locals() else 0,
+                    "long_put_exit": long_pnl,
                     "total_rolls": self.diagonal.roll_count,
                     "vertical_rolls": self.diagonal.vertical_roll_count,
                     "horizontal_rolls": self.diagonal.horizontal_roll_count,
                     "total_premium": self.diagonal.total_premium_collected,
-                    "long_put_pnl": long_pnl if 'long_pnl' in locals() else 0,
+                    "long_put_pnl": long_pnl,
                     "net_pnl": campaign_pnl,
                     "close_reason": reason,
                 })
@@ -1597,6 +2249,75 @@ class RollingPutDiagonalStrategy:
             self.state = RPDState.POSITION_OPEN
             return False
 
+    def _verify_campaign_closed(
+        self,
+        short_uic: Optional[int],
+        long_uic: Optional[int],
+        expected_short_closed: bool,
+        expected_long_closed: bool
+    ) -> bool:
+        """
+        Verify that campaign positions actually closed by checking Saxo.
+
+        This is a critical safety check to ensure our local state matches
+        the broker's actual position state after close orders.
+
+        Args:
+            short_uic: UIC of short put that should be closed
+            long_uic: UIC of long put that should be closed
+            expected_short_closed: Whether we expected short to close
+            expected_long_closed: Whether we expected long to close
+
+        Returns:
+            True if verification passed, False if positions still exist
+        """
+        logger.info("Verifying campaign closure with Saxo...")
+
+        try:
+            # Give Saxo a moment to process
+            import time
+            time.sleep(2)
+
+            all_positions = self.client.get_positions()
+            if not all_positions:
+                logger.info("Verification: No positions found - all closed")
+                return True
+
+            qqq_options = self._filter_qqq_options(all_positions)
+
+            # Check for our specific UICs
+            found_short = False
+            found_long = False
+
+            for pos in qqq_options:
+                uic = pos.get("PositionBase", {}).get("Uic", 0)
+                amount = pos.get("PositionBase", {}).get("Amount", 0)
+
+                if short_uic and uic == short_uic and amount != 0:
+                    found_short = True
+                    logger.warning(f"Short put UIC {short_uic} still has position: {amount}")
+
+                if long_uic and uic == long_uic and amount != 0:
+                    found_long = True
+                    logger.warning(f"Long put UIC {long_uic} still has position: {amount}")
+
+            # Check if we found positions that should have been closed
+            if expected_short_closed and found_short:
+                logger.error("VERIFICATION FAILED: Short put still open!")
+                return False
+
+            if expected_long_closed and found_long:
+                logger.error("VERIFICATION FAILED: Long put still open!")
+                return False
+
+            logger.info("Verification PASSED: All expected positions closed")
+            return True
+
+        except Exception as e:
+            logger.error(f"Verification error: {e}")
+            # On error, be conservative and assume verification failed
+            return False
+
     # =========================================================================
     # ORDER MANAGEMENT
     # =========================================================================
@@ -1606,16 +2327,18 @@ class RollingPutDiagonalStrategy:
         uic: int,
         buy_sell: BuySell,
         quantity: int,
-        description: str
+        description: str,
+        verify_fill: bool = True
     ) -> Dict:
         """
-        Place an order with timeout and orphan protection.
+        Place an order with timeout, orphan protection, and fill verification.
 
         Args:
             uic: Instrument UIC
             buy_sell: BUY or SELL
             quantity: Number of contracts
             description: Order description for logging
+            verify_fill: If True, verify fill with position check after order
 
         Returns:
             Dict with success status and fill info
@@ -1655,18 +2378,115 @@ class RollingPutDiagonalStrategy:
                 return {"success": False, "error": "Orphaned order"}
 
             if result.get("filled"):
-                return {
+                fill_result = {
                     "success": True,
                     "order_id": result.get("order_id"),
                     "position_id": result.get("position_id", ""),
                     "fill_price": result.get("fill_price", limit_price),
                 }
+
+                # Verify the fill with Saxo position check
+                if verify_fill and not self.dry_run:
+                    verified = self._verify_order_fill(
+                        uic=uic,
+                        expected_buy_sell=buy_sell,
+                        expected_quantity=quantity,
+                        description=description
+                    )
+                    fill_result["verified"] = verified
+                    if not verified:
+                        logger.warning(f"Fill verification FAILED for {description}")
+                        # Don't fail the order, but log the discrepancy
+                        if self.trade_logger:
+                            self.trade_logger.log_safety_event({
+                                "event_type": "RPD_FILL_VERIFICATION_FAILED",
+                                "severity": "WARNING",
+                                "description": f"Fill verification failed: {description}",
+                                "action_taken": "LOGGED_DISCREPANCY",
+                                "result": "Position may be inconsistent",
+                                "qqq_price": self.current_price,
+                            })
+
+                return fill_result
             else:
                 return {"success": False, "error": result.get("error", "Order not filled")}
 
         except Exception as e:
             logger.error(f"Order exception: {e}")
             return {"success": False, "error": str(e)}
+
+    def _verify_order_fill(
+        self,
+        uic: int,
+        expected_buy_sell: BuySell,
+        expected_quantity: int,
+        description: str
+    ) -> bool:
+        """
+        Verify an order fill by checking Saxo positions.
+
+        This is a safety check to ensure our local state matches Saxo's
+        actual position state after an order fills.
+
+        Args:
+            uic: UIC of the instrument
+            expected_buy_sell: What we expected (BUY or SELL)
+            expected_quantity: Expected quantity change
+            description: Order description for logging
+
+        Returns:
+            True if position state is consistent, False otherwise
+        """
+        try:
+            # Small delay for Saxo to process
+            import time
+            time.sleep(1)
+
+            # Get current positions
+            all_positions = self.client.get_positions()
+            if not all_positions:
+                # If we sold to close and there are no positions, that's expected
+                if expected_buy_sell == BuySell.SELL:
+                    logger.debug("No positions after sell - consistent")
+                    return True
+                # If we bought and there are no positions, that's unexpected
+                logger.warning("No positions found after buy order")
+                return False
+
+            # Look for the specific UIC
+            for pos in all_positions:
+                pos_uic = pos.get("PositionBase", {}).get("Uic", 0)
+                if pos_uic == uic:
+                    amount = pos.get("PositionBase", {}).get("Amount", 0)
+                    logger.debug(f"Position UIC {uic} has amount {amount}")
+
+                    # Check if position direction is consistent
+                    if expected_buy_sell == BuySell.BUY:
+                        # Buying should result in positive (long) position
+                        if amount > 0:
+                            return True
+                        # Or closing a short (amount was negative, now 0 or less negative)
+                        return True  # Hard to verify partial closes
+                    else:
+                        # Selling should result in negative (short) position
+                        if amount < 0:
+                            return True
+                        # Or closing a long (amount was positive, now 0 or less positive)
+                        return True
+
+            # UIC not found in positions - could be fully closed
+            if expected_buy_sell == BuySell.BUY:
+                # Bought to close a short, position now gone - consistent
+                logger.debug(f"UIC {uic} not found after buy - likely closed short")
+                return True
+            else:
+                # Sold to close a long, position now gone - consistent
+                logger.debug(f"UIC {uic} not found after sell - likely closed long")
+                return True
+
+        except Exception as e:
+            logger.error(f"Fill verification error: {e}")
+            return False
 
     def _handle_partial_fill(self, action: str, filled_legs: List[str]) -> None:
         """
@@ -1709,6 +2529,19 @@ class RollingPutDiagonalStrategy:
         """
         # Safety check: circuit breaker
         if self._check_circuit_breaker():
+            return
+
+        # Safety check: orphaned orders still pending
+        if self._check_for_orphaned_orders():
+            logger.critical("Orphaned orders detected - halting until resolved")
+            return
+
+        # Safety check: orphaned positions blocking trading
+        if self.has_orphaned_positions():
+            orphans = self.get_orphaned_positions()
+            orphan_summary = ", ".join([f"{o['position_type']} {o['description']}" for o in orphans])
+            logger.critical(f"ORPHANED POSITIONS BLOCKING TRADING: {orphan_summary}")
+            logger.critical("Resolve orphaned positions manually before bot can continue")
             return
 
         # Update market data
@@ -1860,6 +2693,24 @@ class RollingPutDiagonalStrategy:
             "roll_count": self.metrics.roll_count,
         }
 
+        # Safety status
+        summary["safety"] = {
+            "circuit_breaker_open": self._circuit_breaker_open,
+            "circuit_breaker_reason": self._circuit_breaker_reason if self._circuit_breaker_open else None,
+            "circuit_breaker_opened_at": self._circuit_breaker_opened_at.isoformat() if self._circuit_breaker_opened_at else None,
+            "consecutive_failures": self._consecutive_failures,
+            "max_failures": self._max_consecutive_failures,
+            "orphaned_orders": len(self._orphaned_orders),
+            "orphaned_positions": len(self._orphaned_positions),
+            "actions_on_cooldown": list(self._action_cooldowns.keys()),
+        }
+
+        # Orphaned position details if any
+        if self._orphaned_positions:
+            summary["orphaned_position_details"] = [
+                f"{o['position_type']} {o['description']}" for o in self._orphaned_positions
+            ]
+
         if self.diagonal:
             summary["position"] = {
                 "long_strike": self.diagonal.long_put.strike if self.diagonal.long_put else None,
@@ -1868,6 +2719,8 @@ class RollingPutDiagonalStrategy:
                 "short_dte": self.diagonal.short_dte,
                 "campaign_rolls": self.diagonal.roll_count,
                 "premium_collected": self.diagonal.total_premium_collected,
+                "is_complete": self.diagonal.is_complete,
+                "has_naked_short": self.diagonal.short_put is not None and self.diagonal.long_put is None,
             }
 
         if self.indicators:

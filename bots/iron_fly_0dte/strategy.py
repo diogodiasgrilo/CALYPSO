@@ -640,7 +640,21 @@ class IronFlyStrategy:
             self._consecutive_failures = 0
 
     def _open_circuit_breaker(self, reason: str) -> None:
-        """Open circuit breaker to prevent further order attempts."""
+        """
+        Open circuit breaker to prevent further order attempts.
+
+        IMPORTANT: Before halting, attempts emergency position closure if we have
+        an active position. This prevents being stuck with an unmanaged position.
+        """
+        # CRITICAL: Attempt emergency position closure BEFORE halting
+        # This is the nuclear option - better to close at a loss than be stuck
+        if self.position and self.state in [IronFlyState.POSITION_OPEN, IronFlyState.MONITORING_EXIT]:
+            logger.critical("🚨 CIRCUIT BREAKER: Attempting emergency position closure before halt")
+            emergency_result = self._emergency_close_position(
+                reason=f"CIRCUIT_BREAKER: {reason}"
+            )
+            logger.critical(f"Emergency close result: {emergency_result}")
+
         self._circuit_breaker_open = True
         self._circuit_breaker_reason = reason
         self._circuit_breaker_opened_at = get_eastern_timestamp()
@@ -656,7 +670,7 @@ class IronFlyStrategy:
             "vix": self.current_vix,
             "description": f"Circuit breaker opened: {reason}",
             "consecutive_failures": self._consecutive_failures,
-            "result": "Trading halted - manual intervention required"
+            "result": "Trading halted - emergency close attempted if position was open"
         })
 
     def _check_circuit_breaker(self) -> bool:
@@ -691,6 +705,156 @@ class IronFlyStrategy:
             )
 
         return False
+
+    def _emergency_close_position(self, reason: str) -> str:
+        """
+        Emergency closure of Iron Fly position using market orders.
+
+        This method bypasses the circuit breaker and uses aggressive market orders
+        to close the position as quickly as possible. Called when:
+        - Circuit breaker is about to open (prevents being stuck with position)
+        - Critical system failure detected
+        - Manual emergency trigger
+
+        Args:
+            reason: Why emergency closure was triggered
+
+        Returns:
+            str: Description of what happened
+        """
+        if not self.position:
+            return "No position to close"
+
+        logger.critical(f"🚨🚨🚨 EMERGENCY CLOSE: {reason} 🚨🚨🚨")
+
+        pnl = self.position.unrealized_pnl
+        hold_time = self.position.hold_time_minutes
+
+        self.trade_logger.log_safety_event({
+            "event_type": "IRON_FLY_EMERGENCY_CLOSE_START",
+            "spy_price": self.current_price,
+            "vix": self.current_vix,
+            "description": f"Emergency close initiated: {reason}",
+            "position_pnl": pnl,
+            "hold_time_minutes": hold_time
+        })
+
+        if self.dry_run:
+            # In dry-run, just clear the position
+            self.trade_logger.log_trade(
+                action="[SIMULATED] EMERGENCY_CLOSE",
+                strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
+                price=self.position.credit_received / 100,
+                delta=0.0,
+                pnl=pnl,
+                saxo_client=self.client,
+                underlying_price=self.current_price,
+                vix=self.current_vix,
+                option_type="Iron Fly",
+                expiry_date=self.position.expiry,
+                dte=0,
+                premium_received=self.position.credit_received,
+                trade_reason=f"EMERGENCY: {reason}"
+            )
+            self.daily_pnl += pnl
+            self.position = None
+            self.state = IronFlyState.DAILY_COMPLETE
+            return f"[DRY RUN] Emergency close complete - P&L: ${pnl:.2f}"
+
+        # =================================================================
+        # LIVE EMERGENCY CLOSE - Use market orders for all legs
+        # =================================================================
+        close_success = 0
+        close_failed = 0
+        close_order_ids = {}
+
+        # Cancel any open limit orders first
+        if self.position.profit_order_id:
+            try:
+                self.client.cancel_order(self.position.profit_order_id)
+                logger.info(f"Cancelled profit order: {self.position.profit_order_id}")
+            except Exception as e:
+                logger.warning(f"Failed to cancel profit order: {e}")
+
+        # Close all 4 legs with market orders (using emergency bypass)
+        legs = [
+            ("short_call", self.position.short_call_uic, BuySell.BUY, "StockIndexOption"),
+            ("short_put", self.position.short_put_uic, BuySell.BUY, "StockIndexOption"),
+            ("long_call", self.position.long_call_uic, BuySell.SELL, "StockIndexOption"),
+            ("long_put", self.position.long_put_uic, BuySell.SELL, "StockIndexOption"),
+        ]
+
+        for leg_name, uic, buy_sell, asset_type in legs:
+            if not uic:
+                logger.warning(f"No UIC for {leg_name} - skipping")
+                continue
+
+            try:
+                logger.critical(f"EMERGENCY: Closing {leg_name} with MARKET order")
+                result = self.client.place_emergency_order(
+                    uic=uic,
+                    asset_type=asset_type,
+                    buy_sell=buy_sell,
+                    amount=self.position.quantity,
+                    order_type=OrderType.MARKET,
+                    to_open_close="ToClose"
+                )
+                if result:
+                    close_order_ids[leg_name] = result.get("OrderId")
+                    close_success += 1
+                    logger.critical(f"✅ {leg_name} close order placed: {result.get('OrderId')}")
+                else:
+                    close_failed += 1
+                    logger.critical(f"❌ {leg_name} close order FAILED - no result")
+            except Exception as e:
+                close_failed += 1
+                logger.critical(f"❌ {leg_name} close order EXCEPTION: {e}")
+
+        # Log results
+        result_msg = f"Emergency close: {close_success}/4 legs closed, {close_failed} failed"
+
+        if close_failed > 0:
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_EMERGENCY_CLOSE_PARTIAL",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": result_msg,
+                "close_order_ids": close_order_ids,
+                "result": "MANUAL INTERVENTION REQUIRED for failed legs"
+            })
+        else:
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_EMERGENCY_CLOSE_SUCCESS",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": result_msg,
+                "close_order_ids": close_order_ids,
+                "result": "All legs closed successfully"
+            })
+
+        # Log the trade
+        self.trade_logger.log_trade(
+            action="EMERGENCY_CLOSE",
+            strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
+            price=self.position.credit_received / 100,
+            delta=0.0,
+            pnl=pnl,
+            saxo_client=self.client,
+            underlying_price=self.current_price,
+            vix=self.current_vix,
+            option_type="Iron Fly",
+            expiry_date=self.position.expiry,
+            dte=0,
+            premium_received=self.position.credit_received,
+            trade_reason=f"EMERGENCY: {reason} - {close_success}/4 legs closed"
+        )
+
+        self.daily_pnl += pnl
+        self.position = None
+        self.state = IronFlyState.DAILY_COMPLETE
+
+        logger.critical(f"Emergency close complete: {result_msg}")
+        return result_msg
 
     # =========================================================================
     # ORDER SAFETY METHODS (Safety feature from Delta Neutral bot)
@@ -1075,6 +1239,8 @@ class IronFlyStrategy:
         2. Bot restarts and doesn't know about the position
         3. Position goes unmonitored (no stop-loss protection)
         4. Or worse, bot enters a NEW position (doubling exposure)
+
+        Enhanced to properly reconstruct IronFlyPosition for full monitoring.
         """
         if self.dry_run:
             logger.info("Position reconciliation skipped (dry-run mode)")
@@ -1088,28 +1254,133 @@ class IronFlyStrategy:
                 logger.info("No positions found at broker - starting fresh")
                 return
 
-            # Look for iron fly positions (4 legs on same underlying)
-            # This is a simplified check - in production, would need more sophisticated matching
-            spx_options = [p for p in broker_positions
-                          if p.get('AssetType') == 'StockOption'
-                          and 'SPX' in str(p.get('Description', ''))]
+            # Look for SPX/SPXW options (StockIndexOption type)
+            spx_options = []
+            for p in broker_positions:
+                asset_type = p.get('AssetType', '')
+                description = str(p.get('Description', '')).upper()
+                # Match both StockOption and StockIndexOption for SPX
+                if asset_type in ['StockOption', 'StockIndexOption'] and ('SPX' in description or 'SPXW' in description):
+                    spx_options.append(p)
 
+            if not spx_options:
+                logger.info("No SPX option positions found at broker - starting fresh")
+                return
+
+            logger.info(f"Found {len(spx_options)} SPX option positions at broker")
+
+            # Categorize by call/put and long/short
+            short_calls = []
+            short_puts = []
+            long_calls = []
+            long_puts = []
+
+            for pos in spx_options:
+                pos_base = pos.get("PositionBase", {})
+                amount = pos_base.get("Amount", 0)
+                put_call = pos.get("PutCall", "")
+
+                if amount < 0:  # Short position
+                    if put_call == "Call":
+                        short_calls.append(pos)
+                    elif put_call == "Put":
+                        short_puts.append(pos)
+                elif amount > 0:  # Long position
+                    if put_call == "Call":
+                        long_calls.append(pos)
+                    elif put_call == "Put":
+                        long_puts.append(pos)
+
+            logger.info(f"Position breakdown: SC={len(short_calls)}, SP={len(short_puts)}, LC={len(long_calls)}, LP={len(long_puts)}")
+
+            # Check if we have a valid iron fly structure (1 of each)
+            if len(short_calls) == 1 and len(short_puts) == 1 and len(long_calls) == 1 and len(long_puts) == 1:
+                # Try to reconstruct the iron fly position
+                sc = short_calls[0]
+                sp = short_puts[0]
+                lc = long_calls[0]
+                lp = long_puts[0]
+
+                # Extract strikes
+                sc_strike = sc.get("Strike", 0)
+                sp_strike = sp.get("Strike", 0)
+                lc_strike = lc.get("Strike", 0)
+                lp_strike = lp.get("Strike", 0)
+
+                # Validate iron fly structure: short strikes should be equal (ATM)
+                if sc_strike == sp_strike:
+                    atm_strike = sc_strike
+                    upper_wing = lc_strike
+                    lower_wing = lp_strike
+
+                    # Get UICs for each leg
+                    sc_uic = sc.get("Uic") or sc.get("PositionBase", {}).get("Uic")
+                    sp_uic = sp.get("Uic") or sp.get("PositionBase", {}).get("Uic")
+                    lc_uic = lc.get("Uic") or lc.get("PositionBase", {}).get("Uic")
+                    lp_uic = lp.get("Uic") or lp.get("PositionBase", {}).get("Uic")
+
+                    # Get quantity (absolute value since we know directions)
+                    quantity = abs(sc.get("PositionBase", {}).get("Amount", 1))
+
+                    # Get expiry
+                    expiry = sc.get("ExpiryDate", "")[:10] if sc.get("ExpiryDate") else ""
+
+                    logger.critical(
+                        f"🔄 RECONSTRUCTING IRON FLY from broker positions:\n"
+                        f"   ATM Strike: {atm_strike}\n"
+                        f"   Upper Wing: {upper_wing}\n"
+                        f"   Lower Wing: {lower_wing}\n"
+                        f"   Quantity: {quantity}\n"
+                        f"   Expiry: {expiry}"
+                    )
+
+                    # Create the position object
+                    self.position = IronFlyPosition(
+                        atm_strike=atm_strike,
+                        upper_wing=upper_wing,
+                        lower_wing=lower_wing,
+                        entry_time=get_eastern_timestamp(),  # Unknown, use now
+                        entry_price=self.current_price,  # Unknown, use current
+                        credit_received=0.0,  # Unknown
+                        quantity=quantity,
+                        expiry=expiry,
+                        short_call_uic=sc_uic,
+                        short_put_uic=sp_uic,
+                        long_call_uic=lc_uic,
+                        long_put_uic=lp_uic
+                    )
+
+                    # Transition to monitoring state
+                    self.state = IronFlyState.MONITORING_EXIT
+
+                    self.trade_logger.log_safety_event({
+                        "event_type": "IRON_FLY_POSITION_RECOVERED",
+                        "spy_price": self.current_price,
+                        "vix": self.current_vix,
+                        "description": f"Recovered iron fly: {lower_wing}/{atm_strike}/{upper_wing} x{quantity}",
+                        "result": "Position fully reconstructed - monitoring resumed"
+                    })
+
+                    logger.critical("✅ Iron Fly position recovered - monitoring wing breaches and exits")
+                    return
+
+                else:
+                    logger.warning(f"Short strikes don't match (SC={sc_strike}, SP={sp_strike}) - not a standard iron fly")
+
+            # If we get here, we have SPX options but not a valid iron fly structure
             if len(spx_options) >= 4:
                 logger.critical(
-                    f"ORPHANED POSITION DETECTED! Found {len(spx_options)} SPX options at broker. "
-                    "This may be a previously opened iron fly. Transitioning to MONITORING_EXIT state."
+                    f"ORPHANED POSITION DETECTED! Found {len(spx_options)} SPX options at broker "
+                    "but cannot reconstruct valid iron fly. Transitioning to MONITORING_EXIT state."
                 )
                 self.trade_logger.log_safety_event({
                     "event_type": "IRON_FLY_ORPHAN_DETECTED",
                     "spy_price": self.current_price,
                     "vix": self.current_vix,
-                    "description": f"Found {len(spx_options)} orphaned SPX options at broker on startup",
-                    "result": "Transitioning to MONITORING_EXIT - manual intervention may be required"
+                    "description": f"Found {len(spx_options)} orphaned SPX options - invalid structure",
+                    "result": "MANUAL INTERVENTION REQUIRED"
                 })
-                # Set state to monitoring but position details unknown
                 self.state = IronFlyState.MONITORING_EXIT
-                # We don't have full position details, but at least we're monitoring
-
             elif spx_options:
                 logger.warning(
                     f"Found {len(spx_options)} SPX options at broker (not a full iron fly). "
@@ -1118,6 +1389,8 @@ class IronFlyStrategy:
 
         except Exception as e:
             logger.error(f"Error reconciling positions with broker: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             # Don't fail startup, but log the error
 
     def _handle_idle_state(self, current_time: datetime) -> str:
