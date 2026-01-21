@@ -783,11 +783,13 @@ class DeltaNeutralStrategy:
                 "to_open_close": "ToClose"
             }
 
-            # Use MARKET-like execution for emergency (higher slippage tolerance)
+            # CRITICAL: Use MARKET order for naked shorts - unlimited risk!
             order_result = self._place_protected_multi_leg_order(
                 legs=[leg],
-                total_limit_price=ask * 100 * naked_leg.quantity * 1.05,  # 5% slippage tolerance
-                order_description=f"EMERGENCY_CLOSE_NAKED_{leg_type}"
+                total_limit_price=ask * 100 * naked_leg.quantity * 1.05,  # For logging only
+                order_description=f"EMERGENCY_CLOSE_NAKED_{leg_type}",
+                emergency_mode=True,
+                use_market_orders=True  # MARKET order - must close naked short immediately!
             )
 
             if order_result["filled"]:
@@ -870,10 +872,13 @@ class DeltaNeutralStrategy:
             # Calculate total with 5% emergency slippage tolerance
             total_price = sum(leg["price"] * leg["amount"] for leg in legs) * 1.05
 
+            # CRITICAL: Use MARKET orders for emergency closing of shorts (unlimited risk!)
             order_result = self._place_protected_multi_leg_order(
                 legs=legs,
                 total_limit_price=total_price,
-                order_description="EMERGENCY_CLOSE_ALL_SHORTS"
+                order_description="EMERGENCY_CLOSE_ALL_SHORTS",
+                emergency_mode=True,
+                use_market_orders=True  # MARKET orders for emergency!
             )
 
             if order_result["filled"]:
@@ -952,6 +957,12 @@ class DeltaNeutralStrategy:
                 return True
             else:
                 logger.error("Emergency closure of all shorts FAILED")
+
+                # CRITICAL: Check for partial fill and sync with Saxo
+                if order_result.get("partial_fill"):
+                    logger.critical("⚠️ PARTIAL FILL on EMERGENCY_CLOSE_ALL_SHORTS - syncing with Saxo")
+                    self._sync_strangle_after_partial_close()
+
                 return False
 
         except Exception as e:
@@ -1071,6 +1082,12 @@ class DeltaNeutralStrategy:
                 return True
             else:
                 logger.error("Emergency closure of straddle FAILED")
+
+                # CRITICAL: Check for partial fill and sync with Saxo
+                if order_result.get("partial_fill"):
+                    logger.critical("⚠️ PARTIAL FILL on EMERGENCY_CLOSE_STRADDLE - syncing with Saxo")
+                    self._sync_straddle_after_partial_close()
+
                 return False
 
         except Exception as e:
@@ -1316,7 +1333,8 @@ class DeltaNeutralStrategy:
         legs: List[Dict],
         total_limit_price: float,
         order_description: str,
-        emergency_mode: bool = False
+        emergency_mode: bool = False,
+        use_market_orders: bool = False
     ) -> Dict:
         """
         Place individual orders for each leg with slippage protection.
@@ -1333,6 +1351,9 @@ class DeltaNeutralStrategy:
             order_description: Description for logging (e.g., "LONG_STRADDLE", "SHORT_STRANGLE")
             emergency_mode: If True, use aggressive pricing with 5% slippage tolerance
                            and shorter 30s timeout for urgent situations.
+            use_market_orders: If True, use MARKET orders instead of limit orders.
+                              WARNING: Only use for CLOSING positions in emergency!
+                              Market orders guarantee fill but may have significant slippage.
 
         Returns:
             dict: {
@@ -1344,17 +1365,27 @@ class DeltaNeutralStrategy:
         """
         from shared.saxo_client import BuySell
 
-        # Adjust timeout and slippage for emergency mode
+        # Adjust timeout for emergency mode
         timeout = 30 if emergency_mode else self.order_timeout_seconds
-        slippage_pct = 5.0 if emergency_mode else 0.0  # 5% slippage tolerance in emergency
+
+        # Slippage tolerance:
+        # - Normal mode: 0% (strict limit at bid/ask)
+        # - Emergency mode: 10% for OPENING (need to get the hedge on)
+        # - Emergency CLOSING uses MARKET orders instead (set via use_market_orders)
+        slippage_pct = 10.0 if emergency_mode else 0.0
 
         mode_str = "🚨 EMERGENCY" if emergency_mode else ""
-        logger.info(f"Placing {mode_str} {order_description} as individual orders (Saxo Live requirement)")
+        order_type_str = "MARKET" if use_market_orders else "LIMIT"
+        logger.info(f"Placing {mode_str} {order_description} as individual {order_type_str} orders (Saxo Live requirement)")
         logger.info(f"  Total limit price: ${total_limit_price:.2f}")
         logger.info(f"  Legs: {len(legs)}")
-        logger.info(f"  Timeout per leg: {timeout}s")
+        if not use_market_orders:
+            logger.info(f"  Timeout per leg: {timeout}s")
         if emergency_mode:
-            logger.warning(f"  ⚡ Emergency mode: {slippage_pct}% slippage tolerance")
+            if use_market_orders:
+                logger.warning(f"  ⚡ Emergency mode: Using MARKET orders for guaranteed fill!")
+            else:
+                logger.warning(f"  ⚡ Emergency mode: {slippage_pct}% slippage tolerance for limit orders")
 
         # In dry_run mode, simulate success
         if self.dry_run:
@@ -1379,60 +1410,109 @@ class DeltaNeutralStrategy:
             # Use per-leg price (already in per-share format, need to use raw price)
             leg_price = leg.get("price", 0) / 100 if leg.get("price", 0) > 100 else leg.get("price", 0)
 
-            # Get fresh quote for accurate limit price
-            quote = self.client.get_quote(leg_uic, leg_asset_type)
-            if quote and "Quote" in quote:
-                if leg_buy_sell == BuySell.BUY:
-                    leg_price = quote["Quote"].get("Ask", leg_price) or leg_price
-                else:
-                    leg_price = quote["Quote"].get("Bid", leg_price) or leg_price
-
-            # Apply emergency slippage if in emergency mode
-            if emergency_mode and slippage_pct > 0:
-                if leg_buy_sell == BuySell.BUY:
-                    # For buying back shorts, pay MORE to ensure fill
-                    leg_price = leg_price * (1 + slippage_pct / 100)
-                else:
-                    # For selling, accept LESS to ensure fill
-                    leg_price = leg_price * (1 - slippage_pct / 100)
-                leg_price = round(leg_price, 2)
-
             # Get to_open_close from the leg data (default ToOpen)
             leg_to_open_close = leg.get("to_open_close", "ToOpen")
 
-            logger.info(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ ${leg_price:.2f} ({leg_to_open_close})")
+            # =================================================================
+            # MARKET ORDER PATH - For emergency closing only
+            # =================================================================
+            if use_market_orders:
+                logger.warning(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ MARKET ({leg_to_open_close})")
 
-            result = self.client.place_limit_order_with_timeout(
-                uic=leg_uic,
-                asset_type=leg_asset_type,
-                buy_sell=leg_buy_sell,
-                amount=leg_amount,
-                limit_price=leg_price,
-                timeout_seconds=timeout,
-                to_open_close=leg_to_open_close
-            )
+                result = self.client.place_market_order(
+                    uic=leg_uic,
+                    asset_type=leg_asset_type,
+                    buy_sell=leg_buy_sell,
+                    amount=leg_amount,
+                    to_open_close=leg_to_open_close
+                )
 
-            if result["filled"]:
-                filled_orders.append(result["order_id"])
-                logger.info(f"  ✓ Leg {i+1} filled: {result['order_id']}")
-            else:
+                if result["filled"]:
+                    filled_orders.append(result["order_id"])
+                    logger.info(f"  ✓ Leg {i+1} MARKET filled: {result['order_id']}")
+                else:
+                    failed = True
+                    failure_message = f"Leg {i+1} MARKET order failed: {result['message']}"
+                    logger.error(f"  ✗ {failure_message}")
+                    break
+
+                continue  # Skip the limit order logic below
+
+            # =================================================================
+            # LIMIT ORDER PATH - With progressive retry for emergency opening
+            # =================================================================
+
+            # For emergency mode opening (ToOpen), use progressive slippage:
+            # 1st attempt: 5% slippage
+            # 2nd attempt: 10% slippage (if 1st fails)
+            is_opening = leg_to_open_close == "ToOpen"
+            slippage_levels = [5.0, 10.0] if (emergency_mode and is_opening) else [slippage_pct]
+
+            leg_filled = False
+            last_result = None
+
+            for attempt, current_slippage in enumerate(slippage_levels):
+                # Get fresh quote for accurate limit price
+                quote = self.client.get_quote(leg_uic, leg_asset_type)
+                base_price = leg_price
+                if quote and "Quote" in quote:
+                    if leg_buy_sell == BuySell.BUY:
+                        base_price = quote["Quote"].get("Ask", leg_price) or leg_price
+                    else:
+                        base_price = quote["Quote"].get("Bid", leg_price) or leg_price
+
+                # Apply slippage
+                if current_slippage > 0:
+                    if leg_buy_sell == BuySell.BUY:
+                        # For buying, pay MORE to ensure fill
+                        adjusted_price = base_price * (1 + current_slippage / 100)
+                    else:
+                        # For selling, accept LESS to ensure fill
+                        adjusted_price = base_price * (1 - current_slippage / 100)
+                    adjusted_price = round(adjusted_price, 2)
+                else:
+                    adjusted_price = base_price
+
+                attempt_str = f" (attempt {attempt+1}/{len(slippage_levels)}, {current_slippage}% slippage)" if len(slippage_levels) > 1 else ""
+                logger.info(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ ${adjusted_price:.2f} ({leg_to_open_close}){attempt_str}")
+
+                result = self.client.place_limit_order_with_timeout(
+                    uic=leg_uic,
+                    asset_type=leg_asset_type,
+                    buy_sell=leg_buy_sell,
+                    amount=leg_amount,
+                    limit_price=adjusted_price,
+                    timeout_seconds=timeout,
+                    to_open_close=leg_to_open_close
+                )
+                last_result = result
+
+                if result["filled"]:
+                    filled_orders.append(result["order_id"])
+                    logger.info(f"  ✓ Leg {i+1} filled: {result['order_id']}")
+                    leg_filled = True
+                    break  # Success, move to next leg
+                else:
+                    # Check if cancel failed - this is serious
+                    if result.get("cancel_failed"):
+                        orphaned_order_id = result.get("order_id")
+                        logger.critical(f"  🚨 CANCEL FAILED - Order {orphaned_order_id} is STILL OPEN on Saxo!")
+                        logger.critical("     This order MUST be cancelled manually before bot continues")
+                        if orphaned_order_id:
+                            self._add_orphaned_order(orphaned_order_id)
+                        self._increment_failure_count(f"cancel_failed_leg_{i+1}_{order_description}")
+                        break  # Can't retry if cancel failed
+
+                    # If more attempts available, log and retry
+                    if attempt < len(slippage_levels) - 1:
+                        next_slippage = slippage_levels[attempt + 1]
+                        logger.warning(f"  ⚠ Leg {i+1} failed at {current_slippage}% slippage - retrying at {next_slippage}%...")
+                    else:
+                        logger.error(f"  ✗ Leg {i+1} failed: {result['message']}")
+
+            if not leg_filled:
                 failed = True
-                failure_message = f"Leg {i+1} failed: {result['message']}"
-                logger.error(f"  ✗ {failure_message}")
-
-                # CRITICAL: Check if cancel failed - this means order is STILL OPEN on Saxo
-                if result.get("cancel_failed"):
-                    orphaned_order_id = result.get("order_id")
-                    logger.critical(f"  🚨 CANCEL FAILED - Order {orphaned_order_id} is STILL OPEN on Saxo!")
-                    logger.critical("     This order MUST be cancelled manually before bot continues")
-
-                    # Track the orphaned order
-                    if orphaned_order_id:
-                        self._add_orphaned_order(orphaned_order_id)
-
-                    # Increment failure count - this is a serious issue
-                    self._increment_failure_count(f"cancel_failed_leg_{i+1}_{order_description}")
-
+                failure_message = f"Leg {i+1} failed: {last_result['message'] if last_result else 'Unknown error'}"
                 break
 
         if failed:
@@ -1759,6 +1839,357 @@ class DeltaNeutralStrategy:
         self.load_historical_pnl_into_metrics()
 
         return True
+
+    def _sync_straddle_after_partial_close(self) -> None:
+        """
+        Sync local straddle state with Saxo after a partial fill on close.
+
+        This is called when CLOSE_LONG_STRADDLE partially fills (one leg closes,
+        the other times out). We need to:
+        1. Query Saxo for current positions
+        2. Figure out which leg closed
+        3. Update self.long_straddle to reflect the partial state
+
+        This ensures the bot knows the true position state and can handle it
+        (e.g., the execute_recenter method will detect the partial straddle).
+        """
+        logger.critical("=" * 60)
+        logger.critical("SYNCING STRADDLE STATE AFTER PARTIAL CLOSE")
+        logger.critical("=" * 60)
+
+        try:
+            # Get current positions from Saxo
+            all_positions = self.client.get_positions()
+            spy_options = self._filter_spy_options(all_positions)
+
+            # Find which long options still exist
+            remaining_call = None
+            remaining_put = None
+
+            for pos in spy_options:
+                amount = pos.get("PositionBase", {}).get("Amount", 0)
+                if amount <= 0:  # Skip shorts
+                    continue
+
+                parsed = self._parse_option_position(pos)
+                if not parsed:
+                    continue
+
+                # Check if this matches our straddle strike
+                if self.long_straddle and abs(parsed["strike"] - self.long_straddle.initial_strike) < 1:
+                    if parsed["option_type"] == "Call":
+                        remaining_call = parsed
+                        logger.info(f"  Found remaining CALL: ${parsed['strike']:.0f}")
+                    elif parsed["option_type"] == "Put":
+                        remaining_put = parsed
+                        logger.info(f"  Found remaining PUT: ${parsed['strike']:.0f}")
+
+            # Update the local straddle state
+            if self.long_straddle:
+                if remaining_call and not remaining_put:
+                    # Put was closed, call remains
+                    logger.critical("  RESULT: PUT was closed, CALL remains open")
+                    self.long_straddle.put = None
+                elif remaining_put and not remaining_call:
+                    # Call was closed, put remains
+                    logger.critical("  RESULT: CALL was closed, PUT remains open")
+                    self.long_straddle.call = None
+                elif not remaining_call and not remaining_put:
+                    # Both closed somehow
+                    logger.critical("  RESULT: Both legs closed - clearing straddle")
+                    self.long_straddle = None
+                    self.initial_straddle_strike = None
+                else:
+                    # Both still exist - no change needed
+                    logger.info("  RESULT: Both legs still open - no change")
+
+            # Log the sync result
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "event_type": "PARTIAL_CLOSE_SYNC",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "description": f"Synced straddle after partial close: call={'exists' if remaining_call else 'closed'}, put={'exists' if remaining_put else 'closed'}",
+                    "result": "SYNCED"
+                })
+
+        except Exception as e:
+            logger.error(f"Failed to sync straddle after partial close: {e}")
+
+        logger.critical("=" * 60)
+
+    def _sync_strangle_after_partial_close(self) -> None:
+        """
+        Sync local strangle state with Saxo after a partial fill on close.
+
+        Same as _sync_straddle_after_partial_close but for shorts.
+        """
+        logger.critical("=" * 60)
+        logger.critical("SYNCING STRANGLE STATE AFTER PARTIAL CLOSE")
+        logger.critical("=" * 60)
+
+        try:
+            # Get current positions from Saxo
+            all_positions = self.client.get_positions()
+            spy_options = self._filter_spy_options(all_positions)
+
+            # Find which short options still exist
+            remaining_call = None
+            remaining_put = None
+
+            for pos in spy_options:
+                amount = pos.get("PositionBase", {}).get("Amount", 0)
+                if amount >= 0:  # Skip longs
+                    continue
+
+                parsed = self._parse_option_position(pos)
+                if not parsed:
+                    continue
+
+                # Check if this matches our strangle expiry
+                if self.short_strangle:
+                    if parsed["option_type"] == "Call":
+                        remaining_call = parsed
+                        logger.info(f"  Found remaining short CALL: ${parsed['strike']:.0f}")
+                    elif parsed["option_type"] == "Put":
+                        remaining_put = parsed
+                        logger.info(f"  Found remaining short PUT: ${parsed['strike']:.0f}")
+
+            # Update the local strangle state
+            if self.short_strangle:
+                if remaining_call and not remaining_put:
+                    # Put was closed, call remains
+                    logger.critical("  RESULT: Short PUT was closed, short CALL remains open")
+                    self.short_strangle.put = None
+                elif remaining_put and not remaining_call:
+                    # Call was closed, put remains
+                    logger.critical("  RESULT: Short CALL was closed, short PUT remains open")
+                    self.short_strangle.call = None
+                elif not remaining_call and not remaining_put:
+                    # Both closed
+                    logger.critical("  RESULT: Both short legs closed - clearing strangle")
+                    self.short_strangle = None
+                else:
+                    # Both still exist - no change needed
+                    logger.info("  RESULT: Both short legs still open - no change")
+
+            # Log the sync result
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "event_type": "PARTIAL_CLOSE_SYNC",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "description": f"Synced strangle after partial close: call={'exists' if remaining_call else 'closed'}, put={'exists' if remaining_put else 'closed'}",
+                    "result": "SYNCED"
+                })
+
+        except Exception as e:
+            logger.error(f"Failed to sync strangle after partial close: {e}")
+
+        logger.critical("=" * 60)
+
+    def _sync_straddle_after_partial_open(self) -> None:
+        """
+        Sync local straddle state with Saxo after a partial fill on entry.
+
+        Called when LONG_STRADDLE_ENTRY partially fills. We need to create
+        a partial straddle with only the leg that filled.
+        """
+        logger.critical("=" * 60)
+        logger.critical("SYNCING STRADDLE STATE AFTER PARTIAL OPEN")
+        logger.critical("=" * 60)
+
+        try:
+            # Get current positions from Saxo
+            all_positions = self.client.get_positions()
+            spy_options = self._filter_spy_options(all_positions)
+
+            # Find which long options exist at ATM strike
+            found_call = None
+            found_put = None
+
+            for pos in spy_options:
+                amount = pos.get("PositionBase", {}).get("Amount", 0)
+                if amount <= 0:  # Skip shorts
+                    continue
+
+                parsed = self._parse_option_position(pos)
+                if not parsed:
+                    continue
+
+                # Check if this is near ATM (within $5 of current price)
+                if abs(parsed["strike"] - self.current_underlying_price) < 5:
+                    if parsed["option_type"] == "Call":
+                        found_call = parsed
+                        logger.info(f"  Found CALL: ${parsed['strike']:.0f}")
+                    elif parsed["option_type"] == "Put":
+                        found_put = parsed
+                        logger.info(f"  Found PUT: ${parsed['strike']:.0f}")
+
+            # Create partial straddle if we found one leg
+            if found_call and not found_put:
+                logger.critical("  RESULT: Only CALL filled - creating partial straddle")
+                self._create_partial_straddle_from_call(found_call)
+            elif found_put and not found_call:
+                logger.critical("  RESULT: Only PUT filled - creating partial straddle")
+                self._create_partial_straddle_from_put(found_put)
+            elif found_call and found_put:
+                logger.info("  RESULT: Both legs found - straddle complete")
+            else:
+                logger.warning("  RESULT: No legs found - entry completely failed")
+
+        except Exception as e:
+            logger.error(f"Failed to sync straddle after partial open: {e}")
+
+        logger.critical("=" * 60)
+
+    def _create_partial_straddle_from_call(self, call_data: Dict) -> None:
+        """Create a partial straddle with only the call leg."""
+        call_option = OptionPosition(
+            position_id=call_data.get("position_id", ""),
+            uic=call_data["uic"],
+            strike=call_data["strike"],
+            expiry=call_data["expiry"],
+            option_type="Call",
+            position_type=PositionType.LONG_CALL,
+            quantity=abs(call_data.get("quantity", 1)),
+            entry_price=call_data.get("entry_price", 0),
+            current_price=call_data.get("current_price", 0),
+            delta=call_data.get("delta", 0.5)
+        )
+
+        self.long_straddle = StraddlePosition(
+            call=call_option,
+            put=None,  # Missing leg
+            initial_strike=call_data["strike"],
+            entry_underlying_price=self.current_underlying_price,
+            entry_date=datetime.now().isoformat()
+        )
+        self.initial_straddle_strike = call_data["strike"]
+        logger.critical(f"Created PARTIAL straddle (CALL only) at ${call_data['strike']:.0f}")
+
+    def _create_partial_straddle_from_put(self, put_data: Dict) -> None:
+        """Create a partial straddle with only the put leg."""
+        put_option = OptionPosition(
+            position_id=put_data.get("position_id", ""),
+            uic=put_data["uic"],
+            strike=put_data["strike"],
+            expiry=put_data["expiry"],
+            option_type="Put",
+            position_type=PositionType.LONG_PUT,
+            quantity=abs(put_data.get("quantity", 1)),
+            entry_price=put_data.get("entry_price", 0),
+            current_price=put_data.get("current_price", 0),
+            delta=put_data.get("delta", -0.5)
+        )
+
+        self.long_straddle = StraddlePosition(
+            call=None,  # Missing leg
+            put=put_option,
+            initial_strike=put_data["strike"],
+            entry_underlying_price=self.current_underlying_price,
+            entry_date=datetime.now().isoformat()
+        )
+        self.initial_straddle_strike = put_data["strike"]
+        logger.critical(f"Created PARTIAL straddle (PUT only) at ${put_data['strike']:.0f}")
+
+    def _sync_strangle_after_partial_open(self) -> None:
+        """
+        Sync local strangle state with Saxo after a partial fill on entry.
+
+        Called when SHORT_STRANGLE_ENTRY partially fills.
+        """
+        logger.critical("=" * 60)
+        logger.critical("SYNCING STRANGLE STATE AFTER PARTIAL OPEN")
+        logger.critical("=" * 60)
+
+        try:
+            # Get current positions from Saxo
+            all_positions = self.client.get_positions()
+            spy_options = self._filter_spy_options(all_positions)
+
+            # Find which short options exist
+            found_call = None
+            found_put = None
+
+            for pos in spy_options:
+                amount = pos.get("PositionBase", {}).get("Amount", 0)
+                if amount >= 0:  # Skip longs
+                    continue
+
+                parsed = self._parse_option_position(pos)
+                if not parsed:
+                    continue
+
+                if parsed["option_type"] == "Call":
+                    found_call = parsed
+                    logger.info(f"  Found short CALL: ${parsed['strike']:.0f}")
+                elif parsed["option_type"] == "Put":
+                    found_put = parsed
+                    logger.info(f"  Found short PUT: ${parsed['strike']:.0f}")
+
+            # Create partial strangle if we found one leg
+            if found_call and not found_put:
+                logger.critical("  RESULT: Only short CALL filled - creating partial strangle")
+                self._create_partial_strangle_from_call(found_call)
+            elif found_put and not found_call:
+                logger.critical("  RESULT: Only short PUT filled - creating partial strangle")
+                self._create_partial_strangle_from_put(found_put)
+            elif found_call and found_put:
+                logger.info("  RESULT: Both short legs found - strangle complete")
+            else:
+                logger.warning("  RESULT: No short legs found - entry completely failed")
+
+        except Exception as e:
+            logger.error(f"Failed to sync strangle after partial open: {e}")
+
+        logger.critical("=" * 60)
+
+    def _create_partial_strangle_from_call(self, call_data: Dict) -> None:
+        """Create a partial strangle with only the short call leg."""
+        call_option = OptionPosition(
+            position_id=call_data.get("position_id", ""),
+            uic=call_data["uic"],
+            strike=call_data["strike"],
+            expiry=call_data["expiry"],
+            option_type="Call",
+            position_type=PositionType.SHORT_CALL,
+            quantity=abs(call_data.get("quantity", 1)),
+            entry_price=call_data.get("entry_price", 0),
+            current_price=call_data.get("current_price", 0),
+            delta=call_data.get("delta", 0.2)
+        )
+
+        self.short_strangle = StranglePosition(
+            call=call_option,
+            put=None,  # Missing leg
+            expiry=call_data["expiry"],
+            entry_date=datetime.now().isoformat()
+        )
+        logger.critical(f"Created PARTIAL strangle (short CALL only) at ${call_data['strike']:.0f}")
+
+    def _create_partial_strangle_from_put(self, put_data: Dict) -> None:
+        """Create a partial strangle with only the short put leg."""
+        put_option = OptionPosition(
+            position_id=put_data.get("position_id", ""),
+            uic=put_data["uic"],
+            strike=put_data["strike"],
+            expiry=put_data["expiry"],
+            option_type="Put",
+            position_type=PositionType.SHORT_PUT,
+            quantity=abs(put_data.get("quantity", 1)),
+            entry_price=put_data.get("entry_price", 0),
+            current_price=put_data.get("current_price", 0),
+            delta=put_data.get("delta", -0.2)
+        )
+
+        self.short_strangle = StranglePosition(
+            call=None,  # Missing leg
+            put=put_option,
+            expiry=put_data["expiry"],
+            entry_date=datetime.now().isoformat()
+        )
+        logger.critical(f"Created PARTIAL strangle (short PUT only) at ${put_data['strike']:.0f}")
 
     def _filter_spy_options(self, positions: List[Dict]) -> List[Dict]:
         """
@@ -3394,6 +3825,12 @@ class DeltaNeutralStrategy:
 
         if not order_result["filled"]:
             logger.error("Failed to place straddle order - slippage protection triggered")
+
+            # CRITICAL: Check for partial fill and sync with Saxo
+            if order_result.get("partial_fill"):
+                logger.critical("⚠️ PARTIAL FILL on LONG_STRADDLE_ENTRY - syncing with Saxo")
+                self._sync_straddle_after_partial_open()
+
             return False
 
         order_response = {"OrderId": order_result["order_id"]}
@@ -3611,6 +4048,12 @@ class DeltaNeutralStrategy:
 
         if not order_result["filled"]:
             logger.error("CRITICAL: Failed to place recenter straddle - slippage protection triggered")
+
+            # CRITICAL: Check for partial fill and sync with Saxo
+            if order_result.get("partial_fill"):
+                logger.critical("⚠️ PARTIAL FILL on RECENTER_STRADDLE - syncing with Saxo")
+                self._sync_straddle_after_partial_open()
+
             return False
 
         order_response = {"OrderId": order_result["order_id"]}
@@ -3757,6 +4200,12 @@ class DeltaNeutralStrategy:
 
         if not order_result["filled"]:
             logger.error("Failed to close straddle - slippage protection triggered")
+
+            # CRITICAL: Check for partial fill and sync with Saxo
+            if order_result.get("partial_fill"):
+                logger.critical("⚠️ PARTIAL FILL on CLOSE_LONG_STRADDLE - syncing with Saxo")
+                self._sync_straddle_after_partial_close()
+
             return False
 
         # Calculate realized P&L
@@ -4536,6 +4985,12 @@ class DeltaNeutralStrategy:
 
         if not order_result["filled"]:
             logger.error("Failed to place strangle order - slippage protection triggered")
+
+            # CRITICAL: Check for partial fill and sync with Saxo
+            if order_result.get("partial_fill"):
+                logger.critical("⚠️ PARTIAL FILL on SHORT_STRANGLE_ENTRY - syncing with Saxo")
+                self._sync_strangle_after_partial_open()
+
             return False
 
         order_response = {"OrderId": order_result["order_id"]}
@@ -5195,17 +5650,25 @@ class DeltaNeutralStrategy:
         # Calculate limit price (sum of ask prices for buying back)
         total_limit_price = self._calculate_combo_limit_price(legs, "Buy")
 
-        # Place order with slippage protection (emergency mode uses aggressive pricing)
+        # Place order with slippage protection
+        # IMPORTANT: In emergency mode, use MARKET orders for shorts (unlimited risk!)
         order_description = "EMERGENCY_CLOSE_SHORT_STRANGLE" if emergency_mode else "CLOSE_SHORT_STRANGLE"
         order_result = self._place_protected_multi_leg_order(
             legs=legs,
             total_limit_price=total_limit_price,
             order_description=order_description,
-            emergency_mode=emergency_mode
+            emergency_mode=emergency_mode,
+            use_market_orders=emergency_mode  # MARKET orders for emergency closing shorts!
         )
 
         if not order_result["filled"]:
             logger.error("Failed to close strangle - slippage protection triggered")
+
+            # CRITICAL: Check for partial fill and sync with Saxo
+            if order_result.get("partial_fill"):
+                logger.critical("⚠️ PARTIAL FILL on CLOSE_SHORT_STRANGLE - syncing with Saxo")
+                self._sync_strangle_after_partial_close()
+
             return False
 
         # Calculate P&L
