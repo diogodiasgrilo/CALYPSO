@@ -186,13 +186,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     # Start real-time price streaming for underlying and VIX
     subscriptions = []
     underlying_uic = config.get("strategy", {}).get("underlying_uic")
-    vix_uic = config.get("strategy", {}).get("vix_uic", 10606)
+    # Use vix_spot_uic for VIX price monitoring (falls back to vix_uic for backwards compatibility)
+    vix_uic = config.get("strategy", {}).get("vix_spot_uic", config.get("strategy", {}).get("vix_uic", 10606))
 
     if underlying_uic:
         # Determine asset type from symbol:
         # - US500.I is CfdOnIndex (tracks SPX)
         # - SPY is Etf
-        # - SPX would be StockIndex
+        # - SPX:xcbf is StockIndex
         underlying_symbol = config.get("strategy", {}).get("underlying_symbol", "")
         if "US500" in underlying_symbol or underlying_symbol.endswith(".I"):
             underlying_type = "CfdOnIndex"

@@ -546,9 +546,12 @@ class IronFlyStrategy:
 
         # Strategy configuration
         self.strategy_config = config.get("strategy", {})
-        self.underlying_symbol = self.strategy_config.get("underlying_symbol", "SPX")
-        self.underlying_uic = self.strategy_config.get("underlying_uic")
-        self.vix_uic = self.strategy_config.get("vix_uic", 10606)
+        self.underlying_symbol = self.strategy_config.get("underlying_symbol", "SPX:xcbf")
+        self.underlying_uic = self.strategy_config.get("underlying_uic", 120)
+        # VIX spot UIC for price monitoring (StockIndex type)
+        self.vix_uic = self.strategy_config.get("vix_spot_uic", self.strategy_config.get("vix_uic", 10606))
+        # Options UIC for SPXW
+        self.options_uic = self.strategy_config.get("options_uic", 128)
 
         # Entry parameters
         self.entry_time = dt_time(10, 0)  # 10:00 AM EST
@@ -1936,9 +1939,16 @@ class IronFlyStrategy:
         data becomes stale and stop-loss protection may be compromised.
         """
         try:
-            # Get underlying price (US500.I is CfdOnIndex)
+            # Get underlying price (SPX is StockIndex, US500.I is CfdOnIndex)
             if self.underlying_uic:
-                quote = self.client.get_quote(self.underlying_uic, asset_type="CfdOnIndex")
+                # Determine asset type based on symbol
+                if "SPX" in self.underlying_symbol:
+                    asset_type = "StockIndex"
+                elif "US500" in self.underlying_symbol or self.underlying_symbol.endswith(".I"):
+                    asset_type = "CfdOnIndex"
+                else:
+                    asset_type = "Etf"
+                quote = self.client.get_quote(self.underlying_uic, asset_type=asset_type)
                 if quote:
                     new_price = quote.get('Quote', {}).get('Mid')
                     if new_price and new_price > 0:
