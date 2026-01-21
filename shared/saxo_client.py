@@ -2839,6 +2839,8 @@ class SaxoClient:
         
         # 1. Start the WebSocket thread if it's not running
         if not self.ws_connection:
+            # Generate fresh context ID to avoid "Subscription Key already in use" errors on reconnect
+            self.subscription_context_id = f"ctx_{int(time.time())}"
             self._start_websocket()
             # Give the socket a moment to connect
             time.sleep(2)
