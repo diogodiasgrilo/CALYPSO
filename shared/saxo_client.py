@@ -3561,7 +3561,7 @@ class SaxoClient:
                       ]
                   }
         """
-        endpoint = f"/chart/v1/charts"
+        endpoint = f"/chart/v3/charts"
         params = {
             "Uic": uic,
             "AssetType": asset_type,
