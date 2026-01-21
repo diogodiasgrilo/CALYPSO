@@ -879,15 +879,75 @@ class DeltaNeutralStrategy:
             if order_result["filled"]:
                 logger.critical(f"✅ Emergency closed all shorts: {', '.join(leg_descriptions)}")
 
+                # Calculate and log P&L for each closed leg
+                total_pnl = 0.0
+                leg_idx = 0
+
                 if self.trade_logger:
+                    # Log short call closure if it existed
+                    if self.short_strangle.call:
+                        call_entry = self.short_strangle.call.entry_price
+                        call_close = legs[leg_idx]["price"] / 100  # Convert back to per-share
+                        call_pnl = (call_entry - call_close) * self.short_strangle.call.quantity * 100
+                        total_pnl += call_pnl
+
+                        self.trade_logger.log_trade(
+                            action="CLOSE_SHORT_CALL",
+                            strike=self.short_strangle.call.strike,
+                            price=call_close,
+                            delta=self.short_strangle.call.delta,
+                            pnl=call_pnl,
+                            saxo_client=self.client,
+                            underlying_price=self.current_underlying_price,
+                            vix=self.current_vix,
+                            option_type="Short Call",
+                            expiry_date=self.short_strangle.call.expiry,
+                            dte=self._calculate_dte(self.short_strangle.call.expiry),
+                            notes="Emergency Close"
+                        )
+                        self.trade_logger.remove_position("Short Call", self.short_strangle.call.strike)
+                        leg_idx += 1
+
+                    # Log short put closure if it existed
+                    if self.short_strangle.put:
+                        put_entry = self.short_strangle.put.entry_price
+                        put_close = legs[leg_idx]["price"] / 100 if len(legs) > leg_idx else 0
+                        put_pnl = (put_entry - put_close) * self.short_strangle.put.quantity * 100
+                        total_pnl += put_pnl
+
+                        self.trade_logger.log_trade(
+                            action="CLOSE_SHORT_PUT",
+                            strike=self.short_strangle.put.strike,
+                            price=put_close,
+                            delta=self.short_strangle.put.delta,
+                            pnl=put_pnl,
+                            saxo_client=self.client,
+                            underlying_price=self.current_underlying_price,
+                            vix=self.current_vix,
+                            option_type="Short Put",
+                            expiry_date=self.short_strangle.put.expiry,
+                            dte=self._calculate_dte(self.short_strangle.put.expiry),
+                            notes="Emergency Close"
+                        )
+                        self.trade_logger.remove_position("Short Put", self.short_strangle.put.strike)
+
+                    # Also log safety event
                     self.trade_logger.log_safety_event({
                         "event_type": "EMERGENCY_CLOSE_ALL_SHORTS",
                         "spy_price": self.current_underlying_price,
                         "vix": self.current_vix,
                         "description": f"Emergency closed: {', '.join(leg_descriptions)}",
+                        "pnl": total_pnl,
                         "result": "SUCCESS"
                     })
 
+                # Update metrics with realized P&L
+                self.metrics.realized_pnl += total_pnl
+                self.metrics.record_trade(total_pnl)
+                if not self.dry_run:
+                    self.metrics.save_to_file()
+
+                logger.critical(f"Emergency close P&L: ${total_pnl:.2f}")
                 self.short_strangle = None
                 return True
             else:
@@ -3384,24 +3444,41 @@ class DeltaNeutralStrategy:
             f"Expiry {call_option['expiry']}, Cost ${straddle_cost:.2f}"
         )
 
-        # Log trade
+        # Log individual leg trades
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
             dte = self._calculate_dte(call_option["expiry"])
+
+            # Log long call open
             self.trade_logger.log_trade(
-                action=f"{action_prefix}OPEN_LONG_STRADDLE",
+                action=f"{action_prefix}OPEN_LONG_CALL",
                 strike=call_option["strike"],
-                price=call_price + put_price,
-                delta=0.0,  # ATM straddle is approximately delta neutral
+                price=call_price,
+                delta=0.5,  # ATM call delta ~0.5
                 pnl=0.0,
                 saxo_client=self.client,
                 underlying_price=self.current_underlying_price,
                 vix=self.current_vix,
-                option_type="Long Straddle",
+                option_type="Long Call",
                 expiry_date=call_option["expiry"],
                 dte=dte,
-                premium_received=None,  # Buying, not receiving premium
-                trade_reason="Initial Entry"
+                notes="Initial Entry"
+            )
+
+            # Log long put open
+            self.trade_logger.log_trade(
+                action=f"{action_prefix}OPEN_LONG_PUT",
+                strike=put_option["strike"],
+                price=put_price,
+                delta=-0.5,  # ATM put delta ~-0.5
+                pnl=0.0,
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Long Put",
+                expiry_date=put_option["expiry"],
+                dte=dte,
+                notes="Initial Entry"
             )
 
             # Add positions to Positions sheet
@@ -3582,24 +3659,41 @@ class DeltaNeutralStrategy:
             f"Expiry {call_option['expiry']}, Cost ${straddle_cost:.2f}"
         )
 
-        # Log trade
+        # Log individual leg trades
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
             dte = self._calculate_dte(call_option["expiry"])
+
+            # Log long call open
             self.trade_logger.log_trade(
-                action=f"{action_prefix}OPEN_LONG_STRADDLE",
+                action=f"{action_prefix}OPEN_LONG_CALL",
                 strike=call_option["strike"],
-                price=call_price + put_price,
-                delta=0.0,
+                price=call_price,
+                delta=0.5,  # ATM call delta ~0.5
                 pnl=0.0,
                 saxo_client=self.client,
                 underlying_price=self.current_underlying_price,
                 vix=self.current_vix,
-                option_type="Long Straddle (Recenter)",
+                option_type="Long Call",
                 expiry_date=call_option["expiry"],
                 dte=dte,
-                premium_received=None,
-                trade_reason="5-Point Recenter"
+                notes="5-Point Recenter"
+            )
+
+            # Log long put open
+            self.trade_logger.log_trade(
+                action=f"{action_prefix}OPEN_LONG_PUT",
+                strike=put_option["strike"],
+                price=put_price,
+                delta=-0.5,  # ATM put delta ~-0.5
+                pnl=0.0,
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Long Put",
+                expiry_date=put_option["expiry"],
+                dte=dte,
+                notes="5-Point Recenter"
             )
 
         return True
@@ -3683,35 +3777,67 @@ class DeltaNeutralStrategy:
             f"Exit value: ${exit_value:.2f}, P&L: ${realized_pnl:.2f}"
         )
 
-        # Log trade (capture expiry before we clear the position)
-        straddle_expiry = self.long_straddle.call.expiry if self.long_straddle.call else None
+        # Log individual leg closures with P&L (capture before clearing position)
+        call_expiry = self.long_straddle.call.expiry if self.long_straddle.call else None
+        put_expiry = self.long_straddle.put.expiry if self.long_straddle.put else None
+        call_strike = self.long_straddle.call.strike if self.long_straddle.call else self.long_straddle.initial_strike
+        put_strike = self.long_straddle.put.strike if self.long_straddle.put else self.long_straddle.initial_strike
+
+        # Calculate individual leg P&L
+        call_entry = self.long_straddle.call.entry_price if self.long_straddle.call else 0
+        put_entry = self.long_straddle.put.entry_price if self.long_straddle.put else 0
+        call_exit = call_bid  # Current bid price for selling
+        put_exit = put_bid
+
+        # P&L for longs: (exit - entry) * quantity * 100
+        call_pnl = (call_exit - call_entry) * self.position_size * 100
+        put_pnl = (put_exit - put_entry) * self.position_size * 100
+
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
             # Determine trade reason based on current state
             if self.state == StrategyState.RECENTERING:
                 reason = "5-Point Recenter"
+            elif emergency_mode:
+                reason = "Emergency Close"
             else:
-                reason = "Exit"
+                reason = ""
+
+            # Log long call closure
             self.trade_logger.log_trade(
-                action=f"{action_prefix}CLOSE_LONG_STRADDLE",
-                strike=self.long_straddle.initial_strike,
-                price=(self.long_straddle.call.current_price +
-                       self.long_straddle.put.current_price),
-                delta=self.long_straddle.total_delta,
-                pnl=realized_pnl,
+                action=f"{action_prefix}CLOSE_LONG_CALL",
+                strike=call_strike,
+                price=call_exit,
+                delta=self.long_straddle.call.delta if self.long_straddle.call else 0,
+                pnl=call_pnl,
                 saxo_client=self.client,
                 underlying_price=self.current_underlying_price,
                 vix=self.current_vix,
-                option_type="Long Straddle",
-                expiry_date=straddle_expiry,
-                dte=self._calculate_dte(straddle_expiry) if straddle_expiry else None,
-                premium_received=None,
-                trade_reason=reason
+                option_type="Long Call",
+                expiry_date=call_expiry,
+                dte=self._calculate_dte(call_expiry) if call_expiry else None,
+                notes=reason
+            )
+
+            # Log long put closure
+            self.trade_logger.log_trade(
+                action=f"{action_prefix}CLOSE_LONG_PUT",
+                strike=put_strike,
+                price=put_exit,
+                delta=self.long_straddle.put.delta if self.long_straddle.put else 0,
+                pnl=put_pnl,
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Long Put",
+                expiry_date=put_expiry,
+                dte=self._calculate_dte(put_expiry) if put_expiry else None,
+                notes=reason
             )
 
             # Remove positions from Positions sheet
-            self.trade_logger.remove_position("Long Call", self.long_straddle.initial_strike)
-            self.trade_logger.remove_position("Long Put", self.long_straddle.initial_strike)
+            self.trade_logger.remove_position("Long Call", call_strike)
+            self.trade_logger.remove_position("Long Put", put_strike)
 
         self.long_straddle = None
         return True
@@ -5107,25 +5233,56 @@ class DeltaNeutralStrategy:
             f"Close cost: ${close_cost:.2f}, P&L: ${realized_pnl:.2f}"
         )
 
-        # Log trade (capture strikes/expiry before we clear the position)
-        strangle_expiry = self.short_strangle.call.expiry if self.short_strangle.call else None
+        # Log individual leg closures with P&L (capture before clearing position)
         call_strike = self.short_strangle.call_strike
         put_strike = self.short_strangle.put_strike
+        call_expiry = self.short_strangle.call.expiry if self.short_strangle.call else None
+        put_expiry = self.short_strangle.put.expiry if self.short_strangle.put else None
+
+        # Calculate individual leg P&L
+        call_entry = self.short_strangle.call.entry_price if self.short_strangle.call else 0
+        put_entry = self.short_strangle.put.entry_price if self.short_strangle.put else 0
+        call_close = call_quote["Quote"].get("Ask", 0) if call_quote else 0
+        put_close = put_quote["Quote"].get("Ask", 0) if put_quote else 0
+
+        # P&L for shorts: (entry - close) * quantity * 100
+        call_pnl = (call_entry - call_close) * self.position_size * 100
+        put_pnl = (put_entry - put_close) * self.position_size * 100
+
         if self.trade_logger:
             action_prefix = "[SIMULATED] " if self.dry_run else ""
+            close_reason = "Emergency Close" if emergency_mode else ""
+
+            # Log short call closure
             self.trade_logger.log_trade(
-                action=f"{action_prefix}CLOSE_SHORT_STRANGLE",
-                strike=f"{put_strike}/{call_strike}",
-                price=close_cost / (self.position_size * 100),
-                delta=self.short_strangle.total_delta,
-                pnl=realized_pnl,
+                action=f"{action_prefix}CLOSE_SHORT_CALL",
+                strike=call_strike,
+                price=call_close,
+                delta=self.short_strangle.call.delta if self.short_strangle.call else 0,
+                pnl=call_pnl,
                 saxo_client=self.client,
                 underlying_price=self.current_underlying_price,
                 vix=self.current_vix,
-                option_type="Short Strangle",
-                expiry_date=strangle_expiry,
-                dte=self._calculate_dte(strangle_expiry) if strangle_expiry else None,
-                premium_received=premium_received
+                option_type="Short Call",
+                expiry_date=call_expiry,
+                dte=self._calculate_dte(call_expiry) if call_expiry else None,
+                notes=close_reason
+            )
+
+            # Log short put closure
+            self.trade_logger.log_trade(
+                action=f"{action_prefix}CLOSE_SHORT_PUT",
+                strike=put_strike,
+                price=put_close,
+                delta=self.short_strangle.put.delta if self.short_strangle.put else 0,
+                pnl=put_pnl,
+                saxo_client=self.client,
+                underlying_price=self.current_underlying_price,
+                vix=self.current_vix,
+                option_type="Short Put",
+                expiry_date=put_expiry,
+                dte=self._calculate_dte(put_expiry) if put_expiry else None,
+                notes=close_reason
             )
 
             # Remove positions from Positions sheet
