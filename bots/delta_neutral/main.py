@@ -437,6 +437,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     dashboard_log_interval = 900  # Log dashboard metrics every 15 minutes
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour (3600 seconds)
+    last_position_sync_time = datetime.now()
+    position_sync_interval = 600  # Sync positions with Saxo every 10 minutes
 
     try:
         while not shutdown_requested:
@@ -614,6 +616,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         last_dashboard_log_time = now
                     except Exception as e:
                         trade_logger.log_error(f"Dashboard logging error: {e}")
+
+                # Periodic position sync with Saxo (every 10 minutes)
+                # This ensures local state stays in sync with actual Saxo positions
+                # Catches any discrepancies from partial fills, manual trades, etc.
+                if (now - last_position_sync_time).total_seconds() >= position_sync_interval:
+                    try:
+                        trade_logger.log_event("Periodic position sync with Saxo...")
+                        strategy.recover_positions()
+                        last_position_sync_time = now
+                    except Exception as e:
+                        trade_logger.log_error(f"Position sync error: {e}")
 
                 # Hourly Bot Logs to Google Sheets (avoid flooding with hundreds of rows)
                 if (now - last_bot_log_time).total_seconds() >= bot_log_interval:

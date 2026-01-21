@@ -48,7 +48,11 @@
         "_roll_note": "Day to roll weekly shorts (open new, close expiring)",
         "max_bid_ask_spread_percent": 0.5,
         "_spread_note": "Maximum acceptable bid-ask spread for slippage protection",
-        "position_size": 1
+        "position_size": 1,
+        "recenter_cutoff_minutes_before_close": 15,
+        "_recenter_cutoff_note": "No recenters after 3:45 PM EST (15 min before close) - risk of incomplete multi-leg operation",
+        "shorts_cutoff_minutes_before_close": 10,
+        "_shorts_cutoff_note": "No new short entries or rolls after 3:50 PM EST (10 min before close)"
     },
 
     "circuit_breaker": {

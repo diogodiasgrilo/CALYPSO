@@ -482,6 +482,7 @@ class DeltaNeutralStrategy:
         self._max_consecutive_failures: int = circuit_breaker_config.get("max_consecutive_errors", 5)
         self._circuit_breaker_open: bool = False
         self._circuit_breaker_reason: str = ""
+        self._circuit_breaker_opened_at: Optional[datetime] = None  # When circuit breaker was triggered
         self._last_failure_time: Optional[datetime] = None
 
         # Track orphaned orders that couldn't be cancelled
@@ -509,6 +510,10 @@ class DeltaNeutralStrategy:
         self.max_spread_percent = self.strategy_config["max_bid_ask_spread_percent"]
         self.roll_days = self.strategy_config["roll_days"]
         self.order_timeout_seconds = self.strategy_config.get("order_timeout_seconds", 60)
+
+        # Trading cutoff times (minutes before market close)
+        self.recenter_cutoff_minutes = self.strategy_config.get("recenter_cutoff_minutes_before_close", 15)
+        self.shorts_cutoff_minutes = self.strategy_config.get("shorts_cutoff_minutes_before_close", 10)
 
         logger.info(f"DeltaNeutralStrategy initialized for {self.underlying_symbol}")
         logger.info(f"Recenter threshold: {self.recenter_threshold} points")
@@ -576,6 +581,7 @@ class DeltaNeutralStrategy:
 
         self._circuit_breaker_open = True
         self._circuit_breaker_reason = reason
+        self._circuit_breaker_opened_at = datetime.now()
 
         logger.critical("=" * 70)
         logger.critical("🚨 CIRCUIT BREAKER OPEN - ALL TRADING HALTED 🚨")
@@ -627,6 +633,15 @@ class DeltaNeutralStrategy:
         actions = []
 
         logger.critical("🔍 EMERGENCY POSITION CHECK - Analyzing risk exposure...")
+
+        # CRITICAL: Sync with Saxo FIRST to get accurate position state
+        # Local state may be stale due to partial fills or failed operations
+        logger.critical("   Syncing with Saxo to get accurate position state...")
+        try:
+            self.recover_positions()
+        except Exception as e:
+            logger.critical(f"   ⚠️ Failed to sync with Saxo: {e}")
+            actions.append(f"WARNING: Could not sync with Saxo - {e}")
 
         straddle_complete = self.long_straddle and self.long_straddle.is_complete
         strangle_complete = self.short_strangle and self.short_strangle.is_complete
@@ -977,13 +992,75 @@ class DeltaNeutralStrategy:
         """
         Check if the circuit breaker is open.
 
+        If the circuit breaker has been open for longer than the cooldown period
+        AND positions are safe (complete straddle or flat), auto-reset.
+
         Returns:
             bool: True if circuit breaker is open (trading should stop), False otherwise
         """
-        if self._circuit_breaker_open:
-            logger.warning(f"🚨 Circuit breaker is OPEN - trading halted. Reason: {self._circuit_breaker_reason}")
-            return True
-        return False
+        if not self._circuit_breaker_open:
+            return False
+
+        # Check if cooldown has elapsed
+        if self._circuit_breaker_opened_at:
+            elapsed_minutes = (datetime.now() - self._circuit_breaker_opened_at).total_seconds() / 60
+
+            if elapsed_minutes >= self._cooldown_seconds / 60:  # _cooldown_seconds is actually in seconds
+                # Cooldown elapsed - check if positions are safe for auto-reset
+                logger.info(f"Circuit breaker cooldown ({self._cooldown_seconds / 60:.0f} min) elapsed. Checking if safe to auto-reset...")
+
+                # Sync with Saxo to get accurate state
+                try:
+                    self.recover_positions()
+                except Exception as e:
+                    logger.error(f"Failed to sync positions for auto-reset check: {e}")
+                    logger.warning(f"🚨 Circuit breaker remains OPEN - could not verify positions")
+                    return True
+
+                # Check if positions are safe
+                straddle_complete = self.long_straddle and self.long_straddle.is_complete
+                has_shorts = self.short_strangle is not None
+                has_partial_strangle = self.short_strangle and not self.short_strangle.is_complete
+                has_orphaned_orders = len(self._orphaned_orders) > 0
+                is_flat = not self.long_straddle and not self.short_strangle
+
+                # Safe states:
+                # 1. Flat (no positions)
+                # 2. Complete straddle only (no shorts or complete strangle)
+                # 3. Complete straddle + complete strangle (full position)
+                positions_safe = (
+                    is_flat or
+                    (straddle_complete and not has_partial_strangle)
+                )
+
+                if positions_safe and not has_orphaned_orders:
+                    logger.info("=" * 60)
+                    logger.info("✅ AUTO-RESET: Positions are safe, resetting circuit breaker")
+                    logger.info(f"   Previous reason: {self._circuit_breaker_reason}")
+                    logger.info(f"   Time elapsed: {elapsed_minutes:.1f} minutes")
+                    logger.info(f"   State: {'FLAT' if is_flat else 'COMPLETE STRADDLE' if straddle_complete else 'UNKNOWN'}")
+                    logger.info("=" * 60)
+
+                    self._circuit_breaker_open = False
+                    self._circuit_breaker_reason = ""
+                    self._circuit_breaker_opened_at = None
+                    self._consecutive_failures = 0
+                    return False
+                else:
+                    # Log why we can't auto-reset
+                    reasons = []
+                    if has_partial_strangle:
+                        reasons.append("partial strangle (naked short)")
+                    if has_orphaned_orders:
+                        reasons.append(f"{len(self._orphaned_orders)} orphaned orders")
+                    if not straddle_complete and has_shorts:
+                        reasons.append("shorts without complete straddle protection")
+
+                    logger.warning(f"🚨 Circuit breaker remains OPEN - unsafe state: {', '.join(reasons)}")
+                    logger.warning("   Manual intervention required")
+
+        logger.warning(f"🚨 Circuit breaker is OPEN - trading halted. Reason: {self._circuit_breaker_reason}")
+        return True
 
     def reset_circuit_breaker(self) -> None:
         """
@@ -1002,6 +1079,7 @@ class DeltaNeutralStrategy:
 
         self._circuit_breaker_open = False
         self._circuit_breaker_reason = ""
+        self._circuit_breaker_opened_at = None
         self._consecutive_failures = 0
         self._orphaned_orders = []
 
@@ -1096,6 +1174,49 @@ class DeltaNeutralStrategy:
         if action_type in self._action_cooldowns:
             del self._action_cooldowns[action_type]
             logger.info(f"✓ Cooldown cleared for '{action_type}' after success")
+
+    def _minutes_until_market_close(self) -> int:
+        """
+        Calculate minutes remaining until market close (4:00 PM EST).
+
+        Returns:
+            int: Minutes until close. Negative if market is already closed.
+        """
+        now = get_us_market_time()
+        market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        delta = market_close - now
+        return int(delta.total_seconds() / 60)
+
+    def _is_past_recenter_cutoff(self) -> bool:
+        """
+        Check if we're past the cutoff time for recenters.
+
+        Recenters involve closing the long straddle then opening a new one.
+        If this fails mid-operation near market close, we could be left with
+        naked shorts overnight - unacceptable risk.
+
+        Returns:
+            bool: True if past cutoff (no recenters allowed), False if OK to recenter
+        """
+        minutes_remaining = self._minutes_until_market_close()
+        if minutes_remaining <= self.recenter_cutoff_minutes:
+            return True
+        return False
+
+    def _is_past_shorts_cutoff(self) -> bool:
+        """
+        Check if we're past the cutoff time for short operations.
+
+        Short entries and rolls are less risky than recenters (if they fail,
+        we're just flat on shorts, not naked), but still best avoided near close.
+
+        Returns:
+            bool: True if past cutoff (no short operations allowed), False if OK
+        """
+        minutes_remaining = self._minutes_until_market_close()
+        if minutes_remaining <= self.shorts_cutoff_minutes:
+            return True
+        return False
 
     # =========================================================================
     # SLIPPAGE PROTECTION - ORDER PLACEMENT WITH TIMEOUT
@@ -1257,8 +1378,9 @@ class DeltaNeutralStrategy:
                     "result": "PARTIAL_FILL" if filled_orders else "FAILED"
                 })
 
-            # Increment failure count for any order failure
-            self._increment_failure_count(f"{order_description}_order_failed")
+            # NOTE: We do NOT increment failure count here - let the calling operation
+            # (recenter, roll, etc.) handle failure counting at a higher level.
+            # This prevents double-counting (one failed recenter was counting as 2-3 failures).
 
             return {
                 "success": False,
@@ -3281,7 +3403,7 @@ class DeltaNeutralStrategy:
 
         return True
 
-    def _enter_straddle_with_options(self, atm_options: dict) -> bool:
+    def _enter_straddle_with_options(self, atm_options: dict, emergency_mode: bool = False) -> bool:
         """
         Enter a long straddle using pre-found ATM options.
 
@@ -3290,32 +3412,52 @@ class DeltaNeutralStrategy:
 
         Args:
             atm_options: Dict with 'call' and 'put' option data from find_atm_options
+            emergency_mode: If True, use aggressive pricing and shorter timeout
 
         Returns:
             bool: True if straddle entered successfully, False otherwise.
         """
+        # =====================================================================
+        # LEG-BY-LEG CHECK: If we already have a partial straddle, add missing leg
+        # This handles recovery from partial fills during recenter
+        # =====================================================================
+        if self.long_straddle and not self.long_straddle.is_complete:
+            missing_leg = "call" if self.needs_straddle_call() else "put"
+            existing_leg = "put" if self.needs_straddle_call() else "call"
+            existing_strike = self.long_straddle.put.strike if existing_leg == "put" else self.long_straddle.call.strike
+
+            logger.info("=" * 70)
+            logger.info(f"⚡ LEG-BY-LEG MODE (RECENTER): Adding missing {missing_leg.upper()} leg")
+            logger.info(f"   Existing {existing_leg}: ${existing_strike:.0f}")
+            logger.info("=" * 70)
+
+            return self._add_missing_straddle_leg()
+
         call_option = atm_options["call"]
         put_option = atm_options["put"]
 
+        if emergency_mode:
+            logger.warning("🚨 EMERGENCY MODE: Entering straddle with aggressive pricing")
         logger.info(f"Entering straddle with pre-found options: Call {call_option['strike']}, Put {put_option['strike']}")
 
-        # Check bid-ask spreads
-        call_spread_ok, call_spread = self.client.check_bid_ask_spread(
-            call_option["uic"],
-            "StockOption",
-            self.max_spread_percent
-        )
-        put_spread_ok, put_spread = self.client.check_bid_ask_spread(
-            put_option["uic"],
-            "StockOption",
-            self.max_spread_percent
-        )
-
-        if not call_spread_ok or not put_spread_ok:
-            logger.warning(
-                f"Bid-ask spread too wide. Call: {call_spread:.2f}%, Put: {put_spread:.2f}%"
+        # Check bid-ask spreads (skip in emergency mode - we need to get filled regardless)
+        if not emergency_mode:
+            call_spread_ok, call_spread = self.client.check_bid_ask_spread(
+                call_option["uic"],
+                "StockOption",
+                self.max_spread_percent
             )
-            return False
+            put_spread_ok, put_spread = self.client.check_bid_ask_spread(
+                put_option["uic"],
+                "StockOption",
+                self.max_spread_percent
+            )
+
+            if not call_spread_ok or not put_spread_ok:
+                logger.warning(
+                    f"Bid-ask spread too wide. Call: {call_spread:.2f}%, Put: {put_spread:.2f}%"
+                )
+                return False
 
         # Get current prices for the options
         call_quote = self.client.get_quote(call_option["uic"], "StockOption")
@@ -3353,10 +3495,12 @@ class DeltaNeutralStrategy:
         total_limit_price = (call_price + put_price) * 100 * self.position_size
 
         # Place order with slippage protection
+        order_description = "EMERGENCY_RECENTER_STRADDLE" if emergency_mode else "RECENTER_STRADDLE"
         order_result = self._place_protected_multi_leg_order(
             legs=legs,
             total_limit_price=total_limit_price,
-            order_description="RECENTER_STRADDLE"
+            order_description=order_description,
+            emergency_mode=emergency_mode
         )
 
         if not order_result["filled"]:
@@ -5120,6 +5264,102 @@ class DeltaNeutralStrategy:
 
         return False
 
+    def _handle_incomplete_recenter(self, reason: str) -> bool:
+        """
+        Handle the dangerous situation where we've closed the long straddle
+        but failed to open a new one during recenter.
+
+        OPTION C FALLBACK: If we have naked shorts, we MUST close them.
+        Being flat is always acceptable; being naked short is never acceptable.
+
+        Args:
+            reason: Why the recenter failed (for logging)
+
+        Returns:
+            bool: True if we successfully got to a safe state, False if still exposed
+        """
+        logger.critical("=" * 60)
+        logger.critical("🚨 INCOMPLETE RECENTER - OPTION C FALLBACK TRIGGERED 🚨")
+        logger.critical("=" * 60)
+        logger.critical(f"Reason: {reason}")
+        logger.critical("Long straddle closed but new one not opened - SHORTS ARE NAKED")
+
+        # Check if we have shorts to close
+        if not self.short_strangle:
+            logger.info("No short strangle position - already safe")
+            self.state = StrategyState.IDLE
+            self._increment_failure_count(f"recenter_{reason}")
+            return True
+
+        # Check time remaining
+        minutes_remaining = self._minutes_until_market_close()
+        logger.critical(f"Minutes until market close: {minutes_remaining}")
+
+        # Attempt 1: If we have >10 minutes, try to open new straddle with emergency mode
+        if minutes_remaining > 10:
+            logger.critical("Attempting emergency retry to open new straddle...")
+            # Try with emergency mode (aggressive pricing)
+            atm_options = self.client.find_atm_options(
+                self.underlying_uic,
+                self.current_underlying_price,
+                1,  # Minimum DTE
+                130  # Maximum DTE - cast wide net
+            )
+            if atm_options and self._enter_straddle_with_options(atm_options, emergency_mode=True):
+                logger.critical("✅ Emergency straddle entry SUCCEEDED - shorts are now covered")
+                self.state = StrategyState.FULL_POSITION if self.short_strangle else StrategyState.LONG_STRADDLE_ACTIVE
+                return True
+            logger.critical("Emergency straddle entry failed - proceeding to close shorts")
+
+        # Attempt 2: Close shorts to eliminate naked exposure
+        logger.critical("🚨 CLOSING SHORT STRANGLE FOR SAFETY 🚨")
+        logger.critical("This will make us FLAT but eliminate unlimited risk")
+
+        if self.close_short_strangle(emergency_mode=True):
+            logger.critical("✅ Short strangle closed - we are now FLAT (no positions)")
+            self.state = StrategyState.IDLE
+            self.short_strangle = None
+
+            # Log safety event
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "OPTION_C_EMERGENCY_CLOSE_SHORTS",
+                    "severity": "CRITICAL",
+                    "reason": reason,
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "minutes_to_close": minutes_remaining,
+                    "action_taken": "Closed shorts after incomplete recenter - now flat",
+                    "details": "Long straddle closed but new one couldn't be opened; closed shorts for safety"
+                })
+
+            self._increment_failure_count(f"recenter_{reason}")
+            return True
+
+        # Attempt 3: If even emergency close failed, we're in trouble
+        logger.critical("=" * 60)
+        logger.critical("🚨🚨🚨 CRITICAL: FAILED TO CLOSE SHORTS 🚨🚨🚨")
+        logger.critical("NAKED SHORT EXPOSURE REMAINS - MANUAL INTERVENTION REQUIRED")
+        logger.critical("=" * 60)
+
+        # Log safety event
+        if self.trade_logger:
+            self.trade_logger.log_safety_event({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_type": "OPTION_C_FAILED_NAKED_SHORTS",
+                "severity": "EMERGENCY",
+                "reason": reason,
+                "spy_price": self.current_underlying_price,
+                "vix": self.current_vix,
+                "minutes_to_close": minutes_remaining,
+                "action_taken": "FAILED - naked shorts remain, manual intervention required",
+                "details": "Could not close shorts after incomplete recenter - DANGEROUS STATE"
+            })
+
+        self._increment_failure_count(f"recenter_{reason}_shorts_close_failed")
+        return False
+
     def execute_recenter(self) -> bool:
         """
         Execute the 5-point recentering procedure.
@@ -5179,16 +5419,50 @@ class DeltaNeutralStrategy:
                 # Enter new straddle using the found options (not enter_long_straddle which uses config DTE)
                 if not self._enter_straddle_with_options(atm_options):
                     logger.error("Failed to enter new long straddle during recenter")
-                    # CRITICAL FIX: Restore state - we closed old straddle but couldn't open new one
-                    # This is serious - we have no long protection! Set to IDLE so bot re-enters
-                    self.state = StrategyState.IDLE
-                    self._increment_failure_count("recenter_enter_failed")
+
+                    # Check if we're near market close - if so, trigger Option C fallback
+                    # During normal hours, let the main loop retry naturally via IDLE state
+                    if self._minutes_until_market_close() <= self.recenter_cutoff_minutes:
+                        # OPTION C FALLBACK: Near close, we must act now
+                        logger.critical("Near market close - triggering Option C fallback")
+                        if not self._handle_incomplete_recenter("enter_straddle_failed"):
+                            return False
+                    else:
+                        # Normal hours: sync with Saxo to detect partial fills, then retry
+                        logger.warning("Syncing with Saxo to detect any partial fills...")
+                        self.recover_positions()
+                        # Set state based on what we found
+                        if self.long_straddle and self.long_straddle.is_complete:
+                            logger.info("Straddle is complete after sync - recenter succeeded")
+                            self.state = StrategyState.FULL_POSITION if self.short_strangle else StrategyState.LONG_STRADDLE_ACTIVE
+                            return True
+                        else:
+                            logger.warning("Setting state to IDLE - main loop will retry straddle entry")
+                            self.state = StrategyState.IDLE
+                            self._increment_failure_count("recenter_enter_failed")
                     return False
             else:
                 logger.error("Failed to find ATM options for recentered straddle")
-                # CRITICAL FIX: Same as above
-                self.state = StrategyState.IDLE
-                self._increment_failure_count("recenter_find_options_failed")
+
+                # Check if we're near market close - if so, trigger Option C fallback
+                if self._minutes_until_market_close() <= self.recenter_cutoff_minutes:
+                    # OPTION C FALLBACK: Near close, we must act now
+                    logger.critical("Near market close - triggering Option C fallback")
+                    if not self._handle_incomplete_recenter("find_options_failed"):
+                        return False
+                else:
+                    # Normal hours: sync with Saxo to detect any partial fills, then retry
+                    logger.warning("Syncing with Saxo to detect any partial fills...")
+                    self.recover_positions()
+                    # Set state based on what we found
+                    if self.long_straddle and self.long_straddle.is_complete:
+                        logger.info("Straddle is complete after sync - recenter succeeded")
+                        self.state = StrategyState.FULL_POSITION if self.short_strangle else StrategyState.LONG_STRADDLE_ACTIVE
+                        return True
+                    else:
+                        logger.warning("Setting state to IDLE - main loop will retry straddle entry")
+                        self.state = StrategyState.IDLE
+                        self._increment_failure_count("recenter_find_options_failed")
                 return False
 
         # Step 3: Keep existing short strangle (DO NOT CLOSE)
@@ -5838,8 +6112,16 @@ class DeltaNeutralStrategy:
             # CRITICAL: Check recenter FIRST before adding shorts
             # Per strategy spec: "recenter_longs function always executes before checking for new short entry"
             if self._check_recenter_condition():
+                # Check cutoff time FIRST - no recenters near market close
+                if self._is_past_recenter_cutoff():
+                    minutes_left = self._minutes_until_market_close()
+                    logger.warning(
+                        f"⏰ RECENTER BLOCKED: Only {minutes_left} minutes until market close. "
+                        f"Cutoff is {self.recenter_cutoff_minutes} minutes. Will reassess tomorrow."
+                    )
+                    action_taken = f"Recenter condition met but past {self.recenter_cutoff_minutes}-min cutoff - will reassess at market open"
                 # Check cooldown before attempting recenter
-                if self._is_action_on_cooldown("recenter"):
+                elif self._is_action_on_cooldown("recenter"):
                     action_taken = "Recenter on cooldown after recent failure"
                 elif self.execute_recenter():
                     self._clear_action_cooldown("recenter")
@@ -5883,24 +6165,42 @@ class DeltaNeutralStrategy:
                         action_taken = "Waiting for Friday 10AM or Monday to enter new shorts"
 
                     if can_try_new_shorts:
-                        # Clear the flag and try to enter new shorts
-                        logger.info("Attempting to enter fresh short strangle (new weekly cycle)")
-                        self._shorts_closed_date = None
-                        if self.enter_short_strangle(for_roll=False):
-                            action_taken = "Added short strangle (new weekly cycle)"
+                        # Check cutoff time FIRST - no short entries near market close
+                        if self._is_past_shorts_cutoff():
+                            minutes_left = self._minutes_until_market_close()
+                            logger.warning(
+                                f"⏰ SHORT ENTRY BLOCKED: Only {minutes_left} minutes until market close. "
+                                f"Cutoff is {self.shorts_cutoff_minutes} minutes. Will enter tomorrow."
+                            )
+                            action_taken = f"Short entry blocked - past {self.shorts_cutoff_minutes}-min cutoff"
                         else:
-                            # Still can't get credit - set flag again and wait
-                            logger.warning("Still cannot enter for credit - will try Monday")
-                            self._shorts_closed_date = today
-                            action_taken = "New shorts still not viable - waiting for Monday"
+                            # Clear the flag and try to enter new shorts
+                            logger.info("Attempting to enter fresh short strangle (new weekly cycle)")
+                            self._shorts_closed_date = None
+                            if self.enter_short_strangle(for_roll=False):
+                                action_taken = "Added short strangle (new weekly cycle)"
+                            else:
+                                # Still can't get credit - set flag again and wait
+                                logger.warning("Still cannot enter for credit - will try Monday")
+                                self._shorts_closed_date = today
+                                action_taken = "New shorts still not viable - waiting for Monday"
                 else:
                     # Normal operation - add short strangle
-                    # CRITICAL: If roll time, enter with next week's expiry directly
-                    should_roll, _ = self.should_roll_shorts()
-                    if should_roll:
-                        logger.info("Roll time detected during entry - entering shorts with NEXT WEEK expiry")
-                    if self.enter_short_strangle(for_roll=should_roll):
-                        action_taken = "Added short strangle"
+                    # Check cutoff time FIRST - no short entries near market close
+                    if self._is_past_shorts_cutoff():
+                        minutes_left = self._minutes_until_market_close()
+                        logger.warning(
+                            f"⏰ SHORT ENTRY BLOCKED: Only {minutes_left} minutes until market close. "
+                            f"Cutoff is {self.shorts_cutoff_minutes} minutes. Will enter tomorrow."
+                        )
+                        action_taken = f"Short entry blocked - past {self.shorts_cutoff_minutes}-min cutoff"
+                    else:
+                        # CRITICAL: If roll time, enter with next week's expiry directly
+                        should_roll, _ = self.should_roll_shorts()
+                        if should_roll:
+                            logger.info("Roll time detected during entry - entering shorts with NEXT WEEK expiry")
+                        if self.enter_short_strangle(for_roll=should_roll):
+                            action_taken = "Added short strangle"
 
         elif self.state == StrategyState.FULL_POSITION:
             # Check exit condition first
@@ -5913,8 +6213,16 @@ class DeltaNeutralStrategy:
 
             # Check recenter condition
             elif self._check_recenter_condition():
+                # Check cutoff time FIRST - no recenters near market close
+                if self._is_past_recenter_cutoff():
+                    minutes_left = self._minutes_until_market_close()
+                    logger.warning(
+                        f"⏰ RECENTER BLOCKED: Only {minutes_left} minutes until market close. "
+                        f"Cutoff is {self.recenter_cutoff_minutes} minutes. Will reassess tomorrow."
+                    )
+                    action_taken = f"Recenter condition met but past {self.recenter_cutoff_minutes}-min cutoff - will reassess at market open"
                 # Check cooldown before attempting recenter
-                if self._is_action_on_cooldown("recenter"):
+                elif self._is_action_on_cooldown("recenter"):
                     action_taken = "Recenter on cooldown after recent failure"
                 elif self.execute_recenter():
                     self._clear_action_cooldown("recenter")
@@ -5927,8 +6235,16 @@ class DeltaNeutralStrategy:
             else:
                 should_roll, challenged_side = self.should_roll_shorts()
                 if should_roll:
+                    # Check cutoff time FIRST - no rolling near market close
+                    if self._is_past_shorts_cutoff():
+                        minutes_left = self._minutes_until_market_close()
+                        logger.warning(
+                            f"⏰ ROLL BLOCKED: Only {minutes_left} minutes until market close. "
+                            f"Cutoff is {self.shorts_cutoff_minutes} minutes. Will roll tomorrow."
+                        )
+                        action_taken = f"Roll condition met but past {self.shorts_cutoff_minutes}-min cutoff - will roll at market open"
                     # Check cooldown before attempting roll
-                    if self._is_action_on_cooldown("roll_shorts"):
+                    elif self._is_action_on_cooldown("roll_shorts"):
                         action_taken = "Roll shorts on cooldown after recent failure"
                     elif self.roll_weekly_shorts(challenged_side=challenged_side):
                         self._clear_action_cooldown("roll_shorts")
@@ -6584,12 +6900,36 @@ class DeltaNeutralStrategy:
         Initialize tracking for a new trading day.
 
         Call this at market open or first check of the day.
+        Resets daily metrics and clears any stale failure counters from previous day.
         """
         self.metrics.reset_daily_tracking(
             current_pnl=self.metrics.total_pnl,
             spy_price=self.current_underlying_price or 0,
             vix=self.current_vix or 0
         )
+
+        # Reset failure counter at start of new trading day
+        # Failures from previous day shouldn't carry over - each day starts fresh
+        if self._consecutive_failures > 0:
+            logger.info(
+                f"Resetting consecutive failure counter from {self._consecutive_failures} to 0 (new trading day)"
+            )
+            self._consecutive_failures = 0
+
+        # Clear action cooldowns from previous day
+        if self._action_cooldowns:
+            logger.info(f"Clearing {len(self._action_cooldowns)} action cooldowns from previous day")
+            self._action_cooldowns = {}
+
+        # Reset circuit breaker if it was open (allow fresh start)
+        if self._circuit_breaker_open:
+            logger.warning(
+                f"Circuit breaker was OPEN from previous day (reason: {self._circuit_breaker_reason}). "
+                "Resetting for new trading day - please verify positions in SaxoTraderGO."
+            )
+            self._circuit_breaker_open = False
+            self._circuit_breaker_reason = ""
+
         logger.info(f"New trading day started. Opening P&L: ${self.metrics.total_pnl:.2f}")
 
     def update_intraday_tracking(self):
