@@ -908,7 +908,7 @@ class DeltaNeutralStrategy:
                             option_type="Short Call",
                             expiry_date=self.short_strangle.call.expiry,
                             dte=self._calculate_dte(self.short_strangle.call.expiry),
-                            notes="Emergency Close"
+                            trade_reason="Emergency Close"
                         )
                         self.trade_logger.remove_position("Short Call", self.short_strangle.call.strike)
                         leg_idx += 1
@@ -932,7 +932,7 @@ class DeltaNeutralStrategy:
                             option_type="Short Put",
                             expiry_date=self.short_strangle.put.expiry,
                             dte=self._calculate_dte(self.short_strangle.put.expiry),
-                            notes="Emergency Close"
+                            trade_reason="Emergency Close"
                         )
                         self.trade_logger.remove_position("Short Put", self.short_strangle.put.strike)
 
@@ -3632,6 +3632,9 @@ class DeltaNeutralStrategy:
 
         Video rule: "Never let the shorts go In-The-Money (ITM)"
 
+        Uses 0.5% threshold consistent with should_roll_weekly_shorts().
+        At SPY ~$690, 0.5% = ~$3.45 buffer from strike.
+
         Returns:
             bool: True if shorts need immediate action, False if safe.
         """
@@ -3642,25 +3645,29 @@ class DeltaNeutralStrategy:
         put_strike = self.short_strangle.put_strike
         price = self.current_underlying_price
 
-        # Check if shorts are ITM or dangerously close (within $1 of strike)
-        # This is more precise than percentage-based - $1 buffer gives time to react
-        itm_buffer = 1.0  # dollars
-        call_itm = price >= (call_strike - itm_buffer)
-        put_itm = price <= (put_strike + itm_buffer)
+        # Check if shorts are ITM or dangerously close (within 0.5% of strike)
+        # Consistent with should_roll_weekly_shorts() threshold
+        call_threshold = call_strike * 0.005  # 0.5% of call strike (~$3.45 at $690)
+        put_threshold = put_strike * 0.005    # 0.5% of put strike
 
-        if call_itm:
-            distance = call_strike - price
+        # Distance from current price to strikes
+        call_distance = call_strike - price
+        put_distance = price - put_strike
+
+        # If price is within 0.5% of either strike, shorts are in danger
+        if call_distance <= call_threshold:
+            pct_from_strike = (call_distance / call_strike) * 100
             logger.critical(
-                f"SHORT CALL ITM RISK! Price ${price:.2f} is ${distance:.2f} from "
-                f"strike ${call_strike:.2f}. Immediate action required."
+                f"SHORT CALL ITM RISK! Price ${price:.2f} is {pct_from_strike:.2f}% "
+                f"(${call_distance:.2f}) from strike ${call_strike:.2f}. Immediate action required."
             )
             return True
 
-        if put_itm:
-            distance = price - put_strike
+        if put_distance <= put_threshold:
+            pct_from_strike = (put_distance / put_strike) * 100
             logger.critical(
-                f"SHORT PUT ITM RISK! Price ${price:.2f} is ${distance:.2f} from "
-                f"strike ${put_strike:.2f}. Immediate action required."
+                f"SHORT PUT ITM RISK! Price ${price:.2f} is {pct_from_strike:.2f}% "
+                f"(${put_distance:.2f}) from strike ${put_strike:.2f}. Immediate action required."
             )
             return True
 
@@ -3899,7 +3906,7 @@ class DeltaNeutralStrategy:
                 option_type="Long Call",
                 expiry_date=call_option["expiry"],
                 dte=dte,
-                notes="Initial Entry"
+                trade_reason="Initial Entry"
             )
 
             # Log long put open
@@ -3915,7 +3922,7 @@ class DeltaNeutralStrategy:
                 option_type="Long Put",
                 expiry_date=put_option["expiry"],
                 dte=dte,
-                notes="Initial Entry"
+                trade_reason="Initial Entry"
             )
 
             # Add positions to Positions sheet
@@ -4120,7 +4127,7 @@ class DeltaNeutralStrategy:
                 option_type="Long Call",
                 expiry_date=call_option["expiry"],
                 dte=dte,
-                notes="5-Point Recenter"
+                trade_reason="5-Point Recenter"
             )
 
             # Log long put open
@@ -4136,7 +4143,7 @@ class DeltaNeutralStrategy:
                 option_type="Long Put",
                 expiry_date=put_option["expiry"],
                 dte=dte,
-                notes="5-Point Recenter"
+                trade_reason="5-Point Recenter"
             )
 
         return True
@@ -4265,7 +4272,7 @@ class DeltaNeutralStrategy:
                 option_type="Long Call",
                 expiry_date=call_expiry,
                 dte=self._calculate_dte(call_expiry) if call_expiry else None,
-                notes=reason
+                trade_reason=reason
             )
 
             # Log long put closure
@@ -4281,7 +4288,7 @@ class DeltaNeutralStrategy:
                 option_type="Long Put",
                 expiry_date=put_expiry,
                 dte=self._calculate_dte(put_expiry) if put_expiry else None,
-                notes=reason
+                trade_reason=reason
             )
 
             # Remove positions from Positions sheet
@@ -5729,7 +5736,7 @@ class DeltaNeutralStrategy:
                 option_type="Short Call",
                 expiry_date=call_expiry,
                 dte=self._calculate_dte(call_expiry) if call_expiry else None,
-                notes=close_reason
+                trade_reason=close_reason
             )
 
             # Log short put closure
@@ -5745,7 +5752,7 @@ class DeltaNeutralStrategy:
                 option_type="Short Put",
                 expiry_date=put_expiry,
                 dte=self._calculate_dte(put_expiry) if put_expiry else None,
-                notes=close_reason
+                trade_reason=close_reason
             )
 
             # Remove positions from Positions sheet
@@ -6039,16 +6046,17 @@ class DeltaNeutralStrategy:
         logger.info("=" * 50)
 
         # =====================================================================
-        # PARTIAL STRADDLE HANDLING: Close everything and start fresh
-        # A partial straddle with shorts is dangerous - shorts are not fully hedged
+        # PARTIAL STRADDLE HANDLING
+        # If we have a partial straddle (one leg missing) with shorts:
+        # - Check if shorts are in danger (within 0.5% of strike)
+        # - If YES: Close ALL positions (emergency) and start fresh
+        # - If NO: Just close the orphaned long leg and recenter straddle, keep shorts
         # =====================================================================
         has_partial_straddle = self.long_straddle and not self.long_straddle.is_complete
 
         if has_partial_straddle and self.short_strangle:
             logger.warning("=" * 50)
             logger.warning("⚠️ PARTIAL STRADDLE DETECTED WITH SHORTS")
-            logger.warning("   This is a dangerous state - shorts not fully hedged")
-            logger.warning("   Action: Close ALL positions, then do fresh entry")
             logger.warning("=" * 50)
 
             # Log the partial state
@@ -6060,73 +6068,199 @@ class DeltaNeutralStrategy:
                 logger.info(f"   Has short CALL: ${self.short_strangle.call.strike:.0f}")
             if self.short_strangle.put:
                 logger.info(f"   Has short PUT: ${self.short_strangle.put.strike:.0f}")
+            logger.info(f"   SPY price: ${self.current_underlying_price:.2f}")
+
+            # Check if shorts are actually in danger (within 0.5% of strike)
+            shorts_in_danger = self._check_shorts_itm()
+
+            if shorts_in_danger:
+                # =============================================================
+                # EMERGENCY PATH: Shorts are in danger - close everything
+                # =============================================================
+                logger.critical("🚨 SHORTS IN DANGER (within 0.5% of strike) - closing ALL positions")
+                logger.warning("   Action: Close ALL positions, then do fresh entry")
+
+                self.state = StrategyState.RECENTERING
+
+                # Step 1: Close the short strangle first (most risky)
+                logger.info("Step 1: Closing short strangle (EMERGENCY)...")
+                if not self._close_short_strangle_emergency():
+                    logger.error("Failed to close short strangle - will retry")
+                    self._increment_failure_count("recenter_partial_close_shorts_failed")
+                    self.state = StrategyState.FULL_POSITION
+                    return False
+
+                # Step 2: Close the partial straddle
+                logger.info("Step 2: Closing partial straddle...")
+                if not self._close_partial_straddle_emergency():
+                    logger.error("Failed to close partial straddle - will retry")
+                    self._increment_failure_count("recenter_partial_close_straddle_failed")
+                    # We closed shorts, so we're in a safer state now
+                    self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                    return False
+
+                logger.info("✅ All positions closed - doing fresh entry")
+
+                # Log safety event
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "PARTIAL_STRADDLE_EMERGENCY_RESET",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "description": "EMERGENCY: Shorts in danger, closed all positions",
+                        "result": "SUCCESS"
+                    })
+
+                # Step 3: Do a fresh entry (straddle + strangle)
+                # VIX check for fresh entry
+                if not self.check_vix_entry_condition():
+                    logger.warning("VIX too high for fresh entry - setting state to WAITING_VIX")
+                    self.state = StrategyState.WAITING_VIX
+                    return True  # Positions closed successfully, just waiting for entry
+
+                # Enter new straddle
+                logger.info("Step 3: Entering new long straddle at ATM...")
+                if not self.enter_long_straddle():
+                    logger.error("Failed to enter new straddle after reset")
+                    self._increment_failure_count("recenter_partial_enter_straddle_failed")
+                    self.state = StrategyState.IDLE
+                    return False
+
+                # Enter new strangle
+                logger.info("Step 4: Entering new short strangle...")
+                if not self.enter_short_strangle():
+                    logger.warning("Failed to enter short strangle - continuing with straddle only")
+                    # Don't fail the whole operation, straddle is the protection
+
+                # Update metrics
+                self.metrics.recenter_count += 1
+                self.metrics.daily_recenter_count += 1
+                self.initial_straddle_strike = self.long_straddle.initial_strike if self.long_straddle else self.current_underlying_price
+
+                # Set final state
+                if self.short_strangle:
+                    self.state = StrategyState.FULL_POSITION
+                else:
+                    self.state = StrategyState.LONG_STRADDLE_ACTIVE
+
+                logger.info("=" * 50)
+                logger.info("✅ PARTIAL STRADDLE EMERGENCY RECENTER COMPLETE")
+                logger.info(f"   New strike: ${self.initial_straddle_strike:.0f}")
+                logger.info("=" * 50)
+
+                return True
+
+            else:
+                # =============================================================
+                # SAFE PATH: Shorts are NOT in danger - keep them, just fix straddle
+                # =============================================================
+                logger.info("✅ Shorts are SAFE (>0.5% from strikes) - keeping them")
+                logger.info("   Action: Close orphaned long leg, recenter straddle only")
+
+                self.state = StrategyState.RECENTERING
+
+                # Step 1: Close just the orphaned long leg (not the shorts!)
+                logger.info("Step 1: Closing orphaned long leg...")
+                if not self._close_partial_straddle_emergency():
+                    logger.error("Failed to close orphaned long leg - will retry")
+                    self._increment_failure_count("recenter_partial_close_orphan_failed")
+                    self.state = StrategyState.FULL_POSITION
+                    return False
+
+                # Log safety event
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "PARTIAL_STRADDLE_SAFE_RECENTER",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "description": "Shorts safe, closed orphaned leg, recentering straddle",
+                        "result": "SUCCESS"
+                    })
+
+                # Step 2: Enter new straddle at ATM (shorts are still there providing income)
+                logger.info("Step 2: Entering new long straddle at ATM...")
+                if not self.enter_long_straddle():
+                    logger.error("Failed to enter new straddle - will retry")
+                    self._increment_failure_count("recenter_partial_enter_straddle_failed")
+                    # We still have shorts but no straddle - need to recenter again
+                    self.state = StrategyState.SHORT_STRANGLE_ACTIVE
+                    return False
+
+                # Update metrics
+                self.metrics.recenter_count += 1
+                self.metrics.daily_recenter_count += 1
+                self.initial_straddle_strike = self.long_straddle.initial_strike if self.long_straddle else self.current_underlying_price
+
+                self.state = StrategyState.FULL_POSITION
+
+                logger.info("=" * 50)
+                logger.info("✅ PARTIAL STRADDLE SAFE RECENTER COMPLETE")
+                logger.info(f"   New straddle strike: ${self.initial_straddle_strike:.0f}")
+                logger.info(f"   Kept shorts: Call ${self.short_strangle.call_strike:.0f}, Put ${self.short_strangle.put_strike:.0f}")
+                logger.info("=" * 50)
+
+                return True
+
+        # =====================================================================
+        # PARTIAL STRADDLE WITHOUT SHORTS: Just close orphaned leg and enter new straddle
+        # This happens when shorts were already closed (manually or by emergency)
+        # =====================================================================
+        if has_partial_straddle and not self.short_strangle:
+            logger.info("=" * 50)
+            logger.info("⚠️ PARTIAL STRADDLE DETECTED (NO SHORTS)")
+            logger.info("   Action: Close orphaned long leg, enter new straddle")
+            logger.info("=" * 50)
+
+            # Log the partial state
+            if self.long_straddle.call:
+                logger.info(f"   Has long CALL: ${self.long_straddle.call.strike:.0f}")
+            if self.long_straddle.put:
+                logger.info(f"   Has long PUT: ${self.long_straddle.put.strike:.0f}")
+
+            # VIX check - this is essentially a fresh entry
+            if not self.check_vix_entry_condition():
+                logger.warning("VIX too high for fresh straddle entry - waiting")
+                self.state = StrategyState.WAITING_VIX
+                return False
 
             self.state = StrategyState.RECENTERING
 
-            # Step 1: Close the short strangle first (most risky)
-            logger.info("Step 1: Closing short strangle...")
-            if not self._close_short_strangle_emergency():
-                logger.error("Failed to close short strangle - will retry")
-                self._increment_failure_count("recenter_partial_close_shorts_failed")
-                self.state = StrategyState.FULL_POSITION
-                return False
-
-            # Step 2: Close the partial straddle
-            logger.info("Step 2: Closing partial straddle...")
+            # Step 1: Close the orphaned long leg
+            logger.info("Step 1: Closing orphaned long leg...")
             if not self._close_partial_straddle_emergency():
-                logger.error("Failed to close partial straddle - will retry")
-                self._increment_failure_count("recenter_partial_close_straddle_failed")
-                # We closed shorts, so we're in a safer state now
+                logger.error("Failed to close orphaned long leg - will retry")
+                self._increment_failure_count("recenter_partial_close_orphan_failed")
                 self.state = StrategyState.LONG_STRADDLE_ACTIVE
                 return False
-
-            logger.info("✅ All positions closed - doing fresh entry")
 
             # Log safety event
             if self.trade_logger:
                 self.trade_logger.log_safety_event({
-                    "event_type": "PARTIAL_STRADDLE_RESET",
+                    "event_type": "PARTIAL_STRADDLE_NO_SHORTS_RECENTER",
                     "spy_price": self.current_underlying_price,
                     "vix": self.current_vix,
-                    "description": "Closed partial straddle + shorts, doing fresh entry",
+                    "description": "Closed orphaned long leg (no shorts), entering new straddle",
                     "result": "SUCCESS"
                 })
 
-            # Step 3: Do a fresh entry (straddle + strangle)
-            # VIX check for fresh entry
-            if not self.check_vix_entry_condition():
-                logger.warning("VIX too high for fresh entry - setting state to WAITING_VIX")
-                self.state = StrategyState.WAITING_VIX
-                return True  # Positions closed successfully, just waiting for entry
-
-            # Enter new straddle
-            logger.info("Step 3: Entering new long straddle at ATM...")
+            # Step 2: Enter new straddle at ATM
+            logger.info("Step 2: Entering new long straddle at ATM...")
             if not self.enter_long_straddle():
-                logger.error("Failed to enter new straddle after reset")
+                logger.error("Failed to enter new straddle - will retry")
                 self._increment_failure_count("recenter_partial_enter_straddle_failed")
                 self.state = StrategyState.IDLE
                 return False
-
-            # Enter new strangle
-            logger.info("Step 4: Entering new short strangle...")
-            if not self.enter_short_strangle():
-                logger.warning("Failed to enter short strangle - continuing with straddle only")
-                # Don't fail the whole operation, straddle is the protection
 
             # Update metrics
             self.metrics.recenter_count += 1
             self.metrics.daily_recenter_count += 1
             self.initial_straddle_strike = self.long_straddle.initial_strike if self.long_straddle else self.current_underlying_price
 
-            # Set final state
-            if self.short_strangle:
-                self.state = StrategyState.FULL_POSITION
-            else:
-                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+            self.state = StrategyState.LONG_STRADDLE_ACTIVE
 
             logger.info("=" * 50)
-            logger.info("✅ PARTIAL STRADDLE RECENTER COMPLETE")
-            logger.info(f"   New strike: ${self.initial_straddle_strike:.0f}")
+            logger.info("✅ PARTIAL STRADDLE (NO SHORTS) RECENTER COMPLETE")
+            logger.info(f"   New straddle strike: ${self.initial_straddle_strike:.0f}")
             logger.info("=" * 50)
 
             return True
