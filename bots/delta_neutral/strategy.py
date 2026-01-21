@@ -5563,12 +5563,110 @@ class DeltaNeutralStrategy:
         - If we have shorts: MUST enter new straddle to cover them (no VIX check)
         - If we DON'T have shorts: Check VIX first - this is essentially a fresh entry
 
+        PARTIAL STRADDLE HANDLING:
+        - If we have a partial straddle (missing one leg) with shorts, this is dangerous
+        - Close ALL positions (partial straddle + shorts) and do a fresh entry
+        - This resets the position to a clean state
+
         Returns:
             bool: True if recenter successful, False otherwise.
         """
         logger.info("=" * 50)
         logger.info("EXECUTING 5-POINT RECENTER")
         logger.info("=" * 50)
+
+        # =====================================================================
+        # PARTIAL STRADDLE HANDLING: Close everything and start fresh
+        # A partial straddle with shorts is dangerous - shorts are not fully hedged
+        # =====================================================================
+        has_partial_straddle = self.long_straddle and not self.long_straddle.is_complete
+
+        if has_partial_straddle and self.short_strangle:
+            logger.warning("=" * 50)
+            logger.warning("⚠️ PARTIAL STRADDLE DETECTED WITH SHORTS")
+            logger.warning("   This is a dangerous state - shorts not fully hedged")
+            logger.warning("   Action: Close ALL positions, then do fresh entry")
+            logger.warning("=" * 50)
+
+            # Log the partial state
+            if self.long_straddle.call:
+                logger.info(f"   Has long CALL: ${self.long_straddle.call.strike:.0f}")
+            if self.long_straddle.put:
+                logger.info(f"   Has long PUT: ${self.long_straddle.put.strike:.0f}")
+            if self.short_strangle.call:
+                logger.info(f"   Has short CALL: ${self.short_strangle.call.strike:.0f}")
+            if self.short_strangle.put:
+                logger.info(f"   Has short PUT: ${self.short_strangle.put.strike:.0f}")
+
+            self.state = StrategyState.RECENTERING
+
+            # Step 1: Close the short strangle first (most risky)
+            logger.info("Step 1: Closing short strangle...")
+            if not self._close_short_strangle_emergency():
+                logger.error("Failed to close short strangle - will retry")
+                self._increment_failure_count("recenter_partial_close_shorts_failed")
+                self.state = StrategyState.FULL_POSITION
+                return False
+
+            # Step 2: Close the partial straddle
+            logger.info("Step 2: Closing partial straddle...")
+            if not self._close_partial_straddle_emergency():
+                logger.error("Failed to close partial straddle - will retry")
+                self._increment_failure_count("recenter_partial_close_straddle_failed")
+                # We closed shorts, so we're in a safer state now
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                return False
+
+            logger.info("✅ All positions closed - doing fresh entry")
+
+            # Log safety event
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "event_type": "PARTIAL_STRADDLE_RESET",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "description": "Closed partial straddle + shorts, doing fresh entry",
+                    "result": "SUCCESS"
+                })
+
+            # Step 3: Do a fresh entry (straddle + strangle)
+            # VIX check for fresh entry
+            if not self.check_vix_entry_condition():
+                logger.warning("VIX too high for fresh entry - setting state to WAITING_VIX")
+                self.state = StrategyState.WAITING_VIX
+                return True  # Positions closed successfully, just waiting for entry
+
+            # Enter new straddle
+            logger.info("Step 3: Entering new long straddle at ATM...")
+            if not self.enter_long_straddle():
+                logger.error("Failed to enter new straddle after reset")
+                self._increment_failure_count("recenter_partial_enter_straddle_failed")
+                self.state = StrategyState.IDLE
+                return False
+
+            # Enter new strangle
+            logger.info("Step 4: Entering new short strangle...")
+            if not self.enter_short_strangle():
+                logger.warning("Failed to enter short strangle - continuing with straddle only")
+                # Don't fail the whole operation, straddle is the protection
+
+            # Update metrics
+            self.metrics.recenter_count += 1
+            self.metrics.daily_recenter_count += 1
+            self.initial_straddle_strike = self.long_straddle.initial_strike if self.long_straddle else self.current_underlying_price
+
+            # Set final state
+            if self.short_strangle:
+                self.state = StrategyState.FULL_POSITION
+            else:
+                self.state = StrategyState.LONG_STRADDLE_ACTIVE
+
+            logger.info("=" * 50)
+            logger.info("✅ PARTIAL STRADDLE RECENTER COMPLETE")
+            logger.info(f"   New strike: ${self.initial_straddle_strike:.0f}")
+            logger.info("=" * 50)
+
+            return True
 
         # VIX CHECK: If we don't have shorts, this is essentially a fresh entry decision
         # We should check VIX before committing to a new straddle
