@@ -7435,7 +7435,7 @@ class DeltaNeutralStrategy:
             logger.info(f"   SPY price: ${self.current_underlying_price:.2f}")
 
             # Check if shorts are actually in danger (within 0.5% of strike)
-            shorts_in_danger = self._check_shorts_itm()
+            shorts_in_danger = self.check_shorts_itm_risk()
 
             if shorts_in_danger:
                 # =============================================================
