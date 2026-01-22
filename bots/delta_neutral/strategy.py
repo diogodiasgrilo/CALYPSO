@@ -268,6 +268,11 @@ class DeltaNeutralStrategy:
         self._recenter_failed_on_roll_day: bool = False
         self._recenter_failure_date: Optional[str] = None
 
+        # TIME-005: Market open delay
+        # Wait N minutes after market open before trading to allow quotes to stabilize
+        # At 9:30:00 exactly, option quotes are often Bid=0/Ask=0 or wildly inaccurate
+        self._market_open_delay_minutes: int = self.strategy_config.get("market_open_delay_minutes", 3)
+
         # ACTION COOLDOWN: Prevent rapid retry of same failed action
         # Maps action_type -> last_attempt_time
         # Configurable via config.json circuit_breaker.cooldown_minutes (default: 5)
@@ -1867,6 +1872,45 @@ class DeltaNeutralStrategy:
         return None
 
     # =========================================================================
+    # TIME-005: MARKET OPEN DELAY
+    # =========================================================================
+
+    def _is_within_market_open_delay(self) -> bool:
+        """
+        TIME-005: Check if we're within the market open delay period.
+
+        At market open (9:30:00), option quotes are often invalid (Bid=0, Ask=0)
+        or wildly inaccurate as market makers initialize. Wait N minutes
+        (configurable, default 3) before placing any orders.
+
+        Returns:
+            bool: True if we should wait before trading
+        """
+        if self._market_open_delay_minutes <= 0:
+            return False
+
+        now_est = get_us_market_time()
+
+        # Market opens at 9:30 AM ET
+        market_open = time(9, 30)
+        delay_end = time(9, 30 + self._market_open_delay_minutes)
+
+        current_time = now_est.time()
+
+        # Check if we're in the delay window (9:30 to 9:30+delay)
+        if market_open <= current_time < delay_end:
+            minutes_left = self._market_open_delay_minutes - (
+                (current_time.hour - 9) * 60 + current_time.minute - 30
+            )
+            logger.info(
+                f"⏳ TIME-005: Within market open delay ({minutes_left} min remaining). "
+                f"Waiting for quotes to stabilize..."
+            )
+            return True
+
+        return False
+
+    # =========================================================================
     # TIME-004: ROLL + RECENTER FAILURE HANDLING
     # =========================================================================
 
@@ -2448,7 +2492,7 @@ class DeltaNeutralStrategy:
             if use_market_orders:
                 logger.warning(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ MARKET ({leg_to_open_close})")
 
-                result = self.client.place_market_order(
+                result = self.client.place_market_order_immediate(
                     uic=leg_uic,
                     asset_type=leg_asset_type,
                     buy_sell=leg_buy_sell,
@@ -2509,11 +2553,22 @@ class DeltaNeutralStrategy:
                 # Get fresh quote for accurate limit price
                 quote = self.client.get_quote(leg_uic, leg_asset_type)
                 base_price = leg_price
+                quote_valid = False
+
                 if quote and "Quote" in quote:
-                    if leg_buy_sell == BuySell.BUY:
-                        base_price = quote["Quote"].get("Ask", leg_price) or leg_price
+                    bid = quote["Quote"].get("Bid", 0) or 0
+                    ask = quote["Quote"].get("Ask", 0) or 0
+
+                    # DATA-004: Validate quote has real prices (not Bid=0/Ask=0)
+                    if bid > 0 and ask > 0:
+                        quote_valid = True
+                        if leg_buy_sell == BuySell.BUY:
+                            base_price = ask
+                        else:
+                            base_price = bid
                     else:
-                        base_price = quote["Quote"].get("Bid", leg_price) or leg_price
+                        logger.warning(f"  ⚠️ DATA-004: Invalid quote for UIC {leg_uic}: Bid=${bid:.2f}, Ask=${ask:.2f}")
+                        logger.warning(f"     Using fallback price ${leg_price:.2f} from original leg data")
 
                 # MARKET ORDER attempt (last resort in progressive sequence)
                 if is_market:
@@ -2548,7 +2603,7 @@ class DeltaNeutralStrategy:
 
                     logger.warning(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ MARKET (attempt {attempt+1}/{len(retry_sequence)} - LAST RESORT)")
 
-                    result = self.client.place_market_order(
+                    result = self.client.place_market_order_immediate(
                         uic=leg_uic,
                         asset_type=leg_asset_type,
                         buy_sell=leg_buy_sell,
@@ -8317,6 +8372,11 @@ class DeltaNeutralStrategy:
         # TIME-003: Check if we're past early close time
         if self._is_past_early_close():
             return "⏰ TIME-003: Market closed early today - no operations"
+
+        # TIME-005: Check if we're within market open delay period
+        # Skip this check if we already have positions (only affects new entries)
+        if self.state == StrategyState.IDLE and self._is_within_market_open_delay():
+            return "⏳ TIME-005: Waiting for quotes to stabilize after market open"
 
         # CRITICAL: Handle stuck states (RECENTERING, EXITING, ROLLING_SHORTS)
         # These states should only be transient - if we're stuck, something went wrong

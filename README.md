@@ -193,7 +193,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - VIX-based entry filtering
 - Position recovery on restart
 
-**Delta Neutral Advanced Safety (41 edge cases covered):**
+**Delta Neutral Advanced Safety (43 edge cases covered):**
 - Progressive order retry (0% → 5% → 10% slippage → MARKET)
 - Partial fill fallback handlers (6 emergency scenarios)
 - Emergency position handlers (close naked shorts, protect straddle)
@@ -205,6 +205,8 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - Position reconciliation (POS-003 - hourly Saxo sync)
 - Token refresh on 401 (CONN-004) and rate limiting (CONN-006)
 - Half-day closure detection (TIME-003)
+- Market open delay for quote stability (TIME-005)
+- Invalid quote detection (DATA-004 - Bid=0/Ask=0)
 - See [Edge Cases Doc](docs/DELTA_NEUTRAL_EDGE_CASES.md) for full analysis
 - See `bots/delta_neutral/safety/__init__.py` for implementation docs
 

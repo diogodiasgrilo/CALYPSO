@@ -8,7 +8,7 @@ but this documentation helps future developers understand the safety systems.
 For detailed edge case analysis, see: docs/DELTA_NEUTRAL_EDGE_CASES.md
 
 =============================================================================
-SAFETY ARCHITECTURE OVERVIEW (42 Edge Cases - 100% Coverage)
+SAFETY ARCHITECTURE OVERVIEW (43 Edge Cases - 100% Coverage)
 =============================================================================
 
 1. CIRCUIT BREAKER (strategy.py ~1053-1127)
@@ -191,6 +191,12 @@ TIME-004: Roll + Recenter Same Day (strategy.py ~1978-2055)
    - _mark_recenter_failed_on_roll_day(): Set flag for later handling
    - Prevents compounding failures by not attempting roll with misaligned positions
 
+TIME-005: Market Open Delay (strategy.py ~1874-1912)
+   - _is_within_market_open_delay(): Check if within delay period
+   - Default 3 minutes after market open (9:30-9:33 AM ET)
+   - Configurable via strategy.market_open_delay_minutes
+   - Prevents placing orders when quotes are Bid=0/Ask=0 at open
+
 STATE MACHINE (STATE-*)
 -----------------------
 STATE-002: State/Position Consistency (strategy.py ~1239-1284)
@@ -214,6 +220,12 @@ DATA-003: Option Chain Validation (strategy.py ~2312-2365)
    - _validate_option_chain(): Comprehensive chain validation
    - Checks: not empty, min options, valid bid/ask, strike range
    - Returns (is_valid, reason) tuple
+
+DATA-004: Invalid Quote Detection (strategy.py ~2552-2571)
+   - Check Bid > 0 and Ask > 0 before using quote
+   - Logs warning when quote has Bid=0 or Ask=0
+   - Falls back to original leg price if quote invalid
+   - Prevents stale quote issues at market open
 
 =============================================================================
 KEY SAFETY PRINCIPLES
@@ -243,7 +255,8 @@ SAFETY CHECK ORDER IN run_strategy_check() (~8350+)
 7. Market data update (SPY, VIX)
 8. MKT-002: Flash crash velocity check
 9. TIME-003: Early close cutoff check (block operations)
-10. Normal strategy logic proceeds...
+10. TIME-005: Market open delay check (quotes stabilization)
+11. Normal strategy logic proceeds...
 
 =============================================================================
 Last Updated: 2026-01-22
