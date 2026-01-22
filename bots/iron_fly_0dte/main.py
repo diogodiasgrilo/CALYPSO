@@ -399,14 +399,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         trade_logger.log_error(f"Hourly bot log error: {e}")
 
                 # Sleep until next check
-                # Use longer interval when daily trading is complete (no need to check every 5s)
+                # Use different intervals based on state for optimal responsiveness
                 status = strategy.get_status_summary()
                 if status['state'] == 'DailyComplete':
                     # Daily trading done - just check every 60s until market close
                     if not interruptible_sleep(60):
                         break
+                elif status.get('position_active'):
+                    # POSITION OPEN: Use 2s interval for faster stop-loss reaction
+                    # Critical for 0DTE where every second matters during wing breach
+                    if not interruptible_sleep(2):
+                        break
                 else:
-                    # Active trading - use fast 5s interval for 0DTE reactions
+                    # No position - use standard 5s interval for entry monitoring
                     if not interruptible_sleep(check_interval):
                         break
 

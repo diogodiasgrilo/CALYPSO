@@ -81,6 +81,11 @@ EARLY_CLOSE_DATES_2026 = [
 EARLY_CLOSE_TIME = dt_time(13, 0)  # 1:00 PM ET
 EARLY_CLOSE_CUTOFF_MINUTES = 15  # Stop trading 15 min before early close (12:45 PM)
 
+# MAX-LOSS: Absolute max loss circuit breaker (per contract)
+# If unrealized P&L drops below this, emergency close regardless of wing position
+# This protects against gaps through wings or illiquid stop fills
+MAX_LOSS_PER_CONTRACT = 400.0  # $400 max loss per contract (above typical $300-350 stop)
+
 # US Eastern timezone
 try:
     import pytz
@@ -1646,6 +1651,26 @@ class IronFlyStrategy:
         if flash_crash_result:
             return flash_crash_result
 
+        # EXIT CHECK 1.6: MAX-LOSS - Absolute loss circuit breaker
+        # This protects against gaps through wings or illiquid stop fills
+        max_loss_threshold = -MAX_LOSS_PER_CONTRACT * self.position.quantity
+        if self.position.unrealized_pnl <= max_loss_threshold:
+            logger.critical(
+                f"MAX-LOSS CIRCUIT BREAKER: P&L ${self.position.unrealized_pnl:.2f} <= "
+                f"threshold ${max_loss_threshold:.2f} - EMERGENCY CLOSE"
+            )
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_MAX_LOSS_BREAKER",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "unrealized_pnl": self.position.unrealized_pnl,
+                "max_loss_threshold": max_loss_threshold,
+                "description": f"Max loss circuit breaker triggered: P&L=${self.position.unrealized_pnl:.2f}",
+                "result": "EMERGENCY CLOSE TRIGGERED"
+            })
+            return self._close_position("MAX_LOSS",
+                f"Max loss breaker: P&L ${self.position.unrealized_pnl:.2f} <= ${max_loss_threshold:.2f}")
+
         # EXIT CHECK 2: Profit target
         if self.position.unrealized_pnl >= self.profit_target * self.position.quantity:
             return self._close_position("PROFIT_TARGET",
@@ -1975,30 +2000,66 @@ class IronFlyStrategy:
             logger.critical(error_msg)
             logger.critical(f"Orders placed before failure: {orders_placed}")
 
-            # Track the partially placed orders as orphaned for cleanup
+            # SAFETY FIX: AUTO-UNWIND any filled legs immediately
+            # Map leg names to their UICs and opposite directions for closing
+            leg_unwind_map = {
+                "short_call": {"uic": short_call_uic, "close_direction": BuySell.BUY},
+                "short_put": {"uic": short_put_uic, "close_direction": BuySell.BUY},
+                "long_call": {"uic": long_call_uic, "close_direction": BuySell.SELL},
+                "long_put": {"uic": long_put_uic, "close_direction": BuySell.SELL},
+            }
+
+            unwind_results = []
             for leg_name in orders_placed:
-                if leg_name in order_ids:
-                    self._add_orphaned_order({
-                        "order_id": order_ids[leg_name],
-                        "leg_name": leg_name,
-                        "reason": "partial_iron_fly_entry"
-                    })
+                if leg_name in leg_unwind_map:
+                    leg_info = leg_unwind_map[leg_name]
+                    logger.critical(f"AUTO-UNWINDING partial fill: {leg_name} (UIC: {leg_info['uic']})")
+                    try:
+                        # Use emergency market order for immediate execution
+                        unwind_result = self.client.place_emergency_order(
+                            uic=leg_info["uic"],
+                            asset_type="StockIndexOption",
+                            buy_sell=leg_info["close_direction"],
+                            amount=self.position_size,
+                            to_open_close="ToClose"
+                        )
+                        if unwind_result and unwind_result.get("OrderId"):
+                            unwind_results.append({
+                                "leg": leg_name,
+                                "order_id": unwind_result.get("OrderId"),
+                                "status": "UNWIND_PLACED"
+                            })
+                            logger.info(f"✓ Unwind order placed for {leg_name}: {unwind_result.get('OrderId')}")
+                        else:
+                            unwind_results.append({"leg": leg_name, "status": "UNWIND_FAILED", "error": "No OrderId"})
+                            logger.error(f"✗ Unwind failed for {leg_name}: No OrderId returned")
+                    except Exception as unwind_err:
+                        unwind_results.append({"leg": leg_name, "status": "UNWIND_ERROR", "error": str(unwind_err)})
+                        logger.error(f"✗ Unwind error for {leg_name}: {unwind_err}")
+                        # Still track as orphaned if unwind fails
+                        if leg_name in order_ids:
+                            self._add_orphaned_order({
+                                "order_id": order_ids[leg_name],
+                                "leg_name": leg_name,
+                                "reason": "partial_iron_fly_entry_unwind_failed"
+                            })
 
             self.trade_logger.log_safety_event({
-                "event_type": "IRON_FLY_PARTIAL_FILL",
+                "event_type": "IRON_FLY_PARTIAL_FILL_AUTO_UNWIND",
                 "spy_price": self.current_price,
                 "vix": self.current_vix,
-                "description": f"Partial fill during iron fly entry: {len(orders_placed)}/4 legs verified",
-                "result": f"MANUAL INTERVENTION REQUIRED - Orders: {order_ids}",
+                "description": f"Partial fill during iron fly entry: {len(orders_placed)}/4 legs - AUTO UNWIND ATTEMPTED",
+                "result": f"Unwind results: {unwind_results}",
                 "orders_placed": orders_placed,
-                "order_ids": order_ids
+                "order_ids": order_ids,
+                "unwind_results": unwind_results
             })
 
             # Open circuit breaker to prevent further entry attempts today
-            self._open_circuit_breaker(f"Partial fill: {len(orders_placed)}/4 legs")
+            self._open_circuit_breaker(f"Partial fill: {len(orders_placed)}/4 legs (auto-unwind attempted)")
 
             self.state = IronFlyState.DAILY_COMPLETE
-            return f"CRITICAL: Partial fill - {len(orders_placed)}/4 legs verified. Manual intervention required!"
+            return f"CRITICAL: Partial fill - {len(orders_placed)}/4 legs. Auto-unwind attempted: {unwind_results}"
 
         # Step 4: Create position object
         self.position = IronFlyPosition(
