@@ -63,6 +63,24 @@ EMERGENCY_SLIPPAGE_PERCENT = 5.0  # 5% slippage tolerance in emergency mode
 MAX_CONSECUTIVE_FAILURES = 5  # Trigger circuit breaker after this many failures
 CIRCUIT_BREAKER_COOLDOWN_MINUTES = 5  # Cooldown period when circuit breaker opens
 
+# CONN-007: Data blackout emergency close threshold
+MAX_STALE_DATA_WARNINGS_BEFORE_EMERGENCY = 5  # Trigger emergency close after 5 consecutive failures
+
+# MKT-001: Flash crash detection constants
+FLASH_CRASH_WINDOW_MINUTES = 5  # Track price over last 5 minutes
+FLASH_CRASH_THRESHOLD_PERCENT = 2.0  # Alert if price moves 2%+ in window
+
+# TIME-003: Early close days (1:00 PM ET close instead of 4:00 PM)
+# Day before Independence Day, day after Thanksgiving, Christmas Eve, New Year's Eve
+EARLY_CLOSE_DATES_2026 = [
+    date(2026, 7, 3),    # Day before July 4th
+    date(2026, 11, 27),  # Day after Thanksgiving (Black Friday)
+    date(2026, 12, 24),  # Christmas Eve
+    date(2026, 12, 31),  # New Year's Eve
+]
+EARLY_CLOSE_TIME = dt_time(13, 0)  # 1:00 PM ET
+EARLY_CLOSE_CUTOFF_MINUTES = 15  # Stop trading 15 min before early close (12:45 PM)
+
 # US Eastern timezone
 try:
     import pytz
@@ -594,6 +612,9 @@ class IronFlyStrategy:
         self._last_health_check = get_eastern_timestamp()
         self._consecutive_stale_data_warnings = 0
 
+        # MKT-001: Flash crash velocity detection - track price history over 5 minutes
+        self._price_history: List[Tuple[datetime, float]] = []
+
         # Circuit breaker tracking (matching Delta Neutral bot safety features)
         self._consecutive_failures = 0
         self._circuit_breaker_open = False
@@ -620,6 +641,9 @@ class IronFlyStrategy:
         logger.info(f"  Economic calendar check: {'ENABLED' if self.economic_calendar_check else 'DISABLED'}")
         if self.manual_expected_move:
             logger.info(f"  Manual expected move: {self.manual_expected_move} points (calibration mode)")
+
+        # TIME-003: Check if today is an early close day and log warning
+        self.check_early_close_warning()
 
     # =========================================================================
     # CIRCUIT BREAKER METHODS (Safety feature from Delta Neutral bot)
@@ -1196,6 +1220,7 @@ class IronFlyStrategy:
                     if mid and mid > 0:
                         self.current_price = mid
                         self.market_data.update_price(mid)
+                        self._record_price_for_velocity(mid)  # MKT-001: Track for flash crash detection
                         logger.info(f"REST fallback: Updated US500.I price to {mid:.2f}")
 
                 # Fetch VIX via get_vix_price() which has Yahoo Finance fallback
@@ -1211,19 +1236,42 @@ class IronFlyStrategy:
             except Exception as e:
                 logger.error(f"REST fallback failed: {e}")
 
-                # Only log critical warning if position is open AND REST failed
+                # CONN-007: Emergency close if position open AND data blackout persists
                 if self.position and self.state in [IronFlyState.POSITION_OPEN, IronFlyState.MONITORING_EXIT]:
-                    if self._consecutive_stale_data_warnings >= 3:
+                    if self._consecutive_stale_data_warnings >= MAX_STALE_DATA_WARNINGS_BEFORE_EMERGENCY:
+                        # CRITICAL: Trigger emergency close - we're flying blind with an open position
                         logger.critical(
-                            "CRITICAL: Market data stale with open position! "
-                            "WebSocket AND REST both failing - stop-loss protection compromised."
+                            f"CONN-007: DATA BLACKOUT EMERGENCY! {self._consecutive_stale_data_warnings} "
+                            f"consecutive data failures with open position. TRIGGERING EMERGENCY CLOSE."
+                        )
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_DATA_BLACKOUT_EMERGENCY",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "consecutive_failures": self._consecutive_stale_data_warnings,
+                            "description": f"Data blackout: {self._consecutive_stale_data_warnings} consecutive failures - emergency close triggered",
+                            "result": "EMERGENCY CLOSE INITIATED - better to exit than fly blind"
+                        })
+                        # Trigger emergency close
+                        emergency_result = self._emergency_close_position(
+                            reason=f"CONN-007: Data blackout ({self._consecutive_stale_data_warnings} failures)"
+                        )
+                        logger.critical(f"CONN-007 emergency close result: {emergency_result}")
+                        return f"EMERGENCY: Data blackout triggered close - {emergency_result}"
+                    elif self._consecutive_stale_data_warnings >= 3:
+                        # Warning level - not yet emergency
+                        logger.critical(
+                            f"CRITICAL: Market data stale with open position! "
+                            f"Failure #{self._consecutive_stale_data_warnings}/{MAX_STALE_DATA_WARNINGS_BEFORE_EMERGENCY} - "
+                            f"emergency close at {MAX_STALE_DATA_WARNINGS_BEFORE_EMERGENCY}."
                         )
                         self.trade_logger.log_safety_event({
                             "event_type": "IRON_FLY_STALE_DATA",
                             "spy_price": self.current_price,
                             "vix": self.current_vix,
+                            "consecutive_failures": self._consecutive_stale_data_warnings,
                             "description": f"Price data stale for {stale_age:.1f}s - both WebSocket and REST failed",
-                            "result": "Continuing with last known price - STOP LOSS MAY BE DELAYED"
+                            "result": f"WARNING: {MAX_STALE_DATA_WARNINGS_BEFORE_EMERGENCY - self._consecutive_stale_data_warnings} more failures until emergency close"
                         })
         else:
             self._consecutive_stale_data_warnings = 0  # Reset on fresh data
@@ -1524,6 +1572,15 @@ class IronFlyStrategy:
             self._log_opening_range_to_sheets("SKIP", fomc_reason)
             return f"Entry blocked - {fomc_reason}"
 
+        # FILTER 1.5: TIME-003 - Early close day cutoff check
+        early_close_blocked, early_close_reason = self.is_past_early_close_cutoff()
+        if early_close_blocked:
+            self.state = IronFlyState.DAILY_COMPLETE
+            self.trade_logger.log_event(f"FILTER BLOCKED: {early_close_reason}")
+            self._log_filter_event("EARLY_CLOSE_CUTOFF", early_close_reason)
+            self._log_opening_range_to_sheets("SKIP", early_close_reason)
+            return f"Entry blocked - {early_close_reason}"
+
         # FILTER 2: Economic calendar check (CPI, PPI, Jobs Report)
         econ_ok, econ_reason = self.check_economic_calendar_filter()
         if not econ_ok:
@@ -1583,6 +1640,11 @@ class IronFlyStrategy:
         if breached:
             return self._close_position("STOP_LOSS",
                 f"Price {self.current_price:.2f} touched {wing} wing at {getattr(self.position, f'{wing}_wing'):.2f}")
+
+        # EXIT CHECK 1.5: MKT-001 - Flash crash velocity detection
+        flash_crash_result = self.check_flash_crash_and_close()
+        if flash_crash_result:
+            return flash_crash_result
 
         # EXIT CHECK 2: Profit target
         if self.position.unrealized_pnl >= self.profit_target * self.position.quantity:
@@ -2262,6 +2324,7 @@ class IronFlyStrategy:
                     if new_price and new_price > 0:
                         self.current_price = new_price
                         self.market_data.update_price(new_price)  # Track staleness
+                        self._record_price_for_velocity(new_price)  # MKT-001: Track for flash crash detection
 
             # Get VIX using get_vix_price() which has Yahoo Finance fallback
             # Saxo may return "NoAccess" for VIX data, so fallback is important
@@ -2657,6 +2720,168 @@ class IronFlyStrategy:
         return (True, "")
 
     # =========================================================================
+    # TIME-003: EARLY CLOSE DAY DETECTION
+    # =========================================================================
+
+    def is_early_close_day(self) -> bool:
+        """
+        TIME-003: Check if today is an early close day (1:00 PM ET instead of 4:00 PM).
+
+        Early close days include:
+        - Day before Independence Day (July 3rd usually)
+        - Day after Thanksgiving (Black Friday)
+        - Christmas Eve
+        - New Year's Eve
+
+        Returns:
+            bool: True if today is an early close day
+        """
+        today = get_us_market_time().date()
+        return today in EARLY_CLOSE_DATES_2026
+
+    def get_market_close_time_today(self) -> dt_time:
+        """
+        TIME-003: Get today's market close time.
+
+        Returns:
+            time: 1:00 PM on early close days, 4:00 PM otherwise
+        """
+        if self.is_early_close_day():
+            return EARLY_CLOSE_TIME  # 1:00 PM
+        return dt_time(16, 0)  # 4:00 PM
+
+    def is_past_early_close_cutoff(self) -> Tuple[bool, str]:
+        """
+        TIME-003: Check if we're past the trading cutoff for early close days.
+
+        On early close days (1:00 PM close), we stop all operations
+        at 12:45 PM (15 minutes before close).
+
+        Returns:
+            Tuple of (is_past_cutoff: bool, reason: str)
+        """
+        if not self.is_early_close_day():
+            return (False, "")
+
+        current_time = get_us_market_time()
+        cutoff_time = dt_time(12, 45)  # 12:45 PM - 15 min before 1PM close
+
+        if current_time.time() >= cutoff_time:
+            reason = f"Early close day - past {cutoff_time.strftime('%I:%M %p')} cutoff (market closes at 1:00 PM)"
+            return (True, reason)
+
+        return (False, "")
+
+    def check_early_close_warning(self) -> None:
+        """
+        TIME-003: Log a warning at market open on early close days.
+
+        Called once at the start of trading to alert operator.
+        """
+        if self.is_early_close_day():
+            close_time = self.get_market_close_time_today()
+            logger.warning(
+                f"TIME-003: TODAY IS AN EARLY CLOSE DAY! "
+                f"Market closes at {close_time.strftime('%I:%M %p')} ET. "
+                f"Trading cutoff at 12:45 PM."
+            )
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_EARLY_CLOSE_DAY",
+                "close_time": close_time.strftime('%I:%M %p'),
+                "cutoff_time": "12:45 PM",
+                "description": "Early close day detected - reduced trading window",
+                "result": "Operations will stop at 12:45 PM"
+            })
+
+    # =========================================================================
+    # MKT-001: FLASH CRASH VELOCITY DETECTION
+    # =========================================================================
+
+    def _record_price_for_velocity(self, price: float) -> None:
+        """
+        MKT-001: Record price point for flash crash velocity tracking.
+
+        Maintains a rolling window of prices over the last FLASH_CRASH_WINDOW_MINUTES.
+        """
+        if price <= 0:
+            return
+
+        now = get_eastern_timestamp()
+        self._price_history.append((now, price))
+
+        # Prune old entries beyond the window
+        cutoff = now - timedelta(minutes=FLASH_CRASH_WINDOW_MINUTES)
+        self._price_history = [(t, p) for t, p in self._price_history if t >= cutoff]
+
+    def detect_flash_crash(self) -> Tuple[bool, str, float]:
+        """
+        MKT-001: Detect if a flash crash is occurring based on price velocity.
+
+        A flash crash is defined as price moving >= FLASH_CRASH_THRESHOLD_PERCENT
+        within FLASH_CRASH_WINDOW_MINUTES.
+
+        Returns:
+            Tuple[bool, str, float]: (is_flash_crash, description, percent_move)
+        """
+        if len(self._price_history) < 2:
+            return (False, "", 0.0)
+
+        # Get oldest and newest prices in window
+        oldest_time, oldest_price = self._price_history[0]
+        newest_time, newest_price = self._price_history[-1]
+
+        if oldest_price <= 0:
+            return (False, "", 0.0)
+
+        # Calculate percent move
+        percent_move = ((newest_price - oldest_price) / oldest_price) * 100.0
+
+        if abs(percent_move) >= FLASH_CRASH_THRESHOLD_PERCENT:
+            direction = "DOWN" if percent_move < 0 else "UP"
+            window_seconds = (newest_time - oldest_time).total_seconds()
+            description = (
+                f"FLASH CRASH {direction}: {abs(percent_move):.2f}% move in "
+                f"{window_seconds:.0f} seconds ({oldest_price:.2f} -> {newest_price:.2f})"
+            )
+            return (True, description, percent_move)
+
+        return (False, "", percent_move)
+
+    def check_flash_crash_and_close(self) -> Optional[str]:
+        """
+        MKT-001: Check for flash crash and trigger emergency close if detected.
+
+        This should be called during position monitoring. If a flash crash is
+        detected while we have an open position, we immediately close to
+        prevent catastrophic losses.
+
+        Returns:
+            Optional[str]: Emergency close result if triggered, None otherwise
+        """
+        if not self.position or self.state not in [IronFlyState.POSITION_OPEN, IronFlyState.MONITORING_EXIT]:
+            return None
+
+        is_crash, description, percent_move = self.detect_flash_crash()
+
+        if is_crash:
+            logger.critical(f"MKT-001: {description} - TRIGGERING EMERGENCY CLOSE")
+
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_FLASH_CRASH_DETECTED",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "percent_move": f"{percent_move:.2f}%",
+                "window_minutes": FLASH_CRASH_WINDOW_MINUTES,
+                "threshold_percent": FLASH_CRASH_THRESHOLD_PERCENT,
+                "description": description,
+                "result": "EMERGENCY CLOSE TRIGGERED"
+            })
+
+            return self._emergency_close_position(reason=f"MKT-001: {description}")
+
+        return None
+
+    # =========================================================================
     # STATUS AND MONITORING
     # =========================================================================
 
@@ -2705,6 +2930,7 @@ class IronFlyStrategy:
             if mid and mid > 0:
                 self.current_price = mid
                 self.market_data.update_price(mid)  # Track staleness
+                self._record_price_for_velocity(mid)  # MKT-001: Track for flash crash detection
             return
 
         # Update VIX

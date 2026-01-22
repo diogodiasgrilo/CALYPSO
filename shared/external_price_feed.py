@@ -105,7 +105,7 @@ class ExternalPriceFeed:
                 "User-Agent": "Mozilla/5.0 (Calypso Trading Bot)"
             }
 
-            response = requests.get(url, params=params, headers=headers, timeout=5)
+            response = requests.get(url, params=params, headers=headers, timeout=10)
 
             if response.status_code == 200:
                 data = response.json()

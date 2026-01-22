@@ -1868,12 +1868,18 @@ class SaxoClient:
         vix_uic = int(vix_uic)
         logger.debug(f"get_vix_price called: looking for UIC {vix_uic}")
 
+        # Track which sources we tried for detailed error logging
+        sources_tried = []
+
         # 1. Check the price cache (from subscription snapshots)
         if vix_uic in self._price_cache:
             cached_data = self._price_cache[vix_uic]
             price = self._extract_price_from_data(cached_data, "VIX cache")
             if price:
                 return price
+            sources_tried.append("cache(no valid price)")
+        else:
+            sources_tried.append("cache(not in cache)")
 
         # 2. REST API - Try Saxo with extended fields for index data
         endpoint = "/trade/v1/infoprices/list"
@@ -1891,16 +1897,27 @@ class SaxoClient:
             price = self._extract_price_from_data(data, "VIX API")
             if price:
                 return price
+            sources_tried.append("REST(no valid price in response)")
+        else:
+            sources_tried.append(f"REST(empty response: {response})" if response else "REST(request failed)")
 
-        # 3. Last resort: Yahoo Finance fallback
+        # 3. Last resort: Yahoo Finance fallback with retry
         if self.external_feed.enabled:
-            logger.info("VIX: Saxo failed, using Yahoo Finance fallback")
-            external_price = self.external_feed.get_vix_price()
-            if external_price:
-                logger.info(f"VIX: Yahoo price {external_price}")
-                return external_price
+            logger.debug("VIX: Saxo sources failed, trying Yahoo Finance fallback")
+            for attempt in range(2):  # Try twice
+                external_price = self.external_feed.get_vix_price()
+                if external_price:
+                    logger.info(f"VIX: Yahoo price {external_price}" + (f" (attempt {attempt + 1})" if attempt > 0 else ""))
+                    return external_price
+                if attempt == 0:
+                    # Wait 1 second before retry
+                    time.sleep(1)
+                    logger.debug("VIX: Yahoo Finance retry after 1s delay")
+            sources_tried.append("Yahoo(failed after 2 attempts)")
+        else:
+            sources_tried.append("Yahoo(disabled)")
 
-        logger.error(f"VIX: All price sources failed for UIC {vix_uic}")
+        logger.error(f"VIX: All price sources failed for UIC {vix_uic} - tried: {', '.join(sources_tried)}")
         return None
 
     def _extract_price_from_data(self, data: Dict, source: str) -> Optional[float]:
@@ -3037,8 +3054,8 @@ class SaxoClient:
 
         self.ws_thread = threading.Thread(
             target=self.ws_connection.run_forever,
-            # Increased timeout and interval for stability in sim environment
-            kwargs={"ping_interval": 30, "ping_timeout": 10}
+            # More aggressive keepalive to prevent Saxo server-side disconnections
+            kwargs={"ping_interval": 15, "ping_timeout": 10}
         )
         self.ws_thread.daemon = True
         self.ws_thread.start()
