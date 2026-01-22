@@ -4939,8 +4939,8 @@ class DeltaNeutralStrategy:
 
         Video rule: "Never let the shorts go In-The-Money (ITM)"
 
-        Uses 0.5% threshold consistent with should_roll_weekly_shorts().
-        At SPY ~$690, 0.5% = ~$3.45 buffer from strike.
+        Uses 0.3% threshold for faster bot reaction (30s check interval).
+        At SPY ~$690, 0.3% = ~$2.07 buffer from strike.
 
         Returns:
             bool: True if shorts need immediate action, False if safe.
@@ -4952,10 +4952,10 @@ class DeltaNeutralStrategy:
         put_strike = self.short_strangle.put_strike
         price = self.current_underlying_price
 
-        # Check if shorts are ITM or dangerously close (within 0.5% of strike)
-        # Consistent with should_roll_weekly_shorts() threshold
-        call_threshold = call_strike * 0.005  # 0.5% of call strike (~$3.45 at $690)
-        put_threshold = put_strike * 0.005    # 0.5% of put strike
+        # Check if shorts are ITM or dangerously close (within 0.3% of strike)
+        # Tighter threshold for bot's 30s check interval
+        call_threshold = call_strike * 0.003  # 0.3% of call strike (~$2.07 at $690)
+        put_threshold = put_strike * 0.003    # 0.3% of put strike
 
         # Distance from current price to strikes
         call_distance = call_strike - price
@@ -7412,7 +7412,7 @@ class DeltaNeutralStrategy:
         # =====================================================================
         # PARTIAL STRADDLE HANDLING
         # If we have a partial straddle (one leg missing) with shorts:
-        # - Check if shorts are in danger (within 0.5% of strike)
+        # - Check if shorts are in danger (within 0.3% of strike)
         # - If YES: Close ALL positions (emergency) and start fresh
         # - If NO: Just close the orphaned long leg and recenter straddle, keep shorts
         # =====================================================================
@@ -7434,14 +7434,14 @@ class DeltaNeutralStrategy:
                 logger.info(f"   Has short PUT: ${self.short_strangle.put.strike:.0f}")
             logger.info(f"   SPY price: ${self.current_underlying_price:.2f}")
 
-            # Check if shorts are actually in danger (within 0.5% of strike)
+            # Check if shorts are actually in danger (within 0.3% of strike)
             shorts_in_danger = self.check_shorts_itm_risk()
 
             if shorts_in_danger:
                 # =============================================================
                 # EMERGENCY PATH: Shorts are in danger - close everything
                 # =============================================================
-                logger.critical("🚨 SHORTS IN DANGER (within 0.5% of strike) - closing ALL positions")
+                logger.critical("🚨 SHORTS IN DANGER (within 0.3% of strike) - closing ALL positions")
                 logger.warning("   Action: Close ALL positions, then do fresh entry")
 
                 self.state = StrategyState.RECENTERING
@@ -7518,7 +7518,7 @@ class DeltaNeutralStrategy:
                 # =============================================================
                 # SAFE PATH: Shorts are NOT in danger - keep them, just fix straddle
                 # =============================================================
-                logger.info("✅ Shorts are SAFE (>0.5% from strikes) - keeping them")
+                logger.info("✅ Shorts are SAFE (>0.3% from strikes) - keeping them")
                 logger.info("   Action: Close orphaned long leg, recenter straddle only")
 
                 self.state = StrategyState.RECENTERING
@@ -7839,21 +7839,22 @@ class DeltaNeutralStrategy:
             return (True, None)  # Scheduled roll, no specific challenge
 
         # Check if shorts are being challenged
-        # Per spec: "within 0.5% of Short_Call_Strike or Short_Put_Strike"
+        # Per spec: "within 0.3% of Short_Call_Strike or Short_Put_Strike"
+        # (Tighter threshold for bot's 30s check interval)
         if self.short_strangle and self.current_underlying_price:
             call_strike = self.short_strangle.call_strike
             put_strike = self.short_strangle.put_strike
             price = self.current_underlying_price
 
-            # Calculate 0.5% threshold for each strike
-            call_threshold = call_strike * 0.005  # 0.5% of call strike
-            put_threshold = put_strike * 0.005    # 0.5% of put strike
+            # Calculate 0.3% threshold for each strike
+            call_threshold = call_strike * 0.003  # 0.3% of call strike (~$2.07 at $690)
+            put_threshold = put_strike * 0.003    # 0.3% of put strike
 
             # Distance from current price to strikes
             call_distance = call_strike - price
             put_distance = price - put_strike
 
-            # If price is within 0.5% of either strike, roll early
+            # If price is within 0.3% of either strike, roll early
             if call_distance <= call_threshold:
                 pct_from_strike = (call_distance / call_strike) * 100
                 logger.warning(f"Short call CHALLENGED! Price ${price:.2f} within {pct_from_strike:.2f}% of call strike ${call_strike:.2f}")

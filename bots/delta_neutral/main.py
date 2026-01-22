@@ -842,8 +842,8 @@ Examples:
     parser.add_argument(
         "--interval", "-i",
         type=int,
-        default=60,
-        help="Strategy check interval in seconds (default: 60)"
+        default=30,
+        help="Strategy check interval in seconds (default: 30)"
     )
 
     parser.add_argument(

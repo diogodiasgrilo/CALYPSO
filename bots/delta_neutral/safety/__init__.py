@@ -75,10 +75,11 @@ SAFETY ARCHITECTURE OVERVIEW (43 Edge Cases - 100% Coverage)
 
    Blocks trading until orphaned orders are resolved.
 
-7. ITM RISK DETECTION (strategy.py ~3656-3700)
+7. ITM RISK DETECTION (strategy.py ~4936-4990)
    - check_shorts_itm_risk(): Monitors short strikes vs SPY price
    - Triggers emergency roll if price approaches strike
-   - Uses percentage-based threshold (default 0.5%)
+   - Uses percentage-based threshold (0.3% with 30s check interval)
+   - At SPY ~$690, 0.3% = ~$2.07 buffer from strike
 
 =============================================================================
 EDGE CASE HANDLERS (Added 2026-01-22)
