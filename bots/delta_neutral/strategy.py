@@ -7584,8 +7584,6 @@ class DeltaNeutralStrategy:
         Returns:
             str: Description of action taken, if any.
         """
-        action_taken = "No action"
-
         # TIME-001: Check operation lock to prevent concurrent strategy checks
         if self._operation_in_progress:
             elapsed = ""
@@ -7600,20 +7598,33 @@ class DeltaNeutralStrategy:
         self._operation_start_time = datetime.now()
 
         try:
-            # ORDER-004: Check for critical intervention first (more severe than circuit breaker)
-            if self._check_critical_intervention():
-                return f"🚨🚨🚨 CRITICAL INTERVENTION REQUIRED - {self._critical_intervention_reason}"
+            return self._run_strategy_check_impl()
+        finally:
+            # TIME-001: Release operation lock
+            self._operation_in_progress = False
+            self._operation_start_time = None
 
-            # STATE-002: Verify state matches actual position objects
-            state_issue = self._check_state_position_consistency()
-            if state_issue:
-                logger.warning(f"⚠️ STATE-002: {state_issue}")
-                logger.info("STATE-002: Running position recovery to fix state...")
-                self.recover_positions()
+    def _run_strategy_check_impl(self) -> str:
+        """
+        Internal implementation of strategy check logic.
+        Called by run_strategy_check() with operation lock held.
+        """
+        action_taken = "No action"
 
-            # CRITICAL: Check strategy-level circuit breaker first
-            if self._check_circuit_breaker():
-                return f"🚨 CIRCUIT BREAKER OPEN - {self._circuit_breaker_reason}"
+        # ORDER-004: Check for critical intervention first (more severe than circuit breaker)
+        if self._check_critical_intervention():
+            return f"🚨🚨🚨 CRITICAL INTERVENTION REQUIRED - {self._critical_intervention_reason}"
+
+        # STATE-002: Verify state matches actual position objects
+        state_issue = self._check_state_position_consistency()
+        if state_issue:
+            logger.warning(f"⚠️ STATE-002: {state_issue}")
+            logger.info("STATE-002: Running position recovery to fix state...")
+            self.recover_positions()
+
+        # CRITICAL: Check strategy-level circuit breaker first
+        if self._check_circuit_breaker():
+            return f"🚨 CIRCUIT BREAKER OPEN - {self._circuit_breaker_reason}"
 
         # Check Saxo client circuit breaker
         if self.client.is_circuit_open():
@@ -7968,14 +7979,9 @@ class DeltaNeutralStrategy:
                                     "result": "SKIPPED"
                                 })
 
-            logger.info(f"Strategy check: {action_taken} | State: {self.state.value}")
+        logger.info(f"Strategy check: {action_taken} | State: {self.state.value}")
 
-            return action_taken
-
-        finally:
-            # TIME-001: Release operation lock
-            self._operation_in_progress = False
-            self._operation_start_time = None
+        return action_taken
 
     def get_status_summary(self) -> Dict:
         """
