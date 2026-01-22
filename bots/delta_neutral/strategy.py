@@ -99,7 +99,7 @@ Date: 2024
 
 import logging
 import time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Optional, Dict, List, Any, Tuple, Set
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
@@ -2052,6 +2052,315 @@ class DeltaNeutralStrategy:
             self._recenter_failure_date = now_est.strftime("%Y-%m-%d")
             logger.warning("⚠️ TIME-004: Recenter failure marked for roll day handling")
 
+    # =========================================================================
+    # POS-002: POSITION VERIFICATION BEFORE MODIFICATIONS
+    # =========================================================================
+
+    def verify_positions_before_operation(self, operation: str) -> bool:
+        """
+        POS-002: Verify positions with Saxo before any modifying operation.
+
+        Detects if user manually intervened (e.g., closed positions in SaxoTraderGO)
+        by comparing our expected state vs Saxo's actual state.
+
+        Args:
+            operation: Description of the planned operation (for logging)
+
+        Returns:
+            bool: True if positions match expectations, False if discrepancy found
+        """
+        logger.debug(f"POS-002: Verifying positions before '{operation}'")
+
+        try:
+            # Get actual positions from Saxo
+            all_positions = self.client.get_positions()
+            spy_options = self._filter_spy_options(all_positions)
+
+            # Count actual positions by type
+            actual_long_calls = sum(1 for p in spy_options if p.get("PositionBase", {}).get("Amount", 0) > 0
+                                     and "Call" in str(p.get("PositionView", {}).get("CalculationReliability", "")))
+            actual_long_puts = sum(1 for p in spy_options if p.get("PositionBase", {}).get("Amount", 0) > 0
+                                    and "Put" in str(p.get("PositionView", {}).get("CalculationReliability", "")))
+            actual_short_calls = sum(1 for p in spy_options if p.get("PositionBase", {}).get("Amount", 0) < 0
+                                      and "Call" in str(p.get("PositionView", {}).get("CalculationReliability", "")))
+            actual_short_puts = sum(1 for p in spy_options if p.get("PositionBase", {}).get("Amount", 0) < 0
+                                     and "Put" in str(p.get("PositionView", {}).get("CalculationReliability", "")))
+
+            # What we expect based on our objects
+            expected_long_call = self.long_straddle and self.long_straddle.call is not None
+            expected_long_put = self.long_straddle and self.long_straddle.put is not None
+            expected_short_call = self.short_strangle and self.short_strangle.call is not None
+            expected_short_put = self.short_strangle and self.short_strangle.put is not None
+
+            # Compare
+            discrepancies = []
+
+            if expected_long_call and actual_long_calls == 0:
+                discrepancies.append("Long Call missing from Saxo")
+            if expected_long_put and actual_long_puts == 0:
+                discrepancies.append("Long Put missing from Saxo")
+            if expected_short_call and actual_short_calls == 0:
+                discrepancies.append("Short Call missing from Saxo")
+            if expected_short_put and actual_short_puts == 0:
+                discrepancies.append("Short Put missing from Saxo")
+
+            if discrepancies:
+                logger.warning("=" * 60)
+                logger.warning(f"⚠️ POS-002: Position discrepancy before '{operation}'")
+                logger.warning("=" * 60)
+                for d in discrepancies:
+                    logger.warning(f"   - {d}")
+                logger.warning("   Likely cause: Manual intervention in SaxoTraderGO")
+                logger.warning("   Action: Running position recovery to sync state")
+                logger.warning("=" * 60)
+
+                # Log safety event
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "event_type": "POSITION_DISCREPANCY",
+                        "severity": "WARNING",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "action_taken": f"Detected before {operation}: {', '.join(discrepancies)}",
+                        "description": "Position mismatch - likely manual intervention",
+                        "result": "RECOVERY_TRIGGERED"
+                    })
+
+                # Sync with Saxo
+                self.recover_positions()
+                return False
+
+            logger.debug(f"POS-002: Positions verified OK for '{operation}'")
+            return True
+
+        except Exception as e:
+            logger.error(f"POS-002: Error verifying positions: {e}")
+            return True  # Proceed anyway to avoid blocking all operations
+
+    # =========================================================================
+    # MKT-004: MARKET HALT DETECTION
+    # =========================================================================
+
+    def _check_market_halt_pattern(self, rejection_count: int = 3) -> bool:
+        """
+        MKT-004: Detect potential market halt via consistent rejection patterns.
+
+        If multiple orders are rejected in quick succession with specific error
+        patterns, this may indicate a market-wide trading halt.
+
+        Args:
+            rejection_count: Number of recent rejections to trigger halt detection
+
+        Returns:
+            bool: True if market halt suspected
+        """
+        # This is tracked by checking consecutive order failures with specific error messages
+        # The circuit breaker already handles this, but we add specific halt detection
+        if self._consecutive_failures >= rejection_count:
+            recent_reason = self._circuit_breaker_reason if self._circuit_breaker_open else ""
+            halt_indicators = ["trading halt", "market closed", "suspended", "circuit breaker"]
+
+            for indicator in halt_indicators:
+                if indicator.lower() in recent_reason.lower():
+                    logger.critical("=" * 60)
+                    logger.critical("🚨 MKT-004: MARKET HALT SUSPECTED")
+                    logger.critical("=" * 60)
+                    logger.critical(f"   Reason: {recent_reason}")
+                    logger.critical("   Action: Bot will wait for market to reopen")
+                    logger.critical("=" * 60)
+
+                    if self.trade_logger:
+                        self.trade_logger.log_safety_event({
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "event_type": "MARKET_HALT_SUSPECTED",
+                            "severity": "CRITICAL",
+                            "spy_price": self.current_underlying_price,
+                            "vix": self.current_vix,
+                            "action_taken": "Bot paused until market reopens",
+                            "description": f"Halt indicator: {recent_reason}",
+                            "result": "WAITING"
+                        })
+
+                    return True
+
+        return False
+
+    # =========================================================================
+    # MKT-005: NO VALID STRIKES HANDLING
+    # =========================================================================
+
+    def _log_no_valid_strikes_error(self, operation: str, reason: str) -> None:
+        """
+        MKT-005: Log explicit error when no valid strikes are found.
+
+        Provides clear messaging when option chain has no suitable strikes
+        (due to liquidity, spread, or other issues).
+
+        Args:
+            operation: What operation was attempted
+            reason: Why no valid strikes were found
+        """
+        logger.error("=" * 60)
+        logger.error(f"❌ MKT-005: NO VALID STRIKES for {operation}")
+        logger.error("=" * 60)
+        logger.error(f"   Reason: {reason}")
+        logger.error(f"   SPY Price: ${self.current_underlying_price:.2f}")
+        logger.error(f"   VIX: {self.current_vix:.2f}")
+        logger.error("   Possible causes:")
+        logger.error("   - Low liquidity across all strikes")
+        logger.error("   - Wide bid-ask spreads exceeding limits")
+        logger.error("   - Option chain data issues from Saxo")
+        logger.error("   Action: Operation skipped, will retry next iteration")
+        logger.error("=" * 60)
+
+        if self.trade_logger:
+            self.trade_logger.log_safety_event({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_type": "NO_VALID_STRIKES",
+                "severity": "WARNING",
+                "spy_price": self.current_underlying_price,
+                "vix": self.current_vix,
+                "action_taken": f"Skipped {operation}",
+                "description": reason,
+                "result": "WILL_RETRY"
+            })
+
+    # =========================================================================
+    # DATA-001: QUOTE TIMESTAMP VALIDATION
+    # =========================================================================
+
+    def _validate_quote_freshness(self, quote: Dict, max_age_seconds: int = 60) -> bool:
+        """
+        DATA-001: Validate that quote data is not stale.
+
+        Checks quote timestamp if available and warns if data is old.
+
+        Args:
+            quote: Quote data from Saxo
+            max_age_seconds: Maximum acceptable quote age
+
+        Returns:
+            bool: True if quote is fresh (or no timestamp available), False if stale
+        """
+        if not quote:
+            return False
+
+        quote_data = quote.get("Quote", {})
+
+        # Try to find timestamp in various fields
+        timestamp_fields = ["LastUpdated", "PriceTime", "QuoteTime", "Time"]
+        quote_time = None
+
+        for field in timestamp_fields:
+            if field in quote_data:
+                try:
+                    time_str = quote_data[field]
+                    # Handle ISO format with Z suffix
+                    if time_str.endswith("Z"):
+                        time_str = time_str[:-1] + "+00:00"
+                    quote_time = datetime.fromisoformat(time_str)
+                    break
+                except (ValueError, TypeError):
+                    continue
+
+        if quote_time:
+            # Make quote_time timezone-aware if needed
+            if quote_time.tzinfo is None:
+                quote_time = quote_time.replace(tzinfo=timezone.utc)
+
+            age = (datetime.now(timezone.utc) - quote_time).total_seconds()
+
+            if age > max_age_seconds:
+                logger.warning(f"⚠️ DATA-001: Quote is {age:.0f}s old (max: {max_age_seconds}s)")
+                return False
+
+        return True
+
+    # =========================================================================
+    # DATA-002: MISSING GREEKS WARNING
+    # =========================================================================
+
+    def _warn_missing_greeks(self, position_type: str, strike: float, greeks: Dict) -> None:
+        """
+        DATA-002: Log warning when option greeks are missing or zero.
+
+        Called when creating position objects to alert operator that
+        risk metrics may be inaccurate.
+
+        Args:
+            position_type: Type of position (e.g., "Long Call", "Short Put")
+            strike: Strike price
+            greeks: Greeks dictionary from Saxo
+        """
+        missing = []
+
+        if not greeks.get("Delta") and not greeks.get("InstrumentDelta"):
+            missing.append("Delta")
+        if not greeks.get("Theta") and not greeks.get("InstrumentTheta"):
+            missing.append("Theta")
+        if not greeks.get("Gamma") and not greeks.get("InstrumentGamma"):
+            missing.append("Gamma")
+        if not greeks.get("Vega") and not greeks.get("InstrumentVega"):
+            missing.append("Vega")
+
+        if missing:
+            logger.warning(f"⚠️ DATA-002: Missing Greeks for {position_type} ${strike:.0f}: {', '.join(missing)}")
+            logger.warning("   Dashboard risk metrics may be inaccurate")
+
+    # =========================================================================
+    # DATA-003: OPTION CHAIN VALIDATION
+    # =========================================================================
+
+    def _validate_option_chain(self, options: List[Dict], min_options: int = 5) -> Tuple[bool, str]:
+        """
+        DATA-003: Validate option chain data before strike selection.
+
+        Checks that the option chain has sufficient valid options for
+        reliable strike selection.
+
+        Args:
+            options: List of option data from Saxo
+            min_options: Minimum number of valid options required
+
+        Returns:
+            Tuple[bool, str]: (is_valid, reason_if_invalid)
+        """
+        if not options:
+            return False, "Option chain is empty"
+
+        if len(options) < min_options:
+            return False, f"Option chain has only {len(options)} options (need at least {min_options})"
+
+        # Check for valid bid/ask on at least some options
+        options_with_valid_prices = 0
+        for opt in options:
+            bid = opt.get("Quote", {}).get("Bid", 0) or 0
+            ask = opt.get("Quote", {}).get("Ask", 0) or 0
+            if bid > 0 and ask > 0:
+                options_with_valid_prices += 1
+
+        if options_with_valid_prices < min_options:
+            return False, f"Only {options_with_valid_prices} options have valid bid/ask (need {min_options})"
+
+        # Check for reasonable strike range
+        strikes = [opt.get("Strike", 0) for opt in options if opt.get("Strike", 0) > 0]
+        if len(strikes) < min_options:
+            return False, f"Only {len(strikes)} options have valid strikes"
+
+        if self.current_underlying_price:
+            price = self.current_underlying_price
+            min_strike = min(strikes)
+            max_strike = max(strikes)
+
+            # Option chain should span reasonable range around current price
+            if min_strike > price * 0.95:
+                return False, f"No strikes below current price (min: ${min_strike:.0f}, SPY: ${price:.2f})"
+            if max_strike < price * 1.05:
+                return False, f"No strikes above current price (max: ${max_strike:.0f}, SPY: ${price:.2f})"
+
+        return True, ""
+
     def _is_action_on_cooldown(self, action_type: str) -> bool:
         """
         Check if an action is on cooldown after a recent failure.
@@ -3498,6 +3807,32 @@ class DeltaNeutralStrategy:
                 calls_by_strike[key] = parsed
             elif parsed["option_type"] == "Put":
                 puts_by_strike[key] = parsed
+
+        # POS-006: Check for multiple straddle candidates before selecting one
+        matching_pairs = [(k, calls_by_strike[k], puts_by_strike[k])
+                          for k in calls_by_strike.keys() if k in puts_by_strike]
+
+        if len(matching_pairs) > 1:
+            logger.warning("=" * 60)
+            logger.warning("⚠️ POS-006: MULTIPLE STRADDLE CANDIDATES DETECTED")
+            logger.warning("=" * 60)
+            for (strike, expiry), call, put in matching_pairs:
+                logger.warning(f"   - Strike ${strike:.0f}, Expiry {expiry}")
+            logger.warning("   Only the first straddle will be used")
+            logger.warning("   Others will be marked as orphaned positions")
+            logger.warning("=" * 60)
+
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "MULTIPLE_STRADDLES",
+                    "severity": "WARNING",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "action_taken": f"Using first of {len(matching_pairs)} straddle candidates",
+                    "description": f"Strikes: {[k[0] for k in [p[0] for p in matching_pairs]]}",
+                    "result": "OTHERS_ORPHANED"
+                })
 
         # Find matching call/put pairs (same strike and expiry)
         for key, call_data in calls_by_strike.items():

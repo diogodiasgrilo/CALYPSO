@@ -233,6 +233,12 @@ class SaxoClient:
         # Prevents race conditions when multiple bots share the same refresh token
         self.token_coordinator = get_token_coordinator()
 
+        # CONN-006: Rate limiting state for exponential backoff
+        self._rate_limit_backoff_until: Optional[datetime] = None
+        self._rate_limit_retry_count: int = 0
+        self._rate_limit_max_retries: int = 5
+        self._rate_limit_base_delay: float = 1.0  # Start with 1 second
+
         # Update coordinator cache with current tokens if we have them
         if self.access_token and self.refresh_token:
             self.token_coordinator.update_cache({
@@ -813,6 +819,15 @@ class SaxoClient:
             logger.warning("Circuit breaker is open. Request blocked.")
             return None
 
+        # CONN-006: Check rate limit backoff
+        if self._rate_limit_backoff_until:
+            if datetime.now() < self._rate_limit_backoff_until:
+                wait_seconds = (self._rate_limit_backoff_until - datetime.now()).total_seconds()
+                logger.warning(f"CONN-006: Rate limit backoff active, waiting {wait_seconds:.1f}s")
+                time.sleep(wait_seconds)
+            # Clear backoff after waiting
+            self._rate_limit_backoff_until = None
+
         # Ensure token is valid
         if not self._is_token_valid():
             if not self.authenticate():
@@ -834,11 +849,46 @@ class SaxoClient:
             # Added 202 to the success list
             if response.status_code in [200, 201, 202]:
                 self._record_success()
+                # Reset rate limit retry count on success
+                self._rate_limit_retry_count = 0
                 # 202 might not have body, safe parsing
                 return response.json() if response.text else {}
             elif response.status_code == 204:
                 self._record_success()
+                self._rate_limit_retry_count = 0
                 return {}
+            elif response.status_code == 429:
+                # CONN-006: Rate limiting - exponential backoff
+                self._rate_limit_retry_count += 1
+                if self._rate_limit_retry_count <= self._rate_limit_max_retries:
+                    # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                    delay = self._rate_limit_base_delay * (2 ** (self._rate_limit_retry_count - 1))
+                    # Check for Retry-After header
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            delay = max(delay, float(retry_after))
+                        except ValueError:
+                            pass
+                    logger.warning(f"CONN-006: Rate limited (429). Retry {self._rate_limit_retry_count}/{self._rate_limit_max_retries}, waiting {delay:.1f}s")
+                    self._rate_limit_backoff_until = datetime.now() + timedelta(seconds=delay)
+                    # Retry the request after backoff
+                    time.sleep(delay)
+                    return self._make_request(method, endpoint, params, data)
+                else:
+                    logger.error(f"CONN-006: Rate limit retries exhausted ({self._rate_limit_max_retries})")
+                    self._record_error()
+                    return None
+            elif response.status_code == 401:
+                # CONN-004: Token expired mid-request - try refreshing
+                logger.warning("CONN-004: 401 Unauthorized - attempting token refresh")
+                if self.authenticate(force_refresh=True):
+                    logger.info("CONN-004: Token refreshed, retrying request")
+                    return self._make_request(method, endpoint, params, data)
+                else:
+                    logger.error("CONN-004: Token refresh failed")
+                    self._record_error()
+                    return None
             else:
                 logger.error(f"API request failed: {response.status_code} - {response.text}")
                 self._record_error()
