@@ -223,7 +223,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     trade_logger.log_event("-" * 60)
 
     last_status_time = datetime.now()
-    status_interval = 60  # Log status every minute (more frequent for 0DTE)
+    status_interval = 30  # Log status every 30 seconds for 0DTE (need fast updates)
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour (3600 seconds)
     last_day = datetime.now().date()
@@ -333,23 +333,47 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         else:
                             trade_logger.log_event(action)
 
-                # Periodic status logging (every 60 seconds to terminal/file logs)
+                # Periodic status logging (every 30 seconds for 0DTE fast updates)
                 now = datetime.now()
                 if (now - last_status_time).total_seconds() >= status_interval:
                     status = strategy.get_status_summary()
                     mode_prefix = "[DRY RUN] " if dry_run else ""
-                    heartbeat_msg = (
-                        f"{mode_prefix}HEARTBEAT | State: {status['state']} | "
-                        f"{config.get('strategy', {}).get('underlying_symbol', 'SPX')}: {status['underlying_price']:.2f} | "
-                        f"VIX: {status['vix']:.2f} | "
-                        f"Trades: {status['trades_today']} | P&L: ${status['daily_pnl']:.2f}"
-                    )
+                    underlying_symbol = config.get('strategy', {}).get('underlying_symbol', 'SPX')
+
+                    # Build heartbeat message with position-specific details when active
+                    if status.get('position_active'):
+                        # Show detailed position info: premium, hold time, distance to wing, P&L
+                        credit = status.get('credit_received', 0) / 100  # Convert cents to dollars
+                        unrealized = status.get('unrealized_pnl', 0)
+                        hold_mins = status.get('hold_time_minutes', 0)
+                        distance = status.get('distance_to_wing', 0)
+                        wing = status.get('nearest_wing', 'N/A')
+                        atm = status.get('atm_strike', 0)
+
+                        heartbeat_msg = (
+                            f"{mode_prefix}HEARTBEAT | {status['state']} | "
+                            f"{underlying_symbol}: {status['underlying_price']:.2f} | "
+                            f"ATM: {atm:.0f} | "
+                            f"Wing Dist: {distance:.1f} ({wing}) | "
+                            f"Hold: {hold_mins:.0f}m | "
+                            f"Credit: ${credit:.2f} | "
+                            f"P&L: ${unrealized:.2f}"
+                        )
+                    else:
+                        # No position - show basic market info
+                        heartbeat_msg = (
+                            f"{mode_prefix}HEARTBEAT | {status['state']} | "
+                            f"{underlying_symbol}: {status['underlying_price']:.2f} | "
+                            f"VIX: {status['vix']:.2f} | "
+                            f"Trades: {status['trades_today']} | Daily P&L: ${status['daily_pnl']:.2f}"
+                        )
+
                     trade_logger.log_event(heartbeat_msg)
 
-                    # Log Account Summary periodically (every 60s for real-time dashboard)
+                    # Log to Google Sheets for real-time dashboard (every 30s)
                     strategy.log_account_summary()
 
-                    # Log position if one is open
+                    # Log position snapshot if one is open
                     if status.get('position_active'):
                         strategy.log_position_to_sheets()
 
