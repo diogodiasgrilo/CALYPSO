@@ -14,10 +14,85 @@ Strategy Overview:
 3. If SPY moves 5 points from initial strike, recenter:
    - Close current Long Straddle
    - Open new ATM Long Straddle at same expiration
-   - Reset Weekly Shorts
 4. Roll weekly shorts on Friday
 5. Exit entire trade when 30-60 DTE remains on Longs
 
+=============================================================================
+METHOD INDEX (for quick navigation - use Ctrl+G to jump to line number)
+=============================================================================
+
+INITIALIZATION
+    __init__                            ~81     Setup and configuration
+
+SAFETY - CIRCUIT BREAKER (see also: safety/__init__.py for documentation)
+    _increment_failure_count            ~178    Track failures
+    _reset_failure_count                ~197    Reset after success
+    _open_circuit_breaker               ~203    Halt trading
+    _check_circuit_breaker              ~978    Check if halted
+    reset_circuit_breaker               ~1052   Manual reset
+
+SAFETY - EMERGENCY HANDLERS
+    _emergency_position_check           ~259    Analyze risk exposure
+    _close_partial_strangle_emergency   ~354    Close naked short
+    _close_short_strangle_emergency     ~435    Close all shorts
+    _emergency_close_all                ~587    Close everything
+    _close_partial_straddle_emergency   ~621    Close partial longs
+
+SAFETY - PARTIAL FILL FALLBACKS
+    _handle_strangle_partial_fill_fallback  ~722    Close naked, keep straddle
+    _handle_straddle_partial_fill_fallback  ~846    Go FLAT
+
+SAFETY - COOLDOWNS & ORPHANS
+    _add_orphaned_order                 ~1073   Track orphaned orders
+    _check_for_orphaned_orders          ~1085   Check before trading
+    _is_action_on_cooldown              ~1116   Check cooldown
+    _set_action_cooldown                ~1144   Set cooldown
+    _clear_action_cooldown              ~1154   Clear cooldown
+
+ORDER MANAGEMENT
+    _place_protected_multi_leg_order    ~1212   Core order placement
+    _calculate_combo_limit_price        ~1527   Calculate prices
+
+POSITION RECOVERY & SYNC
+    recover_positions                   ~1564   Main recovery
+    _sync_straddle_after_partial_close  ~1795   Sync straddle
+    _sync_strangle_after_partial_close  ~1873   Sync strangle
+    _recover_long_straddle              ~2172   Recover straddle
+    _recover_short_strangle             ~2274   Recover strangle
+
+MARKET DATA
+    update_market_data                  ~3340   Update SPY/VIX
+    refresh_position_prices             ~3391   Update option prices
+
+ENTRY CONDITIONS
+    check_vix_entry_condition           ~3516   VIX check
+    check_shorts_itm_risk               ~3581   ITM risk
+    check_emergency_exit_condition      ~3628   5%+ move
+
+STRADDLE OPERATIONS
+    enter_long_straddle                 ~3662   Enter straddle
+    close_long_straddle                 ~4130   Close straddle
+    _add_missing_straddle_leg           ~5384   Complete partial
+
+STRANGLE OPERATIONS
+    enter_short_strangle                ~4297   Enter strangle
+    close_short_strangle                ~5611   Close strangle
+    _add_missing_strangle_leg           ~5117   Complete partial
+
+RECENTER & ROLL
+    execute_recenter                    ~6028   5-point recenter
+    roll_weekly_shorts                  ~6514   Friday roll
+
+EXIT & MAIN LOOP
+    exit_all_positions                  ~6704   Exit all
+    run_strategy_check                  ~6910   Main entry point
+
+REPORTING
+    get_status_summary                  ~7283   Status
+    get_dashboard_metrics               ~7328   Metrics
+    log_daily_summary                   ~7714   Daily log
+
+=============================================================================
 Author: Trading Bot Developer
 Date: 2024
 """
