@@ -146,11 +146,10 @@ POS-006: Multiple Straddles Warning (strategy.py ~3811-3830)
 
 MARKET CONDITIONS (MKT-*)
 -------------------------
-MKT-001: Pre-Market Gap Detection (strategy.py ~1503-1625)
-   - check_pre_market_gap(): Uses Yahoo Finance for pre-market price
-   - Compares against previous close
-   - Warns if gap > 2% (configurable)
-   - update_previous_close(): Call at market close to store reference
+MKT-001: Pre-Market Gap Detection
+   - REMOVED: Requires pre-market data subscription which is not cost-effective
+   - Was intended to detect overnight gaps before market open
+   - ITM risk is still checked at market open via regular price monitoring
 
 MKT-002: Flash Crash Velocity (strategy.py ~1756-1840)
    - _record_price_for_velocity(): Add price to sliding window
