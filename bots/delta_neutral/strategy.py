@@ -1530,6 +1530,10 @@ class DeltaNeutralStrategy:
         and compares to previous day's close. Refreshes every 15 minutes
         during pre-market hours to track price changes.
 
+        Note: Saxo API returns indicative (previous close) prices during pre-market
+        unless you have an extended hours market data subscription. Yahoo Finance
+        provides actual pre-market prices through their preMarketPrice field.
+
         Args:
             gap_threshold_percent: Alert if gap exceeds this percentage (default 2%)
 
@@ -1548,17 +1552,27 @@ class DeltaNeutralStrategy:
         if market_time.hour < 8 or market_time.hour >= 10:
             return None
 
-        # Use Saxo's pre-market price (already streaming via WebSocket)
-        pre_market_price = self.current_underlying_price
+        # Use Yahoo Finance for pre-market prices (Saxo returns indicative prices during pre-market)
+        pre_market_data = self.saxo_client.external_feed.get_pre_market_price("SPY")
+
+        if pre_market_data and pre_market_data.get("price"):
+            pre_market_price = pre_market_data["price"]
+            price_type = pre_market_data.get("price_type", "unknown")
+            market_state = pre_market_data.get("market_state", "UNKNOWN")
+            reference_price = pre_market_data.get("previous_close") or self._previous_close_price
+        else:
+            # Fallback to Saxo price (may be indicative/stale)
+            pre_market_price = self.current_underlying_price
+            price_type = "saxo_indicative"
+            market_state = "UNKNOWN"
+            reference_price = self._previous_close_price or self.current_underlying_price
+            logger.warning("MKT-001: Yahoo pre-market price unavailable, using Saxo (may be indicative)")
 
         if not pre_market_price or pre_market_price <= 0:
-            logger.warning("MKT-001: No pre-market SPY price from Saxo yet")
+            logger.warning("MKT-001: No pre-market SPY price available")
             return None
 
         try:
-
-            # Use previous close or last known price
-            reference_price = self._previous_close_price or self.current_underlying_price
 
             if not reference_price or reference_price <= 0:
                 logger.warning("MKT-001: No reference price available for gap calculation")
@@ -1570,7 +1584,8 @@ class DeltaNeutralStrategy:
             abs_gap = abs(gap_percent)
             is_significant = abs_gap >= gap_threshold_percent
 
-            logger.info(f"📊 MKT-001: Pre-market SPY: ${pre_market_price:.2f} (Saxo) | Previous close: ${reference_price:.2f} | Gap: {gap_percent:+.2f}%")
+            source = "Yahoo" if price_type in ("pre_market", "post_market") else "Saxo"
+            logger.info(f"📊 MKT-001: Pre-market SPY: ${pre_market_price:.2f} ({source}, {price_type}) | Previous close: ${reference_price:.2f} | Gap: {gap_percent:+.2f}%")
 
             if is_significant:
                 direction = "UP" if gap_percent > 0 else "DOWN"

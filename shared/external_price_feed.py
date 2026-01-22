@@ -75,7 +75,7 @@ class ExternalPriceFeed:
 
         return price
 
-    def _fetch_from_yahoo(self, symbol: str) -> Optional[float]:
+    def _fetch_from_yahoo(self, symbol: str, include_pre_market: bool = True) -> Optional[float]:
         """
         Fetch price from Yahoo Finance API.
 
@@ -83,6 +83,7 @@ class ExternalPriceFeed:
 
         Args:
             symbol: Stock symbol (SPY) or ^VIX
+            include_pre_market: If True, return pre-market price when available
 
         Returns:
             float: Current price or None
@@ -116,9 +117,25 @@ class ExternalPriceFeed:
 
                 if result and len(result) > 0:
                     meta = result[0].get("meta", {})
+                    market_state = meta.get("marketState", "").upper()
 
-                    # Try regularMarketPrice first (most accurate during market hours)
-                    price = meta.get("regularMarketPrice")
+                    price = None
+
+                    # During pre-market, try preMarketPrice first
+                    if include_pre_market and market_state in ("PRE", "PREPRE"):
+                        price = meta.get("preMarketPrice")
+                        if price:
+                            logger.debug(f"{symbol}: Using Yahoo pre-market price ${price:.2f}")
+
+                    # During post-market, try postMarketPrice
+                    if not price and market_state in ("POST", "POSTPOST"):
+                        price = meta.get("postMarketPrice")
+                        if price:
+                            logger.debug(f"{symbol}: Using Yahoo post-market price ${price:.2f}")
+
+                    # Try regularMarketPrice (most accurate during market hours)
+                    if not price:
+                        price = meta.get("regularMarketPrice")
 
                     # Fallback to previousClose if market is closed
                     if not price:
@@ -158,6 +175,81 @@ class ExternalPriceFeed:
     def get_vix_price(self) -> Optional[float]:
         """Convenience method to get VIX price."""
         return self.get_price("VIX.I")
+
+    def get_pre_market_price(self, symbol: str) -> Optional[Dict]:
+        """
+        Get pre-market price specifically, with additional metadata.
+
+        Returns dict with price and market state info, or None if unavailable.
+
+        Args:
+            symbol: Stock symbol (e.g., "SPY")
+
+        Returns:
+            dict: {"price": float, "market_state": str, "source": str} or None
+        """
+        if not self.enabled:
+            return None
+
+        try:
+            # Convert VIX.I to ^VIX for Yahoo Finance
+            if symbol == "VIX.I" or symbol == "VIX":
+                yahoo_symbol = "^VIX"
+            else:
+                yahoo_symbol = symbol
+
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
+            params = {"interval": "1m", "range": "1d"}
+            headers = {"User-Agent": "Mozilla/5.0 (Calypso Trading Bot)"}
+
+            response = requests.get(url, params=params, headers=headers, timeout=5)
+
+            if response.status_code == 200:
+                data = response.json()
+                chart = data.get("chart", {})
+                result = chart.get("result", [])
+
+                if result and len(result) > 0:
+                    meta = result[0].get("meta", {})
+                    market_state = meta.get("marketState", "UNKNOWN").upper()
+
+                    result_dict = {
+                        "market_state": market_state,
+                        "source": "Yahoo Finance",
+                        "price": None,
+                        "previous_close": meta.get("previousClose"),
+                        "regular_market_price": meta.get("regularMarketPrice"),
+                    }
+
+                    # Get the appropriate price based on market state
+                    if market_state in ("PRE", "PREPRE"):
+                        pre_market_price = meta.get("preMarketPrice")
+                        if pre_market_price:
+                            result_dict["price"] = float(pre_market_price)
+                            result_dict["price_type"] = "pre_market"
+                            logger.info(f"{symbol}: Yahoo pre-market price ${pre_market_price:.2f}")
+                            return result_dict
+
+                    elif market_state in ("POST", "POSTPOST"):
+                        post_market_price = meta.get("postMarketPrice")
+                        if post_market_price:
+                            result_dict["price"] = float(post_market_price)
+                            result_dict["price_type"] = "post_market"
+                            logger.info(f"{symbol}: Yahoo post-market price ${post_market_price:.2f}")
+                            return result_dict
+
+                    # Fallback to regular market price
+                    regular_price = meta.get("regularMarketPrice")
+                    if regular_price:
+                        result_dict["price"] = float(regular_price)
+                        result_dict["price_type"] = "regular_market"
+                        return result_dict
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error fetching pre-market price for {symbol}: {e}")
+            return None
 
     def clear_cache(self):
         """Clear the price cache."""
