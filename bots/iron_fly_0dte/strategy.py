@@ -1198,14 +1198,13 @@ class IronFlyStrategy:
                         self.market_data.update_price(mid)
                         logger.info(f"REST fallback: Updated US500.I price to {mid:.2f}")
 
-                # Fetch VIX via REST (skip_cache=True to bypass stale streaming cache)
-                vix_quote = self.client.get_quote(self.vix_uic, "StockIndex", skip_cache=True)
-                if vix_quote:
-                    vix_mid = vix_quote.get('Quote', {}).get('Mid') or vix_quote.get('Mid')
-                    if vix_mid and vix_mid > 0:
-                        self.current_vix = vix_mid
-                        self.market_data.update_vix(vix_mid)
-                        logger.info(f"REST fallback: Updated VIX to {vix_mid:.2f}")
+                # Fetch VIX via get_vix_price() which has Yahoo Finance fallback
+                # This is important because Saxo may return "NoAccess" for VIX data
+                vix_price = self.client.get_vix_price(self.vix_uic)
+                if vix_price and vix_price > 0:
+                    self.current_vix = vix_price
+                    self.market_data.update_vix(vix_price)
+                    logger.info(f"REST fallback: Updated VIX to {vix_price:.2f}")
 
                 # Reset stale counter on successful REST fetch
                 self._consecutive_stale_data_warnings = 0
@@ -2257,27 +2256,14 @@ class IronFlyStrategy:
                         self.current_price = new_price
                         self.market_data.update_price(new_price)  # Track staleness
 
-            # Get VIX (StockIndex type)
-            # VIX doesn't have Bid/Ask/Mid - use PriceInfo.High or calculate from High+Low
+            # Get VIX using get_vix_price() which has Yahoo Finance fallback
+            # Saxo may return "NoAccess" for VIX data, so fallback is important
             if self.vix_uic:
-                vix_quote = self.client.get_quote(self.vix_uic, asset_type="StockIndex")
-                if vix_quote:
-                    # First try Quote.Mid (for tradeable indices)
-                    mid = vix_quote.get('Quote', {}).get('Mid')
-                    if mid and mid > 0:
-                        self.current_vix = mid
-                        self.market_data.update_vix(mid)  # Track staleness
-                    else:
-                        # Fall back to PriceInfo for non-tradeable indices like VIX
-                        price_info = vix_quote.get('PriceInfo', {})
-                        high = price_info.get('High', 0)
-                        low = price_info.get('Low', 0)
-                        if high > 0 and low > 0:
-                            # Use midpoint of day's range as proxy
-                            vix_value = (high + low) / 2
-                            self.current_vix = vix_value
-                            self.market_data.update_vix(vix_value)  # Track staleness
-                            logger.debug(f"VIX from PriceInfo: High={high}, Low={low}, Using={vix_value}")
+                vix_price = self.client.get_vix_price(self.vix_uic)
+                if vix_price and vix_price > 0:
+                    self.current_vix = vix_price
+                    self.market_data.update_vix(vix_price)  # Track staleness
+                    logger.debug(f"VIX updated to {vix_price:.2f}")
         except Exception as e:
             logger.warning(f"Error updating market data: {e}")
             # Don't update staleness tracking on error - data remains stale
