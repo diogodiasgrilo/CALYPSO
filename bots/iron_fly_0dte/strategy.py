@@ -381,6 +381,10 @@ class IronFlyPosition:
     # Order tracking
     profit_order_id: Optional[str] = None
 
+    # Close order tracking (for verification during CLOSING state)
+    close_order_ids: Optional[Dict[str, str]] = None  # {"short_call": "order_id", ...}
+    close_legs_verified: Optional[Dict[str, bool]] = None  # Track which legs are verified closed
+
     # Dry-run simulation tracking
     simulated_current_value: float = 0.0  # Tracks simulated cost-to-close
 
@@ -1023,15 +1027,27 @@ class IronFlyStrategy:
                     logger.error(f"Error polling order status: {poll_err}")
                     time.sleep(poll_interval)
 
-            # Timeout reached - cancel the order
+            # Timeout reached - cancel the order with retry logic (3 attempts)
             logger.warning(f"Order {order_id} timeout after {timeout_seconds}s - cancelling")
 
-            try:
-                self.client.cancel_order(order_id)
-                self._pending_order_ids.remove(order_id)
-                logger.info(f"Cancelled timed-out order {order_id}")
-            except Exception as cancel_err:
-                logger.error(f"Failed to cancel order {order_id}: {cancel_err}")
+            cancel_success = False
+            max_cancel_attempts = 3
+            for cancel_attempt in range(max_cancel_attempts):
+                try:
+                    self.client.cancel_order(order_id)
+                    self._pending_order_ids.remove(order_id)
+                    logger.info(f"Cancelled timed-out order {order_id} (attempt {cancel_attempt + 1})")
+                    cancel_success = True
+                    break
+                except Exception as cancel_err:
+                    logger.warning(
+                        f"Cancel attempt {cancel_attempt + 1}/{max_cancel_attempts} failed for {order_id}: {cancel_err}"
+                    )
+                    if cancel_attempt < max_cancel_attempts - 1:
+                        time.sleep(1)  # Wait 1 second before retry
+
+            if not cancel_success:
+                logger.error(f"Failed to cancel order {order_id} after {max_cancel_attempts} attempts")
                 # Track as potentially orphaned
                 self._add_orphaned_order({
                     "order_id": order_id,
@@ -1039,7 +1055,7 @@ class IronFlyStrategy:
                     "direction": direction.value,
                     "amount": amount,
                     "limit_price": limit_price,
-                    "reason": "timeout_cancel_failed"
+                    "reason": "timeout_cancel_failed_after_retries"
                 })
 
             self._increment_failure_count("Order timeout")
@@ -1696,6 +1712,11 @@ class IronFlyStrategy:
         This state handles the period between initiating close orders and
         confirming all legs are actually closed at the broker.
 
+        Enhanced verification (like Delta Neutral):
+        1. Check each close order's fill status via order ID
+        2. Track which legs are verified closed
+        3. Log detailed progress
+
         SAFETY: Includes timeout detection to prevent getting stuck in CLOSING
         state indefinitely if orders fail.
         """
@@ -1727,7 +1748,66 @@ class IronFlyStrategy:
             # Don't transition to DAILY_COMPLETE - leave in CLOSING so operator knows there's an issue
             return f"CRITICAL: Close timeout after {closing_duration:.0f}s - manual intervention required"
 
-        # Verify position is closed at broker
+        # =====================================================================
+        # ENHANCED VERIFICATION: Check each close order's fill status
+        # =====================================================================
+        if self.position and self.position.close_order_ids:
+            legs_pending = []
+            legs_verified = []
+
+            for leg_name, order_id in self.position.close_order_ids.items():
+                if not order_id:
+                    continue
+
+                # Skip already verified legs
+                if (self.position.close_legs_verified and
+                        self.position.close_legs_verified.get(leg_name)):
+                    legs_verified.append(leg_name)
+                    continue
+
+                try:
+                    order_status = self.client.get_order_status(order_id)
+                    status = order_status.get("status", "Unknown") if order_status else "Unknown"
+
+                    if status == "Filled":
+                        logger.info(f"✓ Close order verified: {leg_name} (order {order_id}) FILLED")
+                        if self.position.close_legs_verified:
+                            self.position.close_legs_verified[leg_name] = True
+                        legs_verified.append(leg_name)
+
+                    elif status in ["Cancelled", "Rejected"]:
+                        logger.error(f"✗ Close order FAILED: {leg_name} (order {order_id}) status={status}")
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_CLOSE_ORDER_FAILED",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"Close order for {leg_name} was {status}",
+                            "result": "MANUAL INTERVENTION MAY BE REQUIRED"
+                        })
+                        legs_pending.append(f"{leg_name}({status})")
+
+                    else:
+                        # Still working/pending
+                        legs_pending.append(f"{leg_name}({status})")
+
+                except Exception as e:
+                    logger.warning(f"Error checking {leg_name} close order status: {e}")
+                    legs_pending.append(f"{leg_name}(error)")
+
+            # Log progress
+            if legs_verified:
+                logger.debug(f"Close orders verified: {legs_verified}")
+            if legs_pending:
+                logger.info(f"Close orders pending: {legs_pending}")
+                return f"Waiting for close orders: {len(legs_verified)}/4 verified, pending: {legs_pending}"
+
+            # All close orders verified filled
+            if len(legs_verified) >= len(self.position.close_order_ids):
+                logger.info(f"All {len(legs_verified)} close orders verified FILLED")
+
+        # =====================================================================
+        # FALLBACK: Verify no positions remain at broker
+        # =====================================================================
         try:
             broker_positions = self.client.get_positions()
             if broker_positions:
@@ -1736,17 +1816,19 @@ class IronFlyStrategy:
                               if p.get('AssetType') == 'StockOption'
                               and 'SPX' in str(p.get('Description', ''))]
                 if spx_options:
-                    return f"Waiting for close confirmation - {len(spx_options)} legs still open"
+                    logger.warning(f"Broker still shows {len(spx_options)} SPX options - waiting")
+                    return f"Waiting for close confirmation - {len(spx_options)} legs still open at broker"
 
             # No positions found - close confirmed
+            logger.info("Position close CONFIRMED - no SPX options remaining at broker")
             self.state = IronFlyState.DAILY_COMPLETE
             self.closing_started_at = None
             self.position = None
             return "Position closed - all legs confirmed closed at broker"
 
         except Exception as e:
-            logger.error(f"Error verifying close: {e}")
-            return f"Waiting for close confirmation (verification error: {e})"
+            logger.error(f"Error verifying close at broker: {e}")
+            return f"Waiting for close confirmation (broker verification error: {e})"
 
     # =========================================================================
     # ENTRY AND EXIT METHODS
@@ -2322,6 +2404,15 @@ class IronFlyStrategy:
                 "description": f"Failed to close all legs: {len(close_orders)}/4 closed",
                 "result": f"MANUAL INTERVENTION REQUIRED - Close orders: {close_order_ids}"
             })
+
+        # Store close order IDs on position for verification in CLOSING state
+        self.position.close_order_ids = close_order_ids
+        self.position.close_legs_verified = {
+            "short_call": False,
+            "short_put": False,
+            "long_call": False,
+            "long_put": False
+        }
 
         # Log the close trade to Google Sheets
         self.trade_logger.log_trade(

@@ -27,6 +27,11 @@
         }
     },
 
+    "external_price_feed": {
+        "enabled": true,
+        "_note": "Yahoo Finance fallback - used only if Saxo VIX data is unavailable"
+    },
+
     "strategy": {
         "name": "0DTE Iron Fly (Doc Severson)",
 
