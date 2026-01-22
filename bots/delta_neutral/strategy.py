@@ -2489,7 +2489,36 @@ class DeltaNeutralStrategy:
             # MARKET ORDER PATH - For emergency closing only
             # =================================================================
             if use_market_orders:
-                logger.warning(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ MARKET ({leg_to_open_close})")
+                # ORDER-005: Check bid-ask spread before emergency MARKET order
+                # In emergencies we PROCEED anyway (getting out is priority), but log warning
+                quote = self.client.get_quote(leg_uic, leg_asset_type)
+                spread_warning = ""
+                if quote and "Quote" in quote:
+                    bid = quote["Quote"].get("Bid", 0) or 0
+                    ask = quote["Quote"].get("Ask", 0) or 0
+                    if bid > 0 and ask > 0:
+                        spread = abs(ask - bid)
+                        if spread > self._max_absolute_slippage:
+                            spread_warning = f" ⚠️ WIDE SPREAD: ${spread:.2f} (max ${self._max_absolute_slippage:.2f})"
+                            logger.warning(f"  ⚠️ ORDER-005: Wide bid-ask spread on emergency MARKET order")
+                            logger.warning(f"     Bid: ${bid:.2f}, Ask: ${ask:.2f}, Spread: ${spread:.2f}")
+                            logger.warning(f"     Proceeding anyway - emergency close takes priority over slippage!")
+                            # Log safety event for visibility
+                            if self.trade_logger:
+                                self.trade_logger.log_safety_event({
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "event_type": "EMERGENCY_WIDE_SPREAD",
+                                    "severity": "WARNING",
+                                    "spy_price": self.current_underlying_price,
+                                    "vix": self.current_vix,
+                                    "action_taken": f"Proceeding with emergency MARKET order despite wide spread",
+                                    "description": f"UIC {leg_uic}: Spread ${spread:.2f} > max ${self._max_absolute_slippage:.2f}",
+                                    "result": "PROCEEDING"
+                                })
+                        else:
+                            logger.info(f"     Spread OK: ${spread:.2f} (max ${self._max_absolute_slippage:.2f})")
+
+                logger.warning(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ MARKET ({leg_to_open_close}){spread_warning}")
 
                 result = self.client.place_market_order_immediate(
                     uic=leg_uic,
