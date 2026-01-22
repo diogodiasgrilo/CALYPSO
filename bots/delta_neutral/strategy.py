@@ -996,7 +996,7 @@ class DeltaNeutralStrategy:
                 success = False
 
         if success:
-            self.state = StrategyState.NO_POSITION
+            self.state = StrategyState.IDLE
             logger.critical("✅ All positions closed in emergency")
         else:
             logger.critical("❌ Some positions may still be open - MANUAL CHECK REQUIRED")
@@ -6576,8 +6576,9 @@ class DeltaNeutralStrategy:
                 if not self.enter_long_straddle():
                     logger.error("Failed to enter new straddle - will retry")
                     self._increment_failure_count("recenter_partial_enter_straddle_failed")
-                    # We still have shorts but no straddle - need to recenter again
-                    self.state = StrategyState.SHORT_STRANGLE_ACTIVE
+                    # We still have shorts but no straddle - this will trigger
+                    # partial straddle handling on next recenter attempt
+                    self.state = StrategyState.FULL_POSITION
                     return False
 
                 # Update metrics
