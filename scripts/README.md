@@ -66,4 +66,4 @@ python scripts/tests/test_spy_price.py
 
 ---
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-22

@@ -440,6 +440,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     last_position_sync_time = datetime.now()
     position_sync_interval = 600  # Sync positions with Saxo every 10 minutes
 
+    # POS-003: Position reconciliation tracking
+    last_reconciliation_time = datetime.now()
+    reconciliation_interval = 3600  # Check position reconciliation hourly
+
+    # MKT-001: Pre-market gap detection
+    pre_market_gap_checked_today = False
+
     try:
         while not shutdown_requested:
             try:
@@ -482,6 +489,22 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         )
                         last_performance_metrics_date = today
                         trade_logger.log_event(f"Performance metrics updated ({period})")
+
+                        # MKT-001: Save previous close for next day's gap detection
+                        if is_trading_day and strategy.current_underlying_price > 0:
+                            strategy.update_previous_close(strategy.current_underlying_price)
+
+                    # MKT-001: Pre-market gap check (only on trading days, 8-9:30 AM ET)
+                    if is_trading_day and not pre_market_gap_checked_today:
+                        if 8 <= market_time.hour < 10:
+                            gap = strategy.check_pre_market_gap(gap_threshold_percent=2.0)
+                            if gap is not None:
+                                trade_logger.log_event(f"MKT-001: Pre-market gap detected: {gap:+.2f}%")
+                            pre_market_gap_checked_today = True
+
+                    # Reset pre-market flag at midnight
+                    if market_time.hour == 0:
+                        pre_market_gap_checked_today = False
 
                     market_status = get_market_status_message()
                     trade_logger.log_event(market_status)
@@ -660,6 +683,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         last_bot_log_time = now
                     except Exception as e:
                         trade_logger.log_error(f"Hourly bot log error: {e}")
+
+                # POS-003: Hourly position reconciliation check
+                # Detects early assignment, manual intervention, or position discrepancies
+                if (now - last_reconciliation_time).total_seconds() >= reconciliation_interval:
+                    try:
+                        trade_logger.log_event("POS-003: Running hourly position reconciliation...")
+                        strategy.check_position_reconciliation()
+                        last_reconciliation_time = now
+                    except Exception as e:
+                        trade_logger.log_error(f"Position reconciliation error: {e}")
 
                 # Log bot heartbeat - this is the last message before sleeping
                 # Shows bot is alive and what state it's in

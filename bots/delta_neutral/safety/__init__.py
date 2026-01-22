@@ -17,7 +17,7 @@ SAFETY ARCHITECTURE OVERVIEW
    - reset_circuit_breaker(): Manual reset
 
    Behavior:
-   - Opens after 3 consecutive failures (configurable)
+   - Opens after 5 consecutive failures (configurable via max_consecutive_errors)
    - Auto-resets after cooldown IF positions are safe
    - Requires manual intervention for unsafe states
 

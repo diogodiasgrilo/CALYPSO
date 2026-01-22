@@ -41,7 +41,13 @@ calypso/
 ├── bots/
 │   ├── delta_neutral/           # SPY strategy
 │   │   ├── main.py
-│   │   ├── strategy.py
+│   │   ├── strategy.py          # Core trading logic (~8000 lines)
+│   │   ├── models/              # Data models (extracted)
+│   │   │   ├── states.py        # PositionType, StrategyState enums
+│   │   │   ├── positions.py     # Option/Straddle/Strangle dataclasses
+│   │   │   └── metrics.py       # Performance tracking
+│   │   ├── safety/              # Safety documentation
+│   │   │   └── __init__.py      # Safety architecture docs
 │   │   └── config/config.json
 │   ├── iron_fly_0dte/           # S&P 500 0DTE strategy
 │   │   ├── main.py
@@ -160,6 +166,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - **[VM Commands Reference](docs/VM_COMMANDS.md)** - Complete VM command reference
 - **[Google Sheets Setup](docs/GOOGLE_SHEETS.md)** - Trade logging setup
 - **[Deployment Guide](docs/DEPLOYMENT.md)** - GCP deployment instructions
+- **[Delta Neutral Edge Cases](docs/DELTA_NEUTRAL_EDGE_CASES.md)** - Risk analysis & edge case scenarios
 - **[Configuration Reference](config/README.md)** - Config file reference
 
 ---
@@ -177,12 +184,23 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - US market holiday detection (all NYSE holidays)
 - Intelligent sleep during market closures
 
-**Safety Features:**
+**Safety Features (All Bots):**
+- Circuit breaker (halts trading after consecutive failures)
+- Action cooldowns (prevents rapid retry loops)
 - Fed meeting blackout periods (2 days before FOMC)
 - ITM prevention for short options
 - Emergency exit on large moves (5%+)
 - VIX-based entry filtering
 - Position recovery on restart
+
+**Delta Neutral Advanced Safety:**
+- Progressive order retry (0% → 5% → 10% slippage → MARKET)
+- Partial fill fallback handlers (6 emergency scenarios)
+- Emergency position handlers (close naked shorts, protect straddle)
+- Orphaned order tracking (blocks trading until resolved)
+- ITM risk detection with emergency roll triggers
+- Auto-sync with Saxo before all emergency actions
+- See `bots/delta_neutral/safety/__init__.py` for full documentation
 
 ---
 
@@ -214,5 +232,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 3.0.0
-**Last Updated:** 2026-01-20
+**Version:** 3.1.0
+**Last Updated:** 2026-01-22

@@ -81,9 +81,10 @@ cp config.example.json config.json
 ```json
 {
   "circuit_breaker": {
-    "max_consecutive_errors": 3,
+    "max_consecutive_errors": 5,
     "max_disconnection_seconds": 60,
-    "cooldown_minutes": 15
+    "cooldown_minutes": 15,
+    "auto_reset_if_safe": true
   }
 }
 ```
@@ -192,4 +193,4 @@ Bot-specific settings (strategy parameters) still come from each bot's `config.j
 
 ---
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-22

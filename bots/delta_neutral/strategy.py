@@ -22,75 +22,75 @@ METHOD INDEX (for quick navigation - use Ctrl+G to jump to line number)
 =============================================================================
 
 INITIALIZATION
-    __init__                            ~81     Setup and configuration
+    __init__                            ~156    Setup and configuration
 
 SAFETY - CIRCUIT BREAKER (see also: safety/__init__.py for documentation)
-    _increment_failure_count            ~178    Track failures
-    _reset_failure_count                ~197    Reset after success
-    _open_circuit_breaker               ~203    Halt trading
-    _check_circuit_breaker              ~978    Check if halted
-    reset_circuit_breaker               ~1052   Manual reset
+    _increment_failure_count            ~253    Track failures
+    _reset_failure_count                ~272    Reset after success
+    _open_circuit_breaker               ~278    Halt trading
+    _check_circuit_breaker              ~1053   Check if halted
+    reset_circuit_breaker               ~1127   Manual reset
 
 SAFETY - EMERGENCY HANDLERS
-    _emergency_position_check           ~259    Analyze risk exposure
-    _close_partial_strangle_emergency   ~354    Close naked short
-    _close_short_strangle_emergency     ~435    Close all shorts
-    _emergency_close_all                ~587    Close everything
-    _close_partial_straddle_emergency   ~621    Close partial longs
+    _emergency_position_check           ~334    Analyze risk exposure
+    _close_partial_strangle_emergency   ~429    Close naked short
+    _close_short_strangle_emergency     ~510    Close all shorts
+    _emergency_close_all                ~662    Close everything
+    _close_partial_straddle_emergency   ~696    Close partial longs
 
 SAFETY - PARTIAL FILL FALLBACKS
-    _handle_strangle_partial_fill_fallback  ~722    Close naked, keep straddle
-    _handle_straddle_partial_fill_fallback  ~846    Go FLAT
+    _handle_strangle_partial_fill_fallback  ~797    Close naked, keep straddle
+    _handle_straddle_partial_fill_fallback  ~921    Go FLAT
 
 SAFETY - COOLDOWNS & ORPHANS
-    _add_orphaned_order                 ~1073   Track orphaned orders
-    _check_for_orphaned_orders          ~1085   Check before trading
-    _is_action_on_cooldown              ~1116   Check cooldown
-    _set_action_cooldown                ~1144   Set cooldown
-    _clear_action_cooldown              ~1154   Clear cooldown
+    _add_orphaned_order                 ~1148   Track orphaned orders
+    _check_for_orphaned_orders          ~1160   Check before trading
+    _is_action_on_cooldown              ~1191   Check cooldown
+    _set_action_cooldown                ~1219   Set cooldown
+    _clear_action_cooldown              ~1229   Clear cooldown
 
 ORDER MANAGEMENT
-    _place_protected_multi_leg_order    ~1212   Core order placement
-    _calculate_combo_limit_price        ~1527   Calculate prices
+    _place_protected_multi_leg_order    ~1287   Core order placement
+    _calculate_combo_limit_price        ~1602   Calculate prices
 
 POSITION RECOVERY & SYNC
-    recover_positions                   ~1564   Main recovery
-    _sync_straddle_after_partial_close  ~1795   Sync straddle
-    _sync_strangle_after_partial_close  ~1873   Sync strangle
-    _recover_long_straddle              ~2172   Recover straddle
-    _recover_short_strangle             ~2274   Recover strangle
+    recover_positions                   ~1639   Main recovery
+    _sync_straddle_after_partial_close  ~1870   Sync straddle
+    _sync_strangle_after_partial_close  ~1948   Sync strangle
+    _recover_long_straddle              ~2247   Recover straddle
+    _recover_short_strangle             ~2349   Recover strangle
 
 MARKET DATA
-    update_market_data                  ~3340   Update SPY/VIX
-    refresh_position_prices             ~3391   Update option prices
+    update_market_data                  ~3415   Update SPY/VIX
+    refresh_position_prices             ~3466   Update option prices
 
 ENTRY CONDITIONS
-    check_vix_entry_condition           ~3516   VIX check
-    check_shorts_itm_risk               ~3581   ITM risk
-    check_emergency_exit_condition      ~3628   5%+ move
+    check_vix_entry_condition           ~3591   VIX check
+    check_shorts_itm_risk               ~3656   ITM risk
+    check_emergency_exit_condition      ~3703   5%+ move
 
 STRADDLE OPERATIONS
-    enter_long_straddle                 ~3662   Enter straddle
-    close_long_straddle                 ~4130   Close straddle
-    _add_missing_straddle_leg           ~5384   Complete partial
+    enter_long_straddle                 ~3737   Enter straddle
+    close_long_straddle                 ~4205   Close straddle
+    _add_missing_straddle_leg           ~5459   Complete partial
 
 STRANGLE OPERATIONS
-    enter_short_strangle                ~4297   Enter strangle
-    close_short_strangle                ~5611   Close strangle
-    _add_missing_strangle_leg           ~5117   Complete partial
+    enter_short_strangle                ~4372   Enter strangle
+    close_short_strangle                ~5686   Close strangle
+    _add_missing_strangle_leg           ~5192   Complete partial
 
 RECENTER & ROLL
-    execute_recenter                    ~6028   5-point recenter
-    roll_weekly_shorts                  ~6514   Friday roll
+    execute_recenter                    ~6103   5-point recenter
+    roll_weekly_shorts                  ~6589   Friday roll
 
 EXIT & MAIN LOOP
-    exit_all_positions                  ~6704   Exit all
-    run_strategy_check                  ~6910   Main entry point
+    exit_all_positions                  ~6779   Exit all
+    run_strategy_check                  ~6985   Main entry point
 
 REPORTING
-    get_status_summary                  ~7283   Status
-    get_dashboard_metrics               ~7328   Metrics
-    log_daily_summary                   ~7714   Daily log
+    get_status_summary                  ~7358   Status
+    get_dashboard_metrics               ~7403   Metrics
+    log_daily_summary                   ~7789   Daily log
 
 =============================================================================
 Author: Trading Bot Developer
@@ -193,7 +193,7 @@ class DeltaNeutralStrategy:
         # Per Brian Terry: "You aren't rolling, you're starting a new weekly cycle"
         self._shorts_closed_date: Optional[date] = None
 
-        # CIRCUIT BREAKER: Consecutive failure tracking to prevent death loops
+        # CIRCUIT BREAKER: Failure tracking to prevent death loops
         # If we hit MAX_CONSECUTIVE_FAILURES, halt all trading
         # Configurable via config.json circuit_breaker.max_consecutive_errors (default: 5)
         self._consecutive_failures: int = 0
@@ -204,8 +204,35 @@ class DeltaNeutralStrategy:
         self._circuit_breaker_opened_at: Optional[datetime] = None  # When circuit breaker was triggered
         self._last_failure_time: Optional[datetime] = None
 
+        # CONN-002: Sliding window failure tracking for intermittent errors
+        # Triggers if X failures occur in last Y calls (handles flaky API better than consecutive-only)
+        self._api_call_history: List[Tuple[datetime, bool]] = []  # (timestamp, success)
+        self._sliding_window_size: int = circuit_breaker_config.get("sliding_window_size", 10)
+        self._sliding_window_threshold: int = circuit_breaker_config.get("sliding_window_failures", 5)
+
+        # TIME-001: Operation lock to prevent concurrent strategy checks
+        self._operation_in_progress: bool = False
+        self._operation_start_time: Optional[datetime] = None
+
         # Track orphaned orders that couldn't be cancelled
         self._orphaned_orders: List[str] = []
+
+        # ORDER-004: CRITICAL INTERVENTION FLAG
+        # Set when MARKET orders fail during emergency close - requires manual intervention
+        # This is more severe than circuit breaker - indicates potential stuck positions
+        self._critical_intervention_required: bool = False
+        self._critical_intervention_reason: str = ""
+        self._critical_intervention_timestamp: Optional[datetime] = None
+
+        # POS-003: Position reconciliation tracking
+        # Last known position state for assignment detection
+        self._last_reconciliation_time: Optional[datetime] = None
+        self._expected_positions: Dict[str, int] = {}  # Maps position_id -> expected quantity
+
+        # MKT-001: Pre-market gap detection
+        # Track previous day close for gap detection
+        self._previous_close_price: Optional[float] = None
+        self._pre_market_gap_checked_today: bool = False
 
         # ACTION COOLDOWN: Prevent rapid retry of same failed action
         # Maps action_type -> last_attempt_time
@@ -230,6 +257,10 @@ class DeltaNeutralStrategy:
         self.roll_days = self.strategy_config["roll_days"]
         self.order_timeout_seconds = self.strategy_config.get("order_timeout_seconds", 60)
 
+        # ORDER-005: Max absolute slippage before aborting MARKET order
+        # If bid-ask spread exceeds this dollar amount, abort rather than use MARKET order
+        self._max_absolute_slippage: float = self.strategy_config.get("max_absolute_slippage", 2.00)
+
         # Trading cutoff times (minutes before market close)
         self.recenter_cutoff_minutes = self.strategy_config.get("recenter_cutoff_minutes_before_close", 15)
         self.shorts_cutoff_minutes = self.strategy_config.get("shorts_cutoff_minutes_before_close", 10)
@@ -252,10 +283,11 @@ class DeltaNeutralStrategy:
 
     def _increment_failure_count(self, reason: str) -> None:
         """
-        Increment the consecutive failure count and check circuit breaker.
+        Increment the failure count and check circuit breaker.
 
-        Called when an operation fails. If we hit MAX_CONSECUTIVE_FAILURES,
-        the circuit breaker opens and halts all trading.
+        Called when an operation fails. Triggers circuit breaker if:
+        1. Consecutive failures >= max_consecutive_failures, OR
+        2. CONN-002: Sliding window has >= threshold failures in last N calls
 
         Args:
             reason: Description of the failure for logging
@@ -263,17 +295,56 @@ class DeltaNeutralStrategy:
         self._consecutive_failures += 1
         self._last_failure_time = datetime.now()
 
+        # CONN-002: Add to sliding window history
+        self._record_api_result(success=False)
+
         logger.warning(f"⚠️ Operation failed: {reason}")
         logger.warning(f"   Consecutive failures: {self._consecutive_failures}/{self._max_consecutive_failures}")
 
+        # Check consecutive failures (original logic)
         if self._consecutive_failures >= self._max_consecutive_failures:
             self._open_circuit_breaker(reason)
+            return
+
+        # CONN-002: Check sliding window (catches intermittent failures)
+        recent_failures = self._get_sliding_window_failures()
+        if recent_failures >= self._sliding_window_threshold:
+            self._open_circuit_breaker(
+                f"CONN-002: {recent_failures} failures in last {self._sliding_window_size} API calls. "
+                f"Original error: {reason}"
+            )
 
     def _reset_failure_count(self) -> None:
         """Reset the consecutive failure count after a successful operation."""
+        # CONN-002: Record success in sliding window
+        self._record_api_result(success=True)
+
         if self._consecutive_failures > 0:
-            logger.info(f"✓ Resetting failure count (was {self._consecutive_failures})")
+            logger.info(f"✓ Resetting consecutive failure count (was {self._consecutive_failures})")
             self._consecutive_failures = 0
+
+    def _record_api_result(self, success: bool) -> None:
+        """
+        CONN-002: Record an API call result in the sliding window.
+
+        Args:
+            success: True if call succeeded, False if failed
+        """
+        now = datetime.now()
+        self._api_call_history.append((now, success))
+
+        # Keep only last N entries
+        if len(self._api_call_history) > self._sliding_window_size:
+            self._api_call_history = self._api_call_history[-self._sliding_window_size:]
+
+    def _get_sliding_window_failures(self) -> int:
+        """
+        CONN-002: Get the number of failures in the sliding window.
+
+        Returns:
+            int: Number of failures in the last N API calls
+        """
+        return sum(1 for _, success in self._api_call_history if not success)
 
     def _open_circuit_breaker(self, reason: str) -> None:
         """
@@ -1145,6 +1216,394 @@ class DeltaNeutralStrategy:
         self._consecutive_failures = 0
         self._orphaned_orders = []
 
+    # =========================================================================
+    # STATE-002: STATE/POSITION CONSISTENCY CHECK
+    # =========================================================================
+
+    def _check_state_position_consistency(self) -> Optional[str]:
+        """
+        STATE-002: Verify that strategy state matches actual position objects.
+
+        Catches situations where:
+        - State is FULL_POSITION but short_strangle is None
+        - State is LONG_STRADDLE_ACTIVE but long_straddle is None
+        - State is IDLE but positions exist
+
+        Returns:
+            Optional[str]: Description of inconsistency, or None if consistent
+        """
+        state = self.state
+
+        # Check FULL_POSITION state
+        if state == StrategyState.FULL_POSITION:
+            if not self.long_straddle:
+                return "State is FULL_POSITION but long_straddle is None"
+            if not self.short_strangle:
+                return "State is FULL_POSITION but short_strangle is None"
+
+        # Check LONG_STRADDLE_ACTIVE state
+        elif state == StrategyState.LONG_STRADDLE_ACTIVE:
+            if not self.long_straddle:
+                return "State is LONG_STRADDLE_ACTIVE but long_straddle is None"
+            # Note: short_strangle being None is expected in this state
+
+        # Check IDLE state
+        elif state == StrategyState.IDLE:
+            if self.long_straddle and (self.long_straddle.call or self.long_straddle.put):
+                return "State is IDLE but long_straddle has positions"
+            if self.short_strangle and (self.short_strangle.call or self.short_strangle.put):
+                return "State is IDLE but short_strangle has positions"
+
+        # Check transient states
+        elif state in [StrategyState.RECENTERING, StrategyState.ROLLING_SHORTS, StrategyState.EXITING]:
+            # In transient states, we should have at least a straddle
+            if not self.long_straddle:
+                return f"State is {state.value} but long_straddle is None"
+
+        return None  # All consistent
+
+    # =========================================================================
+    # ORDER-004: CRITICAL INTERVENTION - MARKET ORDER FAILURE HANDLING
+    # =========================================================================
+
+    def _set_critical_intervention(self, reason: str) -> None:
+        """
+        Set the critical intervention flag when MARKET orders fail.
+
+        This is MORE SEVERE than circuit breaker. It indicates that even
+        emergency MARKET orders couldn't execute, leaving positions at risk.
+
+        SCENARIO: ITM risk detected → emergency close shorts with MARKET order → MARKET order fails
+        RESULT: Short positions remain open and at risk of assignment/loss
+
+        Args:
+            reason: Description of why intervention is required
+        """
+        self._critical_intervention_required = True
+        self._critical_intervention_reason = reason
+        self._critical_intervention_timestamp = datetime.now()
+
+        logger.critical("=" * 70)
+        logger.critical("🚨🚨🚨 CRITICAL MANUAL INTERVENTION REQUIRED 🚨🚨🚨")
+        logger.critical("=" * 70)
+        logger.critical(f"Reason: {reason}")
+        logger.critical("")
+        logger.critical("A MARKET ORDER FAILED - This is extremely rare and serious!")
+        logger.critical("Possible causes:")
+        logger.critical("  - Trading halt on the exchange")
+        logger.critical("  - No liquidity for the option")
+        logger.critical("  - Saxo API or exchange rejection")
+        logger.critical("")
+        logger.critical("IMMEDIATE ACTIONS REQUIRED:")
+        logger.critical("  1. Open SaxoTraderGO immediately")
+        logger.critical("  2. Check current positions")
+        logger.critical("  3. Manually close any risky positions")
+        logger.critical("  4. Call reset_critical_intervention() after resolved")
+        logger.critical("=" * 70)
+
+        # Log to Google Sheets with maximum severity
+        if self.trade_logger:
+            self.trade_logger.log_safety_event({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_type": "CRITICAL_MANUAL_INTERVENTION",
+                "severity": "CRITICAL",
+                "spy_price": self.current_underlying_price,
+                "initial_strike": self.initial_straddle_strike,
+                "vix": self.current_vix,
+                "action_taken": "MARKET ORDER FAILED - ALL TRADING BLOCKED",
+                "description": reason,
+                "result": "MANUAL_INTERVENTION_REQUIRED"
+            })
+
+    def _check_critical_intervention(self) -> bool:
+        """
+        Check if critical intervention is required.
+
+        Returns:
+            bool: True if intervention required (blocks all trading), False otherwise
+        """
+        if self._critical_intervention_required:
+            elapsed = ""
+            if self._critical_intervention_timestamp:
+                mins = (datetime.now() - self._critical_intervention_timestamp).total_seconds() / 60
+                elapsed = f" ({mins:.0f} minutes ago)"
+
+            logger.critical(f"🚨 CRITICAL INTERVENTION REQUIRED{elapsed}: {self._critical_intervention_reason}")
+            return True
+        return False
+
+    def reset_critical_intervention(self) -> None:
+        """
+        Manually reset the critical intervention flag.
+
+        Only call this AFTER you have:
+        1. Verified all positions in SaxoTraderGO
+        2. Manually closed any risky positions
+        3. Confirmed account is in safe state
+        """
+        if self._critical_intervention_required:
+            logger.info("=" * 50)
+            logger.info("Critical intervention flag manually cleared")
+            logger.info(f"Previous reason: {self._critical_intervention_reason}")
+            logger.info("=" * 50)
+
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "CRITICAL_INTERVENTION_CLEARED",
+                    "severity": "INFO",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "action_taken": "Manual intervention completed",
+                    "description": f"Cleared: {self._critical_intervention_reason}",
+                    "result": "RESOLVED"
+                })
+
+        self._critical_intervention_required = False
+        self._critical_intervention_reason = ""
+        self._critical_intervention_timestamp = None
+
+    # =========================================================================
+    # POS-003: EARLY ASSIGNMENT / POSITION RECONCILIATION DETECTION
+    # =========================================================================
+
+    def check_position_reconciliation(self) -> bool:
+        """
+        Compare expected positions (bot memory) vs actual positions (Saxo).
+
+        This detects:
+        - Early assignment of short options
+        - Options expiring worthless
+        - Manual intervention by user
+        - Any position discrepancy
+
+        Returns:
+            bool: True if positions match, False if discrepancy detected
+        """
+        logger.info("🔍 POS-003: Running position reconciliation check...")
+
+        # Build expected positions from bot memory
+        expected_calls = 0
+        expected_puts = 0
+        expected_short_calls = 0
+        expected_short_puts = 0
+
+        if self.long_straddle:
+            if self.long_straddle.call:
+                expected_calls = self.long_straddle.call.quantity
+            if self.long_straddle.put:
+                expected_puts = self.long_straddle.put.quantity
+
+        if self.short_strangle:
+            if self.short_strangle.call:
+                expected_short_calls = abs(self.short_strangle.call.quantity)
+            if self.short_strangle.put:
+                expected_short_puts = abs(self.short_strangle.put.quantity)
+
+        # Get actual positions from Saxo
+        actual_positions = self.client.get_positions()
+        spy_options = self._filter_spy_options(actual_positions) if actual_positions else []
+
+        actual_long_calls = 0
+        actual_long_puts = 0
+        actual_short_calls = 0
+        actual_short_puts = 0
+
+        for pos in spy_options:
+            pos_base = pos.get("PositionBase", {})
+            amount = pos_base.get("Amount", 0)
+
+            # Parse option details
+            parsed = self._parse_option_position(pos)
+            if not parsed:
+                continue
+
+            opt_type = parsed.get("option_type", "")
+
+            if amount > 0:  # Long position
+                if opt_type == "Call":
+                    actual_long_calls += amount
+                else:
+                    actual_long_puts += amount
+            elif amount < 0:  # Short position
+                if opt_type == "Call":
+                    actual_short_calls += abs(amount)
+                else:
+                    actual_short_puts += abs(amount)
+
+        # Compare expected vs actual
+        discrepancies = []
+
+        if expected_calls != actual_long_calls:
+            discrepancies.append(f"Long Calls: expected {expected_calls}, actual {actual_long_calls}")
+        if expected_puts != actual_long_puts:
+            discrepancies.append(f"Long Puts: expected {expected_puts}, actual {actual_long_puts}")
+        if expected_short_calls != actual_short_calls:
+            discrepancies.append(f"Short Calls: expected {expected_short_calls}, actual {actual_short_calls}")
+        if expected_short_puts != actual_short_puts:
+            discrepancies.append(f"Short Puts: expected {expected_short_puts}, actual {actual_short_puts}")
+
+        self._last_reconciliation_time = datetime.now()
+
+        if discrepancies:
+            logger.critical("=" * 70)
+            logger.critical("🚨 POS-003: POSITION DISCREPANCY DETECTED!")
+            logger.critical("=" * 70)
+            for d in discrepancies:
+                logger.critical(f"   {d}")
+            logger.critical("")
+            logger.critical("Possible causes:")
+            logger.critical("   - Early assignment of short options")
+            logger.critical("   - Options expired worthless")
+            logger.critical("   - Manual intervention in SaxoTraderGO")
+            logger.critical("")
+            logger.critical("Action: Running position recovery to sync state...")
+            logger.critical("=" * 70)
+
+            # Log to Google Sheets
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "POSITION_DISCREPANCY",
+                    "severity": "WARNING",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "action_taken": "Position recovery triggered",
+                    "description": "; ".join(discrepancies),
+                    "result": "SYNC_REQUIRED"
+                })
+
+            # Auto-recover by syncing with Saxo
+            self.recover_positions()
+            return False
+
+        logger.info("✅ POS-003: Position reconciliation passed - all positions match")
+        return True
+
+    # =========================================================================
+    # MKT-001: PRE-MARKET GAP DETECTION
+    # =========================================================================
+
+    def check_pre_market_gap(self, gap_threshold_percent: float = 2.0) -> Optional[float]:
+        """
+        Check for significant pre-market gaps before market opens.
+
+        Uses Yahoo Finance (external price feed) to get pre-market SPY price
+        and compares to previous day's close.
+
+        Args:
+            gap_threshold_percent: Alert if gap exceeds this percentage (default 2%)
+
+        Returns:
+            float: Gap percentage if detected, None if no significant gap or check failed
+        """
+        from shared.external_price_feed import ExternalPriceFeed
+        from shared.market_hours import is_market_open, get_us_market_time
+
+        # Only check before market opens
+        if is_market_open():
+            return None
+
+        # Only check once per day
+        if self._pre_market_gap_checked_today:
+            return None
+
+        market_time = get_us_market_time()
+
+        # Only check between 8 AM and 9:30 AM ET (pre-market hours)
+        if market_time.hour < 8 or market_time.hour >= 10:
+            return None
+
+        logger.info("🔍 MKT-001: Checking pre-market gap...")
+
+        # Get pre-market price from external feed
+        try:
+            external_feed = ExternalPriceFeed(enabled=True)
+            pre_market_price = external_feed.get_price("SPY")
+
+            if not pre_market_price:
+                logger.warning("MKT-001: Could not fetch pre-market SPY price")
+                return None
+
+            # Use previous close or last known price
+            reference_price = self._previous_close_price or self.current_underlying_price
+
+            if not reference_price or reference_price <= 0:
+                logger.warning("MKT-001: No reference price available for gap calculation")
+                self._previous_close_price = pre_market_price  # Set for next check
+                return None
+
+            # Calculate gap percentage
+            gap_percent = ((pre_market_price - reference_price) / reference_price) * 100
+            abs_gap = abs(gap_percent)
+
+            logger.info(f"MKT-001: Pre-market SPY: ${pre_market_price:.2f}, Previous close: ${reference_price:.2f}")
+            logger.info(f"MKT-001: Gap: {gap_percent:+.2f}%")
+
+            self._pre_market_gap_checked_today = True
+
+            if abs_gap >= gap_threshold_percent:
+                direction = "UP" if gap_percent > 0 else "DOWN"
+                logger.critical("=" * 70)
+                logger.critical(f"🚨 MKT-001: SIGNIFICANT PRE-MARKET GAP DETECTED!")
+                logger.critical("=" * 70)
+                logger.critical(f"   SPY is {direction} {abs_gap:.2f}% in pre-market")
+                logger.critical(f"   Pre-market: ${pre_market_price:.2f}")
+                logger.critical(f"   Previous close: ${reference_price:.2f}")
+                logger.critical("")
+                if self.short_strangle:
+                    call_strike = self.short_strangle.call_strike if self.short_strangle.call else 0
+                    put_strike = self.short_strangle.put_strike if self.short_strangle.put else 0
+                    logger.critical(f"   Short strikes: Call ${call_strike:.0f}, Put ${put_strike:.0f}")
+
+                    # Check if gap threatens strikes
+                    if gap_percent > 0 and call_strike > 0:
+                        distance_to_call = ((call_strike - pre_market_price) / pre_market_price) * 100
+                        if distance_to_call < 1:
+                            logger.critical(f"   ⚠️ SHORT CALL AT RISK! Only {distance_to_call:.1f}% from strike")
+                    elif gap_percent < 0 and put_strike > 0:
+                        distance_to_put = ((pre_market_price - put_strike) / pre_market_price) * 100
+                        if distance_to_put < 1:
+                            logger.critical(f"   ⚠️ SHORT PUT AT RISK! Only {distance_to_put:.1f}% from strike")
+                logger.critical("")
+                logger.critical("   Bot will check ITM risk immediately at market open")
+                logger.critical("=" * 70)
+
+                # Log to Google Sheets
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "event_type": "PRE_MARKET_GAP",
+                        "severity": "WARNING",
+                        "spy_price": pre_market_price,
+                        "vix": self.current_vix,
+                        "action_taken": f"Gap {direction} {abs_gap:.2f}% detected",
+                        "description": f"Pre-market: ${pre_market_price:.2f}, Prev close: ${reference_price:.2f}",
+                        "result": "MONITORING"
+                    })
+
+                return gap_percent
+
+            logger.info(f"✅ MKT-001: Pre-market gap ({gap_percent:+.2f}%) within normal range")
+            return None
+
+        except Exception as e:
+            logger.error(f"MKT-001: Error checking pre-market gap: {e}")
+            return None
+
+    def update_previous_close(self, price: float) -> None:
+        """
+        Update the previous close price for next day's gap detection.
+
+        Call this at market close (4 PM ET).
+
+        Args:
+            price: The closing SPY price
+        """
+        self._previous_close_price = price
+        self._pre_market_gap_checked_today = False  # Reset for next day
+        logger.info(f"MKT-001: Previous close updated to ${price:.2f}")
+
     def _add_orphaned_order(self, order_id: str) -> None:
         """
         Track an orphaned order that couldn't be cancelled.
@@ -1400,6 +1859,13 @@ class DeltaNeutralStrategy:
                     failed_leg_index = i
                     failure_message = f"Leg {i+1} MARKET order failed: {result['message']}"
                     logger.error(f"  ✗ {failure_message}")
+
+                    # ORDER-004: MARKET order failed during emergency - this is CRITICAL
+                    # Emergency MARKET orders should always fill - failure indicates serious issue
+                    self._set_critical_intervention(
+                        f"EMERGENCY MARKET ORDER FAILED: {order_description} leg {i+1}. "
+                        f"Reason: {result['message']}. Position may be at risk!"
+                    )
                     break
 
                 continue  # Skip the limit order logic below
@@ -1445,6 +1911,35 @@ class DeltaNeutralStrategy:
 
                 # MARKET ORDER attempt (last resort in progressive sequence)
                 if is_market:
+                    # ORDER-005: Check bid-ask spread before MARKET order
+                    # If spread is too wide, abort to prevent extreme slippage
+                    if quote and "Quote" in quote:
+                        bid = quote["Quote"].get("Bid", 0) or 0
+                        ask = quote["Quote"].get("Ask", 0) or 0
+                        spread = abs(ask - bid)
+                        if spread > self._max_absolute_slippage:
+                            logger.critical(f"  🚨 ORDER-005: Bid-ask spread ${spread:.2f} exceeds max ${self._max_absolute_slippage:.2f}")
+                            logger.critical(f"     Bid: ${bid:.2f}, Ask: ${ask:.2f}")
+                            logger.critical(f"     ABORTING MARKET order to prevent extreme slippage!")
+                            # Log safety event
+                            if self.trade_logger:
+                                self.trade_logger.log_safety_event({
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "event_type": "MARKET_ORDER_ABORTED",
+                                    "severity": "WARNING",
+                                    "spy_price": self.current_underlying_price,
+                                    "vix": self.current_vix,
+                                    "action_taken": f"Aborted MARKET order for {order_description} leg {i+1}",
+                                    "description": f"Spread ${spread:.2f} > max ${self._max_absolute_slippage:.2f}",
+                                    "result": "ABORTED"
+                                })
+                            # Don't place the MARKET order - let it fail naturally
+                            last_result = {
+                                "filled": False,
+                                "message": f"ORDER-005: Spread ${spread:.2f} too wide, MARKET order aborted"
+                            }
+                            continue  # Skip to next attempt (which doesn't exist, so exits)
+
                     logger.warning(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ MARKET (attempt {attempt+1}/{len(retry_sequence)} - LAST RESORT)")
 
                     result = self.client.place_market_order(
@@ -1464,7 +1959,15 @@ class DeltaNeutralStrategy:
                         break
                     else:
                         logger.error(f"  ✗ Leg {i+1} MARKET order failed: {result['message']}")
-                        # This is very bad - even MARKET order failed
+                        # ORDER-004: This is very bad - even MARKET order failed
+                        # Only trigger critical intervention if we already have filled legs
+                        # (meaning we have a partial position that's now stuck)
+                        if filled_orders:
+                            self._set_critical_intervention(
+                                f"MARKET ORDER FAILED (last resort): {order_description} leg {i+1}. "
+                                f"Filled {len(filled_orders)} legs but leg {i+1} failed. "
+                                f"PARTIAL POSITION AT RISK! Reason: {result['message']}"
+                            )
                         continue  # Will exit loop since this is last attempt
 
                 # LIMIT ORDER attempt
@@ -1501,6 +2004,13 @@ class DeltaNeutralStrategy:
                     leg_filled = True
                     break  # Success, move to next leg
                 else:
+                    # ORDER-007: Detect rejection vs timeout
+                    # Rejection: order_id is None (order never placed)
+                    # Timeout: order_id exists (order placed but not filled)
+                    is_rejection = result.get("order_id") is None
+                    if is_rejection:
+                        logger.warning(f"  ⚠ ORDER-007: Leg {i+1} REJECTED by exchange/API (not timeout)")
+
                     # Check if cancel failed - this is serious
                     if result.get("cancel_failed"):
                         orphaned_order_id = result.get("order_id")
@@ -1598,6 +2108,88 @@ class DeltaNeutralStrategy:
             "order_id": ",".join(filled_orders),
             "message": f"All {len(legs)} legs filled successfully"
         }
+
+    # =========================================================================
+    # CONN-005: POSITION VERIFICATION AFTER ORDER FILLS
+    # =========================================================================
+
+    def _verify_position_exists(self, uic: int, expected_amount: int, direction: str = "long") -> bool:
+        """
+        CONN-005: Verify that a position exists after an order is assumed to have filled.
+
+        This catches the case where an order disappears from open orders but wasn't
+        actually filled (could have been rejected).
+
+        Args:
+            uic: The UIC of the instrument
+            expected_amount: Expected position quantity (positive for long, negative for short)
+            direction: "long" or "short" - which direction we expect
+
+        Returns:
+            bool: True if position exists with expected direction, False otherwise
+        """
+        import time
+        time.sleep(0.5)  # Brief delay for Saxo to update positions
+
+        positions = self.client.get_positions()
+        if not positions:
+            logger.warning(f"CONN-005: Could not fetch positions for verification")
+            return False  # Be conservative - assume not verified
+
+        for pos in positions:
+            pos_base = pos.get("PositionBase", {})
+            pos_uic = pos_base.get("Uic")
+            if pos_uic == uic:
+                amount = pos_base.get("Amount", 0)
+                # Check direction matches
+                if direction == "long" and amount > 0:
+                    logger.info(f"✓ CONN-005: Verified long position exists for UIC {uic}, amount {amount}")
+                    return True
+                elif direction == "short" and amount < 0:
+                    logger.info(f"✓ CONN-005: Verified short position exists for UIC {uic}, amount {amount}")
+                    return True
+
+        logger.warning(f"⚠️ CONN-005: Position NOT FOUND for UIC {uic}, expected {direction} {expected_amount}")
+        return False
+
+    def _verify_positions_after_order(self, legs: List[Dict], order_type: str) -> bool:
+        """
+        CONN-005: Verify all positions exist after a multi-leg order.
+
+        Args:
+            legs: List of leg dictionaries with uic, amount, buy_sell
+            order_type: "buy" (long positions) or "sell" (short positions)
+
+        Returns:
+            bool: True if all positions verified, False if any missing
+        """
+        all_verified = True
+
+        for leg in legs:
+            uic = leg.get("uic")
+            amount = leg.get("amount", 1)
+            buy_sell = leg.get("buy_sell", "Buy")
+
+            # Determine expected direction based on order type and buy/sell
+            if order_type == "buy":
+                direction = "long" if buy_sell == "Buy" else "short"
+            else:  # sell
+                direction = "short" if buy_sell == "Sell" else "long"
+
+            if not self._verify_position_exists(uic, amount, direction):
+                all_verified = False
+                logger.critical(f"⚠️ CONN-005: Position verification FAILED for UIC {uic}")
+
+        if all_verified:
+            logger.info(f"✓ CONN-005: All {len(legs)} positions verified successfully")
+        else:
+            logger.critical("🚨 CONN-005: POSITION VERIFICATION FAILED - some positions not found!")
+            logger.critical("   This may indicate order was rejected but reported as filled")
+            logger.critical("   Running position recovery to sync state...")
+            # Trigger recovery to sync state
+            self.recover_positions()
+
+        return all_verified
 
     def _calculate_combo_limit_price(
         self,
@@ -6994,9 +7586,34 @@ class DeltaNeutralStrategy:
         """
         action_taken = "No action"
 
-        # CRITICAL: Check strategy-level circuit breaker first
-        if self._check_circuit_breaker():
-            return f"🚨 CIRCUIT BREAKER OPEN - {self._circuit_breaker_reason}"
+        # TIME-001: Check operation lock to prevent concurrent strategy checks
+        if self._operation_in_progress:
+            elapsed = ""
+            if self._operation_start_time:
+                mins = (datetime.now() - self._operation_start_time).total_seconds() / 60
+                elapsed = f" ({mins:.1f} minutes)"
+            logger.warning(f"⚠️ TIME-001: Operation already in progress{elapsed}, skipping this check")
+            return "Operation in progress - skipped"
+
+        # Acquire operation lock
+        self._operation_in_progress = True
+        self._operation_start_time = datetime.now()
+
+        try:
+            # ORDER-004: Check for critical intervention first (more severe than circuit breaker)
+            if self._check_critical_intervention():
+                return f"🚨🚨🚨 CRITICAL INTERVENTION REQUIRED - {self._critical_intervention_reason}"
+
+            # STATE-002: Verify state matches actual position objects
+            state_issue = self._check_state_position_consistency()
+            if state_issue:
+                logger.warning(f"⚠️ STATE-002: {state_issue}")
+                logger.info("STATE-002: Running position recovery to fix state...")
+                self.recover_positions()
+
+            # CRITICAL: Check strategy-level circuit breaker first
+            if self._check_circuit_breaker():
+                return f"🚨 CIRCUIT BREAKER OPEN - {self._circuit_breaker_reason}"
 
         # Check Saxo client circuit breaker
         if self.client.is_circuit_open():
@@ -7351,9 +7968,14 @@ class DeltaNeutralStrategy:
                                     "result": "SKIPPED"
                                 })
 
-        logger.info(f"Strategy check: {action_taken} | State: {self.state.value}")
+            logger.info(f"Strategy check: {action_taken} | State: {self.state.value}")
 
-        return action_taken
+            return action_taken
+
+        finally:
+            # TIME-001: Release operation lock
+            self._operation_in_progress = False
+            self._operation_start_time = None
 
     def get_status_summary(self) -> Dict:
         """
