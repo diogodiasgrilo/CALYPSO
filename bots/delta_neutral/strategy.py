@@ -49,6 +49,25 @@ SAFETY - COOLDOWNS & ORPHANS
     _set_action_cooldown                ~1219   Set cooldown
     _clear_action_cooldown              ~1229   Clear cooldown
 
+SAFETY - EDGE CASE HANDLERS (42 scenarios - see docs/DELTA_NEUTRAL_EDGE_CASES.md)
+    check_state_position_consistency    ~1239   STATE-002: State/position mismatch
+    _set_critical_intervention          ~1285   ORDER-004: MARKET order failure
+    check_position_reconciliation       ~1386   POS-003: Early assignment detection
+    check_pre_market_gap                ~1503   MKT-001: Pre-market gap detection
+    check_expired_positions             ~1670   POS-004: Expiration handling
+    _record_price_for_velocity          ~1756   MKT-002: Flash crash tracking
+    check_flash_crash_velocity          ~1777   MKT-002: Flash crash detection
+    is_early_close_day                  ~1849   TIME-003: Half-day closures
+    _handle_recenter_failure_on_roll_day ~1983  TIME-004: Roll+recenter same day
+    verify_positions_before_operation   ~2056   POS-002: Manual intervention
+    _check_market_halt_pattern          ~2147   MKT-004: Market halt detection
+    _log_no_valid_strikes_error         ~2195   MKT-005: No liquidity handling
+    _validate_quote_freshness           ~2235   DATA-001: Stale quote detection
+    _warn_missing_greeks                ~2286   DATA-002: Missing Greeks warning
+    _validate_option_chain              ~2317   DATA-003: Option chain validation
+    _verify_position_exists             ~2832   CONN-005: Position verification
+    _verify_positions_after_order       ~2871   CONN-005: Multi-leg verification
+
 ORDER MANAGEMENT
     _place_protected_multi_leg_order    ~1287   Core order placement
     _calculate_combo_limit_price        ~1602   Calculate prices
@@ -95,6 +114,7 @@ REPORTING
 =============================================================================
 Author: Trading Bot Developer
 Date: 2024
+Last Updated: 2026-01-22 (42 edge case handlers added)
 """
 
 import logging

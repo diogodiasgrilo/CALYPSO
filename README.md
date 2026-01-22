@@ -193,14 +193,21 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - VIX-based entry filtering
 - Position recovery on restart
 
-**Delta Neutral Advanced Safety:**
+**Delta Neutral Advanced Safety (42 edge cases covered):**
 - Progressive order retry (0% → 5% → 10% slippage → MARKET)
 - Partial fill fallback handlers (6 emergency scenarios)
 - Emergency position handlers (close naked shorts, protect straddle)
 - Orphaned order tracking (blocks trading until resolved)
 - ITM risk detection with emergency roll triggers
 - Auto-sync with Saxo before all emergency actions
-- See `bots/delta_neutral/safety/__init__.py` for full documentation
+- Critical intervention flag (halts trading until human review)
+- Pre-market gap detection (MKT-001 via Yahoo Finance)
+- Flash crash velocity detection (MKT-002 - 2%+ in 5 min)
+- Position reconciliation (POS-003 - hourly Saxo sync)
+- Token refresh on 401 (CONN-004) and rate limiting (CONN-006)
+- Half-day closure detection (TIME-003)
+- See [Edge Cases Doc](docs/DELTA_NEUTRAL_EDGE_CASES.md) for full analysis
+- See `bots/delta_neutral/safety/__init__.py` for implementation docs
 
 ---
 

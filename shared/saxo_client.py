@@ -6,9 +6,13 @@ This module handles all interactions with the Saxo Bank OpenAPI including:
 - REST API calls for trading operations
 - WebSocket streaming for real-time price data
 - Circuit breaker pattern for error handling
+- Token refresh on 401 errors (CONN-004)
+- Rate limiting with exponential backoff on 429 errors (CONN-006)
+- Multi-bot token coordination via TokenCoordinator
 
 Author: Trading Bot Developer
 Date: 2024
+Last Updated: 2026-01-22
 """
 
 import json
