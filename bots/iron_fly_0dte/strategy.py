@@ -30,8 +30,9 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from datetime import datetime, timedelta, date, time as dt_time
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Deque
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -42,6 +43,13 @@ METRICS_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "data",
     "iron_fly_metrics.json"
+)
+
+# POS-001: Path for position metadata persistence (for crash recovery)
+POSITION_METADATA_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "data",
+    "iron_fly_position.json"
 )
 
 # Configure module logger
@@ -62,6 +70,10 @@ EMERGENCY_ORDER_TIMEOUT_SECONDS = 30  # Shorter timeout for emergency situations
 EMERGENCY_SLIPPAGE_PERCENT = 5.0  # 5% slippage tolerance in emergency mode
 MAX_CONSECUTIVE_FAILURES = 5  # Trigger circuit breaker after this many failures
 CIRCUIT_BREAKER_COOLDOWN_MINUTES = 5  # Cooldown period when circuit breaker opens
+
+# CONN-002: Sliding window failure counter (catches intermittent failures)
+SLIDING_WINDOW_SIZE = 10  # Track last 10 API calls
+SLIDING_WINDOW_FAILURE_THRESHOLD = 5  # Trigger if 5+ of last 10 fail
 
 # CONN-007: Data blackout emergency close threshold
 MAX_STALE_DATA_WARNINGS_BEFORE_EMERGENCY = 5  # Trigger emergency close after 5 consecutive failures
@@ -85,6 +97,17 @@ EARLY_CLOSE_CUTOFF_MINUTES = 15  # Stop trading 15 min before early close (12:45
 # If unrealized P&L drops below this, emergency close regardless of wing position
 # This protects against gaps through wings or illiquid stop fills
 MAX_LOSS_PER_CONTRACT = 400.0  # $400 max loss per contract (above typical $300-350 stop)
+
+# ORDER-005: Bid-ask spread validation
+# If spread exceeds this percentage, log warning (and optionally block entry)
+DEFAULT_MAX_BID_ASK_SPREAD_PERCENT = 20.0  # 20% max spread before warning
+
+# MKT-002: Market halt detection keywords
+# These keywords in error messages indicate exchange-wide trading halt
+MARKET_HALT_KEYWORDS = [
+    "halt", "halted", "suspended", "circuit breaker", "trading pause",
+    "market closed", "exchange closed", "trading stopped", "luld",  # LULD = Limit Up Limit Down
+]
 
 # US Eastern timezone
 try:
@@ -595,6 +618,11 @@ class IronFlyStrategy:
         # Calibration mode: allow manual expected move override
         self.manual_expected_move = self.strategy_config.get("manual_expected_move", None)
 
+        # ORDER-005: Bid-ask spread validation
+        self.max_bid_ask_spread_percent = self.strategy_config.get(
+            "max_bid_ask_spread_percent", DEFAULT_MAX_BID_ASK_SPREAD_PERCENT
+        )
+
         # Filter configuration
         self.filters_config = config.get("filters", {})
         self.fed_meeting_blackout = self.filters_config.get("fed_meeting_blackout", True)
@@ -630,6 +658,21 @@ class IronFlyStrategy:
         self._circuit_breaker_reason = ""
         self._circuit_breaker_opened_at: Optional[datetime] = None
 
+        # CONN-002: Sliding window failure counter for intermittent errors
+        # True = success, False = failure. Triggers circuit breaker if 5+ of last 10 fail
+        self._api_results_window: Deque[bool] = deque(maxlen=SLIDING_WINDOW_SIZE)
+
+        # ORDER-004: Critical intervention flag - when set, ALL trading halts permanently
+        # until manual intervention (no automatic cooldown like circuit breaker)
+        self._critical_intervention_required = False
+        self._critical_intervention_reason = ""
+        self._critical_intervention_at: Optional[datetime] = None
+
+        # MKT-002: Market halt detection
+        self._market_halt_detected = False
+        self._market_halt_reason = ""
+        self._market_halt_detected_at: Optional[datetime] = None
+
         # Order execution safety tracking
         self._orphaned_orders: List[Dict] = []  # Track orders that may need cleanup
         self._pending_order_ids: List[str] = []  # Track orders awaiting fill
@@ -658,19 +701,57 @@ class IronFlyStrategy:
     # CIRCUIT BREAKER METHODS (Safety feature from Delta Neutral bot)
     # =========================================================================
 
+    def _record_api_result(self, success: bool, reason: str = "") -> None:
+        """
+        CONN-002: Record API result to sliding window and check for intermittent failures.
+
+        Unlike consecutive failure counting which resets on success, this tracks
+        the last N results. If too many fail (even with successes in between),
+        the circuit breaker opens.
+
+        Args:
+            success: True if API call succeeded, False if it failed
+            reason: Description of the failure (only used if success=False)
+        """
+        self._api_results_window.append(success)
+
+        if not success:
+            # Also track consecutive failures for backward compatibility
+            self._consecutive_failures += 1
+            logger.warning(f"API failure #{self._consecutive_failures}: {reason}")
+
+            # Check consecutive threshold (existing behavior)
+            if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                self._open_circuit_breaker(f"Consecutive failures: {reason}")
+                return
+        else:
+            # Success resets consecutive counter
+            if self._consecutive_failures > 0:
+                logger.debug(f"Resetting consecutive failure count (was {self._consecutive_failures})")
+                self._consecutive_failures = 0
+
+        # CONN-002: Check sliding window threshold
+        # Only check when we have enough samples
+        if len(self._api_results_window) >= SLIDING_WINDOW_SIZE:
+            failure_count = sum(1 for r in self._api_results_window if not r)
+            if failure_count >= SLIDING_WINDOW_FAILURE_THRESHOLD:
+                logger.warning(
+                    f"CONN-002: Sliding window threshold breached - "
+                    f"{failure_count}/{SLIDING_WINDOW_SIZE} recent API calls failed"
+                )
+                self._open_circuit_breaker(
+                    f"Intermittent failures: {failure_count}/{SLIDING_WINDOW_SIZE} recent calls failed"
+                )
+
     def _increment_failure_count(self, reason: str) -> None:
         """Increment consecutive failure counter and open circuit breaker if threshold reached."""
-        self._consecutive_failures += 1
-        logger.warning(f"Order failure #{self._consecutive_failures}: {reason}")
-
-        if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-            self._open_circuit_breaker(reason)
+        # Delegate to the new sliding window method
+        self._record_api_result(success=False, reason=reason)
 
     def _reset_failure_count(self) -> None:
         """Reset failure counter after successful operation."""
-        if self._consecutive_failures > 0:
-            logger.info(f"Resetting failure count (was {self._consecutive_failures})")
-            self._consecutive_failures = 0
+        # Delegate to the new sliding window method
+        self._record_api_result(success=True)
 
     def _open_circuit_breaker(self, reason: str) -> None:
         """
@@ -730,6 +811,7 @@ class IronFlyStrategy:
                 self._circuit_breaker_reason = ""
                 self._circuit_breaker_opened_at = None
                 self._consecutive_failures = 0
+                self._api_results_window.clear()  # CONN-002: Reset sliding window too
                 return True
 
             logger.warning(
@@ -737,6 +819,195 @@ class IronFlyStrategy:
                 f"({cooldown_seconds - elapsed:.0f}s remaining in cooldown)"
             )
 
+        return False
+
+    # =========================================================================
+    # ORDER-004: CRITICAL INTERVENTION FLAG (No automatic reset)
+    # =========================================================================
+
+    def _set_critical_intervention(self, reason: str) -> None:
+        """
+        ORDER-004: Set critical intervention flag requiring manual reset.
+
+        Unlike circuit breaker (which has cooldown), this PERMANENTLY halts trading
+        until manual intervention. Used when:
+        - Emergency close fails (legs stuck open)
+        - Unrecoverable system state detected
+        - Safety check identifies dangerous condition
+
+        Args:
+            reason: Why critical intervention is required
+        """
+        self._critical_intervention_required = True
+        self._critical_intervention_reason = reason
+        self._critical_intervention_at = get_eastern_timestamp()
+
+        logger.critical(f"🚨🚨🚨 ORDER-004: CRITICAL INTERVENTION REQUIRED 🚨🚨🚨")
+        logger.critical(f"Reason: {reason}")
+        logger.critical("ALL TRADING HALTED - Manual reset required")
+        logger.critical("To clear: Call strategy.reset_critical_intervention() or restart bot")
+
+        self.trade_logger.log_safety_event({
+            "event_type": "IRON_FLY_CRITICAL_INTERVENTION",
+            "spy_price": self.current_price,
+            "vix": self.current_vix,
+            "description": f"CRITICAL: {reason}",
+            "result": "Trading halted permanently until manual reset"
+        })
+
+    def _check_critical_intervention(self) -> bool:
+        """
+        ORDER-004: Check if critical intervention flag is set.
+
+        Returns:
+            bool: True if trading allowed, False if blocked by critical intervention
+        """
+        if not self._critical_intervention_required:
+            return True
+
+        elapsed = 0
+        if self._critical_intervention_at:
+            elapsed = (get_eastern_timestamp() - self._critical_intervention_at).total_seconds()
+
+        logger.critical(
+            f"🚨 CRITICAL INTERVENTION ACTIVE ({elapsed/60:.1f}m): {self._critical_intervention_reason}"
+        )
+        logger.critical("Trading blocked - manual reset required")
+        return False
+
+    def reset_critical_intervention(self, confirm: str = "") -> str:
+        """
+        ORDER-004: Manually reset critical intervention flag.
+
+        CAUTION: Only call after verifying all positions are properly closed
+        and any underlying issues have been resolved.
+
+        Args:
+            confirm: Must be "CONFIRMED" to proceed (safety check)
+
+        Returns:
+            str: Result message
+        """
+        if confirm != "CONFIRMED":
+            return (
+                "Critical intervention reset BLOCKED - safety confirmation required. "
+                "Call with confirm='CONFIRMED' after verifying all positions are closed."
+            )
+
+        if not self._critical_intervention_required:
+            return "No critical intervention flag was set"
+
+        old_reason = self._critical_intervention_reason
+        elapsed = 0
+        if self._critical_intervention_at:
+            elapsed = (get_eastern_timestamp() - self._critical_intervention_at).total_seconds()
+
+        self._critical_intervention_required = False
+        self._critical_intervention_reason = ""
+        self._critical_intervention_at = None
+
+        # Also reset circuit breaker and failure counters for fresh start
+        self._circuit_breaker_open = False
+        self._circuit_breaker_reason = ""
+        self._consecutive_failures = 0
+        self._api_results_window.clear()
+
+        logger.warning(f"CRITICAL INTERVENTION RESET after {elapsed/60:.1f}m")
+        logger.warning(f"Previous reason was: {old_reason}")
+
+        self.trade_logger.log_safety_event({
+            "event_type": "IRON_FLY_CRITICAL_INTERVENTION_RESET",
+            "spy_price": self.current_price,
+            "vix": self.current_vix,
+            "description": f"Manual reset after {elapsed/60:.1f} minutes",
+            "previous_reason": old_reason,
+            "result": "Trading enabled - all safety counters reset"
+        })
+
+        return f"Critical intervention cleared. Previous reason: {old_reason}"
+
+    # =========================================================================
+    # MKT-002: MARKET HALT DETECTION
+    # =========================================================================
+
+    def _check_for_market_halt(self, error_message: str) -> bool:
+        """
+        MKT-002: Check if an error message indicates a market-wide trading halt.
+
+        Exchange circuit breakers (Level 1/2/3) or LULD halts can suspend trading.
+        This is different from our internal circuit breaker (API errors).
+
+        Args:
+            error_message: Error string from API or order rejection
+
+        Returns:
+            bool: True if market halt detected, False otherwise
+        """
+        if not error_message:
+            return False
+
+        error_lower = error_message.lower()
+        for keyword in MARKET_HALT_KEYWORDS:
+            if keyword in error_lower:
+                self._set_market_halt(f"Detected keyword '{keyword}' in: {error_message[:100]}")
+                return True
+        return False
+
+    def _set_market_halt(self, reason: str) -> None:
+        """
+        MKT-002: Set market halt flag - trading paused until halt lifts.
+
+        Unlike critical intervention (permanent halt), market halts are expected
+        to lift within minutes to hours. We'll automatically retry periodically.
+
+        Args:
+            reason: Why market halt was detected
+        """
+        if self._market_halt_detected:
+            return  # Already in halt mode
+
+        self._market_halt_detected = True
+        self._market_halt_reason = reason
+        self._market_halt_detected_at = get_eastern_timestamp()
+
+        logger.critical(f"🛑 MKT-002: MARKET HALT DETECTED 🛑")
+        logger.critical(f"Reason: {reason}")
+        logger.critical("Trading paused - will retry when halt lifts")
+
+        self.trade_logger.log_safety_event({
+            "event_type": "IRON_FLY_MARKET_HALT_DETECTED",
+            "spy_price": self.current_price,
+            "vix": self.current_vix,
+            "description": f"Market halt: {reason}",
+            "result": "Trading paused until halt lifts"
+        })
+
+    def _check_market_halt_status(self) -> bool:
+        """
+        MKT-002: Check if market halt is still in effect.
+
+        Returns:
+            bool: True if trading allowed, False if still halted
+        """
+        if not self._market_halt_detected:
+            return True
+
+        # Check if enough time has passed to retry (5 minutes minimum)
+        if self._market_halt_detected_at:
+            elapsed = (get_eastern_timestamp() - self._market_halt_detected_at).total_seconds()
+
+            if elapsed >= 300:  # 5 minutes
+                # Try to clear halt - next API call will re-detect if still halted
+                logger.info(f"MKT-002: Market halt check - {elapsed/60:.1f}m elapsed, attempting to resume")
+                self._market_halt_detected = False
+                self._market_halt_reason = ""
+                self._market_halt_detected_at = None
+                return True
+
+            logger.warning(
+                f"🛑 MKT-002: Market halt still in effect ({elapsed/60:.1f}m elapsed): "
+                f"{self._market_halt_reason}"
+            )
         return False
 
     def _emergency_close_position(self, reason: str) -> str:
@@ -847,13 +1118,18 @@ class IronFlyStrategy:
         result_msg = f"Emergency close: {close_success}/4 legs closed, {close_failed} failed"
 
         if close_failed > 0:
+            # ORDER-004: Set critical intervention flag - manual reset required
+            self._set_critical_intervention(
+                f"Emergency close failed: {close_failed}/4 legs could not be closed"
+            )
             self.trade_logger.log_safety_event({
                 "event_type": "IRON_FLY_EMERGENCY_CLOSE_PARTIAL",
                 "spy_price": self.current_price,
                 "vix": self.current_vix,
                 "description": result_msg,
                 "close_order_ids": close_order_ids,
-                "result": "MANUAL INTERVENTION REQUIRED for failed legs"
+                "critical_intervention_required": True,
+                "result": "CRITICAL: MANUAL INTERVENTION REQUIRED - trading halted until reset"
             })
         else:
             self.trade_logger.log_safety_event({
@@ -884,10 +1160,94 @@ class IronFlyStrategy:
 
         self.daily_pnl += pnl
         self.position = None
+        self._clear_position_metadata()  # POS-001: Clear saved metadata
         self.state = IronFlyState.DAILY_COMPLETE
 
         logger.critical(f"Emergency close complete: {result_msg}")
         return result_msg
+
+    # =========================================================================
+    # POS-001: POSITION METADATA PERSISTENCE (Crash Recovery)
+    # =========================================================================
+
+    def _save_position_metadata(self) -> None:
+        """
+        POS-001: Save position metadata to file for crash recovery.
+
+        Saves entry_time, credit_received, and other critical position data
+        so it can be restored if the bot crashes and restarts.
+        """
+        if not self.position:
+            self._clear_position_metadata()
+            return
+
+        metadata = {
+            "saved_at": get_eastern_timestamp().isoformat(),
+            "atm_strike": self.position.atm_strike,
+            "upper_wing": self.position.upper_wing,
+            "lower_wing": self.position.lower_wing,
+            "entry_time": self.position.entry_time.isoformat() if self.position.entry_time else None,
+            "entry_price": self.position.entry_price,
+            "credit_received": self.position.credit_received,
+            "quantity": self.position.quantity,
+            "expiry": self.position.expiry,
+            "short_call_uic": self.position.short_call_uic,
+            "short_put_uic": self.position.short_put_uic,
+            "long_call_uic": self.position.long_call_uic,
+            "long_put_uic": self.position.long_put_uic,
+        }
+
+        try:
+            # Ensure data directory exists
+            os.makedirs(os.path.dirname(POSITION_METADATA_FILE), exist_ok=True)
+
+            with open(POSITION_METADATA_FILE, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            logger.info(f"POS-001: Saved position metadata to {POSITION_METADATA_FILE}")
+        except Exception as e:
+            logger.error(f"POS-001: Failed to save position metadata: {e}")
+
+    def _load_position_metadata(self) -> Optional[Dict]:
+        """
+        POS-001: Load position metadata from file for crash recovery.
+
+        Returns:
+            Dict with metadata if found and valid, None otherwise
+        """
+        if not os.path.exists(POSITION_METADATA_FILE):
+            return None
+
+        try:
+            with open(POSITION_METADATA_FILE, 'r') as f:
+                metadata = json.load(f)
+
+            # Validate it's from today (don't restore old positions)
+            saved_at = metadata.get("saved_at", "")
+            if saved_at:
+                saved_date = saved_at.split("T")[0]
+                today = get_us_market_time().strftime("%Y-%m-%d")
+                if saved_date != today:
+                    logger.info(f"POS-001: Found old position metadata from {saved_date}, ignoring")
+                    self._clear_position_metadata()
+                    return None
+
+            logger.info(f"POS-001: Loaded position metadata from {POSITION_METADATA_FILE}")
+            return metadata
+        except Exception as e:
+            logger.error(f"POS-001: Failed to load position metadata: {e}")
+            return None
+
+    def _clear_position_metadata(self) -> None:
+        """
+        POS-001: Clear the position metadata file after position is closed.
+        """
+        try:
+            if os.path.exists(POSITION_METADATA_FILE):
+                os.remove(POSITION_METADATA_FILE)
+                logger.info("POS-001: Cleared position metadata file")
+        except Exception as e:
+            logger.error(f"POS-001: Failed to clear position metadata: {e}")
 
     # =========================================================================
     # ORDER SAFETY METHODS (Safety feature from Delta Neutral bot)
@@ -1189,8 +1549,14 @@ class IronFlyStrategy:
                 return False, order_id, fill_details
 
         except Exception as e:
-            logger.error(f"Exception placing {leg_name}: {e}")
-            self._increment_failure_count(f"{leg_name} exception: {str(e)}")
+            error_str = str(e)
+            logger.error(f"Exception placing {leg_name}: {error_str}")
+
+            # MKT-002: Check if this error indicates a market halt
+            if self._check_for_market_halt(error_str):
+                logger.warning(f"MKT-002: Market halt detected from order error")
+
+            self._increment_failure_count(f"{leg_name} exception: {error_str}")
             return False, None, None
 
     # =========================================================================
@@ -1213,10 +1579,18 @@ class IronFlyStrategy:
             self._check_for_orphaned_orders()  # Clean up any orphaned orders
             self._position_reconciled = True
 
+        # ORDER-004: Check critical intervention flag FIRST (most severe block)
+        if not self._check_critical_intervention():
+            return f"CRITICAL INTERVENTION REQUIRED: {self._critical_intervention_reason}"
+
         # SAFETY: Check circuit breaker before allowing new trades
         if not self._check_circuit_breaker():
             if self.state == IronFlyState.READY_TO_ENTER:
                 return f"Circuit breaker open: {self._circuit_breaker_reason}"
+
+        # MKT-002: Check if market halt is in effect
+        if not self._check_market_halt_status():
+            return f"Market halt in effect: {self._market_halt_reason}"
 
         # Update market data
         self.update_market_data()
@@ -1419,13 +1793,40 @@ class IronFlyStrategy:
                     # Get expiry
                     expiry = sc.get("ExpiryDate", "")[:10] if sc.get("ExpiryDate") else ""
 
+                    # POS-001: Try to load saved position metadata for accurate recovery
+                    saved_metadata = self._load_position_metadata()
+                    if saved_metadata:
+                        # Verify the saved metadata matches the broker position
+                        if (saved_metadata.get("atm_strike") == atm_strike and
+                            saved_metadata.get("upper_wing") == upper_wing and
+                            saved_metadata.get("lower_wing") == lower_wing):
+                            entry_time_str = saved_metadata.get("entry_time")
+                            entry_time = datetime.fromisoformat(entry_time_str) if entry_time_str else get_eastern_timestamp()
+                            entry_price = saved_metadata.get("entry_price", self.current_price)
+                            credit_received = saved_metadata.get("credit_received", 0.0)
+                            logger.info(
+                                f"POS-001: Using saved metadata - "
+                                f"entry_time={entry_time}, credit=${credit_received:.2f}"
+                            )
+                        else:
+                            logger.warning("POS-001: Saved metadata doesn't match broker positions, using defaults")
+                            entry_time = get_eastern_timestamp()
+                            entry_price = self.current_price
+                            credit_received = 0.0
+                    else:
+                        entry_time = get_eastern_timestamp()
+                        entry_price = self.current_price
+                        credit_received = 0.0
+
                     logger.critical(
                         f"🔄 RECONSTRUCTING IRON FLY from broker positions:\n"
                         f"   ATM Strike: {atm_strike}\n"
                         f"   Upper Wing: {upper_wing}\n"
                         f"   Lower Wing: {lower_wing}\n"
                         f"   Quantity: {quantity}\n"
-                        f"   Expiry: {expiry}"
+                        f"   Expiry: {expiry}\n"
+                        f"   Entry Time: {entry_time}\n"
+                        f"   Credit: ${credit_received:.2f}"
                     )
 
                     # Create the position object
@@ -1433,9 +1834,9 @@ class IronFlyStrategy:
                         atm_strike=atm_strike,
                         upper_wing=upper_wing,
                         lower_wing=lower_wing,
-                        entry_time=get_eastern_timestamp(),  # Unknown, use now
-                        entry_price=self.current_price,  # Unknown, use current
-                        credit_received=0.0,  # Unknown
+                        entry_time=entry_time,
+                        entry_price=entry_price,
+                        credit_received=credit_received,
                         quantity=quantity,
                         expiry=expiry,
                         short_call_uic=sc_uic,
@@ -1824,6 +2225,7 @@ class IronFlyStrategy:
             self.state = IronFlyState.DAILY_COMPLETE
             self.closing_started_at = None
             self.position = None
+            self._clear_position_metadata()  # POS-001: Clear saved metadata
             return "Position closed - all legs confirmed closed at broker"
 
         except Exception as e:
@@ -1970,9 +2372,39 @@ class IronFlyStrategy:
 
         # Extract bid/ask prices (sell at bid, buy at ask)
         sc_bid = short_call_quote.get('Quote', {}).get('Bid', 0)
+        sc_ask = short_call_quote.get('Quote', {}).get('Ask', 0)
         sp_bid = short_put_quote.get('Quote', {}).get('Bid', 0)
+        sp_ask = short_put_quote.get('Quote', {}).get('Ask', 0)
+        lc_bid = long_call_quote.get('Quote', {}).get('Bid', 0)
         lc_ask = long_call_quote.get('Quote', {}).get('Ask', 0)
+        lp_bid = long_put_quote.get('Quote', {}).get('Bid', 0)
         lp_ask = long_put_quote.get('Quote', {}).get('Ask', 0)
+
+        # ORDER-005: Bid-ask spread validation
+        wide_spreads = []
+        for leg_name, bid, ask in [
+            ("Short Call", sc_bid, sc_ask),
+            ("Short Put", sp_bid, sp_ask),
+            ("Long Call", lc_bid, lc_ask),
+            ("Long Put", lp_bid, lp_ask),
+        ]:
+            if bid > 0 and ask > 0:
+                mid_price = (bid + ask) / 2
+                spread_pct = ((ask - bid) / mid_price) * 100 if mid_price > 0 else 0
+                if spread_pct > self.max_bid_ask_spread_percent:
+                    wide_spreads.append(f"{leg_name}: {spread_pct:.1f}%")
+
+        if wide_spreads:
+            spread_warning = f"ORDER-005: Wide bid-ask spreads detected: {', '.join(wide_spreads)}"
+            logger.warning(spread_warning)
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_WIDE_SPREAD_WARNING",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": spread_warning,
+                "threshold": f"{self.max_bid_ask_spread_percent}%",
+                "result": "Entry proceeding with warning - monitor for slippage"
+            })
 
         # Calculate net credit: premium received from shorts - premium paid for longs
         # Multiplied by 100 for contract multiplier
@@ -2005,12 +2437,43 @@ class IronFlyStrategy:
         order_ids = {}
         fill_details = {}
 
+        # ORDER-004: Check critical intervention first (most severe)
+        if not self._check_critical_intervention():
+            error_msg = f"CRITICAL: Entry blocked - {self._critical_intervention_reason}"
+            logger.error(error_msg)
+            self.state = IronFlyState.DAILY_COMPLETE
+            return error_msg
+
         # Check circuit breaker before attempting entry
         if not self._check_circuit_breaker():
             error_msg = f"Circuit breaker open - entry blocked: {self._circuit_breaker_reason}"
             logger.error(error_msg)
             self.state = IronFlyState.DAILY_COMPLETE
             return error_msg
+
+        # FILTER-001: Re-validate VIX immediately before order placement
+        # VIX could have spiked since the initial filter check (READY_TO_ENTER state)
+        fresh_vix = self.client.get_vix_price()
+        if fresh_vix and fresh_vix > self.max_vix:
+            error_msg = (
+                f"FILTER-001: VIX re-check failed - VIX {fresh_vix:.2f} > {self.max_vix} "
+                f"(was {self.current_vix:.2f} at filter check)"
+            )
+            logger.warning(error_msg)
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_VIX_RECHECK_FAILED",
+                "spy_price": self.current_price,
+                "vix": fresh_vix,
+                "vix_at_filter": self.current_vix,
+                "max_vix": self.max_vix,
+                "description": "VIX spiked between filter check and order placement",
+                "result": "Entry blocked - no position opened"
+            })
+            self.state = IronFlyState.DAILY_COMPLETE
+            return error_msg
+        elif fresh_vix:
+            logger.info(f"FILTER-001: VIX re-check passed - VIX {fresh_vix:.2f} <= {self.max_vix}")
+            self.current_vix = fresh_vix  # Update cached value
 
         try:
             # Leg 1: Sell ATM Call (short)
@@ -2173,6 +2636,9 @@ class IronFlyStrategy:
         self.state = IronFlyState.POSITION_OPEN
         self.trades_today += 1
         self.daily_premium_collected += total_credit
+
+        # POS-001: Save position metadata for crash recovery
+        self._save_position_metadata()
 
         # Step 5: Subscribe to option price updates for position monitoring
         try:
@@ -2770,22 +3236,41 @@ class IronFlyStrategy:
         if not self.fed_meeting_blackout:
             return (True, "")
 
-        # 2026 FOMC Meeting Dates (announcement days - typically 2:00 PM EST)
+        # FILTER-002: Multi-year FOMC Meeting Dates (announcement days - typically 2:00 PM EST)
         # Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
-        fomc_dates_2026 = [
-            date(2026, 1, 29),   # Jan 28-29
-            date(2026, 3, 19),   # Mar 18-19
-            date(2026, 5, 7),    # May 6-7
-            date(2026, 6, 18),   # Jun 17-18
-            date(2026, 7, 30),   # Jul 29-30
-            date(2026, 9, 17),   # Sep 16-17
-            date(2026, 11, 5),   # Nov 4-5
-            date(2026, 12, 17),  # Dec 16-17
-        ]
+        # IMPORTANT: Update this dictionary annually when Fed releases new calendar
+        fomc_dates_by_year = {
+            2026: [
+                date(2026, 1, 29),   # Jan 28-29
+                date(2026, 3, 19),   # Mar 18-19
+                date(2026, 5, 7),    # May 6-7
+                date(2026, 6, 18),   # Jun 17-18
+                date(2026, 7, 30),   # Jul 29-30
+                date(2026, 9, 17),   # Sep 16-17
+                date(2026, 11, 5),   # Nov 4-5
+                date(2026, 12, 17),  # Dec 16-17
+            ],
+            # 2027: [  # TODO: Add 2027 dates when Fed releases calendar (typically Oct/Nov 2026)
+            #     date(2027, 1, 27),   # Estimated - verify with Fed calendar
+            #     date(2027, 3, 17),
+            #     ...
+            # ],
+        }
 
         today = get_us_market_time().date()
+        current_year = today.year
 
-        if today in fomc_dates_2026:
+        # FILTER-002: Check if current year is in calendar
+        if current_year not in fomc_dates_by_year:
+            logger.warning(
+                f"FILTER-002: FOMC calendar missing for {current_year}! "
+                f"Update fomc_dates_by_year in strategy.py. Available years: {list(fomc_dates_by_year.keys())}"
+            )
+            # Conservative: allow trading but log warning (could also block here)
+            return (True, "")
+
+        fomc_dates = fomc_dates_by_year[current_year]
+        if today in fomc_dates:
             reason = f"FOMC meeting day ({today.strftime('%b %d')})"
             logger.warning(f"FOMC BLACKOUT: {reason} - Entry blocked")
             return (False, reason)
@@ -2807,7 +3292,7 @@ class IronFlyStrategy:
         if not self.economic_calendar_check:
             return (True, "")
 
-        # 2026 Major Economic Release Dates
+        # FILTER-003: Multi-year Major Economic Release Dates
         # CPI (Consumer Price Index) - typically 2nd week of month
         # PPI (Producer Price Index) - typically day after CPI
         # Jobs Report (NFP) - first Friday of month
@@ -2816,55 +3301,74 @@ class IronFlyStrategy:
         # Note: Dates are approximate - update from BLS calendar:
         # https://www.bls.gov/schedule/news_release/cpi.htm
         # https://www.bls.gov/schedule/news_release/empsit.htm
+        # IMPORTANT: Update this dictionary annually (typically Dec for next year)
 
-        major_economic_dates_2026 = {
-            # Jobs Reports (Non-Farm Payrolls) - First Friday each month
-            date(2026, 1, 3): "Jobs Report (NFP)",
-            date(2026, 2, 6): "Jobs Report (NFP)",
-            date(2026, 3, 6): "Jobs Report (NFP)",
-            date(2026, 4, 3): "Jobs Report (NFP)",
-            date(2026, 5, 1): "Jobs Report (NFP)",
-            date(2026, 6, 5): "Jobs Report (NFP)",
-            date(2026, 7, 3): "Jobs Report (NFP)",
-            date(2026, 8, 7): "Jobs Report (NFP)",
-            date(2026, 9, 4): "Jobs Report (NFP)",
-            date(2026, 10, 2): "Jobs Report (NFP)",
-            date(2026, 11, 6): "Jobs Report (NFP)",
-            date(2026, 12, 4): "Jobs Report (NFP)",
+        economic_dates_by_year = {
+            2026: {
+                # Jobs Reports (Non-Farm Payrolls) - First Friday each month
+                date(2026, 1, 3): "Jobs Report (NFP)",
+                date(2026, 2, 6): "Jobs Report (NFP)",
+                date(2026, 3, 6): "Jobs Report (NFP)",
+                date(2026, 4, 3): "Jobs Report (NFP)",
+                date(2026, 5, 1): "Jobs Report (NFP)",
+                date(2026, 6, 5): "Jobs Report (NFP)",
+                date(2026, 7, 3): "Jobs Report (NFP)",
+                date(2026, 8, 7): "Jobs Report (NFP)",
+                date(2026, 9, 4): "Jobs Report (NFP)",
+                date(2026, 10, 2): "Jobs Report (NFP)",
+                date(2026, 11, 6): "Jobs Report (NFP)",
+                date(2026, 12, 4): "Jobs Report (NFP)",
 
-            # CPI Releases (Consumer Price Index) - ~2nd week each month
-            date(2026, 1, 14): "CPI Release",
-            date(2026, 2, 11): "CPI Release",
-            date(2026, 3, 11): "CPI Release",
-            date(2026, 4, 14): "CPI Release",
-            date(2026, 5, 13): "CPI Release",
-            date(2026, 6, 10): "CPI Release",
-            date(2026, 7, 15): "CPI Release",
-            date(2026, 8, 12): "CPI Release",
-            date(2026, 9, 16): "CPI Release",
-            date(2026, 10, 14): "CPI Release",
-            date(2026, 11, 12): "CPI Release",
-            date(2026, 12, 9): "CPI Release",
+                # CPI Releases (Consumer Price Index) - ~2nd week each month
+                date(2026, 1, 14): "CPI Release",
+                date(2026, 2, 11): "CPI Release",
+                date(2026, 3, 11): "CPI Release",
+                date(2026, 4, 14): "CPI Release",
+                date(2026, 5, 13): "CPI Release",
+                date(2026, 6, 10): "CPI Release",
+                date(2026, 7, 15): "CPI Release",
+                date(2026, 8, 12): "CPI Release",
+                date(2026, 9, 16): "CPI Release",
+                date(2026, 10, 14): "CPI Release",
+                date(2026, 11, 12): "CPI Release",
+                date(2026, 12, 9): "CPI Release",
 
-            # PPI Releases (Producer Price Index) - typically day after CPI
-            date(2026, 1, 15): "PPI Release",
-            date(2026, 2, 12): "PPI Release",
-            date(2026, 3, 12): "PPI Release",
-            date(2026, 4, 15): "PPI Release",
-            date(2026, 5, 14): "PPI Release",
-            date(2026, 6, 11): "PPI Release",
-            date(2026, 7, 16): "PPI Release",
-            date(2026, 8, 13): "PPI Release",
-            date(2026, 9, 17): "PPI Release",
-            date(2026, 10, 15): "PPI Release",
-            date(2026, 11, 13): "PPI Release",
-            date(2026, 12, 10): "PPI Release",
+                # PPI Releases (Producer Price Index) - typically day after CPI
+                date(2026, 1, 15): "PPI Release",
+                date(2026, 2, 12): "PPI Release",
+                date(2026, 3, 12): "PPI Release",
+                date(2026, 4, 15): "PPI Release",
+                date(2026, 5, 14): "PPI Release",
+                date(2026, 6, 11): "PPI Release",
+                date(2026, 7, 16): "PPI Release",
+                date(2026, 8, 13): "PPI Release",
+                date(2026, 9, 17): "PPI Release",
+                date(2026, 10, 15): "PPI Release",
+                date(2026, 11, 13): "PPI Release",
+                date(2026, 12, 10): "PPI Release",
+            },
+            # 2027: {  # TODO: Add 2027 dates when BLS releases calendar (typically Dec 2026)
+            #     # Jobs Reports - First Friday each month
+            #     # CPI Releases - ~2nd week each month
+            #     # PPI Releases - typically day after CPI
+            # },
         }
 
         today = get_us_market_time().date()
+        current_year = today.year
 
-        if today in major_economic_dates_2026:
-            event = major_economic_dates_2026[today]
+        # FILTER-003: Check if current year is in calendar
+        if current_year not in economic_dates_by_year:
+            logger.warning(
+                f"FILTER-003: Economic calendar missing for {current_year}! "
+                f"Update economic_dates_by_year in strategy.py. Available years: {list(economic_dates_by_year.keys())}"
+            )
+            # Conservative: allow trading but log warning (could also block here)
+            return (True, "")
+
+        economic_dates = economic_dates_by_year[current_year]
+        if today in economic_dates:
+            event = economic_dates[today]
             reason = f"Major economic event: {event}"
             logger.warning(f"ECONOMIC CALENDAR BLACKOUT: {reason} - Entry blocked")
             return (False, reason)
@@ -3353,6 +3857,7 @@ class IronFlyStrategy:
         self.state = IronFlyState.IDLE
         self.opening_range = OpeningRange()
         self.position = None
+        self._clear_position_metadata()  # POS-001: Clear any stale metadata
         self.trades_today = 0
         self.daily_pnl = 0.0
         self.daily_premium_collected = 0.0
