@@ -1178,30 +1178,56 @@ class IronFlyStrategy:
 
         current_time = get_us_market_time()
 
-        # SAFETY: Check for stale market data when position is open
-        if self.position and self.state in [IronFlyState.POSITION_OPEN, IronFlyState.MONITORING_EXIT]:
-            if self.market_data.is_price_stale():
-                self._consecutive_stale_data_warnings += 1
-                stale_age = self.market_data.price_age_seconds()
-                logger.warning(
-                    f"STALE DATA WARNING #{self._consecutive_stale_data_warnings}: "
-                    f"Price data is {stale_age:.1f}s old (max {MAX_DATA_STALENESS_SECONDS}s)"
-                )
-                # After 3 consecutive stale warnings, log critical but continue monitoring
-                if self._consecutive_stale_data_warnings >= 3:
-                    logger.critical(
-                        "CRITICAL: Market data consistently stale with open position! "
-                        "Stop-loss protection may be compromised."
-                    )
-                    self.trade_logger.log_safety_event({
-                        "event_type": "IRON_FLY_STALE_DATA",
-                        "spy_price": self.current_price,
-                        "vix": self.current_vix,
-                        "description": f"Price data stale for {stale_age:.1f}s with open position",
-                        "result": "Continuing with last known price - STOP LOSS MAY BE DELAYED"
-                    })
-            else:
-                self._consecutive_stale_data_warnings = 0  # Reset on fresh data
+        # SAFETY: Check for stale market data and use REST fallback if needed
+        if self.market_data.is_price_stale():
+            self._consecutive_stale_data_warnings += 1
+            stale_age = self.market_data.price_age_seconds()
+
+            # ACTIVE FIX: Poll via REST API when WebSocket data is stale
+            logger.warning(
+                f"STALE DATA #{self._consecutive_stale_data_warnings}: "
+                f"Price {stale_age:.1f}s old - fetching via REST API"
+            )
+            try:
+                # Fetch underlying price via REST (skip_cache=True to bypass stale streaming cache)
+                quote = self.client.get_quote(self.underlying_uic, "CfdOnIndex", skip_cache=True)
+                if quote:
+                    mid = quote.get('Quote', {}).get('Mid') or quote.get('Mid')
+                    if mid and mid > 0:
+                        self.current_price = mid
+                        self.market_data.update_price(mid)
+                        logger.info(f"REST fallback: Updated US500.I price to {mid:.2f}")
+
+                # Fetch VIX via REST (skip_cache=True to bypass stale streaming cache)
+                vix_quote = self.client.get_quote(self.vix_uic, "StockIndex", skip_cache=True)
+                if vix_quote:
+                    vix_mid = vix_quote.get('Quote', {}).get('Mid') or vix_quote.get('Mid')
+                    if vix_mid and vix_mid > 0:
+                        self.current_vix = vix_mid
+                        self.market_data.update_vix(vix_mid)
+                        logger.info(f"REST fallback: Updated VIX to {vix_mid:.2f}")
+
+                # Reset stale counter on successful REST fetch
+                self._consecutive_stale_data_warnings = 0
+            except Exception as e:
+                logger.error(f"REST fallback failed: {e}")
+
+                # Only log critical warning if position is open AND REST failed
+                if self.position and self.state in [IronFlyState.POSITION_OPEN, IronFlyState.MONITORING_EXIT]:
+                    if self._consecutive_stale_data_warnings >= 3:
+                        logger.critical(
+                            "CRITICAL: Market data stale with open position! "
+                            "WebSocket AND REST both failing - stop-loss protection compromised."
+                        )
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_STALE_DATA",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"Price data stale for {stale_age:.1f}s - both WebSocket and REST failed",
+                            "result": "Continuing with last known price - STOP LOSS MAY BE DELAYED"
+                        })
+        else:
+            self._consecutive_stale_data_warnings = 0  # Reset on fresh data
 
         # SAFETY: Check max trades per day guard
         if self.trades_today >= MAX_TRADES_PER_DAY and self.state == IronFlyState.READY_TO_ENTER:

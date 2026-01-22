@@ -8,7 +8,7 @@ but this documentation helps future developers understand the safety systems.
 For detailed edge case analysis, see: docs/DELTA_NEUTRAL_EDGE_CASES.md
 
 =============================================================================
-SAFETY ARCHITECTURE OVERVIEW (43 Edge Cases - 100% Coverage)
+SAFETY ARCHITECTURE OVERVIEW (44 Edge Cases - 100% Coverage)
 =============================================================================
 
 1. CIRCUIT BREAKER (strategy.py ~1053-1127)
@@ -116,7 +116,9 @@ ORDER-004: MARKET Order Failure (strategy.py ~1285-1384)
 ORDER-005: Wide Bid-Ask Spread (strategy.py ~2628-2660)
    - Max absolute slippage check before MARKET orders
    - Default $0.50 max spread
-   - Aborts MARKET order if spread too wide, falls back to emergency handler
+   - Progressive retry: Aborts MARKET order if spread too wide
+   - Emergency close: Logs warning but PROCEEDS (closing priority > slippage)
+   - Both paths log safety events for tracking
 
 ORDER-007: Order Rejection Handling (strategy.py ~2721-2760)
    - Explicit rejection detection (vs timeout)

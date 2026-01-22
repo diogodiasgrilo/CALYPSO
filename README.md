@@ -193,12 +193,12 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - VIX-based entry filtering
 - Position recovery on restart
 
-**Delta Neutral Advanced Safety (43 edge cases covered):**
+**Delta Neutral Advanced Safety (44 edge cases covered):**
 - Progressive order retry (0% → 5% → 10% slippage → MARKET)
 - Partial fill fallback handlers (6 emergency scenarios)
 - Emergency position handlers (close naked shorts, protect straddle)
 - Orphaned order tracking (blocks trading until resolved)
-- ITM risk detection with emergency roll triggers
+- ITM risk detection (0.3% threshold, 30s checks) with emergency roll
 - Auto-sync with Saxo before all emergency actions
 - Critical intervention flag (halts trading until human review)
 - Flash crash velocity detection (MKT-002 - 2%+ in 5 min)

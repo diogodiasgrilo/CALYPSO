@@ -907,7 +907,7 @@ class SaxoClient:
             self._record_error()
             return None
 
-    def get_quote(self, uic: int, asset_type: str = "Stock") -> Optional[Dict]:
+    def get_quote(self, uic: int, asset_type: str = "Stock", skip_cache: bool = False) -> Optional[Dict]:
         """
         Get current quote for an instrument.
 
@@ -917,13 +917,14 @@ class SaxoClient:
         Args:
             uic: Unique Instrument Code
             asset_type: Type of asset (Stock, StockOption, Etf, StockIndex, FxSpot, etc.)
+            skip_cache: If True, bypass streaming cache and always use REST API
 
         Returns:
             dict: Quote data including Bid, Ask, LastTraded prices.
         """
-        # First check streaming cache for real-time data
+        # First check streaming cache for real-time data (unless skip_cache is True)
         uic_int = int(uic)
-        if uic_int in self._price_cache:
+        if not skip_cache and uic_int in self._price_cache:
             cached = self._price_cache[uic_int]
             if cached and "Quote" in cached:
                 bid = cached["Quote"].get("Bid", 0)

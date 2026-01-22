@@ -11,8 +11,8 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 42
-**Well-Handled/Resolved:** 42 (100%)
+**Total Scenarios Analyzed:** 44
+**Well-Handled/Resolved:** 44 (100%)
 **Medium Risk:** 0 (0%)
 **High Risk:** 0 (0%) ✅
 
@@ -147,11 +147,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | ORDER-005 |
 | **Trigger** | Options have 50%+ spread, limit order won't fill at fair price |
-| **Current Handling** | **Max absolute slippage check** before MARKET order. Aborts if spread exceeds threshold. |
+| **Current Handling** | **Max absolute slippage check** before MARKET order. Behavior depends on context. |
 | **Risk Level** | ✅ RESOLVED |
 | **Status** | RESOLVED |
-| **Resolution** | Added `_max_absolute_slippage` config (default $2.00) in `strategy.py`. Before placing MARKET order in progressive sequence, checks bid-ask spread. If spread > max, MARKET order is aborted and logged as safety event. Prevents extreme slippage on illiquid options. Configurable via `strategy.max_absolute_slippage`. |
-| **Fixed In** | 2026-01-22 |
+| **Resolution** | Added `_max_absolute_slippage` config (default $0.50) in `strategy.py`. Before placing MARKET order, checks bid-ask spread. **Progressive retry sequence:** If spread > max, MARKET order is aborted and logged as safety event. **Emergency close (ITM risk, etc):** If spread > max, logs warning but PROCEEDS anyway - closing dangerous positions takes priority over slippage. Both paths log safety events for tracking. Configurable via `strategy.max_absolute_slippage`. |
+| **Fixed In** | 2026-01-22, Updated 2026-01-22 |
 
 ### 2.6 Price Moves Between Quote and Execution
 | | |
@@ -358,10 +358,21 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Resolution** | Added `_recenter_failed_on_roll_day` flag, `_recenter_failure_date`, `_mark_recenter_failed_on_roll_day()`, and `_handle_recenter_failure_on_roll_day()` methods in `strategy.py`. When recenter fails on Friday, flag is set. Before attempting roll, checks flag. If set, logs warning explaining situation, skips roll attempt, and lets shorts expire naturally. Straddle remains protected for next week. Prevents compounding failures by not attempting roll with misaligned positions. |
 | **Fixed In** | 2026-01-22 |
 
-### 5.5 Price Changes Between Close Shorts and Enter New Shorts
+### 5.5 Market Open Delay (Stale Quotes at Open)
 | | |
 |---|---|
 | **ID** | TIME-005 |
+| **Trigger** | Bot attempts to place orders at market open when quotes show Bid=0/Ask=0 |
+| **Current Handling** | **Market open delay period** blocks order placement for configurable time after 9:30 AM. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_is_within_market_open_delay()` method in `strategy.py`. Default 3 minutes after market open (9:30-9:33 AM ET). Configurable via `strategy.market_open_delay_minutes`. Returns True if within delay period, preventing order placement. Allows quotes to stabilize before trading. Combined with DATA-004 invalid quote detection for comprehensive protection. |
+| **Fixed In** | 2026-01-22 |
+
+### 5.6 Price Changes Between Close Shorts and Enter New Shorts
+| | |
+|---|---|
+| **ID** | TIME-006 |
 | **Trigger** | During roll, close old shorts, SPY moves, enter new shorts at wrong strikes |
 | **Current Handling** | `roll_weekly_shorts` at `strategy.py:6589` closes then enters. Fresh price fetched for new entry. |
 | **Risk Level** | ✅ LOW |
@@ -450,20 +461,31 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Resolution** | Added `_validate_option_chain()` method in `strategy.py`. Before selecting strikes, validates: (1) Chain not empty, (2) Minimum number of options (default 5), (3) Sufficient options with valid bid/ask, (4) Valid strike values present, (5) Strike range spans around current price (min < price * 0.95, max > price * 1.05). Returns (is_valid, reason_if_invalid). Prevents strike selection on corrupted/incomplete chains. |
 | **Fixed In** | 2026-01-22 |
 
-### 7.4 Metrics File Corruption
+### 7.4 Invalid Quote Detection (Bid=0/Ask=0)
 | | |
 |---|---|
 | **ID** | DATA-004 |
+| **Trigger** | Quote has Bid=0 or Ask=0 (common at market open) |
+| **Current Handling** | **Invalid quote detection** before using quote data for pricing. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added explicit Bid > 0 and Ask > 0 checks in `strategy.py` before using quotes for order pricing. If quote invalid: logs warning "DATA-004: Invalid quote (Bid=0 or Ask=0)", falls back to original leg price if available, logs safety event for tracking. Prevents placing orders based on stale/invalid market open quotes. Works with TIME-005 market open delay for comprehensive protection. |
+| **Fixed In** | 2026-01-22 |
+
+### 7.5 Metrics File Corruption
+| | |
+|---|---|
+| **ID** | DATA-005 |
 | **Trigger** | `delta_neutral_metrics.json` corrupted or invalid JSON |
 | **Current Handling** | `load_from_file` at `metrics.py:241` has try/except, returns None on error. Fresh metrics created. |
 | **Risk Level** | ✅ LOW |
 | **Status** | RESOLVED |
 | **Notes** | Graceful degradation - loses history but continues. |
 
-### 7.5 Position ID Mismatch
+### 7.6 Position ID Mismatch
 | | |
 |---|---|
-| **ID** | DATA-005 |
+| **ID** | DATA-006 |
 | **Trigger** | Position ID in bot memory doesn't match what Saxo reports |
 | **Current Handling** | `recover_positions` rebuilds from Saxo data. Bot objects would be updated. |
 | **Risk Level** | ✅ LOW |
@@ -506,6 +528,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 | DATA-001 | Stale quote data | ✅ RESOLVED | Low |
 | DATA-002 | Missing greeks | ✅ RESOLVED | Low |
 | DATA-003 | Invalid option chain | ✅ RESOLVED | Low |
+| DATA-004 | Invalid quote detection | ✅ RESOLVED | Medium |
+| TIME-005 | Market open delay | ✅ RESOLVED | Medium |
 
 ### 8.3 Statistics by Category
 
@@ -515,10 +539,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Order Execution | 7 | 7 | 0 | 0 |
 | Position State | 6 | 6 | 0 | 0 |
 | Market Conditions | 6 | 6 | 0 | 0 |
-| Timing/Race | 5 | 5 | 0 | 0 |
+| Timing/Race | 6 | 6 | 0 | 0 |
 | State Machine | 4 | 4 | 0 | 0 |
-| Data Integrity | 5 | 5 | 0 | 0 |
-| **TOTAL** | **42** | **42** | **0** | **0** |
+| Data Integrity | 6 | 6 | 0 | 0 |
+| **TOTAL** | **44** | **44** | **0** | **0** |
 
 🎉 **100% COVERAGE ACHIEVED!**
 
@@ -552,7 +576,12 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-22 | RESOLVED DATA-001: Added quote timestamp validation for stale data | Claude |
 | 2026-01-22 | RESOLVED DATA-002: Added warning logging for missing Greeks | Claude |
 | 2026-01-22 | RESOLVED DATA-003: Added option chain validation before strike selection | Claude |
-| 2026-01-22 | **100% EDGE CASE COVERAGE ACHIEVED** | Claude |
+| 2026-01-22 | RESOLVED TIME-005: Added market open delay to allow quote stabilization | Claude |
+| 2026-01-22 | RESOLVED DATA-004: Added invalid quote detection (Bid=0/Ask=0) | Claude |
+| 2026-01-22 | UPDATED ORDER-005: Emergency MARKET orders now proceed with warning (not abort) | Claude |
+| 2026-01-22 | UPDATED ITM threshold: Changed from 0.5% to 0.3% for tighter protection | Claude |
+| 2026-01-22 | RENUMBERED TIME-005→TIME-006, DATA-004→DATA-005, DATA-005→DATA-006 | Claude |
+| 2026-01-22 | **44 EDGE CASES - 100% COVERAGE ACHIEVED** | Claude |
 
 ---
 
