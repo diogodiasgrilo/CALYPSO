@@ -181,6 +181,7 @@ class ExternalPriceFeed:
         Get pre-market price specifically, with additional metadata.
 
         Returns dict with price and market state info, or None if unavailable.
+        Uses historical data to get accurate previous close when meta field is empty.
 
         Args:
             symbol: Stock symbol (e.g., "SPY")
@@ -198,8 +199,9 @@ class ExternalPriceFeed:
             else:
                 yahoo_symbol = symbol
 
+            # Use 5d range with 1d interval to get accurate previous close from historical data
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
-            params = {"interval": "1m", "range": "1d"}
+            params = {"interval": "1d", "range": "5d"}
             headers = {"User-Agent": "Mozilla/5.0 (Calypso Trading Bot)"}
 
             response = requests.get(url, params=params, headers=headers, timeout=5)
@@ -213,11 +215,25 @@ class ExternalPriceFeed:
                     meta = result[0].get("meta", {})
                     market_state = meta.get("marketState", "UNKNOWN").upper()
 
+                    # Get previous close from historical data
+                    # Yahoo's daily data shows completed trading days only
+                    # So closes[-1] is the most recent completed day (yesterday's close)
+                    # This is more reliable than meta.previousClose which can be None
+                    closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                    previous_close = None
+                    if closes:
+                        # closes[-1] is the last completed trading day (yesterday's close)
+                        previous_close = closes[-1]
+
+                    # Fall back to meta if historical not available
+                    if not previous_close:
+                        previous_close = meta.get("previousClose") or meta.get("chartPreviousClose")
+
                     result_dict = {
                         "market_state": market_state,
                         "source": "Yahoo Finance",
                         "price": None,
-                        "previous_close": meta.get("previousClose"),
+                        "previous_close": previous_close,
                         "regular_market_price": meta.get("regularMarketPrice"),
                     }
 
@@ -227,7 +243,7 @@ class ExternalPriceFeed:
                         if pre_market_price:
                             result_dict["price"] = float(pre_market_price)
                             result_dict["price_type"] = "pre_market"
-                            logger.info(f"{symbol}: Yahoo pre-market price ${pre_market_price:.2f}")
+                            logger.info(f"{symbol}: Yahoo pre-market price ${pre_market_price:.2f} (prev close: ${previous_close:.2f})")
                             return result_dict
 
                     elif market_state in ("POST", "POSTPOST"):
@@ -235,7 +251,7 @@ class ExternalPriceFeed:
                         if post_market_price:
                             result_dict["price"] = float(post_market_price)
                             result_dict["price_type"] = "post_market"
-                            logger.info(f"{symbol}: Yahoo post-market price ${post_market_price:.2f}")
+                            logger.info(f"{symbol}: Yahoo post-market price ${post_market_price:.2f} (prev close: ${previous_close:.2f})")
                             return result_dict
 
                     # Fallback to regular market price
