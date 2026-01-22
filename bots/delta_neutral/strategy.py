@@ -252,8 +252,6 @@ class DeltaNeutralStrategy:
         # MKT-001: Pre-market gap detection
         # Track previous day close for gap detection
         self._previous_close_price: Optional[float] = None
-        self._pre_market_gap_last_check: Optional[datetime] = None  # Last Yahoo fetch time
-        self._pre_market_gap_refresh_minutes: int = 15  # Refresh from Yahoo every N minutes
 
         # POS-004: Expiration handling
         # Track when expiration check was last done
@@ -1538,7 +1536,6 @@ class DeltaNeutralStrategy:
         Returns:
             float: Gap percentage if significant, None otherwise
         """
-        from shared.external_price_feed import ExternalPriceFeed
         from shared.market_hours import is_market_open, get_us_market_time
 
         # Only check before market opens
@@ -1551,28 +1548,14 @@ class DeltaNeutralStrategy:
         if market_time.hour < 8 or market_time.hour >= 10:
             return None
 
-        # Check if we need to refresh from Yahoo (every 15 minutes)
-        should_fetch = True
-        if self._pre_market_gap_last_check:
-            minutes_since_last = (market_time - self._pre_market_gap_last_check).total_seconds() / 60
-            if minutes_since_last < self._pre_market_gap_refresh_minutes:
-                should_fetch = False
+        # Use Saxo's pre-market price (already streaming via WebSocket)
+        pre_market_price = self.current_underlying_price
 
-        if not should_fetch:
-            # Skip this check, will refresh on next interval
+        if not pre_market_price or pre_market_price <= 0:
+            logger.warning("MKT-001: No pre-market SPY price from Saxo yet")
             return None
 
-        # Fetch fresh price from Yahoo Finance
-        logger.info("🔍 MKT-001: Fetching pre-market SPY from Yahoo Finance...")
-
-        # Get pre-market price from external feed
         try:
-            external_feed = ExternalPriceFeed(enabled=True)
-            pre_market_price = external_feed.get_price("SPY")
-
-            if not pre_market_price:
-                logger.warning("MKT-001: Could not fetch pre-market SPY price")
-                return None
 
             # Use previous close or last known price
             reference_price = self._previous_close_price or self.current_underlying_price
@@ -1587,11 +1570,7 @@ class DeltaNeutralStrategy:
             abs_gap = abs(gap_percent)
             is_significant = abs_gap >= gap_threshold_percent
 
-            # Update last check time
-            self._pre_market_gap_last_check = market_time
-
-            logger.info(f"MKT-001: Pre-market SPY: ${pre_market_price:.2f}, Previous close: ${reference_price:.2f}")
-            logger.info(f"MKT-001: Gap: {gap_percent:+.2f}%")
+            logger.info(f"📊 MKT-001: Pre-market SPY: ${pre_market_price:.2f} (Saxo) | Previous close: ${reference_price:.2f} | Gap: {gap_percent:+.2f}%")
 
             if is_significant:
                 direction = "UP" if gap_percent > 0 else "DOWN"
@@ -1635,7 +1614,6 @@ class DeltaNeutralStrategy:
 
                 return gap_percent
 
-            logger.info(f"✅ MKT-001: Pre-market gap ({gap_percent:+.2f}%) within normal range")
             return None
 
         except Exception as e:
@@ -1652,7 +1630,6 @@ class DeltaNeutralStrategy:
             price: The closing SPY price
         """
         self._previous_close_price = price
-        self._pre_market_gap_last_check = None  # Reset for next day
         logger.info(f"MKT-001: Previous close updated to ${price:.2f}")
 
     def _add_orphaned_order(self, order_id: str) -> None:
