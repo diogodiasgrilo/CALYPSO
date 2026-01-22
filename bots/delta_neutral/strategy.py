@@ -289,7 +289,6 @@ class DeltaNeutralStrategy:
         self.strangle_multiplier_min = self.strategy_config["weekly_strangle_multiplier_min"]
         self.strangle_multiplier_max = self.strategy_config["weekly_strangle_multiplier_max"]
         self.weekly_target_return_pct = self.strategy_config.get("weekly_target_return_percent", None)
-        self.short_strangle_max_multiplier = self.strategy_config.get("short_strangle_max_multiplier", 1.5)
         self.short_strangle_entry_fee_per_leg = self.strategy_config.get("short_strangle_entry_fee_per_leg", 2.0)
         self.position_size = self.strategy_config["position_size"]
         self.max_spread_percent = self.strategy_config["max_bid_ask_spread_percent"]
@@ -5747,7 +5746,7 @@ class DeltaNeutralStrategy:
         """
         logger.info("=" * 70)
         logger.info(f"1% NET OF LONG STRADDLE COST MODE")
-        logger.info(f"Target: {self.weekly_target_return_pct}% NET | Max Multiplier: {self.short_strangle_max_multiplier}x")
+        logger.info(f"Target: {self.weekly_target_return_pct}% NET | Max Multiplier: {self.strangle_multiplier_max}x")
         logger.info("=" * 70)
 
         # =====================================================================
@@ -5891,7 +5890,7 @@ class DeltaNeutralStrategy:
         # 4. Track which strikes were capped so we can reverse if needed
         # =====================================================================
 
-        max_mult = self.short_strangle_max_multiplier  # 1.5x cap
+        max_mult = self.strangle_multiplier_max  # Cap from config (default 2.0x)
         min_target_return = self.weekly_target_return_pct
 
         # Try progressively lower minimum multipliers until we find valid options
