@@ -2236,6 +2236,11 @@ class IronFlyStrategy:
         """
         Update current price and VIX from market data.
 
+        CRITICAL FIX: Always use skip_cache=True for underlying price to ensure
+        we get fresh REST API data. The streaming cache for CfdOnIndex instruments
+        (like US500.I) doesn't receive delta updates, so the cache can become stale
+        while still appearing "valid" (has Quote.Mid > 0).
+
         Also updates MarketData staleness tracking to detect when
         data becomes stale and stop-loss protection may be compromised.
         """
@@ -2249,7 +2254,9 @@ class IronFlyStrategy:
                     asset_type = "CfdOnIndex"
                 else:
                     asset_type = "Etf"
-                quote = self.client.get_quote(self.underlying_uic, asset_type=asset_type)
+                # CRITICAL: Use skip_cache=True to bypass stale streaming cache
+                # CfdOnIndex WebSocket subscriptions don't receive delta updates reliably
+                quote = self.client.get_quote(self.underlying_uic, asset_type=asset_type, skip_cache=True)
                 if quote:
                     new_price = quote.get('Quote', {}).get('Mid')
                     if new_price and new_price > 0:
