@@ -1553,7 +1553,7 @@ class DeltaNeutralStrategy:
             return None
 
         # Use Yahoo Finance for pre-market prices (Saxo returns indicative prices during pre-market)
-        pre_market_data = self.saxo_client.external_feed.get_pre_market_price("SPY")
+        pre_market_data = self.client.external_feed.get_pre_market_price("SPY")
 
         if pre_market_data and pre_market_data.get("price"):
             pre_market_price = pre_market_data["price"]
