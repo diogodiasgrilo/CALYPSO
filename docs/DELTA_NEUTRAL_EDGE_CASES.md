@@ -12,8 +12,8 @@
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
 **Total Scenarios Analyzed:** 42
-**Well-Handled/Resolved:** 32 (76%)
-**Medium Risk:** 10 (24%)
+**Well-Handled/Resolved:** 36 (86%)
+**Medium Risk:** 6 (14%)
 **High Risk:** 0 (0%) ✅
 
 ---
@@ -213,11 +213,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | POS-004 |
 | **Trigger** | Short strangle expires OTM on Friday |
-| **Current Handling** | Bot should detect via `recover_positions` that strangle no longer exists. |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | OPEN |
-| **Issue** | No explicit handling of expiration events. Bot relies on position recovery to notice positions are gone. Could cause brief state inconsistency. |
-| **Recommendation** | Add expiration date monitoring. Proactively clear position objects when expiry passes. |
+| **Current Handling** | **Proactive expiration check** runs at start of each trading day. Clears position objects when expiry date has passed. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `check_expired_positions()` method in `strategy.py`. Called at start of `_run_strategy_check_impl()`. Compares today's date against strangle expiry. If expiry passed, clears `short_strangle` object, updates `_expected_positions`, and transitions state from FULL_POSITION to LONG_STRADDLE_ACTIVE. Logs safety event for tracking. Prevents state inconsistency by proactively clearing expired positions. |
+| **Fixed In** | 2026-01-22 |
 
 ### 3.5 Orphaned Positions from Previous Runs
 | | |
@@ -260,11 +260,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | MKT-002 |
 | **Trigger** | SPY drops 3% in 5 minutes |
-| **Current Handling** | ITM risk detection at `strategy.py:7074` triggers if short strikes approached. Emergency roll or close shorts. |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | OPEN |
-| **Issue** | ITM threshold is 0.5% from strike. In a fast move, this might not trigger quickly enough. Plus, during a flash crash, liquidity may be poor. |
-| **Recommendation** | Consider more aggressive ITM threshold (1%?) or velocity-based detection. |
+| **Current Handling** | **Velocity-based flash detection** tracks price history and detects rapid moves. Triggers urgent ITM check when threshold exceeded. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_price_history` list and `check_flash_crash_velocity()` method in `strategy.py`. Records price with timestamp on each `update_market_data()` call. Maintains 5-minute sliding window. If price moves >= 2% (configurable via `flash_crash_threshold_percent`) within window, logs critical warning with direction, move size, and distance to threatened strikes. Triggers immediate ITM risk check. More proactive than waiting for 0.5% ITM proximity. |
+| **Fixed In** | 2026-01-22 |
 
 ### 4.3 VIX Spikes Above Threshold Mid-Trade
 | | |
@@ -339,22 +339,22 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | TIME-003 |
 | **Trigger** | Half-day market close (day before holidays) |
-| **Current Handling** | `is_market_holiday` should catch this. Roll would fail if attempted after close. |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | OPEN |
-| **Issue** | Half-day closures (1pm EST) may not be in holiday list. Bot might try to roll at 3pm on a half day when market is closed. |
-| **Recommendation** | Verify holiday calendar includes all half-days. Add explicit half-day handling. |
+| **Current Handling** | **Early close detection** identifies half-day markets (1pm close). Blocks operations after 12:45pm on those days. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `is_early_close_day()`, `get_market_close_time_today()`, `_is_past_early_close()`, and `check_early_close_warning()` methods in `strategy.py`. Detects known early close days: day before Independence Day, day after Thanksgiving, Christmas Eve, New Year's Eve. Logs warning at market open. `_is_past_early_close()` checks 12:45pm cutoff (15 min before 1pm close). Returns "market closed early" if past cutoff, blocking all operations. |
+| **Fixed In** | 2026-01-22 |
 
 ### 5.4 Roll and Recenter Both Triggered
 | | |
 |---|---|
 | **ID** | TIME-004 |
 | **Trigger** | Friday, SPY moved 5 points, and it's roll time |
-| **Current Handling** | Recenter logic at `strategy.py:7132` runs first per spec. Roll happens in `FULL_POSITION` state at `strategy.py:7282`. |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | OPEN |
-| **Issue** | In `LONG_STRADDLE_ACTIVE` state, recenter runs first. But if recenter fails, roll might not happen either. Could end week with expiring shorts. |
-| **Recommendation** | Add explicit handling for "recenter failed on roll day" scenario. |
+| **Current Handling** | **Recenter failure tracking** detects when recenter fails on roll day. Skips roll and lets shorts expire safely. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_recenter_failed_on_roll_day` flag, `_recenter_failure_date`, `_mark_recenter_failed_on_roll_day()`, and `_handle_recenter_failure_on_roll_day()` methods in `strategy.py`. When recenter fails on Friday, flag is set. Before attempting roll, checks flag. If set, logs warning explaining situation, skips roll attempt, and lets shorts expire naturally. Straddle remains protected for next week. Prevents compounding failures by not attempting roll with misaligned positions. |
+| **Fixed In** | 2026-01-22 |
 
 ### 5.5 Price Changes Between Close Shorts and Enter New Shorts
 | | |
@@ -491,15 +491,15 @@ This document catalogs all identified edge cases and potential failure scenarios
 | ORDER-005 | Wide bid/ask spread | ✅ RESOLVED | Medium |
 | ORDER-007 | Order rejection handling | ✅ RESOLVED | Medium |
 | POS-002 | Manual intervention detection | OPEN | Low |
-| POS-004 | Expiration handling | OPEN | Medium |
+| POS-004 | Expiration handling | ✅ RESOLVED | Medium |
 | POS-006 | Multiple straddles | OPEN | Low |
-| MKT-002 | Flash crash speed | OPEN | Medium |
+| MKT-002 | Flash crash speed | ✅ RESOLVED | Medium |
 | MKT-003 | VIX spike mid-trade | OPEN | Low (by design) |
 | MKT-004 | Market halt detection | OPEN | Low |
 | MKT-005 | No liquidity handling | OPEN | Low |
 | TIME-001 | Concurrent operations | ✅ RESOLVED | Medium |
-| TIME-003 | Half-day closures | OPEN | Medium |
-| TIME-004 | Roll + recenter same day | OPEN | Medium |
+| TIME-003 | Half-day closures | ✅ RESOLVED | Medium |
+| TIME-004 | Roll + recenter same day | ✅ RESOLVED | Medium |
 | STATE-002 | State/position mismatch | ✅ RESOLVED | Medium |
 | DATA-001 | Stale quote data | OPEN | Low |
 | DATA-002 | Missing greeks | OPEN | Low |
@@ -511,12 +511,12 @@ This document catalogs all identified edge cases and potential failure scenarios
 |----------|-------|-----------------|-----------|---------|
 | Connection/API | 6 | 4 | 2 | 0 |
 | Order Execution | 7 | 7 | 0 | 0 |
-| Position State | 6 | 4 | 2 | 0 |
-| Market Conditions | 6 | 3 | 3 | 0 |
-| Timing/Race | 5 | 4 | 1 | 0 |
+| Position State | 6 | 5 | 1 | 0 |
+| Market Conditions | 6 | 4 | 2 | 0 |
+| Timing/Race | 5 | 5 | 0 | 0 |
 | State Machine | 4 | 4 | 0 | 0 |
 | Data Integrity | 5 | 3 | 2 | 0 |
-| **TOTAL** | **42** | **32** | **10** | **0** |
+| **TOTAL** | **42** | **36** | **6** | **0** |
 
 ---
 
@@ -534,6 +534,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-22 | RESOLVED ORDER-007: Added explicit rejection detection with partial fill handling | Claude |
 | 2026-01-22 | RESOLVED TIME-001: Added operation lock to prevent concurrent strategy checks | Claude |
 | 2026-01-22 | RESOLVED STATE-002: Added state/position consistency check at strategy start | Claude |
+| 2026-01-22 | RESOLVED POS-004: Added proactive expiration check at start of each trading day | Claude |
+| 2026-01-22 | RESOLVED MKT-002: Added velocity-based flash crash detection with 5-min price history | Claude |
+| 2026-01-22 | RESOLVED TIME-003: Added early close day detection (1pm close before holidays) | Claude |
+| 2026-01-22 | RESOLVED TIME-004: Added recenter failure tracking on roll days with protective skip | Claude |
 
 ---
 

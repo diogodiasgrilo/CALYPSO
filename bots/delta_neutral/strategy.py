@@ -234,6 +234,25 @@ class DeltaNeutralStrategy:
         self._previous_close_price: Optional[float] = None
         self._pre_market_gap_checked_today: bool = False
 
+        # POS-004: Expiration handling
+        # Track when expiration check was last done
+        self._last_expiry_check_date: Optional[str] = None
+
+        # MKT-002: Flash crash velocity detection
+        # Track recent prices for rapid move detection
+        self._price_history: List[Tuple[datetime, float]] = []  # (timestamp, price)
+        self._price_history_window_minutes: int = 5  # Track last 5 minutes
+        self._flash_crash_threshold_percent: float = self.strategy_config.get("flash_crash_threshold_percent", 2.0)
+
+        # TIME-003: Half-day closure dates (1pm ET close)
+        # These are days before major holidays with early market close
+        self._early_close_checked_today: bool = False
+
+        # TIME-004: Roll + recenter failure tracking
+        # If recenter fails on a roll day, track it for special handling
+        self._recenter_failed_on_roll_day: bool = False
+        self._recenter_failure_date: Optional[str] = None
+
         # ACTION COOLDOWN: Prevent rapid retry of same failed action
         # Maps action_type -> last_attempt_time
         # Configurable via config.json circuit_breaker.cooldown_minutes (default: 5)
@@ -1646,6 +1665,392 @@ class DeltaNeutralStrategy:
         logger.info("✓ All tracked orphaned orders have been resolved")
         self._orphaned_orders = []
         return False
+
+    # =========================================================================
+    # POS-004: EXPIRATION HANDLING
+    # =========================================================================
+
+    def check_expired_positions(self) -> Optional[str]:
+        """
+        POS-004: Check if short strangle has expired and clear position objects.
+
+        Proactively detects when short options have passed their expiration date
+        and clears the position objects before state machine runs. This prevents
+        the bot from trying to operate on positions that no longer exist.
+
+        Should be called once at the start of each trading day.
+
+        Returns:
+            Optional[str]: Description of what was found/cleared, or None if nothing expired
+        """
+        now_est = get_us_market_time()
+        today_str = now_est.strftime("%Y-%m-%d")
+
+        # Only check once per day
+        if self._last_expiry_check_date == today_str:
+            return None
+
+        self._last_expiry_check_date = today_str
+        cleared_positions = []
+
+        # Check short strangle expiration
+        if self.short_strangle:
+            strangle_expiry = self.short_strangle.expiry
+            if strangle_expiry:
+                try:
+                    # Parse expiry date (format: YYYY-MM-DD or similar)
+                    if isinstance(strangle_expiry, str):
+                        expiry_date = datetime.strptime(strangle_expiry, "%Y-%m-%d").date()
+                    else:
+                        expiry_date = strangle_expiry
+
+                    if now_est.date() > expiry_date:
+                        call_strike = self.short_strangle.call_strike if self.short_strangle.call else 0
+                        put_strike = self.short_strangle.put_strike if self.short_strangle.put else 0
+
+                        logger.info("=" * 60)
+                        logger.info("📅 POS-004: Short strangle has EXPIRED")
+                        logger.info(f"   Expiry date: {expiry_date}")
+                        logger.info(f"   Today: {now_est.date()}")
+                        logger.info(f"   Call strike: ${call_strike:.0f}")
+                        logger.info(f"   Put strike: ${put_strike:.0f}")
+                        logger.info("   Clearing strangle position objects...")
+                        logger.info("=" * 60)
+
+                        cleared_positions.append(f"Short strangle (Call ${call_strike:.0f}, Put ${put_strike:.0f})")
+
+                        # Log to Google Sheets
+                        if self.trade_logger:
+                            self.trade_logger.log_safety_event({
+                                "timestamp": now_est.strftime("%Y-%m-%d %H:%M:%S"),
+                                "event_type": "POSITION_EXPIRED",
+                                "severity": "INFO",
+                                "spy_price": self.current_underlying_price,
+                                "vix": self.current_vix,
+                                "action_taken": f"Cleared expired strangle: Call ${call_strike:.0f}, Put ${put_strike:.0f}",
+                                "description": f"Strangle expired {expiry_date}, clearing position objects",
+                                "result": "SUCCESS"
+                            })
+
+                        # Clear the strangle
+                        self.short_strangle = None
+
+                        # Remove from expected positions
+                        self._expected_positions = {k: v for k, v in self._expected_positions.items()
+                                                     if "Short" not in k}
+
+                        # Update state if we were in FULL_POSITION
+                        if self.state == StrategyState.FULL_POSITION:
+                            self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                            logger.info("   State changed: FULL_POSITION → LONG_STRADDLE_ACTIVE")
+
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"POS-004: Could not parse strangle expiry '{strangle_expiry}': {e}")
+
+        if cleared_positions:
+            return f"Cleared expired: {', '.join(cleared_positions)}"
+
+        return None
+
+    # =========================================================================
+    # MKT-002: FLASH CRASH VELOCITY DETECTION
+    # =========================================================================
+
+    def _record_price_for_velocity(self, price: float) -> None:
+        """
+        MKT-002: Record current price for velocity tracking.
+
+        Called during update_market_data() to build price history.
+
+        Args:
+            price: Current SPY price
+        """
+        now = datetime.now()
+        self._price_history.append((now, price))
+
+        # Keep only prices within the tracking window
+        cutoff = now - timedelta(minutes=self._price_history_window_minutes)
+        self._price_history = [(t, p) for t, p in self._price_history if t > cutoff]
+
+    def check_flash_crash_velocity(self) -> Optional[Tuple[float, str]]:
+        """
+        MKT-002: Detect rapid price movements (flash crash/rally).
+
+        Checks if price has moved more than threshold in the tracking window.
+        More aggressive than standard ITM check - catches fast moves early.
+
+        Returns:
+            Optional[Tuple[float, str]]: (move_percent, direction) if flash detected, None otherwise
+        """
+        if len(self._price_history) < 2:
+            return None  # Not enough data
+
+        # Get oldest and newest prices in window
+        oldest_time, oldest_price = self._price_history[0]
+        newest_time, newest_price = self._price_history[-1]
+
+        # Calculate move percentage
+        if oldest_price <= 0:
+            return None
+
+        move_percent = ((newest_price - oldest_price) / oldest_price) * 100
+        abs_move = abs(move_percent)
+        direction = "UP" if move_percent > 0 else "DOWN"
+        elapsed_minutes = (newest_time - oldest_time).total_seconds() / 60
+
+        if abs_move >= self._flash_crash_threshold_percent:
+            logger.critical("=" * 70)
+            logger.critical("🚨 MKT-002: FLASH MOVE DETECTED 🚨")
+            logger.critical("=" * 70)
+            logger.critical(f"   Direction: {direction}")
+            logger.critical(f"   Move: {abs_move:.2f}% in {elapsed_minutes:.1f} minutes")
+            logger.critical(f"   Old price: ${oldest_price:.2f} ({oldest_time.strftime('%H:%M:%S')})")
+            logger.critical(f"   New price: ${newest_price:.2f} ({newest_time.strftime('%H:%M:%S')})")
+            logger.critical(f"   Threshold: {self._flash_crash_threshold_percent}%")
+
+            if self.short_strangle:
+                call_strike = self.short_strangle.call_strike if self.short_strangle.call else 0
+                put_strike = self.short_strangle.put_strike if self.short_strangle.put else 0
+                logger.critical(f"   Short strikes: Call ${call_strike:.0f}, Put ${put_strike:.0f}")
+
+                # Check which side is threatened
+                if direction == "UP" and call_strike > 0:
+                    distance = ((call_strike - newest_price) / newest_price) * 100
+                    logger.critical(f"   ⚠️ Call only {distance:.1f}% away!")
+                elif direction == "DOWN" and put_strike > 0:
+                    distance = ((newest_price - put_strike) / newest_price) * 100
+                    logger.critical(f"   ⚠️ Put only {distance:.1f}% away!")
+
+            logger.critical("=" * 70)
+
+            # Log safety event
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "FLASH_MOVE_DETECTED",
+                    "severity": "CRITICAL",
+                    "spy_price": newest_price,
+                    "vix": self.current_vix,
+                    "action_taken": f"Detected {direction} {abs_move:.2f}% in {elapsed_minutes:.1f} min",
+                    "description": f"From ${oldest_price:.2f} to ${newest_price:.2f}",
+                    "result": "MONITORING"
+                })
+
+            return (move_percent, direction)
+
+        return None
+
+    # =========================================================================
+    # TIME-003: HALF-DAY (EARLY CLOSE) DETECTION
+    # =========================================================================
+
+    def is_early_close_day(self, dt: datetime = None) -> Tuple[bool, Optional[str]]:
+        """
+        TIME-003: Check if today is an early market close day (1pm ET).
+
+        Early close days are typically:
+        - Day before Independence Day (if July 4 is on weekday, July 3 closes early)
+        - Day after Thanksgiving (Friday)
+        - Christmas Eve (Dec 24, if weekday)
+        - New Year's Eve (Dec 31, if weekday)
+
+        Args:
+            dt: Date to check (defaults to now in ET)
+
+        Returns:
+            Tuple[bool, Optional[str]]: (is_early_close, reason)
+        """
+        if dt is None:
+            dt = get_us_market_time()
+
+        month = dt.month
+        day = dt.day
+        weekday = dt.weekday()  # 0=Monday, 4=Friday
+
+        # Not on weekends
+        if weekday >= 5:
+            return False, None
+
+        # July 3 (if July 4 is on weekday except Monday where July 3 is Sunday)
+        if month == 7 and day == 3 and weekday <= 4:
+            return True, "Day before Independence Day"
+
+        # Day after Thanksgiving (always Friday)
+        # Thanksgiving is 4th Thursday of November
+        if month == 11 and weekday == 4:  # Friday in November
+            # Check if yesterday was Thanksgiving (4th Thursday)
+            from shared.market_hours import _get_nth_weekday_of_month
+            thanksgiving = _get_nth_weekday_of_month(dt.year, 11, 3, 4)  # 3=Thursday, 4th occurrence
+            if dt.day == thanksgiving.day + 1:
+                return True, "Day after Thanksgiving"
+
+        # Christmas Eve (Dec 24) if it's a weekday
+        if month == 12 and day == 24 and weekday <= 4:
+            return True, "Christmas Eve"
+
+        # New Year's Eve (Dec 31) if it's a weekday
+        if month == 12 and day == 31 and weekday <= 4:
+            return True, "New Year's Eve"
+
+        return False, None
+
+    def get_market_close_time_today(self) -> time:
+        """
+        TIME-003: Get today's market close time, accounting for early close days.
+
+        Returns:
+            time: 13:00 (1pm) for early close days, 16:00 (4pm) otherwise
+        """
+        from datetime import time as dt_time
+
+        is_early, reason = self.is_early_close_day()
+        if is_early:
+            logger.info(f"⏰ TIME-003: Early close day ({reason}) - market closes at 1:00 PM ET")
+            return dt_time(13, 0)  # 1pm ET
+
+        return dt_time(16, 0)  # 4pm ET (normal)
+
+    def _is_past_early_close(self) -> bool:
+        """
+        TIME-003: Check if we're past the early close time.
+
+        Returns:
+            bool: True if market has already closed (or will close very soon)
+        """
+        is_early, reason = self.is_early_close_day()
+        if not is_early:
+            return False
+
+        now_est = get_us_market_time()
+        # Early close is 1pm, give 15 min buffer
+        early_cutoff = time(12, 45)  # 12:45 PM
+
+        if now_est.time() >= early_cutoff:
+            logger.warning(f"⏰ TIME-003: Past early close cutoff ({reason})")
+            return True
+
+        return False
+
+    def check_early_close_warning(self) -> Optional[str]:
+        """
+        TIME-003: Check for early close day and log warning if applicable.
+
+        Call once at market open to alert operator.
+
+        Returns:
+            Optional[str]: Warning message if early close day, None otherwise
+        """
+        now_est = get_us_market_time()
+        today_str = now_est.strftime("%Y-%m-%d")
+
+        # Only check once per day
+        if self._early_close_checked_today:
+            return None
+
+        self._early_close_checked_today = True
+
+        is_early, reason = self.is_early_close_day()
+        if is_early:
+            logger.warning("=" * 60)
+            logger.warning(f"⏰ TIME-003: EARLY CLOSE DAY - {reason}")
+            logger.warning("=" * 60)
+            logger.warning("   Market closes at 1:00 PM ET today")
+            logger.warning("   Roll/recenter operations blocked after 12:45 PM")
+            logger.warning("=" * 60)
+
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": now_est.strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "EARLY_CLOSE_DAY",
+                    "severity": "INFO",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "action_taken": "Early close detection",
+                    "description": f"{reason} - market closes at 1pm ET",
+                    "result": "WARNING"
+                })
+
+            return f"Early close day: {reason}"
+
+        return None
+
+    # =========================================================================
+    # TIME-004: ROLL + RECENTER FAILURE HANDLING
+    # =========================================================================
+
+    def _handle_recenter_failure_on_roll_day(self) -> bool:
+        """
+        TIME-004: Handle scenario where recenter fails on a roll day.
+
+        If it's roll day (Friday) and recenter fails, we risk:
+        - Being unable to roll due to misaligned strikes
+        - Having expiring shorts that we can't manage properly
+
+        The safest action is to close shorts and let them expire,
+        keeping the straddle intact for next week.
+
+        Returns:
+            bool: True if protective action was taken
+        """
+        now_est = get_us_market_time()
+        today_str = now_est.strftime("%Y-%m-%d")
+
+        # Check if this is a roll day (Friday)
+        if now_est.strftime("%A") != "Friday":
+            return False
+
+        # Check if recenter already failed today
+        if not self._recenter_failed_on_roll_day or self._recenter_failure_date != today_str:
+            return False
+
+        logger.critical("=" * 70)
+        logger.critical("🚨 TIME-004: RECENTER FAILED ON ROLL DAY")
+        logger.critical("=" * 70)
+        logger.critical("   Situation: Recenter failed and shorts are expiring today")
+        logger.critical("   Risk: Unable to roll due to misaligned strikes")
+        logger.critical("   Decision: Let shorts expire, keep straddle for next week")
+
+        if self.short_strangle:
+            call_strike = self.short_strangle.call_strike if self.short_strangle.call else 0
+            put_strike = self.short_strangle.put_strike if self.short_strangle.put else 0
+            logger.critical(f"   Expiring shorts: Call ${call_strike:.0f}, Put ${put_strike:.0f}")
+            logger.critical("   Action: NOT attempting roll - letting expire worthless")
+
+            # Log safety event
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": now_est.strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "RECENTER_FAILED_ROLL_DAY",
+                    "severity": "WARNING",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "action_taken": f"Let shorts expire (Call ${call_strike:.0f}, Put ${put_strike:.0f})",
+                    "description": "Recenter failed on roll day - skipping roll, letting expire",
+                    "result": "PROTECTIVE_ACTION"
+                })
+
+        logger.critical("=" * 70)
+
+        # Clear the flag
+        self._recenter_failed_on_roll_day = False
+        self._recenter_failure_date = None
+
+        # Don't attempt roll - let the shorts expire and enter fresh next week
+        return True
+
+    def _mark_recenter_failed_on_roll_day(self) -> None:
+        """
+        TIME-004: Mark that recenter failed on a roll day for later handling.
+
+        Called when recenter fails in the strategy check.
+        """
+        now_est = get_us_market_time()
+
+        # Only matters on Fridays
+        if now_est.strftime("%A") == "Friday":
+            self._recenter_failed_on_roll_day = True
+            self._recenter_failure_date = now_est.strftime("%Y-%m-%d")
+            logger.warning("⚠️ TIME-004: Recenter failure marked for roll day handling")
 
     def _is_action_on_cooldown(self, action_type: str) -> bool:
         """
@@ -4034,6 +4439,8 @@ class DeltaNeutralStrategy:
 
                 if self.current_underlying_price > 0:
                     logger.debug(f"{self.underlying_symbol} price: ${self.current_underlying_price:.2f}")
+                    # MKT-002: Record price for flash crash velocity detection
+                    self._record_price_for_velocity(self.current_underlying_price)
                 else:
                     logger.error(f"{self.underlying_symbol}: No price data found")
                     return False
@@ -7615,6 +8022,16 @@ class DeltaNeutralStrategy:
         if self._check_critical_intervention():
             return f"🚨🚨🚨 CRITICAL INTERVENTION REQUIRED - {self._critical_intervention_reason}"
 
+        # POS-004: Check for expired positions at start of day
+        expired_info = self.check_expired_positions()
+        if expired_info:
+            logger.info(f"📅 POS-004: {expired_info}")
+
+        # TIME-003: Check for early close day warning (once per day)
+        early_close_warning = self.check_early_close_warning()
+        if early_close_warning:
+            logger.warning(f"⏰ TIME-003: {early_close_warning}")
+
         # STATE-002: Verify state matches actual position objects
         state_issue = self._check_state_position_consistency()
         if state_issue:
@@ -7661,6 +8078,18 @@ class DeltaNeutralStrategy:
         # Update market data
         if not self.update_market_data():
             return "Failed to update market data"
+
+        # MKT-002: Check for flash crash/rally velocity
+        flash_move = self.check_flash_crash_velocity()
+        if flash_move:
+            move_pct, direction = flash_move
+            # Flash move detected - this triggers same ITM check but with more urgency
+            # The ITM risk check below will handle the actual position management
+            logger.critical(f"🚨 MKT-002: Flash {direction} {abs(move_pct):.2f}% - checking positions urgently")
+
+        # TIME-003: Check if we're past early close time
+        if self._is_past_early_close():
+            return "⏰ TIME-003: Market closed early today - no operations"
 
         # CRITICAL: Handle stuck states (RECENTERING, EXITING, ROLLING_SHORTS)
         # These states should only be transient - if we're stuck, something went wrong
@@ -7875,14 +8304,19 @@ class DeltaNeutralStrategy:
                     action_taken = "Executed 5-point recenter"
                 else:
                     self._set_action_cooldown("recenter")
+                    # TIME-004: Mark recenter failure on roll day
+                    self._mark_recenter_failed_on_roll_day()
                     action_taken = "Recenter failed - on cooldown"
 
             # Check roll condition
             else:
                 should_roll, challenged_side = self.should_roll_shorts()
                 if should_roll:
+                    # TIME-004: Check if recenter failed on roll day - skip roll if so
+                    if self._handle_recenter_failure_on_roll_day():
+                        action_taken = "TIME-004: Skipping roll after recenter failure - letting shorts expire"
                     # Check cutoff time FIRST - no rolling near market close
-                    if self._is_past_shorts_cutoff():
+                    elif self._is_past_shorts_cutoff():
                         minutes_left = self._minutes_until_market_close()
                         logger.warning(
                             f"⏰ ROLL BLOCKED: Only {minutes_left} minutes until market close. "
