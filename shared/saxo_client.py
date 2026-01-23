@@ -2964,7 +2964,8 @@ class SaxoClient:
                     "AccountKey": self.account_key,
                     "Uic": int(uic),           # Fix: Must be Int, singular
                     "AssetType": asset_type,   # Fix: Specific type for this UIC
-                    "FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo"]
+                    # Include PriceInfoDetails for indices like VIX that use LastTraded
+                    "FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo", "PriceInfoDetails"]
                 }
             }
 
