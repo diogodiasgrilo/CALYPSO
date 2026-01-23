@@ -212,7 +212,16 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="ls -la /opt/calypso/
 
 ## Config Files
 
-Config files are in `.gitignore` - credentials come from Google Secret Manager in cloud mode.
+**IMPORTANT:** Config files are in `.gitignore` and must be edited directly on the VM. They are NOT synced via git. Local config files are for development only - production configs live on the VM.
+
+To edit VM configs, use `nano` or `vim` via SSH:
+```bash
+# Edit Iron Fly config on VM
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso nano /opt/calypso/bots/iron_fly_0dte/config/config.json"
+
+# After editing, restart the bot to apply changes
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte"
+```
 
 ```bash
 # View VM config
