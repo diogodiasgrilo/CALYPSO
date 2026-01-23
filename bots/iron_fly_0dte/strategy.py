@@ -667,6 +667,7 @@ class IronFlyStrategy:
         self.filters_config = config.get("filters", {})
         self.fed_meeting_blackout = self.filters_config.get("fed_meeting_blackout", True)
         self.economic_calendar_check = self.filters_config.get("economic_calendar_check", True)
+        self.require_price_in_range = self.filters_config.get("require_price_in_range", True)
 
         # State
         self.state = IronFlyState.IDLE
@@ -2230,7 +2231,8 @@ class IronFlyStrategy:
             return f"Entry blocked - {reason}"
 
         # FILTER 5: Price within opening range check (Trend Day detection)
-        if not self.opening_range.is_price_in_range(self.current_price):
+        # Can be disabled via config: filters.require_price_in_range = false
+        if self.require_price_in_range and not self.opening_range.is_price_in_range(self.current_price):
             self.state = IronFlyState.DAILY_COMPLETE
             reason = f"Price {self.current_price:.2f} outside range [{self.opening_range.low:.2f}-{self.opening_range.high:.2f}]"
             self.trade_logger.log_event(f"FILTER BLOCKED: Trend Day - {reason}")
