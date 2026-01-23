@@ -3673,7 +3673,7 @@ class IronFlyStrategy:
         Updates a single row for today's date (upsert) rather than appending.
         Shows "MONITORING" as entry_decision until final decision at 10:00 AM.
         """
-        if self.state != IronFlyState.MONITORING_OPENING_RANGE:
+        if self.state != IronFlyState.WAITING_OPENING_RANGE:
             return
 
         current_time = get_us_market_time()
