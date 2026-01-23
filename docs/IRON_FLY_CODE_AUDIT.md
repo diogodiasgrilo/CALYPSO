@@ -532,8 +532,45 @@ The Iron Fly bot has been thoroughly analyzed and is safe for LIVE trading with 
 | 2026-01-23 | Fixed Minor Issue 3: Removed unused order_timeout_seconds config | Claude |
 | 2026-01-23 | Approved for LIVE deployment | Claude |
 | 2026-01-23 | Fixed CONN-008: WebSocket 401 errors on wake from sleep (token refresh before connect) | Claude |
+| 2026-01-23 | **CRITICAL FIX: P&L units bug** - All P&L values were displayed in cents instead of dollars (see section 14) | Claude |
 
 ---
 
-**Document Version:** 1.0
+## 14. POST-DEPLOYMENT FIXES
+
+### 14.1 CRITICAL: P&L Units Bug (Fixed 2026-01-23)
+
+**Severity:** CRITICAL
+**Impact:** P&L displayed as $7500 instead of $75; max loss circuit breaker would NEVER trigger
+
+**Root Cause:**
+Internal P&L values are stored in "contract-adjusted" units (multiplied by 100 for the option contract multiplier). These values were being displayed and compared without dividing by 100.
+
+**Bugs Fixed:**
+
+1. **P&L Display** - Terminal and Google Sheets showed cents as dollars
+   - `$75.00` profit was displaying as `$7500.00`
+   - Fixed in: `get_status_summary()`, all `log_trade()` calls, terminal heartbeat
+
+2. **Max Loss Circuit Breaker** - Compared incompatible units
+   - `MAX_LOSS_PER_CONTRACT = 400.0` (dollars) vs `unrealized_pnl` (cents)
+   - A $400 loss (40000 cents) would never trigger: `40000 > -400` is always true
+   - Fixed in: `_check_profit_target_and_max_loss()`
+
+3. **Google Sheets `current_value`** - Used static `credit_received` instead of live value
+   - Fixed in: `log_position_to_sheets()`, `log_account_summary()`
+
+4. **WebSocket Subscription** - Added `asset_type` parameter to `subscribe_to_option()`
+   - Improvement for StockIndexOption support (polling fallback was already working)
+
+**Files Modified:**
+- `bots/iron_fly_0dte/strategy.py` - All P&L displays and comparisons
+- `bots/iron_fly_0dte/main.py` - Heartbeat display
+- `shared/saxo_client.py` - `subscribe_to_option()` asset_type parameter
+
+**Lesson Learned:** Internal storage units must be clearly documented and consistently converted before display/comparison.
+
+---
+
+**Document Version:** 1.1
 **Last Updated:** 2026-01-23
