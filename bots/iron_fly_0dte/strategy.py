@@ -1864,10 +1864,14 @@ class IronFlyStrategy:
                 return
 
             # Look for SPX/SPXW options (StockIndexOption type)
+            # Note: Saxo API returns nested structure - PositionBase.AssetType and DisplayAndFormat.Description
             spx_options = []
             for p in broker_positions:
-                asset_type = p.get('AssetType', '')
-                description = str(p.get('Description', '')).upper()
+                # Extract from nested Saxo structure
+                position_base = p.get('PositionBase', {})
+                display_format = p.get('DisplayAndFormat', {})
+                asset_type = position_base.get('AssetType', '')
+                description = str(display_format.get('Description', '')).upper()
                 # Match both StockOption and StockIndexOption for SPX
                 if asset_type in ['StockOption', 'StockIndexOption'] and ('SPX' in description or 'SPXW' in description):
                     spx_options.append(p)
@@ -1887,7 +1891,9 @@ class IronFlyStrategy:
             for pos in spx_options:
                 pos_base = pos.get("PositionBase", {})
                 amount = pos_base.get("Amount", 0)
-                put_call = pos.get("PutCall", "")
+                # PutCall is nested inside OptionsData
+                options_data = pos_base.get("OptionsData", {})
+                put_call = options_data.get("PutCall", "")
 
                 if amount < 0:  # Short position
                     if put_call == "Call":
