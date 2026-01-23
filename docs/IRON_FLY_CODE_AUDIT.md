@@ -391,6 +391,24 @@ else:
 
 **Location:** `main.py:303-319`
 
+### 8.5 WebSocket Token Refresh Before Connect ✅ FIXED (2026-01-23)
+
+**Location:** `shared/saxo_client.py:2927-2940`
+
+**Issue Found:** WebSocket 401 Unauthorized errors occurring when bot wakes from sleep.
+
+**Root Cause:** When waking from a 15-minute sleep, `start_price_streaming()` would create the WebSocket with `self.access_token` directly in the handshake header. If another bot (Delta Neutral) had refreshed the shared token during the sleep period, the Iron Fly bot's in-memory token would be stale, causing Saxo to reject the WebSocket handshake with 401.
+
+**Fix Applied:** Added `authenticate()` call before `_start_websocket()` to ensure the token is fresh from the coordinator cache:
+```python
+# CRITICAL FIX: Ensure token is fresh BEFORE starting WebSocket
+if not self.authenticate():
+    logger.warning("Token refresh failed before WebSocket connection...")
+self._start_websocket()
+```
+
+**Verdict:** Prevents race condition between token refresh and WebSocket handshake in multi-bot environments.
+
 ---
 
 ## 9. MINOR ISSUES (All Fixed)
@@ -513,6 +531,7 @@ The Iron Fly bot has been thoroughly analyzed and is safe for LIVE trading with 
 | 2026-01-23 | Fixed Minor Issue 2: Removed redundant order_type assignment | Claude |
 | 2026-01-23 | Fixed Minor Issue 3: Removed unused order_timeout_seconds config | Claude |
 | 2026-01-23 | Approved for LIVE deployment | Claude |
+| 2026-01-23 | Fixed CONN-008: WebSocket 401 errors on wake from sleep (token refresh before connect) | Claude |
 
 ---
 

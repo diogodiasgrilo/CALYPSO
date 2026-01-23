@@ -2923,9 +2923,19 @@ class SaxoClient:
         """
         if self.is_streaming:
             logger.warning("Streaming already active. Adding new subscriptions...")
-        
+
         # 1. Start the WebSocket thread if it's not running
         if not self.ws_connection:
+            # CRITICAL FIX (2026-01-23): Ensure token is fresh BEFORE starting WebSocket
+            # This prevents 401 Unauthorized errors when waking from sleep.
+            # The WebSocket handshake uses self.access_token directly (not _make_request),
+            # so we must refresh here to get the latest token from the coordinator cache.
+            # Without this, a stale token can cause handshake failures if another bot
+            # refreshed the shared token while this bot was sleeping.
+            # See: CONN-008 in IRON_FLY_EDGE_CASES.md
+            if not self.authenticate():
+                logger.warning("Token refresh failed before WebSocket connection - proceeding with existing token")
+
             # Generate fresh context ID to avoid "Subscription Key already in use" errors on reconnect
             self.subscription_context_id = f"ctx_{int(time.time())}"
             self._start_websocket()

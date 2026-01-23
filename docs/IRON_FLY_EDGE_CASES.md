@@ -14,8 +14,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 **⚠️ PRE-LIVE AUDIT (2026-01-23):** Added 10 LIVE-specific edge cases. LIVE-001 (asset type) fixed. One HIGH risk item remains (BY DESIGN).
 
-**Total Scenarios Analyzed:** 62 (52 original + 10 LIVE-specific)
-**Well-Handled (LOW):** 58 (94%)
+**Total Scenarios Analyzed:** 63 (52 original + 10 LIVE-specific + 1 multi-bot)
+**Well-Handled (LOW):** 59 (94%)
 **Medium Risk:** 3 (5%) - LIVE-002, LIVE-004, LIVE-009
 **High Risk:** 1 (2%) - LIVE-006 (shutdown with position - BY DESIGN)
 
@@ -49,6 +49,9 @@ This document catalogs all identified edge cases and potential failure scenarios
 - ✅ **ORDER-006**: Pending order check on startup with auto-cancel
 - ✅ **ORDER-007**: Timed-out orders actively cancelled (not just tracked)
 - ✅ **ORDER-008**: `_cancel_order_with_retry()` method with verification
+
+### Recent Fixes (2026-01-23) - Batch 5 (Multi-Bot Token Coordination)
+- ✅ **CONN-008**: WebSocket 401 fix - token refresh before WebSocket connect
 
 ---
 
@@ -134,6 +137,16 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Risk Level** | ✅ LOW |
 | **Status** | RESOLVED (Fixed 2026-01-22) |
 | **Notes** | Emergency close triggered automatically on data blackout. Logs "CONN-007: DATA BLACKOUT EMERGENCY!" and closes position. |
+
+### 1.8 WebSocket 401 Unauthorized on Wake from Sleep
+| | |
+|---|---|
+| **ID** | CONN-008 |
+| **Trigger** | Bot wakes from 15-minute sleep and attempts WebSocket connection with stale token |
+| **Current Handling** | `start_price_streaming()` now calls `authenticate()` before starting WebSocket to ensure token is fresh from coordinator cache. See `shared/saxo_client.py:2927-2940` |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED (Fixed 2026-01-23) |
+| **Notes** | In multi-bot environments (Iron Fly + Delta Neutral), one bot may refresh the shared token while another sleeps. The sleeping bot's in-memory `self.access_token` becomes stale. Without refreshing before WebSocket connect, the handshake fails with 401. Fix ensures fresh token is loaded from coordinator cache before each WebSocket connection attempt. |
 
 ---
 
@@ -832,6 +845,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 | ID | Issue | Status | Recommended Action |
 |----|-------|--------|-------------------|
 | ~~CONN-007~~ | ~~Both WebSocket AND REST fail with position open~~ | ✅ RESOLVED | Emergency close on data blackout implemented |
+| ~~CONN-008~~ | ~~WebSocket 401 on wake from sleep (multi-bot token race)~~ | ✅ RESOLVED | Token refresh before WebSocket connect |
 | ~~TIME-003~~ | ~~Market early close (half days) not detected~~ | ✅ RESOLVED | Early close date detection implemented |
 | ~~MKT-001~~ | ~~Flash crash velocity detection missing~~ | ✅ RESOLVED | Flash crash detection with 2% threshold implemented |
 | ~~LIVE-001~~ | ~~Asset type mismatch (StockOption vs StockIndexOption)~~ | ✅ RESOLVED | All API calls unified to `StockIndexOption` |
@@ -1009,6 +1023,8 @@ The only remaining MEDIUM item is SIM-001 (Simulated P&L Accuracy), which is mar
 | 2026-01-23 | **Fixed LIVE-001**: Unified all API calls to `StockIndexOption` for SPX/SPXW options (20 occurrences) | Claude |
 | 2026-01-23 | Verified via Saxo Developer Portal: SPX index options require `StockIndexOption` asset type | Claude |
 | 2026-01-23 | Updated statistics: 62 total (58 LOW, 3 MEDIUM, 1 HIGH - BY DESIGN) | Claude |
+| 2026-01-23 | **Fixed CONN-008**: WebSocket 401 on wake from sleep - token refresh before WebSocket connect in `saxo_client.py` | Claude |
+| 2026-01-23 | Updated statistics: 63 total (59 LOW, 3 MEDIUM, 1 HIGH - BY DESIGN) | Claude |
 
 ---
 
@@ -1035,5 +1051,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 4.1
-**Last Updated:** 2026-01-23 (POST LIVE-001 FIX: 62 edge cases, 1 HIGH (by design)/3 MEDIUM remaining)
+**Document Version:** 4.2
+**Last Updated:** 2026-01-23 (POST CONN-008 FIX: 63 edge cases, 1 HIGH (by design)/3 MEDIUM remaining)
