@@ -84,8 +84,8 @@ WING_BREACH_TOLERANCE = 0.10  # $0.10 tolerance for float comparison
 DEFAULT_SIMULATED_CREDIT_PER_WING_POINT = 2.50  # Realistic: $2.50 per point of wing width
 
 # Order execution safety constants (matching Delta Neutral bot)
-DEFAULT_ORDER_TIMEOUT_SECONDS = 60  # Default timeout for limit orders
-EMERGENCY_ORDER_TIMEOUT_SECONDS = 30  # Shorter timeout for emergency situations
+# Market order fill verification timeout: 30s hardcoded in _verify_order_fill()
+EMERGENCY_ORDER_TIMEOUT_SECONDS = 30  # Timeout for emergency/market orders
 EMERGENCY_SLIPPAGE_PERCENT = 5.0  # 5% slippage tolerance in emergency mode
 MAX_CONSECUTIVE_FAILURES = 5  # Trigger circuit breaker after this many failures
 CIRCUIT_BREAKER_COOLDOWN_MINUTES = 5  # Cooldown period when circuit breaker opens
@@ -103,12 +103,21 @@ FLASH_CRASH_THRESHOLD_PERCENT = 2.0  # Alert if price moves 2%+ in window
 
 # TIME-003: Early close days (1:00 PM ET close instead of 4:00 PM)
 # Day before Independence Day, day after Thanksgiving, Christmas Eve, New Year's Eve
-EARLY_CLOSE_DATES_2026 = [
-    date(2026, 7, 3),    # Day before July 4th
-    date(2026, 11, 27),  # Day after Thanksgiving (Black Friday)
-    date(2026, 12, 24),  # Christmas Eve
-    date(2026, 12, 31),  # New Year's Eve
-]
+# Multi-year support to avoid yearly maintenance gaps
+EARLY_CLOSE_DATES = {
+    2026: [
+        date(2026, 7, 3),    # Day before July 4th
+        date(2026, 11, 27),  # Day after Thanksgiving (Black Friday)
+        date(2026, 12, 24),  # Christmas Eve
+        date(2026, 12, 31),  # New Year's Eve
+    ],
+    2027: [
+        date(2027, 7, 2),    # Day before July 4th (July 4th is Sunday, observed Monday)
+        date(2027, 11, 26),  # Day after Thanksgiving (Black Friday)
+        date(2027, 12, 24),  # Christmas Eve
+        date(2027, 12, 31),  # New Year's Eve
+    ],
+}
 EARLY_CLOSE_TIME = dt_time(13, 0)  # 1:00 PM ET
 EARLY_CLOSE_CUTOFF_MINUTES = 15  # Stop trading 15 min before early close (12:45 PM)
 
@@ -716,9 +725,8 @@ class IronFlyStrategy:
         self._orphaned_orders: List[Dict] = []  # Track orders that may need cleanup
         self._pending_order_ids: List[str] = []  # Track orders awaiting fill
         self._filled_orders: Dict[str, Dict] = {}  # Track filled orders by ID
-        self.order_timeout_seconds = self.strategy_config.get(
-            "order_timeout_seconds", DEFAULT_ORDER_TIMEOUT_SECONDS
-        )
+        # Note: Order timeout is hardcoded to 30s in _verify_order_fill() since we always use
+        # market orders which should fill instantly. Config option removed as unused.
 
         # Cumulative metrics tracking (persisted across days)
         self.cumulative_metrics = load_cumulative_metrics()
@@ -1582,9 +1590,10 @@ class IronFlyStrategy:
         logger.info(f"Placing {leg_name}: {direction.value} {amount}x at strike {strike}")
 
         try:
+            # LIVE-001: Use StockIndexOption for SPX/SPXW index options
             order_result = self.client.place_order_with_retry(
                 uic=uic,
-                asset_type="StockOption",
+                asset_type="StockIndexOption",
                 buy_sell=direction,
                 amount=amount,
                 order_type=OrderType.MARKET,
@@ -2401,9 +2410,9 @@ class IronFlyStrategy:
         try:
             broker_positions = self.client.get_positions()
             if broker_positions:
-                # Check for any remaining SPX options
+                # Check for any remaining SPX options (LIVE-001: check both asset types)
                 spx_options = [p for p in broker_positions
-                              if p.get('AssetType') == 'StockOption'
+                              if p.get('AssetType') in ['StockOption', 'StockIndexOption']
                               and 'SPX' in str(p.get('Description', ''))]
                 if spx_options:
                     logger.warning(f"Broker still shows {len(spx_options)} SPX options - waiting")
@@ -2547,11 +2556,11 @@ class IronFlyStrategy:
 
         logger.info(f"Option UICs - SC:{short_call_uic}, SP:{short_put_uic}, LC:{long_call_uic}, LP:{long_put_uic}")
 
-        # Get quotes for credit calculation
-        short_call_quote = self.client.get_quote(short_call_uic, "StockOption")
-        short_put_quote = self.client.get_quote(short_put_uic, "StockOption")
-        long_call_quote = self.client.get_quote(long_call_uic, "StockOption")
-        long_put_quote = self.client.get_quote(long_put_uic, "StockOption")
+        # Get quotes for credit calculation (LIVE-001: Use StockIndexOption for SPX)
+        short_call_quote = self.client.get_quote(short_call_uic, "StockIndexOption")
+        short_put_quote = self.client.get_quote(short_put_uic, "StockIndexOption")
+        long_call_quote = self.client.get_quote(long_call_uic, "StockIndexOption")
+        long_put_quote = self.client.get_quote(long_put_uic, "StockIndexOption")
 
         if not all([short_call_quote, short_put_quote, long_call_quote, long_put_quote]):
             error_msg = "Failed to get quotes for all iron fly legs - ENTRY ABORTED"
@@ -2923,10 +2932,11 @@ class IronFlyStrategy:
                 logger.warning(f"Failed to cancel profit order (may already be filled/cancelled): {e}")
 
         # Step 2: Determine order type based on exit reason
-        # STOP_LOSS: Use MARKET orders for immediate execution (price is touching wing!)
-        # PROFIT_TARGET/TIME_EXIT: Can use limit orders for better fills
+        # STOP_LOSS/MAX_LOSS: Use MARKET orders for immediate execution (price is touching wing!)
+        # PROFIT_TARGET/TIME_EXIT: Also use market orders for simplicity and reliability
+        # Per Doc Severson: "Don't overstay" - exiting quickly is more important than optimal fills
         use_market_orders = (reason == "STOP_LOSS" or reason == "MAX_LOSS")
-        order_type = OrderType.MARKET if use_market_orders else OrderType.MARKET  # Use market for all for simplicity
+        order_type = OrderType.MARKET  # Always use market orders for exits
 
         if use_market_orders:
             logger.warning("STOP LOSS TRIGGERED - Using MARKET orders for immediate close!")
@@ -2945,10 +2955,11 @@ class IronFlyStrategy:
                 logger.info(f"Closing: BUY {self.position.quantity} Short Call at {self.position.atm_strike}")
 
                 # For stop-loss, use emergency order that bypasses circuit breaker
+                # LIVE-001: Use StockIndexOption for SPX/SPXW index options
                 if use_market_orders:
                     sc_close = self.client.place_emergency_order(
                         uic=self.position.short_call_uic,
-                        asset_type="StockOption",
+                        asset_type="StockIndexOption",
                         buy_sell=BuySell.BUY,
                         amount=self.position.quantity,
                         order_type=OrderType.MARKET,
@@ -2957,7 +2968,7 @@ class IronFlyStrategy:
                 else:
                     sc_close = self.client.place_order_with_retry(
                         uic=self.position.short_call_uic,
-                        asset_type="StockOption",
+                        asset_type="StockIndexOption",
                         buy_sell=BuySell.BUY,
                         amount=self.position.quantity,
                         order_type=order_type,
@@ -2975,7 +2986,7 @@ class IronFlyStrategy:
                 if use_market_orders:
                     sp_close = self.client.place_emergency_order(
                         uic=self.position.short_put_uic,
-                        asset_type="StockOption",
+                        asset_type="StockIndexOption",
                         buy_sell=BuySell.BUY,
                         amount=self.position.quantity,
                         order_type=OrderType.MARKET,
@@ -2984,7 +2995,7 @@ class IronFlyStrategy:
                 else:
                     sp_close = self.client.place_order_with_retry(
                         uic=self.position.short_put_uic,
-                        asset_type="StockOption",
+                        asset_type="StockIndexOption",
                         buy_sell=BuySell.BUY,
                         amount=self.position.quantity,
                         order_type=order_type,
@@ -3002,7 +3013,7 @@ class IronFlyStrategy:
                 if use_market_orders:
                     lc_close = self.client.place_emergency_order(
                         uic=self.position.long_call_uic,
-                        asset_type="StockOption",
+                        asset_type="StockIndexOption",
                         buy_sell=BuySell.SELL,
                         amount=self.position.quantity,
                         order_type=OrderType.MARKET,
@@ -3011,7 +3022,7 @@ class IronFlyStrategy:
                 else:
                     lc_close = self.client.place_order_with_retry(
                         uic=self.position.long_call_uic,
-                        asset_type="StockOption",
+                        asset_type="StockIndexOption",
                         buy_sell=BuySell.SELL,
                         amount=self.position.quantity,
                         order_type=order_type,
@@ -3029,7 +3040,7 @@ class IronFlyStrategy:
                 if use_market_orders:
                     lp_close = self.client.place_emergency_order(
                         uic=self.position.long_put_uic,
-                        asset_type="StockOption",
+                        asset_type="StockIndexOption",
                         buy_sell=BuySell.SELL,
                         amount=self.position.quantity,
                         order_type=OrderType.MARKET,
@@ -3038,7 +3049,7 @@ class IronFlyStrategy:
                 else:
                     lp_close = self.client.place_order_with_retry(
                         uic=self.position.long_put_uic,
-                        asset_type="StockOption",
+                        asset_type="StockIndexOption",
                         buy_sell=BuySell.SELL,
                         amount=self.position.quantity,
                         order_type=order_type,
@@ -3441,8 +3452,9 @@ class IronFlyStrategy:
             prices_updated = 0
 
             # Get short call price (we need to BUY to close, so use Ask)
+            # LIVE-001: Use StockIndexOption for SPX/SPXW index options
             if self.position.short_call_uic:
-                sc_quote = self.client.get_quote(self.position.short_call_uic, "StockOption")
+                sc_quote = self.client.get_quote(self.position.short_call_uic, "StockIndexOption")
                 if sc_quote:
                     ask = sc_quote.get('Quote', {}).get('Ask', 0)
                     if ask > 0:
@@ -3451,7 +3463,7 @@ class IronFlyStrategy:
 
             # Get short put price (we need to BUY to close, so use Ask)
             if self.position.short_put_uic:
-                sp_quote = self.client.get_quote(self.position.short_put_uic, "StockOption")
+                sp_quote = self.client.get_quote(self.position.short_put_uic, "StockIndexOption")
                 if sp_quote:
                     ask = sp_quote.get('Quote', {}).get('Ask', 0)
                     if ask > 0:
@@ -3460,7 +3472,7 @@ class IronFlyStrategy:
 
             # Get long call price (we need to SELL to close, so use Bid)
             if self.position.long_call_uic:
-                lc_quote = self.client.get_quote(self.position.long_call_uic, "StockOption")
+                lc_quote = self.client.get_quote(self.position.long_call_uic, "StockIndexOption")
                 if lc_quote:
                     bid = lc_quote.get('Quote', {}).get('Bid', 0)
                     if bid > 0:
@@ -3469,7 +3481,7 @@ class IronFlyStrategy:
 
             # Get long put price (we need to SELL to close, so use Bid)
             if self.position.long_put_uic:
-                lp_quote = self.client.get_quote(self.position.long_put_uic, "StockOption")
+                lp_quote = self.client.get_quote(self.position.long_put_uic, "StockIndexOption")
                 if lp_quote:
                     bid = lp_quote.get('Quote', {}).get('Bid', 0)
                     if bid > 0:
@@ -3797,7 +3809,17 @@ class IronFlyStrategy:
             bool: True if today is an early close day
         """
         today = get_us_market_time().date()
-        return today in EARLY_CLOSE_DATES_2026
+        current_year = today.year
+
+        # Check multi-year calendar
+        if current_year not in EARLY_CLOSE_DATES:
+            logger.warning(
+                f"TIME-003: Early close dates missing for {current_year}! "
+                f"Update EARLY_CLOSE_DATES in strategy.py. Available years: {list(EARLY_CLOSE_DATES.keys())}"
+            )
+            return False  # Conservative: assume normal close if year missing
+
+        return today in EARLY_CLOSE_DATES[current_year]
 
     def get_market_close_time_today(self) -> dt_time:
         """
@@ -4238,8 +4260,9 @@ class IronFlyStrategy:
             try:
                 broker_positions = self.client.get_positions()
                 if broker_positions:
+                    # LIVE-001: Check both asset types for SPX options
                     spx_options = [p for p in broker_positions
-                                  if p.get('AssetType') == 'StockOption'
+                                  if p.get('AssetType') in ['StockOption', 'StockIndexOption']
                                   and 'SPX' in str(p.get('Description', ''))]
                     if spx_options:
                         logger.critical(
