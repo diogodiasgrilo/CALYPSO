@@ -18,7 +18,8 @@ vix_uic = 10606
 
 # Subscribe to VIX to populate cache
 print("=== Subscribing to VIX ===")
-client.start_price_streaming([vix_uic], ["StockIndex"])
+subscriptions = [{"uic": vix_uic, "asset_type": "StockIndex"}]
+client.start_price_streaming(subscriptions, lambda uic, data: print(f"Got data for {uic}"))
 
 time.sleep(2)
 
