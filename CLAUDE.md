@@ -323,6 +323,41 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 ## Documentation
 
-- `docs/IRON_FLY_EDGE_CASES.md` - 63 edge cases analyzed for Iron Fly bot
-- `docs/IRON_FLY_CODE_AUDIT.md` - Comprehensive pre-LIVE code audit (2026-01-23)
-- `.claude/settings.local.json` - Full command reference (also readable)
+### Quick Reference by Problem Type
+
+| Problem | Document | Key Sections |
+|---------|----------|--------------|
+| P&L incorrect | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 2: Extracting Fill Prices |
+| Orders stuck/unknown | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 6: Order Status Handling |
+| VIX fallback to Yahoo | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 3: Price Data Extraction |
+| Wrong asset type errors | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 4: Asset Type Mapping |
+| WebSocket 401 errors | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 8.5: WebSocket Token Refresh |
+| Entry filter questions | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 6: Filter Implementation |
+| Edge case handling | [IRON_FLY_EDGE_CASES.md](docs/IRON_FLY_EDGE_CASES.md) | All 63 documented cases |
+
+### Full Documentation List
+
+| Document | Purpose |
+|----------|---------|
+| `docs/SAXO_API_PATTERNS.md` | **START HERE for Saxo API issues** - Proven patterns for orders, fills, prices |
+| `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
+| `docs/IRON_FLY_EDGE_CASES.md` | 63 edge cases analyzed for Iron Fly bot |
+| `docs/DELTA_NEUTRAL_EDGE_CASES.md` | Edge cases for Delta Neutral bot |
+| `docs/DEPLOYMENT.md` | Deployment procedures |
+| `docs/GOOGLE_SHEETS.md` | Google Sheets logging setup |
+| `docs/VM_COMMANDS.md` | VM administration commands |
+| `.claude/settings.local.json` | Full command reference (also readable)
+
+### Key Lessons Learned (2026-01-23)
+
+These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
+
+1. **P&L Must Use Actual Fill Prices** - Never use quoted bid/ask for P&L calculation. Extract `FilledPrice` from activities/order response. (Cost: ~$20 P&L error per trade)
+
+2. **"Unknown" Order Status = Usually Filled** - Market orders fill instantly and disappear from /orders/. Check activities endpoint immediately. (Cost: Hours of debugging "stuck" orders)
+
+3. **VIX Needs PriceInfoDetails** - VIX is an index with no bid/ask. Must include `"PriceInfoDetails"` in WebSocket FieldGroups. (Cost: Unnecessary Yahoo Finance fallbacks)
+
+4. **Config Options Need Code** - Just because a config exists doesn't mean it's implemented! Verify code actually uses the config. (Cost: Bad trade entry)
+
+5. **Clear Python Cache After Deploy** - `__pycache__` can persist old code. Always clear after git pull. (Cost: Hours debugging "fixed" code that wasn't running)

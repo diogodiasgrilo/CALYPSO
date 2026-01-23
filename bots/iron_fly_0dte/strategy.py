@@ -668,6 +668,10 @@ class IronFlyStrategy:
         self.fed_meeting_blackout = self.filters_config.get("fed_meeting_blackout", True)
         self.economic_calendar_check = self.filters_config.get("economic_calendar_check", True)
         self.require_price_in_range = self.filters_config.get("require_price_in_range", True)
+        self.require_price_near_midpoint = self.filters_config.get("require_price_near_midpoint", True)
+        # How close to midpoint is "near"? Default 70% = price must be within middle 70% of range
+        # If range is 20 pts, price must be within 7 pts of midpoint (not in outer 15% on each side)
+        self.midpoint_tolerance_percent = self.filters_config.get("midpoint_tolerance_percent", 70.0)
 
         # State
         self.state = IronFlyState.IDLE
@@ -2252,7 +2256,8 @@ class IronFlyStrategy:
         2. Economic calendar filter (CPI/PPI/Jobs - skip entire day)
         3. VIX level filter
         4. VIX spike filter
-        5. Price-in-range filter
+        5. Price-in-range filter (Trend Day detection)
+        6. Price-near-midpoint filter (directional bias detection)
         """
         # FILTER 1: FOMC Meeting check (highest priority - binary event)
         fomc_ok, fomc_reason = self.check_fed_meeting_filter()
@@ -2308,6 +2313,26 @@ class IronFlyStrategy:
             self._log_filter_event("TREND_DAY", reason)
             self._log_opening_range_to_sheets("SKIP", reason)
             return f"Entry blocked - Trend Day detected ({reason})"
+
+        # FILTER 6: Price near midpoint check (ideal entry - avoids directional bias)
+        # Doc Severson's strategy prefers entries when price is near the MIDDLE of the range,
+        # not at extremes. Price near range high = bullish momentum, near low = bearish.
+        # Can be disabled via config: filters.require_price_near_midpoint = false
+        if self.require_price_near_midpoint and self.opening_range.range_width > 0:
+            distance_from_mid = abs(self.opening_range.distance_from_midpoint(self.current_price))
+            max_allowed_distance = (self.opening_range.range_width / 2) * (self.midpoint_tolerance_percent / 100)
+
+            if distance_from_mid > max_allowed_distance:
+                self.state = IronFlyState.DAILY_COMPLETE
+                midpoint = self.opening_range.midpoint
+                position_pct = ((self.current_price - self.opening_range.low) / self.opening_range.range_width) * 100
+                direction = "HIGH (bullish bias)" if self.current_price > midpoint else "LOW (bearish bias)"
+                reason = (f"Price {self.current_price:.2f} too far from midpoint {midpoint:.2f} "
+                         f"(at {position_pct:.0f}% of range, near {direction})")
+                self.trade_logger.log_event(f"FILTER BLOCKED: Midpoint - {reason}")
+                self._log_filter_event("MIDPOINT_BIAS", reason)
+                self._log_opening_range_to_sheets("SKIP", reason)
+                return f"Entry blocked - {reason}"
 
         # All filters passed - enter position
         return self._enter_iron_fly()

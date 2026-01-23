@@ -546,6 +546,9 @@ The Iron Fly bot has been thoroughly analyzed and is safe for LIVE trading with 
 | 2026-01-23 | Approved for LIVE deployment | Claude |
 | 2026-01-23 | Fixed CONN-008: WebSocket 401 errors on wake from sleep (token refresh before connect) | Claude |
 | 2026-01-23 | **CRITICAL FIX: P&L units bug** - All P&L values were displayed in cents instead of dollars (see section 14) | Claude |
+| 2026-01-23 | **CRITICAL FIX: P&L calculation bug** - Used quoted prices instead of actual fill prices (see section 14.3) | Claude |
+| 2026-01-23 | **FIX: "Unknown" order status handling** - Close orders stuck when status returned "Unknown" (see section 14.4) | Claude |
+| 2026-01-23 | **NEW FILTER: Midpoint proximity filter** - Prevents entries when price near range extremes (see section 14.5) | Claude |
 
 ---
 
@@ -606,7 +609,140 @@ Opening Range data now updates in real-time during the monitoring period instead
 - `bots/iron_fly_0dte/strategy.py` - Added `log_opening_range_snapshot()`
 - `bots/iron_fly_0dte/main.py` - Added call during heartbeat for MonitoringOpeningRange state
 
+### 14.3 CRITICAL: P&L Calculation Using Wrong Prices (Fixed 2026-01-23)
+
+**Severity:** CRITICAL
+**Impact:** P&L showed ~$0 when actual loss was -$20. Completely unreliable P&L tracking.
+
+**Root Cause:**
+When placing market orders, we stored the **quoted bid/ask prices** at order time instead of the **actual fill prices** returned by Saxo. Market orders often fill at slightly different prices due to slippage.
+
+**Example from today's trade:**
+- Quoted short call bid: $12.50
+- Actual fill price: $12.35
+- Difference: $0.15 per contract = $15 per contract in P&L error
+- With 4 legs, total error: ~$20-40
+
+**The Bug:**
+```python
+# WRONG - What we were doing
+sc_bid = option_chain.get_bid(short_call_strike)  # Quoted price
+position.initial_short_call_price = sc_bid        # Used for P&L!
+
+# RIGHT - What we should do
+fill_details = verify_order_fill(order_id)
+actual_price = fill_details.get("FilledPrice")    # Actual fill price
+position.initial_short_call_price = actual_price  # Accurate P&L!
+```
+
+**Fix Applied (strategy.py ~2986-3052):**
+```python
+def get_fill_price(fill_detail: Optional[Dict], fallback: float) -> float:
+    """Extract fill price from fill_details, with fallback to quoted price."""
+    if fill_detail:
+        price = fill_detail.get("fill_price") or fill_detail.get("FilledPrice") or fill_detail.get("Price")
+        if price and price > 0:
+            return float(price)
+    return fallback
+
+actual_sc_fill = get_fill_price(fill_details.get("short_call"), sc_bid)
+actual_sp_fill = get_fill_price(fill_details.get("short_put"), sp_bid)
+actual_lc_fill = get_fill_price(fill_details.get("long_call"), lc_ask)
+actual_lp_fill = get_fill_price(fill_details.get("long_put"), lp_ask)
+
+actual_credit = (actual_sc_fill + actual_sp_fill - actual_lc_fill - actual_lp_fill)
+```
+
+**Lesson Learned:** NEVER use quoted prices for P&L. ALWAYS extract actual fill prices from order verification response. See `docs/SAXO_API_PATTERNS.md` for full pattern.
+
+### 14.4 "Unknown" Order Status Handling (Fixed 2026-01-23)
+
+**Severity:** HIGH
+**Impact:** Close orders appeared stuck forever with "Unknown" status in logs.
+
+**Symptom:**
+```
+Close orders pending: ['short_call(Unknown)', 'short_put(Unknown)', ...]
+```
+
+**Root Cause:**
+When `get_order_status()` returns "Unknown" (common for market orders that fill instantly), the verification loop kept polling forever. Market orders "disappear" from the orders endpoint after filling.
+
+**Fix Applied (strategy.py ~2497-2516):**
+```python
+elif status == "Unknown":
+    # "Unknown" often means order filled and disappeared from /orders/
+    logger.warning(f"Close order {order_id} has Unknown status - checking activities...")
+
+    if leg_uic:
+        filled, fill_details = self.client.check_order_filled_by_activity(order_id, leg_uic)
+        if filled:
+            logger.info(f"✓ Close order verified via activity: {leg_name} FILLED")
+            legs_verified.append(leg_name)
+            continue
+
+    legs_pending.append(f"{leg_name}({status})")
+```
+
+**Lesson Learned:** For market orders, "Unknown" status usually means FILLED. Check activities endpoint immediately instead of polling order status. See `docs/SAXO_API_PATTERNS.md` section 6.
+
+### 14.5 Midpoint Proximity Filter (Added 2026-01-23)
+
+**Severity:** Enhancement (prevents bad entries)
+**Impact:** Avoids entering trades when price shows directional bias.
+
+**Problem Discovered:**
+Today's trade entered when SPX was at 6908.75, which was at the **95th percentile** of the opening range (6892.90 - 6909.52). This indicated bullish momentum, and SPX continued higher, almost hitting the upper wing.
+
+**The Strategy Intent:**
+Doc Severson's strategy prefers entries when price is **near the midpoint** of the opening range, indicating no strong directional bias. Price at extremes suggests a trending day.
+
+**The Config Gap:**
+- `require_price_near_midpoint: true` existed in config
+- But it was **NEVER IMPLEMENTED** in the entry logic!
+- `distance_from_midpoint()` function existed but was never called
+
+**Fix Applied (strategy.py ~2318-2332):**
+```python
+# FILTER 6: Price near midpoint check (ideal entry - avoids directional bias)
+if self.require_price_near_midpoint and self.opening_range.range_width > 0:
+    distance_from_mid = abs(self.opening_range.distance_from_midpoint(self.current_price))
+    max_allowed_distance = (self.opening_range.range_width / 2) * (self.midpoint_tolerance_percent / 100)
+
+    if distance_from_mid > max_allowed_distance:
+        self.state = IronFlyState.DAILY_COMPLETE
+        position_pct = ((self.current_price - self.opening_range.low) / self.opening_range.range_width) * 100
+        direction = "HIGH (bullish bias)" if self.current_price > midpoint else "LOW (bearish bias)"
+        reason = f"Price {self.current_price:.2f} too far from midpoint (at {position_pct:.0f}% of range, near {direction})"
+        # ... log and skip entry
+```
+
+**Config Options (config.json):**
+```json
+"require_price_near_midpoint": true,
+"midpoint_tolerance_percent": 70.0  // Price must be in middle 70% of range
+```
+
+**Would Today's Trade Have Been Blocked?**
+- Range width: 16.62 pts
+- Max allowed from midpoint: 5.82 pts (70% tolerance)
+- Actual distance: 7.54 pts
+- Position in range: 95%
+- **Result: BLOCKED** - would have saved ~$40-60 loss
+
+**Lesson Learned:** When a config option exists, verify it's actually IMPLEMENTED in code. Config without code is useless.
+
 ---
 
-**Document Version:** 1.2
+## 15. Related Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [SAXO_API_PATTERNS.md](./SAXO_API_PATTERNS.md) | Saxo API integration patterns and gotchas |
+| [IRON_FLY_EDGE_CASES.md](./IRON_FLY_EDGE_CASES.md) | 63 edge cases and their handling |
+| [CLAUDE.md](../CLAUDE.md) | Project overview, VM commands, troubleshooting |
+
+---
+
+**Document Version:** 1.3
 **Last Updated:** 2026-01-23

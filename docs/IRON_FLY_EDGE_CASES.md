@@ -14,8 +14,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 **⚠️ PRE-LIVE AUDIT (2026-01-23):** Added 10 LIVE-specific edge cases. LIVE-001 (asset type) fixed. One HIGH risk item remains (BY DESIGN).
 
-**Total Scenarios Analyzed:** 63 (52 original + 10 LIVE-specific + 1 multi-bot)
-**Well-Handled (LOW):** 59 (94%)
+**Total Scenarios Analyzed:** 64 (52 original + 10 LIVE-specific + 1 multi-bot + 1 post-deployment)
+**Well-Handled (LOW):** 60 (94%)
 **Medium Risk:** 3 (5%) - LIVE-002, LIVE-004, LIVE-009
 **High Risk:** 1 (2%) - LIVE-006 (shutdown with position - BY DESIGN)
 
@@ -52,6 +52,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 ### Recent Fixes (2026-01-23) - Batch 5 (Multi-Bot Token Coordination)
 - ✅ **CONN-008**: WebSocket 401 fix - token refresh before WebSocket connect
+
+### Recent Fixes (2026-01-23) - Batch 6 (Post-Deployment Production Fixes)
+- ✅ **P&L-001**: P&L calculation using actual fill prices instead of quoted prices
+- ✅ **ORDER-009**: "Unknown" order status handling - check activities immediately
+- ✅ **FILTER-006**: Midpoint proximity filter - blocks entries at range extremes
 
 ---
 
@@ -437,6 +442,16 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Risk Level** | ✅ LOW |
 | **Status** | RESOLVED |
 | **Notes** | Division by zero prevented by checking opening_vix > 0 first. |
+
+### 6.6 Price Near Range Extreme (Directional Bias)
+| | |
+|---|---|
+| **ID** | FILTER-006 |
+| **Trigger** | Price at 10:00 AM is near the HIGH or LOW of opening range, indicating directional momentum |
+| **Current Handling** | `require_price_near_midpoint` config + FILTER 6 in `_handle_ready_to_enter_state()` blocks entries when price is too far from midpoint. Uses `midpoint_tolerance_percent` (default 70%). |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED (Added 2026-01-23) |
+| **Notes** | Config option existed but was NOT implemented until 2026-01-23. Example: Price at 95% of range (near HIGH) blocked with "bullish bias" reason. Prevents entering when market is trending. See `strategy.py:2317-2335`. |
 
 ---
 
@@ -1025,6 +1040,11 @@ The only remaining MEDIUM item is SIM-001 (Simulated P&L Accuracy), which is mar
 | 2026-01-23 | Updated statistics: 62 total (58 LOW, 3 MEDIUM, 1 HIGH - BY DESIGN) | Claude |
 | 2026-01-23 | **Fixed CONN-008**: WebSocket 401 on wake from sleep - token refresh before WebSocket connect in `saxo_client.py` | Claude |
 | 2026-01-23 | Updated statistics: 63 total (59 LOW, 3 MEDIUM, 1 HIGH - BY DESIGN) | Claude |
+| 2026-01-23 | **Fixed P&L-001**: P&L calculation using actual fill prices from activities endpoint, not quoted bid/ask | Claude |
+| 2026-01-23 | **Fixed ORDER-009**: "Unknown" order status handling - check activities endpoint immediately for market orders | Claude |
+| 2026-01-23 | **Added FILTER-006**: Midpoint proximity filter - blocks entries when price is at range extremes (directional bias) | Claude |
+| 2026-01-23 | Created `docs/SAXO_API_PATTERNS.md` - comprehensive Saxo API integration patterns from production learnings | Claude |
+| 2026-01-23 | Updated statistics: 64 total (60 LOW, 3 MEDIUM, 1 HIGH - BY DESIGN) | Claude |
 
 ---
 
