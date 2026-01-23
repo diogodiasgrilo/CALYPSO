@@ -2511,6 +2511,90 @@ class SaxoClient:
 
         return None
 
+    def check_order_filled_by_activity(self, order_id: str, uic: int) -> Tuple[bool, Optional[Dict]]:
+        """
+        Check if an order was filled by querying the order activities endpoint.
+
+        When a market order fills very fast, it may disappear from the orders endpoint
+        before we can poll its status. This function checks the activities/trades to
+        confirm if the order actually filled.
+
+        CRITICAL FIX (2026-01-23): This prevents duplicate orders when market orders
+        fill faster than our polling can detect via get_order_status().
+
+        Args:
+            order_id: The order ID to check
+            uic: The instrument UIC (to verify the fill is for the right instrument)
+
+        Returns:
+            Tuple of (filled: bool, fill_details: Optional[Dict])
+        """
+        # Check recent order activities for this order
+        endpoint = "/cs/v1/audit/orderactivities"
+
+        # Look at activities from the last 5 minutes
+        from datetime import datetime, timedelta
+        from_time = (datetime.utcnow() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        params = {
+            "ClientKey": self.client_key,
+            "FromDateTime": from_time,
+            "Status": "FinalFill,Fill",  # Look for fill activities
+            "$top": 50  # Recent activities
+        }
+
+        try:
+            response = self._make_request("GET", endpoint, params=params)
+            if response and "Data" in response:
+                for activity in response["Data"]:
+                    activity_order_id = str(activity.get("OrderId", ""))
+                    activity_uic = activity.get("Uic")
+                    activity_status = activity.get("Status", "")
+
+                    # Check if this activity matches our order
+                    if activity_order_id == str(order_id):
+                        if activity_status in ["FinalFill", "Fill"]:
+                            fill_price = activity.get("Price", 0)
+                            fill_amount = activity.get("Amount", 0)
+                            logger.info(
+                                f"Order {order_id} confirmed FILLED via activities: "
+                                f"Price={fill_price}, Amount={fill_amount}"
+                            )
+                            return True, {
+                                "status": "Filled",
+                                "fill_price": fill_price,
+                                "fill_amount": fill_amount,
+                                "order_id": order_id,
+                                "source": "order_activities"
+                            }
+        except Exception as e:
+            logger.warning(f"Error checking order activities for {order_id}: {e}")
+
+        # Also check if a position exists for this UIC (confirms fill)
+        try:
+            positions = self.get_positions(include_greeks=False)
+            if positions:
+                for pos in positions:
+                    pos_uic = pos.get("PositionBase", {}).get("Uic")
+                    if pos_uic == uic:
+                        amount = pos.get("PositionBase", {}).get("Amount", 0)
+                        avg_price = pos.get("PositionView", {}).get("AverageOpenPrice", 0)
+                        logger.info(
+                            f"Position exists for UIC {uic}: Amount={amount}, AvgPrice={avg_price} "
+                            f"- order {order_id} likely filled"
+                        )
+                        return True, {
+                            "status": "Filled",
+                            "fill_price": avg_price,
+                            "fill_amount": amount,
+                            "order_id": order_id,
+                            "source": "position_check"
+                        }
+        except Exception as e:
+            logger.warning(f"Error checking positions for UIC {uic}: {e}")
+
+        return False, None
+
     def get_open_orders(self) -> List[Dict]:
         """
         Get all open orders for the account.

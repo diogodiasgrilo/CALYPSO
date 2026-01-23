@@ -1501,6 +1501,7 @@ class IronFlyStrategy:
         self,
         order_id: str,
         leg_name: str,
+        uic: int = None,
         timeout_seconds: int = 30
     ) -> Tuple[bool, Optional[Dict]]:
         """
@@ -1509,9 +1510,14 @@ class IronFlyStrategy:
         For market orders, this should be fast, but we still verify to catch
         any edge cases (partial fills, rejections, etc.)
 
+        CRITICAL FIX (2026-01-23): When order status returns None (order not found),
+        check activities/positions to confirm if order actually filled. Market orders
+        can fill so fast they disappear from the orders endpoint before we poll.
+
         Args:
             order_id: The order ID to verify
             leg_name: Name of the leg (for logging)
+            uic: Instrument UIC (used to verify fills via position check)
             timeout_seconds: How long to wait for fill confirmation
 
         Returns:
@@ -1521,14 +1527,39 @@ class IronFlyStrategy:
 
         start_time = time.time()
         poll_interval = 1  # Check every 1 second for market orders (should be fast)
+        order_not_found_count = 0  # Track consecutive "not found" responses
 
         while time.time() - start_time < timeout_seconds:
             try:
                 order_status = self.client.get_order_status(order_id)
-                status = order_status.get("status", "Unknown")
+
+                # CRITICAL FIX: If order_status is None, the order may have already filled
+                # and been removed from the orders endpoint. Check activities/positions.
+                if order_status is None:
+                    order_not_found_count += 1
+                    logger.warning(
+                        f"Order {order_id} not found in orders endpoint "
+                        f"(attempt {order_not_found_count}) - checking if it filled..."
+                    )
+
+                    # After 2 consecutive "not found" responses, check activities/positions
+                    if order_not_found_count >= 2 and uic:
+                        filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
+                        if filled:
+                            logger.info(f"✓ {leg_name} order {order_id} confirmed FILLED via activity/position check")
+                            return True, fill_details
+
+                    time.sleep(poll_interval)
+                    continue
+
+                # Reset counter if we got a valid response
+                order_not_found_count = 0
+
+                # Check the status field - Saxo uses "Status" not "status"
+                status = order_status.get("Status") or order_status.get("status", "Unknown")
 
                 if status == "Filled":
-                    fill_price = order_status.get("fill_price", 0)
+                    fill_price = order_status.get("FilledPrice") or order_status.get("fill_price", 0)
                     logger.info(f"✓ {leg_name} order {order_id} FILLED at {fill_price}")
                     return True, order_status
 
@@ -1537,32 +1568,53 @@ class IronFlyStrategy:
                     return False, order_status
 
                 elif status == "PartiallyFilled":
-                    filled_qty = order_status.get("filled_quantity", 0)
-                    total_qty = order_status.get("total_quantity", 0)
+                    filled_qty = order_status.get("FilledAmount") or order_status.get("filled_quantity", 0)
+                    total_qty = order_status.get("Amount") or order_status.get("total_quantity", 0)
                     logger.warning(f"⚠ {leg_name} order {order_id} partially filled: {filled_qty}/{total_qty}")
                     # Continue waiting for full fill
                     time.sleep(poll_interval)
 
                 else:
-                    # Still working/pending
+                    # Still working/pending - log the actual status for debugging
+                    logger.debug(f"Order {order_id} status: {status}")
                     time.sleep(poll_interval)
 
             except Exception as e:
                 logger.error(f"Error checking {leg_name} order status: {e}")
                 time.sleep(poll_interval)
 
-        # Timeout - order didn't fill in time - actively cancel it
-        logger.error(f"✗ {leg_name} order {order_id} timed out after {timeout_seconds}s - cancelling")
+        # Timeout reached - but BEFORE cancelling, do a final check for fills
+        logger.warning(f"{leg_name} order {order_id} verification timeout after {timeout_seconds}s")
+
+        # CRITICAL: Final check - order may have filled but we missed it
+        if uic:
+            logger.info(f"Final activity/position check for order {order_id}...")
+            filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
+            if filled:
+                logger.info(f"✓ {leg_name} order {order_id} confirmed FILLED on final check!")
+                return True, fill_details
+
+        # Order didn't fill - actively cancel it
+        logger.error(f"✗ {leg_name} order {order_id} NOT filled - attempting to cancel")
 
         # Try to cancel the unfilled order
         if self._cancel_order_with_retry(order_id, f"{leg_name} fill timeout"):
             logger.info(f"Timed-out order {order_id} cancelled successfully")
         else:
-            # If cancel fails, track as orphaned for later cleanup
+            # If cancel fails, the order may have filled - do one more check
+            logger.warning(f"Failed to cancel order {order_id} - checking if it filled...")
+            if uic:
+                filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
+                if filled:
+                    logger.info(f"✓ {leg_name} order {order_id} WAS filled (cancel failed because order no longer exists)")
+                    return True, fill_details
+
+            # Still couldn't confirm fill - track as orphaned
             logger.warning(f"Failed to cancel timed-out order {order_id} - tracking as orphaned")
             self._add_orphaned_order({
                 "order_id": order_id,
                 "leg_name": leg_name,
+                "uic": uic,
                 "reason": "fill_timeout_cancel_failed"
             })
 
@@ -1613,8 +1665,8 @@ class IronFlyStrategy:
                 self._increment_failure_count(f"{leg_name} order has no OrderId")
                 return False, None, None
 
-            # Verify the fill
-            filled, fill_details = self._verify_order_fill(order_id, leg_name)
+            # Verify the fill - pass UIC so we can check positions if order disappears
+            filled, fill_details = self._verify_order_fill(order_id, leg_name, uic=uic)
 
             if filled:
                 self._reset_failure_count()
@@ -2370,9 +2422,43 @@ class IronFlyStrategy:
                     legs_verified.append(leg_name)
                     continue
 
+                # Get the UIC for this leg (for activity/position check)
+                leg_uic = None
+                if leg_name == "short_call":
+                    leg_uic = self.position.short_call_uic
+                elif leg_name == "short_put":
+                    leg_uic = self.position.short_put_uic
+                elif leg_name == "long_call":
+                    leg_uic = self.position.long_call_uic
+                elif leg_name == "long_put":
+                    leg_uic = self.position.long_put_uic
+
                 try:
                     order_status = self.client.get_order_status(order_id)
-                    status = order_status.get("status", "Unknown") if order_status else "Unknown"
+
+                    # CRITICAL FIX (2026-01-23): Handle case where order is "not found"
+                    # This means the order likely filled and was removed from the orders endpoint
+                    if order_status is None:
+                        logger.warning(
+                            f"Close order {order_id} for {leg_name} not found in orders endpoint - "
+                            f"checking activities/positions..."
+                        )
+                        # Check if filled via activities
+                        if leg_uic:
+                            filled, fill_details = self.client.check_order_filled_by_activity(order_id, leg_uic)
+                            if filled:
+                                logger.info(f"✓ Close order verified via activity: {leg_name} (order {order_id}) FILLED")
+                                if self.position.close_legs_verified:
+                                    self.position.close_legs_verified[leg_name] = True
+                                legs_verified.append(leg_name)
+                                continue
+
+                        # If not confirmed filled, treat as pending (will be caught by position check below)
+                        legs_pending.append(f"{leg_name}(verifying)")
+                        continue
+
+                    # Check the status field - Saxo uses "Status" not "status"
+                    status = order_status.get("Status") or order_status.get("status", "Unknown")
 
                     if status == "Filled":
                         logger.info(f"✓ Close order verified: {leg_name} (order {order_id}) FILLED")
@@ -2698,6 +2784,48 @@ class IronFlyStrategy:
             fill_details = {}
 
             logger.info(f"Iron Fly entry attempt {attempt}/{MAX_ENTRY_ATTEMPTS}")
+
+            # CRITICAL FIX (2026-01-23): Before retrying, check if any positions already exist
+            # This prevents duplicate orders if previous attempt filled but verification failed
+            if attempt > 1:
+                logger.info("Checking for existing positions before retry...")
+                try:
+                    existing_positions = self.client.get_positions(include_greeks=False)
+                    existing_uics = []
+                    if existing_positions:
+                        for pos in existing_positions:
+                            pos_uic = pos.get("PositionBase", {}).get("Uic")
+                            pos_amount = pos.get("PositionBase", {}).get("Amount", 0)
+                            if pos_uic in [long_call_uic, long_put_uic, short_call_uic, short_put_uic]:
+                                existing_uics.append(pos_uic)
+                                logger.warning(
+                                    f"Position already exists for UIC {pos_uic} (amount={pos_amount}) - "
+                                    f"previous order likely filled!"
+                                )
+
+                    if existing_uics:
+                        # We have existing positions - abort retry to prevent duplicates!
+                        logger.critical(
+                            f"ABORTING RETRY: Found {len(existing_uics)} existing positions from failed attempt. "
+                            f"UICs: {existing_uics}. Previous orders likely filled but verification failed. "
+                            f"MANUAL INTERVENTION REQUIRED to manage these positions."
+                        )
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_DUPLICATE_PREVENTION",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"Aborted retry - found {len(existing_uics)} existing positions",
+                            "result": "MANUAL INTERVENTION REQUIRED - check positions at broker"
+                        })
+                        # Trigger circuit breaker
+                        self._open_circuit_breaker(
+                            f"Duplicate order prevention - found existing positions: {existing_uics}"
+                        )
+                        self.state = IronFlyState.DAILY_COMPLETE
+                        return f"CRITICAL: Entry aborted - existing positions detected. Check broker manually."
+
+                except Exception as e:
+                    logger.error(f"Failed to check existing positions: {e}")
 
             try:
                 # Leg 1: Buy Long Call (wing protection) - LONGS FIRST for safety
