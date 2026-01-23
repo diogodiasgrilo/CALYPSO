@@ -307,6 +307,135 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 ---
 
+## Running Diagnostic Scripts on VM
+
+When debugging issues, you often need to run Python scripts directly on the VM to test API calls, inspect data structures, or diagnose problems. This section documents the **exact patterns that work**.
+
+### Critical Requirements
+
+1. **Run as `calypso` user** - Required for file permissions and Secret Manager access
+2. **Run from `/opt/calypso`** - Required for Python imports to resolve
+3. **Use the virtualenv Python** - `.venv/bin/python` has all dependencies
+4. **Use heredoc for multi-line scripts** - Avoids quoting hell
+
+### Pattern 1: Simple One-Liner Script
+
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -c \"from shared import SaxoClient; print(SaxoClient)\"'"
+```
+
+### Pattern 2: Multi-Line Script (RECOMMENDED)
+
+Use heredoc (`<<'SCRIPT'`) to write readable multi-line Python scripts:
+
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
+import sys
+sys.path.insert(0, \"/opt/calypso\")
+
+from shared.saxo_client import SaxoClient
+from shared.config_loader import get_config_loader
+
+# Load config
+config_loader = get_config_loader(\"bots/iron_fly_0dte/config\")
+config = config_loader.load_config()
+
+# Create client and authenticate
+client = SaxoClient(config)
+client.authenticate()
+
+# Run your diagnostic code
+positions = client.get_positions()
+print(f\"Found {len(positions)} positions\")
+for p in positions:
+    print(p)
+
+SCRIPT
+'"
+```
+
+### Pattern 3: Test Specific API Calls
+
+**Check current positions:**
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
+import sys
+sys.path.insert(0, \"/opt/calypso\")
+from shared.saxo_client import SaxoClient
+from shared.config_loader import get_config_loader
+
+config = get_config_loader(\"bots/iron_fly_0dte/config\").load_config()
+client = SaxoClient(config)
+client.authenticate()
+
+positions = client.get_positions()
+print(f\"Positions: {len(positions)}\")
+for p in positions:
+    uic = p.get(\"PositionBase\", {}).get(\"Uic\")
+    amount = p.get(\"PositionBase\", {}).get(\"Amount\")
+    strike = p.get(\"PositionBase\", {}).get(\"OptionsData\", {}).get(\"Strike\")
+    print(f\"  UIC={uic}, Amount={amount}, Strike={strike}\")
+SCRIPT
+'"
+```
+
+**Check VIX price:**
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
+import sys
+sys.path.insert(0, \"/opt/calypso\")
+from shared.saxo_client import SaxoClient
+from shared.config_loader import get_config_loader
+
+config = get_config_loader(\"bots/iron_fly_0dte/config\").load_config()
+client = SaxoClient(config)
+client.authenticate()
+
+vix = client.get_vix_level()
+print(f\"VIX: {vix}\")
+SCRIPT
+'"
+```
+
+**Inspect saved position metadata:**
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/data/iron_fly_position.json"
+```
+
+### Common Mistakes to Avoid
+
+| Mistake | Why It Fails | Solution |
+|---------|--------------|----------|
+| Not using `sudo -u calypso` | Permission errors, can't access Secret Manager | Always use `sudo -u calypso bash -c '...'` |
+| Running from wrong directory | `ModuleNotFoundError: No module named 'shared'` | Always `cd /opt/calypso` first |
+| Using system Python | Missing dependencies | Use `.venv/bin/python` |
+| Single quotes inside single quotes | Shell quoting breaks | Use heredoc or escape carefully |
+| Missing `sys.path.insert` | Imports may fail | Add at top of script |
+
+### Debugging Import Errors
+
+If imports fail, run this to check the environment:
+
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
+import sys
+print(\"Python:\", sys.executable)
+print(\"Path:\")
+for p in sys.path:
+    print(f\"  {p}\")
+print()
+print(\"Trying imports...\")
+try:
+    from shared import SaxoClient
+    print(\"OK: shared.SaxoClient\")
+except Exception as e:
+    print(f\"FAIL: {e}\")
+SCRIPT
+'"
+```
+
+---
+
 ## Important Notes
 
 1. **Git on VM:** Must run as `calypso` user: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
