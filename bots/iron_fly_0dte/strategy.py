@@ -1959,59 +1959,86 @@ class IronFlyStrategy:
                 lc = long_calls[0]
                 lp = long_puts[0]
 
-                # Extract strikes from nested Saxo structure
-                # FIX (2026-01-23): Strike is in PositionBase.OptionsData.Strike, NOT top-level
+                # Get UICs for each leg (needed first to check against saved metadata)
+                sc_uic = sc.get("Uic") or sc.get("PositionBase", {}).get("Uic")
+                sp_uic = sp.get("Uic") or sp.get("PositionBase", {}).get("Uic")
+                lc_uic = lc.get("Uic") or lc.get("PositionBase", {}).get("Uic")
+                lp_uic = lp.get("Uic") or lp.get("PositionBase", {}).get("Uic")
+
+                # Get quantity (absolute value since we know directions)
+                quantity = abs(sc.get("PositionBase", {}).get("Amount", 1))
+
+                # Try to extract strikes from nested Saxo structure
+                # NOTE: Saxo may NOT return OptionsData.Strike depending on FieldGroups!
                 sc_strike = sc.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
                 sp_strike = sp.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
                 lc_strike = lc.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
                 lp_strike = lp.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
 
+                # Get expiry from nested structure
+                options_data = sc.get("PositionBase", {}).get("OptionsData", {})
+                expiry_raw = options_data.get("ExpiryDate", "")
+                expiry = expiry_raw[:10] if expiry_raw else ""
+
+                # FIX (2026-01-23): If Saxo didn't return strike data (returns 0), try saved metadata
+                # Match on UICs since those are reliable identifiers
+                saved_metadata = self._load_position_metadata()
+                used_saved_strikes = False
+
+                if sc_strike == 0 and sp_strike == 0 and saved_metadata:
+                    # Broker didn't return strike data - check if UICs match saved metadata
+                    if (saved_metadata.get("short_call_uic") == sc_uic and
+                        saved_metadata.get("short_put_uic") == sp_uic and
+                        saved_metadata.get("long_call_uic") == lc_uic and
+                        saved_metadata.get("long_put_uic") == lp_uic):
+                        # UICs match! Use saved metadata for strikes
+                        sc_strike = saved_metadata.get("atm_strike", 0)
+                        sp_strike = saved_metadata.get("atm_strike", 0)
+                        lc_strike = saved_metadata.get("upper_wing", 0)
+                        lp_strike = saved_metadata.get("lower_wing", 0)
+                        expiry = saved_metadata.get("expiry", "")
+                        used_saved_strikes = True
+                        logger.info(
+                            f"POS-001: Using saved metadata strikes (UICs matched) - "
+                            f"ATM={sc_strike}, Upper={lc_strike}, Lower={lp_strike}"
+                        )
+                    else:
+                        logger.warning(
+                            f"POS-001: Broker returned no strike data and UICs don't match saved metadata. "
+                            f"Broker UICs: SC={sc_uic}, SP={sp_uic}, LC={lc_uic}, LP={lp_uic}. "
+                            f"Saved UICs: SC={saved_metadata.get('short_call_uic')}, "
+                            f"SP={saved_metadata.get('short_put_uic')}, "
+                            f"LC={saved_metadata.get('long_call_uic')}, "
+                            f"LP={saved_metadata.get('long_put_uic')}"
+                        )
+
                 # Validate iron fly structure: short strikes should be equal (ATM)
-                if sc_strike == sp_strike:
+                if sc_strike == sp_strike and sc_strike > 0:
                     atm_strike = sc_strike
                     upper_wing = lc_strike
                     lower_wing = lp_strike
 
-                    # Get UICs for each leg
-                    sc_uic = sc.get("Uic") or sc.get("PositionBase", {}).get("Uic")
-                    sp_uic = sp.get("Uic") or sp.get("PositionBase", {}).get("Uic")
-                    lc_uic = lc.get("Uic") or lc.get("PositionBase", {}).get("Uic")
-                    lp_uic = lp.get("Uic") or lp.get("PositionBase", {}).get("Uic")
-
-                    # Get quantity (absolute value since we know directions)
-                    quantity = abs(sc.get("PositionBase", {}).get("Amount", 1))
-
-                    # Get expiry from nested structure
-                    # FIX (2026-01-23): ExpiryDate is in PositionBase.OptionsData.ExpiryDate
-                    options_data = sc.get("PositionBase", {}).get("OptionsData", {})
-                    expiry_raw = options_data.get("ExpiryDate", "")
-                    expiry = expiry_raw[:10] if expiry_raw else ""
-
-                    # POS-001: Try to load saved position metadata for accurate recovery
-                    saved_metadata = self._load_position_metadata()
-                    if saved_metadata:
-                        # Verify the saved metadata matches the broker position
-                        if (saved_metadata.get("atm_strike") == atm_strike and
-                            saved_metadata.get("upper_wing") == upper_wing and
-                            saved_metadata.get("lower_wing") == lower_wing):
-                            entry_time_str = saved_metadata.get("entry_time")
-                            entry_time = datetime.fromisoformat(entry_time_str) if entry_time_str else get_eastern_timestamp()
-                            entry_price = saved_metadata.get("entry_price", self.current_price)
-                            credit_received = saved_metadata.get("credit_received", 0.0)
-                            logger.info(
-                                f"POS-001: Using saved metadata - "
-                                f"entry_time={entry_time}, credit=${credit_received:.2f}"
-                            )
-                        else:
-                            logger.warning("POS-001: Saved metadata doesn't match broker positions, using defaults")
-                            entry_time = get_eastern_timestamp()
-                            entry_price = self.current_price
-                            credit_received = 0.0
+                    # POS-001: Use saved metadata for entry time, price, credit if available
+                    if saved_metadata and (used_saved_strikes or (
+                        saved_metadata.get("atm_strike") == atm_strike and
+                        saved_metadata.get("upper_wing") == upper_wing and
+                        saved_metadata.get("lower_wing") == lower_wing)):
+                        entry_time_str = saved_metadata.get("entry_time")
+                        entry_time = datetime.fromisoformat(entry_time_str) if entry_time_str else get_eastern_timestamp()
+                        entry_price = saved_metadata.get("entry_price", self.current_price)
+                        credit_received = saved_metadata.get("credit_received", 0.0)
+                        logger.info(
+                            f"POS-001: Using saved metadata - "
+                            f"entry_time={entry_time}, credit=${credit_received / 100:.2f}"
+                        )
                     else:
+                        if saved_metadata:
+                            logger.warning("POS-001: Saved metadata doesn't match broker positions, using defaults")
                         entry_time = get_eastern_timestamp()
                         entry_price = self.current_price
                         credit_received = 0.0
 
+                    # credit_received is in CENTS, display in dollars
                     logger.critical(
                         f"🔄 RECONSTRUCTING IRON FLY from broker positions:\n"
                         f"   ATM Strike: {atm_strike}\n"
@@ -2020,7 +2047,7 @@ class IronFlyStrategy:
                         f"   Quantity: {quantity}\n"
                         f"   Expiry: {expiry}\n"
                         f"   Entry Time: {entry_time}\n"
-                        f"   Credit: ${credit_received:.2f}"
+                        f"   Credit: ${credit_received / 100:.2f}"
                     )
 
                     # Create the position object

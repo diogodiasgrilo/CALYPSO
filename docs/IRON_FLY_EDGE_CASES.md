@@ -57,6 +57,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 - ✅ **P&L-001**: P&L calculation using actual fill prices instead of quoted prices
 - ✅ **ORDER-009**: "Unknown" order status handling - check activities immediately
 - ✅ **FILTER-006**: Midpoint proximity filter - blocks entries at range extremes
+- ✅ **POS-005**: Position reconstruction uses saved metadata when Saxo returns no strike data
 
 ---
 
