@@ -1511,8 +1511,8 @@ class IronFlyStrategy:
         any edge cases (partial fills, rejections, etc.)
 
         CRITICAL FIX (2026-01-23): When order status returns None (order not found),
-        check activities/positions to confirm if order actually filled. Market orders
-        can fill so fast they disappear from the orders endpoint before we poll.
+        check activities/positions IMMEDIATELY to confirm if order filled. Market orders
+        fill in ~3 seconds and disappear from the orders endpoint before we poll.
 
         Args:
             order_id: The order ID to verify
@@ -1527,33 +1527,32 @@ class IronFlyStrategy:
 
         start_time = time.time()
         poll_interval = 1  # Check every 1 second for market orders (should be fast)
-        order_not_found_count = 0  # Track consecutive "not found" responses
 
         while time.time() - start_time < timeout_seconds:
             try:
                 order_status = self.client.get_order_status(order_id)
 
                 # CRITICAL FIX: If order_status is None, the order may have already filled
-                # and been removed from the orders endpoint. Check activities/positions.
+                # and been removed from the orders endpoint. Check activities IMMEDIATELY.
+                # Market orders fill in ~3 seconds - don't wait, check right away!
                 if order_status is None:
-                    order_not_found_count += 1
-                    logger.warning(
-                        f"Order {order_id} not found in orders endpoint "
-                        f"(attempt {order_not_found_count}) - checking if it filled..."
+                    logger.info(
+                        f"Order {order_id} not found in orders endpoint - "
+                        f"checking activities/positions immediately..."
                     )
 
-                    # After 2 consecutive "not found" responses, check activities/positions
-                    if order_not_found_count >= 2 and uic:
+                    # Check activities/positions IMMEDIATELY on first "not found"
+                    if uic:
                         filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
                         if filled:
                             logger.info(f"✓ {leg_name} order {order_id} confirmed FILLED via activity/position check")
                             return True, fill_details
+                        else:
+                            # Not found in activities yet - wait a moment and continue loop
+                            logger.debug(f"Order {order_id} not yet in activities, will retry...")
 
                     time.sleep(poll_interval)
                     continue
-
-                # Reset counter if we got a valid response
-                order_not_found_count = 0
 
                 # Check the status field - Saxo uses "Status" not "status"
                 status = order_status.get("Status") or order_status.get("status", "Unknown")
@@ -3613,8 +3612,10 @@ class IronFlyStrategy:
 
             # Get short call price (we need to BUY to close, so use Ask)
             # LIVE-001: Use StockIndexOption for SPX/SPXW index options
+            # FIX (2026-01-23): Use skip_cache=True to get fresh prices via REST,
+            # not stale cached data from initial WebSocket subscription
             if self.position.short_call_uic:
-                sc_quote = self.client.get_quote(self.position.short_call_uic, "StockIndexOption")
+                sc_quote = self.client.get_quote(self.position.short_call_uic, "StockIndexOption", skip_cache=True)
                 if sc_quote:
                     ask = sc_quote.get('Quote', {}).get('Ask', 0)
                     if ask > 0:
@@ -3623,7 +3624,7 @@ class IronFlyStrategy:
 
             # Get short put price (we need to BUY to close, so use Ask)
             if self.position.short_put_uic:
-                sp_quote = self.client.get_quote(self.position.short_put_uic, "StockIndexOption")
+                sp_quote = self.client.get_quote(self.position.short_put_uic, "StockIndexOption", skip_cache=True)
                 if sp_quote:
                     ask = sp_quote.get('Quote', {}).get('Ask', 0)
                     if ask > 0:
@@ -3632,7 +3633,7 @@ class IronFlyStrategy:
 
             # Get long call price (we need to SELL to close, so use Bid)
             if self.position.long_call_uic:
-                lc_quote = self.client.get_quote(self.position.long_call_uic, "StockIndexOption")
+                lc_quote = self.client.get_quote(self.position.long_call_uic, "StockIndexOption", skip_cache=True)
                 if lc_quote:
                     bid = lc_quote.get('Quote', {}).get('Bid', 0)
                     if bid > 0:
@@ -3641,7 +3642,7 @@ class IronFlyStrategy:
 
             # Get long put price (we need to SELL to close, so use Bid)
             if self.position.long_put_uic:
-                lp_quote = self.client.get_quote(self.position.long_put_uic, "StockIndexOption")
+                lp_quote = self.client.get_quote(self.position.long_put_uic, "StockIndexOption", skip_cache=True)
                 if lp_quote:
                     bid = lp_quote.get('Quote', {}).get('Bid', 0)
                     if bid > 0:
@@ -3649,7 +3650,7 @@ class IronFlyStrategy:
                         prices_updated += 1
 
             if prices_updated > 0:
-                logger.debug(
+                logger.info(
                     f"Option prices updated ({prices_updated}/4): "
                     f"SC={self.position.short_call_price:.2f}, SP={self.position.short_put_price:.2f}, "
                     f"LC={self.position.long_call_price:.2f}, LP={self.position.long_put_price:.2f}, "
