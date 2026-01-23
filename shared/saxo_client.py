@@ -1903,7 +1903,7 @@ class SaxoClient:
 
         # 3. Last resort: Yahoo Finance fallback with retry
         if self.external_feed.enabled:
-            logger.debug("VIX: Saxo sources failed, trying Yahoo Finance fallback")
+            logger.info(f"VIX: Saxo failed ({', '.join(sources_tried)}), using Yahoo fallback")
             for attempt in range(2):  # Try twice
                 external_price = self.external_feed.get_vix_price()
                 if external_price:
