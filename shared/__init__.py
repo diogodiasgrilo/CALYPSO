@@ -8,6 +8,21 @@ This package contains common utilities used by all trading strategies:
 - market_hours: US market hours utilities
 - secret_manager: GCP Secret Manager interface
 - external_price_feed: Yahoo Finance fallback for prices
+- token_coordinator: OAuth token refresh coordination across bots
+- event_calendar: FOMC/economic calendar for trading blackouts
+- technical_indicators: Technical analysis calculations
+
+Key Implementation Notes:
+-------------------------
+VIX Data Fetching (2026-01-23):
+    VIX is a stock index, not a tradable instrument, so it doesn't have
+    bid/ask/mid prices like stocks or ETFs. VIX price comes from
+    PriceInfoDetails.LastTraded field. The WebSocket subscription MUST
+    include "PriceInfoDetails" in FieldGroups to receive this data.
+    Without it, the cache will have no extractable price and the bot
+    will fall back to Yahoo Finance unnecessarily.
+
+    See: saxo_client.py start_price_streaming() around line 2967
 """
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType, AssetType

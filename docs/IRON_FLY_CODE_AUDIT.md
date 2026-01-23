@@ -205,6 +205,19 @@ if self.market_data.is_price_stale():
 
 **Location:** Uses `client.get_vix_price()` which has Yahoo Finance fallback.
 
+**Important Note (2026-01-23 Fix):** VIX is a stock index, not a tradable instrument.
+Unlike stocks/ETFs that have bid/ask/mid prices, VIX only provides `LastTraded` in
+the `PriceInfoDetails` block. The WebSocket subscription MUST include `"PriceInfoDetails"`
+in FieldGroups to cache VIX prices correctly. Without it, all VIX lookups fall through
+to Yahoo Finance.
+
+```python
+# In saxo_client.py start_price_streaming():
+"FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo", "PriceInfoDetails"]
+#                                                         ^^^^^^^^^^^^^^^^
+#                                                         Required for VIX!
+```
+
 ### 4.4 Opening Range Validation ✅ IMPLEMENTED
 
 **Location:** `strategy.py:2132-2145`

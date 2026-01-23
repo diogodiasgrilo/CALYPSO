@@ -276,6 +276,37 @@ gcloud secrets versions access latest --secret=SECRET_NAME --project=calypso-tra
 
 ---
 
+## Troubleshooting
+
+### VIX Data Falling Back to Yahoo Finance
+
+**Symptom:** Logs show `VIX: Saxo failed (...), using Yahoo fallback` repeatedly.
+
+**Root Cause (Fixed 2026-01-23):** VIX is a stock index, not a tradable instrument. Unlike stocks/ETFs that have bid/ask/mid prices, VIX only provides `LastTraded` in the `PriceInfoDetails` block. If the WebSocket subscription doesn't request `PriceInfoDetails` in FieldGroups, the cache will have no extractable price.
+
+**Solution:** Ensure `start_price_streaming()` in `saxo_client.py` includes `"PriceInfoDetails"` in the FieldGroups:
+```python
+"FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo", "PriceInfoDetails"]
+```
+
+**Debugging Steps:**
+1. Check logs for the specific failure reason: `cache(no valid price)` or `REST(no valid price in response)`
+2. Run the VIX REST API test to see what data Saxo returns
+3. Compare cache snapshot vs REST response - cache may be missing `PriceInfoDetails`
+
+### Bots Running Old Code After Deployment
+
+**Symptom:** Code changes don't take effect even after `git pull` and bot restart.
+
+**Root Cause:** Python bytecode cache (`.pyc` files in `__pycache__`) can persist old compiled code.
+
+**Solution:** Always clear cache after pulling changes (now in standard deployment workflow):
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
+```
+
+---
+
 ## Important Notes
 
 1. **Git on VM:** Must run as `calypso` user: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`

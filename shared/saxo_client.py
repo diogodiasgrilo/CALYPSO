@@ -1858,6 +1858,15 @@ class SaxoClient:
         2. Saxo REST API (real-time or last traded)
         3. Yahoo Finance (only if Saxo completely fails)
 
+        IMPORTANT - VIX Data Structure (2026-01-23):
+            VIX is a stock index, NOT a tradable instrument. Unlike stocks/ETFs
+            that have bid/ask/mid prices in the Quote block, VIX only provides
+            price data in PriceInfoDetails.LastTraded.
+
+            For the cache to work, start_price_streaming() MUST include
+            "PriceInfoDetails" in its FieldGroups subscription request.
+            Without it, _extract_price_from_data() will find no valid price.
+
         Args:
             vix_uic: VIX UIC (typically 10606)
 
@@ -1929,6 +1938,16 @@ class SaxoClient:
         Handles various data structures returned by Saxo for different asset types
         and market states (open, closed, after-hours).
 
+        Price Location by Asset Type:
+        -----------------------------
+        - Stocks/ETFs (e.g., SPY): Quote.Mid, Quote.Bid, Quote.Ask
+        - Stock Indices (e.g., VIX): PriceInfoDetails.LastTraded (NO bid/ask!)
+        - CFDs (e.g., US500.I): Quote.Mid, Quote.Bid, Quote.Ask
+        - Options: Quote.Mid, Quote.Bid, Quote.Ask
+
+        IMPORTANT: For VIX and other indices to have extractable prices,
+        the subscription must include "PriceInfoDetails" in FieldGroups.
+
         Args:
             data: Quote data dictionary from Saxo
             source: Source name for logging
@@ -1938,7 +1957,7 @@ class SaxoClient:
         """
         price = None
 
-        # Try Quote block first (standard for tradable instruments)
+        # Try Quote block first (standard for tradable instruments: stocks, ETFs, options)
         if "Quote" in data and isinstance(data["Quote"], dict):
             quote = data["Quote"]
             price = (
@@ -1948,16 +1967,16 @@ class SaxoClient:
                 quote.get("Ask")
             )
 
-        # Try PriceInfoDetails (used for indices like VIX)
+        # Try PriceInfoDetails.LastTraded (REQUIRED for indices like VIX that don't have bid/ask)
         if price is None and "PriceInfoDetails" in data:
             price = data["PriceInfoDetails"].get("LastTraded")
 
-        # Try PriceInfo
+        # Try PriceInfo (some instruments put LastTraded here)
         if price is None and "PriceInfo" in data:
             p_info = data["PriceInfo"]
             price = p_info.get("LastTraded") or p_info.get("Last")
 
-        # Try top-level LastTraded
+        # Try top-level LastTraded (rare fallback)
         if price is None:
             price = data.get("LastTraded")
 
@@ -2964,7 +2983,12 @@ class SaxoClient:
                     "AccountKey": self.account_key,
                     "Uic": int(uic),           # Fix: Must be Int, singular
                     "AssetType": asset_type,   # Fix: Specific type for this UIC
-                    # Include PriceInfoDetails for indices like VIX that use LastTraded
+                    # FieldGroups: MUST include PriceInfoDetails for indices like VIX!
+                    # - Quote: bid/ask/mid for tradable instruments (stocks, ETFs, options)
+                    # - PriceInfo: high/low/netChange
+                    # - PriceInfoDetails: LastTraded (REQUIRED for VIX which has no bid/ask)
+                    # Without PriceInfoDetails, VIX cache lookups fail and fall back to Yahoo.
+                    # See: get_vix_price() and _extract_price_from_data() for price extraction logic.
                     "FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo", "PriceInfoDetails"]
                 }
             }
