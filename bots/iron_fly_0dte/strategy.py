@@ -1955,11 +1955,12 @@ class IronFlyStrategy:
                 lc = long_calls[0]
                 lp = long_puts[0]
 
-                # Extract strikes
-                sc_strike = sc.get("Strike", 0)
-                sp_strike = sp.get("Strike", 0)
-                lc_strike = lc.get("Strike", 0)
-                lp_strike = lp.get("Strike", 0)
+                # Extract strikes from nested Saxo structure
+                # FIX (2026-01-23): Strike is in PositionBase.OptionsData.Strike, NOT top-level
+                sc_strike = sc.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
+                sp_strike = sp.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
+                lc_strike = lc.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
+                lp_strike = lp.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
 
                 # Validate iron fly structure: short strikes should be equal (ATM)
                 if sc_strike == sp_strike:
@@ -1976,8 +1977,11 @@ class IronFlyStrategy:
                     # Get quantity (absolute value since we know directions)
                     quantity = abs(sc.get("PositionBase", {}).get("Amount", 1))
 
-                    # Get expiry
-                    expiry = sc.get("ExpiryDate", "")[:10] if sc.get("ExpiryDate") else ""
+                    # Get expiry from nested structure
+                    # FIX (2026-01-23): ExpiryDate is in PositionBase.OptionsData.ExpiryDate
+                    options_data = sc.get("PositionBase", {}).get("OptionsData", {})
+                    expiry_raw = options_data.get("ExpiryDate", "")
+                    expiry = expiry_raw[:10] if expiry_raw else ""
 
                     # POS-001: Try to load saved position metadata for accurate recovery
                     saved_metadata = self._load_position_metadata()
@@ -2101,40 +2105,48 @@ class IronFlyStrategy:
         """
         detected_flies = []
 
+        # Helper to extract expiry from nested Saxo structure
+        # FIX (2026-01-23): ExpiryDate and Strike are in PositionBase.OptionsData
+        def get_expiry(pos):
+            return pos.get("PositionBase", {}).get("OptionsData", {}).get("ExpiryDate", "")[:10] or ""
+
+        def get_strike(pos):
+            return pos.get("PositionBase", {}).get("OptionsData", {}).get("Strike", 0)
+
         # Group by expiry first
         expiries = set()
         for pos in short_calls + short_puts + long_calls + long_puts:
-            expiry = pos.get("ExpiryDate", "")[:10] if pos.get("ExpiryDate") else ""
+            expiry = get_expiry(pos)
             if expiry:
                 expiries.add(expiry)
 
         for expiry in expiries:
             # Filter legs by this expiry
-            sc_for_expiry = [p for p in short_calls if (p.get("ExpiryDate", "")[:10] if p.get("ExpiryDate") else "") == expiry]
-            sp_for_expiry = [p for p in short_puts if (p.get("ExpiryDate", "")[:10] if p.get("ExpiryDate") else "") == expiry]
-            lc_for_expiry = [p for p in long_calls if (p.get("ExpiryDate", "")[:10] if p.get("ExpiryDate") else "") == expiry]
-            lp_for_expiry = [p for p in long_puts if (p.get("ExpiryDate", "")[:10] if p.get("ExpiryDate") else "") == expiry]
+            sc_for_expiry = [p for p in short_calls if get_expiry(p) == expiry]
+            sp_for_expiry = [p for p in short_puts if get_expiry(p) == expiry]
+            lc_for_expiry = [p for p in long_calls if get_expiry(p) == expiry]
+            lp_for_expiry = [p for p in long_puts if get_expiry(p) == expiry]
 
             # Find matching short call/put pairs (same ATM strike)
             for sc in sc_for_expiry:
-                sc_strike = sc.get("Strike", 0)
+                sc_strike = get_strike(sc)
                 for sp in sp_for_expiry:
-                    sp_strike = sp.get("Strike", 0)
+                    sp_strike = get_strike(sp)
                     if sc_strike == sp_strike and sc_strike > 0:
                         atm_strike = sc_strike
                         # Find wings: long call above ATM, long put below ATM
-                        upper_wings = [lc for lc in lc_for_expiry if lc.get("Strike", 0) > atm_strike]
-                        lower_wings = [lp for lp in lp_for_expiry if lp.get("Strike", 0) < atm_strike]
+                        upper_wings = [lc for lc in lc_for_expiry if get_strike(lc) > atm_strike]
+                        lower_wings = [lp for lp in lp_for_expiry if get_strike(lp) < atm_strike]
 
                         if upper_wings and lower_wings:
                             # Pick closest wing strikes
-                            upper_wing = min(upper_wings, key=lambda x: x.get("Strike", float('inf')))
-                            lower_wing = max(lower_wings, key=lambda x: x.get("Strike", 0))
+                            upper_wing = min(upper_wings, key=lambda x: get_strike(x) or float('inf'))
+                            lower_wing = max(lower_wings, key=lambda x: get_strike(x) or 0)
 
                             detected_flies.append({
                                 "atm_strike": atm_strike,
-                                "upper_wing_strike": upper_wing.get("Strike", 0),
-                                "lower_wing_strike": lower_wing.get("Strike", 0),
+                                "upper_wing_strike": get_strike(upper_wing),
+                                "lower_wing_strike": get_strike(lower_wing),
                                 "expiry": expiry,
                                 "short_call": sc,
                                 "short_put": sp,
@@ -2508,9 +2520,15 @@ class IronFlyStrategy:
             broker_positions = self.client.get_positions()
             if broker_positions:
                 # Check for any remaining SPX options (LIVE-001: check both asset types)
-                spx_options = [p for p in broker_positions
-                              if p.get('AssetType') in ['StockOption', 'StockIndexOption']
-                              and 'SPX' in str(p.get('Description', ''))]
+                # FIX (2026-01-23): Use nested Saxo structure for AssetType and Description
+                spx_options = []
+                for p in broker_positions:
+                    pos_base = p.get('PositionBase', {})
+                    display_format = p.get('DisplayAndFormat', {})
+                    asset_type = pos_base.get('AssetType', '')
+                    description = str(display_format.get('Description', '')).upper()
+                    if asset_type in ['StockOption', 'StockIndexOption'] and ('SPX' in description or 'SPXW' in description):
+                        spx_options.append(p)
                 if spx_options:
                     logger.warning(f"Broker still shows {len(spx_options)} SPX options - waiting")
                     return f"Waiting for close confirmation - {len(spx_options)} legs still open at broker"
