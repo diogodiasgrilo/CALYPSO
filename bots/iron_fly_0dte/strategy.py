@@ -2494,8 +2494,26 @@ class IronFlyStrategy:
                         })
                         legs_pending.append(f"{leg_name}({status})")
 
+                    elif status == "Unknown":
+                        # FIX (2026-01-23): "Unknown" status often means order filled and disappeared
+                        # Market orders fill in ~3 seconds - check activities immediately
+                        logger.warning(
+                            f"Close order {order_id} for {leg_name} has Unknown status - "
+                            f"checking activities/positions..."
+                        )
+                        if leg_uic:
+                            filled, fill_details = self.client.check_order_filled_by_activity(order_id, leg_uic)
+                            if filled:
+                                logger.info(f"✓ Close order verified via activity: {leg_name} (order {order_id}) FILLED")
+                                if self.position.close_legs_verified:
+                                    self.position.close_legs_verified[leg_name] = True
+                                legs_verified.append(leg_name)
+                                continue
+                        # Still unknown - add to pending
+                        legs_pending.append(f"{leg_name}({status})")
+
                     else:
-                        # Still working/pending
+                        # Still working/pending (e.g., "Placed", "Working")
                         legs_pending.append(f"{leg_name}({status})")
 
                 except Exception as e:
