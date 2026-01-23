@@ -21,7 +21,7 @@ import logging
 import threading
 import webbrowser
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Any, Callable
+from typing import Optional, Dict, List, Any, Callable, Tuple
 from urllib.parse import urlencode
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dataclasses import dataclass
