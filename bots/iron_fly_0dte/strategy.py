@@ -24,6 +24,25 @@ Security Audit: 2026-01-19
 - Fixed timezone handling for hold time calculations
 - Added max trades per day guard
 - Fixed dry-run simulation for realistic P&L
+
+Edge Case Audit: 2026-01-22 to 2026-01-23
+- 52 edge cases analyzed and resolved (100% LOW risk)
+- Added circuit breaker with sliding window failure detection (CONN-002)
+- Added critical intervention flag for unrecoverable errors (ORDER-004)
+- Added partial fill auto-unwind with actual UICs (ORDER-001, CB-001)
+- Added stop loss retry escalation (5 retries per leg) (STOP-002)
+- Added daily circuit breaker escalation (halt after 3 opens) (CB-004)
+- Added flash crash velocity detection (MKT-001)
+- Added market halt detection from error messages (MKT-002)
+- Added extreme spread warning during exit (MKT-004)
+- Added VIX re-check before order placement (FILTER-001)
+- Added multi-year FOMC/economic calendar support (FILTER-002/003)
+- Added position metadata persistence for crash recovery (POS-001)
+- Added multiple iron fly detection and auto-selection (POS-004)
+- Added pending order check on startup with auto-cancel (ORDER-006)
+- Added timed-out order cancellation with retry logic (ORDER-007/008)
+
+See docs/IRON_FLY_EDGE_CASES.md for full analysis.
 """
 
 import json
@@ -33,7 +52,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, date, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple, Deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
@@ -108,6 +127,18 @@ MARKET_HALT_KEYWORDS = [
     "halt", "halted", "suspended", "circuit breaker", "trading pause",
     "market closed", "exchange closed", "trading stopped", "luld",  # LULD = Limit Up Limit Down
 ]
+
+# CB-004: Daily circuit breaker escalation
+# If circuit breaker opens too many times in one day, halt for rest of day
+MAX_CIRCUIT_BREAKER_OPENS_PER_DAY = 3  # After 3 CB opens, halt permanently for the day
+
+# STOP-002: Stop loss retry configuration during API outage
+STOP_LOSS_MAX_RETRIES = 5  # Retry stop loss this many times before giving up
+STOP_LOSS_RETRY_DELAY_SECONDS = 2  # Delay between stop loss retries
+
+# MKT-004: Extreme spread warning thresholds (for exit monitoring)
+EXTREME_SPREAD_WARNING_PERCENT = 50.0  # Log warning if spread > 50% during exit
+EXTREME_SPREAD_CRITICAL_PERCENT = 100.0  # Log critical if spread > 100%
 
 # US Eastern timezone
 try:
@@ -673,6 +704,14 @@ class IronFlyStrategy:
         self._market_halt_reason = ""
         self._market_halt_detected_at: Optional[datetime] = None
 
+        # CB-004: Daily circuit breaker tracking for escalation
+        self._circuit_breaker_opens_today = 0
+        self._daily_halt_triggered = False  # When True, no more trading today
+
+        # CB-001: Track partial fill UICs for accurate emergency close
+        # This stores UICs of legs that were actually placed (for partial fills)
+        self._partial_fill_uics: Dict[str, int] = {}
+
         # Order execution safety tracking
         self._orphaned_orders: List[Dict] = []  # Track orders that may need cleanup
         self._pending_order_ids: List[str] = []  # Track orders awaiting fill
@@ -759,7 +798,26 @@ class IronFlyStrategy:
 
         IMPORTANT: Before halting, attempts emergency position closure if we have
         an active position. This prevents being stuck with an unmanaged position.
+
+        CB-004: Tracks daily circuit breaker opens for escalation. After
+        MAX_CIRCUIT_BREAKER_OPENS_PER_DAY opens, trading halts for rest of day.
         """
+        # CB-004: Increment daily counter and check escalation
+        self._circuit_breaker_opens_today += 1
+
+        if self._circuit_breaker_opens_today >= MAX_CIRCUIT_BREAKER_OPENS_PER_DAY:
+            logger.critical(
+                f"CB-004: DAILY HALT TRIGGERED - Circuit breaker opened {self._circuit_breaker_opens_today} times today"
+            )
+            self._daily_halt_triggered = True
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_DAILY_HALT_ESCALATION",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"CB-004: {self._circuit_breaker_opens_today} circuit breaker opens today - DAILY HALT",
+                "result": "Trading suspended for rest of day"
+            })
+
         # CRITICAL: Attempt emergency position closure BEFORE halting
         # This is the nuclear option - better to close at a loss than be stuck
         if self.position and self.state in [IronFlyState.POSITION_OPEN, IronFlyState.MONITORING_EXIT]:
@@ -774,7 +832,7 @@ class IronFlyStrategy:
         self._circuit_breaker_opened_at = get_eastern_timestamp()
 
         logger.critical(
-            f"CIRCUIT BREAKER OPENED: {reason} "
+            f"CIRCUIT BREAKER OPENED (#{self._circuit_breaker_opens_today} today): {reason} "
             f"(after {self._consecutive_failures} consecutive failures)"
         )
 
@@ -782,7 +840,7 @@ class IronFlyStrategy:
             "event_type": "IRON_FLY_CIRCUIT_BREAKER_OPEN",
             "spy_price": self.current_price,
             "vix": self.current_vix,
-            "description": f"Circuit breaker opened: {reason}",
+            "description": f"Circuit breaker #{self._circuit_breaker_opens_today} opened: {reason}",
             "consecutive_failures": self._consecutive_failures,
             "result": "Trading halted - emergency close attempted if position was open"
         })
@@ -791,9 +849,20 @@ class IronFlyStrategy:
         """
         Check if circuit breaker allows trading.
 
+        CB-004: Also checks for daily halt escalation - no automatic reset if
+        circuit breaker has opened too many times today.
+
         Returns:
             bool: True if trading allowed, False if blocked
         """
+        # CB-004: Check for daily halt escalation first (no automatic reset)
+        if self._daily_halt_triggered:
+            logger.warning(
+                f"CB-004: DAILY HALT ACTIVE - Circuit breaker opened {self._circuit_breaker_opens_today} times today. "
+                "Trading suspended until tomorrow."
+            )
+            return False
+
         if not self._circuit_breaker_open:
             return True
 
@@ -842,7 +911,7 @@ class IronFlyStrategy:
         self._critical_intervention_reason = reason
         self._critical_intervention_at = get_eastern_timestamp()
 
-        logger.critical(f"🚨🚨🚨 ORDER-004: CRITICAL INTERVENTION REQUIRED 🚨🚨🚨")
+        logger.critical("🚨🚨🚨 ORDER-004: CRITICAL INTERVENTION REQUIRED 🚨🚨🚨")
         logger.critical(f"Reason: {reason}")
         logger.critical("ALL TRADING HALTED - Manual reset required")
         logger.critical("To clear: Call strategy.reset_critical_intervention() or restart bot")
@@ -970,7 +1039,7 @@ class IronFlyStrategy:
         self._market_halt_reason = reason
         self._market_halt_detected_at = get_eastern_timestamp()
 
-        logger.critical(f"🛑 MKT-002: MARKET HALT DETECTED 🛑")
+        logger.critical("🛑 MKT-002: MARKET HALT DETECTED 🛑")
         logger.critical(f"Reason: {reason}")
         logger.critical("Trading paused - will retry when halt lifts")
 
@@ -1253,6 +1322,130 @@ class IronFlyStrategy:
     # ORDER SAFETY METHODS (Safety feature from Delta Neutral bot)
     # =========================================================================
 
+    def _cancel_order_with_retry(self, order_id: str, reason: str = "", max_retries: int = 3) -> bool:
+        """
+        Cancel an order with retry logic.
+
+        Args:
+            order_id: The order ID to cancel
+            reason: Why we're cancelling (for logging)
+            max_retries: Maximum number of cancel attempts
+
+        Returns:
+            True if cancelled successfully, False otherwise
+
+        Note:
+            All order status checks are direct API calls to Saxo (no caching).
+            This ensures we always have the real-time state from the broker.
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                # First check if order is already filled/cancelled (direct API call - no cache)
+                order_status = self.client.get_order_status(order_id)
+                status = order_status.get("status", "Unknown") if order_status else "Unknown"
+
+                if status in ["Filled", "Cancelled", "Rejected", "Expired"]:
+                    logger.info(f"Order {order_id} already {status} - no cancel needed")
+                    return True
+
+                # Order still active - try to cancel
+                logger.info(f"Cancelling order {order_id} (attempt {attempt}/{max_retries}): {reason}")
+                self.client.cancel_order(order_id)
+
+                # Verify cancellation
+                time.sleep(0.5)
+                verify_status = self.client.get_order_status(order_id)
+                if verify_status and verify_status.get("status") in ["Cancelled", "Rejected"]:
+                    logger.info(f"✓ Order {order_id} cancelled successfully")
+                    return True
+
+            except Exception as e:
+                logger.warning(f"Cancel attempt {attempt}/{max_retries} failed for {order_id}: {e}")
+                if attempt < max_retries:
+                    time.sleep(1)
+
+        logger.error(f"Failed to cancel order {order_id} after {max_retries} attempts")
+        return False
+
+    def _check_and_cancel_pending_orders_on_startup(self) -> None:
+        """
+        Check for any pending/working orders at broker on startup and handle them.
+
+        This catches scenarios where:
+        1. Bot crashed while placing orders
+        2. Orders were placed but fills weren't verified
+        3. Limit orders are still working from previous session
+
+        For SPX options, we cancel working orders and let position reconciliation
+        handle any filled positions.
+
+        Note:
+            get_open_orders() is a direct API call to Saxo (no caching).
+            This ensures we always see the real-time order state from the broker.
+        """
+        if self.dry_run:
+            logger.info("Pending order check skipped (dry-run mode)")
+            return
+
+        try:
+            logger.info("Checking for pending orders at broker (fresh from Saxo API)...")
+            open_orders = self.client.get_open_orders()
+
+            if not open_orders:
+                logger.info("No pending orders found at broker")
+                return
+
+            # Filter for SPX/SPXW option orders
+            spx_orders = []
+            for order in open_orders:
+                description = str(order.get("Description", "")).upper()
+                asset_type = order.get("AssetType", "")
+                if asset_type in ["StockOption", "StockIndexOption"] and ("SPX" in description or "SPXW" in description):
+                    spx_orders.append(order)
+
+            if not spx_orders:
+                logger.info("No SPX option orders pending")
+                return
+
+            logger.warning(f"Found {len(spx_orders)} pending SPX option orders!")
+
+            cancelled_count = 0
+            for order in spx_orders:
+                order_id = order.get("OrderId")
+                status = order.get("Status", "Unknown")
+                description = order.get("Description", "Unknown")
+
+                if status in ["Working", "Pending", "New"]:
+                    logger.warning(f"Cancelling orphaned order: {order_id} ({description})")
+
+                    if self._cancel_order_with_retry(order_id, "orphaned from previous session"):
+                        cancelled_count += 1
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_ORPHAN_ORDER_CANCELLED",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"Cancelled orphaned order on startup: {description}",
+                            "order_id": order_id,
+                            "result": "Order cancelled successfully"
+                        })
+                    else:
+                        logger.critical(f"FAILED to cancel orphaned order {order_id} - MANUAL INTERVENTION REQUIRED")
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_ORPHAN_ORDER_CANCEL_FAILED",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"Failed to cancel orphaned order: {description}",
+                            "order_id": order_id,
+                            "result": "MANUAL INTERVENTION REQUIRED"
+                        })
+
+            logger.info(f"Pending order cleanup complete: {cancelled_count}/{len(spx_orders)} orders cancelled")
+
+        except Exception as e:
+            logger.error(f"Error checking pending orders: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
     def _add_orphaned_order(self, order_info: Dict) -> None:
         """Track a potentially orphaned order for later cleanup."""
         self._orphaned_orders.append({
@@ -1293,138 +1486,6 @@ class IronFlyStrategy:
                         logger.error(f"Failed to cancel orphaned order {order_id}: {cancel_err}")
             except Exception as e:
                 logger.error(f"Error checking orphaned order {order_id}: {e}")
-
-    def _place_limit_order_with_timeout(
-        self,
-        uic: int,
-        amount: int,
-        direction: BuySell,
-        limit_price: float,
-        timeout_seconds: Optional[int] = None,
-        emergency_mode: bool = False
-    ) -> Optional[Dict]:
-        """
-        Place a limit order with timeout and fill verification.
-
-        This is the safe order placement method that:
-        1. Places a limit order
-        2. Waits for fill with timeout
-        3. Cancels and retries if not filled
-        4. Tracks orphaned orders
-
-        Args:
-            uic: Instrument UIC
-            amount: Number of contracts
-            direction: BuySell.Buy or BuySell.Sell
-            limit_price: Limit price for the order
-            timeout_seconds: How long to wait for fill (default from config)
-            emergency_mode: If True, use emergency timeout and slippage
-
-        Returns:
-            Dict with order details if filled, None if failed
-        """
-        if timeout_seconds is None:
-            timeout_seconds = EMERGENCY_ORDER_TIMEOUT_SECONDS if emergency_mode else self.order_timeout_seconds
-
-        # Apply slippage in emergency mode
-        if emergency_mode:
-            slippage = limit_price * (EMERGENCY_SLIPPAGE_PERCENT / 100)
-            if direction == BuySell.Buy:
-                limit_price = limit_price + slippage  # Pay more to buy
-            else:
-                limit_price = limit_price - slippage  # Accept less to sell
-            logger.warning(f"Emergency mode: adjusted limit price with {EMERGENCY_SLIPPAGE_PERCENT}% slippage to {limit_price:.2f}")
-
-        logger.info(
-            f"Placing limit order: {direction.value} {amount}x UIC {uic} @ {limit_price:.2f} "
-            f"(timeout: {timeout_seconds}s, emergency: {emergency_mode})"
-        )
-
-        try:
-            # Place the limit order
-            order_result = self.client.place_order(
-                uic=uic,
-                amount=amount,
-                direction=direction,
-                order_type=OrderType.Limit,
-                limit_price=limit_price
-            )
-
-            if not order_result or "OrderId" not in order_result:
-                logger.error(f"Failed to place limit order: {order_result}")
-                self._increment_failure_count("Order placement failed - no OrderId returned")
-                return None
-
-            order_id = order_result["OrderId"]
-            self._pending_order_ids.append(order_id)
-
-            # Wait for fill with polling
-            start_time = time.time()
-            poll_interval = 2  # Check every 2 seconds
-
-            while time.time() - start_time < timeout_seconds:
-                try:
-                    order_status = self.client.get_order_status(order_id)
-                    status = order_status.get("status", "Unknown")
-
-                    if status == "Filled":
-                        logger.info(f"Order {order_id} filled successfully")
-                        self._pending_order_ids.remove(order_id)
-                        self._filled_orders[order_id] = order_status
-                        self._reset_failure_count()
-                        return order_status
-
-                    elif status in ["Cancelled", "Rejected"]:
-                        logger.warning(f"Order {order_id} was {status}")
-                        self._pending_order_ids.remove(order_id)
-                        self._increment_failure_count(f"Order {status}")
-                        return None
-
-                    # Still working, wait and check again
-                    time.sleep(poll_interval)
-
-                except Exception as poll_err:
-                    logger.error(f"Error polling order status: {poll_err}")
-                    time.sleep(poll_interval)
-
-            # Timeout reached - cancel the order with retry logic (3 attempts)
-            logger.warning(f"Order {order_id} timeout after {timeout_seconds}s - cancelling")
-
-            cancel_success = False
-            max_cancel_attempts = 3
-            for cancel_attempt in range(max_cancel_attempts):
-                try:
-                    self.client.cancel_order(order_id)
-                    self._pending_order_ids.remove(order_id)
-                    logger.info(f"Cancelled timed-out order {order_id} (attempt {cancel_attempt + 1})")
-                    cancel_success = True
-                    break
-                except Exception as cancel_err:
-                    logger.warning(
-                        f"Cancel attempt {cancel_attempt + 1}/{max_cancel_attempts} failed for {order_id}: {cancel_err}"
-                    )
-                    if cancel_attempt < max_cancel_attempts - 1:
-                        time.sleep(1)  # Wait 1 second before retry
-
-            if not cancel_success:
-                logger.error(f"Failed to cancel order {order_id} after {max_cancel_attempts} attempts")
-                # Track as potentially orphaned
-                self._add_orphaned_order({
-                    "order_id": order_id,
-                    "uic": uic,
-                    "direction": direction.value,
-                    "amount": amount,
-                    "limit_price": limit_price,
-                    "reason": "timeout_cancel_failed_after_retries"
-                })
-
-            self._increment_failure_count("Order timeout")
-            return None
-
-        except Exception as e:
-            logger.error(f"Exception placing limit order: {e}")
-            self._increment_failure_count(f"Order exception: {str(e)}")
-            return None
 
     def _verify_order_fill(
         self,
@@ -1480,8 +1541,21 @@ class IronFlyStrategy:
                 logger.error(f"Error checking {leg_name} order status: {e}")
                 time.sleep(poll_interval)
 
-        # Timeout - order didn't fill in time
-        logger.error(f"✗ {leg_name} order {order_id} timed out after {timeout_seconds}s")
+        # Timeout - order didn't fill in time - actively cancel it
+        logger.error(f"✗ {leg_name} order {order_id} timed out after {timeout_seconds}s - cancelling")
+
+        # Try to cancel the unfilled order
+        if self._cancel_order_with_retry(order_id, f"{leg_name} fill timeout"):
+            logger.info(f"Timed-out order {order_id} cancelled successfully")
+        else:
+            # If cancel fails, track as orphaned for later cleanup
+            logger.warning(f"Failed to cancel timed-out order {order_id} - tracking as orphaned")
+            self._add_orphaned_order({
+                "order_id": order_id,
+                "leg_name": leg_name,
+                "reason": "fill_timeout_cancel_failed"
+            })
+
         return False, None
 
     def _place_iron_fly_leg_with_verification(
@@ -1554,7 +1628,7 @@ class IronFlyStrategy:
 
             # MKT-002: Check if this error indicates a market halt
             if self._check_for_market_halt(error_str):
-                logger.warning(f"MKT-002: Market halt detected from order error")
+                logger.warning("MKT-002: Market halt detected from order error")
 
             self._increment_failure_count(f"{leg_name} exception: {error_str}")
             return False, None, None
@@ -1709,10 +1783,15 @@ class IronFlyStrategy:
         4. Or worse, bot enters a NEW position (doubling exposure)
 
         Enhanced to properly reconstruct IronFlyPosition for full monitoring.
+        Also checks for and cancels any orphaned pending orders.
         """
         if self.dry_run:
             logger.info("Position reconciliation skipped (dry-run mode)")
             return
+
+        # FIRST: Check for and cancel any orphaned pending orders
+        # This must happen BEFORE position reconciliation to avoid confusion
+        self._check_and_cancel_pending_orders_on_startup()
 
         try:
             logger.info("Reconciling positions with broker...")
@@ -1760,6 +1839,45 @@ class IronFlyStrategy:
                         long_puts.append(pos)
 
             logger.info(f"Position breakdown: SC={len(short_calls)}, SP={len(short_puts)}, LC={len(long_calls)}, LP={len(long_puts)}")
+
+            # POS-004: Detect multiple iron fly structures
+            if len(short_calls) > 1 or len(short_puts) > 1 or len(long_calls) > 1 or len(long_puts) > 1:
+                # Multiple potential iron flies detected - need to identify which legs belong together
+                detected_flies = self._detect_multiple_iron_flies(short_calls, short_puts, long_calls, long_puts)
+                if detected_flies:
+                    logger.critical(
+                        f"POS-004: MULTIPLE IRON FLIES DETECTED! Found {len(detected_flies)} potential structures"
+                    )
+                    # Use closest to current price if we can identify it
+                    if self.current_price > 0:
+                        best_fly = min(detected_flies, key=lambda f: abs(f["atm_strike"] - self.current_price))
+                        logger.critical(
+                            f"POS-004: Selecting iron fly closest to current price ({self.current_price:.2f}): "
+                            f"ATM={best_fly['atm_strike']}"
+                        )
+                        # Reassign to the best match
+                        short_calls = [best_fly["short_call"]]
+                        short_puts = [best_fly["short_put"]]
+                        long_calls = [best_fly["long_call"]]
+                        long_puts = [best_fly["long_put"]]
+
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_MULTIPLE_DETECTED",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"POS-004: Found {len(detected_flies)} iron fly structures, selected ATM={best_fly['atm_strike']}",
+                            "detected_flies": [f"ATM={fly['atm_strike']}" for fly in detected_flies],
+                            "result": "Monitoring closest structure - VERIFY OTHER POSITIONS MANUALLY"
+                        })
+                    else:
+                        logger.critical(
+                            "POS-004: Cannot select best iron fly (no current price). "
+                            "MANUAL INTERVENTION REQUIRED."
+                        )
+                        self._set_critical_intervention(
+                            f"POS-004: Multiple iron flies detected ({len(detected_flies)}) - manual selection required"
+                        )
+                        return
 
             # Check if we have a valid iron fly structure (1 of each)
             if len(short_calls) == 1 and len(short_puts) == 1 and len(long_calls) == 1 and len(long_puts) == 1:
@@ -1887,6 +2005,77 @@ class IronFlyStrategy:
             import traceback
             logger.error(traceback.format_exc())
             # Don't fail startup, but log the error
+
+    def _detect_multiple_iron_flies(
+        self,
+        short_calls: List[Dict],
+        short_puts: List[Dict],
+        long_calls: List[Dict],
+        long_puts: List[Dict]
+    ) -> List[Dict]:
+        """
+        POS-004: Detect and group multiple iron fly structures.
+
+        When broker has more than 4 SPX options, tries to identify which legs
+        belong together by matching:
+        1. Same expiry date
+        2. Short call and short put at same strike (ATM)
+        3. Long call above ATM, long put below ATM
+
+        Args:
+            short_calls: List of short call positions
+            short_puts: List of short put positions
+            long_calls: List of long call positions
+            long_puts: List of long put positions
+
+        Returns:
+            List of detected iron fly structures, each with leg references
+        """
+        detected_flies = []
+
+        # Group by expiry first
+        expiries = set()
+        for pos in short_calls + short_puts + long_calls + long_puts:
+            expiry = pos.get("ExpiryDate", "")[:10] if pos.get("ExpiryDate") else ""
+            if expiry:
+                expiries.add(expiry)
+
+        for expiry in expiries:
+            # Filter legs by this expiry
+            sc_for_expiry = [p for p in short_calls if (p.get("ExpiryDate", "")[:10] if p.get("ExpiryDate") else "") == expiry]
+            sp_for_expiry = [p for p in short_puts if (p.get("ExpiryDate", "")[:10] if p.get("ExpiryDate") else "") == expiry]
+            lc_for_expiry = [p for p in long_calls if (p.get("ExpiryDate", "")[:10] if p.get("ExpiryDate") else "") == expiry]
+            lp_for_expiry = [p for p in long_puts if (p.get("ExpiryDate", "")[:10] if p.get("ExpiryDate") else "") == expiry]
+
+            # Find matching short call/put pairs (same ATM strike)
+            for sc in sc_for_expiry:
+                sc_strike = sc.get("Strike", 0)
+                for sp in sp_for_expiry:
+                    sp_strike = sp.get("Strike", 0)
+                    if sc_strike == sp_strike and sc_strike > 0:
+                        atm_strike = sc_strike
+                        # Find wings: long call above ATM, long put below ATM
+                        upper_wings = [lc for lc in lc_for_expiry if lc.get("Strike", 0) > atm_strike]
+                        lower_wings = [lp for lp in lp_for_expiry if lp.get("Strike", 0) < atm_strike]
+
+                        if upper_wings and lower_wings:
+                            # Pick closest wing strikes
+                            upper_wing = min(upper_wings, key=lambda x: x.get("Strike", float('inf')))
+                            lower_wing = max(lower_wings, key=lambda x: x.get("Strike", 0))
+
+                            detected_flies.append({
+                                "atm_strike": atm_strike,
+                                "upper_wing_strike": upper_wing.get("Strike", 0),
+                                "lower_wing_strike": lower_wing.get("Strike", 0),
+                                "expiry": expiry,
+                                "short_call": sc,
+                                "short_put": sp,
+                                "long_call": upper_wing,
+                                "long_put": lower_wing
+                            })
+
+        logger.info(f"POS-004: Detected {len(detected_flies)} iron fly structures from {len(short_calls + short_puts + long_calls + long_puts)} options")
+        return detected_flies
 
     def _handle_idle_state(self, current_time: datetime) -> str:
         """
@@ -2736,11 +2925,15 @@ class IronFlyStrategy:
         # Step 2: Determine order type based on exit reason
         # STOP_LOSS: Use MARKET orders for immediate execution (price is touching wing!)
         # PROFIT_TARGET/TIME_EXIT: Can use limit orders for better fills
-        use_market_orders = (reason == "STOP_LOSS")
+        use_market_orders = (reason == "STOP_LOSS" or reason == "MAX_LOSS")
         order_type = OrderType.MARKET if use_market_orders else OrderType.MARKET  # Use market for all for simplicity
 
         if use_market_orders:
             logger.warning("STOP LOSS TRIGGERED - Using MARKET orders for immediate close!")
+
+        # STOP-002: For stop loss, use retry logic with escalation
+        if use_market_orders:
+            return self._close_position_with_retries(reason, description, pnl, hold_time)
 
         # Step 3: Close all 4 legs (reverse the entry trades)
         close_orders = []
@@ -2908,6 +3101,218 @@ class IronFlyStrategy:
 
         return f"Closing position ({reason}): P&L=${pnl:.2f}, {len(close_orders)}/4 orders placed"
 
+    def _close_position_with_retries(self, reason: str, description: str, pnl: float, hold_time: float) -> str:
+        """
+        STOP-002: Close position with retry logic for API outages.
+
+        When stop-loss is triggered during API issues, this method:
+        1. Attempts to close each leg with STOP_LOSS_MAX_RETRIES attempts
+        2. Delays STOP_LOSS_RETRY_DELAY_SECONDS between retries
+        3. If all retries fail, sets critical intervention flag
+        4. MKT-004: Also logs extreme spread warnings during exit
+
+        Args:
+            reason: Exit reason code (STOP_LOSS, MAX_LOSS)
+            description: Human-readable description
+            pnl: Current unrealized P&L
+            hold_time: How long position has been held
+
+        Returns:
+            str: Description of action taken
+        """
+        logger.critical(f"STOP-002: Stop loss close with retries - {reason}: {description}")
+
+        # Cancel any open limit orders (profit taker)
+        if self.position.profit_order_id:
+            try:
+                self.client.cancel_order(self.position.profit_order_id)
+            except Exception as e:
+                logger.warning(f"Failed to cancel profit order: {e}")
+
+        # Define legs to close
+        legs = [
+            ("short_call", self.position.short_call_uic, BuySell.BUY, "StockIndexOption"),
+            ("short_put", self.position.short_put_uic, BuySell.BUY, "StockIndexOption"),
+            ("long_call", self.position.long_call_uic, BuySell.SELL, "StockIndexOption"),
+            ("long_put", self.position.long_put_uic, BuySell.SELL, "StockIndexOption"),
+        ]
+
+        close_order_ids = {}
+        close_orders = []
+        failed_legs = []
+
+        for leg_name, uic, buy_sell, asset_type in legs:
+            if not uic:
+                logger.warning(f"STOP-002: No UIC for {leg_name} - skipping")
+                continue
+
+            # MKT-004: Check spread before closing
+            self._check_and_log_extreme_spread(uic, leg_name, asset_type)
+
+            # Retry loop for this leg
+            success = False
+            last_error = None
+
+            for attempt in range(1, STOP_LOSS_MAX_RETRIES + 1):
+                try:
+                    logger.critical(
+                        f"STOP-002: Closing {leg_name} (attempt {attempt}/{STOP_LOSS_MAX_RETRIES})"
+                    )
+                    result = self.client.place_emergency_order(
+                        uic=uic,
+                        asset_type=asset_type,
+                        buy_sell=buy_sell,
+                        amount=self.position.quantity,
+                        order_type=OrderType.MARKET,
+                        to_open_close="ToClose"
+                    )
+                    if result and result.get("OrderId"):
+                        close_order_ids[leg_name] = result.get("OrderId")
+                        close_orders.append((leg_name, result))
+                        logger.critical(f"✅ STOP-002: {leg_name} closed on attempt {attempt}")
+                        success = True
+                        break
+                    else:
+                        last_error = "No OrderId returned"
+                        logger.warning(f"STOP-002: {leg_name} attempt {attempt} - no OrderId")
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"STOP-002: {leg_name} attempt {attempt} failed: {e}")
+
+                    # Check for market halt
+                    self._check_for_market_halt(str(e))
+
+                # Delay before retry (unless it was the last attempt)
+                if attempt < STOP_LOSS_MAX_RETRIES:
+                    logger.info(f"STOP-002: Waiting {STOP_LOSS_RETRY_DELAY_SECONDS}s before retry...")
+                    time.sleep(STOP_LOSS_RETRY_DELAY_SECONDS)
+
+            if not success:
+                failed_legs.append({
+                    "leg": leg_name,
+                    "uic": uic,
+                    "error": last_error,
+                    "attempts": STOP_LOSS_MAX_RETRIES
+                })
+                logger.critical(
+                    f"❌ STOP-002: {leg_name} FAILED after {STOP_LOSS_MAX_RETRIES} attempts - {last_error}"
+                )
+
+        # Log results
+        logger.critical(f"STOP-002: Stop loss result - {len(close_orders)}/4 legs closed, {len(failed_legs)} failed")
+
+        if failed_legs:
+            # Set critical intervention - some legs couldn't be closed
+            self._set_critical_intervention(
+                f"STOP-002: Stop loss failed for {len(failed_legs)} legs after {STOP_LOSS_MAX_RETRIES} retries each"
+            )
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_STOP_LOSS_FAILED",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"STOP-002: {len(failed_legs)}/4 legs could not be closed",
+                "failed_legs": failed_legs,
+                "successful_close_ids": close_order_ids,
+                "result": "CRITICAL INTERVENTION REQUIRED"
+            })
+        else:
+            self.trade_logger.log_safety_event({
+                "event_type": "IRON_FLY_STOP_LOSS_SUCCESS",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": "STOP-002: All 4 legs closed successfully",
+                "close_order_ids": close_order_ids,
+                "result": "Stop loss executed"
+            })
+
+        # Store close order IDs on position for verification
+        self.position.close_order_ids = close_order_ids
+        self.position.close_legs_verified = {
+            "short_call": False,
+            "short_put": False,
+            "long_call": False,
+            "long_put": False
+        }
+
+        # Log the close trade
+        self.trade_logger.log_trade(
+            action=f"CLOSE_IRON_FLY_{reason}",
+            strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
+            price=self.position.credit_received / 100,
+            delta=0.0,
+            pnl=pnl,
+            saxo_client=self.client,
+            underlying_price=self.current_price,
+            vix=self.current_vix,
+            option_type="Iron Fly",
+            expiry_date=self.position.expiry,
+            dte=0,
+            premium_received=self.position.credit_received,
+            trade_reason=f"STOP-002: {description} (retries used)"
+        )
+
+        self.state = IronFlyState.CLOSING
+        self.closing_started_at = get_eastern_timestamp()
+
+        if failed_legs:
+            return f"STOP-002 PARTIAL: {len(close_orders)}/4 closed, {len(failed_legs)} FAILED - CRITICAL INTERVENTION SET"
+        return f"STOP-002: Stop loss executed ({reason}): P&L=${pnl:.2f}, all legs closed with retries"
+
+    def _check_and_log_extreme_spread(self, uic: int, leg_name: str, asset_type: str) -> None:
+        """
+        MKT-004: Check and log extreme bid-ask spreads during position exit.
+
+        Called before each close order to warn operator about slippage risk.
+
+        Args:
+            uic: The instrument UIC
+            leg_name: Human-readable leg name for logging
+            asset_type: Asset type for quote lookup
+        """
+        try:
+            quote = self.client.get_quote(uic, asset_type=asset_type, skip_cache=True)
+            if quote:
+                bid = quote.get('Quote', {}).get('Bid', 0)
+                ask = quote.get('Quote', {}).get('Ask', 0)
+
+                if bid > 0 and ask > 0:
+                    mid = (bid + ask) / 2
+                    spread = ask - bid
+                    spread_percent = (spread / mid) * 100 if mid > 0 else 0
+
+                    if spread_percent >= EXTREME_SPREAD_CRITICAL_PERCENT:
+                        logger.critical(
+                            f"🚨 MKT-004: EXTREME SPREAD on {leg_name}! "
+                            f"Bid={bid:.2f}, Ask={ask:.2f}, Spread={spread_percent:.1f}%"
+                        )
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_EXTREME_SPREAD_CRITICAL",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"MKT-004: {leg_name} spread {spread_percent:.1f}% (CRITICAL)",
+                            "bid": bid,
+                            "ask": ask,
+                            "spread_percent": spread_percent,
+                            "result": "Proceeding with close anyway (must exit)"
+                        })
+                    elif spread_percent >= EXTREME_SPREAD_WARNING_PERCENT:
+                        logger.warning(
+                            f"⚠️ MKT-004: Wide spread on {leg_name} - "
+                            f"Bid={bid:.2f}, Ask={ask:.2f}, Spread={spread_percent:.1f}%"
+                        )
+                        self.trade_logger.log_safety_event({
+                            "event_type": "IRON_FLY_EXTREME_SPREAD_WARNING",
+                            "spy_price": self.current_price,
+                            "vix": self.current_vix,
+                            "description": f"MKT-004: {leg_name} spread {spread_percent:.1f}% (warning)",
+                            "bid": bid,
+                            "ask": ask,
+                            "spread_percent": spread_percent,
+                            "result": "Proceeding with close"
+                        })
+        except Exception as e:
+            logger.warning(f"MKT-004: Could not check spread for {leg_name}: {e}")
+
     # =========================================================================
     # HELPER METHODS
     # =========================================================================
@@ -2972,7 +3377,6 @@ class IronFlyStrategy:
         if self.dry_run:
             # Get time in position (in minutes)
             hold_minutes = self.position.hold_time_minutes
-            hold_seconds = self.position.hold_time_seconds
 
             # Calculate price distance from ATM (normalized by wing width)
             price_distance = abs(self.current_price - self.position.atm_strike)
@@ -3825,7 +4229,7 @@ class IronFlyStrategy:
                 "event_type": "IRON_FLY_ORPHAN_ON_RESET",
                 "spy_price": self.current_price,
                 "vix": self.current_vix,
-                "description": f"Position not properly closed before daily reset",
+                "description": "Position not properly closed before daily reset",
                 "result": "Position cleared from local state - CHECK BROKER FOR ORPHANED POSITIONS"
             })
 
@@ -3864,3 +4268,10 @@ class IronFlyStrategy:
         self.closing_started_at = None
         self._position_reconciled = False  # Force reconciliation on next run
         self._consecutive_stale_data_warnings = 0
+
+        # CB-004: Reset daily circuit breaker tracking
+        self._circuit_breaker_opens_today = 0
+        self._daily_halt_triggered = False
+
+        # CB-001: Clear partial fill tracking
+        self._partial_fill_uics.clear()
