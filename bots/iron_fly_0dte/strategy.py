@@ -2630,10 +2630,8 @@ class IronFlyStrategy:
 
         # Step 3: Place all 4 orders with fill verification
         # Each leg is placed and verified before proceeding to the next
+        # SAFETY: Longs are placed first to minimize naked short exposure on partial fills
         entry_time_eastern = get_eastern_timestamp()
-        orders_placed = []
-        order_ids = {}
-        fill_details = {}
 
         # ORDER-004: Check critical intervention first (most severe)
         if not self._check_critical_intervention():
@@ -2673,136 +2671,159 @@ class IronFlyStrategy:
             logger.info(f"FILTER-001: VIX re-check passed - VIX {fresh_vix:.2f} <= {self.max_vix}")
             self.current_vix = fresh_vix  # Update cached value
 
-        try:
-            # Leg 1: Sell ATM Call (short)
-            sc_success, sc_order_id, sc_fill = self._place_iron_fly_leg_with_verification(
-                uic=short_call_uic,
-                direction=BuySell.SELL,
-                amount=self.position_size,
-                leg_name="short_call",
-                strike=atm_strike
-            )
-            if sc_success and sc_order_id:
-                order_ids["short_call"] = sc_order_id
-                fill_details["short_call"] = sc_fill
-                orders_placed.append("short_call")
-            else:
-                raise Exception("Failed to place/verify short call order")
+        # ENTRY RETRY LOGIC: Up to 3 attempts with 15-second delays between attempts
+        # This handles transient network/API issues while still failing safely on persistent problems
+        MAX_ENTRY_ATTEMPTS = 3
+        ENTRY_RETRY_DELAY_SECONDS = 15
 
-            # Leg 2: Sell ATM Put (short)
-            sp_success, sp_order_id, sp_fill = self._place_iron_fly_leg_with_verification(
-                uic=short_put_uic,
-                direction=BuySell.SELL,
-                amount=self.position_size,
-                leg_name="short_put",
-                strike=atm_strike
-            )
-            if sp_success and sp_order_id:
-                order_ids["short_put"] = sp_order_id
-                fill_details["short_put"] = sp_fill
-                orders_placed.append("short_put")
-            else:
-                raise Exception("Failed to place/verify short put order")
+        # Map leg names to their UICs and directions for unwind
+        leg_unwind_map = {
+            "long_call": {"uic": long_call_uic, "close_direction": BuySell.SELL},
+            "long_put": {"uic": long_put_uic, "close_direction": BuySell.SELL},
+            "short_call": {"uic": short_call_uic, "close_direction": BuySell.BUY},
+            "short_put": {"uic": short_put_uic, "close_direction": BuySell.BUY},
+        }
 
-            # Leg 3: Buy Long Call (wing protection)
-            lc_success, lc_order_id, lc_fill = self._place_iron_fly_leg_with_verification(
-                uic=long_call_uic,
-                direction=BuySell.BUY,
-                amount=self.position_size,
-                leg_name="long_call",
-                strike=upper_wing
-            )
-            if lc_success and lc_order_id:
-                order_ids["long_call"] = lc_order_id
-                fill_details["long_call"] = lc_fill
-                orders_placed.append("long_call")
-            else:
-                raise Exception("Failed to place/verify long call order")
+        last_error = None
+        for attempt in range(1, MAX_ENTRY_ATTEMPTS + 1):
+            orders_placed = []
+            order_ids = {}
+            fill_details = {}
 
-            # Leg 4: Buy Long Put (wing protection)
-            lp_success, lp_order_id, lp_fill = self._place_iron_fly_leg_with_verification(
-                uic=long_put_uic,
-                direction=BuySell.BUY,
-                amount=self.position_size,
-                leg_name="long_put",
-                strike=lower_wing
-            )
-            if lp_success and lp_order_id:
-                order_ids["long_put"] = lp_order_id
-                fill_details["long_put"] = lp_fill
-                orders_placed.append("long_put")
-            else:
-                raise Exception("Failed to place/verify long put order")
+            logger.info(f"Iron Fly entry attempt {attempt}/{MAX_ENTRY_ATTEMPTS}")
 
-            # All 4 legs successfully placed and verified!
-            logger.info(f"All 4 Iron Fly legs placed and verified: {order_ids}")
+            try:
+                # Leg 1: Buy Long Call (wing protection) - LONGS FIRST for safety
+                lc_success, lc_order_id, lc_fill = self._place_iron_fly_leg_with_verification(
+                    uic=long_call_uic,
+                    direction=BuySell.BUY,
+                    amount=self.position_size,
+                    leg_name="long_call",
+                    strike=upper_wing
+                )
+                if lc_success and lc_order_id:
+                    order_ids["long_call"] = lc_order_id
+                    fill_details["long_call"] = lc_fill
+                    orders_placed.append("long_call")
+                else:
+                    raise Exception("Failed to place/verify long call order")
 
-        except Exception as e:
-            # CRITICAL: If any order fails after others succeeded, we have a partial fill
-            error_msg = f"ORDER PLACEMENT/VERIFICATION FAILED: {e}"
+                # Leg 2: Buy Long Put (wing protection)
+                lp_success, lp_order_id, lp_fill = self._place_iron_fly_leg_with_verification(
+                    uic=long_put_uic,
+                    direction=BuySell.BUY,
+                    amount=self.position_size,
+                    leg_name="long_put",
+                    strike=lower_wing
+                )
+                if lp_success and lp_order_id:
+                    order_ids["long_put"] = lp_order_id
+                    fill_details["long_put"] = lp_fill
+                    orders_placed.append("long_put")
+                else:
+                    raise Exception("Failed to place/verify long put order")
+
+                # Leg 3: Sell ATM Call (short) - SHORTS AFTER longs are in place
+                sc_success, sc_order_id, sc_fill = self._place_iron_fly_leg_with_verification(
+                    uic=short_call_uic,
+                    direction=BuySell.SELL,
+                    amount=self.position_size,
+                    leg_name="short_call",
+                    strike=atm_strike
+                )
+                if sc_success and sc_order_id:
+                    order_ids["short_call"] = sc_order_id
+                    fill_details["short_call"] = sc_fill
+                    orders_placed.append("short_call")
+                else:
+                    raise Exception("Failed to place/verify short call order")
+
+                # Leg 4: Sell ATM Put (short)
+                sp_success, sp_order_id, sp_fill = self._place_iron_fly_leg_with_verification(
+                    uic=short_put_uic,
+                    direction=BuySell.SELL,
+                    amount=self.position_size,
+                    leg_name="short_put",
+                    strike=atm_strike
+                )
+                if sp_success and sp_order_id:
+                    order_ids["short_put"] = sp_order_id
+                    fill_details["short_put"] = sp_fill
+                    orders_placed.append("short_put")
+                else:
+                    raise Exception("Failed to place/verify short put order")
+
+                # All 4 legs successfully placed and verified!
+                logger.info(f"All 4 Iron Fly legs placed and verified on attempt {attempt}: {order_ids}")
+                break  # Success - exit retry loop
+
+            except Exception as e:
+                # Partial fill on this attempt
+                last_error = e
+                error_msg = f"ORDER PLACEMENT/VERIFICATION FAILED (attempt {attempt}/{MAX_ENTRY_ATTEMPTS}): {e}"
+                logger.warning(error_msg)
+                logger.warning(f"Orders placed before failure: {orders_placed}")
+
+                # AUTO-UNWIND any filled legs immediately
+                if orders_placed:
+                    unwind_results = []
+                    for leg_name in orders_placed:
+                        if leg_name in leg_unwind_map:
+                            leg_info = leg_unwind_map[leg_name]
+                            logger.warning(f"AUTO-UNWINDING partial fill: {leg_name} (UIC: {leg_info['uic']})")
+                            try:
+                                unwind_result = self.client.place_emergency_order(
+                                    uic=leg_info["uic"],
+                                    asset_type="StockIndexOption",
+                                    buy_sell=leg_info["close_direction"],
+                                    amount=self.position_size,
+                                    to_open_close="ToClose"
+                                )
+                                if unwind_result and unwind_result.get("OrderId"):
+                                    unwind_results.append({
+                                        "leg": leg_name,
+                                        "order_id": unwind_result.get("OrderId"),
+                                        "status": "UNWIND_PLACED"
+                                    })
+                                    logger.info(f"✓ Unwind order placed for {leg_name}: {unwind_result.get('OrderId')}")
+                                else:
+                                    unwind_results.append({"leg": leg_name, "status": "UNWIND_FAILED", "error": "No OrderId"})
+                                    logger.error(f"✗ Unwind failed for {leg_name}: No OrderId returned")
+                            except Exception as unwind_err:
+                                unwind_results.append({"leg": leg_name, "status": "UNWIND_ERROR", "error": str(unwind_err)})
+                                logger.error(f"✗ Unwind error for {leg_name}: {unwind_err}")
+
+                    self.trade_logger.log_safety_event({
+                        "event_type": "IRON_FLY_PARTIAL_FILL_UNWIND",
+                        "spy_price": self.current_price,
+                        "vix": self.current_vix,
+                        "description": f"Partial fill on attempt {attempt}/{MAX_ENTRY_ATTEMPTS}: {len(orders_placed)}/4 legs - unwound",
+                        "result": f"Unwind results: {unwind_results}",
+                        "orders_placed": orders_placed,
+                        "order_ids": order_ids,
+                        "unwind_results": unwind_results,
+                        "will_retry": attempt < MAX_ENTRY_ATTEMPTS
+                    })
+
+                # If not the last attempt, wait before retrying
+                if attempt < MAX_ENTRY_ATTEMPTS:
+                    logger.info(f"Waiting {ENTRY_RETRY_DELAY_SECONDS}s before retry attempt {attempt + 1}...")
+                    time.sleep(ENTRY_RETRY_DELAY_SECONDS)
+                    continue
+
+                # Final attempt failed - open circuit breaker and halt
+                logger.critical(f"All {MAX_ENTRY_ATTEMPTS} entry attempts failed - opening circuit breaker")
+                self._open_circuit_breaker(f"Entry failed after {MAX_ENTRY_ATTEMPTS} attempts: {last_error}")
+                self.state = IronFlyState.DAILY_COMPLETE
+                return f"CRITICAL: Entry failed after {MAX_ENTRY_ATTEMPTS} attempts - {last_error}"
+
+        # If we get here but don't have all 4 legs, something went wrong
+        if len(orders_placed) != 4:
+            error_msg = f"Entry loop completed but only {len(orders_placed)}/4 legs filled"
             logger.critical(error_msg)
-            logger.critical(f"Orders placed before failure: {orders_placed}")
-
-            # SAFETY FIX: AUTO-UNWIND any filled legs immediately
-            # Map leg names to their UICs and opposite directions for closing
-            leg_unwind_map = {
-                "short_call": {"uic": short_call_uic, "close_direction": BuySell.BUY},
-                "short_put": {"uic": short_put_uic, "close_direction": BuySell.BUY},
-                "long_call": {"uic": long_call_uic, "close_direction": BuySell.SELL},
-                "long_put": {"uic": long_put_uic, "close_direction": BuySell.SELL},
-            }
-
-            unwind_results = []
-            for leg_name in orders_placed:
-                if leg_name in leg_unwind_map:
-                    leg_info = leg_unwind_map[leg_name]
-                    logger.critical(f"AUTO-UNWINDING partial fill: {leg_name} (UIC: {leg_info['uic']})")
-                    try:
-                        # Use emergency market order for immediate execution
-                        unwind_result = self.client.place_emergency_order(
-                            uic=leg_info["uic"],
-                            asset_type="StockIndexOption",
-                            buy_sell=leg_info["close_direction"],
-                            amount=self.position_size,
-                            to_open_close="ToClose"
-                        )
-                        if unwind_result and unwind_result.get("OrderId"):
-                            unwind_results.append({
-                                "leg": leg_name,
-                                "order_id": unwind_result.get("OrderId"),
-                                "status": "UNWIND_PLACED"
-                            })
-                            logger.info(f"✓ Unwind order placed for {leg_name}: {unwind_result.get('OrderId')}")
-                        else:
-                            unwind_results.append({"leg": leg_name, "status": "UNWIND_FAILED", "error": "No OrderId"})
-                            logger.error(f"✗ Unwind failed for {leg_name}: No OrderId returned")
-                    except Exception as unwind_err:
-                        unwind_results.append({"leg": leg_name, "status": "UNWIND_ERROR", "error": str(unwind_err)})
-                        logger.error(f"✗ Unwind error for {leg_name}: {unwind_err}")
-                        # Still track as orphaned if unwind fails
-                        if leg_name in order_ids:
-                            self._add_orphaned_order({
-                                "order_id": order_ids[leg_name],
-                                "leg_name": leg_name,
-                                "reason": "partial_iron_fly_entry_unwind_failed"
-                            })
-
-            self.trade_logger.log_safety_event({
-                "event_type": "IRON_FLY_PARTIAL_FILL_AUTO_UNWIND",
-                "spy_price": self.current_price,
-                "vix": self.current_vix,
-                "description": f"Partial fill during iron fly entry: {len(orders_placed)}/4 legs - AUTO UNWIND ATTEMPTED",
-                "result": f"Unwind results: {unwind_results}",
-                "orders_placed": orders_placed,
-                "order_ids": order_ids,
-                "unwind_results": unwind_results
-            })
-
-            # Open circuit breaker to prevent further entry attempts today
-            self._open_circuit_breaker(f"Partial fill: {len(orders_placed)}/4 legs (auto-unwind attempted)")
-
+            self._open_circuit_breaker(error_msg)
             self.state = IronFlyState.DAILY_COMPLETE
-            return f"CRITICAL: Partial fill - {len(orders_placed)}/4 legs. Auto-unwind attempted: {unwind_results}"
+            return error_msg
 
         # Step 4: Create position object
         self.position = IronFlyPosition(
