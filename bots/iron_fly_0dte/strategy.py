@@ -2654,7 +2654,7 @@ class IronFlyStrategy:
 
         # FILTER-001: Re-validate VIX immediately before order placement
         # VIX could have spiked since the initial filter check (READY_TO_ENTER state)
-        fresh_vix = self.client.get_vix_price()
+        fresh_vix = self.client.get_vix_price(self.vix_uic)
         if fresh_vix and fresh_vix > self.max_vix:
             error_msg = (
                 f"FILTER-001: VIX re-check failed - VIX {fresh_vix:.2f} > {self.max_vix} "
