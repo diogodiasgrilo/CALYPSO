@@ -381,6 +381,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     # Log performance metrics
                     strategy.log_performance_metrics()
 
+                    # Log opening range snapshot during monitoring (updates single row)
+                    if status['state'] == 'MonitoringOpeningRange':
+                        strategy.log_opening_range_snapshot()
+
                     last_status_time = now
 
                 # Hourly Bot Logs to Google Sheets (avoid flooding with hundreds of rows)

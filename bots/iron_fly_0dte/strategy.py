@@ -3665,6 +3665,47 @@ class IronFlyStrategy:
         except Exception as e:
             logger.warning(f"Failed to log opening range to sheets: {e}")
 
+    def log_opening_range_snapshot(self):
+        """
+        Log real-time opening range snapshot to Google Sheets during monitoring.
+
+        Called every 30 seconds during the 9:30-10:00 AM monitoring period.
+        Updates a single row for today's date (upsert) rather than appending.
+        Shows "MONITORING" as entry_decision until final decision at 10:00 AM.
+        """
+        if self.state != IronFlyState.MONITORING_OPENING_RANGE:
+            return
+
+        current_time = get_us_market_time()
+
+        # Build snapshot data
+        data = {
+            "date": current_time.strftime("%Y-%m-%d"),
+            "start_time": self.opening_range.start_time.strftime("%H:%M:%S") if self.opening_range.start_time else "",
+            "end_time": current_time.strftime("%H:%M:%S"),
+            "opening_price": self.opening_range.low if self.opening_range.low != float('inf') else 0,
+            "range_high": self.opening_range.high if self.opening_range.high > 0 else 0,
+            "range_low": self.opening_range.low if self.opening_range.low != float('inf') else 0,
+            "range_width": self.opening_range.range_width,
+            "current_price": self.current_price,
+            "price_in_range": self.opening_range.is_price_in_range(self.current_price) if self.opening_range.high > 0 else True,
+            "opening_vix": self.opening_range.opening_vix,
+            "vix_high": self.opening_range.vix_high,
+            "current_vix": self.current_vix,
+            "vix_spike_percent": self.opening_range.vix_spike_percent,
+            "expected_move": self._calculate_expected_move(),
+            "entry_decision": "MONITORING",
+            "reason": f"Monitoring range ({current_time.strftime('%H:%M:%S')})",
+            "atm_strike": None,
+            "wing_width": None
+        }
+
+        # Update (upsert) the row for today
+        try:
+            self.trade_logger.update_opening_range(data)
+        except Exception as e:
+            logger.warning(f"Failed to update opening range snapshot: {e}")
+
     # =========================================================================
     # PRE-TRADE FILTERS (FOMC / Economic Calendar)
     # =========================================================================

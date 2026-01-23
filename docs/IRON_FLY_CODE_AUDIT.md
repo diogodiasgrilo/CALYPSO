@@ -570,7 +570,30 @@ Internal P&L values are stored in "contract-adjusted" units (multiplied by 100 f
 
 **Lesson Learned:** Internal storage units must be clearly documented and consistently converted before display/comparison.
 
+### 14.2 Opening Range Real-Time Logging (Added 2026-01-23)
+
+**Severity:** Enhancement
+**Impact:** Better visibility during 9:30-10:00 AM monitoring period
+
+**Change:**
+Opening Range data now updates in real-time during the monitoring period instead of only logging once at 10:00 AM.
+
+**Implementation:**
+- `update_opening_range()` - New method in GoogleSheetsLogger that upserts (updates or inserts) a single row for today's date
+- `log_opening_range_snapshot()` - New method in IronFlyStrategy called every 30 seconds during `MONITORING_OPENING_RANGE` state
+- Shows `entry_decision = "MONITORING"` until final decision at 10:00 AM
+
+**Behavior:**
+- During 9:30-10:00 AM: Single row updates every 30 seconds with live range data
+- At 10:00 AM: Final update with `entry_decision = "ENTER"` or `"SKIP"` + reason
+- Result: 1 row per day (not 60 rows) with real-time visibility
+
+**Files Modified:**
+- `shared/logger_service.py` - Added `update_opening_range()` to GoogleSheetsLogger and TradeLogger
+- `bots/iron_fly_0dte/strategy.py` - Added `log_opening_range_snapshot()`
+- `bots/iron_fly_0dte/main.py` - Added call during heartbeat for MonitoringOpeningRange state
+
 ---
 
-**Document Version:** 1.1
+**Document Version:** 1.2
 **Last Updated:** 2026-01-23

@@ -741,6 +741,73 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to log opening range to Google Sheets: {e}")
             return False
 
+    def update_opening_range(self, data: Dict[str, Any]) -> bool:
+        """
+        Update opening range row for today (upsert - create if not exists, update if exists).
+
+        Used for real-time monitoring during 9:30-10:00 AM period. Updates a single row
+        for today's date instead of appending new rows, keeping the sheet clean.
+
+        Args:
+            data: Same dictionary format as log_opening_range()
+
+        Returns:
+            bool: True if updated successfully, False otherwise.
+        """
+        if not self.enabled or "Opening Range" not in self.worksheets:
+            return False
+
+        try:
+            worksheet = self.worksheets["Opening Range"]
+            today_date = data.get("date", "")
+
+            # Build the row data
+            row = [
+                today_date,
+                data.get("start_time", ""),
+                data.get("end_time", ""),
+                f"{data.get('opening_price', 0):.2f}" if data.get('opening_price') else "",
+                f"{data.get('range_high', 0):.2f}" if data.get('range_high') else "",
+                f"{data.get('range_low', 0):.2f}" if data.get('range_low') else "",
+                f"{data.get('range_width', 0):.2f}" if data.get('range_width') else "",
+                f"{data.get('current_price', 0):.2f}" if data.get('current_price') else "",
+                "Yes" if data.get("price_in_range") else "No",
+                f"{data.get('opening_vix', 0):.2f}" if data.get('opening_vix') else "",
+                f"{data.get('vix_high', 0):.2f}" if data.get('vix_high') else "",
+                f"{data.get('current_vix', 0):.2f}" if data.get('current_vix') else "",
+                f"{data.get('vix_spike_percent', 0):.2f}%" if data.get('vix_spike_percent') is not None else "",
+                f"{data.get('expected_move', 0):.2f}" if data.get('expected_move') else "",
+                data.get("entry_decision", ""),
+                data.get("reason", ""),
+                f"{data.get('atm_strike', 0):.0f}" if data.get('atm_strike') else "",
+                f"{data.get('wing_width', 0):.0f}" if data.get('wing_width') else ""
+            ]
+
+            # Find existing row for today's date (column A)
+            all_values = worksheet.get_all_values()
+            row_num = None
+            for i, existing_row in enumerate(all_values):
+                if i == 0:  # Skip header
+                    continue
+                if existing_row and existing_row[0] == today_date:
+                    row_num = i + 1  # gspread is 1-indexed
+                    break
+
+            if row_num:
+                # Update existing row
+                col_range = f"A{row_num}:R{row_num}"  # 18 columns (A-R)
+                worksheet.update(col_range, [row])
+                logger.debug(f"Opening range updated (row {row_num}): {data.get('entry_decision', 'N/A')}")
+            else:
+                # Append new row for today
+                worksheet.append_row(row)
+                logger.debug(f"Opening range created: {data.get('entry_decision', 'N/A')}")
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update opening range to Google Sheets: {e}")
+            return False
+
     def log_trade(self, trade: TradeRecord) -> bool:
         """
         Log a trade record to the Trades worksheet.
@@ -3209,6 +3276,19 @@ class TradeLoggerService:
             f"VIX: {data.get('current_vix', 0):.2f}, "
             f"Reason: {data.get('reason', 'N/A')}"
         )
+
+    def update_opening_range(self, data: Dict[str, Any]):
+        """
+        Update opening range row for today (upsert - create if not exists, update if exists).
+
+        Used for real-time monitoring during 9:30-10:00 AM period. Updates a single row
+        for today's date instead of appending new rows, keeping the sheet clean.
+
+        Args:
+            data: Same dictionary format as log_opening_range()
+        """
+        if self.google_logger.enabled:
+            self.google_logger.update_opening_range(data)
 
     def log_campaign(self, data: Dict[str, Any]):
         """
