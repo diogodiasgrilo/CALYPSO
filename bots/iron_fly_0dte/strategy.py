@@ -2983,14 +2983,51 @@ class IronFlyStrategy:
             self.state = IronFlyState.DAILY_COMPLETE
             return error_msg
 
-        # Step 4: Create position object
+        # Step 4: Extract ACTUAL fill prices from fill_details
+        # FIX (2026-01-23): Use actual fill prices from broker, not quoted bid/ask
+        # This ensures P&L calculations match what the broker shows
+        def get_fill_price(fill_detail: Optional[Dict], fallback: float) -> float:
+            """Extract fill price from fill_details, with fallback to quoted price."""
+            if fill_detail:
+                # Try different keys that may contain the fill price
+                price = fill_detail.get("fill_price") or fill_detail.get("FilledPrice") or fill_detail.get("Price")
+                if price and price > 0:
+                    return float(price)
+            return fallback
+
+        # Extract actual fill prices (fallback to quoted prices if not available)
+        actual_sc_fill = get_fill_price(fill_details.get("short_call"), sc_bid)
+        actual_sp_fill = get_fill_price(fill_details.get("short_put"), sp_bid)
+        actual_lc_fill = get_fill_price(fill_details.get("long_call"), lc_ask)
+        actual_lp_fill = get_fill_price(fill_details.get("long_put"), lp_ask)
+
+        # Calculate ACTUAL credit from fill prices
+        # Shorts: we SOLD, so we received the fill price
+        # Longs: we BOUGHT, so we paid the fill price
+        actual_credit_per_contract = (actual_sc_fill + actual_sp_fill - actual_lc_fill - actual_lp_fill)
+        actual_total_credit = actual_credit_per_contract * self.position_size * 100  # In cents
+
+        # Log comparison between quoted and actual prices
+        logger.info(
+            f"Fill prices - Quoted vs Actual:\n"
+            f"  Short Call: ${sc_bid:.2f} -> ${actual_sc_fill:.2f}\n"
+            f"  Short Put:  ${sp_bid:.2f} -> ${actual_sp_fill:.2f}\n"
+            f"  Long Call:  ${lc_ask:.2f} -> ${actual_lc_fill:.2f}\n"
+            f"  Long Put:   ${lp_ask:.2f} -> ${actual_lp_fill:.2f}\n"
+            f"  Credit: ${total_credit / 100:.2f} (quoted) -> ${actual_total_credit / 100:.2f} (actual)"
+        )
+
+        # Use actual credit for position tracking
+        credit_for_position = actual_total_credit
+
+        # Step 5: Create position object with ACTUAL fill prices
         self.position = IronFlyPosition(
             atm_strike=iron_fly_options["atm_strike"],
             upper_wing=iron_fly_options["upper_wing"],
             lower_wing=iron_fly_options["lower_wing"],
             entry_time=entry_time_eastern,
             entry_price=self.current_price,
-            credit_received=total_credit,
+            credit_received=credit_for_position,  # Use ACTUAL credit
             quantity=self.position_size,
             expiry=iron_fly_options["expiry"][:10],  # YYYY-MM-DD
             # Store order IDs for management
@@ -3003,16 +3040,16 @@ class IronFlyStrategy:
             short_put_uic=short_put_uic,
             long_call_uic=long_call_uic,
             long_put_uic=long_put_uic,
-            # Initial prices
-            short_call_price=sc_bid,
-            short_put_price=sp_bid,
-            long_call_price=lc_ask,
-            long_put_price=lp_ask
+            # Initial prices from ACTUAL fills (for accurate P&L from start)
+            short_call_price=actual_sc_fill,
+            short_put_price=actual_sp_fill,
+            long_call_price=actual_lc_fill,
+            long_put_price=actual_lp_fill
         )
 
         self.state = IronFlyState.POSITION_OPEN
         self.trades_today += 1
-        self.daily_premium_collected += total_credit
+        self.daily_premium_collected += credit_for_position  # Use actual credit
 
         # POS-001: Save position metadata for crash recovery
         self._save_position_metadata()
@@ -3029,11 +3066,11 @@ class IronFlyStrategy:
             logger.warning(f"Failed to subscribe to option streams (will use polling): {e}")
 
         # Log the trade to Google Sheets
-        # Note: credit_per_contract is in dollars, total_credit is in cents
+        # FIX (2026-01-23): Use actual credit from fill prices, not quoted prices
         self.trade_logger.log_trade(
             action="OPEN_IRON_FLY",
             strike=f"{lower_wing}/{atm_strike}/{upper_wing}",
-            price=credit_per_contract,  # Already in dollars (per-contract credit)
+            price=actual_credit_per_contract,  # Actual credit per contract in dollars
             delta=0.0,  # Iron Fly is delta neutral at entry
             pnl=0.0,
             saxo_client=self.client,
@@ -3042,16 +3079,16 @@ class IronFlyStrategy:
             option_type="Iron Fly",
             expiry_date=self.position.expiry,
             dte=0,
-            premium_received=total_credit / 100,  # Cents to dollars
+            premium_received=credit_for_position / 100,  # Actual credit in dollars
             trade_reason="All filters passed"
         )
 
         logger.info(
             f"IRON FLY OPENED: ATM={atm_strike}, Wings={lower_wing}/{upper_wing}, "
-            f"Credit=${total_credit / 100:.2f}, Orders={order_ids}"
+            f"Credit=${credit_for_position / 100:.2f} (actual), Orders={order_ids}"
         )
 
-        return f"Entered Iron Fly at {atm_strike} with ${total_credit / 100:.2f} credit"
+        return f"Entered Iron Fly at {atm_strike} with ${credit_for_position / 100:.2f} credit (actual fills)"
 
     def _close_position(self, reason: str, description: str) -> str:
         """
