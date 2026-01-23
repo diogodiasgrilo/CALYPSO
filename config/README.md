@@ -193,4 +193,4 @@ Bot-specific settings (strategy parameters) still come from each bot's `config.j
 
 ---
 
-**Last Updated:** 2026-01-22
+**Last Updated:** 2026-01-23

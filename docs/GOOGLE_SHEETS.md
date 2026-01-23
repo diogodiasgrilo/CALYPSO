@@ -170,4 +170,4 @@ Useful formulas for your spreadsheet:
 
 ---
 
-**Last Updated:** 2026-01-22
+**Last Updated:** 2026-01-23

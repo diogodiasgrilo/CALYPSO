@@ -166,7 +166,9 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - **[VM Commands Reference](docs/VM_COMMANDS.md)** - Complete VM command reference
 - **[Google Sheets Setup](docs/GOOGLE_SHEETS.md)** - Trade logging setup
 - **[Deployment Guide](docs/DEPLOYMENT.md)** - GCP deployment instructions
-- **[Delta Neutral Edge Cases](docs/DELTA_NEUTRAL_EDGE_CASES.md)** - Risk analysis & edge case scenarios
+- **[Delta Neutral Edge Cases](docs/DELTA_NEUTRAL_EDGE_CASES.md)** - Risk analysis (44 edge cases)
+- **[Iron Fly Edge Cases](docs/IRON_FLY_EDGE_CASES.md)** - Risk analysis (63 edge cases)
+- **[Iron Fly Code Audit](docs/IRON_FLY_CODE_AUDIT.md)** - Pre-LIVE comprehensive code review
 - **[Configuration Reference](config/README.md)** - Config file reference
 
 ---
@@ -210,6 +212,20 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - See [Edge Cases Doc](docs/DELTA_NEUTRAL_EDGE_CASES.md) for full analysis
 - See `bots/delta_neutral/safety/__init__.py` for implementation docs
 
+**Iron Fly 0DTE Advanced Safety (63 edge cases covered):**
+- Entry order: Longs first (Long Call → Long Put → Short Call → Short Put)
+- Entry retries: 3 attempts with 15-second delays; auto-unwind filled legs on failure
+- Stop losses: Software-based via 2-second polling (NOT broker-side stops)
+- Wing breach tolerance: $0.10 buffer to avoid floating-point issues
+- Circuit breaker: 5 consecutive failures or 5-of-10 sliding window triggers halt
+- Daily circuit breaker escalation: 3 opens = daily halt
+- Stop loss retry escalation: 5 retries per leg with extreme spread warning
+- Position recovery on crash with metadata persistence
+- Multiple iron fly detection and auto-selection
+- Multi-bot token coordination (WebSocket 401 fix)
+- See [Edge Cases Doc](docs/IRON_FLY_EDGE_CASES.md) for full analysis
+- See [Code Audit](docs/IRON_FLY_CODE_AUDIT.md) for pre-LIVE review
+
 ---
 
 ## Requirements
@@ -240,5 +256,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 3.1.0
-**Last Updated:** 2026-01-22
+**Version:** 3.2.0
+**Last Updated:** 2026-01-23

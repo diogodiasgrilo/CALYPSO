@@ -25,7 +25,7 @@ Safety Features:
 - Position metadata persistence for crash recovery
 - Multiple iron fly detection and auto-selection
 
-Edge Cases: 52 analyzed, 100% LOW risk (see docs/IRON_FLY_EDGE_CASES.md)
+Edge Cases: 63 analyzed, 59 LOW / 3 MEDIUM / 1 HIGH by design (see docs/IRON_FLY_EDGE_CASES.md)
 Last Updated: 2026-01-23
 """
 
