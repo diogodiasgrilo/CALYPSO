@@ -1897,6 +1897,8 @@ class SaxoClient:
             price = self._extract_price_from_data(data, "VIX API")
             if price:
                 return price
+            # Log the actual data for debugging
+            logger.debug(f"VIX REST response had no extractable price. Keys: {list(data.keys())}, PriceInfoDetails: {data.get('PriceInfoDetails')}")
             sources_tried.append("REST(no valid price in response)")
         else:
             sources_tried.append(f"REST(empty response: {response})" if response else "REST(request failed)")
