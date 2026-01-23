@@ -1122,25 +1122,26 @@ class IronFlyStrategy:
 
         if self.dry_run:
             # In dry-run, just clear the position
+            # Convert cents to dollars for logging
             self.trade_logger.log_trade(
                 action="[SIMULATED] EMERGENCY_CLOSE",
                 strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
-                price=self.position.credit_received / 100,
+                price=self.position.credit_received / 100,  # Cents to dollars
                 delta=0.0,
-                pnl=pnl,
+                pnl=pnl / 100,  # Cents to dollars
                 saxo_client=self.client,
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type="Iron Fly",
                 expiry_date=self.position.expiry,
                 dte=0,
-                premium_received=self.position.credit_received,
+                premium_received=self.position.credit_received / 100,  # Cents to dollars
                 trade_reason=f"EMERGENCY: {reason}"
             )
             self.daily_pnl += pnl
             self.position = None
             self.state = IronFlyState.DAILY_COMPLETE
-            return f"[DRY RUN] Emergency close complete - P&L: ${pnl:.2f}"
+            return f"[DRY RUN] Emergency close complete - P&L: ${pnl / 100:.2f}"
 
         # =================================================================
         # LIVE EMERGENCY CLOSE - Use market orders for all legs
@@ -1218,20 +1219,20 @@ class IronFlyStrategy:
                 "result": "All legs closed successfully"
             })
 
-        # Log the trade
+        # Log the trade - convert cents to dollars for logging
         self.trade_logger.log_trade(
             action="EMERGENCY_CLOSE",
             strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
-            price=self.position.credit_received / 100,
+            price=self.position.credit_received / 100,  # Cents to dollars
             delta=0.0,
-            pnl=pnl,
+            pnl=pnl / 100,  # Cents to dollars
             saxo_client=self.client,
             underlying_price=self.current_price,
             vix=self.current_vix,
             option_type="Iron Fly",
             expiry_date=self.position.expiry,
             dte=0,
-            premium_received=self.position.credit_received,
+            premium_received=self.position.credit_received / 100,  # Cents to dollars
             trade_reason=f"EMERGENCY: {reason} - {close_success}/4 legs closed"
         )
 
@@ -2268,28 +2269,31 @@ class IronFlyStrategy:
 
         # EXIT CHECK 1.6: MAX-LOSS - Absolute loss circuit breaker
         # This protects against gaps through wings or illiquid stop fills
-        max_loss_threshold = -MAX_LOSS_PER_CONTRACT * self.position.quantity
-        if self.position.unrealized_pnl <= max_loss_threshold:
+        # Note: unrealized_pnl is in CENTS, convert to dollars for comparison
+        pnl_dollars = self.position.unrealized_pnl / 100
+        max_loss_threshold = -MAX_LOSS_PER_CONTRACT * self.position.quantity  # In dollars
+        if pnl_dollars <= max_loss_threshold:
             logger.critical(
-                f"MAX-LOSS CIRCUIT BREAKER: P&L ${self.position.unrealized_pnl:.2f} <= "
+                f"MAX-LOSS CIRCUIT BREAKER: P&L ${pnl_dollars:.2f} <= "
                 f"threshold ${max_loss_threshold:.2f} - EMERGENCY CLOSE"
             )
             self.trade_logger.log_safety_event({
                 "event_type": "IRON_FLY_MAX_LOSS_BREAKER",
                 "spy_price": self.current_price,
                 "vix": self.current_vix,
-                "unrealized_pnl": self.position.unrealized_pnl,
+                "unrealized_pnl": pnl_dollars,
                 "max_loss_threshold": max_loss_threshold,
-                "description": f"Max loss circuit breaker triggered: P&L=${self.position.unrealized_pnl:.2f}",
+                "description": f"Max loss circuit breaker triggered: P&L=${pnl_dollars:.2f}",
                 "result": "EMERGENCY CLOSE TRIGGERED"
             })
             return self._close_position("MAX_LOSS",
-                f"Max loss breaker: P&L ${self.position.unrealized_pnl:.2f} <= ${max_loss_threshold:.2f}")
+                f"Max loss breaker: P&L ${pnl_dollars:.2f} <= ${max_loss_threshold:.2f}")
 
-        # EXIT CHECK 2: Profit target
-        if self.position.unrealized_pnl >= self.profit_target * self.position.quantity:
+        # EXIT CHECK 2: Profit target (profit_target is in dollars)
+        profit_target_total = self.profit_target * self.position.quantity  # In dollars
+        if pnl_dollars >= profit_target_total:
             return self._close_position("PROFIT_TARGET",
-                f"Profit target reached: ${self.position.unrealized_pnl:.2f} >= ${self.profit_target * self.position.quantity:.2f}")
+                f"Profit target reached: ${pnl_dollars:.2f} >= ${profit_target_total:.2f}")
 
         # EXIT CHECK 3: Time exit
         if self.position.hold_time_minutes >= self.max_hold_minutes:
@@ -2300,7 +2304,7 @@ class IronFlyStrategy:
         self.state = IronFlyState.MONITORING_EXIT
         distance, wing = self.position.distance_to_wing(self.current_price)
 
-        return (f"Monitoring - P&L: ${self.position.unrealized_pnl:.2f}, "
+        return (f"Monitoring - P&L: ${pnl_dollars:.2f}, "
                 f"Distance to {wing} wing: {distance:.2f} pts, "
                 f"Hold time: {self.position.hold_time_minutes} min")
 
@@ -2498,10 +2502,11 @@ class IronFlyStrategy:
             self.daily_premium_collected += simulated_credit  # Track premium for logging
 
             # Log the simulated trade to Google Sheets
+            # Note: simulated_credit is in cents (multiplied by 100 for contract multiplier)
             self.trade_logger.log_trade(
                 action="[SIMULATED] OPEN_IRON_FLY",
                 strike=f"{lower_wing}/{atm_strike}/{upper_wing}",
-                price=simulated_credit / 100,  # Per-contract credit
+                price=simulated_credit / 100,  # Cents to dollars (per-contract credit)
                 delta=0.0,  # Iron Fly is delta neutral at entry
                 pnl=0.0,  # No P&L at entry
                 saxo_client=self.client,  # For currency conversion
@@ -2510,13 +2515,13 @@ class IronFlyStrategy:
                 option_type="Iron Fly",
                 expiry_date=entry_time_eastern.strftime("%Y-%m-%d"),
                 dte=0,  # 0DTE
-                premium_received=simulated_credit,
+                premium_received=simulated_credit / 100,  # Cents to dollars
                 trade_reason="All filters passed"
             )
 
-            logger.info(f"[DRY RUN] Iron Fly position created: Credit=${simulated_credit:.2f}, "
+            logger.info(f"[DRY RUN] Iron Fly position created: Credit=${simulated_credit / 100:.2f}, "
                        f"Wings={lower_wing}/{atm_strike}/{upper_wing}")
-            return f"[DRY RUN] Entered Iron Fly at {atm_strike} with ${simulated_credit:.2f} credit"
+            return f"[DRY RUN] Entered Iron Fly at {atm_strike} with ${simulated_credit / 100:.2f} credit"
 
         # =================================================================
         # LIVE ORDER PLACEMENT
@@ -2612,17 +2617,17 @@ class IronFlyStrategy:
         logger.info(
             f"Iron Fly pricing: SC Bid={sc_bid:.2f}, SP Bid={sp_bid:.2f}, "
             f"LC Ask={lc_ask:.2f}, LP Ask={lp_ask:.2f}, "
-            f"Net Credit=${total_credit:.2f}"
+            f"Net Credit=${total_credit / 100:.2f}"
         )
 
         if total_credit <= 0:
-            error_msg = f"Iron fly would result in debit (${total_credit:.2f}) - ENTRY ABORTED"
+            error_msg = f"Iron fly would result in debit (${total_credit / 100:.2f}) - ENTRY ABORTED"
             logger.error(error_msg)
             self.trade_logger.log_safety_event({
                 "event_type": "IRON_FLY_DEBIT_SPREAD",
                 "spy_price": self.current_price,
                 "vix": self.current_vix,
-                "description": f"Iron fly would cost ${abs(total_credit):.2f} instead of receiving credit",
+                "description": f"Iron fly would cost ${abs(total_credit / 100):.2f} instead of receiving credit",
                 "result": "Entry blocked - no position opened"
             })
             self.state = IronFlyState.DAILY_COMPLETE
@@ -2860,20 +2865,22 @@ class IronFlyStrategy:
         self._save_position_metadata()
 
         # Step 5: Subscribe to option price updates for position monitoring
+        # LIVE-001: Use StockIndexOption for SPX/SPXW index options (not StockOption)
         try:
-            self.client.subscribe_to_option(short_call_uic, self.handle_price_update)
-            self.client.subscribe_to_option(short_put_uic, self.handle_price_update)
-            self.client.subscribe_to_option(long_call_uic, self.handle_price_update)
-            self.client.subscribe_to_option(long_put_uic, self.handle_price_update)
-            logger.info("Subscribed to option price streams for position monitoring")
+            self.client.subscribe_to_option(short_call_uic, self.handle_price_update, asset_type="StockIndexOption")
+            self.client.subscribe_to_option(short_put_uic, self.handle_price_update, asset_type="StockIndexOption")
+            self.client.subscribe_to_option(long_call_uic, self.handle_price_update, asset_type="StockIndexOption")
+            self.client.subscribe_to_option(long_put_uic, self.handle_price_update, asset_type="StockIndexOption")
+            logger.info("Subscribed to option price streams for position monitoring (StockIndexOption)")
         except Exception as e:
             logger.warning(f"Failed to subscribe to option streams (will use polling): {e}")
 
         # Log the trade to Google Sheets
+        # Note: credit_per_contract is in dollars, total_credit is in cents
         self.trade_logger.log_trade(
             action="OPEN_IRON_FLY",
             strike=f"{lower_wing}/{atm_strike}/{upper_wing}",
-            price=credit_per_contract,
+            price=credit_per_contract,  # Already in dollars (per-contract credit)
             delta=0.0,  # Iron Fly is delta neutral at entry
             pnl=0.0,
             saxo_client=self.client,
@@ -2882,16 +2889,16 @@ class IronFlyStrategy:
             option_type="Iron Fly",
             expiry_date=self.position.expiry,
             dte=0,
-            premium_received=total_credit,
+            premium_received=total_credit / 100,  # Cents to dollars
             trade_reason="All filters passed"
         )
 
         logger.info(
             f"IRON FLY OPENED: ATM={atm_strike}, Wings={lower_wing}/{upper_wing}, "
-            f"Credit=${total_credit:.2f}, Orders={order_ids}"
+            f"Credit=${total_credit / 100:.2f}, Orders={order_ids}"
         )
 
-        return f"Entered Iron Fly at {atm_strike} with ${total_credit:.2f} credit"
+        return f"Entered Iron Fly at {atm_strike} with ${total_credit / 100:.2f} credit"
 
     def _close_position(self, reason: str, description: str) -> str:
         """
@@ -2907,12 +2914,12 @@ class IronFlyStrategy:
         if not self.position:
             return "No position to close"
 
-        pnl = self.position.unrealized_pnl
+        pnl = self.position.unrealized_pnl  # In cents
         hold_time = self.position.hold_time_minutes
 
         self.trade_logger.log_event(
             f"CLOSING IRON FLY: {reason} - {description} | "
-            f"P&L: ${pnl:.2f}, Hold time: {hold_time} min"
+            f"P&L: ${pnl / 100:.2f}, Hold time: {hold_time} min"  # Convert cents to dollars
         )
 
         # Update daily tracking
@@ -2920,25 +2927,26 @@ class IronFlyStrategy:
 
         if self.dry_run:
             # Log the simulated close to Google Sheets
+            # Convert cents to dollars for logging
             self.trade_logger.log_trade(
                 action=f"[SIMULATED] CLOSE_IRON_FLY_{reason}",
                 strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
-                price=self.position.credit_received / 100,  # Original credit per contract
+                price=self.position.credit_received / 100,  # Original credit per contract (dollars)
                 delta=0.0,
-                pnl=pnl,
+                pnl=pnl / 100,  # Convert cents to dollars
                 saxo_client=self.client,  # For currency conversion
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type="Iron Fly",
                 expiry_date=self.position.expiry,
                 dte=0,
-                premium_received=self.position.credit_received,
+                premium_received=self.position.credit_received / 100,  # Convert cents to dollars
                 trade_reason=description
             )
 
             self.position = None
             self.state = IronFlyState.DAILY_COMPLETE
-            return f"[DRY RUN] Closed position - {reason}: ${pnl:.2f} P&L in {hold_time} min"
+            return f"[DRY RUN] Closed position - {reason}: ${pnl / 100:.2f} P&L in {hold_time} min"
 
         # =================================================================
         # LIVE ORDER CLOSING
@@ -3105,25 +3113,26 @@ class IronFlyStrategy:
             "long_put": False
         }
 
-        # Log the close trade to Google Sheets
+        # Log the close trade to Google Sheets (convert cents to dollars)
+        pnl_dollars = pnl / 100
         self.trade_logger.log_trade(
             action=f"CLOSE_IRON_FLY_{reason}",
             strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
-            price=self.position.credit_received / 100,
+            price=self.position.credit_received / 100,  # Convert cents to dollars
             delta=0.0,
-            pnl=pnl,
+            pnl=pnl_dollars,  # Convert cents to dollars
             saxo_client=self.client,
             underlying_price=self.current_price,
             vix=self.current_vix,
             option_type="Iron Fly",
             expiry_date=self.position.expiry,
             dte=0,
-            premium_received=self.position.credit_received,
+            premium_received=self.position.credit_received / 100,  # Convert cents to dollars
             trade_reason=description
         )
 
         logger.info(
-            f"IRON FLY CLOSE INITIATED: {reason} - P&L=${pnl:.2f}, "
+            f"IRON FLY CLOSE INITIATED: {reason} - P&L=${pnl_dollars:.2f}, "
             f"Hold time={hold_time} min, Close orders={close_order_ids}"
         )
 
@@ -3131,7 +3140,7 @@ class IronFlyStrategy:
         self.state = IronFlyState.CLOSING
         self.closing_started_at = get_eastern_timestamp()
 
-        return f"Closing position ({reason}): P&L=${pnl:.2f}, {len(close_orders)}/4 orders placed"
+        return f"Closing position ({reason}): P&L=${pnl_dollars:.2f}, {len(close_orders)}/4 orders placed"
 
     def _close_position_with_retries(self, reason: str, description: str, pnl: float, hold_time: float) -> str:
         """
@@ -3266,20 +3275,20 @@ class IronFlyStrategy:
             "long_put": False
         }
 
-        # Log the close trade
+        # Log the close trade - convert cents to dollars for logging
         self.trade_logger.log_trade(
             action=f"CLOSE_IRON_FLY_{reason}",
             strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
-            price=self.position.credit_received / 100,
+            price=self.position.credit_received / 100,  # Cents to dollars
             delta=0.0,
-            pnl=pnl,
+            pnl=pnl / 100,  # Cents to dollars
             saxo_client=self.client,
             underlying_price=self.current_price,
             vix=self.current_vix,
             option_type="Iron Fly",
             expiry_date=self.position.expiry,
             dte=0,
-            premium_received=self.position.credit_received,
+            premium_received=self.position.credit_received / 100,  # Cents to dollars
             trade_reason=f"STOP-002: {description} (retries used)"
         )
 
@@ -3288,7 +3297,7 @@ class IronFlyStrategy:
 
         if failed_legs:
             return f"STOP-002 PARTIAL: {len(close_orders)}/4 closed, {len(failed_legs)} FAILED - CRITICAL INTERVENTION SET"
-        return f"STOP-002: Stop loss executed ({reason}): P&L=${pnl:.2f}, all legs closed with retries"
+        return f"STOP-002: Stop loss executed ({reason}): P&L=${pnl / 100:.2f}, all legs closed with retries"
 
     def _check_and_log_extreme_spread(self, uic: int, leg_name: str, asset_type: str) -> None:
         """
@@ -3459,7 +3468,7 @@ class IronFlyStrategy:
             logger.debug(
                 f"[DRY RUN] P&L Simulation: Hold={hold_minutes}m, DistRatio={distance_ratio:.2f}, "
                 f"Theta={effective_theta_decay:.3f}, PriceImpact={price_impact:.3f}, "
-                f"CostToClose=${new_cost_to_close:.2f}, P&L=${self.position.unrealized_pnl:.2f}"
+                f"CostToClose=${new_cost_to_close / 100:.2f}, P&L=${self.position.unrealized_pnl / 100:.2f}"
             )
             return
 
@@ -3514,7 +3523,7 @@ class IronFlyStrategy:
                     f"Option prices updated ({prices_updated}/4): "
                     f"SC={self.position.short_call_price:.2f}, SP={self.position.short_put_price:.2f}, "
                     f"LC={self.position.long_call_price:.2f}, LP={self.position.long_put_price:.2f}, "
-                    f"P&L=${self.position.unrealized_pnl:.2f}"
+                    f"P&L=${self.position.unrealized_pnl / 100:.2f}"
                 )
 
         except Exception as e:
@@ -3989,7 +3998,12 @@ class IronFlyStrategy:
     # =========================================================================
 
     def get_status_summary(self) -> Dict[str, Any]:
-        """Get current strategy status for logging/display."""
+        """
+        Get current strategy status for logging/display.
+
+        Note: All monetary values are returned in DOLLARS (converted from internal cents storage).
+        This makes the API consistent for all consumers.
+        """
         summary = {
             "state": self.state.value,
             "underlying_price": self.current_price,
@@ -4000,7 +4014,7 @@ class IronFlyStrategy:
             "opening_range_complete": self.opening_range.is_complete,
             "vix_spike_percent": self.opening_range.vix_spike_percent,
             "trades_today": self.trades_today,
-            "daily_pnl": self.daily_pnl,
+            "daily_pnl": self.daily_pnl / 100,  # Convert cents to dollars
         }
 
         if self.position:
@@ -4010,8 +4024,8 @@ class IronFlyStrategy:
                 "atm_strike": self.position.atm_strike,
                 "upper_wing": self.position.upper_wing,
                 "lower_wing": self.position.lower_wing,
-                "credit_received": self.position.credit_received,
-                "unrealized_pnl": self.position.unrealized_pnl,
+                "credit_received": self.position.credit_received / 100,  # Convert cents to dollars
+                "unrealized_pnl": self.position.unrealized_pnl / 100,  # Convert cents to dollars
                 "hold_time_minutes": self.position.hold_time_minutes,
                 "distance_to_wing": distance,
                 "nearest_wing": wing,
@@ -4124,24 +4138,25 @@ class IronFlyStrategy:
             win_rate = (self.cumulative_metrics.get("winning_trades", 0) / total_completed_trades) * 100
 
         # Iron Fly specific summary - matches the iron_fly Daily Summary columns
+        # All monetary values stored in CENTS internally, convert to DOLLARS for display
         summary = {
             "date": get_us_market_time().strftime("%Y-%m-%d"),
             "underlying_close": self.current_price,  # Generic name for SPX/SPY
             "vix": self.current_vix,
-            "premium_collected": self.daily_premium_collected,
+            "premium_collected": self.daily_premium_collected / 100,  # Convert cents to dollars
             "trades_today": self.trades_today,
             "win_rate": win_rate,
-            "daily_pnl": self.daily_pnl,
-            "daily_pnl_eur": daily_pnl_eur,
-            "cumulative_pnl": self.cumulative_metrics["cumulative_pnl"],
+            "daily_pnl": self.daily_pnl / 100,  # Convert cents to dollars
+            "daily_pnl_eur": daily_pnl_eur / 100,  # Convert cents to EUR
+            "cumulative_pnl": self.cumulative_metrics["cumulative_pnl"] / 100,  # Convert cents to dollars
             "total_trades": self.cumulative_metrics["total_trades"],
             "winning_trades": self.cumulative_metrics.get("winning_trades", 0),
             "notes": f"Iron Fly 0DTE - State: {self.state.value}"
         }
         self.trade_logger.log_daily_summary(summary)
         logger.info(
-            f"Daily summary logged: P&L=${self.daily_pnl:.2f}, Premium=${self.daily_premium_collected:.2f}, "
-            f"Trades={self.trades_today}, Cumulative P&L=${self.cumulative_metrics['cumulative_pnl']:.2f}"
+            f"Daily summary logged: P&L=${self.daily_pnl / 100:.2f}, Premium=${self.daily_premium_collected / 100:.2f}, "
+            f"Trades={self.trades_today}, Cumulative P&L=${self.cumulative_metrics['cumulative_pnl'] / 100:.2f}"
         )
 
     def log_position_to_sheets(self):
@@ -4161,8 +4176,8 @@ class IronFlyStrategy:
             "expiry": self.position.expiry,
             "dte": 0,
             "entry_credit": self.position.credit_received / 100,
-            "current_value": self.position.credit_received / 100,  # Simplified - would need real quotes
-            "pnl": self.position.unrealized_pnl,
+            "current_value": self.position.current_value / 100,  # Cost to close from real-time option prices
+            "pnl": self.position.unrealized_pnl / 100,  # Convert cents to dollars
             "hold_time": self.position.hold_time_minutes,
             "distance_to_wing": distance_to_wing,
             "status": "OPEN"
@@ -4190,16 +4205,17 @@ class IronFlyStrategy:
         # Calculate average hold time from cumulative data (if we start tracking)
         avg_hold_time = hold_minutes  # Simplified for now
 
+        # All monetary values are stored in CENTS internally, convert to DOLLARS for display
         metrics = {
-            "total_pnl": self.daily_pnl,
-            "realized_pnl": self.daily_pnl,
-            "unrealized_pnl": self.position.unrealized_pnl if self.position else 0,
+            "total_pnl": self.daily_pnl / 100,
+            "realized_pnl": self.daily_pnl / 100,
+            "unrealized_pnl": (self.position.unrealized_pnl / 100) if self.position else 0,
             # Premium tracking (key KPI for iron fly)
-            "premium_collected": self.daily_premium_collected,
-            "cumulative_premium": self.cumulative_metrics.get("total_premium_collected", 0),
+            "premium_collected": self.daily_premium_collected / 100,
+            "cumulative_premium": self.cumulative_metrics.get("total_premium_collected", 0) / 100,
             # Stats
             "win_rate": win_rate,
-            "max_drawdown": abs(min(0, self.daily_pnl)),
+            "max_drawdown": abs(min(0, self.daily_pnl / 100)),
             "max_drawdown_pct": 0,
             # Counts
             "trade_count": self.trades_today,
@@ -4207,8 +4223,8 @@ class IronFlyStrategy:
             "losing_trades": losing_trades,
             # Time tracking
             "avg_hold_time": avg_hold_time,
-            "best_trade": self.cumulative_metrics.get("best_trade", 0),
-            "worst_trade": self.cumulative_metrics.get("worst_trade", 0)
+            "best_trade": self.cumulative_metrics.get("best_trade", 0) / 100,
+            "worst_trade": self.cumulative_metrics.get("worst_trade", 0) / 100
         }
         self.trade_logger.log_performance_metrics(
             period="Daily",
@@ -4232,10 +4248,10 @@ class IronFlyStrategy:
             # Market Data
             "underlying_price": self.current_price,
             "vix": self.current_vix,
-            # Position Values
+            # Position Values (all in DOLLARS, divide cents by 100)
             "credit_received": self.position.credit_received / 100 if self.position else 0,
-            "current_value": self.position.credit_received / 100 if self.position else 0,  # Simplified
-            "unrealized_pnl": self.position.unrealized_pnl if self.position else 0,
+            "current_value": self.position.current_value / 100 if self.position else 0,  # Real-time cost to close
+            "unrealized_pnl": self.position.unrealized_pnl / 100 if self.position else 0,  # P&L in dollars
             # Strikes
             "atm_strike": self.position.atm_strike if self.position else 0,
             "lower_wing": self.position.lower_wing if self.position else 0,
@@ -4266,7 +4282,7 @@ class IronFlyStrategy:
         if self.position is not None:
             logger.critical(
                 f"ORPHANED POSITION WARNING: Local position still exists during daily reset! "
-                f"ATM={self.position.atm_strike}, P&L=${self.position.unrealized_pnl:.2f}"
+                f"ATM={self.position.atm_strike}, P&L=${self.position.unrealized_pnl / 100:.2f}"
             )
             self.trade_logger.log_safety_event({
                 "event_type": "IRON_FLY_ORPHAN_ON_RESET",

@@ -343,7 +343,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     # Build heartbeat message with position-specific details when active
                     if status.get('position_active'):
                         # Show detailed position info: premium, hold time, distance to wing, P&L
-                        credit = status.get('credit_received', 0) / 100  # Convert cents to dollars
+                        # Note: get_status_summary() returns all monetary values in DOLLARS
+                        credit = status.get('credit_received', 0)
                         unrealized = status.get('unrealized_pnl', 0)
                         hold_mins = status.get('hold_time_minutes', 0)
                         distance = status.get('distance_to_wing', 0)

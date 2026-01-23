@@ -3110,7 +3110,12 @@ class SaxoClient:
 
         logger.info("Price streaming stopped")
 
-    def subscribe_to_option(self, uic: int, callback: Callable[[int, Dict], None] = None) -> bool:
+    def subscribe_to_option(
+        self,
+        uic: int,
+        callback: Callable[[int, Dict], None] = None,
+        asset_type: str = "StockOption"
+    ) -> bool:
         """
         Subscribe to real-time price streaming for a specific option.
 
@@ -3120,6 +3125,7 @@ class SaxoClient:
         Args:
             uic: The option's Unique Instrument Code
             callback: Optional callback for price updates
+            asset_type: Asset type - "StockOption" for SPY, "StockIndexOption" for SPX/SPXW
 
         Returns:
             bool: True if subscription successful and we have valid quote data
@@ -3140,13 +3146,14 @@ class SaxoClient:
                     return True
 
         # Create subscription for this option
+        # LIVE-001: Use correct asset type (StockIndexOption for SPX/SPXW, StockOption for SPY)
         subscription_request = {
             "ContextId": self.subscription_context_id,
             "ReferenceId": f"opt_{uic}",
             "Arguments": {
                 "AccountKey": self.account_key,
                 "Uic": int(uic),
-                "AssetType": "StockOption",
+                "AssetType": asset_type,
                 "FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo"]
             }
         }
