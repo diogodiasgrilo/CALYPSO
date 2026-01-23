@@ -183,10 +183,12 @@ git commit -m "your message"
 git push
 ```
 
-2. **Pull on VM (must use calypso user):**
+2. **Pull on VM and clear Python cache (must use calypso user):**
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
 ```
+
+> **Why clear cache?** Python caches compiled bytecode in `__pycache__` directories. Stale cache can cause bots to run old code even after `git pull`. This was discovered when VIX data fetching appeared broken but was actually using cached old code.
 
 3. **Restart bots to apply changes:**
 ```bash
