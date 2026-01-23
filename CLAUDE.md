@@ -78,6 +78,29 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 | Stop loss (wing touch) | -$250 to -$350 | Typical stop-out |
 | Max loss (circuit breaker) | -$400 | Safety cap |
 
+### Delta Neutral Bot Details
+- **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
+- **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
+- **Long Entry:** 120 DTE target (configurable)
+- **Long Exit:** 60 DTE threshold - close everything when longs reach this point
+- **Shorts Roll:** Weekly (Thursday/Friday) to next week's expiry for continued premium collection
+- **Recenter:** When SPY moves ±$5 from initial strike, rebalance long straddle strikes
+
+#### Delta Neutral Key Logic (2026-01-23)
+
+**Proactive Restart Check:**
+Instead of waiting for longs to hit 60 DTE and then closing (which wastes recently opened shorts), the bot checks BEFORE opening/rolling shorts:
+- Calculate: `days_until_longs_hit_60_DTE = long_dte - 60`
+- Get: expected DTE for new shorts (5-12 days typically)
+- If `new_shorts_dte > days_until_longs_hit_60_DTE`:
+  - Close everything NOW (don't wait for 60 DTE trigger)
+  - Start fresh with new 120 DTE longs + new shorts
+  - This avoids scenarios where shorts are opened with 7+ DTE but longs only have 5 days until hitting exit threshold
+
+**Why this matters:**
+- Without this: Bot opens shorts on Thursday, longs hit 60 DTE on Monday → exit everything → wasted 4 days of theta on shorts
+- With this: Bot detects the conflict BEFORE opening shorts → closes everything → starts fresh → maximizes theta collection
+
 ### Bot Isolation
 Iron Fly (SPX/SPXW) and Delta Neutral (SPY) are mostly independent:
 - Different underlying instruments (UIC 4913/128 vs SPY UICs)

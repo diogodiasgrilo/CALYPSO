@@ -284,8 +284,7 @@ class DeltaNeutralStrategy:
         self.max_vix = self.strategy_config["max_vix_entry"]
         self.vix_defensive_threshold = self.strategy_config.get("vix_defensive_threshold", 25.0)
         self.target_dte = self.strategy_config.get("long_straddle_target_dte", 120)
-        self.exit_dte_min = self.strategy_config["exit_dte_min"]
-        self.exit_dte_max = self.strategy_config["exit_dte_max"]
+        self.exit_dte_threshold = self.strategy_config.get("exit_dte_max", 60)  # Exit when longs reach this DTE
         self.strangle_multiplier_min = self.strategy_config["weekly_strangle_multiplier_min"]
         self.strangle_multiplier_max = self.strategy_config["weekly_strangle_multiplier_max"]
         self.weekly_target_return_pct = self.strategy_config.get("weekly_target_return_percent", None)
@@ -5720,6 +5719,44 @@ class DeltaNeutralStrategy:
 
         logger.info("Attempting to enter short strangle...")
 
+        # =====================================================================
+        # PROACTIVE LONGS EXPIRY CHECK (2026-01-23)
+        # =====================================================================
+        # Instead of waiting for longs to hit 60 DTE and closing (which wastes
+        # recently opened shorts), check BEFORE opening new shorts whether they
+        # would expire after longs hit the 60 DTE threshold.
+        #
+        # If so: close everything NOW and signal caller to restart with fresh positions.
+        # This avoids the scenario where shorts are opened with 7+ DTE but longs
+        # only have 5 days until hitting the 60 DTE exit trigger.
+        # =====================================================================
+        if not quote_only and self._should_close_and_restart_before_shorts(for_roll=for_roll):
+            logger.info("Proactive restart: closing all positions before opening shorts...")
+
+            # Log the proactive restart event
+            if self.trade_logger:
+                long_dte = self._get_long_straddle_dte()
+                new_shorts_dte = self._get_new_shorts_dte(for_roll=for_roll)
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "PROACTIVE_RESTART",
+                    "severity": "INFO",
+                    "spy_price": self.current_underlying_price,
+                    "initial_strike": self.initial_straddle_strike,
+                    "vix": self.current_vix,
+                    "action_taken": "Close all and restart - shorts would outlive longs at 60 DTE",
+                    "description": f"Long DTE: {long_dte}, New shorts DTE: {new_shorts_dte}, Exit threshold: 60",
+                    "result": "RESTARTING"
+                })
+
+            # Close everything - this will set state to IDLE
+            self.exit_all_positions()
+
+            # Signal that we need to start fresh (caller should re-enter full position)
+            # Return False so caller knows shorts weren't entered, but the state
+            # will be IDLE which signals need for fresh entry
+            return False
+
         # CRITICAL: VIX Defensive Mode Check
         # Per strategy spec: "If the VIX spikes to 25 while a trade is open, the bot
         # should be in Defensive Mode (stop selling new shorts)"
@@ -8070,17 +8107,14 @@ class DeltaNeutralStrategy:
             return False
 
         # Calculate DTE for long straddle
-        expiry_str = self.long_straddle.call.expiry
-        if not expiry_str:
+        dte = self._get_long_straddle_dte()
+        if dte is None:
             return False
 
-        expiry_date = datetime.strptime(expiry_str[:10], "%Y-%m-%d").date()
-        dte = (expiry_date - datetime.now().date()).days
-
-        # Exit when DTE drops below 60 days
-        if dte < 60:
+        # Exit when DTE drops below threshold (default 60 days)
+        if dte < self.exit_dte_threshold:
             logger.info(
-                f"EXIT CONDITION MET: {dte} DTE on long straddle (threshold: < 60 DTE)"
+                f"EXIT CONDITION MET: {dte} DTE on long straddle (threshold: < {self.exit_dte_threshold} DTE)"
             )
             return True
 
@@ -8198,6 +8232,105 @@ class DeltaNeutralStrategy:
             return (expiry_date - datetime.now().date()).days
         except (ValueError, TypeError):
             return None
+
+    def _get_long_straddle_dte(self) -> Optional[int]:
+        """
+        Get the current DTE of the long straddle position.
+
+        Returns:
+            int: Days to expiration, or None if no long straddle exists
+        """
+        if not self.long_straddle or not self.long_straddle.call:
+            return None
+        return self._calculate_dte(self.long_straddle.call.expiry)
+
+    def _get_new_shorts_dte(self, for_roll: bool = False) -> Optional[int]:
+        """
+        Get the DTE that new shorts would have if opened now.
+
+        This looks up the next available weekly expiration without actually
+        placing any orders.
+
+        Args:
+            for_roll: If True, look for next week (5-12 DTE).
+                     If False, look for current week (0-7 DTE).
+
+        Returns:
+            int: Expected DTE for new shorts, or None if lookup fails
+        """
+        expirations = self.client.get_option_expirations(self.underlying_uic)
+        if not expirations:
+            return None
+
+        today = datetime.now().date()
+        dte_min = 5 if for_roll else 0
+        dte_max = 12 if for_roll else 7
+
+        for exp_data in expirations:
+            exp_date_str = exp_data.get("Expiry")
+            if exp_date_str:
+                try:
+                    exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+                    if dte_min < dte <= dte_max:
+                        return dte
+                except (ValueError, TypeError):
+                    continue
+
+        # Fallback: return max of range if no exact match found
+        return dte_max
+
+    def _should_close_and_restart_before_shorts(self, for_roll: bool = False) -> bool:
+        """
+        Check if we should close everything and restart before opening new shorts.
+
+        This implements proactive exit logic: instead of waiting for longs to hit
+        60 DTE and then closing (which wastes recently opened shorts), we check
+        BEFORE opening/rolling shorts whether they would expire after longs hit
+        the 60 DTE threshold.
+
+        Logic:
+        - Calculate days until longs hit 60 DTE
+        - Get expected DTE for new shorts
+        - If shorts_dte > days_until_longs_hit_60 → close everything now
+
+        Args:
+            for_roll: If True, this is for rolling shorts (next week expiry).
+
+        Returns:
+            bool: True if should close and restart, False if safe to proceed
+        """
+        long_dte = self._get_long_straddle_dte()
+        if long_dte is None:
+            # No long straddle - nothing to worry about
+            return False
+
+        # How many days until longs hit the exit threshold (default 60 DTE)
+        days_until_exit = long_dte - self.exit_dte_threshold
+
+        if days_until_exit <= 0:
+            # Already at or past exit threshold - should_exit_trade() will handle this
+            return False
+
+        # Get expected DTE for new shorts
+        new_shorts_dte = self._get_new_shorts_dte(for_roll=for_roll)
+        if new_shorts_dte is None:
+            # Can't determine - don't block the trade
+            return False
+
+        # The critical check: would new shorts outlive our longs hitting the exit threshold?
+        if new_shorts_dte > days_until_exit:
+            logger.warning("=" * 70)
+            logger.warning("🔄 PROACTIVE RESTART TRIGGERED")
+            logger.warning(f"   Long straddle DTE: {long_dte} days")
+            logger.warning(f"   Days until {self.exit_dte_threshold} DTE exit: {days_until_exit} days")
+            logger.warning(f"   New shorts would have: {new_shorts_dte} DTE")
+            logger.warning(f"   → Shorts would expire AFTER longs hit {self.exit_dte_threshold} DTE threshold!")
+            logger.warning("   → Closing everything now to avoid wasted theta on shorts")
+            logger.warning("=" * 70)
+            return True
+
+        return False
 
     def get_current_positions_for_sync(self) -> List[Dict[str, Any]]:
         """
