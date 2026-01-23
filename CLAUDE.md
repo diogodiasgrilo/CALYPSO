@@ -160,6 +160,20 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u i
 
 ## Deployment Workflow
 
+### Pre-Commit Checklist
+
+**IMPORTANT:** Before every commit, ensure documentation is updated for any code changes:
+
+1. **Update `__init__.py` files** - If you added, removed, or changed exports in a module
+2. **Update docstrings/comments** - For any functions or classes you modified
+3. **Update relevant `.md` files:**
+   - `README.md` - If features, safety measures, or project structure changed
+   - `CLAUDE.md` - If VM commands, bot details, or workflows changed
+   - `docs/IRON_FLY_EDGE_CASES.md` - If edge case handling changed
+   - `docs/IRON_FLY_CODE_AUDIT.md` - If significant code changes were made
+   - `bots/*/README.md` - If bot-specific behavior changed
+4. **Update "Last Updated" dates** - In any `.md` files you modified
+
 ### Push Local Changes to VM
 
 1. **Commit and push locally:**
