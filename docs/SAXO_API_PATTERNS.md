@@ -439,6 +439,81 @@ def detect_multiple_iron_flies(self, positions):
 
 ---
 
+## 9. Chart API for Historical OHLC Data
+
+### The Problem (Fixed 2026-01-21)
+The Rolling Put Diagonal bot uses the Chart API to fetch daily OHLC data for calculating technical indicators (EMA, MACD, CCI). On Jan 20-21, 2026, the Chart API returned **404 errors** for QQQ (UIC 4328771), causing EMA to become $0.00 and blocking all entries.
+
+**Root Cause:** The code was using the deprecated `/chart/v1/charts` endpoint instead of `/chart/v3/charts`. This was fixed in commit `d4fa997` on Jan 21, 2026.
+
+### Chart API Endpoint
+```
+GET /chart/v3/charts?Uic={uic}&AssetType={asset_type}&Horizon={horizon}&Count={count}&FieldGroups=ChartInfo,Data
+```
+
+**Parameters:**
+| Parameter | Description | Example Values |
+|-----------|-------------|----------------|
+| Uic | Instrument ID | 4328771 (QQQ), 36590 (SPY) |
+| AssetType | Instrument type | `Etf`, `Stock`, `CfdOnIndex` |
+| Horizon | Bar size in minutes | 1440 (daily), 60 (hourly), 5 (5-min) |
+| Count | Number of bars | 50 (default), max 1200 |
+
+### Key Findings
+
+**1. Chart API v1 is DEPRECATED (use v3):**
+- Jan 20-21: Returned 404 because code used `/chart/v1/charts`
+- Jan 21 15:25: Fixed to use `/chart/v3/charts` (commit d4fa997)
+- Jan 22: Worked correctly with v3 endpoint
+- **Lesson:** Always use `/chart/v3/charts`, not v1
+
+**2. Quote API works when Chart API fails:**
+- Quote endpoint (`/trade/v1/infoprices/list`) returned valid QQQ prices ($611.89)
+- Only the Chart endpoint (`/chart/v3/charts`) failed
+
+**3. Only Rolling Put Diagonal uses Chart API:**
+- Iron Fly: No chart data needed (no technical indicators)
+- Delta Neutral: No chart data needed (no technical indicators)
+- Rolling Put Diagonal: Requires EMA for entry filter
+
+### Deprecated Endpoint 404 Error Pattern
+
+```
+Error Log (Jan 20-21 - using /chart/v1/charts):
+API request failed: 404 - File or directory not found
+Failed to get chart data for UIC 4328771: 'max_consecutive_errors'
+Insufficient chart data for indicators
+QQQ: $611.89 | EMA9: $0.00  <-- Quote API works, Chart API fails
+
+Working Log (Jan 22 - using /chart/v3/charts):
+QQQ: $621.32 | EMA9: $619.28  <-- Both work with v3 endpoint
+```
+
+**The Fix (commit d4fa997):**
+```diff
+- endpoint = f"/chart/v1/charts"
++ endpoint = f"/chart/v3/charts"
+```
+
+### Extended AssetTypes Consideration
+
+Saxo introduced "Extended AssetTypes" which split `Stock` into:
+- `Stock` - Pure equities
+- `Etf` - Exchange-Traded Funds
+- `Etc` - Exchange-Traded Commodities
+- `Etn` - Exchange-Traded Notes
+
+**Impact:** Some older apps/endpoints may not support `AssetType=Etf`. Try `AssetType=Stock` as fallback.
+
+### Sources
+
+- [Saxo Chart v3 API Reference](https://developer.saxobank.com/openapi/referencedocs/chart/v3/charts)
+- [Extended AssetTypes Documentation](https://www.developer.saxo/openapi/learn/extended-assettypes)
+- [Historical Prices FAQ](https://openapi.help.saxo/hc/en-us/articles/4405260778653-How-can-I-get-historical-prices)
+- [Daily Closing Prices FAQ](https://openapi.help.saxo/hc/en-us/articles/4417053702801-How-can-I-get-historical-daily-closing-prices)
+
+---
+
 ## Quick Reference: File Locations
 
 | Pattern | File | Line(s) |
@@ -460,6 +535,7 @@ def detect_multiple_iron_flies(self, positions):
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Created:** 2026-01-23
+**Updated:** 2026-01-25 - Added Section 9: Chart API for Historical OHLC Data
 **Author:** Claude (learned from production bugs)

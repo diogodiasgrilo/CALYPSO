@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -442,6 +442,11 @@ class RollingPutDiagonalStrategy:
         # Order timeout
         self._order_timeout: int = self.management_config.get("order_timeout_seconds", 60)
 
+        # TIME-002: Market open delay
+        # Wait N minutes after market open before trading to allow quotes to stabilize
+        # At 9:30:00 exactly, option quotes are often Bid=0/Ask=0 or Greeks unavailable
+        self._market_open_delay_minutes: int = self.management_config.get("market_open_delay_minutes", 3)
+
         # Emergency slippage tolerance for urgent closures
         self._emergency_slippage_pct: float = 5.0
 
@@ -581,6 +586,51 @@ class RollingPutDiagonalStrategy:
         """Set cooldown for an action after failure."""
         self._action_cooldowns[action_type] = datetime.now()
         logger.info(f"Action '{action_type}' placed on {self._cooldown_seconds}s cooldown")
+
+    def _is_within_market_open_delay(self) -> bool:
+        """
+        TIME-002: Check if we're within the market open delay period.
+
+        At market open (9:30:00), option quotes are often invalid (Bid=0, Ask=0)
+        or Greeks are unavailable as market makers initialize. Wait N minutes
+        (configurable, default 3) before placing any orders.
+
+        This is critical because:
+        - CONN-006: Greeks aren't available at exactly 9:30 AM
+        - Option chains may return zero bid/ask spreads
+        - Long put selection by delta fails without valid Greeks
+
+        Returns:
+            bool: True if we should wait before trading
+        """
+        if self._market_open_delay_minutes <= 0:
+            return False
+
+        now_est = get_us_market_time()
+
+        # Market opens at 9:30 AM ET
+        market_open = dt_time(9, 30)
+        delay_end_minute = 30 + self._market_open_delay_minutes
+        # Handle minute overflow (e.g., 30+35=65 -> 10:05)
+        delay_end_hour = 9 + (delay_end_minute // 60)
+        delay_end_minute = delay_end_minute % 60
+        delay_end = dt_time(delay_end_hour, delay_end_minute)
+
+        current_time = now_est.time()
+
+        # Check if we're in the delay window (9:30 to 9:30+delay)
+        if market_open <= current_time < delay_end:
+            # Calculate minutes left
+            current_minutes = current_time.hour * 60 + current_time.minute
+            delay_end_minutes = delay_end_hour * 60 + delay_end_minute
+            minutes_left = delay_end_minutes - current_minutes
+            logger.info(
+                f"⏳ TIME-002: Within market open delay ({minutes_left} min remaining). "
+                f"Waiting for quotes/Greeks to stabilize..."
+            )
+            return True
+
+        return False
 
     def _track_orphaned_order(self, order_id: str) -> None:
         """Track an order that couldn't be cancelled."""
@@ -1429,6 +1479,7 @@ class RollingPutDiagonalStrategy:
         Check if all entry conditions are met.
 
         Entry requires:
+        0. Not within market open delay (TIME-002)
         1. Price > 9 EMA (bullish bias)
         2. MACD histogram rising (momentum)
         3. CCI < 100 (not overbought)
@@ -1438,6 +1489,10 @@ class RollingPutDiagonalStrategy:
         Returns:
             Tuple of (conditions_met, reason_if_not_met)
         """
+        # TIME-002: Check market open delay first (Greeks may be unavailable)
+        if self._is_within_market_open_delay():
+            return False, "Within market open delay - waiting for quotes to stabilize"
+
         if self.indicators is None:
             return False, "No indicator data available"
 
@@ -1869,9 +1924,9 @@ class RollingPutDiagonalStrategy:
                 self.trade_logger.log_trade(
                     action=f"ROLL_{roll_type.value.upper()}",
                     strike=f"{old_short.strike}->{new_short_data['strike']}",
-                    price=sell_result.get("fill_price", 0) - buy_result.get("fill_price", 0),
+                    price=sell_result.get("fill_price", 0) - close_result.get("fill_price", 0),
                     delta=-0.50,  # ATM put delta
-                    pnl=sell_result.get("fill_price", 0) - buy_result.get("fill_price", 0),
+                    pnl=sell_result.get("fill_price", 0) - close_result.get("fill_price", 0),
                     saxo_client=self.client,
                     underlying_price=self.current_price,
                     option_type=f"Short Put Roll ({roll_type.value})",
