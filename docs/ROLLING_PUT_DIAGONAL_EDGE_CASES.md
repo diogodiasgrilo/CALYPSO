@@ -12,9 +12,10 @@
 This document catalogs all identified edge cases and potential failure scenarios for the Rolling Put Diagonal trading bot. Each scenario is evaluated for current handling and risk level.
 
 **Total Scenarios Analyzed:** 60 (56 edge cases + 4 strategy alignment issues)
-**Well-Handled/Resolved:** 53 (88%)
-**Medium Risk:** 2 (3%)
-**High Risk:** 5 (8%)
+**Well-Handled/Resolved:** 56 (93%)
+**Medium Risk (Partial):** 3 (5%)
+**N/A:** 1 (2%)
+**High Risk:** 0 (0%)
 
 ---
 
@@ -68,22 +69,22 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | CONN-004 |
 | **Trigger** | OAuth token expires mid-operation |
-| **Current Handling** | `main.py:418-422` refreshes token if expiring within 1 hour during sleep. No handling during active trading. |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | Token refresh happens between iterations but not during order placement |
-| **Recommended Fix** | Add automatic retry with token refresh on 401 errors in `_place_protected_order()` |
+| **Current Handling** | Fixed - `saxo_client.py` auto-refreshes token on 401 error with automatic retry |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Already implemented in `saxo_client.py:886-895` with auto-retry on 401 |
+| **Fix Applied** | Pre-existing in shared saxo_client.py |
 
 ### 1.5 Rate Limiting from Saxo
 | | |
 |---|---|
 | **ID** | CONN-005 |
 | **Trigger** | Too many API requests, Saxo returns 429 |
-| **Current Handling** | No explicit 429 handling in strategy code |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Notes** | May be handled in `saxo_client.py` but not verified |
-| **Recommended Fix** | Add exponential backoff for rate limiting |
+| **Current Handling** | Fixed - `saxo_client.py` implements exponential backoff on 429 errors |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Already implemented in `saxo_client.py:864-883` with exponential backoff |
+| **Fix Applied** | Pre-existing in shared saxo_client.py |
 
 ### 1.6 Greeks API Returns No Data
 | | |
@@ -206,11 +207,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | POS-002 |
 | **Trigger** | User manually closes positions in SaxoTraderGO |
-| **Current Handling** | Orphaned position detection in `recover_positions()` at line 1249 |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | Detects orphans but only on restart, not during runtime |
-| **Recommended Fix** | Add periodic position reconciliation during trading hours |
+| **Current Handling** | Fixed - `_reconcile_positions_periodic()` runs every 5 minutes during trading |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Detects orphans and manual changes during runtime, not just on restart |
+| **Fix Applied** | Added `_reconcile_positions_periodic()` method (2026-01-25) |
 
 ### 3.3 Naked Short Put Detection
 | | |
@@ -364,11 +365,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | TIME-001 |
 | **Trigger** | Long-running operation + next iteration fires |
-| **Current Handling** | No explicit operation lock |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Notes** | Could attempt duplicate orders |
-| **Recommended Fix** | Add `_operation_in_progress` flag like Delta Neutral bot |
+| **Current Handling** | Fixed - `_acquire_operation_lock()`/`_release_operation_lock()` with try/finally pattern |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Operation lock prevents concurrent iterations from executing critical sections |
+| **Fix Applied** | Added operation lock mechanism in strategy.py (2026-01-25) |
 
 ### 5.2 Market Open Stale Quotes
 | | |
@@ -386,11 +387,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | TIME-003 |
 | **Trigger** | Early close day (day before holiday) |
-| **Current Handling** | No early close detection |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Notes** | Could try to roll when market is closed |
-| **Recommended Fix** | Add early close detection from `market_hours.py` |
+| **Current Handling** | Fixed - `is_early_close_day()` and `_is_past_early_close()` detect and handle early closes |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Uses `market_hours.py` to detect early close days (day before July 4, Thanksgiving Friday, Christmas Eve, NYE) |
+| **Fix Applied** | Added early close detection methods in strategy.py (2026-01-25) |
 
 ### 5.4 Short Expiring on Non-Trading Day
 | | |
@@ -407,10 +408,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | TIME-005 |
 | **Trigger** | Long put reaches 1-2 DTE threshold for campaign close |
-| **Current Handling** | Referenced in docstring but implementation not found in read portion |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | NEEDS VERIFICATION |
-| **Notes** | Need to verify `should_close_campaign()` implementation |
+| **Current Handling** | Fixed - `should_close_campaign()` checks long put DTE against `campaign_close_dte` threshold |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Config `management.campaign_close_dte: 2` triggers campaign close when long put reaches 2 DTE |
+| **Fix Applied** | Pre-existing in strategy.py - verified working |
 
 ---
 
@@ -431,21 +433,22 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | STATE-002 |
 | **Trigger** | State is POSITION_OPEN but diagonal is None |
-| **Current Handling** | No explicit consistency check |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Recommended Fix** | Add state/position consistency check at iteration start |
+| **Current Handling** | Fixed - `_verify_positions_with_saxo()` checks consistency before critical actions |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Verifies positions match Saxo state, auto-corrects mismatches |
+| **Fix Applied** | Added `_verify_positions_with_saxo()` method (2026-01-25) |
 
 ### 6.3 Circuit Breaker Resets
 | | |
 |---|---|
 | **ID** | STATE-003 |
 | **Trigger** | Circuit breaker is open, bot restarts |
-| **Current Handling** | Circuit breaker flag not persisted |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | Restart clears circuit breaker even if issue not resolved |
-| **Recommended Fix** | Persist circuit breaker state to file |
+| **Current Handling** | Fixed - `_save_circuit_breaker_state()`/`_load_circuit_breaker_state()` persist to file |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Circuit breaker state survives restarts via file persistence |
+| **Fix Applied** | Added circuit breaker persistence methods (2026-01-25) |
 
 ### 6.4 Orphaned Positions Block Forever
 | | |
@@ -499,10 +502,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | DATA-004 |
 | **Trigger** | Quote has Bid=0 or Ask=0 (common at market open) |
-| **Current Handling** | No explicit validation |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Recommended Fix** | Add quote validation before order placement |
+| **Current Handling** | Fixed - `_validate_quote()` checks bid/ask/spread before orders |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Rejects orders when bid or ask is 0, or spread exceeds threshold |
+| **Fix Applied** | Added `_validate_quote()` method (2026-01-25) |
 
 ### 7.5 Position ID Mismatch
 | | |
@@ -572,11 +576,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | LOG-001 |
 | **Trigger** | Same error repeated thousands of times |
-| **Current Handling** | Every iteration logs same chart API error |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Evidence** | Jan 20-21 logs have hundreds of identical "Failed to get chart data" errors |
-| **Recommended Fix** | Add error deduplication or rate limiting |
+| **Current Handling** | Fixed - `_log_deduplicated_error()` with 5-min cooldown between identical messages |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Same error message only logged once per 5 minutes |
+| **Fix Applied** | Added `_log_deduplicated_error()` method (2026-01-25) |
 
 ### 10.2 Google Sheets Logging Fails Silently
 | | |
@@ -616,12 +620,19 @@ This document catalogs all identified edge cases and potential failure scenarios
 | DATA-004 | No quote validation | ✅ RESOLVED | Fixed - _validate_quote() checks bid/ask/spread (2026-01-25) |
 | LOG-001 | Error log flooding | ✅ RESOLVED | Fixed - _log_deduplicated_error() with 5-min cooldown (2026-01-25) |
 
-### 11.2 All Medium Risk Issues
+### 11.2 Medium Risk Issues (Remaining)
+
+| ID | Issue | Status | Notes |
+|----|-------|--------|-------|
+| ORDER-006 | Rejection reason unclear | ⚠️ MEDIUM | Generic failure handling in `_place_protected_order()` |
+| STATE-004 | Orphaned positions block forever | ⚠️ MEDIUM | Requires manual intervention to resolve |
+| DRY-002 | Dry run state drift | ⚠️ MEDIUM | Simulated positions use placeholder entry prices |
+
+### 11.2b Previously Medium Risk (Now Resolved)
 
 | ID | Issue | Status |
 |----|-------|--------|
 | ORDER-005 | No spread validation before entry | ✅ RESOLVED |
-| ORDER-006 | Rejection reason unclear | Low |
 | POS-004 | Early assignment detection | ✅ RESOLVED |
 | POS-008 | Missing strike/expiry fields | ✅ RESOLVED |
 | MKT-001 | No pre-market gap check | ✅ RESOLVED |
@@ -629,24 +640,24 @@ This document catalogs all identified edge cases and potential failure scenarios
 | MKT-003 | No halt detection | ✅ RESOLVED |
 | DATA-002 | Greeks often missing | ✅ RESOLVED |
 | DRY-001 | No simulated P&L | ✅ RESOLVED |
-| DRY-002 | Dry run state drift | Low |
 | CFG-002 | No config value validation | ✅ RESOLVED |
 
 ### 11.3 Statistics by Category
 
-| Category | Total | ✅ Resolved | ⚠️ Medium | 🔴 High |
-|----------|-------|-------------|-----------|---------|
-| Connection/API | 6 | 5 | 1 | 0 |
+| Category | Total | ✅ Resolved | ⚠️ Medium | N/A |
+|----------|-------|-------------|-----------|-----|
+| Connection/API | 6 | 5 | 0 | 1 |
 | Order Execution | 8 | 7 | 1 | 0 |
 | Position State | 8 | 8 | 0 | 0 |
 | Market Conditions | 7 | 7 | 0 | 0 |
 | Timing/Race | 5 | 5 | 0 | 0 |
 | State Machine | 4 | 3 | 1 | 0 |
-| Data Integrity | 5 | 4 | 1 | 0 |
+| Data Integrity | 5 | 5 | 0 | 0 |
 | Dry Run Mode | 2 | 1 | 1 | 0 |
 | Configuration | 2 | 2 | 0 | 0 |
 | Logging | 2 | 2 | 0 | 0 |
-| **TOTAL** | **56** | **49** | **2** | **5** |
+| Strategy Alignment | 4 | 4 | 0 | 0 |
+| **TOTAL** | **60** | **56** | **3** | **1** |
 
 ---
 
@@ -715,12 +726,18 @@ This document catalogs all identified edge cases and potential failure scenarios
 17. ~~**DATA-004**: Add quote validation~~ **RESOLVED**
     - Fixed: Added `_validate_quote()` with bid/ask/spread checks (2026-01-25)
 
-### Priority 4: Nice-to-Have (Future Improvements)
+### Priority 4: Remaining Low-Priority Issues
 
-18. **DRY-001**: Implement proper simulated P&L tracking
-19. **MKT-001/MKT-002**: Pre-market gap and flash crash detection
-20. **CFG-002**: Config value range validation
-21. **ORDER-005**: Add spread validation before entry (partially done with MARKET order check)
+18. ~~**DRY-001**: Implement proper simulated P&L tracking~~ **RESOLVED**
+19. ~~**MKT-001/MKT-002**: Pre-market gap and flash crash detection~~ **RESOLVED**
+20. ~~**CFG-002**: Config value range validation~~ **RESOLVED**
+21. ~~**ORDER-005**: Add spread validation before entry~~ **RESOLVED**
+
+### Remaining Unresolved Issues (Low Priority)
+
+22. **ORDER-006**: Rejection reason unclear - generic failure handling could be improved
+23. **STATE-004**: Orphaned positions block forever - no automatic resolution
+24. **DRY-002**: Dry run state drift - simulated positions use placeholder entry prices
 
 ---
 
@@ -807,7 +824,8 @@ Based on research of Bill Belt's original strategy from [Theta Profits](https://
 | 2026-01-25 | Resolved 7 more edge cases: MKT-002, ORDER-005, POS-004, POS-008, DATA-002, DRY-001, CFG-002 | Claude |
 | 2026-01-25 | Previous count: 51 resolved (85%), 4 medium (7%), 5 high (8%) | Claude |
 | 2026-01-25 | Resolved MKT-001 (pre-market gap check) and MKT-003 (market halt detection) | Claude |
-| 2026-01-25 | Final count: 53 resolved (88%), 2 medium (3%), 5 high (8%) | Claude |
+| 2026-01-25 | Documentation consistency update - reconciled individual sections with summary tables | Claude |
+| 2026-01-25 | Final count: 56 resolved (93%), 3 medium (5%), 1 N/A, 0 high | Claude |
 
 ---
 
@@ -834,5 +852,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 1.5
-**Last Updated:** 2026-01-25 (MKT-001 and MKT-003 resolved - 88% coverage)
+**Document Version:** 1.6
+**Last Updated:** 2026-01-25 (Documentation consistency update - 93% resolved, 0 high-risk remaining)
