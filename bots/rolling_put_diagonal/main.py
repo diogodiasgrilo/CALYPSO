@@ -445,17 +445,30 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
         # Check market status
         if not is_market_open():
             # Market is closed
+            holiday_name = get_holiday_name(now)
             if is_weekend(now):
                 reason = "Weekend"
-            elif is_market_holiday(now):
-                reason = f"Holiday ({get_holiday_name(now)})"
+            elif holiday_name:
+                reason = f"Holiday ({holiday_name})"
             elif now.hour < 9 or (now.hour == 9 and now.minute < 30):
                 reason = "Pre-market"
             else:
                 reason = "After-hours"
 
-            # Calculate smart sleep duration
-            sleep_seconds = calculate_sleep_duration(max_sleep=3600)
+            # Calculate smart sleep duration (max 15 min to keep token alive - Saxo tokens expire in ~20 min)
+            sleep_seconds = calculate_sleep_duration(max_sleep=900)
+
+            # PRECISE WAKE-UP: Calculate exact time until 9:30 AM for trading days
+            market_open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+            if now < market_open_time and now.weekday() < 5 and not holiday_name:
+                # We're in pre-market on a trading day - calculate precise wake time
+                seconds_until_open = (market_open_time - now).total_seconds()
+
+                if seconds_until_open > 0 and seconds_until_open < sleep_seconds:
+                    # Wake at exactly 9:30 AM instead of generic sleep
+                    sleep_seconds = int(seconds_until_open)
+                    trade_logger.log_event(f"Pre-market: will wake at exactly 9:30 AM ({sleep_seconds}s)")
 
             if sleep_seconds > 0:
                 sleep_minutes = sleep_seconds // 60
@@ -474,9 +487,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                 # Reset connection timeout after waking from sleep
                 client.circuit_breaker.last_successful_connection = datetime.now()
             else:
-                # Market about to open, short sleep
-                if not interruptible_sleep(30):
-                    break
+                # FAST INTERVAL: Within 5 min of 9:30 AM, use fast checking to catch market open precisely
+                seconds_until_930 = (market_open_time - now).total_seconds()
+                if 0 < seconds_until_930 <= 300:
+                    trade_logger.log_event(f"Pre-market: {int(seconds_until_930)}s until 9:30 AM - using fast {check_interval}s interval")
+                    if not interruptible_sleep(check_interval):
+                        break
+                else:
+                    # Market about to open or just after close
+                    if not interruptible_sleep(30):
+                        break
 
             continue
 

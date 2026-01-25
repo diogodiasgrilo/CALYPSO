@@ -494,6 +494,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     # Max 15 minutes to ensure token stays alive (Saxo tokens expire in 20 min)
                     sleep_time = calculate_sleep_duration(max_sleep=900)
 
+                    # PRECISE WAKE-UP: Calculate exact time until 9:30 AM for trading days
+                    now_et = get_us_market_time()
+                    market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+
+                    if now_et < market_open_time and now_et.weekday() < 5 and not holiday_name:
+                        # We're in pre-market on a trading day - calculate precise wake time
+                        seconds_until_open = (market_open_time - now_et).total_seconds()
+
+                        if seconds_until_open > 0 and seconds_until_open < sleep_time:
+                            # Wake at exactly 9:30 AM instead of generic sleep
+                            sleep_time = int(seconds_until_open)
+                            trade_logger.log_event(f"Pre-market: will wake at exactly 9:30 AM ({sleep_time}s)")
+
                     if sleep_time > 0:
                         minutes = sleep_time // 60
 
@@ -525,10 +538,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                             logger.debug("Reconnecting WebSocket after sleep")
                             client.start_price_streaming(subscriptions, price_update_handler)
                     else:
-                        reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
-                        trade_logger.log_event(f"HEARTBEAT | Market closed {reason} - rechecking in 60s")
-                        if not interruptible_sleep(60):
-                            break  # Shutdown requested
+                        # FAST INTERVAL: Within 5 min of 9:30 AM, use fast checking to catch market open precisely
+                        seconds_until_930 = (market_open_time - now_et).total_seconds()
+                        if 0 < seconds_until_930 <= 300:
+                            trade_logger.log_event(f"Pre-market: {int(seconds_until_930)}s until 9:30 AM - using fast {check_interval}s interval")
+                            if not interruptible_sleep(check_interval):
+                                break  # Shutdown requested
+                        else:
+                            reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
+                            trade_logger.log_event(f"HEARTBEAT | Market closed {reason} - rechecking in 60s")
+                            if not interruptible_sleep(60):
+                                break  # Shutdown requested
                         # Reset connection timeout after any sleep to prevent false triggers
                         client.circuit_breaker.last_successful_connection = datetime.now()
                     continue
