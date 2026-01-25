@@ -11,9 +11,9 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Rolling Put Diagonal trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 60 (57 edge cases + 3 medium risk)
-**Well-Handled/Resolved:** 57 (95%)
-**Medium Risk (Partial):** 3 (5%)
+**Total Scenarios Analyzed:** 60
+**Well-Handled/Resolved:** 60 (100%)
+**Medium Risk (Partial):** 0 (0%)
 **High Risk:** 0 (0%)
 
 ---
@@ -160,10 +160,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | ORDER-006 |
 | **Trigger** | Exchange rejects order (position limits, market closed, invalid strike) |
-| **Current Handling** | Treated as generic failure in `_place_protected_order()` |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | Error logged but rejection reason may not be clearly communicated |
+| **Current Handling** | Fixed - `_parse_rejection_reason()` extracts specific error codes from Saxo response |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Parses ErrorCode, RejectReason, OrderStatus, and message fields from Saxo API |
+| **Fix Applied** | Added `_parse_rejection_reason()` method for detailed error logging (2026-01-25) |
 
 ### 2.7 Variable `buy_result` Not Defined
 | | |
@@ -455,10 +456,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | STATE-004 |
 | **Trigger** | Orphaned positions detected, never resolved |
-| **Current Handling** | `has_orphaned_positions()` blocks trading |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | No automatic resolution, requires manual intervention |
+| **Current Handling** | Fixed - `_auto_resolve_orphaned_positions()` attempts to adopt or close orphans |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Orphans are either adopted into strategy (if they fit) or closed with market order |
+| **Fix Applied** | Added `_auto_resolve_orphaned_positions()` and `_try_adopt_orphan()` methods (2026-01-25) |
 
 ---
 
@@ -538,10 +540,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | DRY-002 |
 | **Trigger** | Simulated positions don't match what real execution would produce |
-| **Current Handling** | Creates position objects with quantity=1/-1 but entry_price=0 |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | Position state is maintained but values are placeholder |
+| **Current Handling** | Fixed - All dry run positions use `_get_option_mid_price()` for realistic entry prices |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Roll and entry operations now fetch mid-prices and track simulated P&L |
+| **Fix Applied** | Updated all dry run code paths to use mid-prices for entry_price (2026-01-25) |
 
 ---
 
@@ -620,44 +623,43 @@ This document catalogs all identified edge cases and potential failure scenarios
 | DATA-004 | No quote validation | ✅ RESOLVED | Fixed - _validate_quote() checks bid/ask/spread (2026-01-25) |
 | LOG-001 | Error log flooding | ✅ RESOLVED | Fixed - _log_deduplicated_error() with 5-min cooldown (2026-01-25) |
 
-### 11.2 Medium Risk Issues (Remaining)
+### 11.2 Medium Risk Issues (All Resolved!)
 
-| ID | Issue | Status | Notes |
-|----|-------|--------|-------|
-| ORDER-006 | Rejection reason unclear | ⚠️ MEDIUM | Generic failure handling in `_place_protected_order()` |
-| STATE-004 | Orphaned positions block forever | ⚠️ MEDIUM | Requires manual intervention to resolve |
-| DRY-002 | Dry run state drift | ⚠️ MEDIUM | Simulated positions use placeholder entry prices |
+All previously medium-risk issues have been resolved as of 2026-01-25.
 
 ### 11.2b Previously Medium Risk (Now Resolved)
 
 | ID | Issue | Status |
 |----|-------|--------|
 | ORDER-005 | No spread validation before entry | ✅ RESOLVED |
+| ORDER-006 | Rejection reason unclear | ✅ RESOLVED |
 | POS-004 | Early assignment detection | ✅ RESOLVED |
 | POS-008 | Missing strike/expiry fields | ✅ RESOLVED |
 | MKT-001 | No pre-market gap check | ✅ RESOLVED |
 | MKT-002 | No flash crash detection | ✅ RESOLVED |
 | MKT-003 | No halt detection | ✅ RESOLVED |
+| STATE-004 | Orphaned positions block forever | ✅ RESOLVED |
 | DATA-002 | Greeks often missing | ✅ RESOLVED |
 | DRY-001 | No simulated P&L | ✅ RESOLVED |
+| DRY-002 | Dry run state drift | ✅ RESOLVED |
 | CFG-002 | No config value validation | ✅ RESOLVED |
 
 ### 11.3 Statistics by Category
 
-| Category | Total | ✅ Resolved | ⚠️ Medium | N/A |
-|----------|-------|-------------|-----------|-----|
-| Connection/API | 6 | 5 | 0 | 1 |
-| Order Execution | 8 | 7 | 1 | 0 |
-| Position State | 8 | 8 | 0 | 0 |
-| Market Conditions | 7 | 7 | 0 | 0 |
-| Timing/Race | 5 | 5 | 0 | 0 |
-| State Machine | 4 | 3 | 1 | 0 |
-| Data Integrity | 5 | 5 | 0 | 0 |
-| Dry Run Mode | 2 | 1 | 1 | 0 |
-| Configuration | 2 | 2 | 0 | 0 |
-| Logging | 2 | 2 | 0 | 0 |
-| Strategy Alignment | 4 | 4 | 0 | 0 |
-| **TOTAL** | **60** | **56** | **3** | **1** |
+| Category | Total | ✅ Resolved | ⚠️ Medium |
+|----------|-------|-------------|-----------|
+| Connection/API | 6 | 6 | 0 |
+| Order Execution | 8 | 8 | 0 |
+| Position State | 8 | 8 | 0 |
+| Market Conditions | 7 | 7 | 0 |
+| Timing/Race | 5 | 5 | 0 |
+| State Machine | 4 | 4 | 0 |
+| Data Integrity | 5 | 5 | 0 |
+| Dry Run Mode | 2 | 2 | 0 |
+| Configuration | 2 | 2 | 0 |
+| Logging | 2 | 2 | 0 |
+| Strategy Alignment | 4 | 4 | 0 |
+| **TOTAL** | **60** | **60** | **0** |
 
 ---
 
@@ -733,11 +735,16 @@ This document catalogs all identified edge cases and potential failure scenarios
 20. ~~**CFG-002**: Config value range validation~~ **RESOLVED**
 21. ~~**ORDER-005**: Add spread validation before entry~~ **RESOLVED**
 
-### Remaining Unresolved Issues (Low Priority)
+### All Issues Resolved! (2026-01-25)
 
-22. **ORDER-006**: Rejection reason unclear - generic failure handling could be improved
-23. **STATE-004**: Orphaned positions block forever - no automatic resolution
-24. **DRY-002**: Dry run state drift - simulated positions use placeholder entry prices
+22. ~~**ORDER-006**: Rejection reason unclear~~ **RESOLVED**
+    - Fixed: Added `_parse_rejection_reason()` for detailed error parsing (2026-01-25)
+
+23. ~~**STATE-004**: Orphaned positions block forever~~ **RESOLVED**
+    - Fixed: Added `_auto_resolve_orphaned_positions()` to adopt or close orphans (2026-01-25)
+
+24. ~~**DRY-002**: Dry run state drift~~ **RESOLVED**
+    - Fixed: All dry run operations now use mid-prices for realistic P&L tracking (2026-01-25)
 
 ---
 
@@ -825,7 +832,12 @@ Based on research of Bill Belt's original strategy from [Theta Profits](https://
 | 2026-01-25 | Previous count: 51 resolved (85%), 4 medium (7%), 5 high (8%) | Claude |
 | 2026-01-25 | Resolved MKT-001 (pre-market gap check) and MKT-003 (market halt detection) | Claude |
 | 2026-01-25 | Documentation consistency update - reconciled individual sections with summary tables | Claude |
-| 2026-01-25 | Final count: 56 resolved (93%), 3 medium (5%), 1 N/A, 0 high | Claude |
+| 2026-01-25 | Previous count: 56 resolved (93%), 3 medium (5%), 1 N/A, 0 high | Claude |
+| 2026-01-25 | Added CONN-003: WebSocket streaming with auto-reconnection | Claude |
+| 2026-01-25 | Resolved ORDER-006: Added _parse_rejection_reason() for detailed error parsing | Claude |
+| 2026-01-25 | Resolved STATE-004: Added _auto_resolve_orphaned_positions() to adopt/close orphans | Claude |
+| 2026-01-25 | Resolved DRY-002: All dry run operations now use mid-prices | Claude |
+| 2026-01-25 | **FINAL COUNT: 60 resolved (100%), 0 medium, 0 high - ALL ISSUES RESOLVED!** | Claude |
 
 ---
 
@@ -852,5 +864,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 1.6
-**Last Updated:** 2026-01-25 (Documentation consistency update - 93% resolved, 0 high-risk remaining)
+**Document Version:** 2.0
+**Last Updated:** 2026-01-25 (ALL 60 EDGE CASES RESOLVED - 100% coverage!)

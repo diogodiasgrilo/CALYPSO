@@ -866,6 +866,69 @@ class RollingPutDiagonalStrategy:
 
         return None
 
+    def _parse_rejection_reason(self, result: Dict) -> str:
+        """
+        ORDER-006: Parse specific rejection reason from Saxo order response.
+
+        Saxo returns various error codes and messages that can help diagnose
+        why an order was rejected. This method extracts and formats them.
+
+        Args:
+            result: Order result dictionary from Saxo API
+
+        Returns:
+            Human-readable rejection reason
+        """
+        reasons = []
+
+        # Check for explicit error message
+        if result.get("error"):
+            reasons.append(result["error"])
+
+        # Check for Saxo-specific error codes
+        if result.get("ErrorCode"):
+            error_code = result["ErrorCode"]
+            error_map = {
+                "OrderRejected": "Order rejected by exchange",
+                "InsufficientFunds": "Insufficient buying power",
+                "InsufficientMargin": "Insufficient margin",
+                "InvalidPrice": "Invalid price (too far from market)",
+                "MarketClosed": "Market is closed",
+                "InstrumentNotTradeable": "Instrument not tradeable",
+                "AccountBlocked": "Account blocked for trading",
+                "TradingHalted": "Trading halted for this instrument",
+                "MaxPositionExceeded": "Maximum position size exceeded",
+                "InvalidQuantity": "Invalid quantity",
+                "DuplicateOrder": "Duplicate order detected",
+                "RiskLimitExceeded": "Risk limit exceeded",
+            }
+            reason = error_map.get(error_code, f"Error code: {error_code}")
+            reasons.append(reason)
+
+        # Check for message field
+        if result.get("message") and result.get("message") != result.get("error"):
+            reasons.append(result["message"])
+
+        # Check for OrderStatus
+        if result.get("OrderStatus"):
+            status = result["OrderStatus"]
+            if status in ["Rejected", "Cancelled", "Failed"]:
+                reasons.append(f"Order status: {status}")
+
+        # Check for RejectReason (some Saxo responses include this)
+        if result.get("RejectReason"):
+            reasons.append(f"Reject reason: {result['RejectReason']}")
+
+        # Check for response body details
+        if result.get("details"):
+            reasons.append(f"Details: {result['details']}")
+
+        # Combine all reasons
+        if reasons:
+            return " | ".join(reasons)
+
+        return "Unknown rejection reason (no error details in response)"
+
     def _track_orphaned_order(self, order_id: str) -> None:
         """Track an order that couldn't be cancelled."""
         self._orphaned_orders.append(order_id)
@@ -2280,6 +2343,202 @@ class RollingPutDiagonalStrategy:
             logger.info(f"Clearing {len(self._orphaned_positions)} orphaned positions")
             self._orphaned_positions = []
 
+    def _auto_resolve_orphaned_positions(self) -> bool:
+        """
+        STATE-004: Automatically resolve orphaned positions instead of blocking forever.
+
+        Resolution strategies:
+        1. If orphan is a QQQ put and fits our strategy, adopt it
+        2. If orphan doesn't fit, close it with a market order
+
+        Returns:
+            True if all orphans were resolved, False if any remain
+        """
+        if not self._orphaned_positions:
+            return True
+
+        logger.info("=" * 60)
+        logger.info("STATE-004: Attempting automatic orphan resolution")
+        logger.info("=" * 60)
+
+        resolved = []
+        failed = []
+
+        for orphan in self._orphaned_positions:
+            uic = orphan["uic"]
+            amount = orphan["amount"]
+            position_type = orphan["position_type"]
+            description = orphan["description"]
+            entry_price = orphan["entry_price"]
+
+            logger.info(f"Processing orphan: {position_type} {description} (UIC: {uic}, Amount: {amount})")
+
+            # Strategy 1: Try to adopt as part of our diagonal
+            # Only adopt puts that could fit our strategy
+            if "Put" in description and self.underlying_symbol in description:
+                adopted = self._try_adopt_orphan(orphan)
+                if adopted:
+                    logger.info(f"  ✓ Adopted orphan into strategy: {description}")
+                    resolved.append(orphan)
+                    continue
+
+            # Strategy 2: Close the orphan position
+            if not self.dry_run:
+                logger.warning(f"  Orphan doesn't fit strategy - closing: {description}")
+
+                # Determine buy/sell direction to close
+                if amount > 0:
+                    # Long position - sell to close
+                    buy_sell = BuySell.SELL
+                else:
+                    # Short position - buy to close
+                    buy_sell = BuySell.BUY
+
+                result = self._place_protected_order(
+                    uic=uic,
+                    buy_sell=buy_sell,
+                    quantity=abs(amount),
+                    description=f"Close orphan {description}",
+                    verify_fill=True,
+                )
+
+                if result.get("success"):
+                    logger.info(f"  ✓ Closed orphan position: {description}")
+                    resolved.append(orphan)
+
+                    # Log the closure
+                    if self.trade_logger:
+                        self.trade_logger.log_trade(
+                            action="CLOSE_ORPHAN",
+                            strike=description,
+                            price=result.get("fill_price", 0),
+                            delta=0.0,
+                            pnl=0.0,  # Unknown P&L on orphan
+                            saxo_client=self.client,
+                            underlying_price=self.current_price,
+                            option_type="Orphan Resolution",
+                            trade_reason="STATE-004: Auto-resolved orphan position",
+                        )
+                else:
+                    logger.error(f"  ✗ Failed to close orphan: {result.get('error')}")
+                    failed.append(orphan)
+            else:
+                # Dry run - just log what we would do
+                logger.info(f"  [DRY RUN] Would close orphan: {description}")
+                resolved.append(orphan)
+
+        # Update orphaned positions list
+        self._orphaned_positions = failed
+
+        if failed:
+            logger.warning(f"STATE-004: {len(resolved)} orphans resolved, {len(failed)} remain")
+            return False
+        else:
+            logger.info(f"STATE-004: All {len(resolved)} orphans resolved successfully")
+            return True
+
+    def _try_adopt_orphan(self, orphan: Dict) -> bool:
+        """
+        Try to adopt an orphan put as part of our diagonal strategy.
+
+        Args:
+            orphan: Orphan position details
+
+        Returns:
+            True if successfully adopted, False otherwise
+        """
+        uic = orphan["uic"]
+        amount = orphan["amount"]
+        entry_price = orphan["entry_price"]
+
+        # Get option details from Saxo
+        try:
+            quote = self.client.get_quote(uic, asset_type="StockOption")
+            if not quote:
+                return False
+
+            # Extract strike and expiry from the description or fetch from Saxo
+            # The description format is like "QQQ:xnys Put 2026-01-31 $520.00"
+            desc_parts = orphan["description"].split()
+            strike = None
+            expiry = None
+
+            for part in desc_parts:
+                if part.startswith("$"):
+                    try:
+                        strike = float(part.replace("$", "").replace(",", ""))
+                    except ValueError:
+                        pass
+                elif "-" in part and len(part) == 10:  # Date format YYYY-MM-DD
+                    expiry = part
+
+            if not strike or not expiry:
+                logger.warning(f"  Could not parse strike/expiry from: {orphan['description']}")
+                return False
+
+            # Check if we can adopt this orphan
+            if amount > 0:
+                # Long position - could be our long put
+                if self.diagonal is None or self.diagonal.long_put is None:
+                    # Adopt as long put
+                    current_price = None
+                    if quote and "Quote" in quote:
+                        q = quote["Quote"]
+                        bid = q.get("Bid", 0) or 0
+                        ask = q.get("Ask", 0) or 0
+                        if bid and ask:
+                            current_price = (bid + ask) / 2
+
+                    # Get Greeks if available
+                    delta = -0.30  # Default estimate
+                    if quote and "Greeks" in quote:
+                        delta = quote["Greeks"].get("Delta", -0.30)
+
+                    new_long = PutPosition(
+                        uic=uic,
+                        strike=strike,
+                        expiry=expiry,
+                        quantity=amount,
+                        entry_price=entry_price,
+                        current_price=current_price or entry_price,
+                        delta=delta,
+                    )
+
+                    if self.diagonal is None:
+                        self.diagonal = DiagonalPosition(
+                            long_put=new_long,
+                            short_put=None,
+                            campaign_number=self.metrics.campaign_count + 1,
+                            campaign_start_date=datetime.now().strftime("%Y-%m-%d"),
+                        )
+                    else:
+                        self.diagonal.long_put = new_long
+
+                    self.state = RPDState.POSITION_OPEN
+                    logger.info(f"  Adopted orphan as LONG PUT: ${strike} exp {expiry}")
+                    return True
+
+            elif amount < 0:
+                # Short position - could be our short put
+                if self.diagonal is not None and self.diagonal.long_put is not None and self.diagonal.short_put is None:
+                    # We have a long but no short - adopt as short
+                    new_short = PutPosition(
+                        uic=uic,
+                        strike=strike,
+                        expiry=expiry,
+                        quantity=amount,
+                        entry_price=entry_price,
+                    )
+                    self.diagonal.short_put = new_short
+                    self.diagonal.total_premium_collected += entry_price * 100
+                    logger.info(f"  Adopted orphan as SHORT PUT: ${strike} exp {expiry}")
+                    return True
+
+        except Exception as e:
+            logger.error(f"  Error trying to adopt orphan: {e}")
+
+        return False
+
     # =========================================================================
     # POSITION RECOVERY
     # =========================================================================
@@ -3128,16 +3387,22 @@ class RollingPutDiagonalStrategy:
 
             # Step 3: Sell new short put
             if self.dry_run:
-                logger.info(f"[DRY RUN] Would SELL: strike ${new_short_data['strike']}, "
-                           f"expiry {next_expiry['expiry'][:10]}")
+                # DRY-002: Get mid-price for realistic entry price
+                new_short_mid = self._get_option_mid_price(new_short_data["uic"])
+                old_short_mid = self._get_option_mid_price(old_short.uic)
 
-                # Update diagonal in dry run
+                logger.info(f"[DRY RUN] Would SELL: strike ${new_short_data['strike']}, "
+                           f"expiry {next_expiry['expiry'][:10]}, mid ${new_short_mid:.2f}" if new_short_mid else "mid N/A")
+
+                # Update diagonal in dry run with realistic prices
                 old_strike = old_short.strike
                 self.diagonal.short_put = PutPosition(
                     uic=new_short_data["uic"],
                     strike=new_short_data["strike"],
                     expiry=next_expiry["expiry"],
                     quantity=-1,
+                    entry_price=new_short_mid or 0.0,  # DRY-002: Use mid-price
+                    current_price=new_short_mid or 0.0,
                 )
                 self.diagonal.roll_count += 1
                 self.diagonal.last_roll_type = roll_type
@@ -3149,19 +3414,24 @@ class RollingPutDiagonalStrategy:
                     self.metrics.horizontal_rolls += 1
                 self.metrics.roll_count += 1
 
+                # DRY-002: Track simulated premium
+                simulated_premium = (new_short_mid or 0) * 100
+                self.diagonal.total_premium_collected += simulated_premium
+                self.metrics.total_premium_collected += simulated_premium
+
                 # Log the simulated roll to Google Sheets
                 if self.trade_logger:
                     self.trade_logger.log_trade(
                         action=f"[SIMULATED] ROLL_{roll_type.value.upper()}",
                         strike=f"{old_strike}->{new_short_data['strike']}",
-                        price=0.0,  # Unknown in dry run
+                        price=new_short_mid or 0.0,  # DRY-002: Use mid-price
                         delta=0.0,
                         pnl=0.0,
                         saxo_client=self.client,
                         underlying_price=self.current_price,
                         option_type="Short Put Roll",
                         expiry_date=next_expiry["expiry"],
-                        premium_received=0.0,  # Unknown in dry run
+                        premium_received=simulated_premium,  # DRY-002: Use mid-price
                         trade_reason=f"[DRY RUN] {roll_type.value} roll #{self.diagonal.roll_count}"
                     )
 
@@ -3376,19 +3646,33 @@ class RollingPutDiagonalStrategy:
                 return False
 
             if self.dry_run:
+                # DRY-002: Get mid-prices for realistic P&L tracking
+                new_long_mid = self._get_option_mid_price(new_long_data["uic"])
+                old_long_mid = self._get_option_mid_price(old_long.uic)
+
                 logger.info(f"[DRY RUN] Would roll long from ${old_long.strike} to ${new_long_data['strike']}")
+                logger.info(f"  Close old @ ${old_long_mid:.2f}" if old_long_mid else "  Close old @ N/A")
+                logger.info(f"  Open new @ ${new_long_mid:.2f}" if new_long_mid else "  Open new @ N/A")
+
                 old_strike = old_long.strike
+                # DRY-002: Update position with new mid-price
+                self.diagonal.long_put.uic = new_long_data["uic"]
                 self.diagonal.long_put.strike = new_long_data["strike"]
                 self.diagonal.long_put.delta = new_long_data["delta"]
+                self.diagonal.long_put.entry_price = new_long_mid or 0.0
+                self.diagonal.long_put.current_price = new_long_mid or 0.0
+
+                # DRY-002: Track simulated roll cost (pay for new - receive for old)
+                roll_cost = (new_long_mid or 0) - (old_long_mid or 0)
 
                 # Log the simulated long roll to Google Sheets
                 if self.trade_logger:
                     self.trade_logger.log_trade(
                         action="[SIMULATED] ROLL_LONG_UP",
                         strike=f"{old_strike}->{new_long_data['strike']}",
-                        price=0.0,  # Unknown in dry run
+                        price=new_long_mid or 0.0,  # DRY-002: Use mid-price
                         delta=new_long_data["delta"],
-                        pnl=0.0,
+                        pnl=-roll_cost * 100,  # DRY-002: Negative = cost to roll up
                         saxo_client=self.client,
                         underlying_price=self.current_price,
                         option_type="Long Put Roll",
@@ -4026,7 +4310,8 @@ class RollingPutDiagonalStrategy:
                             fallback_price=base_price
                         )
                     else:
-                        last_error = result.get("error", result.get("message", "MARKET order failed"))
+                        # ORDER-006: Parse specific rejection reason for MARKET orders
+                        last_error = self._parse_rejection_reason(result)
                         logger.error(f"  ✗ MARKET order failed: {last_error}")
                         continue
 
@@ -4074,7 +4359,10 @@ class RollingPutDiagonalStrategy:
                         fallback_price=adjusted_price
                     )
                 else:
-                    last_error = result.get("error", "Order not filled")
+                    # ORDER-006: Parse specific rejection reason
+                    last_error = self._parse_rejection_reason(result)
+                    logger.warning(f"  Order not filled: {last_error}")
+
                     # Log retry info
                     if attempt < len(retry_sequence) - 1:
                         next_slippage, next_is_market = retry_sequence[attempt + 1]
@@ -4083,7 +4371,8 @@ class RollingPutDiagonalStrategy:
                         else:
                             logger.warning(f"  ⚠ Failed at {current_slippage}% slippage - retrying at {next_slippage}%...")
                     else:
-                        logger.error(f"  ✗ Failed all {len(retry_sequence)} attempts: {last_error}")
+                        logger.error(f"  ✗ Failed all {len(retry_sequence)} attempts")
+                        logger.error(f"  ORDER-006 Rejection details: {last_error}")
 
             except Exception as e:
                 last_error = str(e)
@@ -4302,9 +4591,16 @@ class RollingPutDiagonalStrategy:
         if self.has_orphaned_positions():
             orphans = self.get_orphaned_positions()
             orphan_summary = ", ".join([f"{o['position_type']} {o['description']}" for o in orphans])
-            logger.critical(f"ORPHANED POSITIONS BLOCKING TRADING: {orphan_summary}")
-            logger.critical("Resolve orphaned positions manually before bot can continue")
-            return
+            logger.warning(f"Orphaned positions detected: {orphan_summary}")
+
+            # STATE-004: Try to auto-resolve instead of blocking forever
+            if self._auto_resolve_orphaned_positions():
+                logger.info("STATE-004: All orphaned positions resolved - continuing")
+            else:
+                # Still have unresolved orphans
+                logger.critical("ORPHANED POSITIONS STILL BLOCKING TRADING")
+                logger.critical("Manual intervention required for remaining orphans")
+                return
 
         # TIME-003: Check for early close day (once per day)
         self.check_early_close_warning()
@@ -4416,13 +4712,22 @@ class RollingPutDiagonalStrategy:
                 return False
 
             if self.dry_run:
-                logger.info(f"[DRY RUN] Would sell new short: ${short_put_data['strike']}")
+                # DRY-002: Get mid-price for realistic P&L tracking
+                short_mid = self._get_option_mid_price(short_put_data["uic"])
+                simulated_premium = (short_mid or 0) * 100
+
+                logger.info(f"[DRY RUN] Would sell new short: ${short_put_data['strike']} @ ${short_mid:.2f}" if short_mid else f"[DRY RUN] Would sell new short: ${short_put_data['strike']}")
                 self.diagonal.short_put = PutPosition(
                     uic=short_put_data["uic"],
                     strike=short_put_data["strike"],
                     expiry=short_put_data["expiry"],
                     quantity=-1,
+                    entry_price=short_mid or 0.0,  # DRY-002: Use mid-price
+                    current_price=short_mid or 0.0,
                 )
+                # DRY-002: Track simulated premium
+                self.diagonal.total_premium_collected += simulated_premium
+                self.metrics.total_premium_collected += simulated_premium
                 return True
 
             result = self._place_protected_order(
