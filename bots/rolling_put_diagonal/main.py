@@ -408,6 +408,24 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     last_bot_log_time = get_us_market_time()  # Use ET market time for consistency when traveling
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
 
+    # CONN-003: Setup WebSocket streaming for real-time price updates
+    # This provides faster price updates than REST polling, useful for:
+    # - MKT-002 flash crash detection
+    # - Real-time P&L tracking
+    # - Faster response to market moves
+    subscriptions = strategy.get_streaming_subscriptions()
+    trade_logger.log_event(f"Starting price streaming for {len(subscriptions)} instruments...")
+
+    def price_update_handler(uic: int, data: dict):
+        """Handle real-time price updates from WebSocket."""
+        strategy.handle_price_update(uic, data)
+
+    streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
+    if streaming_started:
+        trade_logger.log_event("WebSocket streaming started successfully")
+    else:
+        trade_logger.log_event("Warning: WebSocket streaming not started - using REST polling fallback")
+
     # Main loop
     iteration = 0
     while not shutdown_requested:
@@ -443,14 +461,43 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                 sleep_minutes = sleep_seconds // 60
                 trade_logger.log_event(f"Market closed ({reason}). Sleeping {sleep_minutes} minutes...")
 
+                # CONN-003: Disconnect WebSocket before sleeping to avoid timeout errors
+                if client.is_streaming:
+                    client.stop_price_streaming()
+
+                # Force refresh token before sleeping to get fresh expiry
+                client.authenticate(force_refresh=True)
+
                 if not interruptible_sleep(sleep_seconds):
                     break  # Shutdown requested
+
+                # Reset connection timeout after waking from sleep
+                client.circuit_breaker.last_successful_connection = datetime.now()
             else:
                 # Market about to open, short sleep
                 if not interruptible_sleep(30):
                     break
 
             continue
+
+        # CONN-003: Reconnect WebSocket if disconnected during market hours
+        if subscriptions and not client.is_streaming:
+            trade_logger.log_event("WebSocket disconnected during market hours - reconnecting...")
+            try:
+                # Clean up any stale subscriptions first
+                client.stop_price_streaming()
+                import time
+                time.sleep(1)  # Brief pause before reconnecting
+
+                # Get fresh subscriptions (may have new option UICs)
+                subscriptions = strategy.get_streaming_subscriptions()
+
+                if client.start_price_streaming(subscriptions, price_update_handler):
+                    trade_logger.log_event("WebSocket reconnected successfully")
+                else:
+                    trade_logger.log_event("Warning: WebSocket reconnection failed - using REST polling")
+            except Exception as e:
+                trade_logger.log_error(f"WebSocket reconnection error: {e}")
 
         # Market is open - run strategy iteration
         try:
@@ -517,6 +564,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     trade_logger.log_event("=" * 60)
     trade_logger.log_event("BOT SHUTTING DOWN")
     trade_logger.log_event("=" * 60)
+
+    # CONN-003: Stop WebSocket streaming before shutdown
+    if client.is_streaming:
+        client.stop_price_streaming()
+        trade_logger.log_event("WebSocket streaming stopped")
 
     # Log final daily summary to Google Sheets
     strategy.log_daily_summary()

@@ -11,10 +11,9 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Rolling Put Diagonal trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 60 (56 edge cases + 4 strategy alignment issues)
-**Well-Handled/Resolved:** 56 (93%)
+**Total Scenarios Analyzed:** 60 (57 edge cases + 3 medium risk)
+**Well-Handled/Resolved:** 57 (95%)
 **Medium Risk (Partial):** 3 (5%)
-**N/A:** 1 (2%)
 **High Risk:** 0 (0%)
 
 ---
@@ -59,10 +58,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | CONN-003 |
 | **Trigger** | Real-time price feed drops during trading hours |
-| **Current Handling** | Bot uses REST polling only (no WebSocket streaming for Rolling Put Diagonal) |
+| **Current Handling** | WebSocket streaming with automatic reconnection during market hours |
 | **Risk Level** | ✅ LOW |
-| **Status** | N/A - Uses REST |
-| **Notes** | Simpler architecture, but higher latency than WebSocket |
+| **Status** | RESOLVED |
+| **Evidence** | `main.py` checks `client.is_streaming` each loop and reconnects if disconnected |
+| **Fix Applied** | Added `handle_price_update()` in strategy.py, WebSocket setup/reconnection in main.py |
 
 ### 1.4 Token Expires During Order Placement
 | | |

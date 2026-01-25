@@ -508,6 +508,101 @@ class RollingPutDiagonalStrategy:
         logger.info(f"  Progressive retry: {self._progressive_retry}")
 
     # =========================================================================
+    # WEBSOCKET PRICE UPDATES
+    # =========================================================================
+
+    def handle_price_update(self, uic: int, data: dict) -> None:
+        """
+        CONN-003: Handle real-time price update from WebSocket streaming.
+
+        This method is called by the WebSocket handler when price data arrives.
+        It updates the strategy's current_price for faster response to market moves,
+        which is especially useful for MKT-002 flash crash detection.
+
+        Args:
+            uic: Instrument UIC that was updated
+            data: Price data from the streaming update containing Quote and/or Greeks
+        """
+        if uic == self.underlying_uic:
+            # Extract price from Quote block
+            if "Quote" in data:
+                quote = data["Quote"]
+                new_price = (
+                    quote.get("Mid") or
+                    quote.get("LastTraded") or
+                    quote.get("Ask", 0) + quote.get("Bid", 0) / 2 if quote.get("Ask") and quote.get("Bid") else None
+                )
+                if new_price and new_price > 0:
+                    old_price = self.current_price
+                    self.current_price = new_price
+
+                    # MKT-002: Record price for flash crash velocity detection
+                    self._record_price_for_velocity(new_price)
+
+                    logger.debug(f"WebSocket price update: ${old_price:.2f} -> ${new_price:.2f}")
+
+        # Update option positions if they match
+        elif self.diagonal:
+            if self.diagonal.long_put and self.diagonal.long_put.uic == uic:
+                if "Quote" in data:
+                    quote = data["Quote"]
+                    new_price = quote.get("Mid") or quote.get("LastTraded")
+                    if new_price and new_price > 0:
+                        self.diagonal.long_put.current_price = new_price
+                        logger.debug(f"Long put price update: ${new_price:.4f}")
+
+                # Update Greeks if available
+                if "Greeks" in data:
+                    greeks = data["Greeks"]
+                    if "Delta" in greeks:
+                        self.diagonal.long_put.delta = greeks["Delta"]
+                    if "Theta" in greeks:
+                        self.diagonal.long_put.theta = greeks["Theta"]
+
+            if self.diagonal.short_put and self.diagonal.short_put.uic == uic:
+                if "Quote" in data:
+                    quote = data["Quote"]
+                    new_price = quote.get("Mid") or quote.get("LastTraded")
+                    if new_price and new_price > 0:
+                        self.diagonal.short_put.current_price = new_price
+                        logger.debug(f"Short put price update: ${new_price:.4f}")
+
+                # Update Greeks if available
+                if "Greeks" in data:
+                    greeks = data["Greeks"]
+                    if "Delta" in greeks:
+                        self.diagonal.short_put.delta = greeks["Delta"]
+                    if "Theta" in greeks:
+                        self.diagonal.short_put.theta = greeks["Theta"]
+
+    def get_streaming_subscriptions(self) -> list:
+        """
+        Get list of instruments to subscribe for WebSocket streaming.
+
+        Returns:
+            List of dicts with 'uic' and 'asset_type' for each subscription
+        """
+        subscriptions = [
+            # Always subscribe to underlying (QQQ)
+            {"uic": self.underlying_uic, "asset_type": "Etf"}
+        ]
+
+        # Add active option positions
+        if self.diagonal:
+            if self.diagonal.long_put and self.diagonal.long_put.uic:
+                subscriptions.append({
+                    "uic": self.diagonal.long_put.uic,
+                    "asset_type": "StockOption"
+                })
+            if self.diagonal.short_put and self.diagonal.short_put.uic:
+                subscriptions.append({
+                    "uic": self.diagonal.short_put.uic,
+                    "asset_type": "StockOption"
+                })
+
+        return subscriptions
+
+    # =========================================================================
     # SAFETY MECHANISMS
     # =========================================================================
 
