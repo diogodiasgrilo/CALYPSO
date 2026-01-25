@@ -207,7 +207,95 @@ def validate_config(config: dict) -> bool:
     if "underlying_uic" not in strategy:
         raise ValueError("Missing config key: strategy.underlying_uic")
 
+    # CFG-002: Validate strategy value ranges
+    _validate_strategy_value_ranges(strategy)
+
     return True
+
+
+def _validate_strategy_value_ranges(strategy: dict) -> None:
+    """
+    CFG-002: Validate that strategy configuration values are in sensible ranges.
+
+    This prevents silent errors from misconfiguration that could lead to
+    bad trades or no trades at all.
+
+    Args:
+        strategy: Strategy configuration section
+
+    Raises:
+        ValueError: If values are out of range
+    """
+    warnings = []
+
+    # Long put configuration
+    long_put = strategy.get("long_put", {})
+
+    # Target DTE should be 7-60 days for Bill Belt's strategy
+    target_dte = long_put.get("target_dte", 14)
+    if target_dte < 7 or target_dte > 60:
+        raise ValueError(f"CFG-002: long_put.target_dte ({target_dte}) out of range [7, 60]")
+
+    # Target delta should be between -0.15 and -0.50 for OTM to ATM puts
+    target_delta = long_put.get("target_delta", -0.33)
+    if target_delta > 0:
+        raise ValueError(f"CFG-002: long_put.target_delta ({target_delta}) should be negative for puts")
+    if target_delta < -0.60 or target_delta > -0.15:
+        warnings.append(f"long_put.target_delta ({target_delta}) unusual - typical range is [-0.50, -0.20]")
+
+    # Delta tolerance should be small
+    delta_tolerance = long_put.get("delta_tolerance", 0.05)
+    if delta_tolerance < 0.01 or delta_tolerance > 0.15:
+        warnings.append(f"long_put.delta_tolerance ({delta_tolerance}) unusual - typical range is [0.02, 0.10]")
+
+    # Roll delta threshold (should be less than target delta in absolute terms)
+    roll_threshold = long_put.get("roll_delta_threshold", -0.20)
+    if roll_threshold > target_delta:  # e.g., -0.20 > -0.33 in absolute value terms
+        warnings.append(f"roll_delta_threshold ({roll_threshold}) should be lower than target_delta ({target_delta})")
+
+    # Short put configuration
+    short_put = strategy.get("short_put", {})
+
+    # Short DTE should be 0-3 days for daily puts
+    short_dte = short_put.get("target_dte", 1)
+    if short_dte < 0 or short_dte > 7:
+        raise ValueError(f"CFG-002: short_put.target_dte ({short_dte}) out of range [0, 7] for daily puts")
+
+    # Short delta should be around -0.50 for ATM
+    short_delta = short_put.get("target_delta", -0.50)
+    if short_delta > 0:
+        raise ValueError(f"CFG-002: short_put.target_delta ({short_delta}) should be negative for puts")
+
+    # Position size
+    position_size = strategy.get("position_size", 1)
+    if position_size < 1 or position_size > 10:
+        raise ValueError(f"CFG-002: position_size ({position_size}) out of range [1, 10]")
+
+    # Management configuration
+    management = strategy.get("management", {})
+
+    # Max unrealized loss should be positive
+    max_loss = management.get("max_unrealized_loss", 500)
+    if max_loss < 0:
+        raise ValueError(f"CFG-002: max_unrealized_loss ({max_loss}) should be positive")
+    if max_loss > 5000:
+        warnings.append(f"max_unrealized_loss (${max_loss}) is very high - consider if appropriate")
+
+    # Market open delay should be 0-15 minutes
+    open_delay = management.get("market_open_delay_minutes", 3)
+    if open_delay < 0 or open_delay > 30:
+        raise ValueError(f"CFG-002: market_open_delay_minutes ({open_delay}) out of range [0, 30]")
+
+    # Flash crash threshold should be 1-5%
+    flash_threshold = management.get("flash_crash_threshold_percent", 2.0)
+    if flash_threshold < 0.5 or flash_threshold > 10:
+        warnings.append(f"flash_crash_threshold_percent ({flash_threshold}%) unusual - typical range is [1%, 5%]")
+
+    # Print warnings (non-blocking)
+    import logging
+    logger = logging.getLogger(__name__)
+    for warn in warnings:
+        logger.warning(f"CFG-002: {warn}")
 
 
 def print_banner():

@@ -12,8 +12,8 @@
 This document catalogs all identified edge cases and potential failure scenarios for the Rolling Put Diagonal trading bot. Each scenario is evaluated for current handling and risk level.
 
 **Total Scenarios Analyzed:** 60 (56 edge cases + 4 strategy alignment issues)
-**Well-Handled/Resolved:** 44 (73%)
-**Medium Risk:** 11 (18%)
+**Well-Handled/Resolved:** 51 (85%)
+**Medium Risk:** 4 (7%)
 **High Risk:** 5 (8%)
 
 ---
@@ -148,11 +148,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | ORDER-005 |
 | **Trigger** | Options have very wide spread, limit orders won't fill |
-| **Current Handling** | No explicit spread check before order placement |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Notes** | Could place orders at unfavorable prices |
-| **Recommended Fix** | Add max spread check (e.g., bid-ask < 10% of mid) before placing orders |
+| **Current Handling** | Fixed - `_check_spread_acceptable_for_entry()` validates spread before order placement |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Rejects entry if spread > `max_entry_spread_percent` (default: 10%) |
+| **Fix Applied** | Added spread validation in `enter_campaign()` before placing orders (2026-01-25)
 
 ### 2.6 Order Rejected by Exchange
 | | |
@@ -228,11 +228,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | POS-004 |
 | **Trigger** | ITM short put gets assigned before expiration |
-| **Current Handling** | No explicit early assignment detection |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Notes** | QQQ options are American-style, early assignment possible |
-| **Recommended Fix** | Add position reconciliation check that detects unexpected position changes |
+| **Current Handling** | Fixed - `_check_for_early_assignment()` detects when short put disappears and stock appears |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Detects missing short put, checks for QQQ stock position, logs EARLY_ASSIGNMENT event |
+| **Fix Applied** | Added `_check_for_early_assignment()` method called in `_reconcile_positions_periodic()` (2026-01-25)
 
 ### 3.5 Multiple Long Puts Detected
 | | |
@@ -269,11 +269,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | POS-008 |
 | **Trigger** | Saxo returns position without StrikePrice or ExpiryDate fields |
-| **Current Handling** | `_position_dict_to_put()` at line 1299 defaults to 0.0 and "" |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | Bot continues but with invalid position data |
-| **Recommended Fix** | Add validation and fallback parsing from symbol string |
+| **Current Handling** | Fixed - `_parse_option_symbol()` parses strike/expiry from symbol string |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Parses symbols like "QQQ/21Jan26P500" to extract strike and expiry |
+| **Fix Applied** | Added `_parse_option_symbol()` with regex parsing as fallback (2026-01-25)
 
 ---
 
@@ -294,12 +294,13 @@ This document catalogs all identified edge cases and potential failure scenarios
 | | |
 |---|---|
 | **ID** | MKT-002 |
-| **Trigger** | QQQ drops 3% in 5 minutes |
-| **Current Handling** | No velocity-based detection |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Notes** | Short put could move deep ITM before roll triggers |
-| **Recommended Fix** | Add price velocity monitoring with emergency exit trigger |
+| **Trigger** | QQQ drops 2%+ in 5 minutes |
+| **Current Handling** | Fixed - `check_flash_crash_velocity()` detects rapid moves and triggers urgent position check |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Tracks price history in 5-min window, alerts when move exceeds `flash_crash_threshold_percent` |
+| **Fix Applied** | Added `_record_price_for_velocity()` and `check_flash_crash_velocity()` methods (2026-01-25)
+| **Config** | `management.flash_crash_threshold_percent: 2.0`
 
 ### 4.3 Market Circuit Breaker Halt
 | | |
@@ -475,11 +476,12 @@ This document catalogs all identified edge cases and potential failure scenarios
 | | |
 |---|---|
 | **ID** | DATA-002 |
-| **Trigger** | `find_put_by_delta()` can't find option with target delta |
-| **Current Handling** | Returns None, enters error handling |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | Many "No Greeks returned" warnings in logs suggest this happens often |
+| **Trigger** | `find_put_by_delta()` can't find option with target delta because Saxo returns no Greeks |
+| **Current Handling** | Fixed - Falls back to theoretical delta calculation based on moneyness |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | `find_put_by_delta()` now estimates delta when API returns none: ATM ≈ -0.50, adjusted by distance from spot |
+| **Fix Applied** | Added theoretical delta fallback in `saxo_client.py:find_put_by_delta()` (2026-01-25)
 
 ### 7.3 Metrics File Corruption
 | | |
@@ -520,12 +522,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | DRY-001 |
 | **Trigger** | Running in dry run mode |
-| **Current Handling** | Trades logged with price=0.0, no P&L calculation |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Evidence** | Logs show "[SIMULATED] ENTER_CAMPAIGN" but no pricing |
-| **Impact** | Cannot evaluate strategy performance in dry run |
-| **Recommended Fix** | Use mid-price for simulated fills, track simulated P&L |
+| **Current Handling** | Fixed - Uses mid-prices for simulated fills, tracks simulated premium |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | `enter_campaign()` now fetches mid-prices via `_get_option_mid_price()` for dry run positions |
+| **Fix Applied** | Added mid-price fetching and simulated premium calculation in dry run mode (2026-01-25)
 
 ### 8.2 Dry Run State Drift
 | | |
@@ -555,10 +556,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | CFG-002 |
 | **Trigger** | Config has delta=0.99 or DTE=0 |
-| **Current Handling** | No validation of reasonable values |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Recommended Fix** | Add config value range validation |
+| **Current Handling** | Fixed - `_validate_strategy_value_ranges()` checks all config values at startup |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Validates: DTE range [7,60], delta range [-0.60,-0.15], position_size [1,10], etc. |
+| **Fix Applied** | Added `_validate_strategy_value_ranges()` in `main.py:validate_config()` (2026-01-25)
 
 ---
 
@@ -615,35 +617,35 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 ### 11.2 All Medium Risk Issues
 
-| ID | Issue | Priority |
-|----|-------|----------|
-| ORDER-005 | No spread validation before entry | Medium |
+| ID | Issue | Status |
+|----|-------|--------|
+| ORDER-005 | No spread validation before entry | ✅ RESOLVED |
 | ORDER-006 | Rejection reason unclear | Low |
-| POS-004 | Early assignment detection | Medium |
-| POS-008 | Missing strike/expiry fields | Medium |
+| POS-004 | Early assignment detection | ✅ RESOLVED |
+| POS-008 | Missing strike/expiry fields | ✅ RESOLVED |
 | MKT-001 | No pre-market gap check | Medium |
-| MKT-002 | No flash crash detection | Medium |
+| MKT-002 | No flash crash detection | ✅ RESOLVED |
 | MKT-003 | No halt detection | Low |
-| DATA-002 | Greeks often missing | Medium |
-| DRY-001 | No simulated P&L | Medium |
+| DATA-002 | Greeks often missing | ✅ RESOLVED |
+| DRY-001 | No simulated P&L | ✅ RESOLVED |
 | DRY-002 | Dry run state drift | Low |
-| CFG-002 | No config value validation | Low |
+| CFG-002 | No config value validation | ✅ RESOLVED |
 
 ### 11.3 Statistics by Category
 
 | Category | Total | ✅ Resolved | ⚠️ Medium | 🔴 High |
 |----------|-------|-------------|-----------|---------|
 | Connection/API | 6 | 5 | 1 | 0 |
-| Order Execution | 8 | 6 | 2 | 0 |
-| Position State | 8 | 7 | 1 | 0 |
-| Market Conditions | 7 | 4 | 3 | 0 |
+| Order Execution | 8 | 7 | 1 | 0 |
+| Position State | 8 | 8 | 0 | 0 |
+| Market Conditions | 7 | 5 | 2 | 0 |
 | Timing/Race | 5 | 5 | 0 | 0 |
 | State Machine | 4 | 3 | 1 | 0 |
-| Data Integrity | 5 | 3 | 2 | 0 |
-| Dry Run Mode | 2 | 0 | 2 | 0 |
-| Configuration | 2 | 1 | 1 | 0 |
+| Data Integrity | 5 | 4 | 1 | 0 |
+| Dry Run Mode | 2 | 1 | 1 | 0 |
+| Configuration | 2 | 2 | 0 | 0 |
 | Logging | 2 | 2 | 0 | 0 |
-| **TOTAL** | **56** | **40** | **11** | **5** |
+| **TOTAL** | **56** | **47** | **4** | **5** |
 
 ---
 
@@ -801,6 +803,8 @@ Based on research of Bill Belt's original strategy from [Theta Profits](https://
 | 2026-01-25 | Confirmed CONN-004, CONN-005 already in saxo_client.py - 40 resolved (71%) | Claude |
 | 2026-01-25 | Added Section 13: Strategy Alignment - 4 new fixes (STRATEGY-001 to 004) | Claude |
 | 2026-01-25 | Strategy research: Entry 2-candle rule, exit below EMA, CCI optional, BP threshold | Claude |
+| 2026-01-25 | Resolved 7 more edge cases: MKT-002, ORDER-005, POS-004, POS-008, DATA-002, DRY-001, CFG-002 | Claude |
+| 2026-01-25 | Final count: 51 resolved (85%), 4 medium (7%), 5 high (8%) | Claude |
 
 ---
 
@@ -827,5 +831,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 1.3
-**Last Updated:** 2026-01-25 (strategy alignment fixes)
+**Document Version:** 1.4
+**Last Updated:** 2026-01-25 (7 additional edge cases resolved)

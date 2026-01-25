@@ -492,6 +492,14 @@ class RollingPutDiagonalStrategy:
         # Load persisted circuit breaker state
         self._load_circuit_breaker_state()
 
+        # MKT-002: Flash crash velocity detection
+        # Track recent prices for rapid move detection
+        self._price_history: List[Tuple[datetime, float]] = []
+        self._price_history_window_minutes: int = 5  # Track last 5 minutes
+        self._flash_crash_threshold_percent: float = self.management_config.get(
+            "flash_crash_threshold_percent", 2.0
+        )
+
         logger.info(f"RollingPutDiagonalStrategy initialized")
         logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
         logger.info(f"  Dry run: {self.dry_run}")
@@ -674,6 +682,94 @@ class RollingPutDiagonalStrategy:
             return True
 
         return False
+
+    # =========================================================================
+    # MKT-002: FLASH CRASH VELOCITY DETECTION
+    # =========================================================================
+
+    def _record_price_for_velocity(self, price: float) -> None:
+        """
+        MKT-002: Record current price for velocity tracking.
+
+        Called during update_market_data() to build price history.
+        The Rolling Put Diagonal has an exposed short put that can go
+        deep ITM during a flash crash - early detection is critical.
+
+        Args:
+            price: Current QQQ price
+        """
+        now = datetime.now()
+        self._price_history.append((now, price))
+
+        # Keep only prices within the tracking window
+        cutoff = now - timedelta(minutes=self._price_history_window_minutes)
+        self._price_history = [(t, p) for t, p in self._price_history if t > cutoff]
+
+    def check_flash_crash_velocity(self) -> Optional[Tuple[float, str]]:
+        """
+        MKT-002: Detect rapid price movements (flash crash/rally).
+
+        For Rolling Put Diagonal, a flash crash is particularly dangerous
+        because the short put can go deep ITM very quickly. This check
+        catches fast moves before the standard EMA-exit trigger.
+
+        Returns:
+            Optional[Tuple[float, str]]: (move_percent, direction) if flash detected, None otherwise
+        """
+        if len(self._price_history) < 2:
+            return None  # Not enough data
+
+        # Get oldest and newest prices in window
+        oldest_time, oldest_price = self._price_history[0]
+        newest_time, newest_price = self._price_history[-1]
+
+        # Calculate move percentage
+        if oldest_price <= 0:
+            return None
+
+        move_percent = ((newest_price - oldest_price) / oldest_price) * 100
+        abs_move = abs(move_percent)
+        direction = "UP" if move_percent > 0 else "DOWN"
+        elapsed_minutes = (newest_time - oldest_time).total_seconds() / 60
+
+        if abs_move >= self._flash_crash_threshold_percent:
+            logger.critical("=" * 70)
+            logger.critical("🚨 MKT-002: FLASH MOVE DETECTED 🚨")
+            logger.critical("=" * 70)
+            logger.critical(f"   Direction: {direction}")
+            logger.critical(f"   Move: {abs_move:.2f}% in {elapsed_minutes:.1f} minutes")
+            logger.critical(f"   Old price: ${oldest_price:.2f} ({oldest_time.strftime('%H:%M:%S')})")
+            logger.critical(f"   New price: ${newest_price:.2f} ({newest_time.strftime('%H:%M:%S')})")
+            logger.critical(f"   Threshold: {self._flash_crash_threshold_percent}%")
+
+            if self.diagonal and self.diagonal.short_put:
+                short_strike = self.diagonal.short_put.strike
+                logger.critical(f"   Short put strike: ${short_strike:.2f}")
+
+                # Flash crash (DOWN) threatens the short put
+                if direction == "DOWN" and short_strike > 0:
+                    distance = ((newest_price - short_strike) / newest_price) * 100
+                    if distance > 0:
+                        logger.critical(f"   ⚠️ Short put only {distance:.1f}% OTM!")
+                    else:
+                        logger.critical(f"   🚨 SHORT PUT IS ITM by {abs(distance):.1f}%!")
+
+            logger.critical("=" * 70)
+
+            # Log safety event
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "FLASH_MOVE_DETECTED",
+                    "severity": "CRITICAL",
+                    "qqq_price": newest_price,
+                    "action_taken": f"Detected {direction} {abs_move:.2f}% in {elapsed_minutes:.1f} min",
+                    "short_put_strike": self.diagonal.short_put.strike if self.diagonal and self.diagonal.short_put else 0,
+                })
+
+            return (move_percent, direction)
+
+        return None
 
     def _track_orphaned_order(self, order_id: str) -> None:
         """Track an order that couldn't be cancelled."""
@@ -958,6 +1054,115 @@ class RollingPutDiagonalStrategy:
         except Exception as e:
             return False, f"Position verification error: {e}"
 
+    def _check_for_early_assignment(self) -> Optional[str]:
+        """
+        POS-004: Detect early assignment of short put.
+
+        QQQ options are American-style, meaning they can be assigned before expiration.
+        Early assignment typically happens when:
+        1. Short put is deep ITM (intrinsic value > time value)
+        2. Approaching expiration (especially overnight)
+        3. Dividend approaching (not relevant for puts)
+
+        Signs of early assignment:
+        - Short put position disappears from Saxo
+        - Unexpected stock position appears (100 shares per contract)
+
+        Returns:
+            Optional[str]: Assignment description if detected, None otherwise
+        """
+        if self.dry_run:
+            return None
+
+        # Only check if we have a short put
+        if not self.diagonal or not self.diagonal.short_put:
+            return None
+
+        short_uic = self.diagonal.short_put.uic
+        short_strike = self.diagonal.short_put.strike
+
+        try:
+            # Get all positions from Saxo
+            all_positions = self.client.get_positions()
+            if not all_positions:
+                return None
+
+            # Check for our short put
+            short_put_found = False
+            stock_position_found = False
+            stock_shares = 0
+
+            for pos in all_positions:
+                pos_base = pos.get("PositionBase", {})
+                uic = pos_base.get("Uic", 0)
+                asset_type = pos_base.get("AssetType", "")
+                amount = pos_base.get("Amount", 0)
+                symbol = pos.get("DisplayAndFormat", {}).get("Symbol", "")
+
+                # Check if our short put still exists
+                if uic == short_uic and amount < 0:
+                    short_put_found = True
+
+                # Check for QQQ stock position (sign of assignment)
+                # When a put is assigned, you buy the stock at strike price
+                if asset_type == "Stock" and "QQQ" in symbol and amount > 0:
+                    stock_position_found = True
+                    stock_shares = amount
+
+            # Early assignment detection
+            if not short_put_found:
+                assignment_msg = (
+                    f"POS-004: Short put (UIC {short_uic}, ${short_strike}) "
+                    f"disappeared from Saxo"
+                )
+
+                if stock_position_found:
+                    assignment_msg += f" - QQQ stock position found ({stock_shares} shares) - LIKELY EARLY ASSIGNMENT"
+
+                    logger.critical("=" * 70)
+                    logger.critical("🚨 POS-004: EARLY ASSIGNMENT DETECTED 🚨")
+                    logger.critical("=" * 70)
+                    logger.critical(f"   Short put ${short_strike} was ASSIGNED")
+                    logger.critical(f"   Now holding {stock_shares} shares of QQQ")
+                    logger.critical(f"   Current QQQ price: ${self.current_price:.2f}")
+                    logger.critical(f"   Assignment cost: ${short_strike * 100:.2f} per contract")
+                    logger.critical("")
+                    logger.critical("   ACTION REQUIRED:")
+                    logger.critical("   1. Bot will clear the short put from memory")
+                    logger.critical("   2. Manually sell the QQQ stock position")
+                    logger.critical("   3. Bot will sell new short put on next iteration")
+                    logger.critical("=" * 70)
+
+                    if self.trade_logger:
+                        self.trade_logger.log_safety_event({
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "event_type": "EARLY_ASSIGNMENT",
+                            "severity": "CRITICAL",
+                            "qqq_price": self.current_price,
+                            "short_strike": short_strike,
+                            "stock_shares": stock_shares,
+                            "action_taken": "SHORT_PUT_CLEARED",
+                            "description": assignment_msg,
+                        })
+
+                    # Clear the short put from our state
+                    self.diagonal.short_put = None
+                    self._save_state()
+
+                    return assignment_msg
+                else:
+                    # Short put disappeared but no stock - could be expiration OTM
+                    logger.warning(f"⚠️ {assignment_msg} (no stock found - may have expired OTM)")
+                    self.diagonal.short_put = None
+                    self._save_state()
+                    return assignment_msg
+
+            return None
+
+        except Exception as e:
+            logger.error(f"POS-004: Error checking for early assignment: {e}")
+            return None
+
     def _reconcile_positions_periodic(self) -> None:
         """
         POS-002: Periodic position reconciliation during trading hours.
@@ -976,6 +1181,12 @@ class RollingPutDiagonalStrategy:
                 return  # Not time yet
 
         self._last_reconciliation_time = now
+
+        # POS-004: First check for early assignment (more specific check)
+        assignment = self._check_for_early_assignment()
+        if assignment:
+            # Assignment detected and handled - skip general reconciliation
+            return
 
         # Verify positions
         match, message = self._verify_positions_with_saxo()
@@ -1211,6 +1422,81 @@ class RollingPutDiagonalStrategy:
             return True, bid, ask
 
         return True, bid, ask
+
+    def _check_spread_acceptable_for_entry(
+        self,
+        uic: int,
+        strike: float,
+        max_spread_percent: float = 10.0
+    ) -> Tuple[bool, str]:
+        """
+        ORDER-005: Check if option spread is acceptable BEFORE placing entry order.
+
+        This is more strict than the MARKET order spread check because we want
+        to avoid entering positions with poor liquidity.
+
+        Bill Belt's strategy works best with liquid strikes - entering with wide
+        spreads erodes edge significantly.
+
+        Args:
+            uic: Option UIC
+            strike: Strike price (for logging)
+            max_spread_percent: Maximum acceptable spread as % of mid (default 10%)
+
+        Returns:
+            Tuple[bool, str]: (is_acceptable, reason_if_not)
+        """
+        try:
+            quote = self.client.get_quote(uic, asset_type="StockOption")
+            is_valid, bid, ask = self._validate_quote(quote, f"Strike ${strike}")
+
+            if not is_valid:
+                return False, f"Invalid quote for strike ${strike}"
+
+            mid = (bid + ask) / 2
+            spread = ask - bid
+
+            if mid <= 0:
+                return False, f"Invalid mid price for strike ${strike}"
+
+            spread_pct = (spread / mid) * 100
+
+            if spread_pct > max_spread_percent:
+                logger.warning(f"⚠️ ORDER-005: Spread too wide for entry on ${strike} strike")
+                logger.warning(f"   Bid: ${bid:.2f}, Ask: ${ask:.2f}, Spread: ${spread:.2f} ({spread_pct:.1f}%)")
+                logger.warning(f"   Max allowed: {max_spread_percent}%")
+                return False, f"Spread {spread_pct:.1f}% exceeds max {max_spread_percent}%"
+
+            logger.debug(f"ORDER-005: Spread acceptable for ${strike}: {spread_pct:.1f}% <= {max_spread_percent}%")
+            return True, f"Spread OK: {spread_pct:.1f}%"
+
+        except Exception as e:
+            logger.error(f"ORDER-005: Error checking spread for ${strike}: {e}")
+            return False, f"Error: {e}"
+
+    def _get_option_mid_price(self, uic: int) -> Optional[float]:
+        """
+        DRY-001: Get the mid-price for an option for simulated P&L tracking.
+
+        Args:
+            uic: Option UIC
+
+        Returns:
+            Mid-price or None if unavailable
+        """
+        try:
+            quote = self.client.get_quote(uic, asset_type="StockOption")
+            is_valid, bid, ask = self._validate_quote(quote, f"UIC {uic}")
+
+            if is_valid and bid and ask:
+                mid = (bid + ask) / 2
+                return mid
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"DRY-001: Error getting mid-price for UIC {uic}: {e}")
+            return None
 
     # =========================================================================
     # EMERGENCY POSITION MANAGEMENT
@@ -1890,18 +2176,33 @@ class RollingPutDiagonalStrategy:
         """Convert Saxo position dictionary to PutPosition dataclass."""
         base = pos_dict.get("PositionBase", {})
         display = pos_dict.get("DisplayAndFormat", {})
+        options_data = base.get("OptionsData", {})
 
         # Extract strike and expiry from symbol (e.g., "QQQ/21Jan26P500")
         symbol = display.get("Symbol", "")
         strike = 0.0
         expiry = ""
 
-        # Try to parse from symbol - format varies
-        # Also check structured fields
-        if "StrikePrice" in base:
-            strike = base.get("StrikePrice", 0)
-        if "ExpiryDate" in base:
+        # Try structured fields first (most reliable)
+        if options_data.get("Strike"):
+            strike = float(options_data.get("Strike", 0))
+        elif base.get("StrikePrice"):
+            strike = float(base.get("StrikePrice", 0))
+
+        if options_data.get("ExpiryDate"):
+            expiry = options_data.get("ExpiryDate", "")
+        elif base.get("ExpiryDate"):
             expiry = base.get("ExpiryDate", "")
+
+        # POS-008: Parse from symbol if structured fields are missing
+        if (not strike or not expiry) and symbol:
+            parsed_strike, parsed_expiry = self._parse_option_symbol(symbol)
+            if not strike and parsed_strike:
+                strike = parsed_strike
+                logger.info(f"POS-008: Parsed strike ${strike} from symbol '{symbol}'")
+            if not expiry and parsed_expiry:
+                expiry = parsed_expiry
+                logger.info(f"POS-008: Parsed expiry {expiry} from symbol '{symbol}'")
 
         return PutPosition(
             position_id=str(base.get("PositionId", "")),
@@ -1914,6 +2215,60 @@ class RollingPutDiagonalStrategy:
             delta=pos_dict.get("Greeks", {}).get("Delta", 0.0),
             theta=pos_dict.get("Greeks", {}).get("Theta", 0.0),
         )
+
+    def _parse_option_symbol(self, symbol: str) -> Tuple[Optional[float], Optional[str]]:
+        """
+        POS-008: Parse strike and expiry from option symbol.
+
+        Saxo symbols can have formats like:
+        - "QQQ/21Jan26P500" (standard format)
+        - "QQQ:xnas/21JAN26P500.00"
+        - "QQQ/Jan26P500"
+
+        Args:
+            symbol: Option symbol string
+
+        Returns:
+            Tuple[Optional[float], Optional[str]]: (strike, expiry_date_str) or (None, None)
+        """
+        import re
+
+        if not symbol:
+            return None, None
+
+        try:
+            # Extract the part after the underlying symbol (e.g., after "QQQ/")
+            match = re.search(r'(\d{1,2})([A-Z][a-z]{2})(\d{2})[PC](\d+(?:\.\d+)?)', symbol, re.IGNORECASE)
+
+            if match:
+                day = match.group(1)
+                month_str = match.group(2).capitalize()
+                year_short = match.group(3)
+                strike_str = match.group(4)
+
+                # Parse strike
+                strike = float(strike_str)
+
+                # Parse expiry date
+                month_map = {
+                    'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
+                    'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
+                    'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
+                }
+
+                month = month_map.get(month_str, '01')
+                year = f"20{year_short}"
+                expiry = f"{year}-{month}-{day.zfill(2)}"
+
+                logger.debug(f"POS-008: Parsed symbol '{symbol}' -> strike=${strike}, expiry={expiry}")
+                return strike, expiry
+
+            logger.warning(f"POS-008: Could not parse option symbol '{symbol}'")
+            return None, None
+
+        except Exception as e:
+            logger.warning(f"POS-008: Error parsing symbol '{symbol}': {e}")
+            return None, None
 
     def _check_stuck_state(self) -> bool:
         """
@@ -1966,6 +2321,9 @@ class RollingPutDiagonalStrategy:
             if self.current_price <= 0:
                 logger.warning("Invalid QQQ price")
                 return False
+
+            # MKT-002: Record price for flash crash velocity detection
+            self._record_price_for_velocity(self.current_price)
 
             # Get chart data for technical indicators
             daily_bars = self.client.get_daily_ohlc(
@@ -2146,20 +2504,56 @@ class RollingPutDiagonalStrategy:
             logger.info(f"Found short put: strike ${short_put_data['strike']}, "
                        f"DTE {short_put_data['dte']}")
 
+            # ORDER-005: Validate spreads BEFORE placing orders
+            # Wide spreads erode Bill Belt's strategy edge significantly
+            max_spread_pct = self.management_config.get("max_entry_spread_percent", 10.0)
+
+            long_spread_ok, long_reason = self._check_spread_acceptable_for_entry(
+                long_put_data["uic"], long_put_data["strike"], max_spread_pct
+            )
+            if not long_spread_ok:
+                logger.warning(f"⚠️ ORDER-005: Long put spread too wide - aborting entry")
+                logger.warning(f"   {long_reason}")
+                self._set_action_cooldown("enter_campaign")
+                return False
+
+            short_spread_ok, short_reason = self._check_spread_acceptable_for_entry(
+                short_put_data["uic"], short_put_data["strike"], max_spread_pct
+            )
+            if not short_spread_ok:
+                logger.warning(f"⚠️ ORDER-005: Short put spread too wide - aborting entry")
+                logger.warning(f"   {short_reason}")
+                self._set_action_cooldown("enter_campaign")
+                return False
+
+            logger.info(f"ORDER-005: Spreads acceptable - proceeding with entry")
+
             # Step 3: Place orders
             if self.dry_run:
-                logger.info("[DRY RUN] Would place orders:")
-                logger.info(f"  BUY long put: UIC {long_put_data['uic']}, strike {long_put_data['strike']}")
-                logger.info(f"  SELL short put: UIC {short_put_data['uic']}, strike {short_put_data['strike']}")
+                # DRY-001: Use mid-prices for simulated P&L tracking
+                long_mid = self._get_option_mid_price(long_put_data["uic"])
+                short_mid = self._get_option_mid_price(short_put_data["uic"])
 
-                # Simulate success in dry run
+                # Calculate simulated net debit (buy long - sell short)
+                simulated_net_debit = (long_mid or 0) - (short_mid or 0)
+                simulated_premium_received = (short_mid or 0) * 100  # Per contract
+
+                logger.info("[DRY RUN] Would place orders:")
+                logger.info(f"  BUY long put: UIC {long_put_data['uic']}, strike ${long_put_data['strike']}, "
+                           f"mid ${long_mid:.2f}" if long_mid else "mid N/A")
+                logger.info(f"  SELL short put: UIC {short_put_data['uic']}, strike ${short_put_data['strike']}, "
+                           f"mid ${short_mid:.2f}" if short_mid else "mid N/A")
+                logger.info(f"  Simulated net debit: ${simulated_net_debit:.2f}")
+
+                # Simulate success in dry run with mid-prices
                 self.diagonal = DiagonalPosition(
                     long_put=PutPosition(
                         uic=long_put_data["uic"],
                         strike=long_put_data["strike"],
                         expiry=long_put_data["expiry"],
                         quantity=1,
-                        entry_price=0.0,  # Unknown in dry run
+                        entry_price=long_mid or 0.0,  # DRY-001: Use mid-price
+                        current_price=long_mid or 0.0,
                         delta=long_put_data["delta"],
                     ),
                     short_put=PutPosition(
@@ -2167,10 +2561,12 @@ class RollingPutDiagonalStrategy:
                         strike=short_put_data["strike"],
                         expiry=short_put_data["expiry"],
                         quantity=-1,
-                        entry_price=0.0,  # Unknown in dry run
+                        entry_price=short_mid or 0.0,  # DRY-001: Use mid-price
+                        current_price=short_mid or 0.0,
                     ),
                     campaign_number=self.metrics.campaign_count + 1,
                     campaign_start_date=datetime.now().strftime("%Y-%m-%d"),
+                    total_premium_collected=simulated_premium_received,
                 )
 
                 # Log the simulated trade to Google Sheets
@@ -2178,14 +2574,14 @@ class RollingPutDiagonalStrategy:
                     self.trade_logger.log_trade(
                         action="[SIMULATED] ENTER_CAMPAIGN",
                         strike=f"{long_put_data['strike']}/{short_put_data['strike']}",
-                        price=0.0,  # Unknown in dry run
+                        price=simulated_net_debit,  # DRY-001: Use actual mid-price
                         delta=long_put_data.get("delta", -0.33),
-                        pnl=0.0,
+                        pnl=0.0,  # PnL starts at 0
                         saxo_client=self.client,
                         underlying_price=self.current_price,
                         option_type="Put Diagonal",
                         expiry_date=long_put_data["expiry"],
-                        premium_received=0.0,  # Unknown in dry run
+                        premium_received=simulated_premium_received,  # DRY-001: Actual premium
                         trade_reason=f"[DRY RUN] Campaign #{self.diagonal.campaign_number}"
                     )
 
@@ -3623,6 +4019,18 @@ class RollingPutDiagonalStrategy:
 
         logger.info(f"QQQ: ${self.current_price:.2f} | EMA9: ${self.current_ema_9:.2f} | "
                    f"State: {self.state.value}")
+
+        # MKT-002: Check for flash crash/rally velocity
+        # Critical for Rolling Put Diagonal - short put can go deep ITM on flash crash
+        flash_move = self.check_flash_crash_velocity()
+        if flash_move:
+            move_pct, direction = flash_move
+            # Flash DOWN is dangerous - short put gets threatened
+            # This triggers same close campaign check but with more urgency
+            if direction == "DOWN" and self.state == RPDState.POSITION_OPEN:
+                logger.critical(f"🚨 MKT-002: Flash DOWN {abs(move_pct):.2f}% - checking short put urgently")
+                # Let should_close_campaign() handle the actual decision
+                # which will check max_unrealized_loss and EMA exit
 
         # POS-002: Periodic position reconciliation (verify local state matches Saxo)
         self._reconcile_positions_periodic()

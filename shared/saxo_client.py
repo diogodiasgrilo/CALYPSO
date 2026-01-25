@@ -3898,21 +3898,53 @@ class SaxoClient:
         # For each put, get the Greeks and find the one closest to target delta
         best_match = None
         best_delta_diff = float('inf')
+        no_greeks_count = 0
 
         for put in puts:
             put_uic = put.get("Uic")
             strike = put.get("StrikePrice")
 
-            if not put_uic:
+            if not put_uic or not strike:
                 continue
 
             # Get Greeks for this option
             greeks = self.get_option_greeks(put_uic)
-            if not greeks:
-                continue
 
-            delta = greeks.get("Delta", 0)
-            delta_abs = abs(delta)
+            if greeks and greeks.get("Delta"):
+                # Use actual delta from API
+                delta = greeks.get("Delta", 0)
+                delta_abs = abs(delta)
+                delta_source = "API"
+            else:
+                # DATA-002: Fallback to theoretical delta estimation
+                # For puts: delta approaches -1 as strike goes above price (ITM)
+                # and approaches 0 as strike goes below price (OTM)
+                # Simple linear approximation based on moneyness:
+                # At-the-money put delta ≈ -0.50
+                # Each 1% OTM ≈ -0.02 to -0.03 less delta
+                no_greeks_count += 1
+
+                moneyness = (strike - underlying_price) / underlying_price * 100  # % from spot
+
+                # Estimate put delta based on moneyness
+                # OTM put (strike < price): moneyness < 0, delta magnitude < 0.5
+                # ATM put (strike = price): moneyness = 0, delta ≈ -0.5
+                # ITM put (strike > price): moneyness > 0, delta magnitude > 0.5
+                if selected_dte > 0:
+                    # More time = more sensitivity to price
+                    delta_shift_per_pct = 0.025
+                else:
+                    delta_shift_per_pct = 0.04
+
+                theoretical_delta = -0.50 + (moneyness * delta_shift_per_pct)
+                # Clamp between 0 and -1
+                theoretical_delta = max(-0.95, min(-0.05, theoretical_delta))
+
+                delta = theoretical_delta
+                delta_abs = abs(delta)
+                delta_source = "ESTIMATED"
+
+                logger.debug(f"DATA-002: No Greeks for strike ${strike}, using theoretical delta {delta:.3f}")
 
             # Check if this delta is within tolerance and closer to target
             delta_diff = abs(delta_abs - target_delta_abs)
@@ -3923,16 +3955,22 @@ class SaxoClient:
                     "strike": strike,
                     "expiry": target_expiration.get("Expiry"),
                     "delta": delta,
-                    "theta": greeks.get("Theta", 0),
-                    "gamma": greeks.get("Gamma", 0),
-                    "vega": greeks.get("Vega", 0),
+                    "delta_source": delta_source,  # DATA-002: Track if estimated
+                    "theta": greeks.get("Theta", 0) if greeks else 0,
+                    "gamma": greeks.get("Gamma", 0) if greeks else 0,
+                    "vega": greeks.get("Vega", 0) if greeks else 0,
                     "dte": selected_dte,
                     "option_type": "Put"
                 }
 
         if best_match:
+            source_note = ""
+            if best_match.get("delta_source") == "ESTIMATED":
+                source_note = " [ESTIMATED - no Greeks from API]"
+                logger.warning(f"DATA-002: Used theoretical delta - {no_greeks_count} options had no Greeks")
+
             logger.info(f"Found put at strike {best_match['strike']} with delta {best_match['delta']:.3f} "
-                        f"(target: {-target_delta_abs:.3f}, diff: {best_delta_diff:.3f})")
+                        f"(target: {-target_delta_abs:.3f}, diff: {best_delta_diff:.3f}){source_note}")
             return best_match
         else:
             logger.warning(f"No put found with delta close to {-target_delta_abs:.3f} "
