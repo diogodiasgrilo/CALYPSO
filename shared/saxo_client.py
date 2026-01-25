@@ -2683,16 +2683,34 @@ class SaxoClient:
             order_still_open = any(o.get("OrderId") == order_id for o in open_orders)
 
             if not order_still_open:
-                # Order is no longer open - assume filled
+                # Order is no longer open - verify fill via activities
+                # This catches fast fills that complete before our polling interval
                 elapsed = time.time() - start_time
-                logger.info(f"✓ Limit order filled in {elapsed:.1f}s")
-                return {
-                    "success": True,
-                    "filled": True,
-                    "order_id": order_id,
-                    "message": f"Order filled in {elapsed:.1f}s",
-                    "fill_price": limit_price
-                }
+
+                # FAST-FILL-001: Use activity check to confirm fill and get actual price
+                filled, fill_details = self.check_order_filled_by_activity(order_id, uic)
+                if filled:
+                    actual_price = fill_details.get("fill_price", limit_price) if fill_details else limit_price
+                    logger.info(f"✓ Limit order verified FILLED via activity check in {elapsed:.1f}s @ ${actual_price:.2f}")
+                    return {
+                        "success": True,
+                        "filled": True,
+                        "order_id": order_id,
+                        "message": f"Order filled in {elapsed:.1f}s (verified via activity)",
+                        "fill_price": actual_price,
+                        "verified_via_activity": True
+                    }
+                else:
+                    # Order disappeared but no fill activity found - likely filled anyway
+                    # Return success with limit price as fallback
+                    logger.info(f"✓ Limit order likely filled in {elapsed:.1f}s (no activity found, assuming filled)")
+                    return {
+                        "success": True,
+                        "filled": True,
+                        "order_id": order_id,
+                        "message": f"Order filled in {elapsed:.1f}s",
+                        "fill_price": limit_price
+                    }
 
             time.sleep(check_interval)
 
@@ -2731,8 +2749,21 @@ class SaxoClient:
 
         if not cancel_success:
             # Cancel returned error but order is no longer in open orders
-            # It might have filled at the last moment or been rejected
-            logger.warning(f"Order {order_id} not found after cancel - may have filled or been rejected")
+            # FAST-FILL-001: Check if it filled at the last moment via activities
+            logger.warning(f"Order {order_id} not found after cancel - checking if it filled...")
+            filled, fill_details = self.check_order_filled_by_activity(order_id, uic)
+            if filled:
+                actual_price = fill_details.get("fill_price", limit_price) if fill_details else limit_price
+                logger.info(f"✓ Order {order_id} WAS FILLED (cancel failed because order completed) @ ${actual_price:.2f}")
+                return {
+                    "success": True,
+                    "filled": True,
+                    "order_id": order_id,
+                    "message": "Order filled just before timeout (verified via activity)",
+                    "fill_price": actual_price,
+                    "verified_via_activity": True
+                }
+            logger.warning(f"Order {order_id} not found in activities - may have been rejected")
 
         return {
             "success": False,
@@ -2819,13 +2850,28 @@ class SaxoClient:
                 "fill_price": None
             }
 
-        logger.info(f"✓ Market order {order_id} executed")
+        # FAST-FILL-001: Use activity check to get actual fill price for market orders
+        filled, fill_details = self.check_order_filled_by_activity(order_id, uic)
+        if filled:
+            actual_price = fill_details.get("fill_price") if fill_details else None
+            logger.info(f"✓ Market order {order_id} verified FILLED via activity @ ${actual_price:.2f}" if actual_price else f"✓ Market order {order_id} verified FILLED via activity")
+            return {
+                "success": True,
+                "filled": True,
+                "order_id": order_id,
+                "message": "Market order executed (verified via activity)",
+                "fill_price": actual_price,
+                "verified_via_activity": True
+            }
+
+        # Order no longer open but no activity found - assume filled (market orders always fill)
+        logger.info(f"✓ Market order {order_id} executed (no activity details available)")
         return {
             "success": True,
             "filled": True,
             "order_id": order_id,
             "message": "Market order executed",
-            "fill_price": None  # Unknown, would need to check trade history
+            "fill_price": None  # Unknown, activity check didn't find details
         }
 
     def place_aggressive_limit_order(
