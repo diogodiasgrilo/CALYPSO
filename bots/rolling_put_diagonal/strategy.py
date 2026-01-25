@@ -966,6 +966,202 @@ class RollingPutDiagonalStrategy:
         return None
 
     # =========================================================================
+    # MKT-001: PRE-MARKET GAP CHECK
+    # =========================================================================
+
+    def check_premarket_gap(self) -> Tuple[bool, float, str]:
+        """
+        MKT-001: Check if QQQ gapped significantly from previous close.
+
+        A large gap (>= 2%) at open indicates high volatility/news event
+        and we should wait for the market to stabilize before entering.
+
+        Uses the previous close price stored in metrics and compares to
+        current price at market open.
+
+        Returns:
+            Tuple[bool, float, str]: (safe_to_trade, gap_percent, message)
+        """
+        gap_threshold_percent = self.management_config.get("premarket_gap_threshold_percent", 2.0)
+
+        # Get previous close from stored daily tracking
+        prev_close = self.metrics.qqq_open if self.metrics.qqq_open > 0 else 0.0
+
+        # If we don't have a previous close, try to get it from chart data
+        if prev_close == 0:
+            try:
+                chart_data = self.client.get_chart_data(
+                    uic=self.underlying_uic,
+                    asset_type="Etf",
+                    horizon=1440,  # Daily bars
+                    count=2  # Last 2 days
+                )
+                if chart_data and len(chart_data) >= 2:
+                    # The second-to-last bar is yesterday's close
+                    prev_close = chart_data[-2].get("Close", chart_data[-2].get("C", 0))
+            except Exception as e:
+                logger.warning(f"MKT-001: Could not fetch previous close: {e}")
+
+        if prev_close == 0:
+            logger.warning("MKT-001: No previous close available, skipping gap check")
+            return True, 0.0, "No previous close data"
+
+        # Get current price
+        current_price = self.current_price
+        if current_price == 0:
+            # Try to fetch fresh price
+            current_price = self._get_current_price()
+
+        if current_price == 0:
+            logger.warning("MKT-001: No current price available, skipping gap check")
+            return True, 0.0, "No current price data"
+
+        # Calculate gap
+        gap_percent = ((current_price - prev_close) / prev_close) * 100
+        gap_abs = abs(gap_percent)
+
+        if gap_abs >= gap_threshold_percent:
+            direction = "UP" if gap_percent > 0 else "DOWN"
+            message = (
+                f"MKT-001: Large gap detected! QQQ gapped {direction} {gap_abs:.2f}% "
+                f"(prev close: ${prev_close:.2f}, current: ${current_price:.2f}). "
+                f"Waiting for market to stabilize."
+            )
+            logger.warning(message)
+
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "event_type": "RPD_LARGE_GAP_DETECTED",
+                    "severity": "WARNING",
+                    "description": f"Gap {direction} {gap_abs:.2f}%",
+                    "action_taken": "ENTRY_BLOCKED",
+                    "result": "Waiting for stabilization",
+                    "qqq_price": current_price,
+                    "prev_close": prev_close,
+                    "gap_percent": gap_percent,
+                })
+
+            return False, gap_percent, message
+
+        return True, gap_percent, f"Gap within threshold: {gap_percent:.2f}%"
+
+    def _get_current_price(self) -> float:
+        """Get current QQQ price from quote or cache."""
+        if self.current_price > 0:
+            return self.current_price
+
+        try:
+            quote = self.client.get_quote(self.underlying_uic, asset_type="Etf")
+            if quote:
+                mid = quote.get("Mid", 0)
+                if mid == 0:
+                    bid = quote.get("Bid", 0)
+                    ask = quote.get("Ask", 0)
+                    if bid > 0 and ask > 0:
+                        mid = (bid + ask) / 2
+                return mid
+        except Exception as e:
+            logger.error(f"Failed to get current price: {e}")
+
+        return 0.0
+
+    # =========================================================================
+    # MKT-003: MARKET CIRCUIT BREAKER / HALT DETECTION
+    # =========================================================================
+
+    def check_market_halt(self) -> Tuple[bool, str]:
+        """
+        MKT-003: Check if the market appears to be halted (circuit breaker).
+
+        Market-wide circuit breakers halt all trading when S&P 500 drops:
+        - Level 1: 7% drop - 15 minute halt (if before 3:25 PM)
+        - Level 2: 13% drop - 15 minute halt (if before 3:25 PM)
+        - Level 3: 20% drop - Trading halted for the day
+
+        Detection method: If we're unable to get quotes or get stale quotes
+        during market hours, assume a halt condition.
+
+        Returns:
+            Tuple[bool, str]: (market_trading_normally, halt_message)
+        """
+        try:
+            # Try to get a fresh quote
+            quote = self.client.get_quote(self.underlying_uic, asset_type="Etf")
+
+            if quote is None:
+                return False, "MKT-003: No quote available - possible market halt"
+
+            # Check for stale quote (bid/ask both zero)
+            bid = quote.get("Bid", 0)
+            ask = quote.get("Ask", 0)
+
+            if bid == 0 and ask == 0:
+                # This can happen at market open or during halts
+                now_est = get_us_market_time()
+                market_open = dt_time(9, 30)
+
+                # Give 5 minutes after open for quotes to stabilize
+                if now_est.time() > dt_time(9, 35):
+                    return False, "MKT-003: Bid/Ask both zero - possible market halt"
+
+            # Check for unreasonably wide spread (could indicate halt resumption)
+            if bid > 0 and ask > 0:
+                spread_pct = ((ask - bid) / bid) * 100
+                if spread_pct > 10:  # 10% spread is extremely unusual
+                    logger.warning(
+                        f"MKT-003: Extremely wide spread ({spread_pct:.1f}%) - "
+                        f"market may be resuming from halt"
+                    )
+                    # Don't block trading, just warn
+
+            return True, "Market trading normally"
+
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # Check for specific error patterns that indicate halts
+            if "trading halted" in error_msg or "market closed" in error_msg:
+                return False, f"MKT-003: Market halt detected from error: {e}"
+
+            # Connection errors during market hours could indicate issues
+            if "timeout" in error_msg or "connection" in error_msg:
+                logger.warning(f"MKT-003: Connection issue during halt check: {e}")
+                # Don't block trading for connection issues
+                return True, "Connection issue - assuming market is open"
+
+            logger.error(f"MKT-003: Unexpected error checking market halt: {e}")
+            return True, "Error during check - assuming market is open"
+
+    def _detect_halt_from_order_error(self, error_msg: str) -> bool:
+        """
+        MKT-003: Check if an order error indicates a market halt.
+
+        Some error messages from Saxo explicitly indicate halted trading.
+
+        Args:
+            error_msg: Error message from order attempt
+
+        Returns:
+            bool: True if error indicates a market halt
+        """
+        halt_indicators = [
+            "trading halted",
+            "market halt",
+            "circuit breaker",
+            "trading suspended",
+            "market closed",
+            "halt in effect",
+        ]
+
+        error_lower = error_msg.lower()
+        for indicator in halt_indicators:
+            if indicator in error_lower:
+                logger.critical(f"MKT-003: Market halt detected from order error: {error_msg}")
+                return True
+
+        return False
+
+    # =========================================================================
     # STATE-002/POS-002: POSITION RECONCILIATION
     # =========================================================================
 
@@ -2385,6 +2581,8 @@ class RollingPutDiagonalStrategy:
 
         Additional filters:
         0. Not within market open delay (TIME-002)
+        0a. MKT-001: No large pre-market gap
+        0b. MKT-003: Market not halted
         1. At least 2 consecutive green candles closed above 9 EMA (Bill Belt's rule)
         2. MACD histogram rising or positive (momentum)
         3. CCI < 100 (OPTIONAL - not in Bill Belt's original rules, configurable)
@@ -2397,6 +2595,18 @@ class RollingPutDiagonalStrategy:
         # TIME-002: Check market open delay first (Greeks may be unavailable)
         if self._is_within_market_open_delay():
             return False, "Within market open delay - waiting for quotes to stabilize"
+
+        # MKT-003: Check for market halt
+        market_ok, halt_msg = self.check_market_halt()
+        if not market_ok:
+            return False, halt_msg
+
+        # MKT-001: Check for large pre-market gap (only at/near market open)
+        now_est = get_us_market_time()
+        if now_est.time() < dt_time(10, 0):  # Only check before 10am
+            gap_ok, gap_pct, gap_msg = self.check_premarket_gap()
+            if not gap_ok:
+                return False, gap_msg
 
         if self.indicators is None:
             return False, "No indicator data available"

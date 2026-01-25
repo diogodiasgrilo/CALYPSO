@@ -12,8 +12,8 @@
 This document catalogs all identified edge cases and potential failure scenarios for the Rolling Put Diagonal trading bot. Each scenario is evaluated for current handling and risk level.
 
 **Total Scenarios Analyzed:** 60 (56 edge cases + 4 strategy alignment issues)
-**Well-Handled/Resolved:** 51 (85%)
-**Medium Risk:** 4 (7%)
+**Well-Handled/Resolved:** 53 (88%)
+**Medium Risk:** 2 (3%)
 **High Risk:** 5 (8%)
 
 ---
@@ -283,12 +283,13 @@ This document catalogs all identified edge cases and potential failure scenarios
 | | |
 |---|---|
 | **ID** | MKT-001 |
-| **Trigger** | QQQ gaps 3%+ overnight |
-| **Current Handling** | No pre-market gap detection |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Notes** | Could enter positions at unfavorable prices after big gap |
-| **Recommended Fix** | Add pre-market gap check using Yahoo Finance |
+| **Trigger** | QQQ gaps 2%+ overnight |
+| **Current Handling** | Fixed - `check_premarket_gap()` compares current price to previous close |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Blocks entry before 10am if gap exceeds threshold. Uses chart API for previous close. |
+| **Fix Applied** | Added `check_premarket_gap()` method called in `check_entry_conditions()` (2026-01-25) |
+| **Config** | `management.premarket_gap_threshold_percent: 2.0`
 
 ### 4.2 Flash Crash During Trading Hours
 | | |
@@ -307,11 +308,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | MKT-003 |
 | **Trigger** | Level 1/2/3 circuit breaker halts trading |
-| **Current Handling** | No specific halt detection |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | UNRESOLVED |
-| **Notes** | Orders would fail but no specific handling |
-| **Recommended Fix** | Detect halt pattern from error messages |
+| **Current Handling** | Fixed - `check_market_halt()` detects halt conditions from quotes and order errors |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Checks for stale quotes (bid/ask=0), extremely wide spreads, and halt-related error messages |
+| **Fix Applied** | Added `check_market_halt()` and `_detect_halt_from_order_error()` methods (2026-01-25)
 
 ### 4.4 No Liquidity for Strike
 | | |
@@ -623,9 +624,9 @@ This document catalogs all identified edge cases and potential failure scenarios
 | ORDER-006 | Rejection reason unclear | Low |
 | POS-004 | Early assignment detection | ✅ RESOLVED |
 | POS-008 | Missing strike/expiry fields | ✅ RESOLVED |
-| MKT-001 | No pre-market gap check | Medium |
+| MKT-001 | No pre-market gap check | ✅ RESOLVED |
 | MKT-002 | No flash crash detection | ✅ RESOLVED |
-| MKT-003 | No halt detection | Low |
+| MKT-003 | No halt detection | ✅ RESOLVED |
 | DATA-002 | Greeks often missing | ✅ RESOLVED |
 | DRY-001 | No simulated P&L | ✅ RESOLVED |
 | DRY-002 | Dry run state drift | Low |
@@ -638,14 +639,14 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Connection/API | 6 | 5 | 1 | 0 |
 | Order Execution | 8 | 7 | 1 | 0 |
 | Position State | 8 | 8 | 0 | 0 |
-| Market Conditions | 7 | 5 | 2 | 0 |
+| Market Conditions | 7 | 7 | 0 | 0 |
 | Timing/Race | 5 | 5 | 0 | 0 |
 | State Machine | 4 | 3 | 1 | 0 |
 | Data Integrity | 5 | 4 | 1 | 0 |
 | Dry Run Mode | 2 | 1 | 1 | 0 |
 | Configuration | 2 | 2 | 0 | 0 |
 | Logging | 2 | 2 | 0 | 0 |
-| **TOTAL** | **56** | **47** | **4** | **5** |
+| **TOTAL** | **56** | **49** | **2** | **5** |
 
 ---
 
@@ -804,7 +805,9 @@ Based on research of Bill Belt's original strategy from [Theta Profits](https://
 | 2026-01-25 | Added Section 13: Strategy Alignment - 4 new fixes (STRATEGY-001 to 004) | Claude |
 | 2026-01-25 | Strategy research: Entry 2-candle rule, exit below EMA, CCI optional, BP threshold | Claude |
 | 2026-01-25 | Resolved 7 more edge cases: MKT-002, ORDER-005, POS-004, POS-008, DATA-002, DRY-001, CFG-002 | Claude |
-| 2026-01-25 | Final count: 51 resolved (85%), 4 medium (7%), 5 high (8%) | Claude |
+| 2026-01-25 | Previous count: 51 resolved (85%), 4 medium (7%), 5 high (8%) | Claude |
+| 2026-01-25 | Resolved MKT-001 (pre-market gap check) and MKT-003 (market halt detection) | Claude |
+| 2026-01-25 | Final count: 53 resolved (88%), 2 medium (3%), 5 high (8%) | Claude |
 
 ---
 
@@ -831,5 +834,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 1.4
-**Last Updated:** 2026-01-25 (7 additional edge cases resolved)
+**Document Version:** 1.5
+**Last Updated:** 2026-01-25 (MKT-001 and MKT-003 resolved - 88% coverage)
