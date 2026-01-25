@@ -50,7 +50,7 @@ shared/               # Shared modules used by all bots
 | Bot | Service Name | Strategy | Config Path |
 |-----|--------------|----------|-------------|
 | Iron Fly | `iron_fly_0dte.service` | Doc Severson's 0DTE Iron Butterfly | `bots/iron_fly_0dte/config/config.json` |
-| Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral_0dte/config/config.json` |
+| Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral/config/config.json` |
 | Rolling Put Diagonal | `rolling_put_diagonal.service` | Bill Belt's Rolling Put Diagonal | `bots/rolling_put_diagonal/config/config.json` |
 
 All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `StartLimitBurst=5`
@@ -265,7 +265,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 ```bash
 # View VM config
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/iron_fly_0dte/config/config.json"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/delta_neutral_0dte/config/config.json"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/delta_neutral/config/config.json"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/rolling_put_diagonal/config/config.json"
 
 # View systemd service files
@@ -463,7 +463,7 @@ SCRIPT
 
 1. **Git on VM:** Must run as `calypso` user: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
 2. **Service names use underscores:** `iron_fly_0dte`, `delta_neutral`, `rolling_put_diagonal`
-3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral_0dte,rolling_put_diagonal}/bot.log`
+3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral,rolling_put_diagonal}/bot.log`
 4. **Position data:** `/opt/calypso/data/iron_fly_position.json`
 5. **Config files are gitignored:** Real credentials come from Secret Manager
 6. **All API calls are direct:** No caching for order status or positions (always fresh from Saxo)

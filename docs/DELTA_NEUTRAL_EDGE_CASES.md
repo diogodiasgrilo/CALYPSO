@@ -11,8 +11,8 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 44
-**Well-Handled/Resolved:** 44 (100%)
+**Total Scenarios Analyzed:** 45
+**Well-Handled/Resolved:** 45 (100%)
 **Medium Risk:** 0 (0%)
 **High Risk:** 0 (0%) ✅
 
@@ -379,6 +379,17 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Status** | RESOLVED |
 | **Notes** | New strikes calculated at entry time with current price. |
 
+### 5.7 Opening Shorts That Would Outlive Longs Exit Threshold
+| | |
+|---|---|
+| **ID** | TIME-007 |
+| **Trigger** | Thursday: Longs at 65 DTE, attempt to open 7 DTE shorts. Longs would hit 60 DTE exit on Monday, wasting 4 days of shorts premium. |
+| **Current Handling** | **Proactive restart check** before opening/rolling shorts. Detects conflict and closes everything to start fresh. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_get_long_straddle_dte()`, `_get_new_shorts_dte()`, and `_should_close_and_restart_before_shorts()` methods in `strategy.py` (~8240-8336). Before opening shorts, calculates: days_until_exit = long_dte - 60. Gets expected DTE for new shorts (5-12 days). If new_shorts_dte > days_until_exit, returns True to trigger proactive close. Caller (enter_short_strangle) closes everything via exit_all_positions() and starts fresh with new 120 DTE longs. Prevents wasting theta on shorts that would be abandoned. |
+| **Fixed In** | 2026-01-25 |
+
 ---
 
 ## 6. STATE MACHINE EDGE CASES
@@ -539,10 +550,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Order Execution | 7 | 7 | 0 | 0 |
 | Position State | 6 | 6 | 0 | 0 |
 | Market Conditions | 6 | 6 | 0 | 0 |
-| Timing/Race | 6 | 6 | 0 | 0 |
+| Timing/Race | 7 | 7 | 0 | 0 |
 | State Machine | 4 | 4 | 0 | 0 |
 | Data Integrity | 6 | 6 | 0 | 0 |
-| **TOTAL** | **44** | **44** | **0** | **0** |
+| **TOTAL** | **45** | **45** | **0** | **0** |
 
 🎉 **100% COVERAGE ACHIEVED!**
 
@@ -582,6 +593,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-22 | UPDATED ITM threshold: Changed from 0.5% to 0.3% for tighter protection | Claude |
 | 2026-01-22 | RENUMBERED TIME-005→TIME-006, DATA-004→DATA-005, DATA-005→DATA-006 | Claude |
 | 2026-01-22 | **44 EDGE CASES - 100% COVERAGE ACHIEVED** | Claude |
+| 2026-01-25 | RESOLVED TIME-007: Added proactive restart check to prevent wasting theta on shorts | Claude |
+| 2026-01-25 | **45 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 
 ---
 
@@ -608,5 +621,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2026-01-22
+**Document Version:** 1.1
+**Last Updated:** 2026-01-25

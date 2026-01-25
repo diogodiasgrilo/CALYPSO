@@ -231,6 +231,32 @@ DATA-004: Invalid Quote Detection (strategy.py ~2552-2571)
    - Prevents stale quote issues at market open
 
 =============================================================================
+PROACTIVE RESTART CHECK (Added 2026-01-25)
+=============================================================================
+
+Before opening/rolling shorts, the bot checks if new shorts would outlive the
+longs hitting 60 DTE. This prevents wasting theta on shorts that would be
+abandoned at the 60 DTE exit.
+
+Implementation (strategy.py ~8240-8336):
+- _get_long_straddle_dte(): Get current DTE of long straddle position
+- _get_new_shorts_dte(): Preview DTE that new shorts would have if opened now
+- _should_close_and_restart_before_shorts(): Main check logic
+
+Logic:
+1. Calculate days_until_exit = long_dte - 60 (exit threshold)
+2. Get expected DTE for new shorts (5-12 days typically)
+3. If new_shorts_dte > days_until_exit:
+   - Log warning with details
+   - Return True to trigger proactive close
+4. Caller (enter_short_strangle) closes everything and starts fresh
+
+Example scenario prevented:
+- Thursday: Longs at 65 DTE, shorts at 7 DTE
+- Without check: Open shorts on Thursday, longs hit 60 DTE Monday → abandon shorts
+- With check: Detect conflict → close everything → start fresh with 120 DTE longs
+
+=============================================================================
 KEY SAFETY PRINCIPLES
 =============================================================================
 
@@ -244,6 +270,7 @@ KEY SAFETY PRINCIPLES
 8. Critical intervention halts EVERYTHING until human reviews
 9. Multiple layers of protection - circuit breaker + intervention + cooldowns
 10. Proactive checks (expiry, gap, flash crash) catch issues before they escalate
+11. Proactive restart prevents wasting theta on shorts that would be abandoned
 
 =============================================================================
 SAFETY CHECK ORDER IN run_strategy_check() (~8350+)
@@ -262,7 +289,7 @@ SAFETY CHECK ORDER IN run_strategy_check() (~8350+)
 11. Normal strategy logic proceeds...
 
 =============================================================================
-Last Updated: 2026-01-22
+Last Updated: 2026-01-25
 =============================================================================
 """
 

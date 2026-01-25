@@ -9,12 +9,13 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 ## Trading Strategies
 
 ### 1. Delta Neutral (SPY)
-**Long Straddle + Weekly Short Strangles** with 5-point recentering:
-- Buy ATM long straddle (90-120 DTE) when VIX < 18
-- Sell weekly short strangles at 1.5-2x expected move
-- Recenter if SPY moves 5+ points from initial strike
-- Roll shorts on Friday or if challenged
-- Exit when longs reach 30-60 DTE
+**Brian Terry's Strategy from Theta Profits** - Long Straddle + Weekly Short Strangles:
+- Buy ATM long straddle (target 120 DTE) when VIX < 18
+- Sell weekly short strangles targeting 1% NET return on long straddle cost
+- Recenter if SPY moves ±5 points from initial strike
+- Roll shorts on Friday to next week's expiry
+- Exit entire position when longs reach 60 DTE
+- **Proactive restart:** Before opening shorts, check if they would outlive longs hitting 60 DTE - if so, close everything and start fresh
 
 ### 2. Iron Fly 0DTE (S&P 500)
 **0DTE Iron Butterfly** with opening range filter:
@@ -256,5 +257,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 3.2.0
-**Last Updated:** 2026-01-23
+**Version:** 3.3.0
+**Last Updated:** 2026-01-25
