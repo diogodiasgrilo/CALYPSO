@@ -466,6 +466,32 @@ class RollingPutDiagonalStrategy:
         # Position isolation: Only look at QQQ options
         self._position_filter_prefix = "QQQ/"
 
+        # TIME-001: Operation lock to prevent overlapping iterations
+        self._operation_in_progress: bool = False
+        self._operation_start_time: Optional[datetime] = None
+
+        # TIME-003: Early close day tracking (only warn once per day)
+        self._early_close_checked_today: bool = False
+        self._last_early_close_check_date: Optional[str] = None
+
+        # STATE-002/POS-002: Position reconciliation tracking
+        self._last_reconciliation_time: Optional[datetime] = None
+        self._reconciliation_interval_minutes: int = 5  # Check every 5 minutes
+        self._position_mismatch_count: int = 0
+
+        # LOG-001: Error deduplication
+        self._last_logged_errors: Dict[str, datetime] = {}
+        self._error_log_cooldown_seconds: int = 300  # Don't log same error within 5 min
+
+        # STATE-003: Circuit breaker state file for persistence
+        self._circuit_breaker_state_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "data",
+            "rolling_put_diagonal_circuit_breaker.json"
+        )
+        # Load persisted circuit breaker state
+        self._load_circuit_breaker_state()
+
         logger.info(f"RollingPutDiagonalStrategy initialized")
         logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
         logger.info(f"  Dry run: {self.dry_run}")
@@ -556,6 +582,9 @@ class RollingPutDiagonalStrategy:
                 "qqq_price": self.current_price,
                 "state": self.state.value,
             })
+
+        # STATE-003: Persist circuit breaker state
+        self._save_circuit_breaker_state()
 
     def _check_circuit_breaker(self) -> bool:
         """
@@ -696,6 +725,492 @@ class RollingPutDiagonalStrategy:
         logger.info("All tracked orphaned orders have been resolved")
         self._orphaned_orders = []
         return False
+
+    # =========================================================================
+    # TIME-001: OPERATION LOCK
+    # =========================================================================
+
+    def _acquire_operation_lock(self) -> bool:
+        """
+        TIME-001: Acquire operation lock to prevent overlapping iterations.
+
+        Returns:
+            bool: True if lock acquired, False if already in progress
+        """
+        if self._operation_in_progress:
+            elapsed = ""
+            if self._operation_start_time:
+                mins = (datetime.now() - self._operation_start_time).total_seconds() / 60
+                elapsed = f" ({mins:.1f} minutes)"
+            logger.warning(f"⚠️ TIME-001: Operation already in progress{elapsed}, skipping this check")
+            return False
+
+        self._operation_in_progress = True
+        self._operation_start_time = datetime.now()
+        return True
+
+    def _release_operation_lock(self) -> None:
+        """TIME-001: Release operation lock."""
+        self._operation_in_progress = False
+        self._operation_start_time = None
+
+    # =========================================================================
+    # TIME-003: EARLY CLOSE DAY DETECTION
+    # =========================================================================
+
+    def is_early_close_day(self, dt: datetime = None) -> Tuple[bool, Optional[str]]:
+        """
+        TIME-003: Check if today is an early market close day (1pm ET).
+
+        Early close days are typically:
+        - Day before Independence Day (if July 4 is on weekday, July 3 closes early)
+        - Day after Thanksgiving (Friday)
+        - Christmas Eve (Dec 24, if weekday)
+        - New Year's Eve (Dec 31, if weekday)
+
+        Args:
+            dt: Date to check (defaults to now in ET)
+
+        Returns:
+            Tuple[bool, Optional[str]]: (is_early_close, reason)
+        """
+        if dt is None:
+            dt = get_us_market_time()
+
+        month = dt.month
+        day = dt.day
+        weekday = dt.weekday()  # 0=Monday, 4=Friday
+
+        # Not on weekends
+        if weekday >= 5:
+            return False, None
+
+        # July 3 (if July 4 is on weekday except Monday where July 3 is Sunday)
+        if month == 7 and day == 3 and weekday <= 4:
+            return True, "Day before Independence Day"
+
+        # Day after Thanksgiving (always Friday)
+        # Thanksgiving is 4th Thursday of November
+        if month == 11 and weekday == 4:  # Friday in November
+            # Check if this is the day after Thanksgiving (4th Thursday)
+            # The day after the 4th Thursday is between 23-29
+            if 23 <= day <= 29:
+                return True, "Day after Thanksgiving"
+
+        # Christmas Eve (Dec 24) if it's a weekday
+        if month == 12 and day == 24 and weekday <= 4:
+            return True, "Christmas Eve"
+
+        # New Year's Eve (Dec 31) if it's a weekday
+        if month == 12 and day == 31 and weekday <= 4:
+            return True, "New Year's Eve"
+
+        return False, None
+
+    def _is_past_early_close(self) -> bool:
+        """
+        TIME-003: Check if we're past the early close time.
+
+        Returns:
+            bool: True if market has already closed (or will close very soon)
+        """
+        is_early, reason = self.is_early_close_day()
+        if not is_early:
+            return False
+
+        now_est = get_us_market_time()
+        # Early close is 1pm, give 15 min buffer
+        early_cutoff = dt_time(12, 45)  # 12:45 PM
+
+        if now_est.time() >= early_cutoff:
+            logger.warning(f"⏰ TIME-003: Past early close cutoff ({reason})")
+            return True
+
+        return False
+
+    def check_early_close_warning(self) -> Optional[str]:
+        """
+        TIME-003: Check for early close day and log warning if applicable.
+
+        Call once at market open to alert operator.
+
+        Returns:
+            Optional[str]: Warning message if early close day, None otherwise
+        """
+        now_est = get_us_market_time()
+        today_str = now_est.strftime("%Y-%m-%d")
+
+        # Only check once per day
+        if self._last_early_close_check_date == today_str:
+            return None
+
+        self._last_early_close_check_date = today_str
+
+        is_early, reason = self.is_early_close_day()
+        if is_early:
+            logger.warning("=" * 60)
+            logger.warning(f"⏰ TIME-003: EARLY CLOSE DAY - {reason}")
+            logger.warning("=" * 60)
+            logger.warning("   Market closes at 1:00 PM ET today")
+            logger.warning("   Roll/entry operations blocked after 12:45 PM")
+            logger.warning("=" * 60)
+
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "event_type": "RPD_EARLY_CLOSE_WARNING",
+                    "severity": "WARNING",
+                    "description": f"Early close day: {reason}",
+                    "action_taken": "LOGGED_WARNING",
+                    "result": "Market closes at 1pm ET",
+                    "qqq_price": self.current_price,
+                })
+
+            return f"Early close day: {reason}"
+
+        return None
+
+    # =========================================================================
+    # STATE-002/POS-002: POSITION RECONCILIATION
+    # =========================================================================
+
+    def _verify_positions_with_saxo(self) -> Tuple[bool, str]:
+        """
+        STATE-002/POS-002: Verify local state matches actual Saxo positions.
+
+        This is CRITICAL for safety - never rely on local state for important actions.
+        Always check Saxo for the real position state.
+
+        Returns:
+            Tuple[bool, str]: (positions_match, discrepancy_description)
+        """
+        if self.dry_run:
+            return True, "Dry run - skipping position verification"
+
+        try:
+            # Get actual positions from Saxo
+            all_positions = self.client.get_positions()
+            if all_positions is None:
+                return False, "Failed to fetch positions from Saxo"
+
+            # Filter for QQQ options only
+            qqq_options = []
+            for pos in all_positions:
+                pos_base = pos.get("PositionBase", {})
+                asset_type = pos_base.get("AssetType", "")
+                symbol = pos.get("DisplayAndFormat", {}).get("Symbol", "")
+
+                if asset_type == "StockOption" and symbol.startswith("QQQ"):
+                    qqq_options.append(pos)
+
+            # Build expected positions from local state
+            expected_long_uics = []
+            expected_short_uics = []
+
+            if self.diagonal:
+                if self.diagonal.long_put and self.diagonal.long_put.uic:
+                    expected_long_uics.append(self.diagonal.long_put.uic)
+                if self.diagonal.short_put and self.diagonal.short_put.uic:
+                    expected_short_uics.append(self.diagonal.short_put.uic)
+
+            # Build actual positions
+            actual_long_uics = []
+            actual_short_uics = []
+
+            for pos in qqq_options:
+                pos_base = pos.get("PositionBase", {})
+                uic = pos_base.get("Uic", 0)
+                amount = pos_base.get("Amount", 0)
+
+                if amount > 0:
+                    actual_long_uics.append(uic)
+                elif amount < 0:
+                    actual_short_uics.append(uic)
+
+            # Compare
+            discrepancies = []
+
+            # Check for missing expected positions
+            for uic in expected_long_uics:
+                if uic not in actual_long_uics:
+                    discrepancies.append(f"Expected long UIC {uic} not found in Saxo")
+
+            for uic in expected_short_uics:
+                if uic not in actual_short_uics:
+                    discrepancies.append(f"Expected short UIC {uic} not found in Saxo")
+
+            # Check for unexpected positions (orphans)
+            for uic in actual_long_uics:
+                if uic not in expected_long_uics:
+                    discrepancies.append(f"Unexpected long UIC {uic} found in Saxo (orphan)")
+
+            for uic in actual_short_uics:
+                if uic not in expected_short_uics:
+                    discrepancies.append(f"Unexpected short UIC {uic} found in Saxo (orphan)")
+
+            if discrepancies:
+                self._position_mismatch_count += 1
+                return False, "; ".join(discrepancies)
+
+            # Positions match
+            self._position_mismatch_count = 0
+            return True, "Positions verified"
+
+        except Exception as e:
+            return False, f"Position verification error: {e}"
+
+    def _reconcile_positions_periodic(self) -> None:
+        """
+        POS-002: Periodic position reconciliation during trading hours.
+
+        Called during each iteration to detect position drift, early assignment,
+        or manual intervention.
+        """
+        if self.dry_run:
+            return
+
+        # Check if it's time for reconciliation
+        now = datetime.now()
+        if self._last_reconciliation_time:
+            elapsed = (now - self._last_reconciliation_time).total_seconds() / 60
+            if elapsed < self._reconciliation_interval_minutes:
+                return  # Not time yet
+
+        self._last_reconciliation_time = now
+
+        # Verify positions
+        match, message = self._verify_positions_with_saxo()
+
+        if not match:
+            logger.warning("=" * 60)
+            logger.warning(f"⚠️ STATE-002: Position mismatch detected!")
+            logger.warning(f"   {message}")
+            logger.warning(f"   Mismatch count: {self._position_mismatch_count}")
+            logger.warning("=" * 60)
+
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "event_type": "RPD_POSITION_MISMATCH",
+                    "severity": "WARNING",
+                    "description": message,
+                    "action_taken": "LOGGED_DISCREPANCY",
+                    "result": f"Mismatch #{self._position_mismatch_count}",
+                    "qqq_price": self.current_price,
+                })
+
+            # If persistent mismatch, open circuit breaker
+            if self._position_mismatch_count >= 3:
+                self._open_circuit_breaker(f"Persistent position mismatch: {message}")
+
+    def _get_actual_positions_from_saxo(self) -> Dict[str, Any]:
+        """
+        Get actual QQQ option positions from Saxo.
+
+        Returns:
+            Dict with 'long_puts' and 'short_puts' lists of position data
+        """
+        result = {"long_puts": [], "short_puts": [], "raw": []}
+
+        try:
+            all_positions = self.client.get_positions()
+            if not all_positions:
+                return result
+
+            for pos in all_positions:
+                pos_base = pos.get("PositionBase", {})
+                asset_type = pos_base.get("AssetType", "")
+                symbol = pos.get("DisplayAndFormat", {}).get("Symbol", "")
+
+                if asset_type != "StockOption" or not symbol.startswith("QQQ"):
+                    continue
+
+                result["raw"].append(pos)
+
+                uic = pos_base.get("Uic", 0)
+                amount = pos_base.get("Amount", 0)
+                options_data = pos_base.get("OptionsData", {})
+                strike = options_data.get("Strike", 0)
+                expiry = options_data.get("ExpiryDate", "")
+
+                pos_info = {
+                    "uic": uic,
+                    "amount": amount,
+                    "strike": strike,
+                    "expiry": expiry,
+                    "symbol": symbol,
+                }
+
+                if amount > 0:
+                    result["long_puts"].append(pos_info)
+                elif amount < 0:
+                    result["short_puts"].append(pos_info)
+
+        except Exception as e:
+            logger.error(f"Error fetching positions from Saxo: {e}")
+
+        return result
+
+    # =========================================================================
+    # LOG-001: ERROR DEDUPLICATION
+    # =========================================================================
+
+    def _log_deduplicated_error(self, error_key: str, message: str, level: str = "ERROR") -> bool:
+        """
+        LOG-001: Log an error with deduplication to prevent log flooding.
+
+        Args:
+            error_key: Unique identifier for this error type
+            message: Error message to log
+            level: Log level (ERROR, WARNING, CRITICAL)
+
+        Returns:
+            bool: True if message was logged, False if suppressed (duplicate)
+        """
+        now = datetime.now()
+
+        # Check if this error was logged recently
+        if error_key in self._last_logged_errors:
+            last_logged = self._last_logged_errors[error_key]
+            elapsed = (now - last_logged).total_seconds()
+            if elapsed < self._error_log_cooldown_seconds:
+                # Suppress duplicate
+                return False
+
+        # Log the error
+        self._last_logged_errors[error_key] = now
+
+        if level == "CRITICAL":
+            logger.critical(message)
+        elif level == "WARNING":
+            logger.warning(message)
+        else:
+            logger.error(message)
+
+        return True
+
+    def _clear_old_error_logs(self) -> None:
+        """Clear expired error log entries to prevent memory growth."""
+        now = datetime.now()
+        expired_keys = []
+
+        for key, timestamp in self._last_logged_errors.items():
+            elapsed = (now - timestamp).total_seconds()
+            if elapsed > self._error_log_cooldown_seconds * 2:
+                expired_keys.append(key)
+
+        for key in expired_keys:
+            del self._last_logged_errors[key]
+
+    # =========================================================================
+    # STATE-003: CIRCUIT BREAKER PERSISTENCE
+    # =========================================================================
+
+    def _save_circuit_breaker_state(self) -> None:
+        """STATE-003: Save circuit breaker state to file for persistence across restarts."""
+        state = {
+            "open": self._circuit_breaker_open,
+            "reason": self._circuit_breaker_reason,
+            "opened_at": self._circuit_breaker_opened_at.isoformat() if self._circuit_breaker_opened_at else None,
+            "consecutive_failures": self._consecutive_failures,
+        }
+
+        try:
+            os.makedirs(os.path.dirname(self._circuit_breaker_state_file), exist_ok=True)
+            with open(self._circuit_breaker_state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+            logger.debug(f"Circuit breaker state saved to {self._circuit_breaker_state_file}")
+        except Exception as e:
+            logger.error(f"Failed to save circuit breaker state: {e}")
+
+    def _load_circuit_breaker_state(self) -> None:
+        """STATE-003: Load circuit breaker state from file on startup."""
+        try:
+            if os.path.exists(self._circuit_breaker_state_file):
+                with open(self._circuit_breaker_state_file, 'r') as f:
+                    state = json.load(f)
+
+                if state.get("open", False):
+                    self._circuit_breaker_open = True
+                    self._circuit_breaker_reason = state.get("reason", "Unknown (loaded from persisted state)")
+                    if state.get("opened_at"):
+                        self._circuit_breaker_opened_at = datetime.fromisoformat(state["opened_at"])
+                    self._consecutive_failures = state.get("consecutive_failures", 0)
+                    self.state = RPDState.CIRCUIT_OPEN
+
+                    logger.critical("=" * 60)
+                    logger.critical("⚠️ STATE-003: Circuit breaker was OPEN from previous session")
+                    logger.critical(f"   Reason: {self._circuit_breaker_reason}")
+                    logger.critical(f"   Opened at: {self._circuit_breaker_opened_at}")
+                    logger.critical("   Manual intervention required to reset")
+                    logger.critical("=" * 60)
+        except Exception as e:
+            logger.warning(f"Could not load circuit breaker state: {e}")
+
+    def _clear_circuit_breaker_state(self) -> None:
+        """Clear persisted circuit breaker state (called when manually reset)."""
+        try:
+            if os.path.exists(self._circuit_breaker_state_file):
+                os.remove(self._circuit_breaker_state_file)
+                logger.info("Circuit breaker state file cleared")
+        except Exception as e:
+            logger.error(f"Failed to clear circuit breaker state file: {e}")
+
+    # =========================================================================
+    # DATA-004: QUOTE VALIDATION
+    # =========================================================================
+
+    def _validate_quote(self, quote: Dict, description: str = "") -> Tuple[bool, Optional[float], Optional[float]]:
+        """
+        DATA-004: Validate a quote has real prices before using it.
+
+        Args:
+            quote: Quote response from Saxo
+            description: Description for logging
+
+        Returns:
+            Tuple[bool, Optional[float], Optional[float]]: (is_valid, bid, ask)
+        """
+        if not quote or "Quote" not in quote:
+            self._log_deduplicated_error(
+                f"invalid_quote_{description}",
+                f"DATA-004: Invalid quote response for {description}",
+                "WARNING"
+            )
+            return False, None, None
+
+        q = quote["Quote"]
+        bid = q.get("Bid", 0) or 0
+        ask = q.get("Ask", 0) or 0
+
+        if bid <= 0 or ask <= 0:
+            self._log_deduplicated_error(
+                f"zero_quote_{description}",
+                f"DATA-004: Zero bid/ask for {description}: Bid=${bid:.2f}, Ask=${ask:.2f}",
+                "WARNING"
+            )
+            return False, bid, ask
+
+        # Check for inverted market (bid > ask) - sign of stale quotes
+        if bid > ask:
+            self._log_deduplicated_error(
+                f"inverted_quote_{description}",
+                f"DATA-004: Inverted quote for {description}: Bid=${bid:.2f} > Ask=${ask:.2f}",
+                "WARNING"
+            )
+            return False, bid, ask
+
+        # Check for unreasonably wide spread (> 50% of mid)
+        mid = (bid + ask) / 2
+        spread = ask - bid
+        if mid > 0 and (spread / mid) > 0.5:
+            self._log_deduplicated_error(
+                f"wide_spread_{description}",
+                f"DATA-004: Very wide spread for {description}: Bid=${bid:.2f}, Ask=${ask:.2f} ({spread/mid*100:.0f}%)",
+                "WARNING"
+            )
+            # Still return True - wide spread is valid, just concerning
+            return True, bid, ask
+
+        return True, bid, ask
 
     # =========================================================================
     # EMERGENCY POSITION MANAGEMENT
@@ -2902,6 +3417,22 @@ class RollingPutDiagonalStrategy:
 
         Called by main.py every 60 seconds during market hours.
         """
+        # TIME-001: Acquire operation lock to prevent overlapping iterations
+        if not self._acquire_operation_lock():
+            return
+
+        try:
+            self._run_iteration_impl()
+        finally:
+            # TIME-001: Always release the operation lock
+            self._release_operation_lock()
+
+    def _run_iteration_impl(self) -> None:
+        """
+        Internal implementation of run_iteration.
+
+        Separated from run_iteration to allow operation lock wrapping.
+        """
         # Safety check: circuit breaker
         if self._check_circuit_breaker():
             return
@@ -2919,19 +3450,39 @@ class RollingPutDiagonalStrategy:
             logger.critical("Resolve orphaned positions manually before bot can continue")
             return
 
+        # TIME-003: Check for early close day (once per day)
+        self.check_early_close_warning()
+
+        # TIME-003: Block operations if past early close time
+        if self._is_past_early_close():
+            logger.warning("⏰ TIME-003: Past early close time - blocking new operations")
+            return
+
+        # LOG-001: Clear old error log entries periodically
+        self._clear_old_error_logs()
+
         # Update market data
         if not self.update_market_data():
-            logger.warning("Failed to update market data")
+            self._log_deduplicated_error("market_data_fail", "Failed to update market data", "WARNING")
             return
 
         logger.info(f"QQQ: ${self.current_price:.2f} | EMA9: ${self.current_ema_9:.2f} | "
                    f"State: {self.state.value}")
+
+        # POS-002: Periodic position reconciliation (verify local state matches Saxo)
+        self._reconcile_positions_periodic()
 
         # State machine
         if self.state == RPDState.IDLE or self.state == RPDState.WAITING_ENTRY:
             # Check entry conditions
             can_enter, reason = self.check_entry_conditions()
             if can_enter:
+                # STATE-002: Verify we have no unexpected positions before entering
+                actual = self._get_actual_positions_from_saxo()
+                if actual["long_puts"] or actual["short_puts"]:
+                    logger.warning("STATE-002: Found existing positions - cannot enter new campaign")
+                    logger.warning(f"   Long puts: {len(actual['long_puts'])}, Short puts: {len(actual['short_puts'])}")
+                    return
                 self.enter_campaign()
             else:
                 logger.info(f"Entry blocked: {reason}")
@@ -2945,6 +3496,12 @@ class RollingPutDiagonalStrategy:
                 self.state = RPDState.IDLE
 
         elif self.state == RPDState.POSITION_OPEN:
+            # STATE-002: Verify positions before taking any action
+            match, message = self._verify_positions_with_saxo()
+            if not match:
+                logger.warning(f"STATE-002: Position mismatch before action: {message}")
+                # Don't halt - just log, reconciliation will handle if persistent
+
             # Check if we need to close campaign
             should_close, reason = self.should_close_campaign()
             if should_close:

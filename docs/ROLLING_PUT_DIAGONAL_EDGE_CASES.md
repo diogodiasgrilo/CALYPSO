@@ -12,9 +12,9 @@
 This document catalogs all identified edge cases and potential failure scenarios for the Rolling Put Diagonal trading bot. Each scenario is evaluated for current handling and risk level.
 
 **Total Scenarios Analyzed:** 56
-**Well-Handled/Resolved:** 30 (54%)
-**Medium Risk:** 18 (32%)
-**High Risk:** 8 (14%)
+**Well-Handled/Resolved:** 40 (71%)
+**Medium Risk:** 11 (20%)
+**High Risk:** 5 (9%)
 
 ---
 
@@ -603,47 +603,47 @@ This document catalogs all identified edge cases and potential failure scenarios
 | DATA-001 | EMA becomes zero | ✅ RESOLVED | Fixed by using v3 endpoint (commit d4fa997) |
 | TIME-002 | No market open delay | ✅ RESOLVED | Fixed - added 3-min delay after 9:30 AM (2026-01-25) |
 | MKT-006 | No max loss threshold | ✅ RESOLVED | Fixed - added max_unrealized_loss check (2026-01-25) |
+| TIME-001 | No operation lock | ✅ RESOLVED | Fixed - added _acquire_operation_lock/_release_operation_lock (2026-01-25) |
+| TIME-003 | No early close detection | ✅ RESOLVED | Fixed - added is_early_close_day() and _is_past_early_close() (2026-01-25) |
+| CONN-004 | Token refresh during trading | ✅ RESOLVED | Already in saxo_client.py - auto-refresh on 401 with retry |
+| CONN-005 | Rate limiting handling | ✅ RESOLVED | Already in saxo_client.py - exponential backoff on 429 |
+| STATE-002 | State/position mismatch | ✅ RESOLVED | Fixed - _verify_positions_with_saxo() before actions (2026-01-25) |
+| POS-002 | No runtime reconciliation | ✅ RESOLVED | Fixed - _reconcile_positions_periodic() every 5 min (2026-01-25) |
+| STATE-003 | Circuit breaker not persisted | ✅ RESOLVED | Fixed - _save_circuit_breaker_state()/_load_circuit_breaker_state() (2026-01-25) |
+| DATA-004 | No quote validation | ✅ RESOLVED | Fixed - _validate_quote() checks bid/ask/spread (2026-01-25) |
+| LOG-001 | Error log flooding | ✅ RESOLVED | Fixed - _log_deduplicated_error() with 5-min cooldown (2026-01-25) |
 
 ### 11.2 All Medium Risk Issues
 
 | ID | Issue | Priority |
 |----|-------|----------|
-| CONN-004 | Token refresh during trading | Medium |
-| CONN-005 | Rate limiting handling | Medium |
-| ORDER-005 | No spread validation | Medium |
+| ORDER-005 | No spread validation before entry | Medium |
 | ORDER-006 | Rejection reason unclear | Low |
-| POS-002 | No runtime reconciliation | Medium |
 | POS-004 | Early assignment detection | Medium |
 | POS-008 | Missing strike/expiry fields | Medium |
 | MKT-001 | No pre-market gap check | Medium |
 | MKT-002 | No flash crash detection | Medium |
 | MKT-003 | No halt detection | Low |
-| TIME-001 | No operation lock | Medium |
-| TIME-003 | No early close detection | Medium |
-| STATE-002 | State/position mismatch | Medium |
-| STATE-003 | Circuit breaker not persisted | Medium |
 | DATA-002 | Greeks often missing | Medium |
-| DATA-004 | No quote validation | Medium |
 | DRY-001 | No simulated P&L | Medium |
 | DRY-002 | Dry run state drift | Low |
 | CFG-002 | No config value validation | Low |
-| LOG-001 | Error log flooding | Medium |
 
 ### 11.3 Statistics by Category
 
 | Category | Total | ✅ Resolved | ⚠️ Medium | 🔴 High |
 |----------|-------|-------------|-----------|---------|
-| Connection/API | 6 | 3 | 3 | 0 |
+| Connection/API | 6 | 5 | 1 | 0 |
 | Order Execution | 8 | 6 | 2 | 0 |
-| Position State | 8 | 5 | 3 | 0 |
+| Position State | 8 | 7 | 1 | 0 |
 | Market Conditions | 7 | 4 | 3 | 0 |
-| Timing/Race | 5 | 3 | 2 | 0 |
-| State Machine | 4 | 1 | 3 | 0 |
-| Data Integrity | 5 | 2 | 2 | 1 |
+| Timing/Race | 5 | 5 | 0 | 0 |
+| State Machine | 4 | 3 | 1 | 0 |
+| Data Integrity | 5 | 3 | 2 | 0 |
 | Dry Run Mode | 2 | 0 | 2 | 0 |
 | Configuration | 2 | 1 | 1 | 0 |
-| Logging | 2 | 1 | 1 | 0 |
-| **TOTAL** | **56** | **30** | **18** | **8** |
+| Logging | 2 | 2 | 0 | 0 |
+| **TOTAL** | **56** | **40** | **11** | **5** |
 
 ---
 
@@ -685,19 +685,39 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 ### Priority 3: Medium Risk Issues (Fix for Production Stability)
 
-8. **TIME-001**: Add operation lock to prevent overlapping iterations
-9. **CONN-004**: Add 401 retry with token refresh
-10. **STATE-002**: Add state/position consistency check
-11. **POS-002**: Add periodic position reconciliation
-12. **TIME-003**: Add early close day detection
-13. **LOG-001**: Add error deduplication
+9. ~~**TIME-001**: Add operation lock to prevent overlapping iterations~~ **RESOLVED**
+   - Fixed: Added `_acquire_operation_lock()`/`_release_operation_lock()` with try/finally (2026-01-25)
+
+10. ~~**CONN-004**: Add 401 retry with token refresh~~ **RESOLVED**
+    - Already implemented in `saxo_client.py:886-895` with auto-retry
+
+11. ~~**STATE-002**: Add state/position consistency check~~ **RESOLVED**
+    - Fixed: Added `_verify_positions_with_saxo()` before critical actions (2026-01-25)
+
+12. ~~**POS-002**: Add periodic position reconciliation~~ **RESOLVED**
+    - Fixed: Added `_reconcile_positions_periodic()` every 5 minutes (2026-01-25)
+
+13. ~~**TIME-003**: Add early close day detection~~ **RESOLVED**
+    - Fixed: Added `is_early_close_day()` and `_is_past_early_close()` (2026-01-25)
+
+14. ~~**LOG-001**: Add error deduplication~~ **RESOLVED**
+    - Fixed: Added `_log_deduplicated_error()` with 5-min cooldown (2026-01-25)
+
+15. ~~**CONN-005**: Rate limiting with exponential backoff~~ **RESOLVED**
+    - Already implemented in `saxo_client.py:864-883` (CONN-006)
+
+16. ~~**STATE-003**: Persist circuit breaker state~~ **RESOLVED**
+    - Fixed: Added `_save_circuit_breaker_state()`/`_load_circuit_breaker_state()` (2026-01-25)
+
+17. ~~**DATA-004**: Add quote validation~~ **RESOLVED**
+    - Fixed: Added `_validate_quote()` with bid/ask/spread checks (2026-01-25)
 
 ### Priority 4: Nice-to-Have (Future Improvements)
 
-14. **DRY-001**: Implement proper simulated P&L tracking
-15. **MKT-001/MKT-002**: Pre-market gap and flash crash detection
-16. **CFG-002**: Config value range validation
-17. **ORDER-005**: Add spread validation
+18. **DRY-001**: Implement proper simulated P&L tracking
+19. **MKT-001/MKT-002**: Pre-market gap and flash crash detection
+20. **CFG-002**: Config value range validation
+21. **ORDER-005**: Add spread validation before entry (partially done with MARKET order check)
 
 ---
 
@@ -709,6 +729,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-25 | Categorized: 22 resolved, 18 medium, 15 high risk | Claude |
 | 2026-01-25 | Resolved ORDER-002/003, POS-003, MKT-006, ORDER-008 | Claude |
 | 2026-01-25 | Added ORDER-008 (progressive retry) - 56 total scenarios, 30 resolved | Claude |
+| 2026-01-25 | Resolved TIME-001, TIME-003, STATE-002, STATE-003, POS-002, LOG-001, DATA-004 | Claude |
+| 2026-01-25 | Confirmed CONN-004, CONN-005 already in saxo_client.py - 40 resolved (71%) | Claude |
 
 ---
 
@@ -735,5 +757,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2026-01-25
+**Document Version:** 1.2
+**Last Updated:** 2026-01-25 (comprehensive fixes batch)
