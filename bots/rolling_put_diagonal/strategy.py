@@ -450,6 +450,19 @@ class RollingPutDiagonalStrategy:
         # Emergency slippage tolerance for urgent closures
         self._emergency_slippage_pct: float = 5.0
 
+        # MKT-006: Max loss threshold for emergency campaign close
+        # If unrealized loss exceeds this amount, close campaign immediately
+        # Default: $500 per contract (configurable via management.max_unrealized_loss)
+        self._max_unrealized_loss: float = self.management_config.get("max_unrealized_loss", 500.0)
+
+        # ORDER-008: Progressive retry for order placement
+        # Uses 7-attempt sequence: 0%/0%/5%/5%/10%/10%/MARKET (like Delta Neutral)
+        self._progressive_retry: bool = self.management_config.get("progressive_retry", True)
+
+        # ORDER-005: Max bid-ask spread for MARKET orders (safety check)
+        # Aborts MARKET order if spread exceeds this to prevent extreme slippage
+        self._max_market_spread: float = self.management_config.get("max_market_spread", 2.0)
+
         # Position isolation: Only look at QQQ options
         self._position_filter_prefix = "QQQ/"
 
@@ -458,6 +471,7 @@ class RollingPutDiagonalStrategy:
         logger.info(f"  Dry run: {self.dry_run}")
         logger.info(f"  Long put: {self.long_put_config['target_dte']} DTE, {self.long_put_config['target_delta']} delta")
         logger.info(f"  Short put: {self.short_put_config['target_dte']} DTE, ATM")
+        logger.info(f"  Progressive retry: {self._progressive_retry}")
 
     # =========================================================================
     # SAFETY MECHANISMS
@@ -1292,9 +1306,20 @@ class RollingPutDiagonalStrategy:
                     self.state = RPDState.POSITION_OPEN
                     logger.info("Long-only recovered - need to sell new short")
                 elif self.diagonal.short_put and not self.diagonal.long_put:
-                    # DANGEROUS: Naked short with no protection
-                    logger.critical("NAKED SHORT DETECTED - short put with no long protection!")
-                    self.state = RPDState.POSITION_OPEN
+                    # POS-003: DANGEROUS - Naked short with no protection
+                    # Must close immediately to prevent unlimited loss exposure
+                    logger.critical("=" * 70)
+                    logger.critical("POS-003: NAKED SHORT DETECTED - short put with no long protection!")
+                    logger.critical("=" * 70)
+                    logger.critical("This is a CRITICAL risk - closing naked short immediately")
+
+                    if self._emergency_close_short_put():
+                        logger.critical("Successfully closed naked short - now IDLE with no positions")
+                        self.diagonal = None
+                        self.state = RPDState.IDLE
+                    else:
+                        logger.critical("FAILED to close naked short - opening circuit breaker")
+                        self._open_circuit_breaker("POS-003: Failed to close naked short on recovery")
 
             # CRITICAL: Detect orphaned positions
             # This includes: extra long puts, extra short puts, any call options
@@ -1660,9 +1685,44 @@ class RollingPutDiagonalStrategy:
             )
 
             if not short_result.get("success"):
-                logger.error("Failed to sell short put - PARTIAL FILL detected")
-                # We have a long put but no short - this is a partial fill
-                self._handle_partial_fill("enter_campaign", ["long_put"])
+                # ORDER-002: Entry partial fill - long put filled, short put failed
+                # This leaves us with long put only (safe - max loss is premium paid)
+                logger.error("=" * 70)
+                logger.error("ORDER-002: Failed to sell short put - PARTIAL ENTRY")
+                logger.error("=" * 70)
+                logger.error("Long put was bought, but short put could not be sold")
+                logger.error("Position is now: LONG PUT ONLY (protected, max loss = premium)")
+
+                # Create diagonal with just the long (short will be None)
+                self.diagonal = DiagonalPosition(
+                    long_put=PutPosition(
+                        position_id=long_result.get("position_id", ""),
+                        uic=long_put_data["uic"],
+                        strike=long_put_data["strike"],
+                        expiry=long_put_data["expiry"],
+                        quantity=self.strategy_config.get("position_size", 1),
+                        entry_price=long_result.get("fill_price", 0),
+                        delta=long_put_data["delta"],
+                    ),
+                    short_put=None,  # Will be filled on next iteration
+                    campaign_number=self.metrics.campaign_count + 1,
+                    campaign_start_date=datetime.now().strftime("%Y-%m-%d"),
+                )
+                self.state = RPDState.POSITION_OPEN
+
+                # Log the partial entry for tracking
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "RPD_PARTIAL_ENTRY",
+                        "description": f"Entry partial fill: bought long ${long_put_data['strike']}, failed to sell short",
+                        "action_taken": "STATE_UPDATED_TO_LONG_ONLY",
+                        "result": "Will attempt to sell short on next iteration",
+                        "qqq_price": self.current_price,
+                    })
+
+                # Don't halt - the bot will see has_long_only on next iteration and try to sell short
+                logger.info("Bot will attempt to sell short on next iteration")
+                self._set_action_cooldown("enter_campaign")
                 return False
 
             # Both orders filled - create diagonal position
@@ -1885,9 +1945,31 @@ class RollingPutDiagonalStrategy:
             )
 
             if not sell_result.get("success"):
-                logger.error("Failed to sell new short put - PARTIAL ROLL")
-                self._handle_partial_fill("roll_short", ["close_old"])
+                # ORDER-003: Roll partial fill - closed old short but failed to sell new
+                # This leaves us with long put only (safe but no income)
+                logger.error("=" * 70)
+                logger.error("ORDER-003: Failed to sell new short put - PARTIAL ROLL")
+                logger.error("=" * 70)
+                logger.error("Old short was closed, but new short could not be sold")
+                logger.error("Position is now: LONG PUT ONLY (protected but no income)")
+
+                # Update state to reflect reality - we only have the long
+                self.diagonal.short_put = None
                 self.state = RPDState.POSITION_OPEN
+
+                # Log the partial roll for tracking
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "RPD_PARTIAL_ROLL",
+                        "description": f"Roll partial fill: closed old ${old_short.strike}, failed to sell new",
+                        "action_taken": "STATE_UPDATED_TO_LONG_ONLY",
+                        "result": "Will attempt to sell new short on next iteration",
+                        "qqq_price": self.current_price,
+                    })
+
+                # Don't halt - the bot will see has_long_only on next iteration and try to sell new short
+                logger.info("Bot will attempt to sell new short on next iteration")
+                self._set_action_cooldown("roll_short")  # Brief cooldown before retry
                 return False
 
             # Update diagonal
@@ -2075,9 +2157,37 @@ class RollingPutDiagonalStrategy:
             )
 
             if not buy_result.get("success"):
-                logger.error("Failed to buy new long put - PARTIAL ROLL")
-                self._handle_partial_fill("roll_long", ["close_old"])
-                self.state = RPDState.POSITION_OPEN
+                # CRITICAL: Roll long partial fill - closed old long, failed to buy new
+                # This leaves us with NAKED SHORT (extremely dangerous!)
+                logger.critical("=" * 70)
+                logger.critical("CRITICAL: Failed to buy new long put - NAKED SHORT EXPOSURE!")
+                logger.critical("=" * 70)
+                logger.critical("Old long was sold, new long could not be bought")
+                logger.critical("Position is now: NAKED SHORT (UNLIMITED RISK)")
+
+                # Update state to reflect reality - no long protection
+                self.diagonal.long_put = None
+
+                # EMERGENCY: Must close the naked short immediately
+                logger.critical("Initiating emergency close of naked short...")
+                if self._emergency_close_short_put():
+                    logger.critical("Successfully closed naked short - position is now FLAT")
+                    self.diagonal = None
+                    self.state = RPDState.IDLE
+
+                    if self.trade_logger:
+                        self.trade_logger.log_safety_event({
+                            "event_type": "RPD_LONG_ROLL_EMERGENCY",
+                            "description": f"Long roll failed: closed old ${old_long.strike}, failed to buy new, emergency closed short",
+                            "action_taken": "EMERGENCY_CLOSE_NAKED_SHORT",
+                            "result": "Position now FLAT - will re-enter when conditions met",
+                            "qqq_price": self.current_price,
+                        })
+                else:
+                    # Failed to close naked short - this is CRITICAL
+                    logger.critical("FAILED to close naked short - opening circuit breaker!")
+                    self._open_circuit_breaker("Roll long failed, could not close naked short")
+
                 return False
 
             # Update diagonal
@@ -2113,6 +2223,7 @@ class RollingPutDiagonalStrategy:
         1. Long put near expiry (1-2 DTE)
         2. FOMC or major earnings approaching
         3. Emergency exit (price significantly below EMA)
+        4. MKT-006: Max unrealized loss exceeded
 
         Returns:
             Tuple of (should_close, reason)
@@ -2132,6 +2243,13 @@ class RollingPutDiagonalStrategy:
         )
         if should_close:
             return True, f"Event risk: {event_reason}"
+
+        # MKT-006: Check max unrealized loss threshold
+        if self._max_unrealized_loss > 0:
+            unrealized = self.diagonal.unrealized_pnl
+            if unrealized < -self._max_unrealized_loss:
+                logger.warning(f"MKT-006: Unrealized loss ${abs(unrealized):.2f} exceeds max ${self._max_unrealized_loss:.2f}")
+                return True, f"MKT-006: Max loss exceeded (${abs(unrealized):.2f} > ${self._max_unrealized_loss:.2f})"
 
         # Check emergency exit (price significantly below EMA)
         if self.indicators and self.indicators.ema_9 > 0:
@@ -2232,11 +2350,40 @@ class RollingPutDiagonalStrategy:
                 )
 
                 if not verification_passed:
-                    logger.critical("VERIFICATION FAILED - positions may still be open!")
-                    # Don't clear the diagonal yet - we need to handle the partial close
-                    self._handle_partial_fill("close_campaign",
-                        [f"Short: {'closed' if short_closed else 'FAILED'}",
-                         f"Long: {'closed' if long_closed else 'FAILED'}"])
+                    logger.critical("=" * 70)
+                    logger.critical("CLOSE_CAMPAIGN VERIFICATION FAILED")
+                    logger.critical("=" * 70)
+                    logger.critical(f"Short: {'closed' if short_closed else 'STILL OPEN'}")
+                    logger.critical(f"Long: {'closed' if long_closed else 'STILL OPEN'}")
+
+                    # Update diagonal to reflect what actually closed
+                    if short_closed:
+                        self.diagonal.short_put = None
+                    if long_closed:
+                        self.diagonal.long_put = None
+
+                    # Check what's left and handle appropriately
+                    if self.diagonal.short_put and not self.diagonal.long_put:
+                        # DANGEROUS: Only short remaining = naked short
+                        logger.critical("NAKED SHORT REMAINING - emergency closing!")
+                        if self._emergency_close_short_put():
+                            self.diagonal = None
+                            self.state = RPDState.IDLE
+                            logger.critical("Emergency closed remaining short - now IDLE")
+                        else:
+                            self._open_circuit_breaker("Close campaign failed, could not close remaining naked short")
+                            return False
+                    elif self.diagonal.long_put and not self.diagonal.short_put:
+                        # Safe: Only long remaining - keep trying to close it
+                        logger.warning("Long put still open - will retry close on next iteration")
+                        self.state = RPDState.CLOSING_CAMPAIGN
+                    else:
+                        # Both still open - halt for manual intervention
+                        self._handle_partial_fill("close_campaign",
+                            [f"Short: {'closed' if short_closed else 'FAILED'}",
+                             f"Long: {'closed' if long_closed else 'FAILED'}"])
+                        return False
+
                     return False
 
             # Add premium collected to P&L
@@ -2383,10 +2530,18 @@ class RollingPutDiagonalStrategy:
         buy_sell: BuySell,
         quantity: int,
         description: str,
-        verify_fill: bool = True
+        verify_fill: bool = True,
+        progressive_retry: Optional[bool] = None,
+        max_absolute_slippage: Optional[float] = None
     ) -> Dict:
         """
-        Place an order with timeout, orphan protection, and fill verification.
+        Place an order with progressive retry, orphan protection, and fill verification.
+
+        Uses a progressive retry sequence similar to Delta Neutral:
+        - 0% slippage x2 (fresh quote each time)
+        - 5% slippage x2
+        - 10% slippage x2
+        - MARKET order (last resort, with spread safety check)
 
         Args:
             uic: Instrument UIC
@@ -2394,81 +2549,246 @@ class RollingPutDiagonalStrategy:
             quantity: Number of contracts
             description: Order description for logging
             verify_fill: If True, verify fill with position check after order
+            progressive_retry: If True, use progressive slippage retry sequence
+                               (defaults to self._progressive_retry from config)
+            max_absolute_slippage: Max spread allowed for MARKET orders (safety)
+                                   (defaults to self._max_market_spread from config)
 
         Returns:
             Dict with success status and fill info
         """
+        # Use instance config values as defaults
+        if progressive_retry is None:
+            progressive_retry = self._progressive_retry
+        if max_absolute_slippage is None:
+            max_absolute_slippage = self._max_market_spread
+
         logger.info(f"Placing order: {description}")
 
-        try:
-            # Get current quote for limit price
-            quote = self.client.get_quote(uic, asset_type="StockOption")
-            if not quote or "Quote" not in quote:
-                return {"success": False, "error": "Failed to get quote"}
+        # Progressive retry sequence (like Delta Neutral):
+        # - 0% slippage x2 (fresh quotes each time)
+        # - 5% slippage x2
+        # - 10% slippage x2
+        # - MARKET order (last resort)
+        # Format: (slippage_pct, is_market_order)
+        if progressive_retry:
+            retry_sequence = [
+                (0.0, False),   # 1st: 0% slippage
+                (0.0, False),   # 2nd: 0% slippage (fresh quote)
+                (5.0, False),   # 3rd: 5% slippage
+                (5.0, False),   # 4th: 5% slippage (fresh quote)
+                (10.0, False),  # 5th: 10% slippage
+                (10.0, False),  # 6th: 10% slippage (fresh quote)
+                (0.0, True),    # 7th: MARKET order (guaranteed fill)
+            ]
+        else:
+            # Single attempt mode (no progressive retry)
+            retry_sequence = [(0.0, False)]
 
-            q = quote["Quote"]
-            if buy_sell == BuySell.BUY:
-                # Buy at ask
-                limit_price = q.get("Ask") or q.get("Mid", 0)
-            else:
-                # Sell at bid
-                limit_price = q.get("Bid") or q.get("Mid", 0)
+        last_result = None
+        last_error = "Unknown error"
 
-            if limit_price <= 0:
-                return {"success": False, "error": "Invalid limit price"}
+        for attempt, (current_slippage, is_market) in enumerate(retry_sequence):
+            try:
+                # Get fresh quote for accurate limit price
+                quote = self.client.get_quote(uic, asset_type="StockOption")
+                if not quote or "Quote" not in quote:
+                    last_error = "Failed to get quote"
+                    logger.warning(f"  Attempt {attempt+1}/{len(retry_sequence)}: {last_error}")
+                    continue
 
-            # Place order with timeout
-            result = self.client.place_limit_order_with_timeout(
-                uic=uic,
-                asset_type="StockOption",
-                buy_sell=buy_sell.value,
-                quantity=quantity,
-                limit_price=limit_price,
-                timeout_seconds=self._order_timeout,
-            )
+                q = quote["Quote"]
+                bid = q.get("Bid", 0) or 0
+                ask = q.get("Ask", 0) or 0
 
-            if result.get("cancel_failed"):
-                # Order couldn't be cancelled - orphaned
-                self._track_orphaned_order(result.get("order_id", "unknown"))
-                return {"success": False, "error": "Orphaned order"}
+                # Validate quote has real prices
+                if bid <= 0 or ask <= 0:
+                    last_error = f"Invalid quote: Bid=${bid:.2f}, Ask=${ask:.2f}"
+                    logger.warning(f"  Attempt {attempt+1}/{len(retry_sequence)}: {last_error}")
+                    continue
 
-            if result.get("filled"):
-                fill_result = {
-                    "success": True,
-                    "order_id": result.get("order_id"),
-                    "position_id": result.get("position_id", ""),
-                    "fill_price": result.get("fill_price", limit_price),
-                }
+                # Determine base price based on buy/sell direction
+                if buy_sell == BuySell.BUY:
+                    base_price = ask
+                else:
+                    base_price = bid
 
-                # Verify the fill with Saxo position check
-                if verify_fill and not self.dry_run:
-                    verified = self._verify_order_fill(
-                        uic=uic,
-                        expected_buy_sell=buy_sell,
-                        expected_quantity=quantity,
-                        description=description
-                    )
-                    fill_result["verified"] = verified
-                    if not verified:
-                        logger.warning(f"Fill verification FAILED for {description}")
-                        # Don't fail the order, but log the discrepancy
+                # MARKET ORDER attempt (last resort in progressive sequence)
+                if is_market:
+                    # Safety check: Abort if spread is too wide
+                    spread = abs(ask - bid)
+                    if spread > max_absolute_slippage:
+                        logger.critical(f"  🚨 ORDER-005: Bid-ask spread ${spread:.2f} exceeds max ${max_absolute_slippage:.2f}")
+                        logger.critical(f"     Bid: ${bid:.2f}, Ask: ${ask:.2f}")
+                        logger.critical(f"     ABORTING MARKET order to prevent extreme slippage!")
                         if self.trade_logger:
                             self.trade_logger.log_safety_event({
-                                "event_type": "RPD_FILL_VERIFICATION_FAILED",
+                                "event_type": "RPD_MARKET_ORDER_ABORTED",
                                 "severity": "WARNING",
-                                "description": f"Fill verification failed: {description}",
-                                "action_taken": "LOGGED_DISCREPANCY",
-                                "result": "Position may be inconsistent",
+                                "description": f"Spread ${spread:.2f} > max ${max_absolute_slippage:.2f}",
+                                "action_taken": f"Aborted MARKET order for {description}",
+                                "result": "ABORTED",
                                 "qqq_price": self.current_price,
                             })
+                        last_error = f"ORDER-005: Spread ${spread:.2f} too wide, MARKET order aborted"
+                        continue
 
-                return fill_result
-            else:
-                return {"success": False, "error": result.get("error", "Order not filled")}
+                    logger.warning(f"  Attempt {attempt+1}/{len(retry_sequence)}: MARKET ORDER (last resort)")
+                    result = self.client.place_market_order_immediate(
+                        uic=uic,
+                        asset_type="StockOption",
+                        buy_sell=buy_sell,
+                        amount=quantity,
+                        to_open_close="ToOpen" if buy_sell == BuySell.BUY else "ToClose"
+                    )
+                    last_result = result
 
-        except Exception as e:
-            logger.error(f"Order exception: {e}")
-            return {"success": False, "error": str(e)}
+                    if result.get("filled"):
+                        logger.info(f"  ✓ MARKET order filled: {result.get('order_id')}")
+                        return self._finalize_order_result(
+                            result=result,
+                            uic=uic,
+                            buy_sell=buy_sell,
+                            quantity=quantity,
+                            description=description,
+                            verify_fill=verify_fill,
+                            fallback_price=base_price
+                        )
+                    else:
+                        last_error = result.get("error", result.get("message", "MARKET order failed"))
+                        logger.error(f"  ✗ MARKET order failed: {last_error}")
+                        continue
+
+                # LIMIT ORDER attempt with slippage
+                if current_slippage > 0:
+                    if buy_sell == BuySell.BUY:
+                        # For buying, pay MORE to ensure fill
+                        adjusted_price = base_price * (1 + current_slippage / 100)
+                    else:
+                        # For selling, accept LESS to ensure fill
+                        adjusted_price = base_price * (1 - current_slippage / 100)
+                    adjusted_price = round(adjusted_price, 2)
+                else:
+                    adjusted_price = base_price
+
+                attempt_str = f"(attempt {attempt+1}/{len(retry_sequence)}, {current_slippage}% slippage)"
+                logger.info(f"  {buy_sell.value} {quantity} x UIC {uic} @ ${adjusted_price:.2f} {attempt_str}")
+
+                result = self.client.place_limit_order_with_timeout(
+                    uic=uic,
+                    asset_type="StockOption",
+                    buy_sell=buy_sell.value,
+                    quantity=quantity,
+                    limit_price=adjusted_price,
+                    timeout_seconds=self._order_timeout,
+                )
+                last_result = result
+
+                if result.get("cancel_failed"):
+                    # Order couldn't be cancelled - orphaned
+                    orphan_id = result.get("order_id", "unknown")
+                    self._track_orphaned_order(orphan_id)
+                    logger.critical(f"  🚨 CANCEL FAILED - Order {orphan_id} is STILL OPEN!")
+                    return {"success": False, "error": f"Orphaned order: {orphan_id}"}
+
+                if result.get("filled"):
+                    logger.info(f"  ✓ Limit order filled: {result.get('order_id')}")
+                    return self._finalize_order_result(
+                        result=result,
+                        uic=uic,
+                        buy_sell=buy_sell,
+                        quantity=quantity,
+                        description=description,
+                        verify_fill=verify_fill,
+                        fallback_price=adjusted_price
+                    )
+                else:
+                    last_error = result.get("error", "Order not filled")
+                    # Log retry info
+                    if attempt < len(retry_sequence) - 1:
+                        next_slippage, next_is_market = retry_sequence[attempt + 1]
+                        if next_is_market:
+                            logger.warning(f"  ⚠ Failed at {current_slippage}% slippage - will try MARKET order next...")
+                        else:
+                            logger.warning(f"  ⚠ Failed at {current_slippage}% slippage - retrying at {next_slippage}%...")
+                    else:
+                        logger.error(f"  ✗ Failed all {len(retry_sequence)} attempts: {last_error}")
+
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"  Attempt {attempt+1}/{len(retry_sequence)} exception: {e}")
+                continue
+
+        # All attempts failed
+        logger.error(f"Order failed after {len(retry_sequence)} attempts: {last_error}")
+        if self.trade_logger:
+            self.trade_logger.log_safety_event({
+                "event_type": "RPD_ORDER_FAILED",
+                "severity": "ERROR",
+                "description": f"Order failed: {description}",
+                "action_taken": f"Exhausted {len(retry_sequence)} retry attempts",
+                "result": last_error,
+                "qqq_price": self.current_price,
+            })
+        return {"success": False, "error": last_error}
+
+    def _finalize_order_result(
+        self,
+        result: Dict,
+        uic: int,
+        buy_sell: BuySell,
+        quantity: int,
+        description: str,
+        verify_fill: bool,
+        fallback_price: float
+    ) -> Dict:
+        """
+        Finalize an order result after a successful fill.
+
+        Handles fill verification and creates the standardized result dict.
+
+        Args:
+            result: Raw result from order placement
+            uic: Instrument UIC
+            buy_sell: BUY or SELL
+            quantity: Number of contracts
+            description: Order description for logging
+            verify_fill: If True, verify fill with position check
+            fallback_price: Price to use if fill_price not in result
+
+        Returns:
+            Dict with success status and fill info
+        """
+        fill_result = {
+            "success": True,
+            "order_id": result.get("order_id"),
+            "position_id": result.get("position_id", ""),
+            "fill_price": result.get("fill_price", fallback_price),
+        }
+
+        # Verify the fill with Saxo position check
+        if verify_fill and not self.dry_run:
+            verified = self._verify_order_fill(
+                uic=uic,
+                expected_buy_sell=buy_sell,
+                expected_quantity=quantity,
+                description=description
+            )
+            fill_result["verified"] = verified
+            if not verified:
+                logger.warning(f"Fill verification FAILED for {description}")
+                # Don't fail the order, but log the discrepancy
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "event_type": "RPD_FILL_VERIFICATION_FAILED",
+                        "severity": "WARNING",
+                        "description": f"Fill verification failed: {description}",
+                        "action_taken": "LOGGED_DISCREPANCY",
+                        "result": "Position may be inconsistent",
+                        "qqq_price": self.current_price,
+                    })
+
+        return fill_result
 
     def _verify_order_fill(
         self,

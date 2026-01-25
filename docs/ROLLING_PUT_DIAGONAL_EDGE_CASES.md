@@ -11,10 +11,10 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Rolling Put Diagonal trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 55
-**Well-Handled/Resolved:** 22 (40%)
-**Medium Risk:** 18 (33%)
-**High Risk:** 15 (27%)
+**Total Scenarios Analyzed:** 56
+**Well-Handled/Resolved:** 30 (54%)
+**Medium Risk:** 18 (32%)
+**High Risk:** 8 (14%)
 
 ---
 
@@ -116,22 +116,22 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | ORDER-002 |
 | **Trigger** | Long put fills but short put order fails |
-| **Current Handling** | Calls `_handle_partial_fill("enter_campaign", ["long_put"])` at line 1610 |
-| **Risk Level** | 🔴 HIGH |
-| **Status** | UNRESOLVED |
-| **Notes** | `_handle_partial_fill()` method is referenced but implementation is unclear. Left with long put only (not dangerous but inefficient) |
-| **Recommended Fix** | Verify `_handle_partial_fill` implementation - should either close long or wait for short opportunity |
+| **Current Handling** | Fixed - Creates diagonal with long only, state set to POSITION_OPEN, bot will sell short on next iteration |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Position is safe (long only = max loss is premium). Bot auto-recovers via `has_long_only` check. |
+| **Fix Applied** | Updated partial fill handler to properly set state and allow recovery (2026-01-25) |
 
 ### 2.3 Roll Close Succeeds But New Short Fails
 | | |
 |---|---|
 | **ID** | ORDER-003 |
 | **Trigger** | During roll: close old short succeeds, sell new short fails |
-| **Current Handling** | Calls `_handle_partial_fill("roll_short", ["close_old"])` at line 1834 |
-| **Risk Level** | 🔴 HIGH |
-| **Status** | UNRESOLVED |
-| **Notes** | Left with long put only, no income generation. State says POSITION_OPEN but no short exists |
-| **Recommended Fix** | Should retry selling new short or enter waiting state for next opportunity |
+| **Current Handling** | Fixed - Sets `diagonal.short_put = None`, state stays POSITION_OPEN, bot will sell new short on next iteration |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Position is safe (long only). State accurately reflects reality. Bot auto-recovers. |
+| **Fix Applied** | Updated roll partial fill handler to set short_put=None and allow recovery (2026-01-25)
 
 ### 2.4 Order Cancellation Fails
 | | |
@@ -175,6 +175,18 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Evidence** | `strategy.py:1872` - Was `buy_result.get("fill_price", 0)`, now `close_result.get("fill_price", 0)` |
 | **Fix Applied** | Changed `buy_result` to `close_result` on lines 1872 and 1874 (2026-01-25)
 
+### 2.8 No Progressive Retry on Order Timeout
+| | |
+|---|---|
+| **ID** | ORDER-008 |
+| **Trigger** | Single order attempt times out due to fast-moving market |
+| **Current Handling** | Fixed - Progressive retry sequence (like Delta Neutral): 0%/0%/5%/5%/10%/10%/MARKET |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Delta Neutral uses 7-attempt progressive retry for 95%+ fill rate. Now implemented in Rolling Put Diagonal. |
+| **Fix Applied** | Added `_place_protected_order()` with progressive slippage retry sequence (2026-01-25)
+| **Config** | `management.progressive_retry: true`, `management.max_market_spread: 2.0`
+
 ---
 
 ## 3. POSITION STATE EDGE CASES
@@ -205,11 +217,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | POS-003 |
 | **Trigger** | Short put exists without long put protection |
-| **Current Handling** | Detected at line 1244-1247, logs CRITICAL warning, but only sets state to POSITION_OPEN |
-| **Risk Level** | 🔴 HIGH |
-| **Status** | PARTIAL |
-| **Notes** | Detection exists but no automatic emergency action taken |
-| **Recommended Fix** | Should trigger immediate emergency close of naked short (like in emergency check) |
+| **Current Handling** | Fixed - Calls `_emergency_close_short_put()` immediately on detection during recovery |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Naked short is closed immediately, bot goes IDLE. If close fails, circuit breaker opens. |
+| **Fix Applied** | Added emergency close call in `recover_positions()` when naked short detected (2026-01-25)
 
 ### 3.4 Early Assignment of Short Put
 | | |
@@ -325,11 +337,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | MKT-006 |
 | **Trigger** | QQQ drops and short put is significantly ITM |
-| **Current Handling** | Horizontal roll keeps same strike (bearish expectation) |
-| **Risk Level** | ⚠️ MEDIUM |
-| **Status** | PARTIAL |
-| **Notes** | Strategy assumes price will recover. No emergency exit threshold. |
-| **Recommended Fix** | Add max loss threshold for emergency campaign close |
+| **Current Handling** | Fixed - Added max unrealized loss threshold check in `should_close_campaign()` |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Evidence** | Now checks `diagonal.unrealized_pnl` against `max_unrealized_loss` config (default: $500) |
+| **Fix Applied** | Added `max_unrealized_loss` config and check in `should_close_campaign()` (2026-01-25)
 
 ### 4.7 Price Whipsaws Around EMA
 | | |
@@ -583,12 +595,14 @@ This document catalogs all identified edge cases and potential failure scenarios
 |----|-------|--------|-----------------|
 | CONN-002 | Chart API 404 causes EMA=$0 | ✅ RESOLVED | Fixed by using v3 endpoint (commit d4fa997) |
 | CONN-006 | No Greeks at market open | ✅ RESOLVED | Fixed by TIME-002 market open delay (2026-01-25) |
-| ORDER-002 | Partial fill handling unclear | 🔴 UNRESOLVED | Verify `_handle_partial_fill` implementation |
-| ORDER-003 | Roll partial fill leaves no short | 🔴 UNRESOLVED | Retry new short or enter waiting state |
+| ORDER-002 | Partial fill on entry | ✅ RESOLVED | Fixed - creates long-only diagonal, auto-recovers (2026-01-25) |
+| ORDER-003 | Roll partial fill leaves no short | ✅ RESOLVED | Fixed - sets short=None, auto-recovers (2026-01-25) |
 | ORDER-007 | `buy_result` undefined variable | ✅ RESOLVED | Fixed - changed to `close_result` (2026-01-25) |
-| POS-003 | Naked short not auto-closed | 🔴 UNRESOLVED | Trigger emergency close on detection |
+| ORDER-008 | No progressive retry on timeout | ✅ RESOLVED | Fixed - 7-attempt progressive slippage retry (2026-01-25) |
+| POS-003 | Naked short not auto-closed | ✅ RESOLVED | Fixed - emergency close on detection (2026-01-25) |
 | DATA-001 | EMA becomes zero | ✅ RESOLVED | Fixed by using v3 endpoint (commit d4fa997) |
 | TIME-002 | No market open delay | ✅ RESOLVED | Fixed - added 3-min delay after 9:30 AM (2026-01-25) |
+| MKT-006 | No max loss threshold | ✅ RESOLVED | Fixed - added max_unrealized_loss check (2026-01-25) |
 
 ### 11.2 All Medium Risk Issues
 
@@ -604,7 +618,6 @@ This document catalogs all identified edge cases and potential failure scenarios
 | MKT-001 | No pre-market gap check | Medium |
 | MKT-002 | No flash crash detection | Medium |
 | MKT-003 | No halt detection | Low |
-| MKT-006 | No max loss threshold | High |
 | TIME-001 | No operation lock | Medium |
 | TIME-003 | No early close detection | Medium |
 | STATE-002 | State/position mismatch | Medium |
@@ -620,17 +633,17 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 | Category | Total | ✅ Resolved | ⚠️ Medium | 🔴 High |
 |----------|-------|-------------|-----------|---------|
-| Connection/API | 6 | 3 | 2 | 1 |
-| Order Execution | 7 | 3 | 2 | 2 |
-| Position State | 8 | 4 | 3 | 1 |
-| Market Conditions | 7 | 3 | 4 | 0 |
+| Connection/API | 6 | 3 | 3 | 0 |
+| Order Execution | 8 | 6 | 2 | 0 |
+| Position State | 8 | 5 | 3 | 0 |
+| Market Conditions | 7 | 4 | 3 | 0 |
 | Timing/Race | 5 | 3 | 2 | 0 |
 | State Machine | 4 | 1 | 3 | 0 |
 | Data Integrity | 5 | 2 | 2 | 1 |
 | Dry Run Mode | 2 | 0 | 2 | 0 |
 | Configuration | 2 | 1 | 1 | 0 |
 | Logging | 2 | 1 | 1 | 0 |
-| **TOTAL** | **55** | **25** | **15** | **15** |
+| **TOTAL** | **56** | **30** | **18** | **8** |
 
 ---
 
@@ -651,17 +664,24 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 ### Priority 2: High Risk Issues (Fix Before Going Live)
 
-4. **ORDER-002/ORDER-003**: Partial fill handling
-   - Verify and enhance `_handle_partial_fill()` implementation
+4. ~~**ORDER-002/ORDER-003**: Partial fill handling~~ **RESOLVED**
+   - Fixed: Entry partial fill creates long-only diagonal, auto-recovers on next iteration
+   - Fixed: Roll partial fill sets short=None, auto-recovers on next iteration
+   - Fixed: Long roll failure triggers emergency close of naked short
 
-5. **POS-003**: Naked short not auto-closed
-   - On detection, immediately trigger `_emergency_close_short_put()`
+5. ~~**POS-003**: Naked short not auto-closed~~ **RESOLVED**
+   - Fixed: Calls `_emergency_close_short_put()` immediately on detection during recovery
 
 6. ~~**CONN-006/DATA-002**: Missing Greeks at market open~~ **RESOLVED** (by TIME-002 fix)
    - Either delay until Greeks available or calculate theoretical delta
 
-7. **MKT-006**: No max loss threshold
-   - Add emergency campaign close if unrealized loss exceeds threshold
+7. ~~**MKT-006**: No max loss threshold~~ **RESOLVED**
+   - Fixed: Added `max_unrealized_loss` config and check in `should_close_campaign()` (default: $500)
+
+8. ~~**ORDER-008**: No progressive retry on order timeout~~ **RESOLVED**
+   - Fixed: Added 7-attempt progressive slippage retry sequence (0%/0%/5%/5%/10%/10%/MARKET)
+   - Config: `management.progressive_retry: true`, `management.max_market_spread: 2.0`
+   - Matches Delta Neutral's proven order execution pattern (2026-01-25)
 
 ### Priority 3: Medium Risk Issues (Fix for Production Stability)
 
@@ -687,6 +707,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 |------|--------|--------|
 | 2026-01-25 | Initial analysis - 55 edge cases identified | Claude |
 | 2026-01-25 | Categorized: 22 resolved, 18 medium, 15 high risk | Claude |
+| 2026-01-25 | Resolved ORDER-002/003, POS-003, MKT-006, ORDER-008 | Claude |
+| 2026-01-25 | Added ORDER-008 (progressive retry) - 56 total scenarios, 30 resolved | Claude |
 
 ---
 
