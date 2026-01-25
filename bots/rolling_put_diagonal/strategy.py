@@ -1178,20 +1178,28 @@ class RollingPutDiagonalStrategy:
         gap_percent = ((current_price - prev_close) / prev_close) * 100
         gap_abs = abs(gap_percent)
 
+        # Determine if this was an overnight gap or weekend gap
+        now_est = get_us_market_time()
+        gap_type = "overnight"
+        if now_est.weekday() == 0:  # Monday
+            gap_type = "weekend"
+
         if gap_abs >= gap_threshold_percent:
             direction = "UP" if gap_percent > 0 else "DOWN"
             message = (
-                f"MKT-001: Large gap detected! QQQ gapped {direction} {gap_abs:.2f}% "
+                f"MKT-001: Large {gap_type} gap detected! QQQ gapped {direction} {gap_abs:.2f}% "
                 f"(prev close: ${prev_close:.2f}, current: ${current_price:.2f}). "
                 f"Waiting for market to stabilize."
             )
+            logger.warning("=" * 60)
             logger.warning(message)
+            logger.warning("=" * 60)
 
             if self.trade_logger:
                 self.trade_logger.log_safety_event({
                     "event_type": "RPD_LARGE_GAP_DETECTED",
                     "severity": "WARNING",
-                    "description": f"Gap {direction} {gap_abs:.2f}%",
+                    "description": f"{gap_type.capitalize()} gap {direction} {gap_abs:.2f}%",
                     "action_taken": "ENTRY_BLOCKED",
                     "result": "Waiting for stabilization",
                     "qqq_price": current_price,
@@ -1200,8 +1208,170 @@ class RollingPutDiagonalStrategy:
                 })
 
             return False, gap_percent, message
+        else:
+            # Log normal gap for awareness
+            direction = "up" if gap_percent > 0 else "down"
+            logger.info(
+                f"MKT-001: {gap_type.capitalize()} gap check - QQQ {direction} {gap_abs:.2f}% "
+                f"(prev: ${prev_close:.2f} → now: ${current_price:.2f}) - within normal range"
+            )
 
         return True, gap_percent, f"Gap within threshold: {gap_percent:.2f}%"
+
+    def get_premarket_analysis(self, current_qqq_price: float = 0.0) -> dict:
+        """
+        Get comprehensive pre-market analysis for position impact assessment.
+
+        This provides detailed warnings about potential position impacts based on
+        overnight/weekend gaps. Critical for deciding whether to intervene before
+        market open.
+
+        Args:
+            current_qqq_price: Current QQQ price (will fetch if not provided)
+
+        Returns:
+            Dict with:
+            - gap_percent: Overnight percentage change
+            - gap_points: Dollar move from previous close
+            - warning_level: "NORMAL", "CAUTION", "WARNING", "CRITICAL"
+            - position_impacts: List of position-specific warnings
+            - prev_close: Previous day's closing price
+            - current_price: Current pre-market price
+            - is_monday: Whether this is a Monday (weekend gap)
+        """
+        now_est = get_us_market_time()
+
+        result = {
+            "gap_percent": 0.0,
+            "gap_points": 0.0,
+            "warning_level": "NORMAL",
+            "position_impacts": [],
+            "prev_close": 0.0,
+            "current_price": 0.0,
+            "is_monday": now_est.weekday() == 0,
+            "message": ""
+        }
+
+        # Get previous close
+        prev_close = self.metrics.qqq_open if self.metrics.qqq_open > 0 else 0.0
+
+        if prev_close == 0:
+            # Try to fetch from chart data
+            try:
+                chart_data = self.client.get_chart_data(
+                    uic=self.underlying_uic,
+                    asset_type="Etf",
+                    horizon=1440,
+                    count=2
+                )
+                if chart_data and len(chart_data) >= 2:
+                    prev_close = chart_data[-2].get("Close", chart_data[-2].get("C", 0))
+            except Exception:
+                pass
+
+        if prev_close == 0:
+            result["message"] = "No previous close available"
+            return result
+
+        result["prev_close"] = prev_close
+
+        # Get current price
+        if current_qqq_price <= 0:
+            current_qqq_price = self._get_current_price()
+
+        if current_qqq_price <= 0:
+            result["message"] = "No current price available"
+            return result
+
+        result["current_price"] = current_qqq_price
+
+        # Calculate gap
+        gap_points = current_qqq_price - prev_close
+        gap_percent = (gap_points / prev_close) * 100
+        result["gap_percent"] = gap_percent
+        result["gap_points"] = gap_points
+
+        gap_abs = abs(gap_percent)
+        gap_type = "Weekend" if result["is_monday"] else "Overnight"
+
+        # Determine warning level based on gap size
+        # NORMAL: < 0.5%, CAUTION: 0.5-1%, WARNING: 1-2%, CRITICAL: > 2%
+        if gap_abs >= 2.0:
+            result["warning_level"] = "CRITICAL"
+        elif gap_abs >= 1.0:
+            result["warning_level"] = "WARNING"
+        elif gap_abs >= 0.5:
+            result["warning_level"] = "CAUTION"
+        else:
+            result["warning_level"] = "NORMAL"
+
+        direction = "UP" if gap_percent > 0 else "DOWN"
+
+        # Check position impacts if we have positions
+        impacts = []
+
+        if self.diagonal:
+            # Check long put status
+            if self.diagonal.long_put:
+                long_strike = self.diagonal.long_put.strike
+                if current_qqq_price <= long_strike:
+                    impacts.append(
+                        f"⚠️ LONG PUT ITM: QQQ ${current_qqq_price:.2f} <= Long strike ${long_strike}"
+                    )
+                else:
+                    buffer = current_qqq_price - long_strike
+                    if buffer <= 3:
+                        impacts.append(
+                            f"LONG PUT NEAR ITM: Only ${buffer:.2f} above Long strike ${long_strike}"
+                        )
+
+            # Check short put status - THIS IS CRITICAL
+            if self.diagonal.short_put:
+                short_strike = self.diagonal.short_put.strike
+                if current_qqq_price <= short_strike:
+                    # Short put is ITM - this is dangerous!
+                    impacts.append(
+                        f"🚨 SHORT PUT ITM: QQQ ${current_qqq_price:.2f} <= Short strike ${short_strike}"
+                    )
+                    impacts.append(
+                        f"   → Assignment risk! Short put is in-the-money at open"
+                    )
+                    result["warning_level"] = "CRITICAL"  # Override to critical
+                else:
+                    buffer = current_qqq_price - short_strike
+                    if buffer <= 2:
+                        impacts.append(
+                            f"⚠️ SHORT PUT NEAR ITM: Only ${buffer:.2f} above Short strike ${short_strike}"
+                        )
+                    elif buffer <= 5:
+                        impacts.append(
+                            f"SHORT PUT BUFFER: ${buffer:.2f} above Short strike ${short_strike}"
+                        )
+
+            # Entry conditions check (gap blocks entry if >= 2%)
+            gap_threshold = self.management_config.get("premarket_gap_threshold_percent", 2.0)
+            if gap_abs >= gap_threshold:
+                impacts.append(f"ENTRY BLOCKED: Gap {gap_abs:.2f}% exceeds {gap_threshold}% threshold")
+        else:
+            # No position - just note if entry will be blocked
+            gap_threshold = self.management_config.get("premarket_gap_threshold_percent", 2.0)
+            if gap_abs >= gap_threshold:
+                impacts.append(f"ENTRY BLOCKED: Gap {gap_abs:.2f}% exceeds {gap_threshold}% threshold")
+            else:
+                impacts.append(f"No active position - entry allowed if conditions met")
+
+        result["position_impacts"] = impacts
+
+        # Build message
+        if result["is_monday"]:
+            msg = f"{gap_type} GAP: QQQ {direction} ${abs(gap_points):.2f} ({gap_abs:.2f}%)"
+        else:
+            msg = f"{gap_type} gap: QQQ {direction} ${abs(gap_points):.2f} ({gap_abs:.2f}%)"
+
+        msg += f" | Prev close: ${prev_close:.2f} → Now: ${current_qqq_price:.2f}"
+        result["message"] = msg
+
+        return result
 
     def _get_current_price(self) -> float:
         """Get current QQQ price from quote or cache."""

@@ -520,11 +520,69 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         # force_refresh=True ensures we refresh even if current token is still valid
                         client.authenticate(force_refresh=True)
 
-                        # Log heartbeat LAST, right before sleeping
-                        reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
-                        trade_logger.log_event(
-                            f"HEARTBEAT | Market closed {reason} - sleeping for {minutes}m"
-                        )
+                        # MKT-001: During pre-market on trading days, log comprehensive market analysis
+                        is_premarket = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)
+                        is_trading_day = now_et.weekday() < 5 and not holiday_name
+
+                        if is_premarket and is_trading_day:
+                            try:
+                                # Get current SPY price from pre-market session
+                                spy_price = 0.0
+                                quote = client.get_quote(strategy.underlying_uic, asset_type="Etf")
+                                if quote:
+                                    spy_price = quote.get("Mid") or ((quote.get("Bid", 0) + quote.get("Ask", 0)) / 2)
+
+                                if spy_price > 0:
+                                    # Get comprehensive pre-market analysis with position impact warnings
+                                    analysis = strategy.get_premarket_analysis(spy_price)
+                                    min_to_open = int(seconds_until_open / 60) if seconds_until_open > 0 else 0
+
+                                    # Build the pre-market message based on warning level
+                                    warning_prefix = ""
+                                    if analysis["warning_level"] == "CRITICAL":
+                                        warning_prefix = "🚨 CRITICAL "
+                                    elif analysis["warning_level"] == "WARNING":
+                                        warning_prefix = "⚠️ WARNING "
+                                    elif analysis["warning_level"] == "CAUTION":
+                                        warning_prefix = "⚡ CAUTION "
+
+                                    gap_type = "Weekend" if analysis["is_monday"] else "Overnight"
+
+                                    # Main status line with gap info
+                                    trade_logger.log_event(
+                                        f"{warning_prefix}PRE-MARKET | {analysis['message']} | "
+                                        f"{min_to_open} min to 9:30 AM"
+                                    )
+
+                                    # Log position impact warnings if any
+                                    if analysis["position_impacts"]:
+                                        for impact in analysis["position_impacts"]:
+                                            trade_logger.log_event(f"  → {impact}")
+
+                                    # If warning or critical, log extra visibility with separator lines
+                                    if analysis["warning_level"] in ["WARNING", "CRITICAL"]:
+                                        trade_logger.log_event("=" * 60)
+                                        trade_logger.log_event(
+                                            f"  {gap_type.upper()} GAP ALERT: "
+                                            f"${abs(analysis['gap_points']):.2f} ({abs(analysis['gap_percent']):.2f}%) move"
+                                        )
+                                        trade_logger.log_event(
+                                            f"  Previous close: ${analysis['prev_close']:.2f} → "
+                                            f"Current: ${analysis['current_price']:.2f}"
+                                        )
+                                        trade_logger.log_event("=" * 60)
+                                else:
+                                    trade_logger.log_event(f"PRE-MARKET | SPY: No quote yet | Wake in {minutes} min")
+                            except Exception as e:
+                                logger.warning(f"Pre-market analysis error: {e}")
+                                reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
+                                trade_logger.log_event(f"HEARTBEAT | Market closed {reason} - sleeping for {minutes}m")
+                        else:
+                            # Log standard heartbeat for weekend/holiday/after-hours
+                            reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
+                            trade_logger.log_event(
+                                f"HEARTBEAT | Market closed {reason} - sleeping for {minutes}m"
+                            )
 
                         if not interruptible_sleep(sleep_time):
                             break  # Shutdown requested

@@ -407,6 +407,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     dashboard_interval = 900  # 15 minutes
     last_bot_log_time = get_us_market_time()  # Use ET market time for consistency when traveling
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
+    market_open_gap_checked = False  # MKT-001: Track if we've checked the gap at market open today
 
     # CONN-003: Setup WebSocket streaming for real-time price updates
     # This provides faster price updates than REST polling, useful for:
@@ -441,6 +442,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                 qqq_price=strategy.current_price if strategy.current_price > 0 else 0
             )
             last_daily_reset = today
+            market_open_gap_checked = False  # MKT-001: Reset gap check flag for new day
 
         # Check market status
         if not is_market_open():
@@ -472,7 +474,62 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
 
             if sleep_seconds > 0:
                 sleep_minutes = sleep_seconds // 60
-                trade_logger.log_event(f"Market closed ({reason}). Sleeping {sleep_minutes} minutes...")
+
+                # MKT-001: During pre-market on trading days, log comprehensive market analysis
+                if reason == "Pre-market" and now.weekday() < 5 and not holiday_name:
+                    try:
+                        # Get current QQQ price from pre-market session
+                        qqq_price = 0.0
+                        quote = client.get_quote(strategy.underlying_uic, asset_type="Etf")
+                        if quote:
+                            qqq_price = quote.get("Mid") or ((quote.get("Bid", 0) + quote.get("Ask", 0)) / 2)
+
+                        if qqq_price > 0:
+                            # Get comprehensive pre-market analysis with position impact warnings
+                            analysis = strategy.get_premarket_analysis(qqq_price)
+                            min_to_open = int(seconds_until_open / 60) if seconds_until_open > 0 else 0
+
+                            # Build the pre-market message based on warning level
+                            warning_prefix = ""
+                            if analysis["warning_level"] == "CRITICAL":
+                                warning_prefix = "🚨 CRITICAL "
+                            elif analysis["warning_level"] == "WARNING":
+                                warning_prefix = "⚠️ WARNING "
+                            elif analysis["warning_level"] == "CAUTION":
+                                warning_prefix = "⚡ CAUTION "
+
+                            gap_type = "Weekend" if analysis["is_monday"] else "Overnight"
+
+                            # Main status line with gap info
+                            trade_logger.log_event(
+                                f"{warning_prefix}PRE-MARKET | {analysis['message']} | "
+                                f"{min_to_open} min to 9:30 AM"
+                            )
+
+                            # Log position impact warnings if any
+                            if analysis["position_impacts"]:
+                                for impact in analysis["position_impacts"]:
+                                    trade_logger.log_event(f"  → {impact}")
+
+                            # If warning or critical, log extra visibility with separator lines
+                            if analysis["warning_level"] in ["WARNING", "CRITICAL"]:
+                                trade_logger.log_event("=" * 60)
+                                trade_logger.log_event(
+                                    f"  {gap_type.upper()} GAP ALERT: "
+                                    f"${abs(analysis['gap_points']):.2f} ({abs(analysis['gap_percent']):.2f}%) move"
+                                )
+                                trade_logger.log_event(
+                                    f"  Previous close: ${analysis['prev_close']:.2f} → "
+                                    f"Current: ${analysis['current_price']:.2f}"
+                                )
+                                trade_logger.log_event("=" * 60)
+                        else:
+                            trade_logger.log_event(f"PRE-MARKET | QQQ: No quote yet | Wake in {sleep_minutes} min")
+                    except Exception as e:
+                        logger.warning(f"Pre-market analysis error: {e}")
+                        trade_logger.log_event(f"Market closed ({reason}). Sleeping {sleep_minutes} minutes...")
+                else:
+                    trade_logger.log_event(f"Market closed ({reason}). Sleeping {sleep_minutes} minutes...")
 
                 # CONN-003: Disconnect WebSocket before sleeping to avoid timeout errors
                 if client.is_streaming:
@@ -518,6 +575,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     trade_logger.log_event("Warning: WebSocket reconnection failed - using REST polling")
             except Exception as e:
                 trade_logger.log_error(f"WebSocket reconnection error: {e}")
+
+        # MKT-001: Check for overnight/weekend gaps at first market open check of the day
+        if not market_open_gap_checked:
+            try:
+                strategy.check_premarket_gap()  # This logs the gap info
+                market_open_gap_checked = True
+            except Exception as e:
+                trade_logger.log_error(f"Pre-market gap check error: {e}")
+                market_open_gap_checked = True  # Don't keep retrying if it fails
 
         # Market is open - run strategy iteration
         try:
