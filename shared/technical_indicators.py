@@ -50,6 +50,12 @@ class TechnicalIndicatorValues:
     weekly_ema_9: float = 0.0
     weekly_trend_bearish: bool = False
 
+    # STRATEGY-001: Candle analysis for Bill Belt entry rule
+    # "At least 2 daily green candles closed above MA9 line"
+    consecutive_green_candles_above_ema: int = 0
+    last_candle_is_green: bool = False
+    last_candle_closed_above_ema: bool = False
+
     @property
     def entry_conditions_met(self) -> bool:
         """
@@ -58,7 +64,7 @@ class TechnicalIndicatorValues:
         Entry requires:
         1. Price > 9 EMA (bullish trend)
         2. MACD histogram rising OR positive
-        3. CCI not overbought (< 100)
+        3. CCI not overbought (< 100) - NOTE: This is optional, not in Bill's original rules
         4. Weekly trend not bearish
         """
         return (
@@ -69,14 +75,33 @@ class TechnicalIndicatorValues:
         )
 
     @property
+    def bill_belt_entry_met(self) -> bool:
+        """
+        STRATEGY-001: Check Bill Belt's specific entry criteria.
+
+        Per Bill Belt: "At least 2 daily green candles that are closed and
+        above the MA9 line and the MACD lines are bullish."
+
+        Returns:
+            True if Bill Belt's specific entry criteria are met
+        """
+        return (
+            self.consecutive_green_candles_above_ema >= 2 and
+            (self.macd_histogram_rising or self.macd_histogram_positive) and
+            not self.weekly_trend_bearish
+        )
+
+    @property
     def exit_signal(self) -> bool:
         """
-        Check if price has broken below EMA significantly (exit signal).
+        STRATEGY-002: Check if price has broken below EMA (exit signal).
 
-        Bill Belt: "If price closes BELOW the 9 EMA significantly, close campaign."
-        Using 2% below EMA as significant.
+        Bill Belt: "If the price drops under the MA9, either close the spread
+        or buy back the short put and let the long put appreciate as the price drops."
+
+        This is triggered when price goes below EMA - NOT waiting for 2-3% drop.
         """
-        return self.ema_distance_pct < -2.0
+        return not self.price_above_ema
 
     def to_dict(self) -> dict:
         """Convert to dictionary for logging."""
@@ -95,7 +120,11 @@ class TechnicalIndicatorValues:
             "cci_oversold": self.cci_oversold,
             "weekly_ema_9": self.weekly_ema_9,
             "weekly_trend_bearish": self.weekly_trend_bearish,
+            "consecutive_green_candles_above_ema": self.consecutive_green_candles_above_ema,
+            "last_candle_is_green": self.last_candle_is_green,
+            "last_candle_closed_above_ema": self.last_candle_closed_above_ema,
             "entry_conditions_met": self.entry_conditions_met,
+            "bill_belt_entry_met": self.bill_belt_entry_met,
             "exit_signal": self.exit_signal
         }
 
@@ -354,10 +383,77 @@ def is_macd_histogram_rising(histogram: List[float], lookback: int = 2) -> bool:
     return recent[-1] > recent[0]
 
 
+def count_consecutive_green_candles_above_ema(
+    opens: List[float],
+    closes: List[float],
+    ema_values: List[float]
+) -> Tuple[int, bool, bool]:
+    """
+    STRATEGY-001: Count consecutive green candles that closed above EMA.
+
+    Bill Belt's entry rule: "At least 2 daily green candles that are
+    closed and above the MA9 line."
+
+    A green candle = close > open (bullish candle)
+    Above EMA = close > EMA value for that bar
+
+    Args:
+        opens: List of open prices (oldest to newest)
+        closes: List of closing prices (oldest to newest)
+        ema_values: List of EMA values (same length as prices)
+
+    Returns:
+        Tuple of:
+        - consecutive_count: Number of consecutive green candles above EMA (from most recent)
+        - last_is_green: Whether the most recent candle is green
+        - last_above_ema: Whether the most recent candle closed above EMA
+    """
+    if not opens or not closes or not ema_values:
+        return 0, False, False
+
+    if len(opens) != len(closes) or len(opens) != len(ema_values):
+        logger.warning(f"Mismatched array lengths: opens={len(opens)}, closes={len(closes)}, ema={len(ema_values)}")
+        return 0, False, False
+
+    # Check the most recent candle first
+    last_close = closes[-1]
+    last_open = opens[-1]
+    last_ema = ema_values[-1]
+
+    # Handle NaN EMA
+    if last_ema != last_ema:  # NaN check
+        return 0, False, False
+
+    last_is_green = last_close > last_open
+    last_above_ema = last_close > last_ema
+
+    # Count consecutive green candles above EMA from most recent backwards
+    consecutive_count = 0
+    for i in range(len(closes) - 1, -1, -1):
+        close = closes[i]
+        open_price = opens[i]
+        ema = ema_values[i]
+
+        # Skip NaN EMAs
+        if ema != ema:
+            break
+
+        is_green = close > open_price
+        is_above_ema = close > ema
+
+        if is_green and is_above_ema:
+            consecutive_count += 1
+        else:
+            break
+
+    return consecutive_count, last_is_green, last_above_ema
+
+
 def calculate_all_indicators(
     prices: List[float],
     highs: Optional[List[float]] = None,
     lows: Optional[List[float]] = None,
+    opens: Optional[List[float]] = None,
     ema_period: int = 9,
     macd_fast: int = 12,
     macd_slow: int = 26,
@@ -373,6 +469,7 @@ def calculate_all_indicators(
         prices: List of closing prices (oldest to newest)
         highs: List of high prices (optional, uses closes if not provided)
         lows: List of low prices (optional, uses closes if not provided)
+        opens: List of open prices (optional, needed for candle analysis)
         ema_period: Period for EMA (default 9)
         macd_fast: MACD fast period (default 12)
         macd_slow: MACD slow period (default 26)
@@ -396,8 +493,9 @@ def calculate_all_indicators(
 
     current_price = prices[-1]
 
-    # Calculate EMA
-    ema_9 = get_current_ema(prices, ema_period)
+    # Calculate EMA (full list for candle analysis)
+    ema_values = calculate_ema(prices, ema_period)
+    ema_9 = ema_values[-1] if ema_values and ema_values[-1] == ema_values[-1] else 0.0
     price_above_ema = current_price > ema_9 if ema_9 > 0 else False
     ema_distance_pct = ((current_price - ema_9) / ema_9 * 100) if ema_9 > 0 else 0.0
 
@@ -414,6 +512,20 @@ def calculate_all_indicators(
     cci_is_overbought = cci > cci_overbought
     cci_is_oversold = cci < cci_oversold
 
+    # STRATEGY-001: Calculate consecutive green candles above EMA
+    consecutive_green = 0
+    last_is_green = False
+    last_above_ema = False
+
+    if opens is not None and len(opens) == len(prices):
+        consecutive_green, last_is_green, last_above_ema = count_consecutive_green_candles_above_ema(
+            opens, prices, ema_values
+        )
+    else:
+        # If no opens provided, we can't do candle analysis
+        # Default to checking if current price is above EMA
+        last_above_ema = price_above_ema
+
     return TechnicalIndicatorValues(
         current_price=current_price,
         ema_9=ema_9,
@@ -428,7 +540,10 @@ def calculate_all_indicators(
         cci_overbought=cci_is_overbought,
         cci_oversold=cci_is_oversold,
         weekly_ema_9=0.0,  # Set separately if needed
-        weekly_trend_bearish=False  # Set separately if needed
+        weekly_trend_bearish=False,  # Set separately if needed
+        consecutive_green_candles_above_ema=consecutive_green,
+        last_candle_is_green=last_is_green,
+        last_candle_closed_above_ema=last_above_ema
     )
 
 

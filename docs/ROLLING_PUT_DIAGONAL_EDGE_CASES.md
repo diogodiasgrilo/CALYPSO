@@ -11,10 +11,10 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Rolling Put Diagonal trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 56
-**Well-Handled/Resolved:** 40 (71%)
-**Medium Risk:** 11 (20%)
-**High Risk:** 5 (9%)
+**Total Scenarios Analyzed:** 60 (56 edge cases + 4 strategy alignment issues)
+**Well-Handled/Resolved:** 44 (73%)
+**Medium Risk:** 11 (18%)
+**High Risk:** 5 (8%)
 
 ---
 
@@ -721,7 +721,75 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 ---
 
-## 13. CHANGE LOG
+## 13. STRATEGY ALIGNMENT (Bill Belt's Rolling Put Diagonal)
+
+Based on research of Bill Belt's original strategy from [Theta Profits](https://www.thetaprofits.com/rolling-put-diagonal-step-by-step-guide-to-a-powerful-options-strategy/), the following strategy-specific issues were identified and resolved:
+
+### 13.1 Entry Rule Misalignment
+| | |
+|---|---|
+| **ID** | STRATEGY-001 |
+| **Issue** | Entry only checked if current price > EMA, not Bill Belt's "2 green candles closed above MA9" |
+| **Bill Belt's Rule** | "At least 2 daily green candles that are closed and above the MA9 line and the MACD lines are bullish." |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Fix Applied** | Added `consecutive_green_candles_above_ema` tracking in `technical_indicators.py`, updated `check_entry_conditions()` to require `min_green_candles_above_ema` (default: 2) |
+| **Config** | `strategy.indicators.min_green_candles_above_ema: 2` |
+
+### 13.2 Exit Rule Misalignment (CRITICAL)
+| | |
+|---|---|
+| **ID** | STRATEGY-002 |
+| **Issue** | Exit only triggered when price 3%+ below EMA (emergency only) |
+| **Bill Belt's Rule** | "If the price drops under the MA9, either close the spread or buy back the short put and let the long put appreciate." |
+| **Previous Code** | `if distance_pct > 3.0: return True` (line 2789) |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Fix Applied** | Changed to exit when `not self.indicators.price_above_ema` (any drop below EMA triggers exit) |
+| **Additional** | Added `close_short_only()` method for Bill Belt's alternative exit (keep long for appreciation) |
+
+### 13.3 CCI Filter Not in Original
+| | |
+|---|---|
+| **ID** | STRATEGY-003 |
+| **Issue** | CCI < 100 filter was enforced but NOT in Bill Belt's documented rules |
+| **Bill Belt's Rule** | Only mentions EMA and MACD for entry, not CCI |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Fix Applied** | Made CCI filter optional via config `strategy.indicators.use_cci_filter` (default: false) |
+
+### 13.4 Missing Buying Power Roll Threshold
+| | |
+|---|---|
+| **ID** | STRATEGY-004 |
+| **Issue** | Long put roll only triggered by delta < 20, not by buying power threshold |
+| **Bill Belt's Rule** | "Roll long up when BP required hits $1,200 or greater OR when long leg is less than 20 delta." |
+| **Risk Level** | ✅ LOW |
+| **Status** | RESOLVED |
+| **Fix Applied** | Added `_get_current_buying_power_used()` and BP threshold check in `should_roll_long_up()` |
+| **Config** | `strategy.long_put.roll_bp_threshold: 1200` (set 0 to disable) |
+
+### 13.5 Strategy Alignment Summary
+
+| Component | Bill Belt's Rule | Our Implementation | Status |
+|-----------|------------------|-------------------|--------|
+| Long Put Delta | 30-35 delta | 33 delta (config) | ✅ Correct |
+| Long Put DTE | 14-30 days | 14 DTE (config) | ✅ Correct |
+| Short Put Delta | ATM (~50 delta) | ATM (target_delta: -0.50) | ✅ Correct |
+| Short Put DTE | 1 DTE (next day) | 1 DTE | ✅ Correct |
+| Roll Long When | Delta < 20 OR BP >= $1200 | Both conditions checked | ✅ Correct |
+| Vertical Roll | Price >= strike (bullish) → new ATM | Implemented | ✅ Correct |
+| Horizontal Roll | Price < strike (bearish) → same strike | Implemented | ✅ Correct |
+| Campaign Close | Before long expires | campaign_close_dte: 2 | ✅ Correct |
+| Entry: 2 Green Candles | Required | Now checked | ✅ Correct |
+| Entry: MACD Bullish | Required | Checks macd_histogram_rising | ✅ Correct |
+| Entry: CCI | NOT in original | Now optional (disabled) | ✅ Correct |
+| Exit: Price < EMA | Close immediately | Now triggers exit | ✅ Correct |
+| Exit: Close Short Only | Optional (keep long) | Added close_short_only() | ✅ Correct |
+
+---
+
+## 14. CHANGE LOG
 
 | Date | Change | Author |
 |------|--------|--------|
@@ -731,10 +799,12 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-25 | Added ORDER-008 (progressive retry) - 56 total scenarios, 30 resolved | Claude |
 | 2026-01-25 | Resolved TIME-001, TIME-003, STATE-002, STATE-003, POS-002, LOG-001, DATA-004 | Claude |
 | 2026-01-25 | Confirmed CONN-004, CONN-005 already in saxo_client.py - 40 resolved (71%) | Claude |
+| 2026-01-25 | Added Section 13: Strategy Alignment - 4 new fixes (STRATEGY-001 to 004) | Claude |
+| 2026-01-25 | Strategy research: Entry 2-candle rule, exit below EMA, CCI optional, BP threshold | Claude |
 
 ---
 
-## 14. USAGE
+## 15. USAGE
 
 ### Running Verification Against Code
 
@@ -757,5 +827,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 1.2
-**Last Updated:** 2026-01-25 (comprehensive fixes batch)
+**Document Version:** 1.3
+**Last Updated:** 2026-01-25 (strategy alignment fixes)

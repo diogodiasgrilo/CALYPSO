@@ -1975,16 +1975,18 @@ class RollingPutDiagonalStrategy:
             )
 
             if daily_bars and len(daily_bars) >= 30:
-                # Extract price arrays
+                # Extract price arrays (STRATEGY-001: include opens for candle analysis)
                 closes = [bar.get("Close", 0) for bar in daily_bars]
                 highs = [bar.get("High", 0) for bar in daily_bars]
                 lows = [bar.get("Low", 0) for bar in daily_bars]
+                opens = [bar.get("Open", 0) for bar in daily_bars]
 
                 # Calculate indicators
                 self.indicators = calculate_all_indicators(
                     prices=closes,
                     highs=highs,
                     lows=lows,
+                    opens=opens,  # STRATEGY-001: Pass opens for candle analysis
                     ema_period=self.indicator_config.get("ema_period", 9),
                     macd_fast=self.indicator_config.get("macd_fast", 12),
                     macd_slow=self.indicator_config.get("macd_slow", 26),
@@ -1994,7 +1996,8 @@ class RollingPutDiagonalStrategy:
                 )
 
                 self.current_ema_9 = self.indicators.ema_9
-                logger.debug(f"QQQ: ${self.current_price:.2f}, EMA9: ${self.current_ema_9:.2f}")
+                logger.debug(f"QQQ: ${self.current_price:.2f}, EMA9: ${self.current_ema_9:.2f}, "
+                            f"Green candles above EMA: {self.indicators.consecutive_green_candles_above_ema}")
 
             else:
                 logger.warning("Insufficient chart data for indicators")
@@ -2016,14 +2019,18 @@ class RollingPutDiagonalStrategy:
 
     def check_entry_conditions(self) -> Tuple[bool, str]:
         """
-        Check if all entry conditions are met.
+        Check if all entry conditions are met per Bill Belt's Rolling Put Diagonal rules.
 
-        Entry requires:
+        STRATEGY-001: Bill Belt Entry Rules (from thetaprofits.com):
+        "At least 2 daily green candles that are closed and above the MA9 line
+        and the MACD lines are bullish."
+
+        Additional filters:
         0. Not within market open delay (TIME-002)
-        1. Price > 9 EMA (bullish bias)
-        2. MACD histogram rising (momentum)
-        3. CCI < 100 (not overbought)
-        4. Weekly trend not bearish (optional)
+        1. At least 2 consecutive green candles closed above 9 EMA (Bill Belt's rule)
+        2. MACD histogram rising or positive (momentum)
+        3. CCI < 100 (OPTIONAL - not in Bill Belt's original rules, configurable)
+        4. Weekly trend not bearish
         5. No upcoming FOMC or major earnings
 
         Returns:
@@ -2044,20 +2051,30 @@ class RollingPutDiagonalStrategy:
         if should_close:
             return False, f"Event risk: {event_reason}"
 
-        # Check entry filters
+        # STRATEGY-001: Bill Belt's primary entry rule - 2 green candles above EMA
+        min_green_candles = self.indicator_config.get("min_green_candles_above_ema", 2)
+        if self.indicators.consecutive_green_candles_above_ema < min_green_candles:
+            return False, (f"Need {min_green_candles} green candles above EMA, "
+                          f"have {self.indicators.consecutive_green_candles_above_ema}")
+
+        # Check current price above EMA (real-time check, not just candle close)
         if not self.indicators.price_above_ema:
             return False, f"Price ${self.current_price:.2f} below 9 EMA ${self.indicators.ema_9:.2f}"
 
+        # MACD must be bullish
         if not self.indicators.macd_histogram_rising and not self.indicators.macd_histogram_positive:
             return False, f"MACD histogram not rising (current: {self.indicators.macd_histogram:.4f})"
 
-        if self.indicators.cci_overbought:
-            return False, f"CCI overbought: {self.indicators.cci:.2f} > 100"
+        # STRATEGY-003: CCI filter is OPTIONAL (not in Bill Belt's original rules)
+        # Only apply if enabled in config (default: disabled to match Bill Belt)
+        if self.indicator_config.get("use_cci_filter", False):
+            if self.indicators.cci_overbought:
+                return False, f"CCI overbought: {self.indicators.cci:.2f} > 100"
 
         if self.indicators.weekly_trend_bearish:
             return False, "Weekly trend is bearish"
 
-        return True, "All entry conditions met"
+        return True, "All entry conditions met (Bill Belt criteria)"
 
     # =========================================================================
     # CORE STRATEGY LOGIC
@@ -2563,11 +2580,33 @@ class RollingPutDiagonalStrategy:
                     }
         return None
 
+    def _get_current_buying_power_used(self) -> Optional[float]:
+        """
+        STRATEGY-004: Get the current buying power (margin) used by the diagonal.
+
+        Bill Belt's rule: Roll long up when BP required hits $1,200 or greater
+        OR when long leg is less than 20 delta.
+
+        Returns:
+            Buying power used in USD, or None if unable to determine
+        """
+        try:
+            balance = self.client.get_balance()
+            if balance:
+                # Saxo returns MarginUsedByCurrentPositions or similar
+                margin_used = balance.get("MarginUsedByCurrentPositions", 0)
+                return margin_used
+        except Exception as e:
+            logger.debug(f"Could not get buying power: {e}")
+        return None
+
     def should_roll_long_up(self) -> bool:
         """
         Check if long put should be rolled up.
 
-        Roll long put up when delta drops below threshold (20 delta).
+        STRATEGY-004: Bill Belt's criteria for rolling long put up:
+        1. Delta drops below threshold (20 delta) - provides less protection
+        2. Buying power required hits $1,200 or greater
 
         Returns:
             True if long put should be rolled up
@@ -2575,10 +2614,23 @@ class RollingPutDiagonalStrategy:
         if not self.diagonal or not self.diagonal.long_put:
             return False
 
+        # Check delta threshold (primary rule)
         threshold = abs(self.long_put_config.get("roll_delta_threshold", -0.20))
         current_delta = self.diagonal.long_delta_abs
 
-        return current_delta < threshold
+        if current_delta < threshold:
+            logger.info(f"STRATEGY-004: Long put delta {current_delta:.3f} < {threshold:.3f} threshold - should roll up")
+            return True
+
+        # STRATEGY-004: Check buying power threshold (secondary rule)
+        bp_threshold = self.long_put_config.get("roll_bp_threshold", 1200)
+        if bp_threshold > 0:
+            bp_used = self._get_current_buying_power_used()
+            if bp_used and bp_used >= bp_threshold:
+                logger.info(f"STRATEGY-004: Buying power ${bp_used:.2f} >= ${bp_threshold:.2f} threshold - should roll up")
+                return True
+
+        return False
 
     def roll_long_up(self) -> bool:
         """
@@ -2734,11 +2786,15 @@ class RollingPutDiagonalStrategy:
         """
         Check if campaign should be closed.
 
-        Close reasons:
-        1. Long put near expiry (1-2 DTE)
-        2. FOMC or major earnings approaching
-        3. Emergency exit (price significantly below EMA)
-        4. MKT-006: Max unrealized loss exceeded
+        STRATEGY-002: Bill Belt Exit Rules (from thetaprofits.com):
+        "If the price drops under the MA9, either close the spread or buy back
+        the short put and let the long put appreciate as the price drops."
+
+        Close reasons (in priority order):
+        1. Long put near expiry (1-2 DTE) - must close before expiration
+        2. FOMC or major earnings approaching - event risk
+        3. STRATEGY-002: Price below 9 EMA - Bill Belt's exit signal
+        4. MKT-006: Max unrealized loss exceeded - safety limit
 
         Returns:
             Tuple of (should_close, reason)
@@ -2746,7 +2802,7 @@ class RollingPutDiagonalStrategy:
         if not self.diagonal or not self.diagonal.long_put:
             return False, ""
 
-        # Check long put DTE
+        # Check long put DTE (highest priority - must close before expiration)
         close_dte = self.management_config.get("campaign_close_dte", 2)
         if self.diagonal.long_dte <= close_dte:
             return True, f"Long put at {self.diagonal.long_dte} DTE (threshold: {close_dte})"
@@ -2766,13 +2822,112 @@ class RollingPutDiagonalStrategy:
                 logger.warning(f"MKT-006: Unrealized loss ${abs(unrealized):.2f} exceeds max ${self._max_unrealized_loss:.2f}")
                 return True, f"MKT-006: Max loss exceeded (${abs(unrealized):.2f} > ${self._max_unrealized_loss:.2f})"
 
-        # Check emergency exit (price significantly below EMA)
+        # STRATEGY-002: Bill Belt's exit rule - close when price drops below 9 EMA
+        # This is the key fix: Bill says close immediately when price < EMA, not wait for 3%
         if self.indicators and self.indicators.ema_9 > 0:
-            distance_pct = (self.indicators.ema_9 - self.current_price) / self.indicators.ema_9 * 100
-            if distance_pct > 3.0:  # Price 3%+ below EMA
-                return True, f"Emergency: Price {distance_pct:.1f}% below 9 EMA"
+            if not self.indicators.price_above_ema:
+                distance_pct = abs((self.current_price - self.indicators.ema_9) / self.indicators.ema_9 * 100)
+                logger.warning(f"STRATEGY-002: Price ${self.current_price:.2f} dropped below "
+                              f"9 EMA ${self.indicators.ema_9:.2f} ({distance_pct:.2f}% below)")
+                return True, f"STRATEGY-002: Price below 9 EMA (${self.current_price:.2f} < ${self.indicators.ema_9:.2f})"
 
         return False, ""
+
+    def close_short_only(self, reason: str) -> bool:
+        """
+        STRATEGY-002: Close only the short put, keep long for directional appreciation.
+
+        Bill Belt: "If the price drops under the MA9, either close the spread
+        OR buy back the short put and let the long put appreciate as the price drops."
+
+        This is an alternative to full close - use when bearish move expected
+        and we want to profit from the long put's appreciation.
+
+        Args:
+            reason: Reason for closing short only
+
+        Returns:
+            True if short closed successfully, False otherwise
+        """
+        if self._check_circuit_breaker():
+            return False
+
+        if not self.diagonal or not self.diagonal.short_put:
+            logger.warning("No short put to close")
+            return False
+
+        logger.info("=" * 50)
+        logger.info("CLOSING SHORT ONLY (keeping long for appreciation)")
+        logger.info("=" * 50)
+        logger.info(f"Reason: {reason}")
+
+        try:
+            short_put = self.diagonal.short_put
+
+            if self.dry_run:
+                logger.info(f"[DRY RUN] Would close short put ${short_put.strike}, keep long ${self.diagonal.long_put.strike}")
+                self.diagonal.short_put = None
+
+                # Log to Google Sheets
+                if self.trade_logger:
+                    self.trade_logger.log_trade(
+                        action="[SIMULATED] CLOSE_SHORT_ONLY",
+                        strike=short_put.strike,
+                        price=0.0,
+                        delta=0.0,
+                        pnl=0.0,
+                        saxo_client=self.client,
+                        underlying_price=self.current_price,
+                        option_type="Short Put Close",
+                        expiry_date=short_put.expiry,
+                        premium_received=0.0,
+                        trade_reason=f"[DRY RUN] {reason}"
+                    )
+                return True
+
+            # Close short put
+            result = self._place_protected_order(
+                uic=short_put.uic,
+                buy_sell=BuySell.BUY,
+                quantity=abs(short_put.quantity),
+                description=f"Close short put ${short_put.strike} (keeping long)",
+            )
+
+            if result.get("success"):
+                # P&L = entry - exit (for short)
+                short_pnl = (short_put.entry_price - result.get("fill_price", 0)) * 100
+                logger.info(f"Short put closed - P&L: ${short_pnl:.2f}")
+                logger.info(f"Keeping long put ${self.diagonal.long_put.strike} for appreciation")
+
+                # Log to Google Sheets
+                if self.trade_logger:
+                    self.trade_logger.log_trade(
+                        action="CLOSE_SHORT_ONLY",
+                        strike=short_put.strike,
+                        price=result.get("fill_price", 0),
+                        delta=0.0,
+                        pnl=short_pnl,
+                        saxo_client=self.client,
+                        underlying_price=self.current_price,
+                        option_type="Short Put Close",
+                        expiry_date=short_put.expiry,
+                        premium_received=0.0,
+                        trade_reason=reason
+                    )
+
+                # Clear short put from diagonal
+                self.diagonal.short_put = None
+                self._reset_failure_count()
+                return True
+            else:
+                logger.error(f"Failed to close short put: {result.get('error')}")
+                self._increment_failure_count("Failed to close short only")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error closing short only: {e}")
+            self._increment_failure_count(f"Close short only exception: {e}")
+            return False
 
     def close_campaign(self, reason: str) -> bool:
         """
