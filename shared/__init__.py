@@ -21,11 +21,11 @@ Key design: Alerts are sent AFTER actions complete with ACTUAL results.
 The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately.
 Cloud Function delivers SMS/email asynchronously in the background.
 
-Alert Priorities:
-    CRITICAL: SMS + Email (circuit breaker, emergency exit, naked positions)
-    HIGH: SMS + Email (stop loss, max loss, position issues)
-    MEDIUM: Email only (position opened, profit target, daily summaries)
-    LOW: Email only (informational, startup/shutdown)
+Alert Priorities (ALL levels get WhatsApp + Email):
+    CRITICAL: WhatsApp + Email (circuit breaker, emergency exit, naked positions)
+    HIGH: WhatsApp + Email (stop loss, max loss, position issues)
+    MEDIUM: WhatsApp + Email (position opened, profit target, daily summaries)
+    LOW: WhatsApp + Email (informational, startup/shutdown)
 
 Usage:
     from shared import AlertService, AlertType, AlertPriority
@@ -132,10 +132,16 @@ from shared.market_hours import (
     is_extended_hours,
     is_saxo_price_available,
     get_trading_session,
+    is_early_close_day,
+    get_early_close_reason,
+    get_market_close_time,
+    is_market_holiday,
+    get_holiday_name,
 )
 from shared.secret_manager import is_running_on_gcp
 from shared.external_price_feed import ExternalPriceFeed
 from shared.alert_service import AlertService, AlertType, AlertPriority
+from shared.market_status_monitor import MarketStatusMonitor, check_premarket_gap
 
 __all__ = [
     # Saxo Client
@@ -149,10 +155,15 @@ __all__ = [
     # Market Hours (Extended - Saxo: 7:00 AM - 5:00 PM ET)
     'is_pre_market', 'is_after_hours', 'is_extended_hours',
     'is_saxo_price_available', 'get_trading_session',
+    # Market Hours (Early Close / Holidays)
+    'is_early_close_day', 'get_early_close_reason', 'get_market_close_time',
+    'is_market_holiday', 'get_holiday_name',
     # Cloud
     'is_running_on_gcp',
     # Price Feed
     'ExternalPriceFeed',
     # Alerts
     'AlertService', 'AlertType', 'AlertPriority',
+    # Market Status Monitor (for countdown/open/close/holiday alerts)
+    'MarketStatusMonitor', 'check_premarket_gap',
 ]

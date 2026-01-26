@@ -32,6 +32,7 @@ US_EASTERN = pytz.timezone('America/New_York')
 # Regular market hours (US equity markets)
 MARKET_OPEN_TIME = time(9, 30)   # 9:30 AM ET
 MARKET_CLOSE_TIME = time(16, 0)  # 4:00 PM ET
+EARLY_CLOSE_TIME = time(13, 0)   # 1:00 PM ET for early close days
 
 # Extended trading hours (Saxo Bank specific)
 # Pre-market: 7:00 AM - 9:30 AM ET (limit orders only)
@@ -138,6 +139,113 @@ def _adjust_for_weekend(dt: datetime) -> datetime:
     elif dt.weekday() == 6:  # Sunday
         return dt + timedelta(days=1)  # Observe Monday
     return dt
+
+
+def get_early_close_dates(year: int) -> dict:
+    """
+    Get all early close dates for US stock markets.
+
+    NYSE/NASDAQ close at 1:00 PM ET on these days:
+    - Day after Thanksgiving (Black Friday)
+    - Christmas Eve (Dec 24, or Dec 23 if Dec 24 is Sunday)
+    - July 3rd (if July 4th is a weekday, or July 3rd if July 4th is Saturday)
+
+    Note: New Year's Eve is NOT an early close day.
+
+    Args:
+        year: Year to get early close dates for
+
+    Returns:
+        dict: Reason -> date mapping for early close days
+    """
+    early_closes = {}
+
+    # Day after Thanksgiving (4th Thursday of November + 1 day = Friday)
+    thanksgiving = _get_nth_weekday_of_month(year, 11, 3, 4)  # 3=Thursday
+    black_friday = thanksgiving + timedelta(days=1)
+    early_closes["Day After Thanksgiving"] = black_friday
+
+    # Christmas Eve - Dec 24, unless it falls on weekend
+    christmas_eve = datetime(year, 12, 24)
+    if christmas_eve.weekday() == 5:  # Saturday - early close on Friday Dec 23
+        early_closes["Christmas Eve (observed)"] = christmas_eve - timedelta(days=1)
+    elif christmas_eve.weekday() == 6:  # Sunday - no early close (market closed Monday)
+        pass
+    else:
+        early_closes["Christmas Eve"] = christmas_eve
+
+    # July 3rd early close (if July 4th is a weekday)
+    july_4 = datetime(year, 7, 4)
+    if july_4.weekday() == 0:  # Monday - market closed, July 3 is Sunday, no early close
+        pass
+    elif july_4.weekday() == 5:  # Saturday - July 3 is Friday, early close
+        early_closes["Day Before Independence Day"] = datetime(year, 7, 3)
+    elif july_4.weekday() == 6:  # Sunday - July 3 is Saturday, no early close
+        pass
+    else:  # July 4 is Tue-Fri, July 3 is a weekday, early close
+        early_closes["Day Before Independence Day"] = datetime(year, 7, 3)
+
+    return early_closes
+
+
+def is_early_close_day(dt: datetime = None) -> bool:
+    """
+    Check if the given date is an early close day (1:00 PM ET close).
+
+    Args:
+        dt: Datetime to check (defaults to now in ET)
+
+    Returns:
+        bool: True if it's an early close day
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    return get_early_close_reason(dt) is not None
+
+
+def get_early_close_reason(dt: datetime = None) -> Optional[str]:
+    """
+    Get the reason for early close if the given date is an early close day.
+
+    Args:
+        dt: Date to check (defaults to now in ET)
+
+    Returns:
+        str or None: Reason for early close, or None if not an early close day
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    early_closes = get_early_close_dates(dt.year)
+    check_date = dt.date() if hasattr(dt, 'date') else dt
+
+    for reason, close_dt in early_closes.items():
+        if close_dt.date() == check_date:
+            return reason
+
+    return None
+
+
+def get_market_close_time(dt: datetime = None) -> time:
+    """
+    Get the market close time for a given date.
+
+    Returns 1:00 PM for early close days, 4:00 PM for regular days.
+
+    Args:
+        dt: Date to check (defaults to now in ET)
+
+    Returns:
+        time: Market close time (either EARLY_CLOSE_TIME or MARKET_CLOSE_TIME)
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    if is_early_close_day(dt):
+        return EARLY_CLOSE_TIME
+
+    return MARKET_CLOSE_TIME
 
 
 def get_us_market_holidays(year: int) -> dict:

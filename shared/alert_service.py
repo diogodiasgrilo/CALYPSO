@@ -23,10 +23,13 @@ Benefits:
     - Scalable: Add new alert channels without changing bot code
 
 Alert Priorities:
-    CRITICAL: SMS + Email (circuit breaker, emergency exit, naked positions)
-    HIGH: SMS + Email (stop loss, max loss, position issues)
-    MEDIUM: Email only (position opened, profit target, daily summaries)
-    LOW: Email only (informational, startup/shutdown)
+    CRITICAL: WhatsApp + Email (circuit breaker, emergency exit, naked positions)
+    HIGH: WhatsApp + Email (stop loss, max loss, position issues)
+    MEDIUM: WhatsApp + Email (position opened, profit target, daily summaries)
+    LOW: WhatsApp + Email (informational, startup/shutdown)
+
+Note: All priority levels now send to WhatsApp for immediate visibility.
+      Email provides a permanent record with rich HTML formatting.
 
 Usage:
     from shared.alert_service import AlertService, AlertPriority
@@ -90,6 +93,7 @@ class AlertType(Enum):
     DELTA_BREACH = "delta_breach"
     GAP_WARNING = "gap_warning"
     VIX_THRESHOLD = "vix_threshold"
+    PREMARKET_GAP = "premarket_gap"  # Big overnight/premarket move
 
     # Roll/Recenter Events
     ROLL_COMPLETED = "roll_completed"
@@ -101,6 +105,13 @@ class AlertType(Enum):
     BOT_STOPPED = "bot_stopped"
     API_ERROR = "api_error"
     CONNECTION_RESTORED = "connection_restored"
+
+    # Market Status Events (WhatsApp only by default)
+    MARKET_OPENING_SOON = "market_opening_soon"  # 1h, 30m, 15m countdown
+    MARKET_OPEN = "market_open"                   # Market just opened
+    MARKET_CLOSED = "market_closed"               # Market just closed
+    MARKET_HOLIDAY = "market_holiday"             # Holiday - market closed
+    MARKET_EARLY_CLOSE = "market_early_close"     # Early close day alert
 
     # Daily Summary
     DAILY_SUMMARY = "daily_summary"
@@ -120,6 +131,7 @@ DEFAULT_PRIORITIES = {
     AlertType.ROLL_FAILED: AlertPriority.HIGH,
     AlertType.DELTA_BREACH: AlertPriority.HIGH,
     AlertType.API_ERROR: AlertPriority.HIGH,
+    AlertType.PREMARKET_GAP: AlertPriority.HIGH,  # Big gap affects positions
 
     AlertType.POSITION_OPENED: AlertPriority.MEDIUM,
     AlertType.POSITION_CLOSED: AlertPriority.MEDIUM,
@@ -136,6 +148,13 @@ DEFAULT_PRIORITIES = {
     AlertType.BOT_STARTED: AlertPriority.LOW,
     AlertType.BOT_STOPPED: AlertPriority.LOW,
     AlertType.DAILY_SUMMARY: AlertPriority.LOW,
+
+    # Market status alerts - LOW priority (informational)
+    AlertType.MARKET_OPENING_SOON: AlertPriority.LOW,
+    AlertType.MARKET_OPEN: AlertPriority.LOW,
+    AlertType.MARKET_CLOSED: AlertPriority.LOW,
+    AlertType.MARKET_HOLIDAY: AlertPriority.LOW,
+    AlertType.MARKET_EARLY_CLOSE: AlertPriority.LOW,
 }
 
 
@@ -252,7 +271,7 @@ class AlertService:
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "details": details or {},
             "delivery": {
-                "sms": priority in [AlertPriority.CRITICAL, AlertPriority.HIGH],
+                "sms": True,  # All priorities get WhatsApp (Cloud Function handles WhatsApp vs SMS)
                 "email": True,  # All priorities get email
                 "phone_number": self._phone_number,
                 "email_address": self._email
@@ -605,6 +624,163 @@ class AlertService:
             title=f"Daily Summary {pnl_emoji}",
             message=f"Trades: {trades_count}\nTotal P&L: ${total_pnl:.2f}\nWin Rate: {win_rate:.1f}%",
             priority=AlertPriority.LOW,
+            details=extra
+        )
+
+    # =========================================================================
+    # MARKET STATUS ALERTS (WhatsApp + Email)
+    # =========================================================================
+
+    def market_opening_soon(
+        self,
+        minutes_until_open: int,
+        current_time: str,
+        details: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Send market opening countdown alert (LOW - WhatsApp + Email).
+
+        Called at 1h, 30m, 15m before market open.
+        """
+        extra = details or {}
+        extra["minutes_until_open"] = minutes_until_open
+
+        if minutes_until_open >= 60:
+            time_str = f"{minutes_until_open // 60} hour"
+        else:
+            time_str = f"{minutes_until_open} minutes"
+
+        return self.send_alert(
+            alert_type=AlertType.MARKET_OPENING_SOON,
+            title=f"Market Opens in {time_str}",
+            message=f"NYSE/NASDAQ opens at 9:30 AM ET\nCurrent time: {current_time}\n\nPrepare for trading session.",
+            priority=AlertPriority.LOW,
+            details=extra
+        )
+
+    def market_open(
+        self,
+        current_time: str,
+        vix_level: Optional[float] = None,
+        spy_price: Optional[float] = None,
+        details: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Send market open notification (LOW - WhatsApp + Email)."""
+        extra = details or {}
+        if vix_level is not None:
+            extra["vix_level"] = vix_level
+        if spy_price is not None:
+            extra["spy_price"] = spy_price
+
+        message_parts = [f"Market is now OPEN\nTime: {current_time}"]
+        if spy_price is not None:
+            message_parts.append(f"SPY: ${spy_price:.2f}")
+        if vix_level is not None:
+            message_parts.append(f"VIX: {vix_level:.2f}")
+
+        return self.send_alert(
+            alert_type=AlertType.MARKET_OPEN,
+            title="Market OPEN",
+            message="\n".join(message_parts),
+            priority=AlertPriority.LOW,
+            details=extra
+        )
+
+    def market_closed(
+        self,
+        current_time: str,
+        spy_close: Optional[float] = None,
+        day_change_pct: Optional[float] = None,
+        details: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Send market closed notification (LOW - WhatsApp + Email)."""
+        extra = details or {}
+        if spy_close is not None:
+            extra["spy_close"] = spy_close
+        if day_change_pct is not None:
+            extra["day_change_pct"] = day_change_pct
+
+        message_parts = [f"Market is now CLOSED\nTime: {current_time}"]
+        if spy_close is not None:
+            message_parts.append(f"SPY Close: ${spy_close:.2f}")
+        if day_change_pct is not None:
+            change_emoji = "📈" if day_change_pct >= 0 else "📉"
+            message_parts.append(f"Day Change: {change_emoji} {day_change_pct:+.2f}%")
+
+        return self.send_alert(
+            alert_type=AlertType.MARKET_CLOSED,
+            title="Market CLOSED",
+            message="\n".join(message_parts),
+            priority=AlertPriority.LOW,
+            details=extra
+        )
+
+    def market_holiday(
+        self,
+        holiday_name: str,
+        next_open_date: str,
+        details: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Send market holiday notification (LOW - WhatsApp + Email)."""
+        extra = details or {}
+        extra["holiday_name"] = holiday_name
+        extra["next_open_date"] = next_open_date
+
+        return self.send_alert(
+            alert_type=AlertType.MARKET_HOLIDAY,
+            title=f"Market Closed - {holiday_name}",
+            message=f"US markets are closed today for {holiday_name}.\n\nNext trading day: {next_open_date}",
+            priority=AlertPriority.LOW,
+            details=extra
+        )
+
+    def market_early_close(
+        self,
+        reason: str,
+        close_time: str,
+        details: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Send early close day warning (LOW - WhatsApp + Email)."""
+        extra = details or {}
+        extra["reason"] = reason
+        extra["close_time"] = close_time
+
+        return self.send_alert(
+            alert_type=AlertType.MARKET_EARLY_CLOSE,
+            title=f"Early Close Today - {close_time}",
+            message=f"Market closes early today at {close_time} ET\nReason: {reason}\n\nPlan positions accordingly.",
+            priority=AlertPriority.LOW,
+            details=extra
+        )
+
+    def premarket_gap(
+        self,
+        symbol: str,
+        gap_percent: float,
+        previous_close: float,
+        current_price: float,
+        affected_positions: str,
+        details: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Send big pre-market gap alert (HIGH - WhatsApp + Email).
+
+        This is for significant overnight/premarket moves that will affect positions.
+        """
+        extra = details or {}
+        extra["symbol"] = symbol
+        extra["gap_percent"] = gap_percent
+        extra["previous_close"] = previous_close
+        extra["current_price"] = current_price
+
+        direction = "UP" if gap_percent > 0 else "DOWN"
+        gap_emoji = "🚀" if gap_percent > 0 else "📉"
+
+        return self.send_alert(
+            alert_type=AlertType.PREMARKET_GAP,
+            title=f"{gap_emoji} {symbol} Gap {direction} {abs(gap_percent):.1f}%",
+            message=f"Significant pre-market move detected!\n\n{symbol}: ${previous_close:.2f} → ${current_price:.2f}\nGap: {gap_percent:+.1f}%\n\nAffected positions:\n{affected_positions}",
+            priority=AlertPriority.HIGH,
             details=extra
         )
 

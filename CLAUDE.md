@@ -134,10 +134,12 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail →
 ### Alert Priority Levels
 | Priority | Delivery | Examples |
 |----------|----------|----------|
-| CRITICAL | SMS + Email | Circuit breaker, emergency exit, naked position |
-| HIGH | SMS + Email | Stop loss, max loss, wing breach, roll failed |
-| MEDIUM | Email only | Position opened/closed, profit target, roll complete |
-| LOW | Email only | Bot started/stopped, daily summary |
+| CRITICAL | WhatsApp + Email | Circuit breaker, emergency exit, naked position |
+| HIGH | WhatsApp + Email | Stop loss, max loss, wing breach, roll failed |
+| MEDIUM | WhatsApp + Email | Position opened/closed, profit target, roll complete |
+| LOW | WhatsApp + Email | Bot started/stopped, daily summary |
+
+**Note:** ALL alerts go to WhatsApp (rich formatting) + Email. SMS is fallback only.
 
 ### Enabling Alerts
 Add to each bot's `config.json`:

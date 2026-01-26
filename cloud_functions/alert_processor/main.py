@@ -3,9 +3,9 @@
 Cloud Function: Alert Processor
 
 Processes trading alerts from Pub/Sub and sends notifications via:
-- WhatsApp (Twilio) - Primary for CRITICAL/HIGH alerts (works globally, no carrier issues)
-- SMS (Twilio) - Fallback if WhatsApp not configured
-- Email (Gmail SMTP) - All alert levels
+- WhatsApp (Twilio) - Primary for ALL alerts (rich formatting, works globally)
+- SMS (Twilio) - Fallback if WhatsApp fails (concise formatting)
+- Email (Gmail SMTP) - All alert levels (full HTML formatting)
 
 Trigger: Pub/Sub topic "calypso-alerts"
 
@@ -299,8 +299,111 @@ def send_email(to_email: str, subject: str, body_html: str, body_text: str) -> b
         return False
 
 
+def format_whatsapp_message(alert: Dict[str, Any]) -> str:
+    """
+    Format alert for WhatsApp (rich and detailed).
+
+    WhatsApp supports up to 4096 characters and basic formatting:
+    - *bold* for emphasis
+    - _italic_ for secondary info
+    - ~strikethrough~
+    - ```monospace``` for code/data
+    """
+    bot_name = alert.get("bot_name", "CALYPSO")
+    alert_type = alert.get("alert_type", "unknown")
+    priority = alert.get("priority", "medium").upper()
+    title = alert.get("title", "Alert")
+    message = alert.get("message", "")
+    timestamp = alert.get("timestamp", "")
+    details = alert.get("details", {})
+
+    # Priority emoji and label
+    priority_config = {
+        "CRITICAL": {"emoji": "🚨", "label": "CRITICAL"},
+        "HIGH": {"emoji": "⚠️", "label": "HIGH PRIORITY"},
+        "MEDIUM": {"emoji": "📊", "label": "UPDATE"},
+        "LOW": {"emoji": "ℹ️", "label": "INFO"}
+    }
+    config = priority_config.get(priority, {"emoji": "📊", "label": "UPDATE"})
+    emoji = config["emoji"]
+    label = config["label"]
+
+    # Format timestamp to readable format
+    try:
+        if timestamp:
+            from datetime import datetime
+            if timestamp.endswith("Z"):
+                timestamp = timestamp[:-1]
+            dt = datetime.fromisoformat(timestamp)
+            time_str = dt.strftime("%I:%M %p ET")
+        else:
+            time_str = ""
+    except:
+        time_str = timestamp[:19] if timestamp else ""
+
+    # Build rich WhatsApp message
+    lines = []
+
+    # Header with priority
+    lines.append(f"{emoji} *{label}* {emoji}")
+    lines.append(f"*{bot_name}*")
+    lines.append("")
+
+    # Title (bold)
+    lines.append(f"*{title}*")
+    lines.append("")
+
+    # Main message
+    lines.append(message)
+
+    # Add detailed info section if we have details
+    if details:
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append("*Details:*")
+
+        # Format each detail nicely
+        for key, value in details.items():
+            # Skip internal keys
+            if key.startswith("_"):
+                continue
+
+            # Format key nicely (snake_case to Title Case)
+            display_key = key.replace("_", " ").title()
+
+            # Format value based on type
+            if isinstance(value, float):
+                if "pnl" in key.lower() or "cost" in key.lower() or "credit" in key.lower() or "price" in key.lower():
+                    # Money values
+                    if value >= 0:
+                        value_str = f"${value:.2f}"
+                    else:
+                        value_str = f"-${abs(value):.2f}"
+                elif "percent" in key.lower() or "rate" in key.lower():
+                    value_str = f"{value:.1f}%"
+                else:
+                    value_str = f"{value:.2f}"
+            elif isinstance(value, bool):
+                value_str = "Yes" if value else "No"
+            elif isinstance(value, (list, dict)):
+                value_str = str(value)[:100]  # Truncate complex objects
+            else:
+                value_str = str(value)
+
+            lines.append(f"• {display_key}: {value_str}")
+
+    # Footer with timestamp
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    if time_str:
+        lines.append(f"_📅 {time_str}_")
+    lines.append(f"_🤖 CALYPSO Trading Bot_")
+
+    return "\n".join(lines)
+
+
 def format_sms_message(alert: Dict[str, Any]) -> str:
-    """Format alert for SMS (concise)."""
+    """Format alert for SMS (fallback, more concise than WhatsApp)."""
     bot_name = alert.get("bot_name", "CALYPSO")
     priority = alert.get("priority", "medium").upper()
     title = alert.get("title", "Alert")
@@ -310,12 +413,12 @@ def format_sms_message(alert: Dict[str, Any]) -> str:
     emoji_map = {
         "CRITICAL": "🚨",
         "HIGH": "⚠️",
-        "MEDIUM": "📧",
+        "MEDIUM": "📊",
         "LOW": "ℹ️"
     }
-    emoji = emoji_map.get(priority, "📧")
+    emoji = emoji_map.get(priority, "📊")
 
-    # Build SMS (keep it short)
+    # Build SMS (keep it shorter than WhatsApp)
     sms = f"{emoji} {bot_name}\n{title}\n{message}"
 
     # Add key details if available
@@ -481,24 +584,26 @@ def process_alert(cloud_event):
         results = {"whatsapp": None, "sms": None, "email": None}
 
         # Send WhatsApp/SMS if requested and configured
-        # Priority: WhatsApp first (if preferred), SMS as fallback
+        # Priority: WhatsApp first (rich formatting), SMS as fallback (concise)
         if send_sms_flag and (phone_number or whatsapp_number):
-            message = format_sms_message(alert)
-
             # Try WhatsApp first if preferred
             if prefer_whatsapp and whatsapp_number:
-                results["whatsapp"] = send_whatsapp(whatsapp_number, message)
+                # Use rich WhatsApp formatting
+                whatsapp_message = format_whatsapp_message(alert)
+                results["whatsapp"] = send_whatsapp(whatsapp_number, whatsapp_message)
                 if results["whatsapp"]:
                     logger.info("WhatsApp delivery: success")
                 else:
                     logger.info("WhatsApp delivery: failed, falling back to SMS")
-                    # Fall back to SMS
+                    # Fall back to SMS with concise formatting
                     if phone_number:
-                        results["sms"] = send_sms(phone_number, message)
+                        sms_message = format_sms_message(alert)
+                        results["sms"] = send_sms(phone_number, sms_message)
                         logger.info(f"SMS fallback: {'success' if results['sms'] else 'failed'}")
             else:
                 # SMS only (WhatsApp not preferred or not configured)
-                results["sms"] = send_sms(phone_number, message)
+                sms_message = format_sms_message(alert)
+                results["sms"] = send_sms(phone_number, sms_message)
                 logger.info(f"SMS delivery: {'success' if results['sms'] else 'failed'}")
 
         # Send email if requested and configured
@@ -545,10 +650,16 @@ if __name__ == "__main__":
         }
     }
 
-    print("\nFormatted SMS:")
+    print("\nFormatted WhatsApp Message (rich):")
+    print("-" * 40)
+    print(format_whatsapp_message(test_alert))
+
+    print("\n" + "-" * 40)
+    print("\nFormatted SMS (fallback, concise):")
     print("-" * 40)
     print(format_sms_message(test_alert))
 
+    print("\n" + "-" * 40)
     print("\nFormatted Email Subject:")
     print("-" * 40)
     print(format_email_subject(test_alert))

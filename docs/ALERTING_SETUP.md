@@ -208,10 +208,10 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 |----------|----------|----------|
 | **CRITICAL** | WhatsApp + Email | Circuit breaker, emergency exit, naked position |
 | **HIGH** | WhatsApp + Email | Stop loss, max loss, roll failed |
-| **MEDIUM** | Email only | Position opened/closed, profit target, roll complete |
-| **LOW** | Email only | Bot started/stopped, daily summary |
+| **MEDIUM** | WhatsApp + Email | Position opened/closed, profit target, roll complete |
+| **LOW** | WhatsApp + Email | Bot started/stopped, daily summary |
 
-**Note:** WhatsApp is the primary delivery method for CRITICAL/HIGH alerts. SMS is used as fallback if WhatsApp fails or isn't configured.
+**Note:** ALL priority levels are sent to both WhatsApp and Email for immediate visibility. WhatsApp messages use rich formatting with emojis, bold text, and structured details. SMS is used as fallback only if WhatsApp delivery fails.
 
 ---
 
