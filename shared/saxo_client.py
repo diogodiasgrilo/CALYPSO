@@ -1772,21 +1772,42 @@ class SaxoClient:
 
     def get_spy_price(self, spy_uic: int, symbol: str = "SPY") -> Optional[Dict]:
         """
-        Get SPY quote from Saxo with Yahoo Finance as last resort fallback.
+        Get SPY/ETF quote from Saxo with fallback chain.
 
         Priority:
-        1. Saxo real-time price (during market hours)
-        2. Saxo last traded price (after hours / market closed)
-        3. Yahoo Finance (only if Saxo completely fails)
+        1. WebSocket streaming cache (instant, no API call)
+        2. Saxo REST API (fallback if cache miss)
+        3. Yahoo Finance (last resort if Saxo fails)
+
+        The streaming cache is updated in real-time by WebSocket subscriptions,
+        making it the fastest and most efficient source for price data.
+        This eliminates API rate limit concerns for frequent price checks.
 
         Args:
-            spy_uic: SPY UIC
+            spy_uic: SPY UIC (or any ETF UIC)
             symbol: Symbol name for external feed fallback
 
         Returns:
             dict: Quote data with price information, or None if unavailable
         """
-        # Try Saxo API first with extended fields
+        # Ensure UIC is int for consistent cache lookup
+        spy_uic_int = int(spy_uic)
+
+        # PRIORITY 1: Check WebSocket streaming cache (no API call, instant)
+        if spy_uic_int in self._price_cache:
+            cached = self._price_cache[spy_uic_int]
+            if cached and "Quote" in cached:
+                price = (
+                    cached["Quote"].get("Mid") or
+                    cached["Quote"].get("LastTraded") or
+                    cached["Quote"].get("Bid") or
+                    cached["Quote"].get("Ask")
+                )
+                if price and price > 0:
+                    logger.debug(f"{symbol}: Using cached streaming price ${price:.2f}")
+                    return cached
+
+        # PRIORITY 2: Saxo REST API (fallback if cache miss or invalid)
         endpoint = "/trade/v1/infoprices/list"
         params = {
             "AccountKey": self.account_key,

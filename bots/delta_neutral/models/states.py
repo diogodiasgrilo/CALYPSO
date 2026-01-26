@@ -44,11 +44,14 @@ class MonitoringMode(Enum):
 
     Vigilant monitoring system:
     - NORMAL: Standard 30-second check interval (> 0.3% from strike)
-    - VIGILANT: Fast 3-second monitoring (0.1% - 0.3% from strike)
+    - VIGILANT: Fast 1-second monitoring (0.1% - 0.3% from strike)
 
     When price enters VIGILANT zone, we watch closely but don't act.
     This avoids unnecessary closes when price bounces back.
     Only close when price actually reaches 0.1% (DANGER zone).
+
+    Note: 1-second vigilant monitoring is safe because price data comes from
+    WebSocket cache (no API calls), eliminating rate limit concerns.
     """
     NORMAL = 30      # 30 seconds between checks
-    VIGILANT = 3     # 3 seconds between checks (watching closely)
+    VIGILANT = 1     # 1 second between checks (watching closely, uses cached price)
