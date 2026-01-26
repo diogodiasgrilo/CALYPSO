@@ -338,16 +338,14 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
     }
     emoji = priority_emoji.get(priority, "📊")
 
-    # Format timestamp to readable ET format (handles EST/EDT automatically)
+    # Format timestamp to readable ET format
     time_str = ""
     try:
         if timestamp:
-            if timestamp.endswith("Z"):
-                timestamp = timestamp[:-1]
-            # Parse as UTC
-            dt_utc = datetime.fromisoformat(timestamp).replace(tzinfo=timezone.utc)
-            # Convert to US Eastern (handles DST automatically)
-            dt_et = dt_utc.astimezone(US_EASTERN)
+            # Parse ISO format timestamp (may already include timezone offset)
+            dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            # Convert to US Eastern if not already
+            dt_et = dt.astimezone(US_EASTERN)
             time_str = dt_et.strftime("%I:%M %p ET")
     except:
         pass
@@ -372,6 +370,10 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
         if key.startswith("_"):
             continue
 
+        # Skip boolean False values (not useful to show "Is X: No")
+        if isinstance(value, bool) and not value:
+            continue
+
         # Skip if this info is likely already in the message
         key_lower = key.lower()
         skip_keys = ["reason", "pnl", "trigger_price", "cost_or_credit"]
@@ -390,19 +392,25 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
         lines.append("")
 
         for key, value in filtered_details.items():
-            # Format key nicely (snake_case to Title Case)
-            display_key = key.replace("_", " ").title()
+            key_lower = key.lower()
+
+            # Format key nicely - special cases for better wording
+            if key_lower == "is_early_close":
+                display_key = "Early close today"
+            else:
+                display_key = key.replace("_", " ").title()
 
             # Format value based on type
             if isinstance(value, float):
-                if any(word in key.lower() for word in ["pnl", "cost", "credit", "price"]):
-                    value_str = f"${value:+.2f}" if "pnl" in key.lower() else f"${value:.2f}"
-                elif any(word in key.lower() for word in ["percent", "rate", "gap"]):
-                    value_str = f"{value:+.1f}%" if "gap" in key.lower() else f"{value:.1f}%"
+                if any(word in key_lower for word in ["pnl", "cost", "credit", "price"]):
+                    value_str = f"${value:+.2f}" if "pnl" in key_lower else f"${value:.2f}"
+                elif any(word in key_lower for word in ["percent", "rate", "gap"]):
+                    value_str = f"{value:+.1f}%" if "gap" in key_lower else f"{value:.1f}%"
                 else:
                     value_str = f"{value:.2f}"
             elif isinstance(value, bool):
-                value_str = "Yes" if value else "No"
+                # Only True values reach here (False filtered above)
+                value_str = "Yes"
             elif isinstance(value, (list, dict)):
                 value_str = str(value)[:80]
             else:
@@ -487,15 +495,14 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
     timestamp = alert.get("timestamp", "")
     details = alert.get("details", {})
 
-    # Format timestamp to human-readable ET (handles EST/EDT automatically)
+    # Format timestamp to human-readable ET
     time_display = ""
     try:
         if timestamp:
-            if timestamp.endswith("Z"):
-                timestamp = timestamp[:-1]
-            dt_utc = datetime.fromisoformat(timestamp).replace(tzinfo=timezone.utc)
-            # Convert to US Eastern (handles DST automatically)
-            dt_et = dt_utc.astimezone(US_EASTERN)
+            # Parse ISO format timestamp (may already include timezone offset)
+            dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            # Convert to US Eastern if not already
+            dt_et = dt.astimezone(US_EASTERN)
             time_display = dt_et.strftime("%B %d, %Y at %I:%M %p ET")
         else:
             # No timestamp provided, use current time in ET
@@ -521,6 +528,10 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
         if key.startswith("_"):
             continue
 
+        # Skip boolean False values (not useful to show "Is X: No")
+        if isinstance(value, bool) and not value:
+            continue
+
         # Check if value is already mentioned in message
         key_lower = key.lower()
         value_str = ""
@@ -531,7 +542,8 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
             if value_str in message or f"${value_str}" in message:
                 continue
         elif isinstance(value, bool):
-            value_str = "Yes" if value else "No"
+            # Only True values reach here
+            value_str = "Yes"
         elif isinstance(value, (list, dict)):
             value_str = str(value)[:100]
         else:
@@ -539,8 +551,11 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
             if value_str.lower() in message_lower:
                 continue
 
-        # Format display key
-        display_key = key.replace("_", " ").title()
+        # Format display key - special cases for better wording
+        if key_lower == "is_early_close":
+            display_key = "Early close today"
+        else:
+            display_key = key.replace("_", " ").title()
 
         # Format value for display
         if isinstance(value, float):
