@@ -456,6 +456,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     last_reconciliation_time = datetime.now()
     reconciliation_interval = 3600  # Check position reconciliation hourly
 
+    # Track pre-market gap alert to avoid duplicate WhatsApp/Email (one per day)
+    gap_alert_sent_date: Optional[str] = None
+
     try:
         while not shutdown_requested:
             try:
@@ -602,7 +605,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                                         trade_logger.log_event("=" * 60)
 
                                         # Send WhatsApp/Email alert for WARNING (2-3%) and CRITICAL (3%+) gaps
-                                        if strategy.alert_service:
+                                        # Only send once per day to avoid spam on multiple wake cycles
+                                        today_str = now_et.strftime("%Y-%m-%d")
+                                        if strategy.alert_service and gap_alert_sent_date != today_str:
                                             # Build affected positions summary
                                             affected = ""
                                             if analysis["position_impacts"]:
@@ -615,6 +620,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                                                 current_price=analysis["current_price"],
                                                 affected_positions=affected or "Check SPY positions"
                                             )
+                                            gap_alert_sent_date = today_str
+                                            trade_logger.log_event("WhatsApp/Email gap alert sent")
                                 else:
                                     trade_logger.log_event(f"PRE-MARKET | SPY: No quote yet | Wake in {minutes} min")
                             except Exception as e:

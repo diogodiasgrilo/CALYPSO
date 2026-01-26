@@ -411,6 +411,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
     last_bot_log_time = get_us_market_time()  # Use ET market time for consistency when traveling
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
     market_open_gap_checked = False  # MKT-001: Track if we've checked the gap at market open today
+    gap_alert_sent_date = None  # Track pre-market gap alert to avoid duplicate WhatsApp/Email (one per day)
 
     # CONN-003: Setup WebSocket streaming for real-time price updates
     # This provides faster price updates than REST polling, useful for:
@@ -541,7 +542,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                                 trade_logger.log_event("=" * 60)
 
                                 # Send WhatsApp/Email alert for WARNING (2-3%) and CRITICAL (3%+) gaps
-                                if strategy.alert_service:
+                                # Only send once per day to avoid spam on multiple wake cycles
+                                today_str = now.strftime("%Y-%m-%d")
+                                if strategy.alert_service and gap_alert_sent_date != today_str:
                                     # Build affected positions summary
                                     affected = ""
                                     if analysis["position_impacts"]:
@@ -554,6 +557,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                                         current_price=analysis["current_price"],
                                         affected_positions=affected or "Check QQQ positions"
                                     )
+                                    gap_alert_sent_date = today_str
+                                    trade_logger.log_event("WhatsApp/Email gap alert sent")
                         else:
                             trade_logger.log_event(f"PRE-MARKET | QQQ: No quote yet | Wake in {sleep_minutes} min")
                     except Exception as e:
