@@ -10,13 +10,14 @@ Modules:
     metrics: Performance metrics tracking
 """
 
-from .states import PositionType, StrategyState
+from .states import PositionType, StrategyState, MonitoringMode
 from .positions import OptionPosition, StraddlePosition, StranglePosition
 from .metrics import StrategyMetrics, METRICS_FILE
 
 __all__ = [
     'PositionType',
     'StrategyState',
+    'MonitoringMode',
     'OptionPosition',
     'StraddlePosition',
     'StranglePosition',

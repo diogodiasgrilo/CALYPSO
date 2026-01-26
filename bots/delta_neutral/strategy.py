@@ -85,8 +85,9 @@ MARKET DATA
 
 ENTRY CONDITIONS
     check_vix_entry_condition           ~3591   VIX check
-    check_shorts_itm_risk               ~3656   ITM risk
-    check_emergency_exit_condition      ~3703   5%+ move
+    check_shorts_itm_risk               ~5013   ITM risk (0.1% danger threshold)
+    get_monitoring_mode                 ~5060   Vigilant monitoring (0.3% threshold)
+    check_emergency_exit_condition      ~5140   5%+ move
 
 STRADDLE OPERATIONS
     enter_long_straddle                 ~3737   Enter straddle
@@ -130,6 +131,7 @@ from shared.alert_service import AlertService, AlertType, AlertPriority
 from bots.delta_neutral.models import (
     PositionType,
     StrategyState,
+    MonitoringMode,
     OptionPosition,
     StraddlePosition,
     StranglePosition,
@@ -5012,15 +5014,25 @@ class DeltaNeutralStrategy:
 
     def check_shorts_itm_risk(self) -> bool:
         """
-        Check if short options are at risk of expiring In-The-Money.
+        Check if short options are at CRITICAL risk of going In-The-Money.
 
         Video rule: "Never let the shorts go In-The-Money (ITM)"
 
-        Uses 0.3% threshold for faster bot reaction (30s check interval).
-        At SPY ~$690, 0.3% = ~$2.07 buffer from strike.
+        VIGILANT MONITORING SYSTEM:
+        - 0.1% threshold (DANGER): Immediate MARKET close (~$0.70 at SPY $695)
+        - 0.3% threshold (VIGILANT): Switch to fast 3-second monitoring
+        - > 0.3% (NORMAL): Standard 30-second monitoring
+
+        This method only triggers at 0.1% (DANGER zone).
+        Use get_monitoring_mode() to check if we're in VIGILANT zone.
+
+        The 0.1% threshold is safe because:
+        - MARKET orders execute in <1 second
+        - SPY would need to move $0.70 in <1 second to beat us
+        - With 3-second monitoring in VIGILANT zone, we have multiple checks
 
         Returns:
-            bool: True if shorts need immediate action, False if safe.
+            bool: True if shorts need IMMEDIATE close (0.1% from strike), False otherwise.
         """
         if not self.short_strangle or not self.current_underlying_price:
             return False
@@ -5029,33 +5041,102 @@ class DeltaNeutralStrategy:
         put_strike = self.short_strangle.put_strike
         price = self.current_underlying_price
 
-        # Check if shorts are ITM or dangerously close (within 0.3% of strike)
-        # Tighter threshold for bot's 30s check interval
-        call_threshold = call_strike * 0.003  # 0.3% of call strike (~$2.07 at $690)
-        put_threshold = put_strike * 0.003    # 0.3% of put strike
+        # DANGER threshold: 0.1% (~$0.70 at SPY $695)
+        # Only trigger immediate close at this tight threshold
+        danger_threshold_pct = 0.001  # 0.1%
+        call_danger_threshold = call_strike * danger_threshold_pct
+        put_danger_threshold = put_strike * danger_threshold_pct
 
         # Distance from current price to strikes
         call_distance = call_strike - price
         put_distance = price - put_strike
 
-        # If price is within 0.5% of either strike, shorts are in danger
-        if call_distance <= call_threshold:
+        # Only return True if in DANGER zone (0.1% from strike)
+        if call_distance <= call_danger_threshold:
             pct_from_strike = (call_distance / call_strike) * 100
             logger.critical(
-                f"SHORT CALL ITM RISK! Price ${price:.2f} is {pct_from_strike:.2f}% "
-                f"(${call_distance:.2f}) from strike ${call_strike:.2f}. Immediate action required."
+                f"🚨 SHORT CALL IN DANGER ZONE! Price ${price:.2f} is {pct_from_strike:.3f}% "
+                f"(${call_distance:.2f}) from strike ${call_strike:.2f}. IMMEDIATE MARKET CLOSE!"
             )
             return True
 
-        if put_distance <= put_threshold:
+        if put_distance <= put_danger_threshold:
             pct_from_strike = (put_distance / put_strike) * 100
             logger.critical(
-                f"SHORT PUT ITM RISK! Price ${price:.2f} is {pct_from_strike:.2f}% "
-                f"(${put_distance:.2f}) from strike ${put_strike:.2f}. Immediate action required."
+                f"🚨 SHORT PUT IN DANGER ZONE! Price ${price:.2f} is {pct_from_strike:.3f}% "
+                f"(${put_distance:.2f}) from strike ${put_strike:.2f}. IMMEDIATE MARKET CLOSE!"
             )
             return True
 
         return False
+
+    def get_monitoring_mode(self) -> MonitoringMode:
+        """
+        Determine the appropriate monitoring mode based on ITM proximity.
+
+        VIGILANT MONITORING SYSTEM:
+        - NORMAL (30s): Price is > 0.3% from both short strikes (safe)
+        - VIGILANT (3s): Price is 0.1% - 0.3% from a short strike (watching closely)
+
+        This allows the bot to:
+        1. Monitor more frequently when price approaches danger
+        2. Avoid unnecessary closes when price bounces back
+        3. Only close at the last safe moment (0.1%)
+
+        Returns:
+            MonitoringMode: NORMAL or VIGILANT based on proximity to strikes.
+        """
+        if not self.short_strangle or not self.current_underlying_price:
+            return MonitoringMode.NORMAL
+
+        call_strike = self.short_strangle.call_strike
+        put_strike = self.short_strangle.put_strike
+        price = self.current_underlying_price
+
+        # Thresholds
+        vigilant_threshold_pct = 0.003  # 0.3% - enter vigilant mode
+        danger_threshold_pct = 0.001    # 0.1% - would trigger close (handled by check_shorts_itm_risk)
+
+        call_vigilant_threshold = call_strike * vigilant_threshold_pct
+        put_vigilant_threshold = put_strike * vigilant_threshold_pct
+
+        # Distance from current price to strikes
+        call_distance = call_strike - price
+        put_distance = price - put_strike
+
+        # Check if we're in VIGILANT zone (0.1% - 0.3% from strike)
+        call_in_vigilant = call_distance <= call_vigilant_threshold and call_distance > 0
+        put_in_vigilant = put_distance <= put_vigilant_threshold and put_distance > 0
+
+        if call_in_vigilant:
+            pct_from_strike = (call_distance / call_strike) * 100
+            if not hasattr(self, '_last_vigilant_log_call') or self._last_vigilant_log_call != round(pct_from_strike, 2):
+                logger.warning(
+                    f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - price ${price:.2f} is "
+                    f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 3 seconds."
+                )
+                self._last_vigilant_log_call = round(pct_from_strike, 2)
+            return MonitoringMode.VIGILANT
+
+        if put_in_vigilant:
+            pct_from_strike = (put_distance / put_strike) * 100
+            if not hasattr(self, '_last_vigilant_log_put') or self._last_vigilant_log_put != round(pct_from_strike, 2):
+                logger.warning(
+                    f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - price ${price:.2f} is "
+                    f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 3 seconds."
+                )
+                self._last_vigilant_log_put = round(pct_from_strike, 2)
+            return MonitoringMode.VIGILANT
+
+        # Clear vigilant log trackers when back to normal
+        if hasattr(self, '_last_vigilant_log_call'):
+            logger.info("✓ Exited vigilant zone (call) - back to normal 30s monitoring")
+            del self._last_vigilant_log_call
+        if hasattr(self, '_last_vigilant_log_put'):
+            logger.info("✓ Exited vigilant zone (put) - back to normal 30s monitoring")
+            del self._last_vigilant_log_put
+
+        return MonitoringMode.NORMAL
 
     def check_emergency_exit_condition(self) -> bool:
         """
@@ -8522,7 +8603,7 @@ class DeltaNeutralStrategy:
         self.trade_logger.sync_positions_with_saxo(positions)
         logger.info(f"Synced Positions sheet with {len(positions)} current positions")
 
-    def run_strategy_check(self) -> str:
+    def run_strategy_check(self) -> Tuple[str, MonitoringMode]:
         """
         Run a single iteration of the strategy logic.
 
@@ -8530,7 +8611,9 @@ class DeltaNeutralStrategy:
         on price updates to check conditions and take actions.
 
         Returns:
-            str: Description of action taken, if any.
+            Tuple[str, MonitoringMode]: (action_description, monitoring_mode)
+            - action_description: What action was taken, if any
+            - monitoring_mode: NORMAL (30s) or VIGILANT (3s) based on ITM proximity
         """
         # TIME-001: Check operation lock to prevent concurrent strategy checks
         if self._operation_in_progress:
@@ -8539,14 +8622,17 @@ class DeltaNeutralStrategy:
                 mins = (datetime.now() - self._operation_start_time).total_seconds() / 60
                 elapsed = f" ({mins:.1f} minutes)"
             logger.warning(f"⚠️ TIME-001: Operation already in progress{elapsed}, skipping this check")
-            return "Operation in progress - skipped"
+            return ("Operation in progress - skipped", MonitoringMode.NORMAL)
 
         # Acquire operation lock
         self._operation_in_progress = True
         self._operation_start_time = datetime.now()
 
         try:
-            return self._run_strategy_check_impl()
+            action = self._run_strategy_check_impl()
+            # Determine monitoring mode based on ITM proximity
+            monitoring_mode = self.get_monitoring_mode()
+            return (action, monitoring_mode)
         finally:
             # TIME-001: Release operation lock
             self._operation_in_progress = False

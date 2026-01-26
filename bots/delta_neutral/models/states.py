@@ -36,3 +36,19 @@ class StrategyState(Enum):
     RECENTERING = "Recentering"
     ROLLING_SHORTS = "RollingShorts"
     EXITING = "Exiting"
+
+
+class MonitoringMode(Enum):
+    """
+    Monitoring frequency modes for ITM risk detection.
+
+    Vigilant monitoring system:
+    - NORMAL: Standard 30-second check interval (> 0.3% from strike)
+    - VIGILANT: Fast 3-second monitoring (0.1% - 0.3% from strike)
+
+    When price enters VIGILANT zone, we watch closely but don't act.
+    This avoids unnecessary closes when price bounces back.
+    Only close when price actually reaches 0.1% (DANGER zone).
+    """
+    NORMAL = 30      # 30 seconds between checks
+    VIGILANT = 3     # 3 seconds between checks (watching closely)

@@ -57,6 +57,7 @@ from shared.market_status_monitor import MarketStatusMonitor
 
 # Import bot-specific strategy
 from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState
+from bots.delta_neutral.models import MonitoringMode
 
 # Configure main logger
 logger = logging.getLogger(__name__)
@@ -716,7 +717,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                 strategy.update_intraday_tracking()
 
                 # Run strategy check (works in both live and dry-run)
-                action = strategy.run_strategy_check()
+                # Returns tuple: (action_description, monitoring_mode)
+                action, monitoring_mode = strategy.run_strategy_check()
 
                 if dry_run:
                     # In dry-run, prefix all actions with [DRY RUN]
@@ -833,6 +835,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         f"Next check in {retry_interval}s (quick retry mode)"
                     )
                     if not interruptible_sleep(retry_interval):
+                        break  # Shutdown requested
+                elif monitoring_mode == MonitoringMode.VIGILANT:
+                    # VIGILANT MODE: Price is 0.1%-0.3% from short strike
+                    # Use fast 3-second interval to catch any move toward ITM
+                    vigilant_interval = monitoring_mode.value  # 3 seconds
+                    trade_logger.log_event(
+                        f"{mode_prefix}⚠️ VIGILANT | State: {status['state']} | "
+                        f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
+                        f"Next check in {vigilant_interval}s (ITM proximity monitoring)"
+                    )
+                    if not interruptible_sleep(vigilant_interval):
                         break  # Shutdown requested
                 else:
                     trade_logger.log_event(
