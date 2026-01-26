@@ -1401,10 +1401,12 @@ class RollingPutDiagonalStrategy:
         try:
             quote = self.client.get_quote(self.underlying_uic, asset_type="Etf")
             if quote:
-                mid = quote.get("Mid", 0)
+                # FIX: Bid/Ask/Mid are nested inside Quote object from Saxo API
+                quote_data = quote.get("Quote", {})
+                mid = quote_data.get("Mid", 0)
                 if mid == 0:
-                    bid = quote.get("Bid", 0)
-                    ask = quote.get("Ask", 0)
+                    bid = quote_data.get("Bid", 0)
+                    ask = quote_data.get("Ask", 0)
                     if bid > 0 and ask > 0:
                         mid = (bid + ask) / 2
                 return mid
@@ -1439,9 +1441,10 @@ class RollingPutDiagonalStrategy:
             if quote is None:
                 return False, "MKT-003: No quote available - possible market halt"
 
-            # Check for stale quote (bid/ask both zero)
-            bid = quote.get("Bid", 0)
-            ask = quote.get("Ask", 0)
+            # FIX: Bid/Ask are nested inside Quote object from Saxo API
+            quote_data = quote.get("Quote", {})
+            bid = quote_data.get("Bid", 0)
+            ask = quote_data.get("Ask", 0)
 
             if bid == 0 and ask == 0:
                 # This can happen at market open or during halts
