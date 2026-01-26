@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 """
-Market Status Monitor
+Market Status Monitor (2026-01-26)
 
 Monitors market status and sends WhatsApp/Email alerts for:
 - Market opening countdown (1h, 30m, 15m before open)
-- Market open notification
-- Market close notification
+- Market open notification (at exactly 9:30 AM ET, not before)
+- Market close notification (at 4:00 PM ET or 1:00 PM on early close days)
 - Holiday notifications (weekday closures)
 - Early close day warnings
 
-This module is designed to be called from the bot's main loop.
-It tracks which alerts have already been sent to avoid duplicates.
+IMPORTANT: This should run on ONLY ONE BOT (Delta Neutral) to avoid duplicate alerts.
+Other bots (Iron Fly, Rolling Put Diagonal) should NOT initialize MarketStatusMonitor.
+
+The check_premarket_gap() helper function can be used by any bot to send pre-market
+gap alerts. Each bot is responsible for its own underlying (SPY, QQQ, etc.).
+
+Bug Fixes (2026-01-26):
+- Fixed premature market open alert at 9:29 AM caused by int() truncation
+  (int(-0.5) = 0 in Python, which passed the "0 <= 0 <= 5" check)
+- Now explicitly checks now >= market_open_dt before using int() conversion
 
 Usage:
-    from shared.market_status_monitor import MarketStatusMonitor
+    from shared.market_status_monitor import MarketStatusMonitor, check_premarket_gap
 
-    # Initialize once per bot
+    # Initialize ONCE per system (on Delta Neutral only)
     monitor = MarketStatusMonitor(alert_service)
 
     # Call periodically from main loop (every 1-5 minutes)
     monitor.check_and_alert()
+
+    # For pre-market gap alerts (can be called from any bot)
+    check_premarket_gap(alert_service, "SPY", prev_close=600.0, current_price=585.0)
 """
 
 import logging

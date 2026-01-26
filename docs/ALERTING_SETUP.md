@@ -239,6 +239,11 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 | Full Position Open | MEDIUM | After straddle + strangle both filled |
 | Position Closed | MEDIUM/HIGH | After exit (priority based on P&L) |
 | Roll Completed | MEDIUM | After shorts rolled successfully |
+| **Pre-Market Gap** | HIGH/CRITICAL | SPY gaps 2%+ (WARNING) or 3%+ (CRITICAL) |
+| **Market Open** | LOW | Market opens at 9:30 AM ET |
+| **Market Close** | LOW | Market closes at 4:00 PM ET (or early close) |
+| **Market Countdown** | LOW | 1 hour, 30 min, 15 min before market open |
+| **Holiday Alert** | LOW | Market closed for holiday (on weekdays) |
 
 ### Rolling Put Diagonal (QQQ)
 
@@ -248,6 +253,40 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 | Naked Short Detected | CRITICAL | After detecting and closing naked short put |
 | Campaign Opened | MEDIUM | After long + short puts both filled |
 | Campaign Closed | MEDIUM | After campaign closed for DTE or event risk |
+| **Pre-Market Gap** | HIGH/CRITICAL | QQQ gaps 2%+ (WARNING) or 3%+ (CRITICAL) |
+
+---
+
+## Market Status Monitor (2026-01-26)
+
+The `MarketStatusMonitor` class sends automated alerts for market events. It runs **only on Delta Neutral** to avoid duplicate alerts across bots.
+
+### Alerts Sent
+
+| Alert Type | Timing | Content |
+|------------|--------|---------|
+| Opening Countdown | 1h, 30m, 15m before 9:30 AM | "Market opens in X minutes" |
+| Market Open | Within 5 min of 9:30 AM | "US markets are now open" |
+| Market Close | Within 5 min of 4:00 PM (or 1:00 PM early close) | "Markets closed, next open: ..." |
+| Holiday | On weekday market closures | "Markets closed for [holiday name]" |
+| Early Close Warning | Morning of early close days | "Early close today at 1:00 PM" |
+
+### Pre-Market Gap Alerts
+
+Gap alerts are sent when the underlying moves significantly overnight/weekend:
+
+| Bot | Symbol | Thresholds | Alert Frequency |
+|-----|--------|------------|-----------------|
+| Delta Neutral | SPY | WARNING: 2-3%, CRITICAL: 3%+ | Once per day |
+| Rolling Put Diagonal | QQQ | WARNING: 2-3%, CRITICAL: 3%+ | Once per day |
+
+Gap alerts include:
+- Gap percentage and direction (+/-)
+- Previous close price
+- Current pre-market price
+- Affected positions summary
+
+**Note:** Gap alerts are deduplicated - each bot sends at most one alert per day, even if it wakes up multiple times during pre-market.
 
 ---
 

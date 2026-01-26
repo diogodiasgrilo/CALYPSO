@@ -30,13 +30,32 @@ Alert Priorities (ALL levels get WhatsApp + Email):
     MEDIUM: WhatsApp + Email (position opened, profit target, daily summaries)
     LOW: WhatsApp + Email (informational, startup/shutdown)
 
+Alert Responsibilities by Bot:
+    Iron Fly:           AlertService only (no market monitor, no gap alerts - 0DTE only)
+    Delta Neutral:      AlertService + MarketStatusMonitor + SPY gap alerts
+    Rolling Put Diag:   AlertService + QQQ gap alerts
+
+MarketStatusMonitor (runs ONLY on Delta Neutral to avoid duplicates):
+    - Market opening countdown (1h, 30m, 15m before open)
+    - Market open notification (at 9:30 AM ET)
+    - Market close notification (at 4:00 PM ET or early close)
+    - Holiday notifications (weekday market closures)
+
+Pre-Market Gap Alerts (WARNING 2-3%, CRITICAL 3%+):
+    - Delta Neutral: SPY gaps (once per day max)
+    - Rolling Put Diagonal: QQQ gaps (once per day max)
+
 Usage:
-    from shared import AlertService, AlertType, AlertPriority
+    from shared import AlertService, AlertType, AlertPriority, MarketStatusMonitor
 
     alert_service = AlertService(config, "IRON_FLY")
     alert_service.circuit_breaker("5 consecutive failures", 5)
     alert_service.position_opened("Iron Fly @ 6020", -245.50)
-    alert_service.wing_breach("lower", 5989.50, 5990.00, -320.00)
+    alert_service.premarket_gap("SPY", -2.5, 600.00, 585.00, "Check positions")
+
+    # Market status monitor (use only on ONE bot to avoid duplicates)
+    monitor = MarketStatusMonitor(alert_service)
+    monitor.check_and_alert()  # Call periodically from main loop
 
 See: docs/ALERTING_SETUP.md for full deployment guide
 ================================================================================
