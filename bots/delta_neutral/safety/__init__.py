@@ -149,10 +149,13 @@ POS-006: Multiple Straddles Warning (strategy.py ~3811-3830)
 
 MARKET CONDITIONS (MKT-*)
 -------------------------
-MKT-001: Pre-Market Gap Detection
-   - REMOVED: Requires pre-market data subscription which is not cost-effective
-   - Was intended to detect overnight gaps before market open
-   - ITM risk is still checked at market open via regular price monitoring
+MKT-001: Pre-Market Gap Detection (strategy.py ~9469)
+   - IMPLEMENTED: check_pre_market_gap() detects overnight/weekend gaps
+   - Uses Saxo extended hours data (available 7:00 AM - 5:00 PM ET)
+   - IMPORTANT: Only fetches prices when is_saxo_price_available() is True
+   - Logs warning for gaps > 2% (configurable via premarket_gap_threshold_percent)
+   - Does NOT block entry (for Delta Neutral) - informational only
+   - Pre-market analysis logged via get_premarket_analysis() in main.py
 
 MKT-002: Flash Crash Velocity (strategy.py ~1756-1840)
    - _record_price_for_velocity(): Add price to sliding window
@@ -289,7 +292,7 @@ SAFETY CHECK ORDER IN run_strategy_check() (~8350+)
 11. Normal strategy logic proceeds...
 
 =============================================================================
-Last Updated: 2026-01-25
+Last Updated: 2026-01-26
 =============================================================================
 """
 

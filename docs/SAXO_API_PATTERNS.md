@@ -1,6 +1,6 @@
 # Saxo Bank OpenAPI - Critical Patterns and Gotchas
 
-**Last Updated:** 2026-01-23
+**Last Updated:** 2026-01-26
 **Purpose:** Document proven patterns for Saxo API integration to avoid repeating mistakes.
 
 ---
@@ -15,6 +15,8 @@
 6. [Order Status Handling](#6-order-status-handling)
 7. [Position Detection](#7-position-detection)
 8. [Common Mistakes](#8-common-mistakes)
+9. [Chart API for Historical OHLC Data](#9-chart-api-for-historical-ohlc-data)
+10. [Extended Hours Trading](#10-extended-hours-trading-pre-market--after-hours)
 
 ---
 
@@ -514,6 +516,87 @@ Saxo introduced "Extended AssetTypes" which split `Stock` into:
 
 ---
 
+## 10. Extended Hours Trading (Pre-Market & After-Hours)
+
+### The Problem (Fixed 2026-01-26)
+Bots were attempting to fetch pre-market prices from Saxo at times when the extended hours session hadn't started yet (e.g., 4:30 AM UTC = before 7:00 AM ET). Saxo does not provide extended hours data outside of specific windows.
+
+### Saxo Extended Hours Schedule
+
+| Session | Time (ET) | Time (UTC in Winter) | Notes |
+|---------|-----------|---------------------|-------|
+| **Pre-Market** | 7:00 AM - 9:30 AM | 12:00 PM - 2:30 PM | Limit orders only |
+| **Regular** | 9:30 AM - 4:00 PM | 2:30 PM - 9:00 PM | Full trading |
+| **After-Hours** | 4:00 PM - 5:00 PM | 9:00 PM - 10:00 PM | Limit orders only |
+
+**Source:** [Saxo Extended Trading Hours](https://www.help.saxo/hc/en-us/articles/7574076258589-Extended-trading-hours)
+
+### Key Points
+
+1. **Extended hours is auto-enabled** on all Saxo accounts
+2. **Only limit orders** are supported during extended hours (no market orders)
+3. **Price data available** during extended hours for US stocks, ETFs, and single stock CFDs
+4. **Before 7:00 AM ET**: Saxo returns stale data or no prices - do NOT attempt to fetch
+
+### Implementation Pattern
+
+```python
+from shared.market_hours import (
+    is_pre_market,           # True if 7:00-9:30 AM ET on trading day
+    is_after_hours,          # True if 4:00-5:00 PM ET on trading day
+    is_saxo_price_available, # True if 7:00 AM - 5:00 PM ET on trading day
+    get_trading_session,     # Returns "pre_market", "regular", "after_hours", "closed"
+)
+
+def fetch_premarket_price():
+    """Only fetch prices when Saxo can provide them."""
+
+    # CRITICAL: Check if Saxo has prices available
+    if not is_saxo_price_available():
+        logger.info("Saxo prices not available yet (before 7:00 AM ET)")
+        return None
+
+    # Now safe to fetch
+    quote = client.get_quote(uic, asset_type="Etf")
+    if quote:
+        return quote.get("Mid") or ((quote.get("Bid", 0) + quote.get("Ask", 0)) / 2)
+    return None
+```
+
+### Error Pattern (What to Avoid)
+
+```python
+# WRONG - Fetches at any time, causing failed requests before 7 AM
+is_premarket = now.hour < 9 or (now.hour == 9 and now.minute < 30)
+if is_premarket:
+    quote = client.get_quote(uic)  # May fail before 7 AM!
+
+# RIGHT - Only fetch during Saxo's extended hours window
+if is_saxo_price_available():  # True only between 7 AM - 5 PM ET
+    quote = client.get_quote(uic)  # Saxo has prices available
+```
+
+### Helper Functions in `shared/market_hours.py`
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `is_pre_market()` | `bool` | True if 7:00-9:30 AM ET on trading day |
+| `is_after_hours()` | `bool` | True if 4:00-5:00 PM ET on trading day |
+| `is_extended_hours()` | `bool` | True if pre-market OR after-hours |
+| `is_saxo_price_available()` | `bool` | True if 7:00 AM - 5:00 PM ET (when Saxo has data) |
+| `get_trading_session()` | `str` | Returns "pre_market", "regular", "after_hours", or "closed" |
+| `get_extended_hours_status_message()` | `str` | Human-readable status with session info |
+
+### Bot-Specific Handling
+
+| Bot | Pre-Market Behavior |
+|-----|---------------------|
+| **Iron Fly 0DTE** | Sleeps until 9:30 AM - no pre-market price fetching needed |
+| **Delta Neutral** | Fetches SPY price if `is_saxo_price_available()`, logs gap analysis |
+| **Rolling Put Diagonal** | Fetches QQQ price if `is_saxo_price_available()`, logs gap analysis |
+
+---
+
 ## Quick Reference: File Locations
 
 | Pattern | File | Line(s) |
@@ -524,6 +607,9 @@ Saxo introduced "Extended AssetTypes" which split `Stock` into:
 | WebSocket setup | `shared/saxo_client.py` | ~2927-2970 |
 | Unknown status handling | `bots/iron_fly_0dte/strategy.py` | ~2497-2516 |
 | Position detection | `shared/saxo_client.py` | ~1600-1700 |
+| Extended hours helpers | `shared/market_hours.py` | ~430-570 |
+| Pre-market price fetch (Delta Neutral) | `bots/delta_neutral/main.py` | ~523-590 |
+| Pre-market price fetch (Rolling Put Diagonal) | `bots/rolling_put_diagonal/main.py` | ~478-540 |
 
 ---
 
@@ -535,7 +621,7 @@ Saxo introduced "Extended AssetTypes" which split `Stock` into:
 
 ---
 
-**Document Version:** 1.1
+**Document Version:** 1.2
 **Created:** 2026-01-23
-**Updated:** 2026-01-25 - Added Section 9: Chart API for Historical OHLC Data
+**Updated:** 2026-01-26 - Added Section 10: Extended Hours Trading (Pre-Market & After-Hours)
 **Author:** Claude (learned from production bugs)

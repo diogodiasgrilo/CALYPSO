@@ -74,6 +74,23 @@ Full documentation: docs/SAXO_API_PATTERNS.md
    in-memory token is stale and will cause 401 Unauthorized.
 
    See: saxo_client.py start_price_streaming() around line 2927
+
+6. EXTENDED HOURS PRICE FETCHING (2026-01-26)
+   -------------------------------------------
+   Saxo extended hours: 7:00 AM - 5:00 PM ET on trading days.
+   NEVER try to fetch prices before 7:00 AM ET - Saxo has no data.
+
+   | Session      | Time (ET)         | Notes              |
+   |--------------|-------------------|--------------------|
+   | Pre-Market   | 7:00 AM - 9:30 AM | Limit orders only  |
+   | Regular      | 9:30 AM - 4:00 PM | Full trading       |
+   | After-Hours  | 4:00 PM - 5:00 PM | Limit orders only  |
+
+   Use is_saxo_price_available() before fetching:
+   if is_saxo_price_available():  # True only 7:00 AM - 5:00 PM ET
+       quote = client.get_quote(uic)
+
+   See: docs/SAXO_API_PATTERNS.md Section 10
 ================================================================================
 """
 
@@ -84,6 +101,11 @@ from shared.market_hours import (
     is_market_open,
     get_market_status_message,
     calculate_sleep_duration,
+    is_pre_market,
+    is_after_hours,
+    is_extended_hours,
+    is_saxo_price_available,
+    get_trading_session,
 )
 from shared.secret_manager import is_running_on_gcp
 from shared.external_price_feed import ExternalPriceFeed
@@ -95,8 +117,11 @@ __all__ = [
     'TradeLoggerService', 'setup_logging', 'TradeRecord',
     # Config
     'ConfigLoader', 'get_config_loader',
-    # Market Hours
+    # Market Hours (Regular)
     'is_market_open', 'get_market_status_message', 'calculate_sleep_duration',
+    # Market Hours (Extended - Saxo: 7:00 AM - 5:00 PM ET)
+    'is_pre_market', 'is_after_hours', 'is_extended_hours',
+    'is_saxo_price_available', 'get_trading_session',
     # Cloud
     'is_running_on_gcp',
     # Price Feed

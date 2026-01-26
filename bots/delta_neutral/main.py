@@ -46,7 +46,11 @@ if _project_root not in sys.path:
 # Import shared modules
 from shared.saxo_client import SaxoClient
 from shared.logger_service import TradeLoggerService, setup_logging
-from shared.market_hours import is_market_open, get_market_status_message, calculate_sleep_duration, is_weekend, is_market_holiday, get_us_market_time, get_holiday_name
+from shared.market_hours import (
+    is_market_open, get_market_status_message, calculate_sleep_duration,
+    is_weekend, is_market_holiday, get_us_market_time, get_holiday_name,
+    is_pre_market, is_saxo_price_available, get_extended_hours_status_message
+)
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
 
@@ -521,12 +525,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         client.authenticate(force_refresh=True)
 
                         # MKT-001: During pre-market on trading days, log comprehensive market analysis
-                        is_premarket = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)
-                        is_trading_day = now_et.weekday() < 5 and not holiday_name
+                        # IMPORTANT: Only fetch prices when Saxo can provide them (7:00 AM - 5:00 PM ET)
+                        # Before 7:00 AM, Saxo has no pre-market data available
+                        is_premarket_session = is_pre_market(now_et)  # True if 7:00-9:30 AM on trading day
+                        saxo_has_prices = is_saxo_price_available(now_et)  # True if 7:00 AM - 5:00 PM
 
-                        if is_premarket and is_trading_day:
+                        if is_premarket_session and saxo_has_prices:
                             try:
                                 # Get current SPY price from pre-market session
+                                # Saxo provides extended hours data starting at 7:00 AM ET
                                 spy_price = 0.0
                                 quote = client.get_quote(strategy.underlying_uic, asset_type="Etf")
                                 if quote:
@@ -577,6 +584,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                                 logger.warning(f"Pre-market analysis error: {e}")
                                 reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
                                 trade_logger.log_event(f"HEARTBEAT | Market closed {reason} - sleeping for {minutes}m")
+                        elif not saxo_has_prices and not is_weekend(now_et) and not holiday_name:
+                            # Before 7:00 AM on a trading day - Saxo has no prices yet
+                            trade_logger.log_event(
+                                f"HEARTBEAT | Pre-market not yet open (starts 7:00 AM ET) | Sleeping {minutes}m"
+                            )
                         else:
                             # Log standard heartbeat for weekend/holiday/after-hours
                             reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""

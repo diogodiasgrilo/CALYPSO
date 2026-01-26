@@ -328,6 +328,31 @@ gcloud secrets versions access latest --secret=SECRET_NAME --project=calypso-tra
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
 ```
 
+### Pre-Market Price Fetching Fails (Before 7:00 AM ET)
+
+**Symptom:** Bots log "No quote yet" or fail to get prices during what appears to be pre-market hours.
+
+**Root Cause (Fixed 2026-01-26):** Saxo Bank's extended hours trading only starts at 7:00 AM ET. Before this time, no pre-market data is available. The bots were attempting to fetch prices too early.
+
+**Saxo Extended Hours Schedule:**
+| Session | Time (ET) | Notes |
+|---------|-----------|-------|
+| Pre-Market | 7:00 AM - 9:30 AM | Limit orders only |
+| Regular | 9:30 AM - 4:00 PM | Full trading |
+| After-Hours | 4:00 PM - 5:00 PM | Limit orders only |
+
+**Solution:** Use `is_saxo_price_available()` from `shared/market_hours.py` before fetching prices:
+```python
+from shared.market_hours import is_saxo_price_available
+
+if is_saxo_price_available():  # True only 7:00 AM - 5:00 PM ET on trading days
+    quote = client.get_quote(uic)
+else:
+    logger.info("Saxo prices not available yet")
+```
+
+**See:** [SAXO_API_PATTERNS.md Section 10](docs/SAXO_API_PATTERNS.md#10-extended-hours-trading-pre-market--after-hours)
+
 ---
 
 ## Running Diagnostic Scripts on VM

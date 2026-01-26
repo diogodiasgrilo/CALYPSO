@@ -2,8 +2,21 @@
 """
 Market Hours Module
 
-Provides utilities for checking if US equity markets are open.
-Handles weekends, holidays, and market hours (9:30 AM - 4:00 PM ET).
+Provides utilities for checking US equity market status including:
+- Regular market hours (9:30 AM - 4:00 PM ET)
+- Pre-market session (7:00 AM - 9:30 AM ET)
+- After-hours session (4:00 PM - 5:00 PM ET)
+- Weekends and holidays
+
+Extended hours are based on Saxo Bank's extended trading hours:
+https://www.help.saxo/hc/en-us/articles/7574076258589-Extended-trading-hours
+
+Key functions:
+- is_market_open(): Check if regular market is open
+- is_pre_market(): Check if in pre-market session (7:00-9:30 AM)
+- is_after_hours(): Check if in after-hours session (4:00-5:00 PM)
+- is_saxo_price_available(): Check if Saxo can provide price data (7:00 AM - 5:00 PM)
+- get_trading_session(): Get current session name ("pre_market", "regular", "after_hours", "closed")
 """
 
 import logging
@@ -19,6 +32,13 @@ US_EASTERN = pytz.timezone('America/New_York')
 # Regular market hours (US equity markets)
 MARKET_OPEN_TIME = time(9, 30)   # 9:30 AM ET
 MARKET_CLOSE_TIME = time(16, 0)  # 4:00 PM ET
+
+# Extended trading hours (Saxo Bank specific)
+# Pre-market: 7:00 AM - 9:30 AM ET (limit orders only)
+# After-hours: 4:00 PM - 5:00 PM ET (limit orders only)
+# See: https://www.help.saxo/hc/en-us/articles/7574076258589-Extended-trading-hours
+PRE_MARKET_OPEN_TIME = time(7, 0)   # 7:00 AM ET - Pre-market starts
+AFTER_HOURS_CLOSE_TIME = time(17, 0)  # 5:00 PM ET - After-hours ends
 
 
 def _get_nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> datetime:
@@ -422,6 +442,199 @@ def calculate_sleep_duration(max_sleep: int = 3600) -> int:
     return min(seconds_until_open, max_sleep)
 
 
+# =========================================================================
+# EXTENDED HOURS FUNCTIONS (Saxo Bank Extended Trading Hours)
+# =========================================================================
+# Saxo Bank offers extended hours trading on US exchanges:
+# - Pre-market: 7:00 AM - 9:30 AM ET (limit orders only)
+# - After-hours: 4:00 PM - 5:00 PM ET (limit orders only)
+# Price data is available during these sessions but liquidity is lower.
+# Source: https://www.help.saxo/hc/en-us/articles/7574076258589-Extended-trading-hours
+# =========================================================================
+
+
+def is_pre_market(dt: datetime = None) -> bool:
+    """
+    Check if we're in the pre-market trading session (7:00 AM - 9:30 AM ET).
+
+    Pre-market is when Saxo Bank provides price data but regular market is not yet open.
+    Only limit orders are supported during pre-market.
+
+    Args:
+        dt: Datetime to check (defaults to now in ET)
+
+    Returns:
+        bool: True if within pre-market hours on a trading day
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    # Must be a trading day (not weekend or holiday)
+    if is_weekend(dt) or is_market_holiday(dt):
+        return False
+
+    current_time = dt.time()
+    return PRE_MARKET_OPEN_TIME <= current_time < MARKET_OPEN_TIME
+
+
+def is_after_hours(dt: datetime = None) -> bool:
+    """
+    Check if we're in the after-hours trading session (4:00 PM - 5:00 PM ET).
+
+    After-hours is when Saxo Bank provides price data but regular market has closed.
+    Only limit orders are supported during after-hours.
+
+    Args:
+        dt: Datetime to check (defaults to now in ET)
+
+    Returns:
+        bool: True if within after-hours on a trading day
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    # Must be a trading day (not weekend or holiday)
+    if is_weekend(dt) or is_market_holiday(dt):
+        return False
+
+    current_time = dt.time()
+    return MARKET_CLOSE_TIME <= current_time < AFTER_HOURS_CLOSE_TIME
+
+
+def is_extended_hours(dt: datetime = None) -> bool:
+    """
+    Check if we're in any extended trading session (pre-market or after-hours).
+
+    Extended hours = Pre-market (7:00-9:30 AM) OR After-hours (4:00-5:00 PM)
+
+    Args:
+        dt: Datetime to check (defaults to now in ET)
+
+    Returns:
+        bool: True if within any extended trading session
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    return is_pre_market(dt) or is_after_hours(dt)
+
+
+def is_saxo_price_available(dt: datetime = None) -> bool:
+    """
+    Check if Saxo Bank price data is available (regular + extended hours).
+
+    Price data is available during:
+    - Pre-market: 7:00 AM - 9:30 AM ET
+    - Regular hours: 9:30 AM - 4:00 PM ET
+    - After-hours: 4:00 PM - 5:00 PM ET
+
+    Total: 7:00 AM - 5:00 PM ET on trading days.
+
+    IMPORTANT: This is when Saxo CAN provide prices. Outside these hours,
+    price fetching will likely return stale data or fail.
+
+    Args:
+        dt: Datetime to check (defaults to now in ET)
+
+    Returns:
+        bool: True if Saxo should have live price data available
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    # Must be a trading day (not weekend or holiday)
+    if is_weekend(dt) or is_market_holiday(dt):
+        return False
+
+    current_time = dt.time()
+    return PRE_MARKET_OPEN_TIME <= current_time < AFTER_HOURS_CLOSE_TIME
+
+
+def get_trading_session(dt: datetime = None) -> str:
+    """
+    Get the current trading session name.
+
+    Args:
+        dt: Datetime to check (defaults to now in ET)
+
+    Returns:
+        str: One of "pre_market", "regular", "after_hours", "closed"
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    # Weekend or holiday = closed
+    if is_weekend(dt) or is_market_holiday(dt):
+        return "closed"
+
+    current_time = dt.time()
+
+    # Before pre-market opens
+    if current_time < PRE_MARKET_OPEN_TIME:
+        return "closed"
+
+    # Pre-market: 7:00 AM - 9:30 AM
+    if current_time < MARKET_OPEN_TIME:
+        return "pre_market"
+
+    # Regular hours: 9:30 AM - 4:00 PM
+    if current_time < MARKET_CLOSE_TIME:
+        return "regular"
+
+    # After-hours: 4:00 PM - 5:00 PM
+    if current_time < AFTER_HOURS_CLOSE_TIME:
+        return "after_hours"
+
+    # After extended hours close
+    return "closed"
+
+
+def get_extended_hours_status_message(dt: datetime = None) -> str:
+    """
+    Get a detailed market status message including extended hours info.
+
+    Args:
+        dt: Datetime to check (defaults to now in ET)
+
+    Returns:
+        str: Human-readable status including session type
+    """
+    if dt is None:
+        dt = get_us_market_time()
+
+    session = get_trading_session(dt)
+    time_str = dt.strftime('%I:%M:%S %p %Z')
+
+    if session == "regular":
+        return f"🟢 REGULAR SESSION | {time_str} | Saxo prices available"
+    elif session == "pre_market":
+        mins_to_open = int((datetime.combine(dt.date(), MARKET_OPEN_TIME) -
+                           datetime.combine(dt.date(), dt.time())).total_seconds() // 60)
+        return f"🟡 PRE-MARKET | {time_str} | {mins_to_open} min until 9:30 AM | Saxo prices available"
+    elif session == "after_hours":
+        mins_to_close = int((datetime.combine(dt.date(), AFTER_HOURS_CLOSE_TIME) -
+                            datetime.combine(dt.date(), dt.time())).total_seconds() // 60)
+        return f"🟡 AFTER-HOURS | {time_str} | {mins_to_close} min until close | Saxo prices available"
+    else:
+        # Closed
+        next_open, seconds = get_next_market_open()
+        hours = seconds // 3600
+
+        # Check if it's before pre-market on a trading day
+        if not is_weekend(dt) and not is_market_holiday(dt):
+            current_time = dt.time()
+            if current_time < PRE_MARKET_OPEN_TIME:
+                # Before 7 AM on a trading day
+                pre_market_dt = dt.replace(hour=7, minute=0, second=0, microsecond=0)
+                mins_to_premarket = int((pre_market_dt - dt).total_seconds() // 60)
+                return f"🔴 CLOSED | {time_str} | Pre-market opens in {mins_to_premarket} min (7:00 AM)"
+            else:
+                # After 5 PM
+                return f"🔴 CLOSED | {time_str} | After-hours ended | Opens in {hours}h"
+
+        return f"🔴 CLOSED | {time_str} | Opens in {hours} hours"
+
+
 # Test function
 if __name__ == "__main__":
     print("="*70)
@@ -449,6 +662,21 @@ if __name__ == "__main__":
 
     sleep_duration = calculate_sleep_duration()
     print(f"\nRecommended sleep duration: {sleep_duration} seconds ({sleep_duration // 60} minutes)")
+
+    # Extended hours info
+    print("\n" + "="*70)
+    print("EXTENDED HOURS STATUS")
+    print("="*70)
+    print(f"\nSaxo Extended Hours Schedule:")
+    print(f"  Pre-market:   7:00 AM - 9:30 AM ET")
+    print(f"  Regular:      9:30 AM - 4:00 PM ET")
+    print(f"  After-hours:  4:00 PM - 5:00 PM ET")
+    print(f"\nCurrent session: {get_trading_session(now)}")
+    print(f"Is pre-market? {is_pre_market(now)}")
+    print(f"Is after-hours? {is_after_hours(now)}")
+    print(f"Is extended hours? {is_extended_hours(now)}")
+    print(f"Is Saxo price available? {is_saxo_price_available(now)}")
+    print(f"\n{get_extended_hours_status_message(now)}")
 
     # Show all holidays for current year
     print("\n" + "="*70)

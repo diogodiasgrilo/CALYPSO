@@ -58,6 +58,9 @@ from shared.market_hours import (
     is_market_holiday,
     get_us_market_time,
     get_holiday_name,
+    is_pre_market,
+    is_saxo_price_available,
+    get_extended_hours_status_message,
 )
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
@@ -476,9 +479,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                 sleep_minutes = sleep_seconds // 60
 
                 # MKT-001: During pre-market on trading days, log comprehensive market analysis
-                if reason == "Pre-market" and now.weekday() < 5 and not holiday_name:
+                # IMPORTANT: Only fetch prices when Saxo can provide them (7:00 AM - 5:00 PM ET)
+                # Before 7:00 AM, Saxo has no pre-market data available
+                is_premarket_session = is_pre_market(now)  # True if 7:00-9:30 AM on trading day
+                saxo_has_prices = is_saxo_price_available(now)  # True if 7:00 AM - 5:00 PM
+
+                if is_premarket_session and saxo_has_prices:
                     try:
                         # Get current QQQ price from pre-market session
+                        # Saxo provides extended hours data starting at 7:00 AM ET
                         qqq_price = 0.0
                         quote = client.get_quote(strategy.underlying_uic, asset_type="Etf")
                         if quote:
@@ -528,6 +537,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                     except Exception as e:
                         logger.warning(f"Pre-market analysis error: {e}")
                         trade_logger.log_event(f"Market closed ({reason}). Sleeping {sleep_minutes} minutes...")
+                elif not saxo_has_prices and not is_weekend(now) and not holiday_name:
+                    # Before 7:00 AM on a trading day - Saxo has no prices yet
+                    trade_logger.log_event(
+                        f"HEARTBEAT | Pre-market not yet open (starts 7:00 AM ET) | Sleeping {sleep_minutes}m"
+                    )
                 else:
                     trade_logger.log_event(f"Market closed ({reason}). Sleeping {sleep_minutes} minutes...")
 
