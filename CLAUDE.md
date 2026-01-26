@@ -13,6 +13,7 @@ CALYPSO is a monorepo containing multiple automated options trading bots that tr
 - **Google Secret Manager** for credentials (never in config files)
 - **Google Sheets** for trade logging and dashboards
 - **WebSocket streaming** for real-time price data
+- **Pub/Sub + Cloud Functions** for SMS/Email alerts (Twilio + Gmail)
 
 ### Codebase Structure
 ```
@@ -31,6 +32,10 @@ shared/               # Shared modules used by all bots
   token_coordinator.py # OAuth token refresh coordination
   external_price_feed.py # Yahoo Finance fallback for VIX
   technical_indicators.py # TA calculations
+  alert_service.py    # SMS/Email alerting via Pub/Sub
+
+cloud_functions/      # Google Cloud Functions
+  alert_processor/    # Processes alerts from Pub/Sub, sends SMS/Email
 ```
 
 ---
@@ -112,6 +117,65 @@ Iron Fly (SPX/SPXW) and Delta Neutral (SPY) are mostly independent:
 - `token_coordinator.py` manages OAuth token refresh across all bots via file-based locking
 - When one bot refreshes the token, others pick up the fresh token from the shared cache
 - WebSocket connections refresh tokens before connecting to avoid 401 errors (CONN-008 fix)
+
+---
+
+## Alert System (SMS/Email)
+
+All bots use a shared alerting system via Google Cloud Pub/Sub and Cloud Functions.
+
+### Architecture
+```
+Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail → User
+```
+
+**Key Design Principle:** Alerts are sent AFTER actions complete with ACTUAL results (not predictions). The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately. Cloud Function delivers SMS/email asynchronously.
+
+### Alert Priority Levels
+| Priority | Delivery | Examples |
+|----------|----------|----------|
+| CRITICAL | SMS + Email | Circuit breaker, emergency exit, naked position |
+| HIGH | SMS + Email | Stop loss, max loss, wing breach, roll failed |
+| MEDIUM | Email only | Position opened/closed, profit target, roll complete |
+| LOW | Email only | Bot started/stopped, daily summary |
+
+### Enabling Alerts
+Add to each bot's `config.json`:
+```json
+{
+    "alerts": {
+        "enabled": true,
+        "phone_number": "+1XXXXXXXXXX",
+        "email": "your@email.com"
+    }
+}
+```
+
+### Key Files
+| File | Purpose |
+|------|---------|
+| `shared/alert_service.py` | AlertService class used by bots |
+| `cloud_functions/alert_processor/main.py` | Cloud Function that sends SMS/email |
+| `docs/ALERTING_SETUP.md` | Full deployment guide |
+
+### Testing Alerts Locally (Dry Run)
+```bash
+export ALERT_DRY_RUN=true
+python -c "
+from shared.alert_service import AlertService
+svc = AlertService({'alerts': {'enabled': True}}, 'TEST')
+svc.circuit_breaker('Test reason', 3)
+"
+```
+
+### Monitoring Alert Delivery
+```bash
+# View Cloud Function logs
+gcloud functions logs read process-trading-alert --region=us-east1 --project=calypso-trading-bot --limit=50
+
+# Check dead letter queue for failed alerts
+gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-trading-bot --limit=10 --auto-ack
+```
 
 ---
 
@@ -511,6 +575,7 @@ SCRIPT
 | WebSocket 401 errors | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 8.5: WebSocket Token Refresh |
 | Entry filter questions | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 6: Filter Implementation |
 | Edge case handling | [IRON_FLY_EDGE_CASES.md](docs/IRON_FLY_EDGE_CASES.md) | All 63 documented cases |
+| SMS/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
 
 ### Full Documentation List
 
@@ -520,6 +585,7 @@ SCRIPT
 | `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
 | `docs/IRON_FLY_EDGE_CASES.md` | 63 edge cases analyzed for Iron Fly bot |
 | `docs/DELTA_NEUTRAL_EDGE_CASES.md` | Edge cases for Delta Neutral bot |
+| `docs/ALERTING_SETUP.md` | SMS/Email alert system deployment guide |
 | `docs/DEPLOYMENT.md` | Deployment procedures |
 | `docs/GOOGLE_SHEETS.md` | Google Sheets logging setup |
 | `docs/VM_COMMANDS.md` | VM administration commands |

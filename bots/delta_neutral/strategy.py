@@ -124,6 +124,7 @@ from typing import Optional, Dict, List, Any, Tuple, Set
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.market_hours import get_us_market_time, is_weekend, is_market_holiday, is_market_open
+from shared.alert_service import AlertService, AlertType, AlertPriority
 
 # Import models from the models package
 from bots.delta_neutral.models import (
@@ -173,7 +174,7 @@ class DeltaNeutralStrategy:
         >>> strategy.run()
     """
 
-    def __init__(self, client: SaxoClient, config: Dict[str, Any], trade_logger: Any = None, dry_run: bool = False):
+    def __init__(self, client: SaxoClient, config: Dict[str, Any], trade_logger: Any = None, dry_run: bool = False, alert_service: Optional[AlertService] = None):
         """
         Initialize the strategy.
 
@@ -182,12 +183,19 @@ class DeltaNeutralStrategy:
             config: Configuration dictionary with strategy parameters
             trade_logger: Optional logger service for trade logging
             dry_run: If True, simulate trades without placing real orders
+            alert_service: Optional AlertService for SMS/email notifications
         """
         self.client = client
         self.config = config
         self.strategy_config = config["strategy"]
         self.trade_logger = trade_logger
         self.dry_run = dry_run
+
+        # Alert service for SMS/email notifications
+        if alert_service:
+            self.alert_service = alert_service
+        else:
+            self.alert_service = AlertService(config, "DELTA_NEUTRAL")
 
         # Strategy state
         self.state = StrategyState.IDLE
@@ -438,6 +446,20 @@ class DeltaNeutralStrategy:
                 "description": f"Circuit breaker opened after {self._consecutive_failures} consecutive failures. Reason: {reason}",
                 "result": "HALTED"
             })
+
+        # ALERT: Send circuit breaker alert AFTER emergency actions complete
+        self.alert_service.circuit_breaker(
+            reason=reason,
+            consecutive_failures=self._consecutive_failures,
+            details={
+                "spy_price": self.current_underlying_price,
+                "vix": self.current_vix,
+                "initial_strike": self.initial_straddle_strike,
+                "emergency_actions": emergency_actions,
+                "has_straddle": self.long_straddle is not None,
+                "has_strangle": self.short_strangle is not None
+            }
+        )
 
     def _emergency_position_check(self) -> str:
         """
@@ -796,8 +818,34 @@ class DeltaNeutralStrategy:
         if success:
             self.state = StrategyState.IDLE
             logger.critical("✅ All positions closed in emergency")
+
+            # ALERT: Send emergency exit alert AFTER successful close
+            self.alert_service.emergency_exit(
+                reason="Emergency close all - unprotected position detected",
+                pnl=0.0,  # P&L unknown in emergency
+                details={
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "had_straddle": self.long_straddle is not None,
+                    "had_strangle": self.short_strangle is not None,
+                    "result": "All positions closed"
+                }
+            )
         else:
             logger.critical("❌ Some positions may still be open - MANUAL CHECK REQUIRED")
+
+            # ALERT: Critical - emergency close failed
+            self.alert_service.send_alert(
+                alert_type=AlertType.EMERGENCY_EXIT,
+                title="EMERGENCY CLOSE FAILED",
+                message="Some positions may still be open!\nMANUAL CHECK REQUIRED.",
+                priority=AlertPriority.CRITICAL,
+                details={
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "result": "PARTIAL FAILURE"
+                }
+            )
 
         return success
 
@@ -6533,6 +6581,25 @@ class DeltaNeutralStrategy:
                 "status": "Active"
             })
 
+        # ALERT: Full position opened (straddle + strangle)
+        straddle_strike = self.long_straddle.strike if self.long_straddle else "N/A"
+        straddle_dte = self.long_straddle.dte if self.long_straddle else 0
+        net_cost = (self.long_straddle.net_cost if self.long_straddle else 0) - self.short_strangle.premium_collected
+        self.alert_service.position_opened(
+            position_summary=f"DN Full Position: Straddle ${straddle_strike} ({straddle_dte} DTE) + Strangle ${put_option['strike']}p/${call_option['strike']}c",
+            cost_or_credit=net_cost,
+            details={
+                "straddle_strike": straddle_strike,
+                "straddle_dte": straddle_dte,
+                "short_call_strike": call_option['strike'],
+                "short_put_strike": put_option['strike'],
+                "strangle_expiry": str(call_option['expiry']),
+                "premium_collected": self.short_strangle.premium_collected,
+                "spy_price": self.current_underlying_price,
+                "vix": self.current_vix
+            }
+        )
+
         return True
 
     def _add_missing_strangle_leg(self, for_roll: bool = False) -> bool:
@@ -8184,6 +8251,21 @@ class DeltaNeutralStrategy:
 
                 # Clear all positions from Positions sheet
                 self.trade_logger.clear_all_positions()
+
+            # ALERT: Position closed successfully
+            exit_reason = "Emergency exit" if emergency_mode else "DTE exit threshold reached"
+            self.alert_service.position_closed(
+                reason=exit_reason,
+                pnl=self.metrics.total_pnl,
+                details={
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "initial_strike": self.initial_straddle_strike,
+                    "recenter_count": self.metrics.recenter_count,
+                    "roll_count": self.metrics.roll_count,
+                    "emergency_mode": emergency_mode
+                }
+            )
         else:
             # CRITICAL FIX: Restore state based on what positions remain
             # Don't leave in EXITING state which causes the bot to freeze
@@ -8199,6 +8281,20 @@ class DeltaNeutralStrategy:
             else:
                 self.state = StrategyState.IDLE
             logger.info(f"State restored to: {self.state.value}")
+
+            # ALERT: Exit failed
+            self.alert_service.send_alert(
+                alert_type=AlertType.POSITION_CLOSED,
+                title="Position Exit PARTIAL FAILURE",
+                message=f"Exit incomplete!\nSome positions may still be open.\nManual check required.",
+                priority=AlertPriority.HIGH,
+                details={
+                    "spy_price": self.current_underlying_price,
+                    "has_straddle": self.long_straddle is not None,
+                    "has_strangle": self.short_strangle is not None,
+                    "state": self.state.value
+                }
+            )
 
         return success
 

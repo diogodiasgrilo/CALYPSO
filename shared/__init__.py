@@ -11,6 +11,32 @@ This package contains common utilities used by all trading strategies:
 - token_coordinator: OAuth token refresh coordination across bots
 - event_calendar: FOMC/economic calendar for trading blackouts
 - technical_indicators: Technical analysis calculations
+- alert_service: SMS/Email alerting via Google Cloud Pub/Sub
+
+ALERT SYSTEM (2026-01-26)
+================================================================================
+Architecture: Bot -> AlertService -> Pub/Sub -> Cloud Function -> Twilio/Gmail
+
+Key design: Alerts are sent AFTER actions complete with ACTUAL results.
+The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately.
+Cloud Function delivers SMS/email asynchronously in the background.
+
+Alert Priorities:
+    CRITICAL: SMS + Email (circuit breaker, emergency exit, naked positions)
+    HIGH: SMS + Email (stop loss, max loss, position issues)
+    MEDIUM: Email only (position opened, profit target, daily summaries)
+    LOW: Email only (informational, startup/shutdown)
+
+Usage:
+    from shared import AlertService, AlertType, AlertPriority
+
+    alert_service = AlertService(config, "IRON_FLY")
+    alert_service.circuit_breaker("5 consecutive failures", 5)
+    alert_service.position_opened("Iron Fly @ 6020", -245.50)
+    alert_service.wing_breach("lower", 5989.50, 5990.00, -320.00)
+
+See: docs/ALERTING_SETUP.md for full deployment guide
+================================================================================
 
 ================================================================================
 CRITICAL IMPLEMENTATION NOTES - READ BEFORE MODIFYING SAXO API CODE
@@ -109,6 +135,7 @@ from shared.market_hours import (
 )
 from shared.secret_manager import is_running_on_gcp
 from shared.external_price_feed import ExternalPriceFeed
+from shared.alert_service import AlertService, AlertType, AlertPriority
 
 __all__ = [
     # Saxo Client
@@ -126,4 +153,6 @@ __all__ = [
     'is_running_on_gcp',
     # Price Feed
     'ExternalPriceFeed',
+    # Alerts
+    'AlertService', 'AlertType', 'AlertPriority',
 ]

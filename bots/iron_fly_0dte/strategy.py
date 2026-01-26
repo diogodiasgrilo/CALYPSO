@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
+from shared.alert_service import AlertService, AlertType, AlertPriority
 
 # Path for persistent metrics storage
 METRICS_FILE = os.path.join(
@@ -618,7 +619,8 @@ class IronFlyStrategy:
         saxo_client: SaxoClient,
         config: Dict[str, Any],
         logger_service: Any,
-        dry_run: bool = False
+        dry_run: bool = False,
+        alert_service: Optional[AlertService] = None
     ):
         """
         Initialize the 0DTE Iron Fly strategy.
@@ -628,11 +630,19 @@ class IronFlyStrategy:
             config: Strategy configuration dictionary
             logger_service: Trade logging service (Google Sheets, etc.)
             dry_run: If True, simulate trades without placing real orders
+            alert_service: Optional AlertService for SMS/email notifications
         """
         self.client = saxo_client
         self.config = config
         self.trade_logger = logger_service
         self.dry_run = dry_run
+
+        # Alert service for SMS/email notifications
+        # If not provided, create one from config (will auto-disable if not configured)
+        if alert_service:
+            self.alert_service = alert_service
+        else:
+            self.alert_service = AlertService(config, "IRON_FLY")
 
         # Strategy configuration
         self.strategy_config = config.get("strategy", {})
@@ -858,6 +868,18 @@ class IronFlyStrategy:
             "result": "Trading halted - emergency close attempted if position was open"
         })
 
+        # ALERT: Send SMS/email AFTER action is complete with actual results
+        self.alert_service.circuit_breaker(
+            reason=reason,
+            consecutive_failures=self._consecutive_failures,
+            details={
+                "circuit_breaker_opens_today": self._circuit_breaker_opens_today,
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "daily_halt": self._daily_halt_triggered
+            }
+        )
+
     def _check_circuit_breaker(self) -> bool:
         """
         Check if circuit breaker allows trading.
@@ -936,6 +958,19 @@ class IronFlyStrategy:
             "description": f"CRITICAL: {reason}",
             "result": "Trading halted permanently until manual reset"
         })
+
+        # ALERT: Critical intervention requires immediate attention
+        self.alert_service.send_alert(
+            alert_type=AlertType.CRITICAL_INTERVENTION,
+            title="CRITICAL INTERVENTION REQUIRED",
+            message=f"{reason}\n\nALL TRADING HALTED.\nManual reset required to resume.",
+            priority=AlertPriority.CRITICAL,
+            details={
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "position_open": self.position is not None
+            }
+        )
 
     def _check_critical_intervention(self) -> bool:
         """
@@ -1245,6 +1280,21 @@ class IronFlyStrategy:
         self.position = None
         self._clear_position_metadata()  # POS-001: Clear saved metadata
         self.state = IronFlyState.DAILY_COMPLETE
+
+        # ALERT: Send emergency exit alert AFTER close is complete with actual results
+        pnl_dollars = pnl / 100
+        self.alert_service.emergency_exit(
+            reason=reason,
+            pnl=pnl_dollars,
+            details={
+                "close_success": close_success,
+                "close_failed": close_failed,
+                "close_order_ids": close_order_ids,
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "hold_time_minutes": hold_time
+            }
+        )
 
         logger.critical(f"Emergency close complete: {result_msg}")
         return result_msg
@@ -3158,7 +3208,26 @@ class IronFlyStrategy:
             f"Credit=${credit_for_position / 100:.2f} (actual), Orders={order_ids}"
         )
 
-        return f"Entered Iron Fly at {atm_strike} with ${credit_for_position / 100:.2f} credit (actual fills)"
+        # ALERT: Send position opened alert AFTER all 4 legs are filled successfully
+        credit_dollars = credit_for_position / 100
+        self.alert_service.position_opened(
+            position_summary=f"Iron Fly @ {atm_strike} (wings: {lower_wing}/{upper_wing})",
+            cost_or_credit=credit_dollars,
+            details={
+                "atm_strike": atm_strike,
+                "lower_wing": lower_wing,
+                "upper_wing": upper_wing,
+                "expected_move": expected_move,
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "expiry": str(self.position.expiry),
+                "quantity": self.position.quantity,
+                "profit_target": self.profit_target * self.position.quantity,
+                "max_hold_minutes": self.max_hold_minutes
+            }
+        )
+
+        return f"Entered Iron Fly at {atm_strike} with ${credit_dollars:.2f} credit (actual fills)"
 
     def _close_position(self, reason: str, description: str) -> str:
         """
@@ -3400,6 +3469,38 @@ class IronFlyStrategy:
         self.state = IronFlyState.CLOSING
         self.closing_started_at = get_eastern_timestamp()
 
+        # ALERT: Send appropriate alert AFTER close orders are placed
+        alert_details = {
+            "strike": self.position.atm_strike,
+            "wings": f"{self.position.lower_wing}/{self.position.upper_wing}",
+            "hold_time_minutes": hold_time,
+            "spy_price": self.current_price,
+            "legs_closed": len(close_orders)
+        }
+
+        if reason == "PROFIT_TARGET":
+            self.alert_service.profit_target(
+                target_amount=self.profit_target * self.position.quantity,
+                actual_pnl=pnl_dollars,
+                details=alert_details
+            )
+        elif reason == "TIME_EXIT":
+            self.alert_service.send_alert(
+                alert_type=AlertType.TIME_EXIT,
+                title="Time Exit - Max Hold Reached",
+                message=f"Max hold time {self.max_hold_minutes} min reached.\nP&L: ${pnl_dollars:.2f}",
+                priority=AlertPriority.MEDIUM,
+                details=alert_details
+            )
+        elif reason == "MAX_LOSS":
+            self.alert_service.send_alert(
+                alert_type=AlertType.MAX_LOSS,
+                title="Max Loss Triggered",
+                message=f"Max loss threshold breached.\nP&L: ${pnl_dollars:.2f}",
+                priority=AlertPriority.HIGH,
+                details=alert_details
+            )
+
         return f"Closing position ({reason}): P&L=${pnl_dollars:.2f}, {len(close_orders)}/4 orders placed"
 
     def _close_position_with_retries(self, reason: str, description: str, pnl: float, hold_time: float) -> str:
@@ -3555,9 +3656,38 @@ class IronFlyStrategy:
         self.state = IronFlyState.CLOSING
         self.closing_started_at = get_eastern_timestamp()
 
+        # ALERT: Send stop loss alert AFTER close is complete with actual results
+        pnl_dollars = pnl / 100
         if failed_legs:
+            # Critical alert if legs failed to close
+            self.alert_service.send_alert(
+                alert_type=AlertType.STOP_LOSS,
+                title="STOP LOSS PARTIAL FAILURE",
+                message=f"{description}\n{len(close_orders)}/4 legs closed, {len(failed_legs)} FAILED\nP&L: ${pnl_dollars:.2f}\nCritical intervention required!",
+                priority=AlertPriority.CRITICAL,
+                details={
+                    "spy_price": self.current_price,
+                    "reason": reason,
+                    "legs_closed": len(close_orders),
+                    "legs_failed": len(failed_legs),
+                    "pnl": pnl_dollars,
+                    "hold_time_minutes": hold_time
+                }
+            )
             return f"STOP-002 PARTIAL: {len(close_orders)}/4 closed, {len(failed_legs)} FAILED - CRITICAL INTERVENTION SET"
-        return f"STOP-002: Stop loss executed ({reason}): P&L=${pnl / 100:.2f}, all legs closed with retries"
+
+        # Successful stop loss
+        self.alert_service.stop_loss(
+            trigger_price=self.current_price,
+            pnl=pnl_dollars,
+            details={
+                "strike": self.position.atm_strike,
+                "wings": f"{self.position.lower_wing}/{self.position.upper_wing}",
+                "hold_time_minutes": hold_time,
+                "reason": description
+            }
+        )
+        return f"STOP-002: Stop loss executed ({reason}): P&L=${pnl_dollars:.2f}, all legs closed with retries"
 
     def _check_and_log_extreme_spread(self, uic: int, leg_name: str, asset_type: str) -> None:
         """

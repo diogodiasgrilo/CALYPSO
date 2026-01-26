@@ -42,6 +42,7 @@ from shared.event_calendar import (
     get_event_status_message,
     get_next_fomc_date,
 )
+from shared.alert_service import AlertService, AlertType, AlertPriority
 
 # Path for persistent metrics storage
 METRICS_FILE = os.path.join(
@@ -374,7 +375,8 @@ class RollingPutDiagonalStrategy:
         client: SaxoClient,
         config: Dict[str, Any],
         trade_logger: Any = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        alert_service: Optional[AlertService] = None
     ):
         """
         Initialize the strategy.
@@ -384,12 +386,19 @@ class RollingPutDiagonalStrategy:
             config: Configuration dictionary with strategy parameters
             trade_logger: Optional logger service for trade logging
             dry_run: If True, simulate trades without placing real orders
+            alert_service: Optional AlertService for SMS/email notifications
         """
         self.client = client
         self.config = config
         self.strategy_config = config["strategy"]
         self.trade_logger = trade_logger
         self.dry_run = dry_run or self.strategy_config.get("dry_run", False)
+
+        # Alert service for SMS/email notifications
+        if alert_service:
+            self.alert_service = alert_service
+        else:
+            self.alert_service = AlertService(config, "ROLLING_PUT_DIAGONAL")
 
         # Strategy state
         self.state = RPDState.IDLE
@@ -685,6 +694,18 @@ class RollingPutDiagonalStrategy:
                 "qqq_price": self.current_price,
                 "state": self.state.value,
             })
+
+        # ALERT: Send circuit breaker alert AFTER emergency actions complete
+        self.alert_service.circuit_breaker(
+            reason=reason,
+            consecutive_failures=self._consecutive_failures,
+            details={
+                "qqq_price": self.current_price,
+                "emergency_actions": emergency_actions,
+                "has_long_put": self.diagonal and self.diagonal.long_put is not None,
+                "has_short_put": self.diagonal and self.diagonal.short_put is not None
+            }
+        )
 
         # STATE-003: Persist circuit breaker state
         self._save_circuit_breaker_state()
@@ -2242,6 +2263,18 @@ class RollingPutDiagonalStrategy:
                 self.metrics.record_campaign(pnl)
                 self.metrics.save_to_file()
 
+                # ALERT: Naked short was detected and closed
+                self.alert_service.naked_position(
+                    missing_leg="Long Put (protection)",
+                    details={
+                        "short_strike": short.strike,
+                        "fill_price": fill_price,
+                        "pnl": pnl,
+                        "qqq_price": self.current_price,
+                        "result": "Successfully closed naked short"
+                    }
+                )
+
                 # Clear the short position
                 self.diagonal.short_put = None
                 return True
@@ -3438,6 +3471,22 @@ class RollingPutDiagonalStrategy:
                     trade_reason=f"Campaign #{self.diagonal.campaign_number}"
                 )
 
+            # ALERT: Campaign opened successfully with both legs
+            net_debit = long_result.get("fill_price", 0) - short_result.get("fill_price", 0)
+            self.alert_service.position_opened(
+                position_summary=f"RPD Campaign #{self.diagonal.campaign_number}: Long ${long_put_data['strike']}p ({long_put_data['dte']} DTE) + Short ${short_put_data['strike']}p",
+                cost_or_credit=-net_debit,  # Negative because it's a debit
+                details={
+                    "long_strike": long_put_data['strike'],
+                    "long_dte": long_put_data['dte'],
+                    "long_delta": long_put_data.get('delta', -0.33),
+                    "short_strike": short_put_data['strike'],
+                    "short_dte": short_put_data.get('dte', 1),
+                    "qqq_price": self.current_price,
+                    "campaign_number": self.diagonal.campaign_number
+                }
+            )
+
             return True
 
         except Exception as e:
@@ -4257,6 +4306,22 @@ class RollingPutDiagonalStrategy:
                     "net_pnl": campaign_pnl,
                     "close_reason": reason,
                 })
+
+            # ALERT: Campaign closed successfully
+            self.alert_service.position_closed(
+                reason=reason,
+                pnl=campaign_pnl,
+                details={
+                    "campaign_number": self.diagonal.campaign_number,
+                    "rolls": self.diagonal.roll_count,
+                    "vertical_rolls": self.diagonal.vertical_roll_count,
+                    "horizontal_rolls": self.diagonal.horizontal_roll_count,
+                    "premium_collected": self.diagonal.total_premium_collected,
+                    "long_pnl": long_pnl,
+                    "short_pnl": short_pnl,
+                    "qqq_price": self.current_price
+                }
+            )
 
             # Clear diagonal
             self.diagonal = None
