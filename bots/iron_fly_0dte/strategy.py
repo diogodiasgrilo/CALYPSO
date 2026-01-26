@@ -3873,10 +3873,11 @@ class IronFlyStrategy:
 
             # Get short call price (we need to BUY to close, so use Ask)
             # LIVE-001: Use StockIndexOption for SPX/SPXW index options
-            # FIX (2026-01-23): Use skip_cache=True to get fresh prices via REST,
-            # not stale cached data from initial WebSocket subscription
+            # FIX (2026-01-26): Now using WebSocket cache (binary parsing fixed).
+            # Options are subscribed after entry, cache receives live updates.
+            # This reduces REST API calls from 48/min to ~0 during position monitoring.
             if self.position.short_call_uic:
-                sc_quote = self.client.get_quote(self.position.short_call_uic, "StockIndexOption", skip_cache=True)
+                sc_quote = self.client.get_quote(self.position.short_call_uic, "StockIndexOption")
                 if sc_quote:
                     ask = sc_quote.get('Quote', {}).get('Ask', 0)
                     if ask > 0:
@@ -3885,7 +3886,7 @@ class IronFlyStrategy:
 
             # Get short put price (we need to BUY to close, so use Ask)
             if self.position.short_put_uic:
-                sp_quote = self.client.get_quote(self.position.short_put_uic, "StockIndexOption", skip_cache=True)
+                sp_quote = self.client.get_quote(self.position.short_put_uic, "StockIndexOption")
                 if sp_quote:
                     ask = sp_quote.get('Quote', {}).get('Ask', 0)
                     if ask > 0:
@@ -3894,7 +3895,7 @@ class IronFlyStrategy:
 
             # Get long call price (we need to SELL to close, so use Bid)
             if self.position.long_call_uic:
-                lc_quote = self.client.get_quote(self.position.long_call_uic, "StockIndexOption", skip_cache=True)
+                lc_quote = self.client.get_quote(self.position.long_call_uic, "StockIndexOption")
                 if lc_quote:
                     bid = lc_quote.get('Quote', {}).get('Bid', 0)
                     if bid > 0:
@@ -3903,7 +3904,7 @@ class IronFlyStrategy:
 
             # Get long put price (we need to SELL to close, so use Bid)
             if self.position.long_put_uic:
-                lp_quote = self.client.get_quote(self.position.long_put_uic, "StockIndexOption", skip_cache=True)
+                lp_quote = self.client.get_quote(self.position.long_put_uic, "StockIndexOption")
                 if lp_quote:
                     bid = lp_quote.get('Quote', {}).get('Bid', 0)
                     if bid > 0:
