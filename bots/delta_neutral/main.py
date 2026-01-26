@@ -53,7 +53,7 @@ from shared.market_hours import (
 )
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
-from shared.market_status_monitor import MarketStatusMonitor
+# Note: MarketStatusMonitor is only enabled in iron_fly_0dte to avoid duplicate alerts
 
 # Import bot-specific strategy
 from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState
@@ -342,11 +342,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     # Initialize strategy (pass dry_run flag)
     strategy = DeltaNeutralStrategy(client, config, trade_logger, dry_run=dry_run)
 
-    # Initialize market status monitor for countdown/open/close alerts
-    market_monitor = None
-    if strategy.alert_service:
-        market_monitor = MarketStatusMonitor(strategy.alert_service)
-        trade_logger.log_event("Market status monitor initialized (countdown alerts enabled)")
+    # Note: MarketStatusMonitor (countdown/open/close alerts) is only enabled in
+    # iron_fly_0dte bot to avoid duplicate alerts when multiple bots are running
 
     # CRITICAL: Attempt to recover existing positions on startup
     # This handles bot restarts, GCP VM reboots, and crash recovery
@@ -458,13 +455,6 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     try:
         while not shutdown_requested:
             try:
-                # Check market status and send countdown/open/close alerts
-                if market_monitor:
-                    try:
-                        market_monitor.check_and_alert()
-                    except Exception as e:
-                        logger.debug(f"Market monitor check failed: {e}")
-
                 # Check if market is open
                 if not is_market_open():
                     # Daily Summary & Performance Metrics: Update EVERY day (including weekends)
