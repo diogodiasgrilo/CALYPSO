@@ -468,6 +468,41 @@ else:
 
 **See:** [SAXO_API_PATTERNS.md Section 10](docs/SAXO_API_PATTERNS.md#10-extended-hours-trading-pre-market--after-hours)
 
+### WebSocket Streaming Shows Stale Prices
+
+**Symptom:** Cached prices from WebSocket don't update. Logs show the same price for minutes/hours. Bot falls back to REST API for every price check.
+
+**Root Cause (Fixed 2026-01-26):** Saxo Bank sends WebSocket messages as **binary frames**, not plain JSON text. Previous code tried to decode binary as UTF-8 text which silently failed, leaving the cache with only the initial snapshot.
+
+**Binary Frame Format:**
+```
+| 8 bytes | 2 bytes  | 1 byte      | N bytes | 1 byte  | 4 bytes | N bytes |
+| Msg ID  | Reserved | RefID Len   | RefID   | Format  | Size    | Payload |
+| uint64  |          | uint8       | ASCII   | 0=JSON  | int32   | JSON    |
+```
+
+**Solution:** The `_decode_binary_ws_message()` function in `saxo_client.py` now properly parses binary frames using Python's `struct` module:
+```python
+# Proper binary parsing (in saxo_client.py)
+msg_id = struct.unpack_from('<Q', raw, pos)[0]  # 8 bytes, uint64 little-endian
+ref_id_len = struct.unpack_from('B', raw, pos)[0]  # 1 byte
+payload_size = struct.unpack_from('<i', raw, pos)[0]  # 4 bytes, int32 little-endian
+```
+
+**Impact on All Bots:**
+| Bot | Benefit |
+|-----|---------|
+| Delta Neutral | ITM monitoring now works at 1-second intervals (was 3s, now uses cache) |
+| Iron Fly | Option price callbacks in `handle_price_update()` now actually fire |
+| Rolling Put Diagonal | Same benefit as Iron Fly |
+
+**Verification:** After bot restart, check logs for WebSocket update messages:
+```
+WebSocket update #1: UIC 36590 = $693.19
+WebSocket update #2: UIC 36590 = $693.24
+```
+Prices should change over time, not stay static.
+
 ---
 
 ## Running Diagnostic Scripts on VM
@@ -643,7 +678,7 @@ SCRIPT
 | `docs/VM_COMMANDS.md` | VM administration commands |
 | `.claude/settings.local.json` | Full command reference (also readable)
 
-### Key Lessons Learned (2026-01-23)
+### Key Lessons Learned (2026-01-26)
 
 These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
 
@@ -656,3 +691,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 4. **Config Options Need Code** - Just because a config exists doesn't mean it's implemented! Verify code actually uses the config. (Cost: Bad trade entry)
 
 5. **Clear Python Cache After Deploy** - `__pycache__` can persist old code. Always clear after git pull. (Cost: Hours debugging "fixed" code that wasn't running)
+
+6. **Saxo WebSocket Uses Binary Frames, Not JSON Text** - See WebSocket Binary Parsing section below. Previous code tried `json.loads(message.decode('utf-8'))` which silently failed. (Cost: Stale cached prices, unnecessary REST API calls)

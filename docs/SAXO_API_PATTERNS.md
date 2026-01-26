@@ -260,7 +260,77 @@ positions = client.get_positions(asset_type=asset_type)
 ## 5. WebSocket Streaming
 
 ### The Problem
-WebSocket subscriptions must include correct FieldGroups or data will be missing.
+WebSocket subscriptions must include correct FieldGroups or data will be missing. Additionally, Saxo sends **binary frames**, not plain JSON text.
+
+### CRITICAL: Binary WebSocket Format (Fixed 2026-01-26)
+
+Saxo Bank sends WebSocket messages as **binary frames**, not plain JSON text. Previous code tried to decode binary as UTF-8 which silently failed, causing stale cached prices.
+
+**Documentation:** https://www.developer.saxo/openapi/learn/plain-websocket-streaming
+
+**Binary Frame Format:**
+```
+| 8 bytes | 2 bytes  | 1 byte    | N bytes | 1 byte  | 4 bytes | N bytes |
+| Msg ID  | Reserved | RefID Len | RefID   | Format  | Size    | Payload |
+| uint64  |          | uint8     | ASCII   | 0=JSON  | int32   | JSON    |
+| little  |          |           |         | 1=Proto | little  |         |
+```
+
+**Correct Parsing (in `saxo_client.py`):**
+```python
+import struct
+
+def _decode_binary_ws_message(self, raw: bytes):
+    """Decode Saxo Bank binary WebSocket message format."""
+    pos = 0
+    while pos < len(raw):
+        # Message ID (8 bytes, uint64 little-endian)
+        msg_id = struct.unpack_from('<Q', raw, pos)[0]
+        pos += 8
+
+        # Reserved (2 bytes, skip)
+        pos += 2
+
+        # Reference ID length (1 byte)
+        ref_id_len = struct.unpack_from('B', raw, pos)[0]
+        pos += 1
+
+        # Reference ID (variable length ASCII)
+        ref_id = raw[pos:pos + ref_id_len].decode('ascii')
+        pos += ref_id_len
+
+        # Payload format (1 byte: 0=JSON, 1=Protobuf)
+        payload_format = struct.unpack_from('B', raw, pos)[0]
+        pos += 1
+
+        # Payload size (4 bytes, int32 little-endian)
+        payload_size = struct.unpack_from('<i', raw, pos)[0]
+        pos += 4
+
+        # Extract and parse JSON payload
+        payload_data = raw[pos:pos + payload_size]
+        pos += payload_size
+
+        if payload_format == 0:  # JSON
+            msg = json.loads(payload_data.decode('utf-8'))
+            yield {'refid': ref_id, 'msgId': msg_id, 'msg': msg}
+```
+
+**Wrong (Previous Code):**
+```python
+# WRONG - Binary frames cannot be decoded as UTF-8 text
+def on_message(ws, message):
+    data = json.loads(message.decode('utf-8'))  # FAILS SILENTLY!
+```
+
+### Cache Architecture
+
+WebSocket updates populate `self._price_cache` which is used by:
+- `get_quote()` - Checks cache first, falls back to REST API
+- `get_spy_price()` - Checks cache first, falls back to REST, then Yahoo
+- `get_vix_price()` - Checks cache first, falls back to REST, then Yahoo
+
+This eliminates API rate limit concerns for frequent price checks (e.g., 1-second ITM monitoring).
 
 ### Required FieldGroups by Use Case
 
@@ -438,6 +508,12 @@ def detect_multiple_iron_flies(self, positions):
 **Right:** Check `/activities/` or `/positions/` for market orders
 
 **Impact:** Filled orders appear as "not found".
+
+### Mistake 7: Decoding WebSocket as Text (Fixed 2026-01-26)
+**Wrong:** `json.loads(message.decode('utf-8'))` - treats binary as text
+**Right:** Use `struct.unpack()` to parse binary frame format
+
+**Impact:** WebSocket cache never updates, stale prices, unnecessary REST API calls.
 
 ---
 
@@ -621,7 +697,7 @@ if is_saxo_price_available():  # True only between 7 AM - 5 PM ET
 
 ---
 
-**Document Version:** 1.2
+**Document Version:** 1.3
 **Created:** 2026-01-23
-**Updated:** 2026-01-26 - Added Section 10: Extended Hours Trading (Pre-Market & After-Hours)
+**Updated:** 2026-01-26 - Added WebSocket binary parsing documentation (Section 5), Mistake 7
 **Author:** Claude (learned from production bugs)

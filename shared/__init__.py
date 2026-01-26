@@ -139,6 +139,25 @@ Full documentation: docs/SAXO_API_PATTERNS.md
        quote = client.get_quote(uic)
 
    See: docs/SAXO_API_PATTERNS.md Section 10
+
+7. WEBSOCKET BINARY PARSING (2026-01-26)
+   --------------------------------------
+   Saxo WebSocket sends BINARY frames, NOT plain JSON text!
+   Previous code tried message.decode('utf-8') which silently failed,
+   causing stale cached prices and unnecessary REST API fallbacks.
+
+   Binary frame format (per Saxo documentation):
+   | 8 bytes | 2 bytes  | 1 byte    | N bytes | 1 byte  | 4 bytes | N bytes |
+   | Msg ID  | Reserved | RefID Len | RefID   | Format  | Size    | Payload |
+
+   WRONG: json.loads(message.decode('utf-8'))  # Fails silently on binary!
+   RIGHT: struct.unpack() to parse binary, then json.loads() on payload
+
+   The fix is in saxo_client.py _decode_binary_ws_message() method.
+   This enables proper WebSocket caching for get_quote(), get_spy_price(),
+   get_vix_price() - eliminating rate limit concerns for 1-second monitoring.
+
+   See: docs/SAXO_API_PATTERNS.md Section 5
 ================================================================================
 """
 

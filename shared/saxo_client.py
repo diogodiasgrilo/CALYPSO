@@ -912,8 +912,12 @@ class SaxoClient:
         """
         Get current quote for an instrument.
 
-        First checks the streaming price cache for real-time data, then
-        falls back to /trade/v1/infoprices/list endpoint.
+        Priority order:
+        1. WebSocket streaming cache (instant, no API call) - if subscribed via start_price_streaming()
+        2. REST API /trade/v1/infoprices/list (100-300ms latency)
+
+        The cache is populated by real-time WebSocket updates. Use skip_cache=True
+        when you need guaranteed fresh data (e.g., for order placement validation).
 
         Args:
             uic: Unique Instrument Code
@@ -3084,9 +3088,20 @@ class SaxoClient:
     ) -> bool:
         """
         Start WebSocket streaming for real-time price updates.
-        
-        FIXED: Now handles multiple AssetTypes correctly by creating 
-        individual subscriptions for each instrument.
+
+        This is the primary method for enabling real-time price data without
+        REST API calls. Once started, prices are cached in self._price_cache
+        and automatically used by get_quote(), get_spy_price(), get_vix_price().
+
+        CRITICAL (2026-01-26): Saxo sends BINARY WebSocket frames, not JSON text.
+        The binary parsing is handled by _decode_binary_ws_message() using struct.
+        Previous code tried to decode binary as UTF-8 which silently failed.
+
+        Architecture:
+        - WebSocket receives binary frames -> _decode_binary_ws_message() parses
+        - Parsed data updates self._price_cache[uic] in _handle_streaming_message()
+        - get_quote()/get_spy_price()/get_vix_price() check cache first (instant)
+        - If cache miss or skip_cache=True, falls back to REST API
 
         Args:
             subscriptions: List of dicts, e.g. [{"uic": 211, "asset_type": "Stock"}, ...]
@@ -3242,9 +3257,30 @@ class SaxoClient:
                 break
 
     def _start_websocket(self):
-        """Initialize and start the WebSocket connection."""
+        """
+        Initialize and start the WebSocket connection for real-time price streaming.
+
+        CRITICAL: Saxo Bank sends binary WebSocket frames, NOT plain JSON text.
+        This was a major discovery (2026-01-26) - previous code tried to decode
+        binary as UTF-8 text which silently failed, causing stale cached prices.
+
+        The binary format is documented at:
+        https://www.developer.saxo/openapi/learn/plain-websocket-streaming
+
+        Binary frame structure (parsed by _decode_binary_ws_message):
+        - 8 bytes: Message ID (uint64 little-endian)
+        - 2 bytes: Reserved
+        - 1 byte: Reference ID length
+        - N bytes: Reference ID (ASCII)
+        - 1 byte: Payload format (0=JSON, 1=Protobuf)
+        - 4 bytes: Payload size (int32 little-endian)
+        - N bytes: JSON payload
+
+        The WebSocket updates self._price_cache which is used by get_quote(),
+        get_spy_price(), and get_vix_price() to avoid REST API calls.
+        """
         def on_message(ws, message):
-            """Handle incoming WebSocket messages."""
+            """Handle incoming WebSocket messages (binary or text)."""
             try:
                 # Saxo sends binary WebSocket frames with a specific format
                 # See: https://www.developer.saxo/openapi/learn/plain-websocket-streaming
