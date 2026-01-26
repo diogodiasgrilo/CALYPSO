@@ -104,6 +104,9 @@ class AlertType(Enum):
     GAP_WARNING = "gap_warning"
     VIX_THRESHOLD = "vix_threshold"
     PREMARKET_GAP = "premarket_gap"  # Big overnight/premarket move
+    VIGILANT_ENTERED = "vigilant_entered"  # Price entering 0.1%-0.3% danger zone
+    VIGILANT_EXITED = "vigilant_exited"    # Price back to safe zone (>0.3%)
+    ITM_RISK_CLOSE = "itm_risk_close"      # Shorts closed due to ITM risk (0.1% threshold)
 
     # Roll/Recenter Events
     ROLL_COMPLETED = "roll_completed"
@@ -142,6 +145,8 @@ DEFAULT_PRIORITIES = {
     AlertType.DELTA_BREACH: AlertPriority.HIGH,
     AlertType.API_ERROR: AlertPriority.HIGH,
     AlertType.PREMARKET_GAP: AlertPriority.HIGH,  # Big gap affects positions
+    AlertType.VIGILANT_ENTERED: AlertPriority.HIGH,  # Price near short strike
+    AlertType.ITM_RISK_CLOSE: AlertPriority.CRITICAL,  # Emergency close of shorts
 
     AlertType.POSITION_OPENED: AlertPriority.MEDIUM,
     AlertType.POSITION_CLOSED: AlertPriority.MEDIUM,
@@ -158,6 +163,7 @@ DEFAULT_PRIORITIES = {
     AlertType.BOT_STARTED: AlertPriority.LOW,
     AlertType.BOT_STOPPED: AlertPriority.LOW,
     AlertType.DAILY_SUMMARY: AlertPriority.LOW,
+    AlertType.VIGILANT_EXITED: AlertPriority.LOW,  # Back to safe zone
 
     # Market status alerts - LOW priority (informational)
     AlertType.MARKET_OPENING_SOON: AlertPriority.LOW,

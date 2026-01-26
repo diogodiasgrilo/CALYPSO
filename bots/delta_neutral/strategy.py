@@ -5110,30 +5110,90 @@ class DeltaNeutralStrategy:
 
         if call_in_vigilant:
             pct_from_strike = (call_distance / call_strike) * 100
-            if not hasattr(self, '_last_vigilant_log_call') or self._last_vigilant_log_call != round(pct_from_strike, 2):
+            # Only alert once when ENTERING vigilant mode (not on every check)
+            if not hasattr(self, '_vigilant_alert_sent_call'):
                 logger.warning(
                     f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - price ${price:.2f} is "
                     f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 1 second."
                 )
+                # Send WhatsApp/Email alert for vigilant entry
+                self.alert_service.send_alert(
+                    alert_type=AlertType.VIGILANT_ENTERED,
+                    title="VIGILANT: Price Near Short Call",
+                    message=(
+                        f"SPY ${price:.2f} is {pct_from_strike:.2f}% from short call ${call_strike:.0f}\n"
+                        f"Distance: ${call_distance:.2f}\n"
+                        f"Monitoring every 1 second. Close at 0.1% (~${call_strike * 0.001:.2f})."
+                    ),
+                    details={
+                        "strike_type": "call",
+                        "strike": call_strike,
+                        "price": price,
+                        "distance_dollars": round(call_distance, 2),
+                        "distance_pct": round(pct_from_strike, 3),
+                        "threshold_pct": 0.3
+                    }
+                )
+                self._vigilant_alert_sent_call = True
+            # Update log tracker for repeated logging (less verbose)
+            if not hasattr(self, '_last_vigilant_log_call') or self._last_vigilant_log_call != round(pct_from_strike, 2):
                 self._last_vigilant_log_call = round(pct_from_strike, 2)
             return MonitoringMode.VIGILANT
 
         if put_in_vigilant:
             pct_from_strike = (put_distance / put_strike) * 100
-            if not hasattr(self, '_last_vigilant_log_put') or self._last_vigilant_log_put != round(pct_from_strike, 2):
+            # Only alert once when ENTERING vigilant mode (not on every check)
+            if not hasattr(self, '_vigilant_alert_sent_put'):
                 logger.warning(
                     f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - price ${price:.2f} is "
                     f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 1 second."
                 )
+                # Send WhatsApp/Email alert for vigilant entry
+                self.alert_service.send_alert(
+                    alert_type=AlertType.VIGILANT_ENTERED,
+                    title="VIGILANT: Price Near Short Put",
+                    message=(
+                        f"SPY ${price:.2f} is {pct_from_strike:.2f}% from short put ${put_strike:.0f}\n"
+                        f"Distance: ${put_distance:.2f}\n"
+                        f"Monitoring every 1 second. Close at 0.1% (~${put_strike * 0.001:.2f})."
+                    ),
+                    details={
+                        "strike_type": "put",
+                        "strike": put_strike,
+                        "price": price,
+                        "distance_dollars": round(put_distance, 2),
+                        "distance_pct": round(pct_from_strike, 3),
+                        "threshold_pct": 0.3
+                    }
+                )
+                self._vigilant_alert_sent_put = True
+            # Update log tracker for repeated logging (less verbose)
+            if not hasattr(self, '_last_vigilant_log_put') or self._last_vigilant_log_put != round(pct_from_strike, 2):
                 self._last_vigilant_log_put = round(pct_from_strike, 2)
             return MonitoringMode.VIGILANT
 
-        # Clear vigilant log trackers when back to normal
-        if hasattr(self, '_last_vigilant_log_call'):
+        # Clear vigilant trackers when back to normal and send exit alert
+        if hasattr(self, '_vigilant_alert_sent_call'):
             logger.info("✓ Exited vigilant zone (call) - back to normal 10s monitoring")
+            self.alert_service.send_alert(
+                alert_type=AlertType.VIGILANT_EXITED,
+                title="SAFE: Exited Vigilant Zone (Call)",
+                message=f"SPY ${price:.2f} is now safely away from short call ${call_strike:.0f}.\nBack to normal 10s monitoring.",
+                details={"strike_type": "call", "strike": call_strike, "price": price}
+            )
+            del self._vigilant_alert_sent_call
+        if hasattr(self, '_last_vigilant_log_call'):
             del self._last_vigilant_log_call
-        if hasattr(self, '_last_vigilant_log_put'):
+        if hasattr(self, '_vigilant_alert_sent_put'):
             logger.info("✓ Exited vigilant zone (put) - back to normal 10s monitoring")
+            self.alert_service.send_alert(
+                alert_type=AlertType.VIGILANT_EXITED,
+                title="SAFE: Exited Vigilant Zone (Put)",
+                message=f"SPY ${price:.2f} is now safely away from short put ${put_strike:.0f}.\nBack to normal 10s monitoring.",
+                details={"strike_type": "put", "strike": put_strike, "price": price}
+            )
+            del self._vigilant_alert_sent_put
+        if hasattr(self, '_last_vigilant_log_put'):
             del self._last_vigilant_log_put
 
         return MonitoringMode.NORMAL
@@ -7987,6 +8047,26 @@ class DeltaNeutralStrategy:
             f"Total recenters: {self.metrics.recenter_count}, State: {self.state.value}"
         )
 
+        # Send RECENTER_COMPLETE alert
+        self.alert_service.send_alert(
+            alert_type=AlertType.RECENTER,
+            title="Position Recentered",
+            message=(
+                f"Long straddle recentered to new ATM strike.\n"
+                f"New Strike: ${self.initial_straddle_strike:.0f}\n"
+                f"SPY: ${self.current_underlying_price:.2f} | VIX: {self.current_vix:.2f}\n"
+                f"Total recenters: {self.metrics.recenter_count}"
+            ),
+            details={
+                "new_strike": self.initial_straddle_strike,
+                "spy_price": self.current_underlying_price,
+                "vix": self.current_vix,
+                "total_recenters": self.metrics.recenter_count,
+                "state": self.state.value,
+                "has_shorts": self.short_strangle is not None
+            }
+        )
+
         # Log trade
         straddle_expiry = self.long_straddle.call.expiry if self.long_straddle and self.long_straddle.call else None
         if self.trade_logger:
@@ -8223,6 +8303,30 @@ class DeltaNeutralStrategy:
 
         logger.info(f"Weekly shorts rolled successfully. Total rolls: {self.metrics.roll_count}")
         logger.info("=" * 50)
+
+        # Send SHORTS_ROLLED alert
+        roll_reason = "Emergency (ITM risk)" if emergency_mode else (f"Challenged ({challenged_side})" if challenged_side else "Scheduled (weekly)")
+        self.alert_service.send_alert(
+            alert_type=AlertType.ROLL_COMPLETED,
+            title="Shorts Rolled Successfully",
+            message=(
+                f"Short strangle rolled for {roll_reason.lower()}.\n"
+                f"Old: Put ${old_put_strike:.0f} / Call ${old_call_strike:.0f}\n"
+                f"New: Put ${new_put_strike:.0f} / Call ${new_call_strike:.0f}\n"
+                f"Premium: ${new_premium:.2f} | SPY: ${self.current_underlying_price:.2f}"
+            ),
+            details={
+                "roll_reason": roll_reason,
+                "emergency_mode": emergency_mode,
+                "old_call_strike": old_call_strike,
+                "old_put_strike": old_put_strike,
+                "new_call_strike": new_call_strike,
+                "new_put_strike": new_put_strike,
+                "new_premium": round(new_premium, 2),
+                "spy_price": self.current_underlying_price,
+                "total_rolls": self.metrics.roll_count
+            }
+        )
 
         # Log safety event for the roll
         if self.trade_logger:
@@ -8764,11 +8868,35 @@ class DeltaNeutralStrategy:
             logger.critical("ITM RISK DETECTED - Closing shorts for safety")
             logger.critical("Will check VIX before re-entering any new positions")
 
+            # Save short strike info before closing for alert
+            closed_call_strike = self.short_strangle.call_strike if self.short_strangle else None
+            closed_put_strike = self.short_strangle.put_strike if self.short_strangle else None
+
             # Close shorts only (not the entire position)
             if self.close_short_strangle(emergency_mode=True):
                 self._reset_failure_count()
                 self.short_strangle = None
                 self.state = StrategyState.LONG_STRADDLE_ACTIVE
+
+                # CRITICAL ALERT: Shorts closed due to ITM risk
+                self.alert_service.send_alert(
+                    alert_type=AlertType.ITM_RISK_CLOSE,
+                    title="ITM RISK: Shorts Closed",
+                    message=(
+                        f"Short strangle CLOSED due to ITM risk (0.1% threshold).\n"
+                        f"SPY: ${self.current_underlying_price:.2f}\n"
+                        f"Closed: Call ${closed_call_strike:.0f} / Put ${closed_put_strike:.0f}\n"
+                        f"Long straddle retained. Will check VIX before new entries."
+                    ),
+                    details={
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "closed_call_strike": closed_call_strike,
+                        "closed_put_strike": closed_put_strike,
+                        "long_straddle_retained": True,
+                        "threshold_pct": 0.1
+                    }
+                )
 
                 # Log safety event
                 if self.trade_logger:
