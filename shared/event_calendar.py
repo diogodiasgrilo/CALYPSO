@@ -71,14 +71,17 @@ FOMC_DATES_2025 = [
 ]
 
 FOMC_DATES_2026 = [
+    # Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+    # Announcement/press conference is on day 2 at 2:00 PM EST
     date(2026, 1, 27), date(2026, 1, 28),   # Jan 27-28
-    date(2026, 3, 17), date(2026, 3, 18),   # Mar 17-18
-    date(2026, 5, 5), date(2026, 5, 6),     # May 5-6
-    date(2026, 6, 16), date(2026, 6, 17),   # Jun 16-17
+    date(2026, 3, 17), date(2026, 3, 18),   # Mar 17-18*
+    date(2026, 4, 28), date(2026, 4, 29),   # Apr 28-29
+    date(2026, 6, 16), date(2026, 6, 17),   # Jun 16-17*
     date(2026, 7, 28), date(2026, 7, 29),   # Jul 28-29
-    date(2026, 9, 15), date(2026, 9, 16),   # Sep 15-16
-    date(2026, 11, 4), date(2026, 11, 5),   # Nov 4-5
-    date(2026, 12, 15), date(2026, 12, 16), # Dec 15-16
+    date(2026, 9, 15), date(2026, 9, 16),   # Sep 15-16*
+    date(2026, 10, 27), date(2026, 10, 28), # Oct 27-28
+    date(2026, 12, 8), date(2026, 12, 9),   # Dec 8-9*
+    # * = Summary of Economic Projections released
 ]
 
 # Combined FOMC dates
@@ -91,7 +94,7 @@ FOMC_DATES = {
 
 def get_fomc_dates(year: int) -> List[date]:
     """
-    Get all FOMC meeting dates for a given year.
+    Get all FOMC meeting dates for a given year (both days of each meeting).
 
     Args:
         year: Year to get FOMC dates for
@@ -100,6 +103,44 @@ def get_fomc_dates(year: int) -> List[date]:
         List of FOMC meeting dates
     """
     return FOMC_DATES.get(year, [])
+
+
+def get_fomc_announcement_dates(year: int) -> List[date]:
+    """
+    Get only FOMC announcement days for a given year (day 2 of each meeting).
+
+    This is the day when the Fed releases its decision and the Chair holds
+    a press conference at 2:00 PM EST. This is typically the high-volatility day.
+
+    Args:
+        year: Year to get FOMC announcement dates for
+
+    Returns:
+        List of FOMC announcement dates (day 2 of each meeting)
+    """
+    all_dates = FOMC_DATES.get(year, [])
+    # FOMC dates are stored as pairs [day1, day2, day1, day2, ...]
+    # Return only day 2 (index 1, 3, 5, 7, ...)
+    return [d for i, d in enumerate(all_dates) if i % 2 == 1]
+
+
+def is_fomc_announcement_day(check_date: date = None) -> bool:
+    """
+    Check if a specific date is an FOMC announcement day.
+
+    Use this to block trading on FOMC days when the Fed releases its decision.
+
+    Args:
+        check_date: Date to check (defaults to today)
+
+    Returns:
+        True if the date is an FOMC announcement day
+    """
+    if check_date is None:
+        check_date = date.today()
+
+    announcement_dates = get_fomc_announcement_dates(check_date.year)
+    return check_date in announcement_dates
 
 
 def get_next_fomc_date(from_date: date = None) -> Optional[date]:

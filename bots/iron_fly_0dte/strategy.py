@@ -4104,10 +4104,12 @@ class IronFlyStrategy:
 
     def check_fed_meeting_filter(self) -> Tuple[bool, str]:
         """
-        Check if today is an FOMC meeting day.
+        Check if today is an FOMC announcement day.
 
         Per Doc Severson: "NEVER trade on FOMC or major economic data days"
         The market will likely trend and blow past stops on Fed days.
+
+        Uses shared/event_calendar.py as single source of truth for FOMC dates.
 
         Returns:
             Tuple[bool, str]: (True if safe to trade, reason if blocked)
@@ -4115,42 +4117,24 @@ class IronFlyStrategy:
         if not self.fed_meeting_blackout:
             return (True, "")
 
-        # FILTER-002: Multi-year FOMC Meeting Dates (announcement days - typically 2:00 PM EST)
+        # FILTER-002: Use shared event calendar for FOMC dates
         # Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
-        # IMPORTANT: Update this dictionary annually when Fed releases new calendar
-        fomc_dates_by_year = {
-            2026: [
-                date(2026, 1, 29),   # Jan 28-29
-                date(2026, 3, 19),   # Mar 18-19
-                date(2026, 5, 7),    # May 6-7
-                date(2026, 6, 18),   # Jun 17-18
-                date(2026, 7, 30),   # Jul 29-30
-                date(2026, 9, 17),   # Sep 16-17
-                date(2026, 11, 5),   # Nov 4-5
-                date(2026, 12, 17),  # Dec 16-17
-            ],
-            # 2027: [  # TODO: Add 2027 dates when Fed releases calendar (typically Oct/Nov 2026)
-            #     date(2027, 1, 27),   # Estimated - verify with Fed calendar
-            #     date(2027, 3, 17),
-            #     ...
-            # ],
-        }
+        from shared.event_calendar import is_fomc_announcement_day, get_fomc_announcement_dates
 
         today = get_us_market_time().date()
-        current_year = today.year
 
-        # FILTER-002: Check if current year is in calendar
-        if current_year not in fomc_dates_by_year:
+        # Check if calendar has dates for current year
+        announcement_dates = get_fomc_announcement_dates(today.year)
+        if not announcement_dates:
             logger.warning(
-                f"FILTER-002: FOMC calendar missing for {current_year}! "
-                f"Update fomc_dates_by_year in strategy.py. Available years: {list(fomc_dates_by_year.keys())}"
+                f"FILTER-002: FOMC calendar missing for {today.year}! "
+                f"Update FOMC_DATES_{today.year} in shared/event_calendar.py"
             )
-            # Conservative: allow trading but log warning (could also block here)
+            # Conservative: allow trading but log warning
             return (True, "")
 
-        fomc_dates = fomc_dates_by_year[current_year]
-        if today in fomc_dates:
-            reason = f"FOMC meeting day ({today.strftime('%b %d')})"
+        if is_fomc_announcement_day(today):
+            reason = f"FOMC announcement day ({today.strftime('%b %d')})"
             logger.warning(f"FOMC BLACKOUT: {reason} - Entry blocked")
             return (False, reason)
 

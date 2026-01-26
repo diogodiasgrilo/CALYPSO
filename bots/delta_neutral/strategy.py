@@ -4974,26 +4974,27 @@ class DeltaNeutralStrategy:
         Avoids entering positions before major binary events that can cause
         large volatility spikes.
 
+        Uses shared/event_calendar.py as single source of truth for FOMC dates.
+
         Returns:
             bool: True if safe to enter (no Fed meeting soon), False otherwise.
         """
-        # 2026 FOMC Meeting Dates (update annually)
-        # Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
-        fomc_dates_2026 = [
-            datetime(2026, 1, 28).date(),  # Jan 27-28
-            datetime(2026, 3, 18).date(),  # Mar 17-18
-            datetime(2026, 5, 6).date(),   # May 5-6
-            datetime(2026, 6, 17).date(),  # Jun 16-17
-            datetime(2026, 7, 29).date(),  # Jul 28-29
-            datetime(2026, 9, 16).date(),  # Sep 15-16
-            datetime(2026, 11, 4).date(),  # Nov 3-4
-            datetime(2026, 12, 16).date(), # Dec 15-16
-        ]
+        from shared.event_calendar import get_fomc_announcement_dates
 
         today = datetime.now().date()
         blackout_days = self.strategy_config.get("fed_blackout_days", 2)
 
-        for meeting_date in fomc_dates_2026:
+        # Get FOMC announcement dates from shared calendar
+        fomc_dates = get_fomc_announcement_dates(today.year)
+        if not fomc_dates:
+            logger.warning(
+                f"FOMC calendar missing for {today.year}! "
+                f"Update FOMC_DATES_{today.year} in shared/event_calendar.py"
+            )
+            # Conservative: allow trading but log warning
+            return True
+
+        for meeting_date in fomc_dates:
             days_until_meeting = (meeting_date - today).days
 
             if 0 <= days_until_meeting <= blackout_days:
