@@ -489,8 +489,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
                         # Get current QQQ price from pre-market session
                         # Saxo provides extended hours data starting at 7:00 AM ET
                         qqq_price = 0.0
-                        quote = client.get_quote(strategy.underlying_uic, asset_type="Etf")
-                        if quote:
+                        quote_response = client.get_quote(strategy.underlying_uic, asset_type="Etf")
+                        if quote_response and "Quote" in quote_response:
+                            quote = quote_response["Quote"]
                             qqq_price = quote.get("Mid") or ((quote.get("Bid", 0) + quote.get("Ask", 0)) / 2)
 
                         if qqq_price > 0:
