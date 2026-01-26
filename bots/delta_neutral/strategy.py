@@ -9656,7 +9656,7 @@ class DeltaNeutralStrategy:
             )
             return False, gap_percent, f"Normal {gap_type} gap: {gap_percent:.2f}%"
 
-    def get_premarket_analysis(self, current_spy_price: float = 0.0) -> dict:
+    def get_premarket_analysis(self, current_spy_price: float = 0.0, prev_close: float = 0.0) -> dict:
         """
         Get comprehensive pre-market analysis for position impact assessment.
 
@@ -9666,6 +9666,7 @@ class DeltaNeutralStrategy:
 
         Args:
             current_spy_price: Current SPY price (will fetch if not provided)
+            prev_close: Previous day's closing price (from Saxo PriceInfoDetails.LastClose)
 
         Returns:
             Dict with:
@@ -9690,12 +9691,9 @@ class DeltaNeutralStrategy:
             "message": ""
         }
 
-        # Get previous close
-        prev_close = 0.0
-        if hasattr(self.metrics, 'spy_open') and self.metrics.spy_open > 0:
-            prev_close = self.metrics.spy_open
-        else:
-            # Try to fetch from chart data
+        # Use provided prev_close (from Saxo PriceInfoDetails.LastClose) or fetch from chart data
+        if prev_close <= 0:
+            # Fallback: Try to fetch from chart data
             try:
                 chart_data = self.client.get_chart_data(
                     uic=self.underlying_uic,
@@ -9708,7 +9706,7 @@ class DeltaNeutralStrategy:
             except Exception:
                 pass
 
-        if prev_close == 0:
+        if prev_close <= 0:
             result["message"] = "No previous close available"
             return result
 

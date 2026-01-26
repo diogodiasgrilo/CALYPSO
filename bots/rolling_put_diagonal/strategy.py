@@ -1239,7 +1239,7 @@ class RollingPutDiagonalStrategy:
 
         return True, gap_percent, f"Gap within threshold: {gap_percent:.2f}%"
 
-    def get_premarket_analysis(self, current_qqq_price: float = 0.0) -> dict:
+    def get_premarket_analysis(self, current_qqq_price: float = 0.0, prev_close: float = 0.0) -> dict:
         """
         Get comprehensive pre-market analysis for position impact assessment.
 
@@ -1249,6 +1249,7 @@ class RollingPutDiagonalStrategy:
 
         Args:
             current_qqq_price: Current QQQ price (will fetch if not provided)
+            prev_close: Previous day's closing price (from Saxo PriceInfoDetails.LastClose)
 
         Returns:
             Dict with:
@@ -1273,11 +1274,9 @@ class RollingPutDiagonalStrategy:
             "message": ""
         }
 
-        # Get previous close
-        prev_close = self.metrics.qqq_open if self.metrics.qqq_open > 0 else 0.0
-
-        if prev_close == 0:
-            # Try to fetch from chart data
+        # Use provided prev_close (from Saxo PriceInfoDetails.LastClose) or fetch from chart data
+        if prev_close <= 0:
+            # Fallback: Try to fetch from chart data
             try:
                 chart_data = self.client.get_chart_data(
                     uic=self.underlying_uic,
@@ -1290,7 +1289,7 @@ class RollingPutDiagonalStrategy:
             except Exception:
                 pass
 
-        if prev_close == 0:
+        if prev_close <= 0:
             result["message"] = "No previous close available"
             return result
 

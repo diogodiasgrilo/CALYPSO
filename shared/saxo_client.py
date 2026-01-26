@@ -943,7 +943,8 @@ class SaxoClient:
             "Uics": str(uic),
             "AssetType": asset_type,
             "Amount": 1,  # Always include Amount (number of units)
-            "FieldGroups": "DisplayAndFormat,Quote,PriceInfo"
+            # Include PriceInfoDetails for LastClose (previous day close) and LastTraded
+            "FieldGroups": "DisplayAndFormat,Quote,PriceInfo,PriceInfoDetails"
         }
 
         logger.debug(f"get_quote: Calling {endpoint} for UIC {uic}")

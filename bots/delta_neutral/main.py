@@ -550,14 +550,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                                 # Get current SPY price from pre-market session
                                 # Saxo provides extended hours data starting at 7:00 AM ET
                                 spy_price = 0.0
+                                prev_close = 0.0
                                 quote_response = client.get_quote(strategy.underlying_uic, asset_type="Etf")
                                 if quote_response and "Quote" in quote_response:
                                     quote = quote_response["Quote"]
                                     spy_price = quote.get("Mid") or ((quote.get("Bid", 0) + quote.get("Ask", 0)) / 2)
+                                    # Extract previous close from PriceInfoDetails (Saxo provides this)
+                                    price_details = quote_response.get("PriceInfoDetails", {})
+                                    prev_close = price_details.get("LastClose", 0.0)
 
                                 if spy_price > 0:
                                     # Get comprehensive pre-market analysis with position impact warnings
-                                    analysis = strategy.get_premarket_analysis(spy_price)
+                                    # Pass prev_close from Saxo's PriceInfoDetails.LastClose
+                                    analysis = strategy.get_premarket_analysis(spy_price, prev_close)
                                     min_to_open = int(seconds_until_open / 60) if seconds_until_open > 0 else 0
 
                                     # Build the pre-market message based on warning level
