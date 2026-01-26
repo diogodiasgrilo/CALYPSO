@@ -409,10 +409,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | FILTER-002 |
 | **Trigger** | Running in 2027 with only 2026 FOMC dates defined |
-| **Current Handling** | Multi-year dictionary `fomc_dates_by_year` with year-keyed lookup. Warning logged if current year missing. |
+| **Current Handling** | Uses `shared/event_calendar.py` as single source of truth. All bots import `is_fomc_announcement_day()` from shared module. Warning logged if current year missing. |
 | **Risk Level** | ✅ LOW |
-| **Status** | RESOLVED (Fixed 2026-01-22) |
-| **Notes** | Calendar now uses `fomc_dates_by_year[current_year]` pattern. If year not found, logs "FILTER-002: FOMC calendar missing for XXXX!" and lists available years. Trading allowed but operator alerted. |
+| **Status** | RESOLVED (Refactored 2026-01-26) |
+| **Notes** | FOMC dates consolidated into `shared/event_calendar.py`. Use `get_fomc_announcement_dates(year)` for announcement days (day 2 of each meeting). Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm |
 
 ### 6.3 Economic Calendar Date Maintenance
 | | |

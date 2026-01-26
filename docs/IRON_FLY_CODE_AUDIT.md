@@ -285,11 +285,14 @@ Handles:
 
 ### 6.1 FOMC Blackout ✅ IMPLEMENTED
 
-**Location:** `strategy.py:3633-3685`
+**Location:** `strategy.py:check_fed_meeting_filter()` → imports from `shared/event_calendar.py`
 
-- Multi-year calendar support ✅
-- Warning if year missing ✅
-- Proper date comparison ✅
+**Refactored 2026-01-26:** Now uses `shared/event_calendar.py` as single source of truth for all bots.
+
+- Imports `is_fomc_announcement_day()` from shared module ✅
+- Checks announcement days only (day 2 of each FOMC meeting) ✅
+- Warning if year missing in calendar ✅
+- Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
 
 ### 6.2 Economic Calendar ✅ IMPLEMENTED
 

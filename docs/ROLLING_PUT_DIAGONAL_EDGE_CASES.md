@@ -331,10 +331,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | MKT-005 |
 | **Trigger** | FOMC or QQQ earnings approaching |
-| **Current Handling** | `check_entry_conditions()` at line 1445 uses event calendar |
+| **Current Handling** | `check_entry_conditions()` uses `shared/event_calendar.py` (single source of truth for all bots) |
 | **Risk Level** | ✅ LOW |
 | **Status** | RESOLVED |
-| **Notes** | Blocks new entries during blackout |
+| **Notes** | Blocks new entries during blackout. FOMC dates: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm |
 
 ### 4.6 Short Put Goes Deep ITM
 | | |

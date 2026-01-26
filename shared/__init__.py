@@ -164,6 +164,14 @@ from shared.secret_manager import is_running_on_gcp
 from shared.external_price_feed import ExternalPriceFeed
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_status_monitor import MarketStatusMonitor, check_premarket_gap
+from shared.event_calendar import (
+    get_fomc_dates,
+    get_fomc_announcement_dates,
+    is_fomc_announcement_day,
+    get_next_fomc_date,
+    is_fomc_approaching,
+    FOMC_DATES_2026,
+)
 
 __all__ = [
     # Saxo Client
@@ -188,4 +196,7 @@ __all__ = [
     'AlertService', 'AlertType', 'AlertPriority',
     # Market Status Monitor (for countdown/open/close/holiday alerts)
     'MarketStatusMonitor', 'check_premarket_gap',
+    # Event Calendar (FOMC dates - single source of truth)
+    'get_fomc_dates', 'get_fomc_announcement_dates', 'is_fomc_announcement_day',
+    'get_next_fomc_date', 'is_fomc_approaching', 'FOMC_DATES_2026',
 ]

@@ -27,7 +27,7 @@ shared/               # Shared modules used by all bots
   logger_service.py   # Trade logging (Google Sheets, local files)
   config_loader.py    # Config loading with Secret Manager integration
   market_hours.py     # Market hours, holidays, early close detection
-  event_calendar.py   # FOMC/economic calendar for trading blackouts
+  event_calendar.py   # FOMC/economic calendar (SINGLE SOURCE OF TRUTH for all bots)
   secret_manager.py   # Google Secret Manager integration
   token_coordinator.py # OAuth token refresh coordination
   external_price_feed.py # Yahoo Finance fallback for VIX
@@ -311,6 +311,33 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal"
 ```
 
+5. **Post-Deployment Documentation Update (MANDATORY):**
+
+After successfully deploying code and verifying it works, you MUST update all relevant documentation:
+
+| What Changed | Files to Update |
+|--------------|-----------------|
+| New exports in shared/ | `shared/__init__.py` - add to imports and `__all__` |
+| New/changed functions | Update docstrings in the source file |
+| Bot behavior changes | `CLAUDE.md`, `bots/*/README.md` |
+| Edge case handling | `docs/*_EDGE_CASES.md` |
+| API patterns | `docs/SAXO_API_PATTERNS.md` |
+| Filter/calendar changes | `shared/event_calendar.py` docstrings |
+| Alert system changes | `docs/ALERTING_SETUP.md` |
+
+**Documentation Checklist:**
+- [ ] `__init__.py` exports updated for any new public functions
+- [ ] Docstrings added/updated for modified functions
+- [ ] Code comments explain non-obvious logic
+- [ ] Relevant `.md` files updated with new behavior
+- [ ] "Last Updated" dates changed in modified `.md` files
+
+**Example:** When adding FOMC calendar functions:
+1. Add functions to `shared/event_calendar.py` with docstrings
+2. Export them in `shared/__init__.py`
+3. Update `CLAUDE.md` if workflow changed
+4. Update `docs/IRON_FLY_EDGE_CASES.md` if edge case handling changed
+
 ---
 
 ## VM System Commands
@@ -583,6 +610,7 @@ SCRIPT
 7. **Iron Fly bot:** Running in LIVE mode (as of 2026-01-23)
 8. **Delta Neutral bot:** Running in LIVE mode
 9. **Rolling Put Diagonal bot:** Still in dry-run mode
+10. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 
 ---
 

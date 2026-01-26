@@ -306,10 +306,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | MKT-006 |
 | **Trigger** | FOMC announcement day |
-| **Current Handling** | `check_fed_meeting_filter` at `strategy.py:3614` blocks new entries 2 days before FOMC. |
+| **Current Handling** | `check_fed_meeting_filter` imports from `shared/event_calendar.py` and blocks new entries within configured blackout period (default 2 days before FOMC). |
 | **Risk Level** | ✅ LOW |
-| **Status** | RESOLVED |
-| **Notes** | No new positions during Fed blackout. |
+| **Status** | RESOLVED (Refactored 2026-01-26) |
+| **Notes** | Uses `shared/event_calendar.py` as single source of truth. No new positions during Fed blackout. |
 
 ---
 
