@@ -588,6 +588,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                                             trade_logger.log_event(f"  → {impact}")
 
                                     # If warning or critical, log extra visibility with separator lines
+                                    # AND send WhatsApp/Email alert for significant gaps
                                     if analysis["warning_level"] in ["WARNING", "CRITICAL"]:
                                         trade_logger.log_event("=" * 60)
                                         trade_logger.log_event(
@@ -599,6 +600,21 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                                             f"Current: ${analysis['current_price']:.2f}"
                                         )
                                         trade_logger.log_event("=" * 60)
+
+                                        # Send WhatsApp/Email alert for WARNING (2-3%) and CRITICAL (3%+) gaps
+                                        if strategy.alert_service:
+                                            # Build affected positions summary
+                                            affected = ""
+                                            if analysis["position_impacts"]:
+                                                affected = "; ".join(analysis["position_impacts"])
+
+                                            strategy.alert_service.premarket_gap(
+                                                symbol="SPY",
+                                                gap_percent=analysis["gap_percent"],
+                                                previous_close=analysis["prev_close"],
+                                                current_price=analysis["current_price"],
+                                                affected_positions=affected or "Check SPY positions"
+                                            )
                                 else:
                                     trade_logger.log_event(f"PRE-MARKET | SPY: No quote yet | Wake in {minutes} min")
                             except Exception as e:

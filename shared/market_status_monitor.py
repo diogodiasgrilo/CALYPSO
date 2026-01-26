@@ -224,9 +224,16 @@ class MarketStatusMonitor:
         market_open_dt = datetime.combine(now.date(), MARKET_OPEN_TIME)
         market_open_dt = US_EASTERN.localize(market_open_dt)
 
-        minutes_since_open = int((now - market_open_dt).total_seconds() / 60)
+        # IMPORTANT: Must check now >= market_open_dt FIRST before using int()
+        # because int() truncates toward zero: int(-0.5) = 0, not -1
+        # This caused premature alerts at 9:29:30 AM (bug fixed 2026-01-26)
+        if now < market_open_dt:
+            return False
 
-        if 0 <= minutes_since_open <= 5:
+        seconds_since_open = (now - market_open_dt).total_seconds()
+        minutes_since_open = int(seconds_since_open / 60)
+
+        if minutes_since_open <= 5:
             logger.info("Market monitor: Sending market open alert")
             self.alert_service.market_open(
                 current_time=now.strftime("%I:%M %p ET"),
@@ -256,9 +263,15 @@ class MarketStatusMonitor:
         market_close_dt = US_EASTERN.localize(market_close_dt)
 
         # Check if we just passed market close (within 5 minutes)
-        minutes_since_close = int((now - market_close_dt).total_seconds() / 60)
+        # IMPORTANT: Must check now >= market_close_dt FIRST before using int()
+        # because int() truncates toward zero: int(-0.5) = 0, not -1
+        if now < market_close_dt:
+            return False
 
-        if 0 <= minutes_since_close <= 5:
+        seconds_since_close = (now - market_close_dt).total_seconds()
+        minutes_since_close = int(seconds_since_close / 60)
+
+        if minutes_since_close <= 5:
             logger.info("Market monitor: Sending market closed alert")
 
             # Get next market open
