@@ -308,96 +308,108 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
     - _italic_ for secondary info
     - ~strikethrough~
     - ```monospace``` for code/data
+
+    Design principles:
+    - No redundant information (don't repeat what's in the message)
+    - Concise but complete
+    - Action-oriented for urgent alerts
     """
     bot_name = alert.get("bot_name", "CALYPSO")
-    alert_type = alert.get("alert_type", "unknown")
     priority = alert.get("priority", "medium").upper()
     title = alert.get("title", "Alert")
     message = alert.get("message", "")
     timestamp = alert.get("timestamp", "")
     details = alert.get("details", {})
 
-    # Priority emoji and label
-    priority_config = {
-        "CRITICAL": {"emoji": "🚨", "label": "CRITICAL"},
-        "HIGH": {"emoji": "⚠️", "label": "HIGH PRIORITY"},
-        "MEDIUM": {"emoji": "📊", "label": "UPDATE"},
-        "LOW": {"emoji": "ℹ️", "label": "INFO"}
+    # Priority emoji
+    priority_emoji = {
+        "CRITICAL": "🚨",
+        "HIGH": "⚠️",
+        "MEDIUM": "📊",
+        "LOW": "ℹ️"
     }
-    config = priority_config.get(priority, {"emoji": "📊", "label": "UPDATE"})
-    emoji = config["emoji"]
-    label = config["label"]
+    emoji = priority_emoji.get(priority, "📊")
 
-    # Format timestamp to readable format
+    # Format timestamp to readable ET format
+    time_str = ""
     try:
         if timestamp:
-            from datetime import datetime
+            from datetime import datetime, timezone
             if timestamp.endswith("Z"):
                 timestamp = timestamp[:-1]
-            dt = datetime.fromisoformat(timestamp)
-            time_str = dt.strftime("%I:%M %p ET")
-        else:
-            time_str = ""
+            # Parse as UTC
+            dt_utc = datetime.fromisoformat(timestamp).replace(tzinfo=timezone.utc)
+            # Convert to ET (UTC-5, or UTC-4 during DST)
+            # Simple approximation: assume ET is UTC-5 (EST)
+            # For accuracy, would need pytz, but keeping it simple
+            from datetime import timedelta
+            dt_et = dt_utc - timedelta(hours=5)
+            time_str = dt_et.strftime("%I:%M %p") + " ET"
     except:
-        time_str = timestamp[:19] if timestamp else ""
+        pass
 
-    # Build rich WhatsApp message
+    # Build clean WhatsApp message
     lines = []
 
-    # Header with priority
-    lines.append(f"{emoji} *{label}* {emoji}")
-    lines.append(f"*{bot_name}*")
+    # Compact header: emoji + bot name + title
+    lines.append(f"{emoji} *{bot_name}* | {title}")
     lines.append("")
 
-    # Title (bold)
-    lines.append(f"*{title}*")
-    lines.append("")
-
-    # Main message
+    # Main message (already contains the key info)
     lines.append(message)
 
-    # Add detailed info section if we have details
-    if details:
-        lines.append("")
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        lines.append("*Details:*")
+    # Add supplementary details (only info NOT already in message)
+    # Filter out keys that are redundant with message content
+    message_lower = message.lower()
+    filtered_details = {}
 
-        # Format each detail nicely
-        for key, value in details.items():
-            # Skip internal keys
-            if key.startswith("_"):
+    for key, value in details.items():
+        # Skip internal keys
+        if key.startswith("_"):
+            continue
+
+        # Skip if this info is likely already in the message
+        key_lower = key.lower()
+        skip_keys = ["reason", "pnl", "trigger_price", "cost_or_credit"]
+        if key_lower in skip_keys:
+            # Check if the value appears in message
+            if isinstance(value, (int, float)):
+                if f"{value:.2f}" in message or str(int(value)) in message:
+                    continue
+            elif str(value).lower() in message_lower:
                 continue
 
+        filtered_details[key] = value
+
+    # Only show details section if we have non-redundant info
+    if filtered_details:
+        lines.append("")
+
+        for key, value in filtered_details.items():
             # Format key nicely (snake_case to Title Case)
             display_key = key.replace("_", " ").title()
 
             # Format value based on type
             if isinstance(value, float):
-                if "pnl" in key.lower() or "cost" in key.lower() or "credit" in key.lower() or "price" in key.lower():
-                    # Money values
-                    if value >= 0:
-                        value_str = f"${value:.2f}"
-                    else:
-                        value_str = f"-${abs(value):.2f}"
-                elif "percent" in key.lower() or "rate" in key.lower():
-                    value_str = f"{value:.1f}%"
+                if any(word in key.lower() for word in ["pnl", "cost", "credit", "price"]):
+                    value_str = f"${value:+.2f}" if "pnl" in key.lower() else f"${value:.2f}"
+                elif any(word in key.lower() for word in ["percent", "rate", "gap"]):
+                    value_str = f"{value:+.1f}%" if "gap" in key.lower() else f"{value:.1f}%"
                 else:
                     value_str = f"{value:.2f}"
             elif isinstance(value, bool):
                 value_str = "Yes" if value else "No"
             elif isinstance(value, (list, dict)):
-                value_str = str(value)[:100]  # Truncate complex objects
+                value_str = str(value)[:80]
             else:
                 value_str = str(value)
 
             lines.append(f"• {display_key}: {value_str}")
 
-    # Footer with timestamp
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    # Minimal footer with timestamp only
     if time_str:
-        lines.append(f"_📅 {time_str}_")
-    lines.append(f"_🤖 CALYPSO Trading Bot_")
+        lines.append("")
+        lines.append(f"_{time_str}_")
 
     return "\n".join(lines)
 
@@ -454,6 +466,12 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
     """
     Format alert for email (detailed HTML + plain text).
 
+    Design principles:
+    - Clean, professional appearance
+    - No redundant information
+    - Human-readable timestamps
+    - Mobile-friendly HTML
+
     Returns:
         tuple: (html_body, text_body)
     """
@@ -462,8 +480,25 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
     priority = alert.get("priority", "medium").upper()
     title = alert.get("title", "Alert")
     message = alert.get("message", "")
-    timestamp = alert.get("timestamp", datetime.utcnow().isoformat())
+    timestamp = alert.get("timestamp", "")
     details = alert.get("details", {})
+
+    # Format timestamp to human-readable ET
+    time_display = ""
+    try:
+        if timestamp:
+            if timestamp.endswith("Z"):
+                timestamp = timestamp[:-1]
+            dt_utc = datetime.fromisoformat(timestamp)
+            # Convert to ET (approximate: UTC-5)
+            from datetime import timedelta, timezone
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+            dt_et = dt_utc - timedelta(hours=5)
+            time_display = dt_et.strftime("%B %d, %Y at %I:%M %p") + " ET"
+        else:
+            time_display = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p") + " UTC"
+    except:
+        time_display = timestamp[:19] if timestamp else ""
 
     # Priority colors
     color_map = {
@@ -474,71 +509,88 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
     }
     color = color_map.get(priority, "#0d6efd")
 
-    # Format details as table rows
+    # Filter details to remove redundant info already in message
+    message_lower = message.lower()
+    filtered_details = {}
+
+    for key, value in details.items():
+        if key.startswith("_"):
+            continue
+
+        # Check if value is already mentioned in message
+        key_lower = key.lower()
+        value_str = ""
+
+        if isinstance(value, float):
+            value_str = f"{value:.2f}"
+            # Skip if this exact value appears in message
+            if value_str in message or f"${value_str}" in message:
+                continue
+        elif isinstance(value, bool):
+            value_str = "Yes" if value else "No"
+        elif isinstance(value, (list, dict)):
+            value_str = str(value)[:100]
+        else:
+            value_str = str(value)
+            if value_str.lower() in message_lower:
+                continue
+
+        # Format display key
+        display_key = key.replace("_", " ").title()
+
+        # Format value for display
+        if isinstance(value, float):
+            if any(word in key_lower for word in ["pnl", "cost", "credit", "price"]):
+                value_str = f"${value:,.2f}"
+            elif any(word in key_lower for word in ["percent", "rate", "gap"]):
+                value_str = f"{value:.1f}%"
+
+        filtered_details[display_key] = value_str
+
+    # Build details HTML table
     details_html = ""
     details_text = ""
-    if details:
-        for key, value in details.items():
-            if isinstance(value, float):
-                value_str = f"{value:.2f}"
-            else:
-                value_str = str(value)
-            details_html += f"<tr><td style='padding: 5px; border-bottom: 1px solid #ddd;'><strong>{key}</strong></td><td style='padding: 5px; border-bottom: 1px solid #ddd;'>{value_str}</td></tr>"
-            details_text += f"  {key}: {value_str}\n"
+    if filtered_details:
+        for key, value in filtered_details.items():
+            details_html += f"<tr><td style='padding: 8px 12px; border-bottom: 1px solid #eee; color: #666;'>{key}</td><td style='padding: 8px 12px; border-bottom: 1px solid #eee; font-weight: 500;'>{value}</td></tr>"
+            details_text += f"  {key}: {value}\n"
 
-    # HTML body
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
-            .container {{ max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-            .header {{ background: {color}; color: white; padding: 20px; }}
-            .header h1 {{ margin: 0; font-size: 18px; }}
-            .header .badge {{ display: inline-block; background: rgba(255,255,255,0.2); padding: 4px 8px; border-radius: 4px; font-size: 12px; margin-top: 8px; }}
-            .content {{ padding: 20px; }}
-            .message {{ font-size: 16px; line-height: 1.5; color: #333; white-space: pre-line; }}
-            .details {{ margin-top: 20px; }}
-            .details table {{ width: 100%; border-collapse: collapse; }}
-            .footer {{ padding: 15px 20px; background: #f8f9fa; font-size: 12px; color: #6c757d; border-top: 1px solid #eee; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>{title}</h1>
-                <span class="badge">{bot_name} | {priority}</span>
-            </div>
-            <div class="content">
-                <div class="message">{message}</div>
-                {f'<div class="details"><h3 style="margin-bottom: 10px; color: #333;">Details</h3><table>{details_html}</table></div>' if details_html else ''}
-            </div>
-            <div class="footer">
-                <strong>Alert Type:</strong> {alert_type}<br>
-                <strong>Timestamp:</strong> {timestamp}<br>
-                <em>This is an automated alert from CALYPSO Trading Bot</em>
-            </div>
+    # HTML body - clean, modern design
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
+    <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+        <div style="background: {color}; color: white; padding: 24px;">
+            <div style="font-size: 13px; opacity: 0.9; margin-bottom: 8px;">{bot_name} • {priority}</div>
+            <h1 style="margin: 0; font-size: 22px; font-weight: 600;">{title}</h1>
         </div>
-    </body>
-    </html>
-    """
+        <div style="padding: 24px;">
+            <div style="font-size: 16px; line-height: 1.6; color: #333; white-space: pre-line;">{message}</div>
+            {f'<div style="margin-top: 24px;"><table style="width: 100%; border-collapse: collapse; background: #fafafa; border-radius: 6px;">{details_html}</table></div>' if details_html else ''}
+        </div>
+        <div style="padding: 16px 24px; background: #f8f9fa; font-size: 13px; color: #6c757d; border-top: 1px solid #eee;">
+            {time_display}
+        </div>
+    </div>
+</body>
+</html>"""
 
-    # Plain text body
-    text = f"""
-{bot_name} ALERT: {title}
+    # Plain text body - clean and scannable
+    text = f"""{bot_name} | {priority}
 {'=' * 50}
-Priority: {priority}
-Alert Type: {alert_type}
-Timestamp: {timestamp}
+{title}
+{'=' * 50}
 
 {message}
-
-{'Details:' if details_text else ''}
-{details_text}
+{f'''
+Details:
+{details_text}''' if details_text else ''}
 ---
-This is an automated alert from CALYPSO Trading Bot
+{time_display}
 """
 
     return html, text

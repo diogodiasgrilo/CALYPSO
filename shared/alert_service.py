@@ -334,13 +334,12 @@ class AlertService:
     ) -> bool:
         """Send circuit breaker alert (CRITICAL)."""
         extra = details or {}
-        extra["consecutive_failures"] = consecutive_failures
-        extra["reason"] = reason
+        extra["failures"] = consecutive_failures
 
         return self.send_alert(
             alert_type=AlertType.CIRCUIT_BREAKER,
             title="Circuit Breaker Triggered",
-            message=f"{reason}\n{consecutive_failures} failures detected.\nManual review required.",
+            message=f"Trading halted after {consecutive_failures} failures.\n\n{reason}\n\nManual review required before restart.",
             priority=AlertPriority.CRITICAL,
             details=extra
         )
@@ -351,14 +350,14 @@ class AlertService:
         cost_or_credit: float,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send position opened alert (MEDIUM - email only)."""
+        """Send position opened alert (MEDIUM)."""
         extra = details or {}
-        extra["cost_or_credit"] = cost_or_credit
 
+        credit_label = "Credit received" if cost_or_credit > 0 else "Cost"
         return self.send_alert(
             alert_type=AlertType.POSITION_OPENED,
             title="Position Opened",
-            message=f"{position_summary}\nCost/Credit: ${cost_or_credit:.2f}",
+            message=f"{position_summary}\n\n{credit_label}: ${abs(cost_or_credit):.2f}",
             priority=AlertPriority.MEDIUM,
             details=extra
         )
@@ -371,8 +370,6 @@ class AlertService:
     ) -> bool:
         """Send position closed alert (priority based on P&L)."""
         extra = details or {}
-        extra["pnl"] = pnl
-        extra["reason"] = reason
 
         # Determine priority based on exit reason and P&L
         if "emergency" in reason.lower() or "circuit" in reason.lower():
@@ -383,11 +380,12 @@ class AlertService:
             priority = AlertPriority.MEDIUM
 
         pnl_emoji = "✅" if pnl >= 0 else "❌"
+        pnl_sign = "+" if pnl >= 0 else ""
 
         return self.send_alert(
             alert_type=AlertType.POSITION_CLOSED,
             title=f"Position Closed {pnl_emoji}",
-            message=f"{reason}\nP&L: ${pnl:.2f}",
+            message=f"Exit: {reason}\n\nP&L: {pnl_sign}${pnl:.2f}",
             priority=priority,
             details=extra
         )
@@ -400,13 +398,11 @@ class AlertService:
     ) -> bool:
         """Send stop loss triggered alert (HIGH)."""
         extra = details or {}
-        extra["trigger_price"] = trigger_price
-        extra["pnl"] = pnl
 
         return self.send_alert(
             alert_type=AlertType.STOP_LOSS,
-            title="Stop Loss Triggered",
-            message=f"Price: ${trigger_price:.2f}\nP&L: ${pnl:.2f}\nPosition closed.",
+            title="Stop Loss Hit",
+            message=f"Trigger price: ${trigger_price:.2f}\nRealized P&L: ${pnl:.2f}\n\nPosition closed automatically.",
             priority=AlertPriority.HIGH,
             details=extra
         )
@@ -421,15 +417,14 @@ class AlertService:
     ) -> bool:
         """Send wing breach alert for Iron Fly (HIGH)."""
         extra = details or {}
-        extra["breached_wing"] = breached_wing
-        extra["current_price"] = current_price
-        extra["wing_strike"] = wing_strike
-        extra["pnl"] = pnl
+
+        wing_label = breached_wing.capitalize()
+        direction = "below" if breached_wing.lower() == "lower" else "above"
 
         return self.send_alert(
             alert_type=AlertType.WING_BREACH,
-            title=f"{breached_wing.upper()} Wing Breached",
-            message=f"Price ${current_price:.2f} touched {breached_wing} wing at ${wing_strike:.2f}\nP&L: ${pnl:.2f}\nPosition closed.",
+            title=f"{wing_label} Wing Breached",
+            message=f"Price moved {direction} {wing_label.lower()} wing.\n\nPrice: ${current_price:.2f}\nWing strike: ${wing_strike:.2f}\nP&L: ${pnl:.2f}\n\nPosition closed automatically.",
             priority=AlertPriority.HIGH,
             details=extra
         )
@@ -442,13 +437,11 @@ class AlertService:
     ) -> bool:
         """Send profit target reached alert (MEDIUM)."""
         extra = details or {}
-        extra["target_amount"] = target_amount
-        extra["actual_pnl"] = actual_pnl
 
         return self.send_alert(
             alert_type=AlertType.PROFIT_TARGET,
-            title="Profit Target Reached",
-            message=f"Target: ${target_amount:.2f}\nActual P&L: ${actual_pnl:.2f}\nPosition closed.",
+            title="Profit Target Hit",
+            message=f"Target: ${target_amount:.2f}\nRealized: +${actual_pnl:.2f}\n\nPosition closed with profit.",
             priority=AlertPriority.MEDIUM,
             details=extra
         )
@@ -461,13 +454,11 @@ class AlertService:
     ) -> bool:
         """Send emergency exit alert (CRITICAL)."""
         extra = details or {}
-        extra["pnl"] = pnl
-        extra["reason"] = reason
 
         return self.send_alert(
             alert_type=AlertType.EMERGENCY_EXIT,
-            title="EMERGENCY EXIT",
-            message=f"{reason}\nP&L: ${pnl:.2f}\nAll positions closed.",
+            title="Emergency Exit Executed",
+            message=f"All positions closed immediately.\n\nReason: {reason}\nRealized P&L: ${pnl:.2f}",
             priority=AlertPriority.CRITICAL,
             details=extra
         )
@@ -479,12 +470,11 @@ class AlertService:
     ) -> bool:
         """Send naked position warning (CRITICAL)."""
         extra = details or {}
-        extra["missing_leg"] = missing_leg
 
         return self.send_alert(
             alert_type=AlertType.NAKED_POSITION,
-            title="NAKED POSITION DETECTED",
-            message=f"Missing leg: {missing_leg}\nNo protection in place!\nEmergency close initiated.",
+            title="Naked Position Detected",
+            message=f"RISK: Position has no protection!\n\nMissing: {missing_leg}\n\nEmergency close initiated.",
             priority=AlertPriority.CRITICAL,
             details=extra
         )
@@ -498,16 +488,14 @@ class AlertService:
     ) -> bool:
         """Send pre-market gap warning (MEDIUM)."""
         extra = details or {}
-        extra["gap_percent"] = gap_percent
-        extra["previous_close"] = previous_close
-        extra["current_price"] = current_price
 
-        direction = "UP" if gap_percent > 0 else "DOWN"
+        direction = "up" if gap_percent > 0 else "down"
+        emoji = "📈" if gap_percent > 0 else "📉"
 
         return self.send_alert(
             alert_type=AlertType.GAP_WARNING,
-            title=f"Pre-Market Gap {direction}",
-            message=f"Gap: {abs(gap_percent):.1f}%\nPrev close: ${previous_close:.2f}\nCurrent: ${current_price:.2f}\nEntry may be blocked.",
+            title=f"{emoji} Gap {direction.capitalize()} {abs(gap_percent):.1f}%",
+            message=f"Pre-market gap detected.\n\nPrev close: ${previous_close:.2f}\nCurrent: ${current_price:.2f}\nGap: {gap_percent:+.1f}%\n\nEntry filters may block trading.",
             priority=AlertPriority.MEDIUM,
             details=extra
         )
@@ -521,13 +509,13 @@ class AlertService:
     ) -> bool:
         """Send VIX threshold alert (MEDIUM)."""
         extra = details or {}
-        extra["current_vix"] = current_vix
-        extra["threshold"] = threshold
+
+        over_under = "above" if current_vix > threshold else "at"
 
         return self.send_alert(
             alert_type=AlertType.VIX_THRESHOLD,
-            title="VIX Threshold Alert",
-            message=f"VIX: {current_vix:.2f}\nThreshold: {threshold:.2f}\nAction: {action}",
+            title=f"VIX {over_under.capitalize()} Threshold",
+            message=f"VIX currently {over_under} entry threshold.\n\nVIX: {current_vix:.2f}\nThreshold: {threshold:.2f}\n\nAction: {action}",
             priority=AlertPriority.MEDIUM,
             details=extra
         )
@@ -542,15 +530,13 @@ class AlertService:
     ) -> bool:
         """Send roll completed alert (MEDIUM)."""
         extra = details or {}
-        extra["roll_type"] = roll_type
-        extra["old_position"] = old_position
-        extra["new_position"] = new_position
-        extra["cost"] = cost
+
+        cost_label = "Credit" if cost > 0 else "Debit"
 
         return self.send_alert(
             alert_type=AlertType.ROLL_COMPLETED,
             title=f"{roll_type} Roll Complete",
-            message=f"Old: {old_position}\nNew: {new_position}\nCost: ${cost:.2f}",
+            message=f"Successfully rolled position.\n\nClosed: {old_position}\nOpened: {new_position}\n{cost_label}: ${abs(cost):.2f}",
             priority=AlertPriority.MEDIUM,
             details=extra
         )
@@ -563,13 +549,11 @@ class AlertService:
     ) -> bool:
         """Send roll failed alert (HIGH)."""
         extra = details or {}
-        extra["roll_type"] = roll_type
-        extra["reason"] = reason
 
         return self.send_alert(
             alert_type=AlertType.ROLL_FAILED,
-            title=f"{roll_type} Roll FAILED",
-            message=f"Failed to roll: {reason}\nManual review may be needed.",
+            title=f"{roll_type} Roll Failed",
+            message=f"Unable to complete roll.\n\nReason: {reason}\n\nManual intervention may be required.",
             priority=AlertPriority.HIGH,
             details=extra
         )
@@ -577,12 +561,12 @@ class AlertService:
     def bot_started(self, environment: str, details: Optional[Dict[str, Any]] = None) -> bool:
         """Send bot started notification (LOW)."""
         extra = details or {}
-        extra["environment"] = environment
+        extra["mode"] = environment
 
         return self.send_alert(
             alert_type=AlertType.BOT_STARTED,
-            title=f"Bot Started ({environment})",
-            message=f"{self.bot_name} is now running in {environment} mode.",
+            title="Bot Started",
+            message=f"{self.bot_name} is now running.\n\nMode: {environment.upper()}",
             priority=AlertPriority.LOW,
             details=extra
         )
@@ -590,16 +574,16 @@ class AlertService:
     def bot_stopped(self, reason: str, details: Optional[Dict[str, Any]] = None) -> bool:
         """Send bot stopped notification (LOW, or HIGH if unexpected)."""
         extra = details or {}
-        extra["reason"] = reason
 
         # Unexpected stops are HIGH priority
         is_unexpected = any(word in reason.lower() for word in ["error", "crash", "exception", "fail"])
         priority = AlertPriority.HIGH if is_unexpected else AlertPriority.LOW
+        title = "Bot Stopped Unexpectedly" if is_unexpected else "Bot Stopped"
 
         return self.send_alert(
             alert_type=AlertType.BOT_STOPPED,
-            title="Bot Stopped",
-            message=f"{self.bot_name} has stopped.\nReason: {reason}",
+            title=title,
+            message=f"{self.bot_name} has stopped.\n\nReason: {reason}",
             priority=priority,
             details=extra
         )
@@ -613,16 +597,14 @@ class AlertService:
     ) -> bool:
         """Send end-of-day summary (LOW)."""
         extra = details or {}
-        extra["trades_count"] = trades_count
-        extra["total_pnl"] = total_pnl
-        extra["win_rate"] = win_rate
 
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+        pnl_sign = "+" if total_pnl >= 0 else ""
 
         return self.send_alert(
             alert_type=AlertType.DAILY_SUMMARY,
             title=f"Daily Summary {pnl_emoji}",
-            message=f"Trades: {trades_count}\nTotal P&L: ${total_pnl:.2f}\nWin Rate: {win_rate:.1f}%",
+            message=f"Today's trading complete.\n\nTrades: {trades_count}\nP&L: {pnl_sign}${total_pnl:.2f}\nWin rate: {win_rate:.0f}%",
             priority=AlertPriority.LOW,
             details=extra
         )
@@ -643,17 +625,20 @@ class AlertService:
         Called at 1h, 30m, 15m before market open.
         """
         extra = details or {}
-        extra["minutes_until_open"] = minutes_until_open
 
         if minutes_until_open >= 60:
             time_str = f"{minutes_until_open // 60} hour"
         else:
-            time_str = f"{minutes_until_open} minutes"
+            time_str = f"{minutes_until_open} min"
+
+        # Check if early close day
+        is_early = extra.get("is_early_close", False)
+        close_note = "\nNote: Early close today (1:00 PM)" if is_early else ""
 
         return self.send_alert(
             alert_type=AlertType.MARKET_OPENING_SOON,
             title=f"Market Opens in {time_str}",
-            message=f"NYSE/NASDAQ opens at 9:30 AM ET\nCurrent time: {current_time}\n\nPrepare for trading session.",
+            message=f"US markets open at 9:30 AM ET.{close_note}",
             priority=AlertPriority.LOW,
             details=extra
         )
@@ -668,20 +653,17 @@ class AlertService:
         """Send market open notification (LOW - WhatsApp + Email)."""
         extra = details or {}
         if vix_level is not None:
-            extra["vix_level"] = vix_level
+            extra["vix"] = vix_level
         if spy_price is not None:
-            extra["spy_price"] = spy_price
+            extra["spy"] = spy_price
 
-        message_parts = [f"Market is now OPEN\nTime: {current_time}"]
-        if spy_price is not None:
-            message_parts.append(f"SPY: ${spy_price:.2f}")
-        if vix_level is not None:
-            message_parts.append(f"VIX: {vix_level:.2f}")
+        # Check close time from details
+        close_time = extra.get("close_time", "4:00 PM ET")
 
         return self.send_alert(
             alert_type=AlertType.MARKET_OPEN,
-            title="Market OPEN",
-            message="\n".join(message_parts),
+            title="Market Open",
+            message=f"US markets are now open.\n\nClose: {close_time}",
             priority=AlertPriority.LOW,
             details=extra
         )
@@ -698,19 +680,16 @@ class AlertService:
         if spy_close is not None:
             extra["spy_close"] = spy_close
         if day_change_pct is not None:
-            extra["day_change_pct"] = day_change_pct
+            extra["day_change"] = f"{day_change_pct:+.2f}%"
 
-        message_parts = [f"Market is now CLOSED\nTime: {current_time}"]
-        if spy_close is not None:
-            message_parts.append(f"SPY Close: ${spy_close:.2f}")
-        if day_change_pct is not None:
-            change_emoji = "📈" if day_change_pct >= 0 else "📉"
-            message_parts.append(f"Day Change: {change_emoji} {day_change_pct:+.2f}%")
+        # Get next open from details
+        next_open = extra.get("next_open", "Tomorrow 9:30 AM ET")
+        close_type = extra.get("close_type", "Regular close")
 
         return self.send_alert(
             alert_type=AlertType.MARKET_CLOSED,
-            title="Market CLOSED",
-            message="\n".join(message_parts),
+            title="Market Closed",
+            message=f"US markets are now closed.\n\n{close_type}\nNext open: {next_open}",
             priority=AlertPriority.LOW,
             details=extra
         )
@@ -723,13 +702,11 @@ class AlertService:
     ) -> bool:
         """Send market holiday notification (LOW - WhatsApp + Email)."""
         extra = details or {}
-        extra["holiday_name"] = holiday_name
-        extra["next_open_date"] = next_open_date
 
         return self.send_alert(
             alert_type=AlertType.MARKET_HOLIDAY,
-            title=f"Market Closed - {holiday_name}",
-            message=f"US markets are closed today for {holiday_name}.\n\nNext trading day: {next_open_date}",
+            title=f"Holiday: {holiday_name}",
+            message=f"US markets closed today.\n\nNext open: {next_open_date}",
             priority=AlertPriority.LOW,
             details=extra
         )
@@ -742,13 +719,11 @@ class AlertService:
     ) -> bool:
         """Send early close day warning (LOW - WhatsApp + Email)."""
         extra = details or {}
-        extra["reason"] = reason
-        extra["close_time"] = close_time
 
         return self.send_alert(
             alert_type=AlertType.MARKET_EARLY_CLOSE,
-            title=f"Early Close Today - {close_time}",
-            message=f"Market closes early today at {close_time} ET\nReason: {reason}\n\nPlan positions accordingly.",
+            title=f"Early Close: {close_time}",
+            message=f"Markets close early today.\n\nClose time: {close_time} ET\nReason: {reason}",
             priority=AlertPriority.LOW,
             details=extra
         )
@@ -768,18 +743,14 @@ class AlertService:
         This is for significant overnight/premarket moves that will affect positions.
         """
         extra = details or {}
-        extra["symbol"] = symbol
-        extra["gap_percent"] = gap_percent
-        extra["previous_close"] = previous_close
-        extra["current_price"] = current_price
 
-        direction = "UP" if gap_percent > 0 else "DOWN"
-        gap_emoji = "🚀" if gap_percent > 0 else "📉"
+        direction = "up" if gap_percent > 0 else "down"
+        emoji = "🚀" if gap_percent > 0 else "📉"
 
         return self.send_alert(
             alert_type=AlertType.PREMARKET_GAP,
-            title=f"{gap_emoji} {symbol} Gap {direction} {abs(gap_percent):.1f}%",
-            message=f"Significant pre-market move detected!\n\n{symbol}: ${previous_close:.2f} → ${current_price:.2f}\nGap: {gap_percent:+.1f}%\n\nAffected positions:\n{affected_positions}",
+            title=f"{emoji} {symbol} Gap {direction.capitalize()} {abs(gap_percent):.1f}%",
+            message=f"Large overnight move detected.\n\n{symbol}: ${previous_close:.2f} → ${current_price:.2f}\n\nAffected: {affected_positions}",
             priority=AlertPriority.HIGH,
             details=extra
         )
