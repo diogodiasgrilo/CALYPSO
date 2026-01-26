@@ -234,6 +234,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour (3600 seconds)
     last_day = datetime.now().date()
     consecutive_errors = 0  # Track consecutive errors for health monitoring
+    daily_summary_sent_date = None  # Track daily summary to send only once at market close
 
     try:
         while not shutdown_requested:
@@ -253,6 +254,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     # Determine reason for closure (for heartbeat messages)
                     from shared.market_hours import is_weekend, get_us_market_time
                     holiday_name = get_holiday_name()
+                    now_et = get_us_market_time()
+                    is_after_hours = now_et.hour >= 16  # 4 PM ET or later
+
                     if holiday_name:
                         close_reason = f"({holiday_name})"
                     elif is_weekend():
@@ -260,12 +264,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     else:
                         close_reason = ""
 
+                    # Send daily summary once at market close (not on every restart)
+                    today_date = now_et.date()
+                    if is_after_hours and daily_summary_sent_date != today_date:
+                        trade_logger.log_event("Market closed - sending daily summary...")
+                        strategy.log_daily_summary()
+                        daily_summary_sent_date = today_date
+                        trade_logger.log_event("Daily summary sent")
+
                     # Calculate sleep duration (max 15 min to keep token alive)
                     sleep_time = calculate_sleep_duration(max_sleep=900)
 
                     # IRON FLY SPECIFIC: Wake up at exactly 9:30 AM for opening range tracking
                     # If we're in pre-market (before 9:30 AM), calculate exact time until 9:30
-                    now_et = get_us_market_time()
                     market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
 
                     if now_et < market_open_time and now_et.weekday() < 5 and not holiday_name:

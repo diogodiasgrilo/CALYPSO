@@ -412,6 +412,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
     market_open_gap_checked = False  # MKT-001: Track if we've checked the gap at market open today
     gap_alert_sent_date = None  # Track pre-market gap alert to avoid duplicate WhatsApp/Email (one per day)
+    daily_summary_sent_date = None  # Track daily summary to send only once at market close (not on every restart)
 
     # CONN-003: Setup WebSocket streaming for real-time price updates
     # This provides faster price updates than REST polling, useful for:
@@ -460,6 +461,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                 reason = "Pre-market"
             else:
                 reason = "After-hours"
+                # Send daily summary once at market close (not on every restart)
+                today = now.date()
+                if daily_summary_sent_date != today:
+                    trade_logger.log_event("Market closed - sending daily summary...")
+                    strategy.log_daily_summary()
+                    daily_summary_sent_date = today
+                    trade_logger.log_event("Daily summary sent")
 
             # Calculate smart sleep duration (max 15 min to keep token alive - Saxo tokens expire in ~20 min)
             sleep_seconds = calculate_sleep_duration(max_sleep=900)
@@ -697,9 +705,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
         client.stop_price_streaming()
         trade_logger.log_event("WebSocket streaming stopped")
 
-    # Log final daily summary to Google Sheets
-    strategy.log_daily_summary()
-    trade_logger.log_event("Daily summary logged")
+    # Note: Daily summary is sent at market close, not on shutdown
+    # This prevents duplicate alerts when the bot is restarted mid-day
 
     # Save metrics
     strategy.metrics.save_to_file()
