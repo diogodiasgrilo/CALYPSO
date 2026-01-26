@@ -230,7 +230,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     trade_logger.log_event("-" * 60)
 
     last_status_time = datetime.now()
-    status_interval = 30  # Log status every 30 seconds for 0DTE (need fast updates)
+    status_interval = 15  # Log status every 15 seconds for 0DTE (fast updates with WebSocket cache)
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour (3600 seconds)
     last_day = datetime.now().date()

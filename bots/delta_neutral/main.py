@@ -442,7 +442,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     trade_logger.log_event("-" * 60)
 
     last_status_time = datetime.now()
-    status_interval = 300  # Log status every 5 minutes
+    status_interval = 60  # Log status every 60 seconds (reduced from 5min with WebSocket cache)
     last_daily_summary_date = None  # Track last daily summary logged (trading days only)
     last_performance_metrics_date = None  # Track last performance metrics logged (every day)
     trading_day_started = False  # Track if we've started tracking for today

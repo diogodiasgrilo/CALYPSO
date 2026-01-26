@@ -3529,8 +3529,9 @@ class SaxoClient:
             return None
 
         # Wait for valid quotes to arrive via stream
+        # Poll interval reduced to 0.2s (from 0.5s) since WebSocket binary parsing is fixed
         start_time = time.time()
-        poll_interval = 0.5
+        poll_interval = 0.2
 
         while time.time() - start_time < max_wait_seconds:
             if uic in self._price_cache:
