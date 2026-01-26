@@ -131,6 +131,8 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail →
 
 **Key Design Principle:** Alerts are sent AFTER actions complete with ACTUAL results (not predictions). The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately. Cloud Function delivers SMS/email asynchronously.
 
+**Timezone:** All alert timestamps use US Eastern Time (ET) - the exchange timezone. Consistent regardless of where you travel. DST transitions (EST ↔ EDT) are handled automatically.
+
 ### Alert Priority Levels
 | Priority | Delivery | Examples |
 |----------|----------|----------|

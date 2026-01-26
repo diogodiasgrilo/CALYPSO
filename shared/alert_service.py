@@ -22,6 +22,11 @@ Benefits:
     - Auditable: Full trail in Cloud Logging
     - Scalable: Add new alert channels without changing bot code
 
+Timezone:
+    All timestamps use US Eastern Time (ET) - the exchange timezone.
+    This ensures consistent timestamps regardless of where you travel.
+    DST transitions (EST ↔ EDT) are handled automatically via pytz.
+
 Alert Priorities:
     CRITICAL: WhatsApp + Email (circuit breaker, emergency exit, naked positions)
     HIGH: WhatsApp + Email (stop loss, max loss, position issues)
@@ -50,11 +55,16 @@ Usage:
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
+import pytz
+
 from shared.secret_manager import is_running_on_gcp, get_project_id
+
+# US Eastern timezone (handles EST/EDT automatically based on DST)
+US_EASTERN = pytz.timezone('America/New_York')
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +278,7 @@ class AlertService:
             "priority": priority.value,
             "title": title,
             "message": message,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(US_EASTERN).isoformat(),
             "details": details or {},
             "delivery": {
                 "sms": True,  # All priorities get WhatsApp (Cloud Function handles WhatsApp vs SMS)

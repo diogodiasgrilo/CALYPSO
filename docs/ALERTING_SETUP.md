@@ -44,6 +44,7 @@ This document describes how to deploy and configure the WhatsApp/SMS/Email alert
 - **Accurate**: Alerts sent AFTER actions complete with actual results
 - **Global delivery**: WhatsApp works everywhere, no carrier issues
 - **Works on WiFi**: Perfect for traveling - no cellular needed for WhatsApp
+- **Exchange timezone**: All timestamps in US Eastern Time (ET) - consistent regardless of where you are
 
 ---
 

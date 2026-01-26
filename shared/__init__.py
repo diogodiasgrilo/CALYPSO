@@ -21,6 +21,9 @@ Key design: Alerts are sent AFTER actions complete with ACTUAL results.
 The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately.
 Cloud Function delivers SMS/email asynchronously in the background.
 
+Timezone: All timestamps use US Eastern Time (ET) - the exchange timezone.
+          Handles EST ↔ EDT transitions automatically via pytz.
+
 Alert Priorities (ALL levels get WhatsApp + Email):
     CRITICAL: WhatsApp + Email (circuit breaker, emergency exit, naked positions)
     HIGH: WhatsApp + Email (stop loss, max loss, position issues)

@@ -7,6 +7,10 @@ Processes trading alerts from Pub/Sub and sends notifications via:
 - SMS (Twilio) - Fallback if WhatsApp fails (concise formatting)
 - Email (Gmail SMTP) - All alert levels (full HTML formatting)
 
+Timezone:
+    All timestamps are displayed in US Eastern Time (ET) - the exchange timezone.
+    Handles EST ↔ EDT transitions automatically via pytz.
+
 Trigger: Pub/Sub topic "calypso-alerts"
 
 Environment Variables (set in Cloud Function deployment):
@@ -46,12 +50,16 @@ import json
 import logging
 import os
 import smtplib
-from datetime import datetime
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, Optional
 
 import functions_framework
+import pytz
+
+# US Eastern timezone (handles EST/EDT automatically)
+US_EASTERN = pytz.timezone('America/New_York')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -330,21 +338,17 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
     }
     emoji = priority_emoji.get(priority, "📊")
 
-    # Format timestamp to readable ET format
+    # Format timestamp to readable ET format (handles EST/EDT automatically)
     time_str = ""
     try:
         if timestamp:
-            from datetime import datetime, timezone
             if timestamp.endswith("Z"):
                 timestamp = timestamp[:-1]
             # Parse as UTC
             dt_utc = datetime.fromisoformat(timestamp).replace(tzinfo=timezone.utc)
-            # Convert to ET (UTC-5, or UTC-4 during DST)
-            # Simple approximation: assume ET is UTC-5 (EST)
-            # For accuracy, would need pytz, but keeping it simple
-            from datetime import timedelta
-            dt_et = dt_utc - timedelta(hours=5)
-            time_str = dt_et.strftime("%I:%M %p") + " ET"
+            # Convert to US Eastern (handles DST automatically)
+            dt_et = dt_utc.astimezone(US_EASTERN)
+            time_str = dt_et.strftime("%I:%M %p ET")
     except:
         pass
 
@@ -483,20 +487,20 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
     timestamp = alert.get("timestamp", "")
     details = alert.get("details", {})
 
-    # Format timestamp to human-readable ET
+    # Format timestamp to human-readable ET (handles EST/EDT automatically)
     time_display = ""
     try:
         if timestamp:
             if timestamp.endswith("Z"):
                 timestamp = timestamp[:-1]
-            dt_utc = datetime.fromisoformat(timestamp)
-            # Convert to ET (approximate: UTC-5)
-            from datetime import timedelta, timezone
-            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
-            dt_et = dt_utc - timedelta(hours=5)
-            time_display = dt_et.strftime("%B %d, %Y at %I:%M %p") + " ET"
+            dt_utc = datetime.fromisoformat(timestamp).replace(tzinfo=timezone.utc)
+            # Convert to US Eastern (handles DST automatically)
+            dt_et = dt_utc.astimezone(US_EASTERN)
+            time_display = dt_et.strftime("%B %d, %Y at %I:%M %p ET")
         else:
-            time_display = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p") + " UTC"
+            # No timestamp provided, use current time in ET
+            dt_et = datetime.now(US_EASTERN)
+            time_display = dt_et.strftime("%B %d, %Y at %I:%M %p ET")
     except:
         time_display = timestamp[:19] if timestamp else ""
 
@@ -683,14 +687,14 @@ if __name__ == "__main__":
     print("ALERT PROCESSOR LOCAL TEST")
     print("=" * 60)
 
-    # Sample alert message
+    # Sample alert message (using ET timestamp)
     test_alert = {
         "bot_name": "IRON_FLY",
         "alert_type": "circuit_breaker",
         "priority": "critical",
         "title": "Circuit Breaker Triggered",
         "message": "5 consecutive API failures detected.\nTrading halted for safety.",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(US_EASTERN).isoformat(),
         "details": {
             "consecutive_failures": 5,
             "last_error": "Connection timeout",
