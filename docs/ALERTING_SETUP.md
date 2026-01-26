@@ -1,6 +1,6 @@
 # CALYPSO Alert System Setup Guide
 
-This document describes how to deploy and configure the SMS/Email alerting system for CALYPSO trading bots.
+This document describes how to deploy and configure the WhatsApp/SMS/Email alerting system for CALYPSO trading bots.
 
 ## Architecture Overview
 
@@ -27,20 +27,23 @@ This document describes how to deploy and configure the SMS/Email alerting syste
               │   Cloud Function            │
               │   "process-trading-alert"   │
               └─────────────┬───────────────┘
-              ┌─────────────┴───────────────┐
-              ▼                             ▼
-    ┌─────────────────┐          ┌─────────────────┐
-    │ Twilio (GCP)    │          │  Gmail SMTP     │
-    └────────┬────────┘          └────────┬────────┘
-             ▼                            ▼
-         Your Phone                  Your Email
+              ┌─────────────┼───────────────┐
+              ▼             ▼               ▼
+    ┌──────────────┐ ┌───────────┐ ┌─────────────┐
+    │ WhatsApp     │ │ SMS       │ │ Gmail SMTP  │
+    │ (Twilio)     │ │ (Twilio)  │ │             │
+    └──────┬───────┘ └─────┬─────┘ └──────┬──────┘
+           └───────────────┼──────────────┘
+                           ▼
+                      Your Devices
 ```
 
 **Key Benefits:**
 - **Non-blocking**: Bot publishes to Pub/Sub (~50ms) and continues immediately
 - **Reliable**: Pub/Sub retries for 7 days, dead-letter queue captures failures
 - **Accurate**: Alerts sent AFTER actions complete with actual results
-- **Unified billing**: All costs on Google Cloud billing
+- **Global delivery**: WhatsApp works everywhere, no carrier issues
+- **Works on WiFi**: Perfect for traveling - no cellular needed for WhatsApp
 
 ---
 
@@ -65,13 +68,26 @@ gcloud pubsub subscriptions create calypso-alerts-dlq-sub \
 
 ---
 
-## Step 2: Set Up Twilio (via GCP Marketplace)
+## Step 2: Set Up Twilio (WhatsApp + SMS)
 
-1. Go to [GCP Marketplace](https://console.cloud.google.com/marketplace)
-2. Search for "Twilio"
-3. Subscribe to Twilio via marketplace (billing goes to GCP)
-4. Get your Account SID, Auth Token, and purchase a phone number
-5. Store credentials in Secret Manager:
+### 2a. Create Twilio Account
+
+1. Sign up at [twilio.com](https://www.twilio.com/try-twilio)
+2. Get your Account SID and Auth Token from the Console
+3. (Optional) Buy a phone number for SMS (~$1/month) - only needed if you want SMS fallback
+
+### 2b. Set Up WhatsApp Sandbox (Recommended)
+
+WhatsApp is the recommended delivery method - works globally, no carrier issues, works on WiFi.
+
+1. Go to [Twilio Console > Messaging > WhatsApp](https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn)
+2. Note the sandbox number: `+1 415 523 8886`
+3. **On your phone**: Open WhatsApp and send the join message (e.g., "join your-sandbox-code") to +1 415 523 8886
+4. You'll receive a confirmation that you've joined the sandbox
+
+**Note:** The sandbox is free and sufficient for personal alerts. For production apps with multiple recipients, apply for WhatsApp Business API approval.
+
+### 2c. Store Credentials in Secret Manager
 
 ```bash
 # Create Twilio credentials secret
@@ -80,7 +96,9 @@ gcloud secrets create calypso-twilio-credentials \
     --replication-policy="automatic"
 
 # Add the secret value (JSON format)
-echo '{"account_sid": "YOUR_SID", "auth_token": "YOUR_TOKEN", "phone_number": "+1XXXXXXXXXX"}' | \
+# whatsapp_number is the Twilio sandbox number (prefix with whatsapp:)
+# phone_number is optional - only needed for SMS fallback
+echo '{"account_sid": "YOUR_SID", "auth_token": "YOUR_TOKEN", "whatsapp_number": "whatsapp:+14155238886", "phone_number": "+1XXXXXXXXXX"}' | \
     gcloud secrets versions add calypso-twilio-credentials \
     --project=calypso-trading-bot \
     --data-file=-
@@ -104,11 +122,18 @@ gcloud secrets create calypso-alert-config \
     --replication-policy="automatic"
 
 # Add the secret value
-echo '{"phone_number": "+1XXXXXXXXXX", "email": "your@email.com", "gmail_address": "your@gmail.com", "gmail_app_password": "YOUR_APP_PASSWORD"}' | \
+# whatsapp_number is YOUR phone number (same as phone_number usually)
+# prefer_whatsapp: true = use WhatsApp first, SMS as fallback
+echo '{"phone_number": "+971XXXXXXXXX", "whatsapp_number": "+971XXXXXXXXX", "email": "your@email.com", "gmail_address": "your@gmail.com", "gmail_app_password": "YOUR_APP_PASSWORD", "prefer_whatsapp": true}' | \
     gcloud secrets versions add calypso-alert-config \
     --project=calypso-trading-bot \
     --data-file=-
 ```
+
+**Important for UAE/International numbers:**
+- Use E.164 format: `+971XXXXXXXXX` for UAE
+- WhatsApp works globally - no need for a US phone number
+- You can receive alerts anywhere in the world on WiFi
 
 ---
 
@@ -181,10 +206,12 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 | Priority | Delivery | Examples |
 |----------|----------|----------|
-| **CRITICAL** | SMS + Email | Circuit breaker, emergency exit, naked position |
-| **HIGH** | SMS + Email | Stop loss, max loss, roll failed |
+| **CRITICAL** | WhatsApp + Email | Circuit breaker, emergency exit, naked position |
+| **HIGH** | WhatsApp + Email | Stop loss, max loss, roll failed |
 | **MEDIUM** | Email only | Position opened/closed, profit target, roll complete |
 | **LOW** | Email only | Bot started/stopped, daily summary |
+
+**Note:** WhatsApp is the primary delivery method for CRITICAL/HIGH alerts. SMS is used as fallback if WhatsApp fails or isn't configured.
 
 ---
 
@@ -285,12 +312,17 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub \
 |---------|-----------|-----------------|--------------|
 | Pub/Sub | 10GB/month | ~1MB | $0.00 |
 | Cloud Functions | 2M invocations | ~1000 | $0.00 |
-| Twilio SMS | N/A | ~50 SMS @ $0.0079 | ~$0.40 |
+| Twilio WhatsApp | Sandbox free | ~50 messages | $0.00 |
+| Twilio SMS (fallback) | N/A | ~10 SMS @ $0.10 | ~$1.00 |
 | Gmail SMTP | Free | ~200 emails | $0.00 |
 
-**Total: ~$0.40 - $1.00/month**
+**Total: ~$0.00 - $1.00/month** (Free if using WhatsApp sandbox only)
 
-**Note:** Gmail SMTP allows 500 emails/day for regular accounts. Twilio SMS pricing varies by region (~$0.0079 per SMS to US numbers).
+**Notes:**
+- WhatsApp sandbox is free for personal use (unlimited messages to yourself)
+- WhatsApp Business API: ~$0.005-0.05 per message depending on country
+- SMS to UAE: ~$0.10/message (use WhatsApp instead!)
+- Gmail SMTP allows 500 emails/day for regular accounts
 
 ---
 
@@ -313,11 +345,19 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub \
 3. Check Cloud Function logs for errors
 4. Verify secrets exist in Secret Manager
 
-### SMS Not Delivered
+### WhatsApp Not Delivered
+
+1. **Sandbox not joined**: Send "join <your-code>" to +1 415 523 8886 from your WhatsApp
+2. **24-hour window expired**: For sandbox, you must interact with the bot within 24 hours to receive messages. Send any message to refresh.
+3. Check Twilio console for delivery status
+4. Verify phone number format (+971XXXXXXXXX for UAE)
+
+### SMS Not Delivered (Fallback)
 
 1. Check Twilio console for delivery status
-2. Verify phone number format (+1XXXXXXXXXX)
+2. Verify phone number format (E.164: +971XXXXXXXXX)
 3. Check Twilio account balance
+4. International SMS may be blocked by carriers - prefer WhatsApp
 
 ### Email Not Delivered
 
