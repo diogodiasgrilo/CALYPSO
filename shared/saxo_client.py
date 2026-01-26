@@ -213,8 +213,6 @@ class SaxoClient:
 
         # Price cache for subscription snapshots (UIC -> latest price data)
         self._price_cache: Dict[int, Dict] = {}
-        # Timestamps for cache staleness detection (UIC -> last update time)
-        self._price_cache_timestamps: Dict[int, float] = {}
 
         # Account information - auto-select based on environment
         account_config = config.get("account", {})
@@ -1797,27 +1795,18 @@ class SaxoClient:
         spy_uic_int = int(spy_uic)
 
         # PRIORITY 1: Check WebSocket streaming cache (no API call, instant)
-        # Only use cache if it's been updated within the last 60 seconds
-        # This prevents stale data if WebSocket stops receiving updates
-        cache_max_age_seconds = 60
         if spy_uic_int in self._price_cache:
-            cache_timestamp = self._price_cache_timestamps.get(spy_uic_int, 0)
-            cache_age = time.time() - cache_timestamp
-
-            if cache_age <= cache_max_age_seconds:
-                cached = self._price_cache[spy_uic_int]
-                if cached and "Quote" in cached:
-                    price = (
-                        cached["Quote"].get("Mid") or
-                        cached["Quote"].get("LastTraded") or
-                        cached["Quote"].get("Bid") or
-                        cached["Quote"].get("Ask")
-                    )
-                    if price and price > 0:
-                        logger.debug(f"{symbol}: Using cached streaming price ${price:.2f} (age: {cache_age:.1f}s)")
-                        return cached
-            else:
-                logger.debug(f"{symbol}: Cache stale ({cache_age:.1f}s > {cache_max_age_seconds}s), using REST API")
+            cached = self._price_cache[spy_uic_int]
+            if cached and "Quote" in cached:
+                price = (
+                    cached["Quote"].get("Mid") or
+                    cached["Quote"].get("LastTraded") or
+                    cached["Quote"].get("Bid") or
+                    cached["Quote"].get("Ask")
+                )
+                if price and price > 0:
+                    logger.debug(f"{symbol}: Using cached streaming price ${price:.2f}")
+                    return cached
 
         # PRIORITY 2: Saxo REST API (fallback if cache miss, invalid, or stale)
         endpoint = "/trade/v1/infoprices/list"
@@ -3167,7 +3156,6 @@ class SaxoClient:
                 # Cache the snapshot price data for later retrieval
                 snapshot = response["Snapshot"]
                 self._price_cache[uic] = snapshot
-                self._price_cache_timestamps[uic] = time.time()
 
                 # Log the snapshot structure for debugging
                 snapshot_keys = list(snapshot.keys()) if isinstance(snapshot, dict) else str(type(snapshot))
@@ -3363,9 +3351,8 @@ class SaxoClient:
                     # Ensure UIC is int for consistent cache keys
                     uic = int(uic)
 
-                    # Update price cache with latest data and timestamp
+                    # Update price cache with latest data
                     self._price_cache[uic] = item
-                    self._price_cache_timestamps[uic] = time.time()
 
                     # Call the callback if registered
                     if uic in self.price_callbacks:
@@ -3441,7 +3428,6 @@ class SaxoClient:
         if response and "Snapshot" in response:
             snapshot = response["Snapshot"]
             self._price_cache[uic] = snapshot
-            self._price_cache_timestamps[uic] = time.time()
 
             # Store callback if provided
             if callback:
