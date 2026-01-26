@@ -4577,6 +4577,12 @@ class IronFlyStrategy:
             f"Trades={self.trades_today}, Cumulative P&L=${self.cumulative_metrics['cumulative_pnl'] / 100:.2f}"
         )
 
+        # Send WhatsApp/Email daily summary alert
+        summary_for_alert = summary.copy()
+        summary_for_alert["dry_run"] = self.dry_run
+        self.alert_service.daily_summary_iron_fly(summary_for_alert)
+        logger.info("Daily summary alert sent to WhatsApp/Email")
+
     def log_position_to_sheets(self):
         """Log current position to Positions worksheet (iron fly format)."""
         if not self.position:

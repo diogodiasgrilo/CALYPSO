@@ -611,7 +611,7 @@ class AlertService:
         win_rate: float,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send end-of-day summary (LOW)."""
+        """Send end-of-day summary (LOW) - generic version."""
         extra = details or {}
 
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
@@ -623,6 +623,173 @@ class AlertService:
             message=f"Today's trading complete.\n\nTrades: {trades_count}\nP&L: {pnl_sign}${total_pnl:.2f}\nWin rate: {win_rate:.0f}%",
             priority=AlertPriority.LOW,
             details=extra
+        )
+
+    def daily_summary_delta_neutral(
+        self,
+        summary: Dict[str, Any]
+    ) -> bool:
+        """
+        Send comprehensive daily summary for Delta Neutral bot (LOW).
+
+        Args:
+            summary: Dictionary with daily summary data from log_daily_summary()
+        """
+        daily_pnl = summary.get("daily_pnl", 0)
+        cumulative_pnl = summary.get("cumulative_pnl", 0)
+        state = summary.get("state", "Unknown")
+        spy_close = summary.get("spy_close", 0)
+        vix_avg = summary.get("vix_avg", 0)
+        net_theta = summary.get("total_theta", 0)
+        roll_count = summary.get("roll_count", 0)
+        recenter_count = summary.get("recenter_count", 0)
+        rolled_today = summary.get("rolled_today", False)
+        recentered_today = summary.get("recentered_today", False)
+        dry_run = summary.get("dry_run", False)
+
+        pnl_emoji = "📈" if daily_pnl >= 0 else "📉"
+        pnl_sign = "+" if daily_pnl >= 0 else ""
+        cum_sign = "+" if cumulative_pnl >= 0 else ""
+        mode = "[DRY RUN] " if dry_run else "[LIVE] "
+
+        # Build activity summary
+        activities = []
+        if rolled_today:
+            activities.append("Shorts rolled")
+        if recentered_today:
+            activities.append("Position recentered")
+        activity_str = ", ".join(activities) if activities else "No adjustments"
+
+        message = (
+            f"{mode}Delta Neutral - End of Day\n\n"
+            f"State: {state}\n"
+            f"SPY Close: ${spy_close:.2f}\n"
+            f"VIX: {vix_avg:.2f}\n\n"
+            f"Daily P&L: {pnl_sign}${daily_pnl:.2f}\n"
+            f"Cumulative P&L: {cum_sign}${cumulative_pnl:.2f}\n"
+            f"Net Theta: ${net_theta:.2f}/day\n\n"
+            f"Today's Activity: {activity_str}\n"
+            f"Total Rolls: {roll_count} | Recenters: {recenter_count}"
+        )
+
+        return self.send_alert(
+            alert_type=AlertType.DAILY_SUMMARY,
+            title=f"Delta Neutral Daily {pnl_emoji}",
+            message=message,
+            priority=AlertPriority.LOW,
+            details=summary
+        )
+
+    def daily_summary_iron_fly(
+        self,
+        summary: Dict[str, Any]
+    ) -> bool:
+        """
+        Send comprehensive daily summary for Iron Fly bot (LOW).
+
+        Args:
+            summary: Dictionary with daily summary data from log_daily_summary()
+        """
+        daily_pnl = summary.get("daily_pnl", 0)
+        cumulative_pnl = summary.get("cumulative_pnl", 0)
+        trades_today = summary.get("trades_today", 0)
+        win_rate = summary.get("win_rate", 0)
+        premium_collected = summary.get("premium_collected", 0)
+        underlying_close = summary.get("underlying_close", 0)
+        vix = summary.get("vix", 0)
+        dry_run = summary.get("dry_run", False)
+        notes = summary.get("notes", "")
+
+        pnl_emoji = "📈" if daily_pnl >= 0 else "📉"
+        pnl_sign = "+" if daily_pnl >= 0 else ""
+        cum_sign = "+" if cumulative_pnl >= 0 else ""
+        mode = "[DRY RUN] " if dry_run else "[LIVE] "
+
+        # Determine trade outcome
+        if trades_today == 0:
+            outcome = "No trades (filters blocked or outside hours)"
+        elif daily_pnl > 0:
+            outcome = "Profit target hit"
+        elif daily_pnl < 0:
+            outcome = "Stop loss triggered"
+        else:
+            outcome = "Breakeven"
+
+        message = (
+            f"{mode}Iron Fly 0DTE - End of Day\n\n"
+            f"SPX Close: ${underlying_close:.2f}\n"
+            f"VIX: {vix:.2f}\n\n"
+            f"Trades Today: {trades_today}\n"
+            f"Outcome: {outcome}\n\n"
+            f"Daily P&L: {pnl_sign}${daily_pnl:.2f}\n"
+            f"Cumulative P&L: {cum_sign}${cumulative_pnl:.2f}\n"
+            f"Premium Collected: ${premium_collected:.2f}\n"
+            f"Win Rate: {win_rate:.0f}%"
+        )
+
+        return self.send_alert(
+            alert_type=AlertType.DAILY_SUMMARY,
+            title=f"Iron Fly Daily {pnl_emoji}",
+            message=message,
+            priority=AlertPriority.LOW,
+            details=summary
+        )
+
+    def daily_summary_rolling_put_diagonal(
+        self,
+        summary: Dict[str, Any]
+    ) -> bool:
+        """
+        Send comprehensive daily summary for Rolling Put Diagonal bot (LOW).
+
+        Args:
+            summary: Dictionary with daily summary data from log_daily_summary()
+        """
+        daily_pnl = summary.get("daily_pnl", 0)
+        cumulative_pnl = summary.get("cumulative_pnl", 0)
+        qqq_close = summary.get("qqq_close", 0)
+        ema_9 = summary.get("ema_9", 0)
+        macd_histogram = summary.get("macd_histogram", 0)
+        cci = summary.get("cci", 0)
+        roll_type = summary.get("roll_type", "")
+        campaign_number = summary.get("campaign_number", 0)
+        entry_conditions = summary.get("entry_conditions_met", "No")
+        long_delta = summary.get("long_put_delta", 0)
+        dry_run = summary.get("dry_run", False)
+        notes = summary.get("notes", "")
+
+        pnl_emoji = "📈" if daily_pnl >= 0 else "📉"
+        pnl_sign = "+" if daily_pnl >= 0 else ""
+        cum_sign = "+" if cumulative_pnl >= 0 else ""
+        mode = "[DRY RUN] " if dry_run else "[LIVE] "
+
+        # Activity description
+        if roll_type:
+            activity = f"Roll: {roll_type}"
+        elif campaign_number > 0:
+            activity = f"Campaign #{campaign_number} active"
+        else:
+            activity = "Waiting for entry"
+
+        message = (
+            f"{mode}Rolling Put Diagonal - End of Day\n\n"
+            f"QQQ Close: ${qqq_close:.2f}\n"
+            f"9 EMA: ${ema_9:.2f}\n"
+            f"MACD Hist: {macd_histogram:.4f}\n"
+            f"CCI: {cci:.1f}\n\n"
+            f"Daily P&L: {pnl_sign}${daily_pnl:.2f}\n"
+            f"Cumulative P&L: {cum_sign}${cumulative_pnl:.2f}\n\n"
+            f"Activity: {activity}\n"
+            f"Entry Conditions: {entry_conditions}\n"
+            f"Long Put Delta: {long_delta:.2f}"
+        )
+
+        return self.send_alert(
+            alert_type=AlertType.DAILY_SUMMARY,
+            title=f"Rolling Put Diagonal Daily {pnl_emoji}",
+            message=message,
+            priority=AlertPriority.LOW,
+            details=summary
         )
 
     # =========================================================================

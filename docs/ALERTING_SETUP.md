@@ -236,9 +236,13 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 |-------|----------|-----------|
 | Circuit Breaker | CRITICAL | After consecutive failures + emergency actions |
 | Emergency Close All | CRITICAL | After detecting unprotected position and closing |
+| **ITM Risk Close** | CRITICAL | After shorts emergency closed due to price within 0.1% of strike |
+| **Vigilant Mode Entry** | HIGH | When price enters 0.1%-0.3% danger zone near short strike |
 | Full Position Open | MEDIUM | After straddle + strangle both filled |
 | Position Closed | MEDIUM/HIGH | After exit (priority based on P&L) |
 | Roll Completed | MEDIUM | After shorts rolled successfully |
+| **Recenter Complete** | MEDIUM | After long straddle recentered to new ATM strike |
+| **Vigilant Mode Exit** | LOW | When price moves back to safe zone (>0.3% from strikes) |
 | **Pre-Market Gap** | HIGH/CRITICAL | SPY gaps 2%+ (WARNING) or 3%+ (CRITICAL) |
 | **Market Open** | LOW | Market opens at 9:30 AM ET |
 | **Market Close** | LOW | Market closes at 4:00 PM ET (or early close) |
@@ -287,6 +291,77 @@ Gap alerts include:
 - Affected positions summary
 
 **Note:** Gap alerts are deduplicated - each bot sends at most one alert per day, even if it wakes up multiple times during pre-market.
+
+### ITM Monitoring Alerts (Delta Neutral Only) (2026-01-26)
+
+The Delta Neutral bot monitors proximity to short strikes and sends alerts when price approaches danger zones:
+
+| Alert | Priority | Trigger | Details Included |
+|-------|----------|---------|------------------|
+| **VIGILANT_ENTERED** | HIGH | Price within 0.1%-0.3% of short strike | Strike type, distance ($), distance (%), strike price |
+| **VIGILANT_EXITED** | LOW | Price moves back >0.3% from strikes | Strike type, current price |
+| **ITM_RISK_CLOSE** | CRITICAL | Shorts closed at 0.1% threshold | Closed strikes, SPY price, VIX, positions retained |
+| **ROLL_COMPLETED** | MEDIUM | Shorts rolled successfully | Old/new strikes, premium, roll reason |
+| **RECENTER** | MEDIUM | Straddle recentered | New strike, SPY price, VIX, total recenters |
+
+**Example VIGILANT_ENTERED alert:**
+```
+VIGILANT: Price Near Short Call
+SPY $694.50 is 0.22% from short call $695
+Distance: $0.50
+Monitoring every 1 second. Close at 0.1% (~$0.70).
+```
+
+**Example ITM_RISK_CLOSE alert:**
+```
+ITM RISK: Shorts Closed
+Short strangle CLOSED due to ITM risk (0.1% threshold).
+SPY: $695.30
+Closed: Call $695 / Put $680
+Long straddle retained. Will check VIX before new entries.
+```
+
+### Daily Summary Alerts (All Bots) (2026-01-26)
+
+Each bot sends a comprehensive daily summary via WhatsApp and Email right after market close:
+
+| Bot | Alert Content |
+|-----|---------------|
+| **Iron Fly** | SPX close, VIX, trades today, outcome (profit/stop/none), daily P&L, cumulative P&L, premium collected, win rate |
+| **Delta Neutral** | State, SPY close, VIX, daily P&L, cumulative P&L, net theta, today's activity (rolls/recenters), totals |
+| **Rolling Put Diagonal** | QQQ close, 9 EMA, MACD, CCI, daily P&L, cumulative P&L, activity, entry conditions, long put delta |
+
+**Example Iron Fly Daily Summary:**
+```
+[LIVE] Iron Fly 0DTE - End of Day
+
+SPX Close: $6025.50
+VIX: 15.42
+
+Trades Today: 1
+Outcome: Profit target hit
+
+Daily P&L: +$75.00
+Cumulative P&L: +$1,250.00
+Premium Collected: $245.00
+Win Rate: 68%
+```
+
+**Example Delta Neutral Daily Summary:**
+```
+[LIVE] Delta Neutral - End of Day
+
+State: FullPosition
+SPY Close: $693.25
+VIX: 15.96
+
+Daily P&L: +$45.00
+Cumulative P&L: +$890.00
+Net Theta: $32.50/day
+
+Today's Activity: Shorts rolled
+Total Rolls: 4 | Recenters: 1
+```
 
 ---
 

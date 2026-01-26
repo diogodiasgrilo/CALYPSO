@@ -25,15 +25,22 @@ Timezone: All timestamps use US Eastern Time (ET) - the exchange timezone.
           Handles EST ↔ EDT transitions automatically via pytz.
 
 Alert Priorities (ALL levels get WhatsApp + Email):
-    CRITICAL: WhatsApp + Email (circuit breaker, emergency exit, naked positions)
-    HIGH: WhatsApp + Email (stop loss, max loss, position issues)
-    MEDIUM: WhatsApp + Email (position opened, profit target, daily summaries)
-    LOW: WhatsApp + Email (informational, startup/shutdown)
+    CRITICAL: WhatsApp + Email (circuit breaker, emergency exit, naked positions, ITM risk close)
+    HIGH: WhatsApp + Email (stop loss, max loss, position issues, vigilant mode entry)
+    MEDIUM: WhatsApp + Email (position opened, profit target, rolls, recenters)
+    LOW: WhatsApp + Email (informational, startup/shutdown, vigilant mode exit)
 
 Alert Responsibilities by Bot:
     Iron Fly:           AlertService only (no market monitor, no gap alerts - 0DTE only)
-    Delta Neutral:      AlertService + MarketStatusMonitor + SPY gap alerts
+    Delta Neutral:      AlertService + MarketStatusMonitor + SPY gap alerts + ITM monitoring alerts
     Rolling Put Diag:   AlertService + QQQ gap alerts
+
+Delta Neutral ITM Monitoring Alerts (2026-01-26):
+    - VIGILANT_ENTERED (HIGH): Price enters 0.1%-0.3% danger zone near short strike
+    - VIGILANT_EXITED (LOW): Price moves back to safe zone (>0.3% from strikes)
+    - ITM_RISK_CLOSE (CRITICAL): Shorts emergency closed at 0.1% threshold
+    - ROLL_COMPLETED (MEDIUM): Weekly shorts rolled (scheduled, challenged, or emergency)
+    - RECENTER (MEDIUM): Long straddle recentered to new ATM strike
 
 MarketStatusMonitor (runs ONLY on Delta Neutral to avoid duplicates):
     - Market opening countdown (1h, 30m, 15m before open)

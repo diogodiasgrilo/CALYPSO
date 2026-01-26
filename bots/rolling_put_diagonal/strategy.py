@@ -5146,6 +5146,12 @@ class RollingPutDiagonalStrategy:
             f"Rolls={self.metrics.roll_count}, P&L=${self.metrics.total_pnl:.2f}"
         )
 
+        # Send WhatsApp/Email daily summary alert
+        summary_for_alert = summary.copy()
+        summary_for_alert["dry_run"] = self.dry_run
+        self.alert_service.daily_summary_rolling_put_diagonal(summary_for_alert)
+        logger.info("Daily summary alert sent to WhatsApp/Email")
+
     def log_position_to_sheets(self):
         """
         Log current positions to Google Sheets Positions tab.

@@ -136,10 +136,10 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail →
 ### Alert Priority Levels
 | Priority | Delivery | Examples |
 |----------|----------|----------|
-| CRITICAL | WhatsApp + Email | Circuit breaker, emergency exit, naked position |
-| HIGH | WhatsApp + Email | Stop loss, max loss, wing breach, roll failed |
-| MEDIUM | WhatsApp + Email | Position opened/closed, profit target, roll complete |
-| LOW | WhatsApp + Email | Bot started/stopped, daily summary |
+| CRITICAL | WhatsApp + Email | Circuit breaker, emergency exit, naked position, ITM risk close |
+| HIGH | WhatsApp + Email | Stop loss, max loss, wing breach, roll failed, vigilant mode entry |
+| MEDIUM | WhatsApp + Email | Position opened/closed, profit target, roll complete, recenter |
+| LOW | WhatsApp + Email | Bot started/stopped, daily summary, vigilant mode exit |
 
 **Note:** ALL alerts go to WhatsApp (rich formatting) + Email. SMS is fallback only.
 
@@ -162,6 +162,13 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail →
 - Rolling Put Diagonal monitors QQQ gaps during pre-market
 - Each bot sends at most ONE gap alert per day (deduplication prevents spam)
 - Alerts include: gap %, previous close, current price, affected positions
+
+**Delta Neutral ITM Monitoring Alerts** (2026-01-26):
+- VIGILANT_ENTERED (HIGH): Price enters 0.1%-0.3% danger zone near short strike
+- VIGILANT_EXITED (LOW): Price moves back to safe zone (>0.3% from strikes)
+- ITM_RISK_CLOSE (CRITICAL): Shorts emergency closed at 0.1% threshold
+- ROLL_COMPLETED (MEDIUM): Weekly shorts rolled successfully
+- RECENTER (MEDIUM): Long straddle recentered to new ATM strike
 
 ### Enabling Alerts
 Add to each bot's `config.json`:

@@ -9735,6 +9735,13 @@ class DeltaNeutralStrategy:
         day_type = "weekend/holiday" if is_non_trading_day else "trading day"
         logger.info(f"Daily summary logged ({day_type}): P&L ${daily_pnl:.2f}, Net Theta ${net_theta:.2f}")
 
+        # Send WhatsApp/Email daily summary alert (only on trading days)
+        if not is_non_trading_day:
+            summary_for_alert = summary.copy()
+            summary_for_alert["dry_run"] = self.dry_run
+            self.alert_service.daily_summary_delta_neutral(summary_for_alert)
+            logger.info("Daily summary alert sent to WhatsApp/Email")
+
         return True
 
     def start_new_trading_day(self):
