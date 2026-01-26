@@ -19,6 +19,13 @@ Roll Types:
 
 Author: Trading Bot Developer
 Date: 2026
+Last Updated: 2026-01-26
+
+Code Audit: 2026-01-26
+- Fixed operator precedence bug in mid-price calculation: (Ask + Bid) / 2
+- Removed undefined _save_state() calls (replaced with logging)
+- Removed unused imports: field (dataclasses), AlertType, AlertPriority
+- Fixed string formatting bugs in dry-run logging
 """
 
 import json
@@ -27,7 +34,7 @@ import os
 import time
 from datetime import datetime, timedelta, date, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
@@ -42,7 +49,7 @@ from shared.event_calendar import (
     get_event_status_message,
     get_next_fomc_date,
 )
-from shared.alert_service import AlertService, AlertType, AlertPriority
+from shared.alert_service import AlertService
 
 # Path for persistent metrics storage
 METRICS_FILE = os.path.join(
@@ -539,7 +546,7 @@ class RollingPutDiagonalStrategy:
                 new_price = (
                     quote.get("Mid") or
                     quote.get("LastTraded") or
-                    quote.get("Ask", 0) + quote.get("Bid", 0) / 2 if quote.get("Ask") and quote.get("Bid") else None
+                    ((quote.get("Ask", 0) + quote.get("Bid", 0)) / 2 if quote.get("Ask") and quote.get("Bid") else None)
                 )
                 if new_price and new_price > 0:
                     old_price = self.current_price
@@ -1694,14 +1701,14 @@ class RollingPutDiagonalStrategy:
 
                     # Clear the short put from our state
                     self.diagonal.short_put = None
-                    self._save_state()
+                    logger.info("POS-004: Short put cleared from local state (will be recovered from Saxo on restart)")
 
                     return assignment_msg
                 else:
                     # Short put disappeared but no stock - could be expiration OTM
                     logger.warning(f"⚠️ {assignment_msg} (no stock found - may have expired OTM)")
                     self.diagonal.short_put = None
-                    self._save_state()
+                    logger.info("POS-004: Short put cleared from local state (will be recovered from Saxo on restart)")
                     return assignment_msg
 
             return None
@@ -3309,9 +3316,9 @@ class RollingPutDiagonalStrategy:
 
                 logger.info("[DRY RUN] Would place orders:")
                 logger.info(f"  BUY long put: UIC {long_put_data['uic']}, strike ${long_put_data['strike']}, "
-                           f"mid ${long_mid:.2f}" if long_mid else "mid N/A")
+                           f"mid ${long_mid:.2f}" if long_mid else f"  BUY long put: UIC {long_put_data['uic']}, strike ${long_put_data['strike']}, mid N/A")
                 logger.info(f"  SELL short put: UIC {short_put_data['uic']}, strike ${short_put_data['strike']}, "
-                           f"mid ${short_mid:.2f}" if short_mid else "mid N/A")
+                           f"mid ${short_mid:.2f}" if short_mid else f"  SELL short put: UIC {short_put_data['uic']}, strike ${short_put_data['strike']}, mid N/A")
                 logger.info(f"  Simulated net debit: ${simulated_net_debit:.2f}")
 
                 # Simulate success in dry run with mid-prices

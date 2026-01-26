@@ -115,7 +115,13 @@ REPORTING
 =============================================================================
 Author: Trading Bot Developer
 Date: 2024
-Last Updated: 2026-01-22 (42 edge case handlers added)
+Last Updated: 2026-01-26
+
+Change History:
+- 2026-01-22: Added 42 edge case handlers (see docs/DELTA_NEUTRAL_EDGE_CASES.md)
+- 2026-01-26: Code Audit fixes:
+  * Fixed entry_strike -> initial_strike in get_premarket_analysis() (4 occurrences)
+  * Fixed undefined _get_underlying_price() calls (replaced with client.get_quote())
 """
 
 import logging
@@ -9827,7 +9833,9 @@ class DeltaNeutralStrategy:
         if current_price == 0:
             # Try to fetch fresh price
             try:
-                current_price = self._get_underlying_price()
+                quote = self.client.get_quote(self.underlying_uic)
+                if quote:
+                    current_price = quote.get("Mid") or quote.get("LastTraded", 0)
             except Exception:
                 pass
 
@@ -9937,7 +9945,9 @@ class DeltaNeutralStrategy:
         # Get current price
         if current_spy_price <= 0:
             try:
-                current_spy_price = self._get_underlying_price()
+                quote = self.client.get_quote(self.underlying_uic)
+                if quote:
+                    current_spy_price = quote.get("Mid") or quote.get("LastTraded", 0)
             except Exception:
                 pass
 
@@ -9991,9 +10001,9 @@ class DeltaNeutralStrategy:
                 if buffer_to_put <= 2:
                     impacts.append(f"SHORT PUT CLOSE: Only ${buffer_to_put:.2f} above Put strike ${short_put_strike}")
 
-        # Check if longs would trigger recenter (>= 5 points from entry strike)
-        if self.long_straddle and self.long_straddle.entry_strike:
-            long_strike = self.long_straddle.entry_strike
+        # Check if longs would trigger recenter (>= 5 points from initial strike)
+        if self.long_straddle and self.long_straddle.initial_strike:
+            long_strike = self.long_straddle.initial_strike
             move_from_strike = abs(current_spy_price - long_strike)
 
             if move_from_strike >= self.recenter_threshold:
@@ -10008,9 +10018,9 @@ class DeltaNeutralStrategy:
                     f"(recenter at {self.recenter_threshold} pts)"
                 )
 
-        # Check emergency exit threshold (5% from entry)
-        if self.long_straddle and self.long_straddle.entry_strike:
-            long_strike = self.long_straddle.entry_strike
+        # Check emergency exit threshold (5% from initial strike)
+        if self.long_straddle and self.long_straddle.initial_strike:
+            long_strike = self.long_straddle.initial_strike
             emergency_pct = self.strategy_config.get("emergency_exit_percent", 5.0)
             emergency_threshold = long_strike * (emergency_pct / 100)
             move_from_strike = abs(current_spy_price - long_strike)

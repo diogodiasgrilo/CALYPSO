@@ -42,6 +42,11 @@ Edge Case Audit: 2026-01-22 to 2026-01-23
 - Added pending order check on startup with auto-cancel (ORDER-006)
 - Added timed-out order cancellation with retry logic (ORDER-007/008)
 
+Code Audit: 2026-01-26
+- Removed unused _pending_order_ids and _filled_orders variables
+- Consolidated duplicate get_us_market_time() to use shared.market_hours
+- Removed unused json import from main.py
+
 See docs/IRON_FLY_EDGE_CASES.md for full analysis.
 """
 
@@ -57,6 +62,7 @@ from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
+from shared.market_hours import get_us_market_time, US_EASTERN
 
 # Path for persistent metrics storage
 METRICS_FILE = os.path.join(
@@ -149,22 +155,6 @@ STOP_LOSS_RETRY_DELAY_SECONDS = 2  # Delay between stop loss retries
 # MKT-004: Extreme spread warning thresholds (for exit monitoring)
 EXTREME_SPREAD_WARNING_PERCENT = 50.0  # Log warning if spread > 50% during exit
 EXTREME_SPREAD_CRITICAL_PERCENT = 100.0  # Log critical if spread > 100%
-
-# US Eastern timezone
-try:
-    import pytz
-    US_EASTERN = pytz.timezone('US/Eastern')
-except ImportError:
-    US_EASTERN = None
-
-
-def get_us_market_time() -> datetime:
-    """Get current time in US Eastern timezone."""
-    if US_EASTERN:
-        return datetime.now(US_EASTERN)
-    # Fallback: assume local time is Eastern (for development)
-    return datetime.now()
-
 
 def load_cumulative_metrics() -> Dict[str, Any]:
     """
@@ -738,8 +728,6 @@ class IronFlyStrategy:
 
         # Order execution safety tracking
         self._orphaned_orders: List[Dict] = []  # Track orders that may need cleanup
-        self._pending_order_ids: List[str] = []  # Track orders awaiting fill
-        self._filled_orders: Dict[str, Dict] = {}  # Track filled orders by ID
         # Note: Order timeout is hardcoded to 30s in _verify_order_fill() since we always use
         # market orders which should fill instantly. Config option removed as unused.
 

@@ -22,10 +22,10 @@ Key Logic (2026-01-23):
 Configuration:
 - weekly_target_return_percent: 1.0 (target 1% NET weekly return)
 - exit_dte_max: 60 (close everything when longs reach this DTE)
-- short_strangle_max_multiplier: 1.5 (cap for strike distance)
+- weekly_strangle_multiplier_max: 2.0 (max multiplier for strike distance)
 - recenter_threshold_points: 5.0 (recenter when SPY moves ±$5)
 
-Updated: 2026-01-25
+Updated: 2026-01-26 (Code Audit - fixed config key name)
 """
 
 from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState

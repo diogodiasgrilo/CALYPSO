@@ -3,15 +3,18 @@ Shared infrastructure modules for CALYPSO trading bots.
 
 This package contains common utilities used by all trading strategies:
 - saxo_client: Saxo Bank API client for trading operations
+  (includes AssetType enum: STOCK, STOCK_OPTION, STOCK_INDEX_OPTION, CFD_ON_STOCK, CFD_ON_INDEX, ETF, FUTURES)
 - logger_service: Google Sheets and local file logging
 - config_loader: Smart config loading (cloud vs local)
-- market_hours: US market hours utilities
+- market_hours: US market hours utilities (get_us_market_time, US_EASTERN, etc.)
 - secret_manager: GCP Secret Manager interface
 - external_price_feed: Yahoo Finance fallback for prices
 - token_coordinator: OAuth token refresh coordination across bots
 - event_calendar: FOMC/economic calendar for trading blackouts
 - technical_indicators: Technical analysis calculations
 - alert_service: SMS/Email alerting via Google Cloud Pub/Sub
+
+Last Updated: 2026-01-26 (Code Audit - added get_us_market_time, US_EASTERN exports)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -185,6 +188,8 @@ from shared.market_hours import (
     get_market_close_time,
     is_market_holiday,
     get_holiday_name,
+    get_us_market_time,
+    US_EASTERN,
 )
 from shared.secret_manager import is_running_on_gcp
 from shared.external_price_feed import ExternalPriceFeed
@@ -214,6 +219,8 @@ __all__ = [
     # Market Hours (Early Close / Holidays)
     'is_early_close_day', 'get_early_close_reason', 'get_market_close_time',
     'is_market_holiday', 'get_holiday_name',
+    # Market Hours (Timezone)
+    'get_us_market_time', 'US_EASTERN',
     # Cloud
     'is_running_on_gcp',
     # Price Feed

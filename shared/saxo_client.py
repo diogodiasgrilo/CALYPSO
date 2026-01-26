@@ -10,9 +10,18 @@ This module handles all interactions with the Saxo Bank OpenAPI including:
 - Rate limiting with exponential backoff on 429 errors (CONN-006)
 - Multi-bot token coordination via TokenCoordinator
 
+AssetType enum includes:
+- STOCK, STOCK_OPTION, STOCK_INDEX_OPTION
+- CFD_ON_STOCK, CFD_ON_INDEX
+- ETF, FUTURES
+
 Author: Trading Bot Developer
 Date: 2024
-Last Updated: 2026-01-22
+Last Updated: 2026-01-26
+
+Code Audit: 2026-01-26
+- Added STOCK_INDEX_OPTION and CFD_ON_INDEX to AssetType enum
+- Removed duplicate get_open_orders() definition (kept /orders/me endpoint version)
 """
 
 import json
@@ -59,7 +68,9 @@ class AssetType(Enum):
     """Enumeration of asset types."""
     STOCK = "Stock"
     STOCK_OPTION = "StockOption"
+    STOCK_INDEX_OPTION = "StockIndexOption"
     CFD_ON_STOCK = "CfdOnStock"
+    CFD_ON_INDEX = "CfdOnIndex"
     ETF = "Etf"
     FUTURES = "Futures"
 
@@ -2153,24 +2164,6 @@ class SaxoClient:
                         )
 
             return positions
-        return []
-
-    def get_open_orders(self) -> Optional[List[Dict]]:
-        """
-        Get all open orders for the account.
-
-        Returns:
-            list: List of open order dictionaries.
-        """
-        endpoint = f"/port/v1/orders"
-        params = {
-            "ClientKey": self.client_key,
-            "FieldGroups": "DisplayAndFormat"
-        }
-
-        response = self._make_request("GET", endpoint, params=params)
-        if response and "Data" in response:
-            return response["Data"]
         return []
 
     def place_order(

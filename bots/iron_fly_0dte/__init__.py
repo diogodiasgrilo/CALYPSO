@@ -26,7 +26,7 @@ Safety Features:
 - Multiple iron fly detection and auto-selection
 
 Edge Cases: 63 analyzed, 59 LOW / 3 MEDIUM / 1 HIGH by design (see docs/IRON_FLY_EDGE_CASES.md)
-Last Updated: 2026-01-23
+Last Updated: 2026-01-26 (Code Audit - removed dead code, consolidated imports)
 """
 
 from bots.iron_fly_0dte.strategy import IronFlyStrategy, IronFlyState
