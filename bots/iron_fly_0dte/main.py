@@ -50,6 +50,7 @@ from shared.market_hours import (
 )
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
+from shared.market_status_monitor import MarketStatusMonitor
 
 # Import bot-specific strategy
 from bots.iron_fly_0dte.strategy import IronFlyStrategy, IronFlyState
@@ -158,6 +159,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     # Initialize strategy
     strategy = IronFlyStrategy(client, config, trade_logger, dry_run=dry_run)
 
+    # Initialize market status monitor for countdown/open/close alerts
+    market_monitor = None
+    if strategy.alert_service:
+        market_monitor = MarketStatusMonitor(strategy.alert_service)
+        trade_logger.log_event("Market status monitor initialized (countdown alerts enabled)")
+
     # Log dashboard metrics on startup (always update on restart for fresh data)
     try:
         trade_logger.log_event("Logging dashboard metrics on startup...")
@@ -241,6 +248,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     trade_logger.log_event("New trading day detected - resetting strategy")
                     strategy.reset_for_new_day()
                     last_day = today
+
+                # Check market status and send countdown/open/close alerts
+                if market_monitor:
+                    try:
+                        market_monitor.check_and_alert()
+                    except Exception as e:
+                        logger.debug(f"Market monitor check failed: {e}")
 
                 # Check if market is open
                 if not is_market_open():
