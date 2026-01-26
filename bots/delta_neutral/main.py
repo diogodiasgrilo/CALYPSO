@@ -447,7 +447,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     last_performance_metrics_date = None  # Track last performance metrics logged (every day)
     trading_day_started = False  # Track if we've started tracking for today
     last_dashboard_log_time = datetime.now()
-    dashboard_log_interval = 900  # Log dashboard metrics every 15 minutes
+    dashboard_log_interval = 300  # Log dashboard metrics every 5 minutes (reduced from 15min for better ITM visibility)
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour (3600 seconds)
     last_position_sync_time = datetime.now()
@@ -741,7 +741,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     trade_logger.log_status(status)
                     last_status_time = now
 
-                # Periodic dashboard logging (every 15 min for Looker Studio)
+                # Periodic dashboard logging (every 5 min for Looker Studio)
                 if (now - last_dashboard_log_time).total_seconds() >= dashboard_log_interval:
                     try:
                         # Refresh position prices before logging
@@ -838,8 +838,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         break  # Shutdown requested
                 elif monitoring_mode == MonitoringMode.VIGILANT:
                     # VIGILANT MODE: Price is 0.1%-0.3% from short strike
-                    # Use fast 3-second interval to catch any move toward ITM
-                    vigilant_interval = monitoring_mode.value  # 3 seconds
+                    # Use fast 1-second interval to catch any move toward ITM (WebSocket cache, no API cost)
+                    vigilant_interval = monitoring_mode.value  # 1 second
                     trade_logger.log_event(
                         f"{mode_prefix}⚠️ VIGILANT | State: {status['state']} | "
                         f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
@@ -848,14 +848,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     if not interruptible_sleep(vigilant_interval):
                         break  # Shutdown requested
                 else:
+                    # NORMAL MODE: Use MonitoringMode.NORMAL interval (10s with WebSocket cache)
+                    normal_interval = MonitoringMode.NORMAL.value
                     trade_logger.log_event(
                         f"{mode_prefix}HEARTBEAT | State: {status['state']} | "
                         f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
-                        f"Next check in {check_interval}s"
+                        f"Next check in {normal_interval}s"
                     )
 
                     # Sleep until next check (interruptible for fast shutdown)
-                    if not interruptible_sleep(check_interval):
+                    if not interruptible_sleep(normal_interval):
                         break  # Shutdown requested
 
             except KeyboardInterrupt:

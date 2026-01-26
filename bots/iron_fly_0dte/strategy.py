@@ -4062,7 +4062,7 @@ class IronFlyStrategy:
         """
         Log real-time opening range snapshot to Google Sheets during monitoring.
 
-        Called every 30 seconds during the 9:30-10:00 AM monitoring period.
+        Called every 15 seconds during the 9:30-10:00 AM monitoring period.
         Updates a single row for today's date (upsert) rather than appending.
         Shows "MONITORING" as entry_decision until final decision at 10:00 AM.
         """

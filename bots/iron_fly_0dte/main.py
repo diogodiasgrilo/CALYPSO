@@ -340,7 +340,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         else:
                             trade_logger.log_event(action)
 
-                # Periodic status logging (every 30 seconds for 0DTE fast updates)
+                # Periodic status logging (every 15 seconds for 0DTE fast updates with WebSocket cache)
                 now = datetime.now()
                 if (now - last_status_time).total_seconds() >= status_interval:
                     status = strategy.get_status_summary()
@@ -378,7 +378,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
 
                     trade_logger.log_event(heartbeat_msg)
 
-                    # Log to Google Sheets for real-time dashboard (every 30s)
+                    # Log to Google Sheets for real-time dashboard (every 15s)
                     strategy.log_account_summary()
 
                     # Log position snapshot if one is open

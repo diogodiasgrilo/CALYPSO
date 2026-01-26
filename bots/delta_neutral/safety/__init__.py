@@ -78,7 +78,7 @@ SAFETY ARCHITECTURE OVERVIEW (44 Edge Cases - 100% Coverage)
 7. ITM RISK DETECTION (strategy.py ~4936-4990)
    - check_shorts_itm_risk(): Monitors short strikes vs SPY price
    - Triggers emergency roll if price approaches strike
-   - Uses percentage-based threshold (0.3% with 30s check interval)
+   - Uses percentage-based threshold (0.3% with 10s check interval, 1s in VIGILANT mode)
    - At SPY ~$690, 0.3% = ~$2.07 buffer from strike
 
 =============================================================================

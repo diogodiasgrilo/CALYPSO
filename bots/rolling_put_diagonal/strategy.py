@@ -4797,7 +4797,7 @@ class RollingPutDiagonalStrategy:
         """
         Run one iteration of the strategy loop.
 
-        Called by main.py every 60 seconds during market hours.
+        Called by main.py every 30 seconds during market hours (optimized for WebSocket streaming).
         """
         # TIME-001: Acquire operation lock to prevent overlapping iterations
         if not self._acquire_operation_lock():

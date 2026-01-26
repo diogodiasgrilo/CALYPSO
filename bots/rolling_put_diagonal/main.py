@@ -320,7 +320,7 @@ def print_banner():
     print(banner)
 
 
-def run_bot(config: dict, dry_run: bool = False, check_interval: int = 60):
+def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     """
     Run the main trading bot loop.
 
@@ -820,8 +820,8 @@ def main():
     parser.add_argument(
         "--interval",
         type=int,
-        default=60,
-        help="Check interval in seconds (default: 60)"
+        default=30,
+        help="Check interval in seconds (default: 30, optimized for WebSocket streaming)"
     )
 
     args = parser.parse_args()

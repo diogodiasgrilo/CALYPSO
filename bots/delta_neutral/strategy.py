@@ -5074,9 +5074,9 @@ class DeltaNeutralStrategy:
         """
         Determine the appropriate monitoring mode based on ITM proximity.
 
-        VIGILANT MONITORING SYSTEM:
-        - NORMAL (30s): Price is > 0.3% from both short strikes (safe)
-        - VIGILANT (3s): Price is 0.1% - 0.3% from a short strike (watching closely)
+        VIGILANT MONITORING SYSTEM (2026-01-26: optimized for WebSocket streaming):
+        - NORMAL (10s): Price is > 0.3% from both short strikes (safe)
+        - VIGILANT (1s): Price is 0.1% - 0.3% from a short strike (watching closely)
 
         This allows the bot to:
         1. Monitor more frequently when price approaches danger
@@ -5113,7 +5113,7 @@ class DeltaNeutralStrategy:
             if not hasattr(self, '_last_vigilant_log_call') or self._last_vigilant_log_call != round(pct_from_strike, 2):
                 logger.warning(
                     f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - price ${price:.2f} is "
-                    f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 3 seconds."
+                    f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 1 second."
                 )
                 self._last_vigilant_log_call = round(pct_from_strike, 2)
             return MonitoringMode.VIGILANT
@@ -5123,17 +5123,17 @@ class DeltaNeutralStrategy:
             if not hasattr(self, '_last_vigilant_log_put') or self._last_vigilant_log_put != round(pct_from_strike, 2):
                 logger.warning(
                     f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - price ${price:.2f} is "
-                    f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 3 seconds."
+                    f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 1 second."
                 )
                 self._last_vigilant_log_put = round(pct_from_strike, 2)
             return MonitoringMode.VIGILANT
 
         # Clear vigilant log trackers when back to normal
         if hasattr(self, '_last_vigilant_log_call'):
-            logger.info("✓ Exited vigilant zone (call) - back to normal 30s monitoring")
+            logger.info("✓ Exited vigilant zone (call) - back to normal 10s monitoring")
             del self._last_vigilant_log_call
         if hasattr(self, '_last_vigilant_log_put'):
-            logger.info("✓ Exited vigilant zone (put) - back to normal 30s monitoring")
+            logger.info("✓ Exited vigilant zone (put) - back to normal 10s monitoring")
             del self._last_vigilant_log_put
 
         return MonitoringMode.NORMAL
@@ -8055,7 +8055,7 @@ class DeltaNeutralStrategy:
 
         # Check if shorts are being challenged
         # Per spec: "within 0.3% of Short_Call_Strike or Short_Put_Strike"
-        # (Tighter threshold for bot's 30s check interval)
+        # (Tighter threshold for bot's 10s check interval with WebSocket streaming)
         if self.short_strangle and self.current_underlying_price:
             call_strike = self.short_strangle.call_strike
             put_strike = self.short_strangle.put_strike
@@ -8613,7 +8613,7 @@ class DeltaNeutralStrategy:
         Returns:
             Tuple[str, MonitoringMode]: (action_description, monitoring_mode)
             - action_description: What action was taken, if any
-            - monitoring_mode: NORMAL (30s) or VIGILANT (3s) based on ITM proximity
+            - monitoring_mode: NORMAL (10s) or VIGILANT (1s) based on ITM proximity
         """
         # TIME-001: Check operation lock to prevent concurrent strategy checks
         if self._operation_in_progress:
