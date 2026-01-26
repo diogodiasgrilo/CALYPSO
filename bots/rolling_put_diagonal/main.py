@@ -461,9 +461,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                 reason = "Pre-market"
             else:
                 reason = "After-hours"
-                # Send daily summary once at market close (not on every restart)
+                # Send daily summary once at market close (>= 4 PM ET, not on every restart)
+                # IMPORTANT: Only send if actually after 4 PM ET, not just "else" case
+                is_after_market_close = now.hour >= 16  # 4 PM ET or later
                 today = now.date()
-                if daily_summary_sent_date != today:
+                if is_after_market_close and daily_summary_sent_date != today:
                     trade_logger.log_event("Market closed - sending daily summary...")
                     strategy.log_daily_summary()
                     daily_summary_sent_date = today
