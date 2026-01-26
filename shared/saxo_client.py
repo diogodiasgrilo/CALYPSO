@@ -20,6 +20,7 @@ import time
 import logging
 import threading
 import webbrowser
+import struct
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Callable, Tuple
 from urllib.parse import urlencode
@@ -212,6 +213,8 @@ class SaxoClient:
 
         # Price cache for subscription snapshots (UIC -> latest price data)
         self._price_cache: Dict[int, Dict] = {}
+        # Timestamps for cache staleness detection (UIC -> last update time)
+        self._price_cache_timestamps: Dict[int, float] = {}
 
         # Account information - auto-select based on environment
         account_config = config.get("account", {})
@@ -1794,20 +1797,29 @@ class SaxoClient:
         spy_uic_int = int(spy_uic)
 
         # PRIORITY 1: Check WebSocket streaming cache (no API call, instant)
+        # Only use cache if it's been updated within the last 60 seconds
+        # This prevents stale data if WebSocket stops receiving updates
+        cache_max_age_seconds = 60
         if spy_uic_int in self._price_cache:
-            cached = self._price_cache[spy_uic_int]
-            if cached and "Quote" in cached:
-                price = (
-                    cached["Quote"].get("Mid") or
-                    cached["Quote"].get("LastTraded") or
-                    cached["Quote"].get("Bid") or
-                    cached["Quote"].get("Ask")
-                )
-                if price and price > 0:
-                    logger.debug(f"{symbol}: Using cached streaming price ${price:.2f}")
-                    return cached
+            cache_timestamp = self._price_cache_timestamps.get(spy_uic_int, 0)
+            cache_age = time.time() - cache_timestamp
 
-        # PRIORITY 2: Saxo REST API (fallback if cache miss or invalid)
+            if cache_age <= cache_max_age_seconds:
+                cached = self._price_cache[spy_uic_int]
+                if cached and "Quote" in cached:
+                    price = (
+                        cached["Quote"].get("Mid") or
+                        cached["Quote"].get("LastTraded") or
+                        cached["Quote"].get("Bid") or
+                        cached["Quote"].get("Ask")
+                    )
+                    if price and price > 0:
+                        logger.debug(f"{symbol}: Using cached streaming price ${price:.2f} (age: {cache_age:.1f}s)")
+                        return cached
+            else:
+                logger.debug(f"{symbol}: Cache stale ({cache_age:.1f}s > {cache_max_age_seconds}s), using REST API")
+
+        # PRIORITY 2: Saxo REST API (fallback if cache miss, invalid, or stale)
         endpoint = "/trade/v1/infoprices/list"
         params = {
             "AccountKey": self.account_key,
@@ -3155,6 +3167,7 @@ class SaxoClient:
                 # Cache the snapshot price data for later retrieval
                 snapshot = response["Snapshot"]
                 self._price_cache[uic] = snapshot
+                self._price_cache_timestamps[uic] = time.time()
 
                 # Log the snapshot structure for debugging
                 snapshot_keys = list(snapshot.keys()) if isinstance(snapshot, dict) else str(type(snapshot))
@@ -3173,31 +3186,115 @@ class SaxoClient:
 
         return success_count > 0
 
+    def _decode_binary_ws_message(self, raw: bytes):
+        """
+        Decode Saxo Bank binary WebSocket message format.
+
+        Binary format (from Saxo documentation):
+        - 8 bytes: Message ID (uint64, little-endian)
+        - 2 bytes: Reserved
+        - 1 byte: Reference ID length
+        - N bytes: Reference ID (ASCII string)
+        - 1 byte: Payload format (0=JSON, 1=Protobuf)
+        - 4 bytes: Payload size (int32, little-endian)
+        - N bytes: Payload data
+
+        A single raw message can contain multiple data messages.
+
+        Yields:
+            dict: Decoded message with 'refid', 'msgId', and 'msg' keys
+        """
+        pos = 0
+        while pos < len(raw):
+            try:
+                # Message ID (8 bytes, uint64 little-endian)
+                msg_id = struct.unpack_from('<Q', raw, pos)[0]
+                pos += 8
+
+                # Reserved (2 bytes, skip)
+                pos += 2
+
+                # Reference ID length (1 byte)
+                ref_id_len = struct.unpack_from('B', raw, pos)[0]
+                pos += 1
+
+                # Reference ID (variable length ASCII)
+                ref_id = raw[pos:pos + ref_id_len].decode('ascii')
+                pos += ref_id_len
+
+                # Payload format (1 byte: 0=JSON, 1=Protobuf)
+                payload_format = struct.unpack_from('B', raw, pos)[0]
+                pos += 1
+
+                # Payload size (4 bytes, int32 little-endian)
+                payload_size = struct.unpack_from('<i', raw, pos)[0]
+                pos += 4
+
+                # Payload data
+                payload_data = raw[pos:pos + payload_size]
+                pos += payload_size
+
+                # Parse payload based on format
+                if payload_format == 0:  # JSON
+                    msg = json.loads(payload_data.decode('utf-8'))
+                else:
+                    # Protobuf - just store raw bytes (we don't use this)
+                    msg = payload_data
+
+                yield {
+                    'refid': ref_id,
+                    'msgId': msg_id,
+                    'msg': msg
+                }
+            except struct.error:
+                # End of data or malformed message
+                break
+            except json.JSONDecodeError as e:
+                logger.debug(f"Failed to decode JSON payload: {e}")
+                break
+
     def _start_websocket(self):
         """Initialize and start the WebSocket connection."""
         def on_message(ws, message):
             """Handle incoming WebSocket messages."""
             try:
-                # Saxo sends bytes or string; decode if needed
+                # Saxo sends binary WebSocket frames with a specific format
+                # See: https://www.developer.saxo/openapi/learn/plain-websocket-streaming
                 if isinstance(message, bytes):
-                    message = message.decode('utf-8')
-                    
-                data = json.loads(message)
-                
-                # heartbeat checks - still record success to keep circuit breaker happy
-                if "ReferenceId" in data and data["ReferenceId"] == "_heartbeat":
-                    self._heartbeat_count += 1
-                    self._record_success()  # Heartbeat proves WebSocket is alive
-                    # Log every 10th heartbeat to confirm they're being received
-                    if self._heartbeat_count % 10 == 0:
-                        logger.debug(f"WebSocket heartbeat #{self._heartbeat_count} received - connection healthy")
-                    return
+                    # Parse binary format using struct
+                    for decoded in self._decode_binary_ws_message(message):
+                        ref_id = decoded.get('refid', '')
+                        msg_data = decoded.get('msg', {})
 
-                self._handle_streaming_message(data)
-                self._record_success()
+                        # Heartbeat messages have special reference ID
+                        if ref_id == '_heartbeat':
+                            self._heartbeat_count += 1
+                            self._record_success()
+                            if self._heartbeat_count % 10 == 0:
+                                logger.debug(f"WebSocket heartbeat #{self._heartbeat_count} received")
+                            continue
+
+                        # Price update messages
+                        if isinstance(msg_data, dict):
+                            self._handle_streaming_message(msg_data)
+                            self._record_success()
+                else:
+                    # Text message (fallback, shouldn't happen with Saxo)
+                    data = json.loads(message)
+                    if "ReferenceId" in data and data["ReferenceId"] == "_heartbeat":
+                        self._heartbeat_count += 1
+                        self._record_success()
+                        return
+                    self._handle_streaming_message(data)
+                    self._record_success()
+
             except Exception as e:
-                # Don't log every decode error (keep logs clean)
-                pass
+                # Log the first few errors for debugging
+                if not hasattr(self, '_ws_error_count'):
+                    self._ws_error_count = 0
+                self._ws_error_count += 1
+                if self._ws_error_count <= 5:
+                    logger.warning(f"WebSocket message decode error #{self._ws_error_count}: {e}")
 
         def on_error(ws, error):
             logger.error(f"WebSocket error: {error}")
@@ -3266,8 +3363,9 @@ class SaxoClient:
                     # Ensure UIC is int for consistent cache keys
                     uic = int(uic)
 
-                    # Update price cache with latest data
+                    # Update price cache with latest data and timestamp
                     self._price_cache[uic] = item
+                    self._price_cache_timestamps[uic] = time.time()
 
                     # Call the callback if registered
                     if uic in self.price_callbacks:
@@ -3343,6 +3441,7 @@ class SaxoClient:
         if response and "Snapshot" in response:
             snapshot = response["Snapshot"]
             self._price_cache[uic] = snapshot
+            self._price_cache_timestamps[uic] = time.time()
 
             # Store callback if provided
             if callback:
