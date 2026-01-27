@@ -249,7 +249,7 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-tradin
 
 ### Emergency Stop (All Bots)
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 ```
 
 ### Stop Individual Bots
@@ -262,37 +262,42 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop 
 
 # Rolling Put Diagonal
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop rolling_put_diagonal"
+
+# MEIC
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop meic"
 ```
 
 ### Start Bots
 ```bash
 # All bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte delta_neutral rolling_put_diagonal"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 
 # Individual
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start delta_neutral"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start rolling_put_diagonal"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start meic"
 ```
 
 ### Restart Bots
 ```bash
 # All bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 
 # Individual
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart delta_neutral"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart rolling_put_diagonal"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart meic"
 ```
 
 ### Check Status
 ```bash
 # All bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 
 # List running services
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling)'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling|meic)'"
 ```
 
 ### View Logs
@@ -301,12 +306,15 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u delta_neutral -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u rolling_put_diagonal -n 50 --no-pager"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -n 50 --no-pager"
 
 # Follow logs (live)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte -f"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -f"
 
 # Today's logs
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte --since today --no-pager"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic --since today --no-pager"
 ```
 
 ---
@@ -345,12 +353,12 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 3. **Restart bots to apply changes:**
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 ```
 
 4. **Verify status:**
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 ```
 
 5. **Post-Deployment Documentation Update (MANDATORY):**
@@ -424,11 +432,13 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/iron_fly_0dte/config/config.json"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/delta_neutral/config/config.json"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/rolling_put_diagonal/config/config.json"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/meic/config/config.json"
 
 # View systemd service files
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/iron_fly_0dte.service"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/delta_neutral.service"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/rolling_put_diagonal.service"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/meic.service"
 ```
 
 ---
@@ -679,15 +689,16 @@ SCRIPT
 ## Important Notes
 
 1. **Git on VM:** Must run as `calypso` user: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
-2. **Service names use underscores:** `iron_fly_0dte`, `delta_neutral`, `rolling_put_diagonal`
-3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral,rolling_put_diagonal}/bot.log`
+2. **Service names use underscores:** `iron_fly_0dte`, `delta_neutral`, `rolling_put_diagonal`, `meic`
+3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral,rolling_put_diagonal,meic}/bot.log`
 4. **Position data:** `/opt/calypso/data/iron_fly_position.json`
 5. **Config files are gitignored:** Real credentials come from Secret Manager
 6. **All API calls are direct:** No caching for order status or positions (always fresh from Saxo)
-7. **Iron Fly bot:** Running in LIVE mode (as of 2026-01-23)
+7. **Iron Fly bot:** PAUSED (as of 2026-01-23)
 8. **Delta Neutral bot:** Running in LIVE mode
 9. **Rolling Put Diagonal bot:** Still in dry-run mode
-10. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
+10. **MEIC bot:** NEW - ready for dry-run testing
+11. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 
 ---
 
