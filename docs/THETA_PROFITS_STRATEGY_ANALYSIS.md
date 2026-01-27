@@ -758,7 +758,6 @@ Day 3: Deployment
 | **Stock-Based Strategies** | Requires share ownership, assignment handling |
 
 ### Questionable Risk/Reward
-
 | Strategy | Reason |
 |----------|--------|
 | **0DTE Breakeven IC** | 39% win rate, double stop-out risk increasing |

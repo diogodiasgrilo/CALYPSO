@@ -18,9 +18,10 @@ CALYPSO is a monorepo containing multiple automated options trading bots that tr
 ### Codebase Structure
 ```
 bots/
-  iron_fly_0dte/      # Doc Severson's Iron Fly strategy
+  iron_fly_0dte/      # Doc Severson's Iron Fly strategy (PAUSED)
   delta_neutral/      # Brian's Delta Neutral strategy
   rolling_put_diagonal/  # Bill Belt's Rolling Put Diagonal strategy
+  meic/               # Tammy Chambless's MEIC strategy (Multiple Entry Iron Condors)
 
 shared/               # Shared modules used by all bots
   saxo_client.py      # Saxo Bank API client (orders, positions, streaming)
@@ -50,13 +51,14 @@ cloud_functions/      # Google Cloud Functions
 
 ---
 
-## Trading Bots (3 Total)
+## Trading Bots (4 Total)
 
-| Bot | Service Name | Strategy | Config Path |
-|-----|--------------|----------|-------------|
-| Iron Fly | `iron_fly_0dte.service` | Doc Severson's 0DTE Iron Butterfly | `bots/iron_fly_0dte/config/config.json` |
-| Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral/config/config.json` |
-| Rolling Put Diagonal | `rolling_put_diagonal.service` | Bill Belt's Rolling Put Diagonal | `bots/rolling_put_diagonal/config/config.json` |
+| Bot | Service Name | Strategy | Config Path | Status |
+|-----|--------------|----------|-------------|--------|
+| Iron Fly | `iron_fly_0dte.service` | Doc Severson's 0DTE Iron Butterfly | `bots/iron_fly_0dte/config/config.json` | PAUSED |
+| Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral/config/config.json` | LIVE |
+| Rolling Put Diagonal | `rolling_put_diagonal.service` | Bill Belt's Rolling Put Diagonal | `bots/rolling_put_diagonal/config/config.json` | DRY-RUN |
+| MEIC | `meic.service` | Tammy Chambless's MEIC (Multiple Entry Iron Condors) | `bots/meic/config/config.json` | NEW |
 
 All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `StartLimitBurst=5`
 
@@ -82,6 +84,34 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 | Profit target hit | +$75 | Target exit |
 | Stop loss (wing touch) | -$250 to -$350 | Typical stop-out |
 | Max loss (circuit breaker) | -$400 | Safety cap |
+
+### MEIC Bot Details (NEW - 2026-01-27)
+- **Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors) - "Queen of 0DTE"
+- **Structure:** 6 scheduled iron condor entries per day
+- **Entry times:** 10:00, 10:30, 11:00, 11:30, 12:00, 12:30 AM ET
+- **Strikes:** 5-15 delta OTM, 50-60 point spreads
+- **Stop loss:** Per-side stop = total credit received (breakeven design)
+- **MEIC+ modification:** Stop = credit - $0.10 for small wins on stop days
+- **Expected results:** 20.7% CAGR, 4.31% max drawdown, 4.8 Calmar ratio, ~70% win rate
+- **Edge cases:** 75 analyzed pre-implementation (see `docs/MEIC_EDGE_CASES.md`)
+- **Specification:** Full strategy spec (see `docs/MEIC_STRATEGY_SPECIFICATION.md`)
+
+#### MEIC Key Features
+- **Position Registry:** Uses shared Position Registry for multi-bot SPX trading isolation
+- **Safe entry order:** Longs first (hedges) then shorts - never leave naked position
+- **Per-entry stops:** Each IC has independent stop monitoring
+- **FOMC blackout:** Skips all entries on FOMC announcement days
+- **VIX filter:** Skips remaining entries if VIX > 25
+- **Circuit breaker:** 5 consecutive failures or 5-of-10 sliding window triggers halt
+
+#### MEIC Typical P&L (per IC, 50pt spreads, $2.50 credit)
+| Scenario | Probability | P&L |
+|----------|-------------|-----|
+| Both sides expire worthless | ~60% | +$250 |
+| One side stopped, other expires | ~34% | ~$0 (breakeven) |
+| Both sides stopped | ~6% | -$250 to -$750 |
+
+**Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
@@ -117,6 +147,10 @@ Iron Fly (SPX/SPXW) and Delta Neutral (SPY) are mostly independent:
 - `token_coordinator.py` manages OAuth token refresh across all bots via file-based locking
 - When one bot refreshes the token, others pick up the fresh token from the shared cache
 - WebSocket connections refresh tokens before connecting to avoid 401 errors (CONN-008 fix)
+- `position_registry.py` tracks which bot owns which position (for SPX multi-bot isolation)
+  - File-based persistence at `/opt/calypso/data/position_registry.json`
+  - fcntl file locking for concurrent access
+  - Required when running MEIC + Iron Fly simultaneously (both trade SPX)
 
 ---
 
@@ -143,13 +177,14 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail →
 
 **Note:** ALL alerts go to WhatsApp (rich formatting) + Email. SMS is fallback only.
 
-### Alert Responsibilities by Bot (2026-01-26)
+### Alert Responsibilities by Bot (2026-01-27)
 
 | Bot | AlertService | MarketStatusMonitor | Pre-Market Gap Alerts |
 |-----|--------------|---------------------|----------------------|
 | **Iron Fly** | ✅ IRON_FLY | ❌ | ❌ (0DTE only) |
 | **Delta Neutral** | ✅ DELTA_NEUTRAL | ✅ (sole owner) | ✅ SPY gaps |
 | **Rolling Put Diagonal** | ✅ ROLLING_PUT_DIAGONAL | ❌ | ✅ QQQ gaps |
+| **MEIC** | ✅ MEIC | ❌ | ❌ (0DTE only) |
 
 **MarketStatusMonitor** (only on Delta Neutral to avoid duplicates):
 - Market opening countdown (1h, 30m, 15m before open)
@@ -669,6 +704,8 @@ SCRIPT
 | WebSocket 401 errors | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 8.5: WebSocket Token Refresh |
 | Entry filter questions | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 6: Filter Implementation |
 | Edge case handling | [IRON_FLY_EDGE_CASES.md](docs/IRON_FLY_EDGE_CASES.md) | All 63 documented cases |
+| **MEIC strategy spec** | [MEIC_STRATEGY_SPECIFICATION.md](docs/MEIC_STRATEGY_SPECIFICATION.md) | Full MEIC implementation details |
+| **MEIC edge cases** | [MEIC_EDGE_CASES.md](docs/MEIC_EDGE_CASES.md) | 75 edge cases for MEIC bot |
 | SMS/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
 | **Next bots to build** | [THETA_PROFITS_STRATEGY_ANALYSIS.md](docs/THETA_PROFITS_STRATEGY_ANALYSIS.md) | Top 3: MEIC, METF, SPX Put Credit |
 | **Capital allocation** | [PORTFOLIO_ALLOCATION_ANALYSIS.md](docs/PORTFOLIO_ALLOCATION_ANALYSIS.md) | $50K optimal split: MEIC + Delta Neutral |
@@ -684,6 +721,8 @@ SCRIPT
 | `docs/MULTI_BOT_POSITION_MANAGEMENT.md` | **Position Registry** - Running multiple bots on same underlying |
 | `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
 | `docs/IRON_FLY_EDGE_CASES.md` | 63 edge cases analyzed for Iron Fly bot |
+| `docs/MEIC_STRATEGY_SPECIFICATION.md` | **MEIC strategy** - Full Tammy Chambless MEIC implementation spec |
+| `docs/MEIC_EDGE_CASES.md` | 75 edge cases analyzed for MEIC bot |
 | `docs/DELTA_NEUTRAL_EDGE_CASES.md` | Edge cases for Delta Neutral bot |
 | `docs/ROLLING_PUT_DIAGONAL_EDGE_CASES.md` | Edge cases for Rolling Put Diagonal bot |
 | `docs/ALERTING_SETUP.md` | SMS/Email alert system deployment guide |

@@ -1,0 +1,60 @@
+# MEIC (Multiple Entry Iron Condors) Trading Bot Systemd Service
+#
+# Installation:
+#   sudo cp /opt/calypso/bots/meic/meic.service /etc/systemd/system/meic.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable meic.service
+#   sudo systemctl start meic.service
+#
+# Management:
+#   sudo systemctl status meic
+#   sudo systemctl stop meic
+#   sudo systemctl restart meic
+#   sudo journalctl -u meic -f
+#
+# IMPORTANT: Never use `kill` or `pkill` - always use systemctl to stop the service!
+# The service has Restart=always, so killing it will cause auto-restart in 30 seconds.
+
+[Unit]
+Description=MEIC 0DTE Trading Bot (Tammy Chambless Strategy)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="PATH=/opt/calypso/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/opt/calypso"
+Environment="GOOGLE_APPLICATION_CREDENTIALS=/opt/calypso/credentials/service-account.json"
+
+# Run the MEIC bot in LIVE mode
+# Remove --live for SIM mode
+# Add --dry-run for simulation without real orders
+ExecStart=/opt/calypso/.venv/bin/python -m bots.meic.main --live
+
+# Graceful shutdown - send SIGTERM, wait 60s for cleanup
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Restart policy
+# Bot will automatically restart on crashes
+# Max 5 restarts in 10 minutes, then fail
+Restart=always
+RestartSec=30
+StartLimitInterval=600
+StartLimitBurst=5
+
+# Resource limits
+MemoryLimit=512M
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meic
+
+[Install]
+WantedBy=multi-user.target
