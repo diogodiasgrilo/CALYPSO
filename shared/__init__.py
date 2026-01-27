@@ -13,8 +13,9 @@ This package contains common utilities used by all trading strategies:
 - event_calendar: FOMC/economic calendar for trading blackouts
 - technical_indicators: Technical analysis calculations
 - alert_service: SMS/Email alerting via Google Cloud Pub/Sub
+- position_registry: Multi-bot position ownership tracking (for same underlying)
 
-Last Updated: 2026-01-26 (Code Audit - added get_us_market_time, US_EASTERN exports)
+Last Updated: 2026-01-27 (Added PositionRegistry for multi-bot same-underlying support)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -203,6 +204,7 @@ from shared.event_calendar import (
     is_fomc_approaching,
     FOMC_DATES_2026,
 )
+from shared.position_registry import PositionRegistry
 
 __all__ = [
     # Saxo Client
@@ -232,4 +234,6 @@ __all__ = [
     # Event Calendar (FOMC dates - single source of truth)
     'get_fomc_dates', 'get_fomc_announcement_dates', 'is_fomc_announcement_day',
     'get_next_fomc_date', 'is_fomc_approaching', 'FOMC_DATES_2026',
+    # Position Registry (for multi-bot same-underlying support)
+    'PositionRegistry',
 ]

@@ -2175,7 +2175,8 @@ class SaxoClient:
         order_type: OrderType = OrderType.MARKET,
         limit_price: Optional[float] = None,
         duration_type: str = "DayOrder",
-        to_open_close: str = "ToOpen"
+        to_open_close: str = "ToOpen",
+        external_reference: Optional[str] = None
     ) -> Optional[Dict]:
         """
         Place a single order.
@@ -2189,6 +2190,11 @@ class SaxoClient:
             limit_price: Limit price for limit orders
             duration_type: Order duration (DayOrder, GoodTillCancel, etc.)
             to_open_close: ToOpen or ToClose (required for options)
+            external_reference: Optional client-defined identifier (max 50 chars).
+                               Used to track bot ownership of resulting positions.
+                               Format: "{BOT_NAME}_{strategy_id}" e.g., "IRON_FLY_0DTE_20260127_001"
+                               NOTE: This persists to orders/activities but NOT to positions.
+                               See docs/MULTI_BOT_POSITION_MANAGEMENT.md for Position Registry usage.
 
         Returns:
             dict: Order response with OrderId if successful.
@@ -2212,6 +2218,16 @@ class SaxoClient:
 
         if order_type == OrderType.LIMIT and limit_price:
             order_data["OrderPrice"] = limit_price
+
+        # Add ExternalReference for position tracking (max 50 chars per Saxo API)
+        if external_reference:
+            if len(external_reference) > 50:
+                logger.warning(
+                    f"ExternalReference truncated from {len(external_reference)} to 50 chars: "
+                    f"{external_reference[:50]}..."
+                )
+                external_reference = external_reference[:50]
+            order_data["ExternalReference"] = external_reference
 
         logger.info(f"Placing order: {buy_sell.value} {amount} x UIC {uic}")
 
