@@ -3324,9 +3324,9 @@ class SaxoClient:
                                 logger.debug(f"WebSocket heartbeat #{self._heartbeat_count} received")
                             continue
 
-                        # Price update messages
+                        # Price update messages - pass ref_id so we can extract UIC
                         if isinstance(msg_data, dict):
-                            self._handle_streaming_message(msg_data)
+                            self._handle_streaming_message(msg_data, ref_id)
                             self._record_success()
                 else:
                     # Text message (fallback, shouldn't happen with Saxo)
@@ -3398,37 +3398,55 @@ class SaxoClient:
         
         logger.info("WebSocket thread initialized")
 
-    def _handle_streaming_message(self, data: Dict):
+    def _handle_streaming_message(self, data: Dict, ref_id: str = None):
         """
         Handle incoming streaming message and dispatch to callbacks.
 
+        Saxo WebSocket messages can come in two formats:
+        1. Wrapped format: {"Data": [{"Uic": 123, "Quote": {...}}]}
+        2. Direct format: {"Quote": {...}, "PriceInfo": {...}} with UIC in ref_id
+
         Args:
             data: The parsed message data
+            ref_id: Reference ID from binary message (e.g., "ref_36590" for UIC 36590)
         """
         # Track update count for debugging
         if not hasattr(self, '_ws_update_count'):
             self._ws_update_count = 0
 
-        # Extract UIC and quote data from the message
+        # Format 1: Wrapped in "Data" array (from initial snapshot or some updates)
         if "Data" in data:
             for item in data["Data"]:
                 uic = item.get("Uic")
                 if uic:
-                    # Ensure UIC is int for consistent cache keys
                     uic = int(uic)
-
-                    # Update price cache with latest data
                     self._price_cache[uic] = item
                     self._ws_update_count += 1
 
-                    # Log first few cache updates to verify streaming works
                     if self._ws_update_count <= 5:
                         price = self._extract_price_from_data(item)
                         logger.info(f"WebSocket cache update #{self._ws_update_count}: UIC {uic} = ${price}")
 
-                    # Call the callback if registered
                     if uic in self.price_callbacks:
                         self.price_callbacks[uic](uic, item)
+            return
+
+        # Format 2: Direct message with UIC in ref_id (e.g., "ref_36590")
+        # This is the format for streaming price updates
+        if ref_id and ref_id.startswith("ref_"):
+            try:
+                uic = int(ref_id.split("_")[1])
+                self._price_cache[uic] = data
+                self._ws_update_count += 1
+
+                if self._ws_update_count <= 5:
+                    price = self._extract_price_from_data(data)
+                    logger.info(f"WebSocket cache update #{self._ws_update_count}: UIC {uic} = ${price}")
+
+                if uic in self.price_callbacks:
+                    self.price_callbacks[uic](uic, data)
+            except (ValueError, IndexError):
+                logger.debug(f"Could not extract UIC from ref_id: {ref_id}")
 
     def stop_price_streaming(self):
         """Stop WebSocket streaming and clean up subscriptions."""
