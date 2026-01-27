@@ -5028,10 +5028,10 @@ class DeltaNeutralStrategy:
 
         Video rule: "Never let the shorts go In-The-Money (ITM)"
 
-        VIGILANT MONITORING SYSTEM:
+        VIGILANT MONITORING SYSTEM (Updated 2026-01-27):
         - 0.1% threshold (DANGER): Immediate MARKET close (~$0.70 at SPY $695)
-        - 0.3% threshold (VIGILANT): Switch to fast 3-second monitoring
-        - > 0.3% (NORMAL): Standard 30-second monitoring
+        - 0.5% threshold (VIGILANT): Switch to fast 1-second monitoring
+        - > 0.5% (NORMAL): Standard 10-second monitoring
 
         This method only triggers at 0.1% (DANGER zone).
         Use get_monitoring_mode() to check if we're in VIGILANT zone.
@@ -5039,7 +5039,7 @@ class DeltaNeutralStrategy:
         The 0.1% threshold is safe because:
         - MARKET orders execute in <1 second
         - SPY would need to move $0.70 in <1 second to beat us
-        - With 3-second monitoring in VIGILANT zone, we have multiple checks
+        - With 1-second monitoring in VIGILANT zone, we have multiple checks
 
         Returns:
             bool: True if shorts need IMMEDIATE close (0.1% from strike), False otherwise.
@@ -5084,13 +5084,13 @@ class DeltaNeutralStrategy:
         """
         Determine the appropriate monitoring mode based on ITM proximity.
 
-        VIGILANT MONITORING SYSTEM (2026-01-26: optimized for WebSocket streaming):
-        - NORMAL (10s): Price is > 0.3% from both short strikes (safe)
-        - VIGILANT (1s): Price is 0.1% - 0.3% from a short strike (watching closely)
+        VIGILANT MONITORING SYSTEM (Updated 2026-01-27 with 0.5% thresholds):
+        - NORMAL (10s): Price is > 0.5% from both short strikes (safe)
+        - VIGILANT (1s): Price is 0.1% - 0.5% from a short strike (watching closely)
 
         This allows the bot to:
         1. Monitor more frequently when price approaches danger
-        2. Avoid unnecessary closes when price bounces back
+        2. Provide time for challenged roll attempt at 0.5% threshold
         3. Only close at the last safe moment (0.1%)
 
         Returns:
@@ -5104,7 +5104,10 @@ class DeltaNeutralStrategy:
         price = self.current_underlying_price
 
         # Thresholds
-        vigilant_threshold_pct = 0.003  # 0.3% - enter vigilant mode
+        # UPDATED (2026-01-27): Vigilant mode at 0.5% aligns with challenged roll threshold
+        # This provides fast monitoring when price approaches strike, giving time for
+        # challenged roll attempt before emergency close at 0.1%
+        vigilant_threshold_pct = 0.005  # 0.5% - enter vigilant mode (aligned with challenged roll)
         danger_threshold_pct = 0.001    # 0.1% - would trigger close (handled by check_shorts_itm_risk)
 
         call_vigilant_threshold = call_strike * vigilant_threshold_pct
@@ -5114,7 +5117,7 @@ class DeltaNeutralStrategy:
         call_distance = call_strike - price
         put_distance = price - put_strike
 
-        # Check if we're in VIGILANT zone (0.1% - 0.3% from strike)
+        # Check if we're in VIGILANT zone (0.1% - 0.5% from strike)
         call_in_vigilant = call_distance <= call_vigilant_threshold and call_distance > 0
         put_in_vigilant = put_distance <= put_vigilant_threshold and put_distance > 0
 
@@ -5141,7 +5144,7 @@ class DeltaNeutralStrategy:
                         "price": price,
                         "distance_dollars": round(call_distance, 2),
                         "distance_pct": round(pct_from_strike, 3),
-                        "threshold_pct": 0.3
+                        "threshold_pct": 0.5
                     }
                 )
                 self._vigilant_alert_sent_call = True
@@ -5173,7 +5176,7 @@ class DeltaNeutralStrategy:
                         "price": price,
                         "distance_dollars": round(put_distance, 2),
                         "distance_pct": round(pct_from_strike, 3),
-                        "threshold_pct": 0.3
+                        "threshold_pct": 0.5
                     }
                 )
                 self._vigilant_alert_sent_put = True
@@ -6159,8 +6162,15 @@ class DeltaNeutralStrategy:
         max_mult = self.strangle_multiplier_max  # Cap from config (default 2.0x)
         min_target_return = self.weekly_target_return_pct
 
-        # Try progressively lower minimum multipliers until we find valid options
-        MIN_MULT_ATTEMPTS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
+        # CRITICAL FIX (2026-01-27): Use config minimum multiplier (1.5x) instead of hardcoded 1.0x
+        # The strategy requires 1.5x-2.0x expected move for safety. Using 1.0x resulted in
+        # strikes too close (e.g., 1.4x) which got challenged at only 0.29% price move.
+        min_mult_from_config = self.strategy_config.get("weekly_strangle_multiplier_min", 1.5)
+
+        # Only try the configured minimum - don't go lower
+        # If we can't hit premium target at 1.5x minimum, that's a signal that
+        # market conditions aren't suitable (low IV, etc.)
+        MIN_MULT_ATTEMPTS = [min_mult_from_config]
 
         final_call = None
         final_put = None
@@ -6304,6 +6314,20 @@ class DeltaNeutralStrategy:
                             else:
                                 break
 
+            # SYMMETRY CHECK (2026-01-27): Ensure strikes are balanced for delta neutrality
+            # Both legs should be within MAX_ASYMMETRY (0.3x) of each other
+            # Example: If call is 1.6x, put must be 1.3x-1.9x
+            MAX_ASYMMETRY = 0.3
+            mult_diff = abs(working_call["mult"] - working_put["mult"])
+
+            if mult_diff > MAX_ASYMMETRY:
+                logger.warning(f"  ASYMMETRIC strikes: Call {working_call['mult']:.2f}x vs Put {working_put['mult']:.2f}x (diff {mult_diff:.2f}x > {MAX_ASYMMETRY}x)")
+                logger.warning(f"  Skipping this combination - violates delta neutrality")
+                # Try next minimum multiplier
+                continue
+
+            logger.info(f"  Symmetry check PASSED: Call {working_call['mult']:.2f}x vs Put {working_put['mult']:.2f}x (diff {mult_diff:.2f}x)")
+
             # Now verify we can actually get quotes for these strikes
             # If not, use fallback logic to reverse changes
             call_quote = self.client.get_quote(working_call["uic"], "StockOption")
@@ -6323,7 +6347,7 @@ class DeltaNeutralStrategy:
 
                     final_call = working_call
                     final_put = working_put
-                    logger.info(f"  SUCCESS: Found valid options at {min_mult_threshold}x minimum")
+                    logger.info(f"  SUCCESS: Found valid symmetric options at {min_mult_threshold}x minimum")
                     break
 
             # Fallback: Reverse optimization changes first
@@ -8144,22 +8168,24 @@ class DeltaNeutralStrategy:
             return (True, None)  # Scheduled roll, no specific challenge
 
         # Check if shorts are being challenged
-        # Per spec: "within 0.3% of Short_Call_Strike or Short_Put_Strike"
-        # (Tighter threshold for bot's 10s check interval with WebSocket streaming)
+        # UPDATED (2026-01-27): Changed from 0.3% to 0.5% based on analysis:
+        # - With proper 1.5x-2.0x strikes, 0.3% was too tight (rolls often failed for debit)
+        # - 0.5% allows time to roll for credit while still protecting from ITM risk
+        # - Analysis showed rolls at 0.5% away have good chance of credit with symmetric strikes
         if self.short_strangle and self.current_underlying_price:
             call_strike = self.short_strangle.call_strike
             put_strike = self.short_strangle.put_strike
             price = self.current_underlying_price
 
-            # Calculate 0.3% threshold for each strike
-            call_threshold = call_strike * 0.003  # 0.3% of call strike (~$2.07 at $690)
-            put_threshold = put_strike * 0.003    # 0.3% of put strike
+            # Calculate 0.5% threshold for each strike
+            call_threshold = call_strike * 0.005  # 0.5% of call strike (~$3.50 at $700)
+            put_threshold = put_strike * 0.005    # 0.5% of put strike
 
             # Distance from current price to strikes
             call_distance = call_strike - price
             put_distance = price - put_strike
 
-            # If price is within 0.3% of either strike, roll early
+            # If price is within 0.5% of either strike, attempt challenged roll
             if call_distance <= call_threshold:
                 pct_from_strike = (call_distance / call_strike) * 100
                 logger.warning(f"Short call CHALLENGED! Price ${price:.2f} within {pct_from_strike:.2f}% of call strike ${call_strike:.2f}")

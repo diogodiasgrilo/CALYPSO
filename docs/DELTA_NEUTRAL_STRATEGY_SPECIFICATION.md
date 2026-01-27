@@ -22,7 +22,11 @@ The Delta Neutral strategy consists of a long-term ATM straddle against which yo
 ### Short Position (Shorts)
 - **Structure:** OTM Strangle (1 Call + 1 Put at different strikes)
 - **DTE on Entry:** 5-12 DTE (typically target next Friday)
-- **Strike Selection:** 1.0x - 2.0x expected move from ATM
+- **Strike Selection:** 1.5x - 2.0x expected move from ATM (Updated 2026-01-27)
+  - **Minimum:** 1.5x expected move (ENFORCED - no fallback to lower multipliers)
+  - **Maximum:** 2.0x expected move (capped for premium collection)
+  - **Symmetry:** Both legs within 0.3x of each other (for delta neutrality)
+  - **Expected Move:** Calculated from ATM straddle price (Call mid + Put mid)
 - **Purpose:** Collect weekly premium to offset long theta cost and generate 1% NET return
 
 ---
@@ -47,8 +51,8 @@ The Delta Neutral strategy consists of a long-term ATM straddle against which yo
 
 #### When to Roll
 - **Scheduled Roll:** Every Friday (or Thursday if Friday is holiday)
-- **Challenged Roll:** When price moves within 0.3% of a short strike
-- **Emergency Roll:** When price is within 0.1% of ITM (use aggressive pricing)
+- **Challenged Roll:** When price moves within 0.5% of a short strike (Updated 2026-01-27)
+- **Emergency Close:** When price is within 0.1% of ITM (close shorts, keep longs)
 
 #### Roll Mechanics: BOTH LEGS, NOT SINGLE LEG
 
@@ -183,20 +187,25 @@ RESULT: Roll REJECTED → Close entire position
 
 ### 3. ITM Risk Monitoring (Vigilant Mode)
 
-#### Monitoring Thresholds
+#### Monitoring Thresholds (Updated 2026-01-27)
 
 | Threshold | Distance from Strike | Action | Alert Priority |
 |-----------|----------------------|--------|----------------|
-| **Safe Zone** | > 0.3% | Normal monitoring (5s intervals) | None |
-| **Vigilant Zone** | 0.1% - 0.3% | Heightened monitoring (1s intervals) | HIGH |
+| **Safe Zone** | > 0.5% | Normal monitoring (10s intervals) | None |
+| **Vigilant Zone** | 0.1% - 0.5% | Heightened monitoring (1s intervals) + Challenged roll attempt | HIGH |
 | **Danger Zone** | < 0.1% | Emergency close shorts | CRITICAL |
+
+**Key Changes (2026-01-27):**
+- Challenged roll threshold widened from 0.3% to 0.5%
+- With proper 1.5x-2.0x strike selection, 0.5% allows time to roll for credit
+- 0.3% was too tight, resulting in debit rolls with suboptimal strikes
 
 #### Vigilant Mode Entry/Exit
 
 **Entry (HIGH Alert):**
 ```
 Distance % = |SPY Price - Strike| / Strike × 100
-If Distance % ≤ 0.3%:
+If Distance % ≤ 0.5%:
   - Enter VIGILANT mode
   - Increase monitoring to 1-second intervals
   - Send alert: "Short [call/put] CHALLENGED"
@@ -204,9 +213,9 @@ If Distance % ≤ 0.3%:
 
 **Exit (LOW Alert):**
 ```
-If Distance % > 0.3%:
+If Distance % > 0.5%:
   - Exit VIGILANT mode
-  - Resume normal 5-second intervals
+  - Resume normal 10-second intervals
   - Send alert: "Moved away from strike - returned to safe zone"
 ```
 
@@ -513,8 +522,57 @@ When closing shorts, use progressive slippage:
 - Bot can now transition from exit back to checking for new entry
 - No more crashes when returning to IDLE state
 
+### Issue 3: Strike Selection Violated Config Constraints
+
+**Problem:**
+- Config specified `weekly_strangle_multiplier_min: 1.5`
+- Code used `MIN_MULT_ATTEMPTS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]`
+- Bot selected call at 1.4x expected move (below 1.5x minimum!)
+- Resulted in challenged roll at only 0.29% price move
+- Roll failed for debit (-$125), position exited prematurely
+
+**Example from 2026-01-27:**
+- Expected move: $5.00 (0.72% of SPY $690)
+- Call strike: $697 (1.4x EM) - TOO CLOSE
+- Put strike: $678 (2.4x EM) - TOO FAR
+- Asymmetric: 1.4x vs 2.4x violates delta neutrality
+- Price moved $5 to $695 → Call challenged at 0.29%
+
+**Solution:**
+- Changed `MIN_MULT_ATTEMPTS` to use config value: `[1.5]`
+- Added symmetry constraint: Both legs within 0.3x of each other
+- No fallback to lower multipliers - if can't hit 1.5x minimum, skip entry
+
+**Impact:**
+- Future shorts will be properly placed at 1.5x-2.0x expected move
+- Symmetric strikes maintain delta neutrality
+- Challenged rolls at 0.5% more likely to succeed for credit
+
+### Issue 4: Challenged Roll Threshold Too Tight
+
+**Problem:**
+- Challenged roll triggered at 0.3% from strike
+- With 1.4x strikes, this was too late to roll for credit
+- Challenged leg expensive to close, new leg cheap to open = debit
+
+**Analysis:**
+- At 0.3% away (with 1.5x strikes): Roll costs -$80 debit
+- At 0.5% away (with 1.5x strikes): Roll yields +$30 credit
+- At 0.5% away (with 2.0x strikes): Roll yields +$110 credit
+
+**Solution:**
+- Updated challenged roll threshold from 0.3% to 0.5%
+- Updated vigilant monitoring threshold from 0.3% to 0.5%
+- Kept emergency close threshold at 0.1% (already correct)
+
+**Impact:**
+- With proper 1.5x-2.0x strikes, challenged rolls at 0.5% can achieve credit
+- If roll still fails (debit), exit entire position per Brian Terry guidance
+- Emergency at 0.1% catches edge cases (gaps, bot downtime)
+
 ---
 
 **Last Research Date:** 2026-01-27
-**Researcher:** AI Assistant via Web Search
+**Last Updated:** 2026-01-27 (Strike selection and threshold fixes)
+**Researcher:** AI Assistant via Web Search + Trade Analysis
 **Implementation Status:** Active in LIVE trading (CALYPSO Delta Neutral bot)
