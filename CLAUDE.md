@@ -671,6 +671,8 @@ SCRIPT
 | Edge case handling | [IRON_FLY_EDGE_CASES.md](docs/IRON_FLY_EDGE_CASES.md) | All 63 documented cases |
 | SMS/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
 | **Next bots to build** | [THETA_PROFITS_STRATEGY_ANALYSIS.md](docs/THETA_PROFITS_STRATEGY_ANALYSIS.md) | Top 3: MEIC, METF, SPX Put Credit |
+| **Capital allocation** | [PORTFOLIO_ALLOCATION_ANALYSIS.md](docs/PORTFOLIO_ALLOCATION_ANALYSIS.md) | $50K optimal split: MEIC + Delta Neutral |
+| **Multi-bot same underlying** | [MULTI_BOT_POSITION_MANAGEMENT.md](docs/MULTI_BOT_POSITION_MANAGEMENT.md) | Position Registry design for SPX multi-bot |
 
 ### Full Documentation List
 
@@ -678,6 +680,8 @@ SCRIPT
 |----------|---------|
 | `docs/SAXO_API_PATTERNS.md` | **START HERE for Saxo API issues** - Proven patterns for orders, fills, prices |
 | `docs/THETA_PROFITS_STRATEGY_ANALYSIS.md` | **20 strategies analyzed** - Next bots to implement (MEIC, METF, etc.) |
+| `docs/PORTFOLIO_ALLOCATION_ANALYSIS.md` | **Capital allocation** - $50K optimal split across bots |
+| `docs/MULTI_BOT_POSITION_MANAGEMENT.md` | **Position Registry** - Running multiple bots on same underlying |
 | `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
 | `docs/IRON_FLY_EDGE_CASES.md` | 63 edge cases analyzed for Iron Fly bot |
 | `docs/DELTA_NEUTRAL_EDGE_CASES.md` | Edge cases for Delta Neutral bot |
