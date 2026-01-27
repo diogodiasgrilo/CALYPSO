@@ -51,7 +51,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from shared.token_coordinator import get_token_coordinator, TokenCoordinator
-from shared.config_loader import get_config_loader
+from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
 
 # Configure logging
@@ -321,7 +321,7 @@ def main():
     config_path = "bots/iron_fly_0dte/config"
 
     try:
-        loader = get_config_loader(config_path)
+        loader = ConfigLoader(config_path)
         config = loader.load_config()
         logger.info(f"Configuration loaded from {config_path}")
     except Exception as e:
