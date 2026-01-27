@@ -3290,14 +3290,31 @@ class SaxoClient:
         """
         def on_message(ws, message):
             """Handle incoming WebSocket messages (binary or text)."""
+            # Track message count for debugging
+            if not hasattr(self, '_ws_msg_count'):
+                self._ws_msg_count = 0
+            self._ws_msg_count += 1
+
+            # Log first few messages at INFO level to verify WebSocket is working
+            if self._ws_msg_count <= 3:
+                msg_type = "binary" if isinstance(message, bytes) else "text"
+                msg_len = len(message) if message else 0
+                logger.info(f"WebSocket message #{self._ws_msg_count}: type={msg_type}, len={msg_len}")
+
             try:
                 # Saxo sends binary WebSocket frames with a specific format
                 # See: https://www.developer.saxo/openapi/learn/plain-websocket-streaming
                 if isinstance(message, bytes):
                     # Parse binary format using struct
+                    decoded_count = 0
                     for decoded in self._decode_binary_ws_message(message):
+                        decoded_count += 1
                         ref_id = decoded.get('refid', '')
                         msg_data = decoded.get('msg', {})
+
+                        # Log first few decoded messages for debugging
+                        if self._ws_msg_count <= 3:
+                            logger.info(f"  Decoded #{decoded_count}: refid={ref_id}, data_keys={list(msg_data.keys()) if isinstance(msg_data, dict) else 'not-dict'}")
 
                         # Heartbeat messages have special reference ID
                         if ref_id == '_heartbeat':
@@ -3388,6 +3405,10 @@ class SaxoClient:
         Args:
             data: The parsed message data
         """
+        # Track update count for debugging
+        if not hasattr(self, '_ws_update_count'):
+            self._ws_update_count = 0
+
         # Extract UIC and quote data from the message
         if "Data" in data:
             for item in data["Data"]:
@@ -3398,6 +3419,12 @@ class SaxoClient:
 
                     # Update price cache with latest data
                     self._price_cache[uic] = item
+                    self._ws_update_count += 1
+
+                    # Log first few cache updates to verify streaming works
+                    if self._ws_update_count <= 5:
+                        price = self._extract_price_from_data(item)
+                        logger.info(f"WebSocket cache update #{self._ws_update_count}: UIC {uic} = ${price}")
 
                     # Call the callback if registered
                     if uic in self.price_callbacks:
