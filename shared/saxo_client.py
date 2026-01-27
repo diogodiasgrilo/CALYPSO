@@ -3424,7 +3424,7 @@ class SaxoClient:
                     self._ws_update_count += 1
 
                     if self._ws_update_count <= 5:
-                        price = self._extract_price_from_data(item)
+                        price = self._extract_price_from_data(item, "websocket")
                         logger.info(f"WebSocket cache update #{self._ws_update_count}: UIC {uic} = ${price}")
 
                     if uic in self.price_callbacks:
@@ -3440,7 +3440,7 @@ class SaxoClient:
                 self._ws_update_count += 1
 
                 if self._ws_update_count <= 5:
-                    price = self._extract_price_from_data(data)
+                    price = self._extract_price_from_data(data, "websocket")
                     logger.info(f"WebSocket cache update #{self._ws_update_count}: UIC {uic} = ${price}")
 
                 if uic in self.price_callbacks:
