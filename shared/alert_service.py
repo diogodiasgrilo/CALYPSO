@@ -735,6 +735,68 @@ class AlertService:
             details=summary
         )
 
+    def daily_summary_meic(
+        self,
+        summary: Dict[str, Any]
+    ) -> bool:
+        """
+        Send comprehensive daily summary for MEIC bot (LOW).
+
+        Args:
+            summary: Dictionary with daily summary data from get_daily_summary()
+        """
+        total_pnl = summary.get("total_pnl", 0)
+        cumulative_pnl = summary.get("cumulative_pnl", 0)
+        entries_completed = summary.get("entries_completed", 0)
+        entries_failed = summary.get("entries_failed", 0)
+        entries_skipped = summary.get("entries_skipped", 0)
+        total_credit = summary.get("total_credit", 0)
+        call_stops = summary.get("call_stops", 0)
+        put_stops = summary.get("put_stops", 0)
+        double_stops = summary.get("double_stops", 0)
+        spx_close = summary.get("spx_close", 0)
+        vix_close = summary.get("vix_close", 0)
+        dry_run = summary.get("dry_run", False)
+
+        pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        cum_sign = "+" if cumulative_pnl >= 0 else ""
+        mode = "[DRY RUN] " if dry_run else "[LIVE] "
+
+        # Calculate win rate (entries without double stops / completed entries)
+        total_stops = call_stops + put_stops
+        winning_entries = entries_completed - double_stops
+        win_rate = (winning_entries / entries_completed * 100) if entries_completed > 0 else 0
+
+        message = (
+            f"{mode}MEIC (Multiple Entry Iron Condors) - End of Day\n\n"
+            f"SPX Close: ${spx_close:.2f}\n"
+            f"VIX Close: {vix_close:.2f}\n\n"
+            f"Entries: {entries_completed}/6 completed"
+        )
+
+        if entries_failed > 0:
+            message += f" ({entries_failed} failed)"
+        if entries_skipped > 0:
+            message += f" ({entries_skipped} skipped)"
+
+        message += (
+            f"\nTotal Credit: ${total_credit:.2f}\n"
+            f"Call Stops: {call_stops} | Put Stops: {put_stops}\n"
+            f"Double Stops: {double_stops}\n\n"
+            f"Daily P&L: {pnl_sign}${total_pnl:.2f}\n"
+            f"Cumulative P&L: {cum_sign}${cumulative_pnl:.2f}\n"
+            f"Win Rate: {win_rate:.0f}%"
+        )
+
+        return self.send_alert(
+            alert_type=AlertType.DAILY_SUMMARY,
+            title=f"MEIC Daily {pnl_emoji}",
+            message=message,
+            priority=AlertPriority.LOW,
+            details=summary
+        )
+
     def daily_summary_rolling_put_diagonal(
         self,
         summary: Dict[str, Any]

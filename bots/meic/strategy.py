@@ -31,13 +31,13 @@ import os
 import time
 from collections import deque
 from datetime import datetime, timedelta, date, time as dt_time
-from typing import Optional, Dict, List, Any, Tuple, Deque, Set
+from typing import Optional, Dict, List, Any, Tuple, Deque
 from dataclasses import dataclass, field
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
-from shared.market_hours import get_us_market_time, US_EASTERN, is_market_open
+from shared.market_hours import get_us_market_time, US_EASTERN, is_market_open, is_early_close_day
 from shared.event_calendar import is_fomc_announcement_day
 from shared.position_registry import PositionRegistry
 
@@ -474,8 +474,16 @@ class MEICStrategy:
         else:
             self.entry_times = DEFAULT_ENTRY_TIMES.copy()
 
-        # TIME-003: Check for early close day
-        # TODO: Implement early close day detection
+        # MKT-009: Check for early close day (1:00 PM close)
+        # On early close days, only use entries before 11:00 AM
+        if is_early_close_day():
+            logger.warning("EARLY CLOSE DAY - Using reduced entry schedule (before 11:00 AM only)")
+            early_cutoff = dt_time(11, 0)
+            self.entry_times = [t for t in self.entry_times if t < early_cutoff]
+            if not self.entry_times:
+                # Fallback to at least one entry at 10:00 AM
+                self.entry_times = [dt_time(10, 0)]
+            logger.info(f"Early close entry times: {[t.strftime('%H:%M') for t in self.entry_times]}")
 
     # =========================================================================
     # MAIN LOOP - Called by main.py every few seconds
@@ -767,11 +775,13 @@ class MEICStrategy:
 
                 # Send alert
                 self.alert_service.position_opened(
-                    description=f"MEIC Entry #{entry_num}",
-                    entry_price=self.current_price,
-                    strike_info=f"Call: {entry.short_call_strike}/{entry.long_call_strike}, "
-                               f"Put: {entry.short_put_strike}/{entry.long_put_strike}",
-                    credit=entry.total_credit
+                    position_summary=f"MEIC Entry #{entry_num}: Call {entry.short_call_strike}/{entry.long_call_strike}, Put {entry.short_put_strike}/{entry.long_put_strike}",
+                    cost_or_credit=entry.total_credit,
+                    details={
+                        "spx_price": self.current_price,
+                        "entry_number": entry_num,
+                        "spread_width": self.spread_width
+                    }
                 )
 
                 self._record_api_result(True)
@@ -1372,11 +1382,14 @@ class MEICStrategy:
         self.daily_state.total_realized_pnl -= stop_level
 
         # Send alert
-        self.alert_service.stop_loss_triggered(
-            description=f"MEIC Entry #{entry.entry_number} {side.upper()} side stopped",
-            exit_price=self.current_price,
-            loss=stop_level,
-            reason=f"{side} spread value reached stop level"
+        self.alert_service.stop_loss(
+            trigger_price=self.current_price,
+            pnl=-stop_level,
+            details={
+                "description": f"MEIC Entry #{entry.entry_number} {side.upper()} side stopped",
+                "reason": f"{side} spread value reached stop level",
+                "entry_number": entry.entry_number
+            }
         )
 
         return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${stop_level:.2f})"
@@ -1629,6 +1642,24 @@ class MEICStrategy:
         """Reset state for a new trading day."""
         logger.info("Resetting for new trading day")
 
+        # STATE-004: Check for overnight 0DTE positions (should NEVER happen)
+        my_position_ids = self.registry.get_positions("MEIC")
+        if my_position_ids:
+            # This is a critical error - 0DTE positions should never survive to next day
+            error_msg = f"CRITICAL: {len(my_position_ids)} MEIC positions survived overnight! 0DTE should expire same day."
+            logger.critical(error_msg)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title="MEIC Overnight Position Detected!",
+                message=error_msg,
+                priority=AlertPriority.CRITICAL,
+                details={"position_ids": list(my_position_ids)}
+            )
+            # Halt trading - manual intervention required
+            self._critical_intervention_required = True
+            self._critical_intervention_reason = "Overnight 0DTE positions detected - investigate immediately"
+            return  # Don't reset state, need to handle existing positions
+
         self.daily_state = MEICDailyState()
         self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
 
@@ -1668,18 +1699,13 @@ class MEICStrategy:
         """Send daily summary alert."""
         summary = self.get_daily_summary()
 
-        self.alert_service.daily_summary(
-            trades_executed=summary["entries_completed"],
-            total_pnl=summary["total_pnl"],
-            total_premium=summary["total_credit"],
-            additional_stats={
-                "Entries Failed": summary["entries_failed"],
-                "Entries Skipped": summary["entries_skipped"],
-                "Call Stops": summary["call_stops"],
-                "Put Stops": summary["put_stops"],
-                "Double Stops": summary["double_stops"]
-            }
-        )
+        # Add extra fields for alert formatting
+        summary["spx_close"] = self.current_price
+        summary["vix_close"] = self.current_vix
+        summary["cumulative_pnl"] = self.cumulative_metrics.get("cumulative_pnl", 0) + summary["total_pnl"]
+        summary["dry_run"] = self.dry_run
+
+        self.alert_service.daily_summary_meic(summary)
 
     def get_daily_summary(self) -> Dict:
         """Get daily trading summary."""
