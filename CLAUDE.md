@@ -179,24 +179,18 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail →
 
 ### Alert Responsibilities by Bot (2026-01-27)
 
-| Bot | AlertService | MarketStatusMonitor | Pre-Market Gap Alerts |
-|-----|--------------|---------------------|----------------------|
-| **Iron Fly** | ✅ IRON_FLY | ❌ | ❌ (0DTE only) |
-| **Delta Neutral** | ✅ DELTA_NEUTRAL | ✅ (sole owner) | ✅ SPY gaps |
-| **Rolling Put Diagonal** | ✅ ROLLING_PUT_DIAGONAL | ❌ | ✅ QQQ gaps |
-| **MEIC** | ✅ MEIC | ❌ | ❌ (0DTE only) |
+| Bot | AlertService | MarketStatusMonitor |
+|-----|--------------|---------------------|
+| **Iron Fly** | ✅ IRON_FLY | ❌ |
+| **Delta Neutral** | ✅ DELTA_NEUTRAL | ✅ (sole owner) |
+| **Rolling Put Diagonal** | ✅ ROLLING_PUT_DIAGONAL | ❌ |
+| **MEIC** | ✅ MEIC | ❌ |
 
 **MarketStatusMonitor** (only on Delta Neutral to avoid duplicates):
-- Market opening countdown (1h, 30m, 15m before open)
+- Market opening countdown (1h, 30m, 15m before open) - sends WhatsApp/Email alerts
 - Market open notification (at 9:30 AM ET)
 - Market close notification (at 4:00 PM ET or early close)
 - Holiday notifications (weekday market closures)
-
-**Pre-Market Gap Alerts** (WARNING 2-3%, CRITICAL 3%+):
-- Delta Neutral monitors SPY gaps during pre-market (7:00-9:30 AM ET)
-- Rolling Put Diagonal monitors QQQ gaps during pre-market
-- Each bot sends at most ONE gap alert per day (deduplication prevents spam)
-- Alerts include: gap %, previous close, current price, affected positions
 
 **Delta Neutral ITM Monitoring Alerts** (2026-01-26):
 - VIGILANT_ENTERED (HIGH): Price enters 0.1%-0.3% danger zone near short strike

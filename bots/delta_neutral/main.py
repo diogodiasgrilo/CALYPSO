@@ -48,8 +48,7 @@ from shared.saxo_client import SaxoClient
 from shared.logger_service import TradeLoggerService, setup_logging
 from shared.market_hours import (
     is_market_open, get_market_status_message, calculate_sleep_duration,
-    is_weekend, is_market_holiday, get_us_market_time, get_holiday_name,
-    is_pre_market, is_saxo_price_available, get_extended_hours_status_message
+    is_weekend, is_market_holiday, get_us_market_time, get_holiday_name
 )
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
@@ -457,9 +456,6 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     last_reconciliation_time = datetime.now()
     reconciliation_interval = 3600  # Check position reconciliation hourly
 
-    # Track pre-market gap alert to avoid duplicate WhatsApp/Email (one per day)
-    gap_alert_sent_date: Optional[str] = None
-
     try:
         while not shutdown_requested:
             try:
@@ -543,103 +539,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         # force_refresh=True ensures we refresh even if current token is still valid
                         client.authenticate(force_refresh=True)
 
-                        # MKT-001: During pre-market on trading days, log comprehensive market analysis
-                        # IMPORTANT: Only fetch prices when Saxo can provide them (7:00 AM - 5:00 PM ET)
-                        # Before 7:00 AM, Saxo has no pre-market data available
-                        is_premarket_session = is_pre_market(now_et)  # True if 7:00-9:30 AM on trading day
-                        saxo_has_prices = is_saxo_price_available(now_et)  # True if 7:00 AM - 5:00 PM
-
-                        if is_premarket_session and saxo_has_prices:
-                            try:
-                                # Get current SPY price from pre-market session
-                                # Saxo provides extended hours data starting at 7:00 AM ET
-                                spy_price = 0.0
-                                prev_close = 0.0
-                                quote_response = client.get_quote(strategy.underlying_uic, asset_type="Etf")
-                                if quote_response and "Quote" in quote_response:
-                                    quote = quote_response["Quote"]
-                                    spy_price = quote.get("Mid") or ((quote.get("Bid", 0) + quote.get("Ask", 0)) / 2)
-                                    # Extract previous close from PriceInfoDetails (Saxo provides this)
-                                    price_details = quote_response.get("PriceInfoDetails", {})
-                                    prev_close = price_details.get("LastClose", 0.0)
-
-                                if spy_price > 0:
-                                    # Get comprehensive pre-market analysis with position impact warnings
-                                    # Pass prev_close from Saxo's PriceInfoDetails.LastClose
-                                    analysis = strategy.get_premarket_analysis(spy_price, prev_close)
-                                    min_to_open = int(seconds_until_open / 60) if seconds_until_open > 0 else 0
-
-                                    # Build the pre-market message based on warning level
-                                    warning_prefix = ""
-                                    if analysis["warning_level"] == "CRITICAL":
-                                        warning_prefix = "🚨 CRITICAL "
-                                    elif analysis["warning_level"] == "WARNING":
-                                        warning_prefix = "⚠️ WARNING "
-                                    elif analysis["warning_level"] == "CAUTION":
-                                        warning_prefix = "⚡ CAUTION "
-
-                                    gap_type = "Weekend" if analysis["is_monday"] else "Overnight"
-
-                                    # Main status line with gap info
-                                    trade_logger.log_event(
-                                        f"{warning_prefix}PRE-MARKET | {analysis['message']} | "
-                                        f"{min_to_open} min to 9:30 AM"
-                                    )
-
-                                    # Log position impact warnings if any
-                                    if analysis["position_impacts"]:
-                                        for impact in analysis["position_impacts"]:
-                                            trade_logger.log_event(f"  → {impact}")
-
-                                    # If warning or critical, log extra visibility with separator lines
-                                    # AND send WhatsApp/Email alert for significant gaps
-                                    if analysis["warning_level"] in ["WARNING", "CRITICAL"]:
-                                        trade_logger.log_event("=" * 60)
-                                        trade_logger.log_event(
-                                            f"  {gap_type.upper()} GAP ALERT: "
-                                            f"${abs(analysis['gap_points']):.2f} ({abs(analysis['gap_percent']):.2f}%) move"
-                                        )
-                                        trade_logger.log_event(
-                                            f"  Previous close: ${analysis['prev_close']:.2f} → "
-                                            f"Current: ${analysis['current_price']:.2f}"
-                                        )
-                                        trade_logger.log_event("=" * 60)
-
-                                        # Send WhatsApp/Email alert for WARNING (2-3%) and CRITICAL (3%+) gaps
-                                        # Only send once per day to avoid spam on multiple wake cycles
-                                        today_str = now_et.strftime("%Y-%m-%d")
-                                        if strategy.alert_service and gap_alert_sent_date != today_str:
-                                            # Build affected positions summary
-                                            affected = ""
-                                            if analysis["position_impacts"]:
-                                                affected = "; ".join(analysis["position_impacts"])
-
-                                            strategy.alert_service.premarket_gap(
-                                                symbol="SPY",
-                                                gap_percent=analysis["gap_percent"],
-                                                previous_close=analysis["prev_close"],
-                                                current_price=analysis["current_price"],
-                                                affected_positions=affected or "Check SPY positions"
-                                            )
-                                            gap_alert_sent_date = today_str
-                                            trade_logger.log_event("WhatsApp/Email gap alert sent")
-                                else:
-                                    trade_logger.log_event(f"PRE-MARKET | SPY: No quote yet | Wake in {minutes} min")
-                            except Exception as e:
-                                logger.warning(f"Pre-market analysis error: {e}")
-                                reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
-                                trade_logger.log_event(f"HEARTBEAT | Market closed {reason} - sleeping for {minutes}m")
-                        elif not saxo_has_prices and not is_weekend(now_et) and not holiday_name:
-                            # Before 7:00 AM on a trading day - Saxo has no prices yet
-                            trade_logger.log_event(
-                                f"HEARTBEAT | Pre-market not yet open (starts 7:00 AM ET) | Sleeping {minutes}m"
-                            )
-                        else:
-                            # Log standard heartbeat for weekend/holiday/after-hours
-                            reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
-                            trade_logger.log_event(
-                                f"HEARTBEAT | Market closed {reason} - sleeping for {minutes}m"
-                            )
+                        # Log heartbeat message while market is closed
+                        reason = f"({holiday_name})" if holiday_name else "(weekend)" if is_weekend() else ""
+                        trade_logger.log_event(
+                            f"HEARTBEAT | Market closed {reason} - sleeping for {minutes}m"
+                        )
 
                         if not interruptible_sleep(sleep_time):
                             break  # Shutdown requested

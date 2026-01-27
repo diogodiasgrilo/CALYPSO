@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Market Status Monitor (2026-01-26)
+Market Status Monitor (2026-01-27)
 
 Monitors market status and sends WhatsApp/Email alerts for:
 - Market opening countdown (1h, 30m, 15m before open)
@@ -10,27 +10,22 @@ Monitors market status and sends WhatsApp/Email alerts for:
 - Early close day warnings
 
 IMPORTANT: This should run on ONLY ONE BOT (Delta Neutral) to avoid duplicate alerts.
-Other bots (Iron Fly, Rolling Put Diagonal) should NOT initialize MarketStatusMonitor.
+Other bots (Iron Fly, Rolling Put Diagonal, MEIC) should NOT initialize MarketStatusMonitor.
 
-The check_premarket_gap() helper function can be used by any bot to send pre-market
-gap alerts. Each bot is responsible for its own underlying (SPY, QQQ, etc.).
-
-Bug Fixes (2026-01-26):
-- Fixed premature market open alert at 9:29 AM caused by int() truncation
+Bug Fixes:
+- 2026-01-26: Fixed premature market open alert at 9:29 AM caused by int() truncation
   (int(-0.5) = 0 in Python, which passed the "0 <= 0 <= 5" check)
-- Now explicitly checks now >= market_open_dt before using int() conversion
+- 2026-01-27: Widened countdown alert window from ±2 to ±8 minutes to ensure alerts
+  are sent even with 15-minute sleep cycles during pre-market
 
 Usage:
-    from shared.market_status_monitor import MarketStatusMonitor, check_premarket_gap
+    from shared.market_status_monitor import MarketStatusMonitor
 
     # Initialize ONCE per system (on Delta Neutral only)
     monitor = MarketStatusMonitor(alert_service)
 
     # Call periodically from main loop (every 1-5 minutes)
     monitor.check_and_alert()
-
-    # For pre-market gap alerts (can be called from any bot)
-    check_premarket_gap(alert_service, "SPY", prev_close=600.0, current_price=585.0)
 """
 
 import logging
@@ -205,8 +200,9 @@ class MarketStatusMonitor:
             if self._was_sent(alert_key, now):
                 continue
 
-            # Within threshold window? (threshold +/- 2 minutes)
-            if threshold - 2 <= minutes_until_open <= threshold + 2:
+            # Within threshold window? (threshold +/- 8 minutes)
+            # Window is wide enough to catch alerts even with 15-minute sleep cycles
+            if threshold - 8 <= minutes_until_open <= threshold + 8:
                 logger.info(f"Market monitor: Sending {threshold}min countdown alert")
                 self.alert_service.market_opening_soon(
                     minutes_until_open=threshold,
@@ -299,48 +295,6 @@ class MarketStatusMonitor:
             return True
 
         return False
-
-
-# Convenience function for quick pre-market gap check
-def check_premarket_gap(
-    alert_service: AlertService,
-    symbol: str,
-    previous_close: float,
-    current_price: float,
-    threshold_percent: float = 2.0,
-    affected_positions: str = ""
-) -> bool:
-    """
-    Check for significant pre-market gap and send alert if threshold exceeded.
-
-    Args:
-        alert_service: AlertService instance
-        symbol: Stock/ETF symbol (e.g., "SPY", "QQQ")
-        previous_close: Previous day's closing price
-        current_price: Current pre-market price
-        threshold_percent: Gap percentage threshold to trigger alert (default 2%)
-        affected_positions: Description of affected positions
-
-    Returns:
-        bool: True if alert was sent
-    """
-    if previous_close <= 0:
-        return False
-
-    gap_percent = ((current_price - previous_close) / previous_close) * 100
-
-    if abs(gap_percent) >= threshold_percent:
-        logger.warning(f"Pre-market gap detected: {symbol} {gap_percent:+.1f}%")
-        alert_service.premarket_gap(
-            symbol=symbol,
-            gap_percent=gap_percent,
-            previous_close=previous_close,
-            current_price=current_price,
-            affected_positions=affected_positions or f"Check {symbol}-related positions"
-        )
-        return True
-
-    return False
 
 
 # Test function
