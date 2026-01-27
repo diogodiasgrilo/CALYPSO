@@ -10,23 +10,33 @@ The Problem:
 - Multiple bots share the same Saxo refresh token in Secret Manager
 - Refresh tokens are ONE-TIME USE - once used, they're invalidated
 - If Bot A refreshes while Bot B has stale tokens, Bot B gets 401 errors
+- Saxo tokens expire every 20 minutes
 
 The Solution:
 - File-based lock prevents concurrent refresh attempts
 - Local token cache file provides fast reads
 - Secret Manager remains source of truth for persistence
 - Lock timeout prevents deadlocks
+- Token Keeper service runs 24/7 to keep tokens fresh even when bots are stopped
 
 Usage:
-    coordinator = TokenCoordinator()
-    tokens = coordinator.get_valid_tokens()  # Automatically refreshes if needed
+    # Used by trading bots (SaxoClient):
+    coordinator = get_token_coordinator()
+    tokens = coordinator.get_cached_tokens()
+    if not coordinator.is_token_valid(tokens):
+        tokens = coordinator.refresh_with_lock(refresh_func)
 
-    # Or manually check and refresh
-    if coordinator.needs_refresh():
-        tokens = coordinator.refresh_tokens(refresh_func)
+    # Used by Token Keeper service (services/token_keeper/main.py):
+    # Token Keeper checks every 60 seconds and refreshes when < 5 min until expiry
+    # See: services/token_keeper/README.md
+
+Files:
+    - Token cache: /opt/calypso/data/saxo_token_cache.json
+    - Lock file: /opt/calypso/data/saxo_token.lock
 
 Author: Trading Bot Developer
 Date: 2025
+Last Updated: 2026-01-27 (Token Keeper service integration)
 """
 
 import os
@@ -175,16 +185,21 @@ class TokenCoordinator:
 
         return tokens
 
-    def is_token_valid(self, tokens: Dict[str, Any] = None) -> bool:
+    def is_token_valid(self, tokens: Dict[str, Any] = None, buffer_seconds: int = None) -> bool:
         """
         Check if access token is still valid (with buffer).
 
         Args:
             tokens: Token dict to check, or None to use cached
+            buffer_seconds: Custom buffer in seconds. If None, uses REFRESH_BUFFER_SECONDS (120s).
+                           Token Keeper uses 300s (5 min) for proactive refresh.
 
         Returns:
-            True if token is valid for at least REFRESH_BUFFER_SECONDS
+            True if token is valid for at least buffer_seconds
         """
+        if buffer_seconds is None:
+            buffer_seconds = REFRESH_BUFFER_SECONDS
+
         if tokens is None:
             tokens = self.get_cached_tokens()
 
@@ -206,12 +221,13 @@ class TokenCoordinator:
         now = datetime.now(expiry.tzinfo) if expiry.tzinfo else datetime.now()
         time_until_expiry = (expiry - now).total_seconds()
 
-        return time_until_expiry > REFRESH_BUFFER_SECONDS
+        return time_until_expiry > buffer_seconds
 
     def refresh_with_lock(
         self,
         refresh_func: Callable[[], Optional[Dict[str, Any]]],
-        save_to_secret_manager: Callable[[Dict[str, Any]], bool] = None
+        save_to_secret_manager: Callable[[Dict[str, Any]], bool] = None,
+        validity_buffer_seconds: int = None
     ) -> Optional[Dict[str, Any]]:
         """
         Refresh tokens with exclusive lock to prevent race conditions.
@@ -223,6 +239,9 @@ class TokenCoordinator:
             refresh_func: Function that performs the actual token refresh.
                          Should return new tokens dict or None on failure.
             save_to_secret_manager: Optional function to persist tokens to Secret Manager.
+            validity_buffer_seconds: Custom buffer for validity check. If None, uses
+                                    REFRESH_BUFFER_SECONDS (120s). Token Keeper passes
+                                    300s to ensure proactive refresh.
 
         Returns:
             New tokens dict if refresh successful, None otherwise
@@ -236,7 +255,7 @@ class TokenCoordinator:
         try:
             # Re-check cache after acquiring lock (another process may have refreshed)
             cached_tokens = self._read_cache_file()
-            if cached_tokens and self.is_token_valid(cached_tokens):
+            if cached_tokens and self.is_token_valid(cached_tokens, validity_buffer_seconds):
                 logger.info("Another process already refreshed tokens - using cached")
                 self._cached_tokens = cached_tokens
                 self._cache_loaded_at = datetime.now()

@@ -29,10 +29,10 @@ def main():
 
     client = SaxoClient(config)
     underlying_uic = config["strategy"]["underlying_uic"]
-    target_dte = config["strategy"]["long_straddle_target_dte"]
+    target_dte = config["strategy"].get("long_straddle_max_dte", 120)  # Target ~120 DTE for longs
     max_vix = config["strategy"]["max_vix_entry"]
     weekly_target_return_pct = config["strategy"].get("weekly_target_return_percent", 1.0)
-    max_multiplier = config["strategy"].get("short_strangle_max_multiplier", 1.5)
+    max_multiplier = config["strategy"].get("weekly_strangle_multiplier_max", 2.0)
     entry_fee_per_leg = config["strategy"].get("short_strangle_entry_fee_per_leg", 2.0)
     position_size = config["strategy"]["position_size"]
 
@@ -235,7 +235,9 @@ def main():
     # 3. If no valid options found, progressively reduce minimum multiplier
     # 4. Track which strikes were capped so we can reverse if needed
 
-    MIN_MULT_ATTEMPTS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
+    # UPDATED: Use config minimum multiplier (1.5x) per strategy spec
+    min_mult_from_config = config["strategy"].get("weekly_strangle_multiplier_min", 1.5)
+    MIN_MULT_ATTEMPTS = [min_mult_from_config]  # Only try configured minimum, don't go lower
 
     final_call = None
     final_put = None

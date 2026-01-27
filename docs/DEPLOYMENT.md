@@ -17,10 +17,12 @@ Complete guide for deploying Calypso trading bots to Google Cloud Platform.
 │  │  Compute Engine  │────▶│    Secret Manager      │        │
 │  │  (e2-small VM)   │     │  - Saxo credentials    │        │
 │  │                  │     │  - Google Sheets creds │        │
-│  │  3 systemd bots: │     └────────────────────────┘        │
+│  │  4 bots + 1 svc: │     └────────────────────────┘        │
+│  │  - token_keeper  │                                       │
 │  │  - delta_neutral │                                       │
 │  │  - iron_fly_0dte │────▶ Google Sheets (logging)          │
 │  │  - rolling_put   │                                       │
+│  │  - meic          │                                       │
 │  └────────┬─────────┘                                       │
 │           │                                                  │
 └───────────┼──────────────────────────────────────────────────┘
@@ -222,11 +224,61 @@ RestartSec=30
 WantedBy=multi-user.target
 ```
 
+### `/etc/systemd/system/meic.service`
+```ini
+[Unit]
+Description=Calypso MEIC Trading Bot
+After=network.target token_keeper.service
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+ExecStart=/opt/calypso/.venv/bin/python -m bots.meic.main --live --dry-run
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### `/etc/systemd/system/token_keeper.service`
+```ini
+[Unit]
+Description=Calypso Token Keeper - Keeps Saxo OAuth Tokens Fresh
+After=network.target network-online.target
+Wants=network-online.target
+Before=iron_fly_0dte.service delta_neutral.service rolling_put_diagonal.service meic.service
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+ExecStart=/opt/calypso/.venv/bin/python -m services.token_keeper.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ### Enable and Start Services
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable delta_neutral iron_fly_0dte rolling_put_diagonal
-sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal
+# Start token keeper first (ensures fresh token)
+sudo systemctl enable token_keeper
+sudo systemctl start token_keeper
+# Then enable and start trading bots
+sudo systemctl enable delta_neutral iron_fly_0dte rolling_put_diagonal meic
+sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal meic
 ```
 
 ---
@@ -252,7 +304,10 @@ sudo systemctl status delta_neutral
 ```bash
 cd /opt/calypso
 sudo -u calypso git pull
-sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal
+# Clear Python cache to ensure new code runs
+find bots shared services -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
+sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic
+# Token keeper rarely needs restart (only if token_keeper code changed)
 ```
 
 ### View Logs
@@ -305,4 +360,4 @@ sudo systemctl restart delta_neutral
 
 ---
 
-**Last Updated:** 2026-01-23
+**Last Updated:** 2026-01-27

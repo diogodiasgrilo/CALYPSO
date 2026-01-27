@@ -33,6 +33,13 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - Roll short put daily for income
 - Roll long put when approaching expiry
 
+### 4. MEIC - Multiple Entry Iron Condors (S&P 500)
+**Tammy Chambless's MEIC** strategy - "Queen of 0DTE":
+- 6 scheduled iron condor entries per day (10:00-12:30 PM ET)
+- 5-15 delta OTM, 50-60 point spreads
+- Per-side stop = total credit received (breakeven design)
+- Expected: ~20.7% CAGR, 4.31% max drawdown, ~70% win rate
+
 ---
 
 ## Project Structure
@@ -54,10 +61,16 @@ calypso/
 │   │   ├── main.py
 │   │   ├── strategy.py
 │   │   └── config/config.json
-│   └── rolling_put_diagonal/    # QQQ strategy
+│   ├── rolling_put_diagonal/    # QQQ strategy
+│   │   ├── main.py
+│   │   ├── strategy.py
+│   │   └── config/config.json
+│   └── meic/                    # MEIC (Multiple Entry Iron Condors)
 │       ├── main.py
 │       ├── strategy.py
 │       └── config/config.json
+├── services/                    # Standalone services
+│   └── token_keeper/           # Keeps OAuth tokens fresh 24/7
 ├── shared/                      # Shared infrastructure
 │   ├── saxo_client.py          # Saxo Bank API client
 │   ├── logger_service.py       # Logging + Google Sheets
@@ -107,11 +120,22 @@ python -m bots.delta_neutral.main --status
 
 ## GCP VM Deployment
 
-All 3 bots run as systemd services on a single GCP VM (`calypso-bot`, zone `us-east1-b`).
+All 4 bots run as systemd services on a single GCP VM (`calypso-bot`, zone `us-east1-b`), along with a dedicated Token Keeper service that keeps OAuth tokens fresh 24/7.
 
 ### SSH Access
 ```bash
 gcloud compute ssh calypso-bot --zone=us-east1-b
+```
+
+### Token Keeper Service
+The Token Keeper service keeps OAuth tokens fresh 24/7, independent of trading bot status. This ensures tokens don't expire when bots are stopped.
+
+```bash
+# Check token keeper status
+sudo systemctl status token_keeper
+
+# View token keeper logs
+sudo journalctl -u token_keeper -f
 ```
 
 ### Bot Management
@@ -120,10 +144,11 @@ gcloud compute ssh calypso-bot --zone=us-east1-b
 sudo systemctl start delta_neutral
 sudo systemctl stop iron_fly_0dte
 sudo systemctl restart rolling_put_diagonal
+sudo systemctl restart meic
 
-# Start/stop ALL bots
-sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal
-sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal
+# Start/stop ALL bots (token keeper keeps running)
+sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal meic
+sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal meic
 
 # Emergency kill (immediate)
 sudo systemctl kill -s SIGKILL delta_neutral
@@ -147,7 +172,9 @@ sudo journalctl -u rolling_put_diagonal -f
 ```bash
 cd /opt/calypso
 sudo -u calypso git pull
-sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal
+# Clear Python cache to ensure new code runs
+find bots shared services -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
+sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic
 ```
 
 ---
@@ -162,6 +189,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 | Delta Neutral | `logs/delta_neutral/bot.log` | Full logs for DN bot |
 | Iron Fly 0DTE | `logs/iron_fly_0dte/bot.log` | Full logs for IF bot |
 | Rolling Put Diagonal | `logs/rolling_put_diagonal/bot.log` | Full logs for RPD bot |
+| MEIC | `logs/meic/bot.log` | Full logs for MEIC bot |
 
 ---
 
@@ -174,7 +202,10 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - **[Delta Neutral Edge Cases](docs/DELTA_NEUTRAL_EDGE_CASES.md)** - Risk analysis (44 edge cases)
 - **[Iron Fly Edge Cases](docs/IRON_FLY_EDGE_CASES.md)** - Risk analysis (63 edge cases)
 - **[Iron Fly Code Audit](docs/IRON_FLY_CODE_AUDIT.md)** - Pre-LIVE comprehensive code review
+- **[MEIC Strategy Spec](docs/MEIC_STRATEGY_SPECIFICATION.md)** - Full MEIC implementation details
+- **[MEIC Edge Cases](docs/MEIC_EDGE_CASES.md)** - Risk analysis (75 edge cases)
 - **[Configuration Reference](config/README.md)** - Config file reference
+- **[Token Keeper Service](services/token_keeper/README.md)** - OAuth token refresh service
 
 ---
 
@@ -262,5 +293,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 3.4.0
-**Last Updated:** 2026-01-26
+**Version:** 3.5.0
+**Last Updated:** 2026-01-27

@@ -230,7 +230,13 @@ def perform_token_refresh(coordinator: TokenCoordinator, config: dict) -> bool:
         return False
 
     # Use coordinator with lock
-    new_tokens = coordinator.refresh_with_lock(do_refresh, save_to_secret_manager)
+    # Pass REFRESH_THRESHOLD_SECONDS so coordinator uses same threshold as Token Keeper
+    # This prevents the coordinator from short-circuiting when token has < 5 min but > 2 min left
+    new_tokens = coordinator.refresh_with_lock(
+        do_refresh,
+        save_to_secret_manager,
+        validity_buffer_seconds=REFRESH_THRESHOLD_SECONDS
+    )
     return new_tokens is not None
 
 

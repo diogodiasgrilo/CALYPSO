@@ -14,13 +14,19 @@ bots/
 ├── iron_fly_0dte/config/
 │   ├── config.json
 │   └── config.example.json
-└── rolling_put_diagonal/config/
+├── rolling_put_diagonal/config/
+│   ├── config.json
+│   └── config.example.json
+└── meic/config/
     ├── config.json
     └── config.example.json
 
 config/
 └── google_credentials.json      # Shared Google API creds (NEVER COMMIT)
 ```
+
+**Note:** The Token Keeper service uses the same Saxo credentials as the trading bots.
+It loads configuration from `bots/iron_fly_0dte/config/config.json` by default.
 
 ---
 
@@ -171,6 +177,23 @@ cp config.example.json config.json
 }
 ```
 
+### MEIC (Multiple Entry Iron Condors) Strategy
+
+```json
+{
+  "strategy": {
+    "underlying_symbol": "SPXW",
+    "underlying_uic": 4913,
+    "entry_times_et": ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30"],
+    "target_delta": 10,
+    "spread_width": 50,
+    "max_vix_entry": 25.0,
+    "stop_loss_credit_multiplier": 1.0,
+    "position_size": 1
+  }
+}
+```
+
 ---
 
 ## Security
@@ -193,4 +216,4 @@ Bot-specific settings (strategy parameters) still come from each bot's `config.j
 
 ---
 
-**Last Updated:** 2026-01-23
+**Last Updated:** 2026-01-27
