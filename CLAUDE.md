@@ -685,7 +685,7 @@ SCRIPT
 | `docs/VM_COMMANDS.md` | VM administration commands |
 | `.claude/settings.local.json` | Full command reference (also readable)
 
-### Key Lessons Learned (2026-01-26)
+### Key Lessons Learned (2026-01-27)
 
 These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
 
@@ -700,3 +700,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 5. **Clear Python Cache After Deploy** - `__pycache__` can persist old code. Always clear after git pull. (Cost: Hours debugging "fixed" code that wasn't running)
 
 6. **Saxo WebSocket Uses Binary Frames, Not JSON Text** - See WebSocket Binary Parsing section below. Previous code tried `json.loads(message.decode('utf-8'))` which silently failed. (Cost: Stale cached prices, unnecessary REST API calls)
+
+7. **Daily Summary Only at Market Close, Not Calendar Day Reset** - Calendar days change at midnight UTC (7 PM EST), but trading days end at 4 PM EST. Never send daily summaries from `reset_for_new_day()` - only from main.py after-hours check. (Cost: Duplicate alert spam, user confusion)
