@@ -1780,13 +1780,17 @@ class MEICStrategy:
         """Log performance metrics to Google Sheets."""
         try:
             summary = self.get_daily_summary()
-            self.trade_logger.log_performance_metrics({
-                "timestamp": get_us_market_time().isoformat(),
-                "daily_pnl": summary["total_pnl"],
-                "entries_completed": summary["entries_completed"],
-                "total_stops": summary["call_stops"] + summary["put_stops"],
-                "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + summary["total_pnl"]
-            })
+            self.trade_logger.log_performance_metrics(
+                period="Intraday",
+                metrics={
+                    "timestamp": get_us_market_time().isoformat(),
+                    "daily_pnl": summary["total_pnl"],
+                    "entries_completed": summary["entries_completed"],
+                    "total_stops": summary["call_stops"] + summary["put_stops"],
+                    "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + summary["total_pnl"]
+                },
+                saxo_client=self.client
+            )
         except Exception as e:
             logger.error(f"Failed to log performance metrics: {e}")
 
