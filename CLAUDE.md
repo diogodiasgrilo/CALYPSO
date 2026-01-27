@@ -753,3 +753,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 6. **Saxo WebSocket Uses Binary Frames, Not JSON Text** - See WebSocket Binary Parsing section below. Previous code tried `json.loads(message.decode('utf-8'))` which silently failed. (Cost: Stale cached prices, unnecessary REST API calls)
 
 7. **Daily Summary Only at Market Close, Not Calendar Day Reset** - Calendar days change at midnight UTC (7 PM EST), but trading days end at 4 PM EST. Never send daily summaries from `reset_for_new_day()` - only from main.py after-hours check. (Cost: Duplicate alert spam, user confusion)
+
+8. **WebSocket Streaming Updates Use ref_id Format** - Initial snapshot wraps data in `{"Data": [{"Uic": 123, ...}]}` but streaming updates use `{"Quote": {...}}` with UIC in ref_id as `ref_<UIC>`. Must handle both formats in `_handle_streaming_message()`. (Cost: SPY/VIX prices stuck at stale values, fixed 2026-01-27)
