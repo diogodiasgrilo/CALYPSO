@@ -161,10 +161,10 @@ def perform_token_refresh(coordinator: TokenCoordinator, config: dict) -> bool:
         return False
 
     # Determine token URL based on environment
-    saxo_config = config.get("saxo", {})
-    environment = saxo_config.get("environment", "SIM")
+    saxo_api_config = config.get("saxo_api", {})
+    environment = saxo_api_config.get("environment", "sim").lower()
 
-    if environment.upper() == "LIVE":
+    if environment == "live":
         token_url = "https://live.logonvalidation.net/token"
     else:
         token_url = "https://sim.logonvalidation.net/token"
@@ -330,13 +330,19 @@ def main():
         sys.exit(1)
 
     # Verify we have the necessary credentials
-    saxo_config = config.get("saxo", {})
-    if not saxo_config.get("app_key") or not saxo_config.get("app_secret"):
-        logger.error("Missing app_key or app_secret in Saxo configuration")
+    # Config structure: config["saxo_api"]["environment"] -> "live" or "sim"
+    #                   config["saxo_api"]["live"] -> {app_key, app_secret, ...}
+    saxo_api_config = config.get("saxo_api", {})
+    environment = saxo_api_config.get("environment", "sim").lower()
+    env_credentials = saxo_api_config.get(environment, {})
+
+    if not env_credentials.get("app_key") or not env_credentials.get("app_secret"):
+        logger.error(f"Missing app_key or app_secret in saxo_api.{environment} configuration")
+        logger.error(f"Available keys in config: {list(config.keys())}")
+        logger.error(f"Available keys in saxo_api: {list(saxo_api_config.keys())}")
         sys.exit(1)
 
-    environment = saxo_config.get("environment", "SIM")
-    logger.info(f"Saxo environment: {environment}")
+    logger.info(f"Saxo environment: {environment.upper()}")
     logger.info(f"Running on GCP: {is_running_on_gcp()}")
 
     # Run the main loop
