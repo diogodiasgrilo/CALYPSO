@@ -212,6 +212,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
             """Handle real-time price updates."""
             strategy.handle_price_update(uic, data)
 
+            # P2: Update WebSocket price cache for fast stop monitoring
+            # Extract mid price and cache it
+            quote = data.get("Quote", {})
+            bid = quote.get("Bid")
+            ask = quote.get("Ask")
+            if bid and ask:
+                mid_price = (bid + ask) / 2
+                strategy.update_ws_price_cache(uic, mid_price)
+            elif quote.get("LastTraded"):
+                strategy.update_ws_price_cache(uic, quote["LastTraded"])
+
         streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
         if not streaming_started:
             trade_logger.log_event("Warning: Real-time streaming not started. Using polling mode.")
@@ -366,15 +377,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     except Exception as e:
                         trade_logger.log_error(f"Hourly bot log error: {e}")
 
-                # Sleep until next check
+                # Sleep until next check - P2: Use dynamic monitoring interval
                 status = strategy.get_status_summary()
                 if status['state'] == 'DailyComplete' and status['active_entries'] == 0:
                     # All done - check less frequently
                     if not interruptible_sleep(60):
                         break
                 elif status['active_entries'] > 0:
-                    # Active positions - check more frequently for stop monitoring
-                    if not interruptible_sleep(2):
+                    # Active positions - use strategy's recommended interval
+                    # P2: Vigilant mode (2s) when near stops, normal (5s) otherwise
+                    recommended_interval = strategy.get_recommended_check_interval()
+                    if not interruptible_sleep(recommended_interval):
                         break
                 else:
                     # Standard interval

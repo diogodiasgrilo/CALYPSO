@@ -29,10 +29,12 @@ import json
 import logging
 import os
 import time
+import threading
+import fcntl
 from collections import deque
 from datetime import datetime, timedelta, date, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple, Deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
@@ -113,6 +115,22 @@ MAX_DATA_STALENESS_SECONDS = 30
 
 # TIME-001: Clock skew tolerance
 MAX_CLOCK_SKEW_SECONDS = 5
+
+# TIME-001: Operation lock timeout
+OPERATION_LOCK_TIMEOUT_SECONDS = 60
+
+# POS-003: Hourly reconciliation
+RECONCILIATION_INTERVAL_MINUTES = 60
+
+# MKT-002: Flash crash/velocity detection
+VELOCITY_WINDOW_MINUTES = 5
+FLASH_CRASH_THRESHOLD_PERCENT = 2.0  # 2% move in 5 minutes
+
+# MONITORING: Dynamic interval thresholds
+# When price is within this % of stop level, use faster monitoring
+VIGILANT_THRESHOLD_PERCENT = 50  # 50% of stop level used = vigilant mode
+VIGILANT_CHECK_INTERVAL_SECONDS = 2
+NORMAL_CHECK_INTERVAL_SECONDS = 5
 
 
 # =============================================================================
@@ -319,23 +337,46 @@ class MEICDailyState:
 
 @dataclass
 class MarketData:
-    """Tracks market data with staleness detection."""
+    """Tracks market data with staleness detection and intraday statistics."""
     spx_price: float = 0.0
     vix: float = 0.0
     last_spx_update: Optional[datetime] = None
     last_vix_update: Optional[datetime] = None
 
+    # P3: Intraday high/low tracking
+    spx_high: float = 0.0
+    spx_low: float = float('inf')
+    vix_high: float = 0.0
+    vix_samples: List[float] = field(default_factory=list)
+
+    # P3: Flash crash velocity tracking
+    price_history: Deque[Tuple[datetime, float]] = field(default_factory=lambda: deque(maxlen=100))
+
     def update_spx(self, price: float):
-        """Update SPX price with timestamp."""
+        """Update SPX price with timestamp and track high/low."""
         if price > 0:
             self.spx_price = price
             self.last_spx_update = get_us_market_time()
 
+            # Track intraday high/low
+            if price > self.spx_high:
+                self.spx_high = price
+            if price < self.spx_low:
+                self.spx_low = price
+
+            # Track for velocity detection
+            self.price_history.append((self.last_spx_update, price))
+
     def update_vix(self, vix: float):
-        """Update VIX with timestamp."""
+        """Update VIX with timestamp and track high/average."""
         if vix > 0:
             self.vix = vix
             self.last_vix_update = get_us_market_time()
+
+            # Track VIX high and samples for average
+            if vix > self.vix_high:
+                self.vix_high = vix
+            self.vix_samples.append(vix)
 
     def is_spx_stale(self, max_age: int = MAX_DATA_STALENESS_SECONDS) -> bool:
         """Check if SPX data is stale."""
@@ -350,6 +391,62 @@ class MarketData:
             return True
         age = (get_us_market_time() - self.last_vix_update).total_seconds()
         return age > max_age
+
+    def get_spx_range(self) -> float:
+        """Get intraday SPX range (high - low)."""
+        if self.spx_low == float('inf') or self.spx_high == 0:
+            return 0.0
+        return self.spx_high - self.spx_low
+
+    def get_vix_average(self) -> float:
+        """Get average VIX for the day."""
+        if not self.vix_samples:
+            return self.vix
+        return sum(self.vix_samples) / len(self.vix_samples)
+
+    def check_flash_crash_velocity(self) -> Tuple[bool, str, float]:
+        """
+        MKT-002: Check for flash crash conditions (2%+ move in 5 minutes).
+
+        Returns:
+            Tuple of (is_flash_crash, direction, percent_change)
+        """
+        if len(self.price_history) < 2:
+            return False, "", 0.0
+
+        now = get_us_market_time()
+        window_start = now - timedelta(minutes=VELOCITY_WINDOW_MINUTES)
+
+        # Find the oldest price in the velocity window
+        oldest_price = None
+        oldest_time = None
+        for ts, price in self.price_history:
+            if ts >= window_start:
+                if oldest_price is None:
+                    oldest_price = price
+                    oldest_time = ts
+                break
+
+        if oldest_price is None or oldest_price == 0:
+            return False, "", 0.0
+
+        # Calculate percentage change
+        current = self.spx_price
+        pct_change = ((current - oldest_price) / oldest_price) * 100
+
+        if abs(pct_change) >= FLASH_CRASH_THRESHOLD_PERCENT:
+            direction = "up" if pct_change > 0 else "down"
+            return True, direction, pct_change
+
+        return False, "", pct_change
+
+    def reset_daily_tracking(self):
+        """Reset intraday tracking for new day."""
+        self.spx_high = 0.0
+        self.spx_low = float('inf')
+        self.vix_high = 0.0
+        self.vix_samples.clear()
+        self.price_history.clear()
 
 
 # =============================================================================
@@ -471,8 +568,25 @@ class MEICStrategy:
         # Daily summary tracking
         self._daily_summary_sent = False
 
+        # TIME-001: Operation lock to prevent concurrent strategy checks
+        self._operation_lock = threading.Lock()
+        self._operation_in_progress = False
+        self._operation_started_at: Optional[datetime] = None
+
+        # POS-003: Hourly reconciliation tracking
+        self._last_reconciliation_time: Optional[datetime] = None
+
+        # P2: WebSocket price cache for stop monitoring
+        self._ws_price_cache: Dict[int, Tuple[float, datetime]] = {}  # uic -> (price, timestamp)
+
+        # P2: Monitoring mode tracking
+        self._current_monitoring_mode = "normal"  # "normal" or "vigilant"
+
         # Initialize metrics
         self.cumulative_metrics = self._load_cumulative_metrics()
+
+        # P1: Attempt to recover state from previous session
+        self._recover_state_from_disk()
 
         logger.info(f"MEICStrategy initialized - State: {self.state.value}")
         logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
@@ -516,9 +630,28 @@ class MEICStrategy:
         """
         Main strategy loop - called periodically by main.py.
 
+        Includes all safety checks from Delta Neutral:
+        - TIME-001: Operation lock to prevent concurrent runs
+        - STATE-002: State/position consistency validation
+        - DATA-001: Stale data validation
+        - POS-003: Hourly position reconciliation
+        - MKT-002: Flash crash velocity detection
+
         Returns:
             str: Description of action taken (for logging)
         """
+        # TIME-001: Acquire operation lock to prevent concurrent checks
+        if not self._acquire_operation_lock():
+            return "Operation already in progress - skipping"
+
+        try:
+            return self._run_strategy_check_internal()
+        finally:
+            self._release_operation_lock()
+
+    def _run_strategy_check_internal(self) -> str:
+        """Internal strategy check - called with operation lock held."""
+
         # Check critical intervention first
         if self._critical_intervention_required:
             return f"HALTED: {self._critical_intervention_reason}"
@@ -539,6 +672,35 @@ class MEICStrategy:
 
         # Update market data
         self._update_market_data()
+
+        # DATA-001: Validate data freshness before trading
+        if self._is_data_stale_for_trading():
+            return "Skipping action - market data is stale"
+
+        # MKT-002: Check for flash crash conditions
+        flash_crash, direction, pct_change = self.market_data.check_flash_crash_velocity()
+        if flash_crash:
+            logger.warning(f"MKT-002: Flash crash detected! SPX moved {pct_change:.2f}% {direction} in 5 min")
+            # Don't halt, but trigger vigilant mode and alert
+            self._current_monitoring_mode = "vigilant"
+            if self.daily_state.active_entries:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.MAX_LOSS,
+                    title=f"Flash Crash Warning - SPX {direction.upper()} {abs(pct_change):.1f}%",
+                    message=f"SPX moved {pct_change:.2f}% in 5 minutes. Active positions being monitored.",
+                    priority=AlertPriority.HIGH,
+                    details={"direction": direction, "pct_change": pct_change, "spx": self.current_price}
+                )
+
+        # STATE-002: Validate state/position consistency
+        consistency_error = self._check_state_consistency()
+        if consistency_error:
+            logger.error(f"STATE-002: {consistency_error}")
+            # Attempt to recover instead of halting
+            self._attempt_state_recovery()
+
+        # POS-003: Periodic position reconciliation (hourly)
+        self._check_hourly_reconciliation()
 
         # MKT-008: Skip all trading on FOMC days
         if is_fomc_announcement_day():
@@ -568,6 +730,223 @@ class MEICStrategy:
 
         else:
             return f"Unknown state: {self.state.value}"
+
+    # =========================================================================
+    # OPERATION LOCK (TIME-001)
+    # =========================================================================
+
+    def _acquire_operation_lock(self) -> bool:
+        """
+        TIME-001: Acquire operation lock to prevent concurrent strategy checks.
+
+        Returns:
+            True if lock acquired, False if another operation in progress
+        """
+        acquired = self._operation_lock.acquire(blocking=False)
+        if not acquired:
+            return False
+
+        # Check for stale lock (operation hung)
+        if self._operation_in_progress and self._operation_started_at:
+            elapsed = (get_us_market_time() - self._operation_started_at).total_seconds()
+            if elapsed > OPERATION_LOCK_TIMEOUT_SECONDS:
+                logger.warning(f"TIME-001: Stale operation lock detected ({elapsed:.0f}s old) - resetting")
+                self._operation_in_progress = False
+
+        if self._operation_in_progress:
+            self._operation_lock.release()
+            return False
+
+        self._operation_in_progress = True
+        self._operation_started_at = get_us_market_time()
+        return True
+
+    def _release_operation_lock(self):
+        """Release operation lock."""
+        self._operation_in_progress = False
+        self._operation_started_at = None
+        try:
+            self._operation_lock.release()
+        except RuntimeError:
+            pass  # Lock wasn't held
+
+    # =========================================================================
+    # STATE CONSISTENCY CHECK (STATE-002)
+    # =========================================================================
+
+    def _check_state_consistency(self) -> Optional[str]:
+        """
+        STATE-002: Validate that strategy state matches actual positions.
+
+        Returns:
+            Error message if inconsistent, None if OK
+        """
+        active_entries = len(self.daily_state.active_entries)
+        my_positions = self.registry.get_positions("MEIC")
+
+        # Check state vs position count
+        if self.state == MEICState.MONITORING and active_entries == 0:
+            return "State is MONITORING but no active entries"
+
+        if self.state == MEICState.IDLE and active_entries > 0:
+            return f"State is IDLE but have {active_entries} active entries"
+
+        if self.state == MEICState.WAITING_FIRST_ENTRY and active_entries > 0:
+            # This is OK - waiting for next entry while monitoring existing
+
+            pass
+
+        # Cross-check with Position Registry
+        expected_positions = sum(len(e.all_position_ids) for e in self.daily_state.active_entries)
+        registry_count = len(my_positions)
+
+        if abs(expected_positions - registry_count) > 2:  # Allow small discrepancy
+            return f"Position count mismatch: expected {expected_positions}, registry has {registry_count}"
+
+        return None
+
+    def _attempt_state_recovery(self):
+        """Attempt to recover from state inconsistency."""
+        logger.info("STATE-002: Attempting state recovery...")
+
+        # Re-reconcile positions
+        self._reconcile_positions()
+
+        # Update state based on actual positions
+        active_entries = len(self.daily_state.active_entries)
+
+        if active_entries > 0:
+            if self.state not in [MEICState.MONITORING, MEICState.STOP_TRIGGERED]:
+                logger.info(f"STATE-002: Setting state to MONITORING (have {active_entries} active entries)")
+                self.state = MEICState.MONITORING
+        elif self._next_entry_index < len(self.entry_times):
+            if self.state != MEICState.WAITING_FIRST_ENTRY:
+                logger.info("STATE-002: Setting state to WAITING_FIRST_ENTRY")
+                self.state = MEICState.WAITING_FIRST_ENTRY
+        else:
+            if self.state != MEICState.DAILY_COMPLETE:
+                logger.info("STATE-002: Setting state to DAILY_COMPLETE")
+                self.state = MEICState.DAILY_COMPLETE
+
+    # =========================================================================
+    # STALE DATA VALIDATION (DATA-001)
+    # =========================================================================
+
+    def _is_data_stale_for_trading(self) -> bool:
+        """
+        DATA-001: Check if market data is too stale for trading decisions.
+
+        Returns:
+            True if data is stale and we should skip trading actions
+        """
+        # Only check staleness during market hours
+        if not is_market_open():
+            return False
+
+        # Check SPX staleness
+        if self.market_data.is_spx_stale():
+            logger.warning("DATA-001: SPX data is stale - will refresh")
+            # Try to refresh
+            self._update_market_data()
+            if self.market_data.is_spx_stale():
+                logger.warning("DATA-001: SPX still stale after refresh - skipping actions")
+                return True
+
+        return False
+
+    # =========================================================================
+    # HOURLY RECONCILIATION (POS-003)
+    # =========================================================================
+
+    def _check_hourly_reconciliation(self):
+        """
+        POS-003: Perform hourly position reconciliation during market hours.
+
+        Compares expected positions vs actual Saxo positions to detect:
+        - Early assignment
+        - Manual intervention
+        - Orphaned positions
+        """
+        if not is_market_open():
+            return
+
+        now = get_us_market_time()
+
+        # Check if it's time for reconciliation
+        if self._last_reconciliation_time:
+            elapsed_minutes = (now - self._last_reconciliation_time).total_seconds() / 60
+            if elapsed_minutes < RECONCILIATION_INTERVAL_MINUTES:
+                return
+
+        logger.info("POS-003: Performing hourly position reconciliation")
+        self._last_reconciliation_time = now
+
+        try:
+            # Get actual positions from Saxo
+            actual_positions = self.client.get_positions()
+            actual_position_ids = {str(p.get("PositionBase", {}).get("PositionId")) for p in actual_positions}
+
+            # Get expected positions from our tracking
+            expected_position_ids = set()
+            for entry in self.daily_state.active_entries:
+                expected_position_ids.update(entry.all_position_ids)
+
+            # Check for missing positions (closed manually or assigned)
+            missing = expected_position_ids - actual_position_ids
+            if missing:
+                logger.warning(f"POS-003: {len(missing)} expected positions NOT FOUND in Saxo!")
+                logger.warning(f"  Missing IDs: {missing}")
+
+                # This is serious - positions may have been manually closed
+                self.alert_service.send_alert(
+                    alert_type=AlertType.CRITICAL_INTERVENTION,
+                    title="Position Mismatch Detected",
+                    message=f"{len(missing)} MEIC positions missing from Saxo. Manual intervention suspected.",
+                    priority=AlertPriority.HIGH,
+                    details={"missing_ids": list(missing)}
+                )
+
+                # Clean up registry and daily state
+                self._handle_missing_positions(missing)
+
+            # Check for unexpected positions (assigned, etc.)
+            my_registry_positions = self.registry.get_positions("MEIC")
+            unexpected = (actual_position_ids & my_registry_positions) - expected_position_ids
+            if unexpected:
+                logger.warning(f"POS-003: {len(unexpected)} unexpected MEIC positions found")
+
+            # Persist state after reconciliation
+            self._save_state_to_disk()
+
+            logger.info(f"POS-003: Reconciliation complete - {len(expected_position_ids)} expected, {len(actual_position_ids & my_registry_positions)} found")
+
+        except Exception as e:
+            logger.error(f"POS-003: Reconciliation failed: {e}")
+
+    def _handle_missing_positions(self, missing_ids: set):
+        """Handle positions that are missing from Saxo (manually closed or assigned)."""
+        for entry in self.daily_state.entries:
+            for position_id in list(missing_ids):
+                # Check if this entry had the missing position
+                if position_id in entry.all_position_ids:
+                    # Determine which leg
+                    if position_id == entry.short_call_position_id:
+                        logger.warning(f"  Entry #{entry.entry_number}: Short Call missing - marking call side stopped")
+                        entry.call_side_stopped = True
+                        entry.short_call_position_id = None
+                    elif position_id == entry.long_call_position_id:
+                        logger.warning(f"  Entry #{entry.entry_number}: Long Call missing")
+                        entry.long_call_position_id = None
+                    elif position_id == entry.short_put_position_id:
+                        logger.warning(f"  Entry #{entry.entry_number}: Short Put missing - marking put side stopped")
+                        entry.put_side_stopped = True
+                        entry.short_put_position_id = None
+                    elif position_id == entry.long_put_position_id:
+                        logger.warning(f"  Entry #{entry.entry_number}: Long Put missing")
+                        entry.long_put_position_id = None
+
+                    # Unregister from registry
+                    self.registry.unregister(position_id)
 
     # =========================================================================
     # STATE HANDLERS
@@ -760,6 +1139,33 @@ class MEICStrategy:
             return 0.0
         return (target - now).total_seconds() / 60
 
+    def _is_entry_time(self) -> bool:
+        """
+        P0 BUG FIX: Check if we're still within the entry window.
+
+        Used by retry logic to determine if entry should continue.
+        Similar to _should_attempt_entry but doesn't increment index.
+
+        Returns:
+            True if still within entry window for current entry
+        """
+        if self._next_entry_index >= len(self.entry_times):
+            return False
+
+        now = get_us_market_time()
+        scheduled_time = self.entry_times[self._next_entry_index]
+        scheduled_datetime = now.replace(
+            hour=scheduled_time.hour,
+            minute=scheduled_time.minute,
+            second=0,
+            microsecond=0
+        )
+
+        # Window extends ENTRY_WINDOW_MINUTES after scheduled time
+        window_end = scheduled_datetime + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+
+        return scheduled_datetime <= now <= window_end
+
     def _initiate_entry(self) -> str:
         """
         Initiate an iron condor entry with retry logic.
@@ -841,6 +1247,9 @@ class MEICStrategy:
 
                     self._record_api_result(True)
                     self._next_entry_index += 1
+
+                    # P1: Save state after successful entry
+                    self._save_state_to_disk()
 
                     result_msg = f"Entry #{entry_num} complete - Credit: ${entry.total_credit:.2f}"
                     if attempt > 0:
@@ -1580,27 +1989,53 @@ class MEICStrategy:
         """
         Update option prices for an entry.
 
-        Uses WebSocket cache or REST API fallback.
+        P2: Uses WebSocket cache first, falls back to REST API if cache miss.
+        This allows fast 2-second monitoring without API rate limits.
         """
         if self.dry_run:
             # Simulate price movement based on SPX movement
             self._simulate_entry_prices(entry)
             return
 
-        # Get current option prices from REST API (get_quote)
-        # Note: For monitoring, we could also use WebSocket streaming if set up
+        # P2: Try WebSocket cache first for each leg
+        # Max age of 5 seconds for cached prices
+        cache_max_age = 5
+
+        # Short Call
         if entry.short_call_uic:
-            quote = self.client.get_quote(entry.short_call_uic, asset_type="StockIndexOption")
-            entry.short_call_price = self._extract_mid_price(quote) or 0
+            cached = self._get_cached_price(entry.short_call_uic, cache_max_age)
+            if cached:
+                entry.short_call_price = cached
+            else:
+                quote = self.client.get_quote(entry.short_call_uic, asset_type="StockIndexOption")
+                entry.short_call_price = self._extract_mid_price(quote) or 0
+
+        # Long Call
         if entry.long_call_uic:
-            quote = self.client.get_quote(entry.long_call_uic, asset_type="StockIndexOption")
-            entry.long_call_price = self._extract_mid_price(quote) or 0
+            cached = self._get_cached_price(entry.long_call_uic, cache_max_age)
+            if cached:
+                entry.long_call_price = cached
+            else:
+                quote = self.client.get_quote(entry.long_call_uic, asset_type="StockIndexOption")
+                entry.long_call_price = self._extract_mid_price(quote) or 0
+
+        # Short Put
         if entry.short_put_uic:
-            quote = self.client.get_quote(entry.short_put_uic, asset_type="StockIndexOption")
-            entry.short_put_price = self._extract_mid_price(quote) or 0
+            cached = self._get_cached_price(entry.short_put_uic, cache_max_age)
+            if cached:
+                entry.short_put_price = cached
+            else:
+                quote = self.client.get_quote(entry.short_put_uic, asset_type="StockIndexOption")
+                entry.short_put_price = self._extract_mid_price(quote) or 0
+
+        # Long Put
         if entry.long_put_uic:
-            quote = self.client.get_quote(entry.long_put_uic, asset_type="StockIndexOption")
-            entry.long_put_price = self._extract_mid_price(quote) or 0
+            cached = self._get_cached_price(entry.long_put_uic, cache_max_age)
+            if cached:
+                entry.long_put_price = cached
+            else:
+                quote = self.client.get_quote(entry.long_put_uic, asset_type="StockIndexOption")
+                entry.long_put_price = self._extract_mid_price(quote) or 0
 
     def _extract_mid_price(self, quote: Optional[Dict]) -> Optional[float]:
         """Extract mid price from quote for option pricing."""
@@ -1687,6 +2122,9 @@ class MEICStrategy:
                 "entry_number": entry.entry_number
             }
         )
+
+        # P1: Save state after stop loss
+        self._save_state_to_disk()
 
         return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${stop_level:.2f})"
 
@@ -1965,7 +2403,19 @@ class MEICStrategy:
         self._consecutive_failures = 0
         self._api_results_window.clear()
 
+        # P3: Reset intraday market data tracking
+        self.market_data.reset_daily_tracking()
+
+        # P2: Clear WebSocket price cache
+        self._ws_price_cache.clear()
+
+        # Reset reconciliation timer
+        self._last_reconciliation_time = None
+
         self.state = MEICState.IDLE
+
+        # Save clean state to disk
+        self._save_state_to_disk()
 
     # =========================================================================
     # LOGGING AND ALERTS
@@ -2138,3 +2588,305 @@ class MEICStrategy:
     def update_market_data(self):
         """Public method to update market data (called by main.py)."""
         self._update_market_data()
+
+    # =========================================================================
+    # STATE PERSISTENCE (P1 - POS-001)
+    # =========================================================================
+
+    def _save_state_to_disk(self):
+        """
+        P1: Save current daily state to disk for crash recovery.
+
+        Persists all active entries with their position IDs, strikes, credits,
+        and stop levels so they can be recovered on restart.
+        """
+        try:
+            state_data = {
+                "date": self.daily_state.date,
+                "state": self.state.value,
+                "next_entry_index": self._next_entry_index,
+                "entries_completed": self.daily_state.entries_completed,
+                "entries_failed": self.daily_state.entries_failed,
+                "entries_skipped": self.daily_state.entries_skipped,
+                "total_credit_received": self.daily_state.total_credit_received,
+                "total_realized_pnl": self.daily_state.total_realized_pnl,
+                "call_stops_triggered": self.daily_state.call_stops_triggered,
+                "put_stops_triggered": self.daily_state.put_stops_triggered,
+                "double_stops": self.daily_state.double_stops,
+                "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
+                "entries": []
+            }
+
+            # Serialize each entry
+            for entry in self.daily_state.entries:
+                entry_data = {
+                    "entry_number": entry.entry_number,
+                    "entry_time": entry.entry_time.isoformat() if entry.entry_time else None,
+                    "strategy_id": entry.strategy_id,
+                    # Strikes
+                    "short_call_strike": entry.short_call_strike,
+                    "long_call_strike": entry.long_call_strike,
+                    "short_put_strike": entry.short_put_strike,
+                    "long_put_strike": entry.long_put_strike,
+                    # Position IDs
+                    "short_call_position_id": entry.short_call_position_id,
+                    "long_call_position_id": entry.long_call_position_id,
+                    "short_put_position_id": entry.short_put_position_id,
+                    "long_put_position_id": entry.long_put_position_id,
+                    # UICs
+                    "short_call_uic": entry.short_call_uic,
+                    "long_call_uic": entry.long_call_uic,
+                    "short_put_uic": entry.short_put_uic,
+                    "long_put_uic": entry.long_put_uic,
+                    # Credits
+                    "call_spread_credit": entry.call_spread_credit,
+                    "put_spread_credit": entry.put_spread_credit,
+                    # Stops
+                    "call_side_stop": entry.call_side_stop,
+                    "put_side_stop": entry.put_side_stop,
+                    # Status
+                    "is_complete": entry.is_complete,
+                    "call_side_stopped": entry.call_side_stopped,
+                    "put_side_stopped": entry.put_side_stopped,
+                }
+                state_data["entries"].append(entry_data)
+
+            state_data["last_saved"] = get_us_market_time().isoformat()
+
+            # Write atomically using temp file
+            temp_file = STATE_FILE + ".tmp"
+            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+
+            with open(temp_file, 'w') as f:
+                json.dump(state_data, f, indent=2)
+
+            os.replace(temp_file, STATE_FILE)
+            logger.debug(f"State saved to {STATE_FILE}")
+
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}")
+
+    def _recover_state_from_disk(self):
+        """
+        P1: Recover daily state from disk after restart.
+
+        Called during __init__ to restore previous session state if:
+        1. State file exists
+        2. State file is from today
+        3. We have active entries to recover
+        """
+        if not os.path.exists(STATE_FILE):
+            logger.info("No state file found - starting fresh")
+            return
+
+        try:
+            with open(STATE_FILE, 'r') as f:
+                state_data = json.load(f)
+
+            # Check if state is from today
+            saved_date = state_data.get("date", "")
+            today = get_us_market_time().strftime("%Y-%m-%d")
+
+            if saved_date != today:
+                logger.info(f"State file is from {saved_date}, not today ({today}) - starting fresh")
+                return
+
+            # Recover daily state
+            logger.info(f"Recovering state from {STATE_FILE}")
+
+            self.daily_state.date = saved_date
+            self._next_entry_index = state_data.get("next_entry_index", 0)
+            self.daily_state.entries_completed = state_data.get("entries_completed", 0)
+            self.daily_state.entries_failed = state_data.get("entries_failed", 0)
+            self.daily_state.entries_skipped = state_data.get("entries_skipped", 0)
+            self.daily_state.total_credit_received = state_data.get("total_credit_received", 0.0)
+            self.daily_state.total_realized_pnl = state_data.get("total_realized_pnl", 0.0)
+            self.daily_state.call_stops_triggered = state_data.get("call_stops_triggered", 0)
+            self.daily_state.put_stops_triggered = state_data.get("put_stops_triggered", 0)
+            self.daily_state.double_stops = state_data.get("double_stops", 0)
+            self.daily_state.circuit_breaker_opens = state_data.get("circuit_breaker_opens", 0)
+
+            # Recover entries
+            for entry_data in state_data.get("entries", []):
+                entry = IronCondorEntry(entry_number=entry_data.get("entry_number", 0))
+
+                # Entry time
+                entry_time_str = entry_data.get("entry_time")
+                if entry_time_str:
+                    entry.entry_time = datetime.fromisoformat(entry_time_str)
+
+                entry.strategy_id = entry_data.get("strategy_id", "")
+
+                # Strikes
+                entry.short_call_strike = entry_data.get("short_call_strike", 0.0)
+                entry.long_call_strike = entry_data.get("long_call_strike", 0.0)
+                entry.short_put_strike = entry_data.get("short_put_strike", 0.0)
+                entry.long_put_strike = entry_data.get("long_put_strike", 0.0)
+
+                # Position IDs
+                entry.short_call_position_id = entry_data.get("short_call_position_id")
+                entry.long_call_position_id = entry_data.get("long_call_position_id")
+                entry.short_put_position_id = entry_data.get("short_put_position_id")
+                entry.long_put_position_id = entry_data.get("long_put_position_id")
+
+                # UICs
+                entry.short_call_uic = entry_data.get("short_call_uic")
+                entry.long_call_uic = entry_data.get("long_call_uic")
+                entry.short_put_uic = entry_data.get("short_put_uic")
+                entry.long_put_uic = entry_data.get("long_put_uic")
+
+                # Credits
+                entry.call_spread_credit = entry_data.get("call_spread_credit", 0.0)
+                entry.put_spread_credit = entry_data.get("put_spread_credit", 0.0)
+
+                # Stops
+                entry.call_side_stop = entry_data.get("call_side_stop", 0.0)
+                entry.put_side_stop = entry_data.get("put_side_stop", 0.0)
+
+                # Status
+                entry.is_complete = entry_data.get("is_complete", False)
+                entry.call_side_stopped = entry_data.get("call_side_stopped", False)
+                entry.put_side_stopped = entry_data.get("put_side_stopped", False)
+
+                self.daily_state.entries.append(entry)
+
+            # Set appropriate state
+            saved_state = state_data.get("state", "Idle")
+            try:
+                self.state = MEICState(saved_state)
+            except ValueError:
+                # Unknown state - determine from entries
+                if self.daily_state.active_entries:
+                    self.state = MEICState.MONITORING
+                elif self._next_entry_index < len(self.entry_times):
+                    self.state = MEICState.WAITING_FIRST_ENTRY
+                else:
+                    self.state = MEICState.DAILY_COMPLETE
+
+            active_count = len(self.daily_state.active_entries)
+            logger.info(
+                f"State recovered: {self.state.value}, "
+                f"{self.daily_state.entries_completed} entries completed, "
+                f"{active_count} active entries"
+            )
+
+            # Alert about recovery
+            if active_count > 0:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.POSITION_OPENED,
+                    title="MEIC Bot Recovered",
+                    message=f"Recovered {active_count} active iron condor(s) from previous session",
+                    priority=AlertPriority.MEDIUM,
+                    details={"active_entries": active_count, "state": self.state.value}
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to recover state: {e}")
+            logger.info("Starting fresh due to recovery failure")
+
+    # =========================================================================
+    # WEBSOCKET PRICE CACHE (P2)
+    # =========================================================================
+
+    def update_ws_price_cache(self, uic: int, price: float):
+        """
+        P2: Update WebSocket price cache for fast stop monitoring.
+
+        Called by main.py's price callback.
+        """
+        if price > 0:
+            self._ws_price_cache[uic] = (price, get_us_market_time())
+
+    def _get_cached_price(self, uic: int, max_age_seconds: int = 5) -> Optional[float]:
+        """
+        P2: Get cached price from WebSocket if fresh enough.
+
+        Args:
+            uic: Instrument UIC
+            max_age_seconds: Maximum age in seconds for cached price
+
+        Returns:
+            Cached price if fresh, None otherwise
+        """
+        if uic not in self._ws_price_cache:
+            return None
+
+        price, timestamp = self._ws_price_cache[uic]
+        age = (get_us_market_time() - timestamp).total_seconds()
+
+        if age <= max_age_seconds:
+            return price
+
+        return None
+
+    # =========================================================================
+    # VIGILANT MONITORING MODE (P2)
+    # =========================================================================
+
+    def get_monitoring_mode(self) -> str:
+        """
+        P2: Get the recommended monitoring mode based on position proximity to stops.
+
+        Returns:
+            "vigilant" if price is approaching stop levels (2s intervals)
+            "normal" otherwise (5s intervals)
+        """
+        if not self.daily_state.active_entries:
+            return "normal"
+
+        # Check each active entry for proximity to stops
+        for entry in self.daily_state.active_entries:
+            # Check call side
+            if not entry.call_side_stopped and entry.call_side_stop > 0:
+                current_value = entry.call_spread_value
+                stop_level = entry.call_side_stop
+                if stop_level > 0:
+                    usage_percent = (current_value / stop_level) * 100
+                    if usage_percent >= VIGILANT_THRESHOLD_PERCENT:
+                        self._current_monitoring_mode = "vigilant"
+                        return "vigilant"
+
+            # Check put side
+            if not entry.put_side_stopped and entry.put_side_stop > 0:
+                current_value = entry.put_spread_value
+                stop_level = entry.put_side_stop
+                if stop_level > 0:
+                    usage_percent = (current_value / stop_level) * 100
+                    if usage_percent >= VIGILANT_THRESHOLD_PERCENT:
+                        self._current_monitoring_mode = "vigilant"
+                        return "vigilant"
+
+        self._current_monitoring_mode = "normal"
+        return "normal"
+
+    def get_recommended_check_interval(self) -> int:
+        """
+        P2: Get the recommended check interval in seconds based on monitoring mode.
+
+        Returns:
+            2 for vigilant mode, 5 for normal mode
+        """
+        mode = self.get_monitoring_mode()
+        if mode == "vigilant":
+            return VIGILANT_CHECK_INTERVAL_SECONDS
+        return NORMAL_CHECK_INTERVAL_SECONDS
+
+    # =========================================================================
+    # INTRADAY STATS (P3)
+    # =========================================================================
+
+    def get_intraday_stats(self) -> Dict:
+        """
+        P3: Get intraday market statistics.
+
+        Returns:
+            Dict with SPX high/low/range and VIX high/average
+        """
+        return {
+            "spx_high": self.market_data.spx_high,
+            "spx_low": self.market_data.spx_low if self.market_data.spx_low != float('inf') else 0,
+            "spx_range": self.market_data.get_spx_range(),
+            "vix_high": self.market_data.vix_high,
+            "vix_average": self.market_data.get_vix_average(),
+            "vix_samples": len(self.market_data.vix_samples)
+        }
