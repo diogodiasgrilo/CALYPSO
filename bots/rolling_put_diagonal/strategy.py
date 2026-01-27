@@ -2918,12 +2918,8 @@ class RollingPutDiagonalStrategy:
         if not market_ok:
             return False, halt_msg
 
-        # MKT-001: Check for large pre-market gap (only at/near market open)
-        now_est = get_us_market_time()
-        if now_est.time() < dt_time(10, 0):  # Only check before 10am
-            gap_ok, gap_pct, gap_msg = self.check_premarket_gap()
-            if not gap_ok:
-                return False, gap_msg
+        # MKT-001: Pre-market gap check removed (2026-01-27)
+        # Gap detection was unreliable due to Saxo's stale LastClose data
 
         if self.indicators is None:
             return False, "No indicator data available"

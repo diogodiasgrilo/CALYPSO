@@ -30,11 +30,10 @@ import logging
 import os
 import time
 import threading
-import fcntl
 from collections import deque
 from datetime import datetime, timedelta, date, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple, Deque, Set
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType

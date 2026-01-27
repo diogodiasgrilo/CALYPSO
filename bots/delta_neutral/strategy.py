@@ -53,7 +53,6 @@ SAFETY - EDGE CASE HANDLERS (42 scenarios - see docs/DELTA_NEUTRAL_EDGE_CASES.md
     check_state_position_consistency    ~1239   STATE-002: State/position mismatch
     _set_critical_intervention          ~1285   ORDER-004: MARKET order failure
     check_position_reconciliation       ~1386   POS-003: Early assignment detection
-    check_pre_market_gap                ~1503   MKT-001: Pre-market gap detection
     check_expired_positions             ~1670   POS-004: Expiration handling
     _record_price_for_velocity          ~1756   MKT-002: Flash crash tracking
     check_flash_crash_velocity          ~1777   MKT-002: Flash crash detection
@@ -120,8 +119,8 @@ Last Updated: 2026-01-26
 Change History:
 - 2026-01-22: Added 42 edge case handlers (see docs/DELTA_NEUTRAL_EDGE_CASES.md)
 - 2026-01-26: Code Audit fixes:
-  * Fixed entry_strike -> initial_strike in get_premarket_analysis() (4 occurrences)
   * Fixed undefined _get_underlying_price() calls (replaced with client.get_quote())
+- 2026-01-27: Removed pre-market gap detection (unreliable data from Saxo LastClose field)
 """
 
 import logging

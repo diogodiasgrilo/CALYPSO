@@ -45,12 +45,12 @@ if _project_root not in sys.path:
 
 # Import shared modules
 from shared.saxo_client import SaxoClient
-from shared.logger_service import TradeLoggerService, setup_logging
+from shared.logger_service import setup_logging
 from shared.market_hours import (
     is_market_open, get_market_status_message, calculate_sleep_duration,
     is_weekend, is_market_holiday, get_us_market_time, get_holiday_name
 )
-from shared.config_loader import ConfigLoader, get_config_loader
+from shared.config_loader import ConfigLoader
 from shared.secret_manager import is_running_on_gcp
 from shared.market_status_monitor import MarketStatusMonitor
 

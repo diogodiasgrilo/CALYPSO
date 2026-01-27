@@ -2032,7 +2032,7 @@ class SaxoClient:
         uic: int,
         asset_type: str = "StockOption",
         max_spread_percent: float = 0.5
-    ) -> tuple[bool, float]:
+    ) -> Tuple[bool, float]:
         """
         Check if bid-ask spread is within acceptable threshold.
 
