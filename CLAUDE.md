@@ -35,6 +35,9 @@ shared/               # Shared modules used by all bots
   technical_indicators.py # TA calculations
   alert_service.py    # SMS/Email alerting via Pub/Sub
 
+services/             # Standalone services (independent of trading bots)
+  token_keeper/       # Keeps Saxo OAuth tokens fresh 24/7
+
 cloud_functions/      # Google Cloud Functions
   alert_processor/    # Processes alerts from Pub/Sub, sends SMS/Email
 ```
@@ -155,6 +158,72 @@ Iron Fly (SPX/SPXW) and Delta Neutral (SPY) are mostly independent:
 
 ---
 
+## Token Keeper Service (NEW - 2026-01-27)
+
+A dedicated service that keeps Saxo OAuth tokens fresh 24/7, independent of trading bot status.
+
+### Why It's Needed
+- Saxo tokens expire every **20 minutes**
+- If all bots are stopped (e.g., for safety or maintenance), no one refreshes the token
+- Expired tokens require **manual OAuth browser flow** to re-authenticate
+- Token Keeper ensures tokens stay fresh even when all trading bots are stopped
+
+### How It Works
+| Property | Value |
+|----------|-------|
+| Service Name | `token_keeper.service` |
+| Check Interval | Every 60 seconds |
+| Refresh Threshold | 5 minutes before expiry |
+| Token Cache | `/opt/calypso/data/saxo_token_cache.json` |
+| Lock File | `/opt/calypso/data/saxo_token.lock` |
+| Restart Policy | `Restart=always`, `RestartSec=10` |
+
+### Service Commands
+```bash
+# Start token keeper
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start token_keeper"
+
+# Stop token keeper
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop token_keeper"
+
+# Check status
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper"
+
+# View logs
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -n 50 --no-pager"
+
+# Follow logs (live)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -f"
+```
+
+### First-Time Deployment
+```bash
+# 1. Copy service file to systemd
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo cp /opt/calypso/deploy/token_keeper.service /etc/systemd/system/"
+
+# 2. Reload systemd
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl daemon-reload"
+
+# 3. Enable service (auto-start on boot)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl enable token_keeper"
+
+# 4. Start service
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start token_keeper"
+```
+
+### Integration with Trading Bots
+- Uses the same `TokenCoordinator` as all trading bots
+- File-based locking prevents race conditions during refresh
+- All bots read from the same cache file (`saxo_token_cache.json`)
+- Token Keeper runs with `Before=` directive to start before trading bots
+
+**Important:** Token Keeper should be the **only** service actively refreshing tokens. Trading bots will:
+1. Check the shared cache on startup
+2. Use cached tokens (refreshed by Token Keeper)
+3. Only refresh if Token Keeper is down and token is about to expire
+
+---
+
 ## Alert System (SMS/Email)
 
 All bots use a shared alerting system via Google Cloud Pub/Sub and Cloud Functions.
@@ -242,12 +311,16 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-tradin
 
 ## Quick Reference Commands
 
-### Emergency Stop (All Bots)
+### Emergency Stop (All Bots + Token Keeper)
 ```bash
+# Stop all trading bots (token keeper keeps running to preserve auth)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic"
+
+# Stop EVERYTHING including token keeper (token will expire in ~20 min!)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic token_keeper"
 ```
 
-### Stop Individual Bots
+### Stop Individual Services
 ```bash
 # Iron Fly
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte"
@@ -260,54 +333,68 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop 
 
 # MEIC
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop meic"
+
+# Token Keeper (WARNING: token will expire in ~20 min without this!)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop token_keeper"
 ```
 
-### Start Bots
+### Start Services
 ```bash
-# All bots
+# Start token keeper first (ensures fresh token for bots)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start token_keeper"
+
+# Start all trading bots
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 
-# Individual
+# Individual bots
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start delta_neutral"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start rolling_put_diagonal"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start meic"
 ```
 
-### Restart Bots
+### Restart Services
 ```bash
-# All bots
+# Restart all trading bots (token keeper usually doesn't need restart)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 
-# Individual
+# Individual bots
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart delta_neutral"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart rolling_put_diagonal"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart meic"
+
+# Token Keeper (rarely needed)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart token_keeper"
 ```
 
 ### Check Status
 ```bash
-# All bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal meic"
+# All services (bots + token keeper)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper iron_fly_0dte delta_neutral rolling_put_diagonal meic"
 
-# List running services
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling|meic)'"
+# List running Calypso services
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling|meic|token_keeper)'"
 ```
 
 ### View Logs
 ```bash
-# Recent logs (50 lines)
+# Token Keeper logs (check token refresh status)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -n 50 --no-pager"
+
+# Trading bot logs (50 lines)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u delta_neutral -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u rolling_put_diagonal -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -n 50 --no-pager"
 
 # Follow logs (live)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -f"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte -f"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -f"
 
 # Today's logs
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper --since today --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte --since today --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic --since today --no-pager"
 ```

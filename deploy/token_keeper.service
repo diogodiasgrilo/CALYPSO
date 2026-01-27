@@ -1,0 +1,47 @@
+[Unit]
+Description=Calypso Token Keeper - Keeps Saxo OAuth Tokens Fresh
+Documentation=https://github.com/your-repo/calypso
+After=network.target network-online.target
+Wants=network-online.target
+
+# Start before trading bots to ensure fresh token is available
+Before=iron_fly_0dte.service delta_neutral.service rolling_put_diagonal.service meic.service
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+# Environment variables
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+
+# Main command - runs the token keeper service
+ExecStart=/opt/calypso/.venv/bin/python -m services.token_keeper.main
+
+# Restart policy - ALWAYS restart to ensure tokens stay fresh
+# This is the most critical service - if it dies, tokens expire
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-token-keeper
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/calypso /opt/calypso/logs /opt/calypso/data
+
+# Resource limits - very lightweight service
+MemoryMax=128M
+CPUQuota=10%
+
+[Install]
+WantedBy=multi-user.target
