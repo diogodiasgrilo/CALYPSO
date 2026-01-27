@@ -85,6 +85,22 @@ CIRCUIT_BREAKER_COOLDOWN_MINUTES = 5
 # ORDER-006: Wide bid-ask spread thresholds
 MAX_BID_ASK_SPREAD_PERCENT_WARNING = 50  # Log warning
 MAX_BID_ASK_SPREAD_PERCENT_SKIP = 100  # Skip entry
+MAX_ABSOLUTE_SLIPPAGE = 2.00  # Max $ slippage before aborting MARKET order
+
+# ORDER-007: Progressive slippage retry sequence for 0DTE (tighter timeouts)
+# Format: (slippage_percent, is_market_order)
+PROGRESSIVE_RETRY_SEQUENCE = [
+    (0.0, False),   # 1st: 0% slippage (limit at mid)
+    (0.0, False),   # 2nd: 0% slippage (fresh quote)
+    (5.0, False),   # 3rd: 5% slippage
+    (10.0, False),  # 4th: 10% slippage
+    (0.0, True),    # 5th: MARKET order (guaranteed fill)
+]
+ORDER_TIMEOUT_SECONDS = 30  # Shorter for 0DTE (vs 60s for Delta Neutral)
+ORDER_TIMEOUT_EMERGENCY_SECONDS = 15  # Even shorter for emergency closes
+
+# CONN-005: Position verification
+POSITION_VERIFY_DELAY_SECONDS = 0.5  # Wait before verifying position exists
 
 # MKT-006: VIX filter
 DEFAULT_MAX_VIX_ENTRY = 25  # Skip remaining entries if VIX > this
@@ -445,6 +461,13 @@ class MEICStrategy:
         self._critical_intervention_required = False
         self._critical_intervention_reason = ""
 
+        # Orphaned order tracking (ORDER-008)
+        self._orphaned_orders: List[str] = []
+
+        # Order slippage settings (from config or defaults)
+        self._max_absolute_slippage = self.strategy_config.get("max_absolute_slippage", MAX_ABSOLUTE_SLIPPAGE)
+        self._order_timeout = self.strategy_config.get("order_timeout_seconds", ORDER_TIMEOUT_SECONDS)
+
         # Daily summary tracking
         self._daily_summary_sent = False
 
@@ -506,6 +529,13 @@ class MEICStrategy:
                 self._close_circuit_breaker()
             else:
                 return f"Circuit breaker open: {self._circuit_breaker_reason}"
+
+        # ORDER-008: Check for orphaned orders
+        if self._has_orphaned_orders():
+            # Try to clean up orphaned orders by checking if they've been filled/cancelled
+            self._attempt_orphan_cleanup()
+            if self._has_orphaned_orders():
+                return f"Blocked by {len(self._orphaned_orders)} orphaned order(s) - manual intervention required"
 
         # Update market data
         self._update_market_data()
@@ -732,7 +762,12 @@ class MEICStrategy:
 
     def _initiate_entry(self) -> str:
         """
-        Initiate an iron condor entry.
+        Initiate an iron condor entry with retry logic.
+
+        CONN-001: Retries entry up to ENTRY_MAX_RETRIES times within
+        ENTRY_WINDOW_MINUTES of the scheduled time.
+
+        ORDER-008: Checks for orphaned orders before attempting entry.
 
         Returns:
             str: Description of action taken
@@ -740,77 +775,103 @@ class MEICStrategy:
         entry_num = self._next_entry_index + 1
         logger.info(f"Initiating Entry #{entry_num} of {len(self.entry_times)}")
 
+        # ORDER-008: Check for orphaned orders blocking trading
+        if self._has_orphaned_orders():
+            logger.error(f"Entry #{entry_num} blocked by orphaned orders")
+            self._next_entry_index += 1  # Skip this entry
+            return f"Entry #{entry_num} skipped - orphaned orders blocking"
+
         self._entry_in_progress = True
         self.state = MEICState.ENTRY_IN_PROGRESS
 
-        try:
-            # Create entry object
-            entry = IronCondorEntry(entry_number=entry_num)
-            entry.strategy_id = f"meic_{get_us_market_time().strftime('%Y%m%d')}_entry{entry_num}"
-            self._current_entry = entry
+        # CONN-001: Entry retry loop
+        last_error = None
+        for attempt in range(ENTRY_MAX_RETRIES):
+            try:
+                if attempt > 0:
+                    logger.info(f"Entry #{entry_num} retry {attempt + 1}/{ENTRY_MAX_RETRIES}")
+                    time.sleep(ENTRY_RETRY_DELAY_SECONDS)
 
-            # Calculate strikes
-            if not self._calculate_strikes(entry):
-                raise Exception("Failed to calculate strikes")
+                    # Check if still within entry window
+                    if not self._is_entry_time():
+                        logger.warning(f"Entry #{entry_num} window expired after {attempt} retries")
+                        break
 
-            if self.dry_run:
-                # Simulate entry
-                success = self._simulate_entry(entry)
-            else:
-                # Execute real entry
-                success = self._execute_entry(entry)
+                # Create entry object (fresh each attempt)
+                entry = IronCondorEntry(entry_number=entry_num)
+                entry.strategy_id = f"meic_{get_us_market_time().strftime('%Y%m%d')}_entry{entry_num}"
+                self._current_entry = entry
 
-            if success:
-                entry.entry_time = get_us_market_time()
-                entry.is_complete = True
-                self.daily_state.entries.append(entry)
-                self.daily_state.entries_completed += 1
-                self.daily_state.total_credit_received += entry.total_credit
+                # Calculate strikes (may change between retries due to price movement)
+                if not self._calculate_strikes(entry):
+                    last_error = "Failed to calculate strikes"
+                    continue
 
-                # Calculate stop losses
-                self._calculate_stop_levels(entry)
+                if self.dry_run:
+                    # Simulate entry
+                    success = self._simulate_entry(entry)
+                else:
+                    # Execute real entry
+                    success = self._execute_entry(entry)
 
-                # Log to Google Sheets
-                self._log_entry(entry)
+                if success:
+                    entry.entry_time = get_us_market_time()
+                    entry.is_complete = True
+                    self.daily_state.entries.append(entry)
+                    self.daily_state.entries_completed += 1
+                    self.daily_state.total_credit_received += entry.total_credit
 
-                # Send alert
-                self.alert_service.position_opened(
-                    position_summary=f"MEIC Entry #{entry_num}: Call {entry.short_call_strike}/{entry.long_call_strike}, Put {entry.short_put_strike}/{entry.long_put_strike}",
-                    cost_or_credit=entry.total_credit,
-                    details={
-                        "spx_price": self.current_price,
-                        "entry_number": entry_num,
-                        "spread_width": self.spread_width
-                    }
-                )
+                    # Calculate stop losses
+                    self._calculate_stop_levels(entry)
 
-                self._record_api_result(True)
-                self._next_entry_index += 1
-                return f"Entry #{entry_num} complete - Credit: ${entry.total_credit:.2f}"
-            else:
-                self.daily_state.entries_failed += 1
-                self._record_api_result(False, f"Entry #{entry_num} failed")
-                self._next_entry_index += 1  # Move on even if failed
-                return f"Entry #{entry_num} failed"
+                    # Log to Google Sheets
+                    self._log_entry(entry)
 
-        except Exception as e:
-            logger.error(f"Entry #{entry_num} error: {e}")
-            self.daily_state.entries_failed += 1
-            self._record_api_result(False, str(e))
-            self._next_entry_index += 1
-            return f"Entry #{entry_num} error: {e}"
+                    # Send alert
+                    self.alert_service.position_opened(
+                        position_summary=f"MEIC Entry #{entry_num}: Call {entry.short_call_strike}/{entry.long_call_strike}, Put {entry.short_put_strike}/{entry.long_put_strike}",
+                        cost_or_credit=entry.total_credit,
+                        details={
+                            "spx_price": self.current_price,
+                            "entry_number": entry_num,
+                            "spread_width": self.spread_width,
+                            "attempts": attempt + 1
+                        }
+                    )
 
-        finally:
-            self._entry_in_progress = False
-            self._current_entry = None
+                    self._record_api_result(True)
+                    self._next_entry_index += 1
 
-            # Transition state
-            if self.daily_state.active_entries:
-                self.state = MEICState.MONITORING
-            elif self._next_entry_index < len(self.entry_times):
-                self.state = MEICState.WAITING_FIRST_ENTRY
-            else:
-                self.state = MEICState.DAILY_COMPLETE
+                    result_msg = f"Entry #{entry_num} complete - Credit: ${entry.total_credit:.2f}"
+                    if attempt > 0:
+                        result_msg += f" (after {attempt + 1} attempts)"
+                    return result_msg
+                else:
+                    last_error = "Entry execution failed"
+                    # Continue to next retry
+
+            except Exception as e:
+                logger.error(f"Entry #{entry_num} attempt {attempt + 1} error: {e}")
+                last_error = str(e)
+                # Continue to next retry
+
+        # All retries exhausted
+        self.daily_state.entries_failed += 1
+        self._record_api_result(False, f"Entry #{entry_num} failed after {ENTRY_MAX_RETRIES} attempts: {last_error}")
+        self._next_entry_index += 1  # Move on to next entry time
+
+        self._entry_in_progress = False
+        self._current_entry = None
+
+        # Transition state
+        if self.daily_state.active_entries:
+            self.state = MEICState.MONITORING
+        elif self._next_entry_index < len(self.entry_times):
+            self.state = MEICState.WAITING_FIRST_ENTRY
+        else:
+            self.state = MEICState.DAILY_COMPLETE
+
+        return f"Entry #{entry_num} failed after {ENTRY_MAX_RETRIES} attempts: {last_error}"
 
     def _calculate_strikes(self, entry: IronCondorEntry) -> bool:
         """
@@ -1055,10 +1116,21 @@ class MEICStrategy:
         put_call: str,
         buy_sell: BuySell,
         expiry: str,
-        external_ref: str
+        external_ref: str,
+        emergency_mode: bool = False
     ) -> Optional[Dict]:
         """
-        Place a single option order.
+        Place a single option order with progressive slippage retry.
+
+        ORDER-007: Uses progressive retry sequence:
+        1. Limit at mid price (0% slippage)
+        2. Limit at mid price (fresh quote)
+        3. Limit with 5% slippage
+        4. Limit with 10% slippage
+        5. MARKET order (guaranteed fill, if spread acceptable)
+
+        ORDER-006: Checks bid-ask spread before placing orders.
+        CONN-005: Verifies position exists after fill.
 
         Args:
             strike: Strike price
@@ -1066,6 +1138,7 @@ class MEICStrategy:
             buy_sell: BuySell enum
             expiry: Expiry date string (YYYY-MM-DD)
             external_ref: External reference for tracking
+            emergency_mode: If True, use shorter timeouts
 
         Returns:
             dict with order result including position_id, uic, credit/debit
@@ -1077,36 +1150,244 @@ class MEICStrategy:
             logger.error(f"Could not find UIC for {put_call} {strike} {expiry}")
             return None
 
-        # Place market order
-        result = self.client.place_order(
-            uic=uic,
-            asset_type="StockIndexOption",
-            buy_sell=buy_sell,
-            amount=self.contracts_per_entry,
-            order_type=OrderType.MARKET,
-            to_open_close="ToOpen",
-            external_reference=external_ref
-        )
+        timeout = ORDER_TIMEOUT_EMERGENCY_SECONDS if emergency_mode else self._order_timeout
+        last_result = None
+        leg_description = f"{put_call} {strike}"
 
-        if not result:
-            logger.error(f"Order failed for {put_call} {strike}")
-            return None
+        # Progressive retry sequence
+        for attempt, (slippage_percent, is_market) in enumerate(PROGRESSIVE_RETRY_SEQUENCE):
+            # Get fresh quote for each attempt
+            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+            if not quote or "Quote" not in quote:
+                logger.warning(f"  Attempt {attempt + 1}: No quote for {leg_description}")
+                time.sleep(1)
+                continue
 
-        # Get position ID from activities
-        # This may require waiting for fill confirmation
-        position_id = self._get_position_id_from_order(result)
-        if not position_id:
-            logger.warning(f"Could not get position ID for {put_call} {strike}")
+            bid = quote["Quote"].get("Bid") or 0
+            ask = quote["Quote"].get("Ask") or 0
+            spread = abs(ask - bid) if bid and ask else 0
 
-        # Get fill price for credit calculation
-        fill_price = self._get_fill_price(result)
+            # ORDER-006: Check bid-ask spread
+            if bid > 0:
+                spread_percent = (spread / bid) * 100
+                if spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_SKIP:
+                    logger.warning(f"  ORDER-006: Spread {spread_percent:.1f}% too wide, skipping attempt")
+                    continue
+                elif spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_WARNING:
+                    logger.warning(f"  ORDER-006: Wide spread warning: {spread_percent:.1f}%")
 
-        return {
-            "position_id": position_id,
-            "uic": uic,
-            "credit": fill_price * 100 if buy_sell == BuySell.SELL else 0,
-            "debit": fill_price * 100 if buy_sell == BuySell.BUY else 0
-        }
+            if is_market:
+                # ORDER-005: Check absolute spread before MARKET order
+                if spread > self._max_absolute_slippage:
+                    logger.critical(f"  ORDER-005: Spread ${spread:.2f} > max ${self._max_absolute_slippage:.2f}")
+                    logger.critical(f"  ABORTING MARKET order for {leg_description}")
+                    continue
+
+                # Place MARKET order
+                logger.info(f"  Attempt {attempt + 1}: MARKET order for {leg_description}")
+                result = self.client.place_order(
+                    uic=uic,
+                    asset_type="StockIndexOption",
+                    buy_sell=buy_sell,
+                    amount=self.contracts_per_entry,
+                    order_type=OrderType.MARKET,
+                    to_open_close="ToOpen",
+                    external_reference=external_ref
+                )
+            else:
+                # Calculate limit price with slippage
+                mid_price = (bid + ask) / 2 if bid and ask else ask or bid
+                if slippage_percent > 0:
+                    if buy_sell == BuySell.BUY:
+                        # Pay MORE to buy (aggressive)
+                        limit_price = mid_price * (1 + slippage_percent / 100)
+                    else:
+                        # Accept LESS to sell (aggressive)
+                        limit_price = mid_price * (1 - slippage_percent / 100)
+                    limit_price = round(limit_price, 2)
+                else:
+                    limit_price = round(mid_price, 2)
+
+                logger.info(
+                    f"  Attempt {attempt + 1}: LIMIT @ ${limit_price:.2f} "
+                    f"({slippage_percent}% slippage) for {leg_description}"
+                )
+
+                # Place limit order with timeout
+                result = self.client.place_limit_order_with_timeout(
+                    uic=uic,
+                    asset_type="StockIndexOption",
+                    buy_sell=buy_sell,
+                    amount=self.contracts_per_entry,
+                    limit_price=limit_price,
+                    timeout_seconds=timeout,
+                    to_open_close="ToOpen",
+                    external_reference=external_ref
+                )
+
+            last_result = result
+
+            if result and result.get("filled"):
+                # Order filled - verify position exists
+                position_id = self._get_position_id_from_order(result)
+                fill_price = self._get_fill_price(result)
+
+                # CONN-005: Verify position exists
+                if position_id and not self._verify_position_exists(uic, position_id, buy_sell):
+                    logger.warning(f"  CONN-005: Position verification failed for {leg_description}")
+                    # Position may still exist, continue with warning
+
+                logger.info(f"  ✓ Filled {leg_description} @ ${fill_price:.2f}")
+
+                return {
+                    "position_id": position_id,
+                    "uic": uic,
+                    "credit": fill_price * 100 if buy_sell == BuySell.SELL else 0,
+                    "debit": fill_price * 100 if buy_sell == BuySell.BUY else 0,
+                    "fill_price": fill_price
+                }
+
+            # Check if cancel failed (orphaned order)
+            if result and result.get("cancel_failed"):
+                order_id = result.get("order_id")
+                if order_id:
+                    logger.critical(f"  ORDER-008: Cancel failed - orphaned order {order_id}")
+                    self._add_orphaned_order(order_id)
+                    # Cannot continue with orphaned order
+                    return None
+
+            # Log retry info
+            if attempt < len(PROGRESSIVE_RETRY_SEQUENCE) - 1:
+                next_slippage, next_is_market = PROGRESSIVE_RETRY_SEQUENCE[attempt + 1]
+                if next_is_market:
+                    logger.warning(f"  ⚠ {leg_description} not filled - trying MARKET next...")
+                else:
+                    logger.warning(f"  ⚠ {leg_description} not filled - retrying at {next_slippage}% slippage...")
+
+        # All attempts failed
+        logger.error(f"  ✗ {leg_description} failed all {len(PROGRESSIVE_RETRY_SEQUENCE)} attempts")
+        return None
+
+    def _verify_position_exists(self, uic: int, position_id: str, buy_sell: BuySell) -> bool:
+        """
+        CONN-005: Verify that a position exists after fill.
+
+        Catches the case where an order disappears from open orders but wasn't
+        actually filled (could have been rejected).
+
+        Args:
+            uic: Option UIC
+            position_id: Expected position ID
+            buy_sell: Direction of the order
+
+        Returns:
+            True if position verified, False otherwise
+        """
+        time.sleep(POSITION_VERIFY_DELAY_SECONDS)
+
+        positions = self.client.get_positions()
+        if not positions:
+            logger.warning("CONN-005: Could not fetch positions for verification")
+            return False
+
+        expected_direction = "long" if buy_sell == BuySell.BUY else "short"
+
+        for pos in positions:
+            pos_base = pos.get("PositionBase", {})
+            pos_id = str(pos_base.get("PositionId", ""))
+            pos_uic = pos_base.get("Uic")
+            amount = pos_base.get("Amount", 0)
+
+            if pos_id == position_id or pos_uic == uic:
+                # Check direction matches
+                if expected_direction == "long" and amount > 0:
+                    logger.info(f"  ✓ CONN-005: Verified long position for UIC {uic}")
+                    return True
+                elif expected_direction == "short" and amount < 0:
+                    logger.info(f"  ✓ CONN-005: Verified short position for UIC {uic}")
+                    return True
+
+        logger.warning(f"  ⚠ CONN-005: Position NOT FOUND for UIC {uic}")
+        return False
+
+    def _add_orphaned_order(self, order_id: str):
+        """
+        ORDER-008: Track an orphaned order (cancel failed).
+
+        Args:
+            order_id: The order ID that failed to cancel
+        """
+        if order_id not in self._orphaned_orders:
+            self._orphaned_orders.append(order_id)
+            logger.critical(f"ORDER-008: Added orphaned order {order_id}")
+            logger.critical(f"  Total orphaned orders: {len(self._orphaned_orders)}")
+
+            # Alert about orphaned order
+            self.alert_service.send_alert(
+                alert_type=AlertType.CIRCUIT_BREAKER,
+                title="Orphaned Order Detected",
+                message=f"Order {order_id} failed to cancel - manual intervention may be required",
+                priority=AlertPriority.HIGH,
+                details={"order_id": order_id, "orphaned_orders": self._orphaned_orders}
+            )
+
+    def _has_orphaned_orders(self) -> bool:
+        """Check if there are any orphaned orders blocking trading."""
+        if self._orphaned_orders:
+            logger.warning(f"ORDER-008: {len(self._orphaned_orders)} orphaned orders blocking trading")
+            return True
+        return False
+
+    def _clear_orphaned_order(self, order_id: str):
+        """Remove an orphaned order after manual resolution."""
+        if order_id in self._orphaned_orders:
+            self._orphaned_orders.remove(order_id)
+            logger.info(f"ORDER-008: Cleared orphaned order {order_id}")
+
+    def _attempt_orphan_cleanup(self):
+        """
+        ORDER-008: Attempt to clean up orphaned orders.
+
+        Checks if orphaned orders have been filled/cancelled and clears them
+        from the tracking list if they're no longer open.
+        """
+        if not self._orphaned_orders:
+            return
+
+        logger.info(f"ORDER-008: Attempting cleanup of {len(self._orphaned_orders)} orphaned orders")
+
+        # Get current open orders
+        try:
+            open_orders = self.client.get_orders()
+            open_order_ids = {str(o.get("OrderId")) for o in (open_orders or [])}
+        except Exception as e:
+            logger.error(f"Failed to fetch open orders for orphan cleanup: {e}")
+            return
+
+        # Check each orphaned order
+        orders_to_clear = []
+        for order_id in self._orphaned_orders:
+            if order_id not in open_order_ids:
+                # Order is no longer open - it was filled or cancelled
+                logger.info(f"ORDER-008: Orphaned order {order_id} no longer open - clearing")
+                orders_to_clear.append(order_id)
+            else:
+                # Still open - try to cancel again
+                logger.warning(f"ORDER-008: Orphaned order {order_id} still open - attempting cancel")
+                try:
+                    cancel_result = self.client.cancel_order(order_id)
+                    if cancel_result:
+                        orders_to_clear.append(order_id)
+                        logger.info(f"ORDER-008: Successfully cancelled orphaned order {order_id}")
+                except Exception as e:
+                    logger.error(f"ORDER-008: Failed to cancel orphaned order {order_id}: {e}")
+
+        # Clear resolved orders
+        for order_id in orders_to_clear:
+            self._clear_orphaned_order(order_id)
+
+        if self._orphaned_orders:
+            logger.warning(f"ORDER-008: {len(self._orphaned_orders)} orphaned orders remain")
 
     def _get_option_uic(self, strike: float, put_call: str, expiry: str) -> Optional[int]:
         """
@@ -1306,15 +1587,30 @@ class MEICStrategy:
             self._simulate_entry_prices(entry)
             return
 
-        # Get current option prices from cache or API
+        # Get current option prices from REST API (get_quote)
+        # Note: For monitoring, we could also use WebSocket streaming if set up
         if entry.short_call_uic:
-            entry.short_call_price = self.client.get_cached_price(entry.short_call_uic) or 0
+            quote = self.client.get_quote(entry.short_call_uic, asset_type="StockIndexOption")
+            entry.short_call_price = self._extract_mid_price(quote) or 0
         if entry.long_call_uic:
-            entry.long_call_price = self.client.get_cached_price(entry.long_call_uic) or 0
+            quote = self.client.get_quote(entry.long_call_uic, asset_type="StockIndexOption")
+            entry.long_call_price = self._extract_mid_price(quote) or 0
         if entry.short_put_uic:
-            entry.short_put_price = self.client.get_cached_price(entry.short_put_uic) or 0
+            quote = self.client.get_quote(entry.short_put_uic, asset_type="StockIndexOption")
+            entry.short_put_price = self._extract_mid_price(quote) or 0
         if entry.long_put_uic:
-            entry.long_put_price = self.client.get_cached_price(entry.long_put_uic) or 0
+            quote = self.client.get_quote(entry.long_put_uic, asset_type="StockIndexOption")
+            entry.long_put_price = self._extract_mid_price(quote) or 0
+
+    def _extract_mid_price(self, quote: Optional[Dict]) -> Optional[float]:
+        """Extract mid price from quote for option pricing."""
+        if not quote or "Quote" not in quote:
+            return None
+        bid = quote["Quote"].get("Bid") or 0
+        ask = quote["Quote"].get("Ask") or 0
+        if bid and ask:
+            return (bid + ask) / 2
+        return ask or bid or None
 
     def _simulate_entry_prices(self, entry: IronCondorEntry):
         """Simulate option prices in dry-run mode."""
