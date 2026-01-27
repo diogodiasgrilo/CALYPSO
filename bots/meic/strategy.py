@@ -1414,22 +1414,16 @@ class MEICStrategy:
 
     def _update_market_data(self):
         """Update SPX and VIX prices from cache or API."""
-        # Try cache first
-        spx = self.client.get_cached_price(self.underlying_uic)
-        if spx:
-            self.market_data.update_spx(spx)
-            self.current_price = spx
-        else:
-            # Fallback to REST
-            quote = self.client.get_quote(self.underlying_uic)
-            if quote:
-                price = self._extract_price(quote)
-                if price:
-                    self.market_data.update_spx(price)
-                    self.current_price = price
+        # US500.I is a CFD that tracks SPX - use CfdOnIndex asset type
+        quote = self.client.get_quote(self.underlying_uic, asset_type="CfdOnIndex")
+        if quote:
+            price = self._extract_price(quote)
+            if price:
+                self.market_data.update_spx(price)
+                self.current_price = price
 
-        # VIX
-        vix = self.client.get_vix_level()
+        # VIX - use get_vix_price which has Yahoo Finance fallback
+        vix = self.client.get_vix_price(self.vix_uic)
         if vix:
             self.market_data.update_vix(vix)
             self.current_vix = vix
