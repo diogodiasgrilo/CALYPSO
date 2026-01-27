@@ -228,231 +228,119 @@ def main():
     puts.sort(key=lambda x: x["strike"], reverse=True)
 
     # =========================================================================
-    # STEP 4: Find optimal strikes with fallback logic
+    # STEP 4: Find highest SYMMETRIC multiplier achieving >= 1% NET return
     # =========================================================================
-    # Strategy:
-    # 1. Start at 1.0x minimum multiplier
-    # 2. Find combinations, apply 1.5x cap, optimize for safety
-    # 3. If no valid options found, progressively reduce minimum multiplier
-    # 4. Track which strikes were capped so we can reverse if needed
+    # NEW STRATEGY (2026-01-27):
+    # 1. Start from MAX multiplier (2.0x) and work DOWN in 0.01 increments
+    # 2. At each level, find symmetric strikes (same multiplier for both legs)
+    # 3. Stop at FIRST (highest) multiplier that achieves >= 1% NET return
+    # 4. This gives the safest/widest strikes that still hit premium target
+    #
+    # Benefits:
+    # - Always symmetric (true delta neutral)
+    # - Dynamically adapts to VIX/expected move
+    # - Low VIX: goes to lower multipliers to hit target
+    # - High VIX: stays at higher multipliers for safety
 
-    # UPDATED: Use config minimum multiplier (1.5x) per strategy spec
-    min_mult_from_config = config["strategy"].get("weekly_strangle_multiplier_min", 1.5)
-    MIN_MULT_ATTEMPTS = [min_mult_from_config]  # Only try configured minimum, don't go lower
+    min_mult_absolute = 0.5  # Absolute floor
+    min_target_return = weekly_target_return_pct
+
+    # Build strike->data mappings
+    call_by_strike = {c["strike"]: c for c in calls}
+    put_by_strike = {p["strike"]: p for p in puts}
+    all_call_strikes = sorted(call_by_strike.keys())
+    all_put_strikes = sorted(put_by_strike.keys(), reverse=True)
+
+    print(f"Available: {len(all_call_strikes)} call strikes, {len(all_put_strikes)} put strikes")
+    print(f"Scanning from {max_multiplier}x down to {min_mult_absolute}x for symmetric strikes >= {min_target_return}% NET")
+    print()
 
     final_call = None
     final_put = None
+    found_mult = None
 
-    for min_mult_threshold in MIN_MULT_ATTEMPTS:
-        print(f"Trying MIN_MULTIPLIER = {min_mult_threshold}x...")
+    # Test multipliers from max down to min in 0.01 increments
+    test_multipliers = []
+    mult = max_multiplier
+    while mult >= min_mult_absolute:
+        test_multipliers.append(round(mult, 2))
+        mult -= 0.01
 
-        # Find all combinations meeting minimum requirements
-        combinations = []
-        for c in calls:
-            for p in puts:
-                if c["mult"] < min_mult_threshold or p["mult"] < min_mult_threshold:
-                    continue
+    for target_mult in test_multipliers:
+        target_distance = expected_move * target_mult
 
-                gross = c["premium"] + p["premium"]
-                if gross < required_gross:
-                    continue
-
-                net = gross - weekly_theta - total_entry_fees
-                net_return = (net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
-                min_mult = min(c["mult"], p["mult"])
-
-                combinations.append({
-                    "call": c,
-                    "put": p,
-                    "gross": gross,
-                    "net": net,
-                    "return": net_return,
-                    "min_mult": min_mult
-                })
-
-        if not combinations:
-            print(f"  No combinations at {min_mult_threshold}x minimum")
-            continue
-
-        # Sort by minimum multiplier (widest/safest first)
-        combinations.sort(key=lambda x: x["min_mult"], reverse=True)
-        print(f"  Found {len(combinations)} combinations")
-
-        # Start with the widest combination
-        best = combinations[0]
-        working_call = best["call"]
-        working_put = best["put"]
-
-        # Track original strikes before any capping
-        original_call = working_call
-        original_put = working_put
-        call_was_capped = False
-        put_was_capped = False
-
-        print(f"  Widest: Put ${working_put['strike']:.0f} ({working_put['mult']:.2f}x) / Call ${working_call['strike']:.0f} ({working_call['mult']:.2f}x)")
-
-        # Apply 1.5x cap - track which sides were capped
-        # We want the option CLOSEST to 1.5x (but not over), so iterate from furthest to closest
-        if working_call["mult"] > max_multiplier:
-            call_was_capped = True
-            # Calls are sorted ascending (closest first), so reverse to check furthest first
-            for c in reversed(calls):
-                if c["mult"] <= max_multiplier:
-                    working_call = c
-                    print(f"  Call capped: ${original_call['strike']:.0f} ({original_call['mult']:.2f}x) -> ${working_call['strike']:.0f} ({working_call['mult']:.2f}x)")
-                    break
-
-        if working_put["mult"] > max_multiplier:
-            put_was_capped = True
-            # Puts are sorted descending (closest first), so reverse to check furthest first
-            for p in reversed(puts):
-                if p["mult"] <= max_multiplier:
-                    working_put = p
-                    print(f"  Put capped: ${original_put['strike']:.0f} ({original_put['mult']:.2f}x) -> ${working_put['strike']:.0f} ({working_put['mult']:.2f}x)")
-                    break
-
-        # Optimize: Push tighter strike OUT while staying >= target
-        current_gross = working_call["premium"] + working_put["premium"]
-        current_net = current_gross - weekly_theta - total_entry_fees
-        current_return = (current_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
-
-        # Track optimization changes
-        call_was_optimized = False
-        put_was_optimized = False
-        pre_opt_call = working_call
-        pre_opt_put = working_put
-
-        if current_return > weekly_target_return_pct:
-            # Find tighter side and push out
-            if working_call["mult"] < working_put["mult"]:
-                # Call is tighter, try wider calls
-                for c in calls:
-                    if c["mult"] > max_multiplier or c["strike"] <= working_call["strike"]:
-                        continue
-                    test_gross = c["premium"] + working_put["premium"]
-                    test_net = test_gross - weekly_theta - total_entry_fees
-                    test_return = (test_net / long_straddle_cost) * 100
-                    if test_return >= weekly_target_return_pct:
-                        working_call = c
-                        call_was_optimized = True
-                    else:
-                        break
-            else:
-                # Put is tighter, try wider puts
-                for p in puts:
-                    if p["mult"] > max_multiplier or p["strike"] >= working_put["strike"]:
-                        continue
-                    test_gross = working_call["premium"] + p["premium"]
-                    test_net = test_gross - weekly_theta - total_entry_fees
-                    test_return = (test_net / long_straddle_cost) * 100
-                    if test_return >= weekly_target_return_pct:
-                        working_put = p
-                        put_was_optimized = True
-                    else:
-                        break
-
-            # Try pushing OTHER leg too
-            current_gross = working_call["premium"] + working_put["premium"]
-            current_net = current_gross - weekly_theta - total_entry_fees
-            current_return = (current_net / long_straddle_cost) * 100
-
-            if current_return > weekly_target_return_pct:
-                if working_call["mult"] < working_put["mult"]:
-                    for c in calls:
-                        if c["mult"] > max_multiplier or c["strike"] <= working_call["strike"]:
-                            continue
-                        test_gross = c["premium"] + working_put["premium"]
-                        test_net = test_gross - weekly_theta - total_entry_fees
-                        test_return = (test_net / long_straddle_cost) * 100
-                        if test_return >= weekly_target_return_pct:
-                            working_call = c
-                            call_was_optimized = True
-                        else:
-                            break
-                else:
-                    for p in puts:
-                        if p["mult"] > max_multiplier or p["strike"] >= working_put["strike"]:
-                            continue
-                        test_gross = working_call["premium"] + p["premium"]
-                        test_net = test_gross - weekly_theta - total_entry_fees
-                        test_return = (test_net / long_straddle_cost) * 100
-                        if test_return >= weekly_target_return_pct:
-                            working_put = p
-                            put_was_optimized = True
-                        else:
-                            break
-
-        # Verify quotes are still valid (bid > 0)
-        call_quote = client.get_quote(working_call["uic"], "StockOption")
-        put_quote = client.get_quote(working_put["uic"], "StockOption")
-
-        if call_quote and put_quote:
-            call_bid = call_quote["Quote"].get("Bid", 0) or 0
-            put_bid = put_quote["Quote"].get("Bid", 0) or 0
-
-            if call_bid > 0 and put_bid > 0:
-                # Update with fresh prices
-                working_call["bid"] = call_bid
-                working_call["premium"] = call_bid * 100 * position_size
-                working_put["bid"] = put_bid
-                working_put["premium"] = put_bid * 100 * position_size
-
-                final_call = working_call
-                final_put = working_put
-                print(f"  SUCCESS: Found valid options at {min_mult_threshold}x minimum")
+        # Find call strike at or above target distance
+        target_call_strike = spy_price + target_distance
+        call_strike = None
+        for s in all_call_strikes:
+            if s >= target_call_strike:
+                call_strike = s
                 break
 
-        # Fallback: Reverse optimization changes first
-        print(f"  Options unavailable, trying fallback...")
+        # Find put strike at or below target distance
+        target_put_strike = spy_price - target_distance
+        put_strike = None
+        for s in all_put_strikes:
+            if s <= target_put_strike:
+                put_strike = s
+                break
 
-        fallback_attempts = []
+        if not call_strike or not put_strike:
+            continue
 
-        # 1. If call was optimized, try pre-optimization call
-        if call_was_optimized:
-            fallback_attempts.append((pre_opt_call, working_put, "reverse call optimization"))
+        call_data = call_by_strike.get(call_strike)
+        put_data = put_by_strike.get(put_strike)
 
-        # 2. If put was optimized, try pre-optimization put
-        if put_was_optimized:
-            fallback_attempts.append((working_call, pre_opt_put, "reverse put optimization"))
+        if not call_data or not put_data:
+            continue
 
-        # 3. If call was capped, try original (wider) call
-        if call_was_capped:
-            fallback_attempts.append((original_call, working_put, "reverse call cap"))
+        # Check symmetry
+        mult_diff = abs(call_data["mult"] - put_data["mult"])
+        if mult_diff > 0.3:
+            continue
 
-        # 4. If put was capped, try original (wider) put
-        if put_was_capped:
-            fallback_attempts.append((working_call, original_put, "reverse put cap"))
+        # Calculate NET return
+        gross_premium = call_data["premium"] + put_data["premium"]
+        net_premium = gross_premium - weekly_theta - total_entry_fees
+        net_return = (net_premium / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
 
-        # 5. Try both original (pre-cap) strikes
-        if call_was_capped or put_was_capped:
-            fallback_attempts.append((original_call, original_put, "both original strikes"))
+        # Check if meets target
+        if net_return >= min_target_return:
+            # Verify fresh quotes
+            call_quote = client.get_quote(call_data["uic"], "StockOption")
+            put_quote = client.get_quote(put_data["uic"], "StockOption")
 
-        for fb_call, fb_put, fb_desc in fallback_attempts:
-            fb_call_quote = client.get_quote(fb_call["uic"], "StockOption")
-            fb_put_quote = client.get_quote(fb_put["uic"], "StockOption")
+            if call_quote and put_quote:
+                call_bid = call_quote["Quote"].get("Bid", 0) or 0
+                put_bid = put_quote["Quote"].get("Bid", 0) or 0
 
-            if fb_call_quote and fb_put_quote:
-                fb_call_bid = fb_call_quote["Quote"].get("Bid", 0) or 0
-                fb_put_bid = fb_put_quote["Quote"].get("Bid", 0) or 0
+                if call_bid > 0 and put_bid > 0:
+                    # Update with fresh prices
+                    call_data["bid"] = call_bid
+                    call_data["premium"] = call_bid * 100 * position_size
+                    put_data["bid"] = put_bid
+                    put_data["premium"] = put_bid * 100 * position_size
 
-                if fb_call_bid > 0 and fb_put_bid > 0:
-                    fb_call["bid"] = fb_call_bid
-                    fb_call["premium"] = fb_call_bid * 100 * position_size
-                    fb_put["bid"] = fb_put_bid
-                    fb_put["premium"] = fb_put_bid * 100 * position_size
+                    # Recalculate with fresh prices
+                    fresh_gross = call_data["premium"] + put_data["premium"]
+                    fresh_net = fresh_gross - weekly_theta - total_entry_fees
+                    fresh_return = (fresh_net / long_straddle_cost) * 100
 
-                    final_call = fb_call
-                    final_put = fb_put
-                    print(f"  FALLBACK SUCCESS: {fb_desc}")
-                    break
-
-        if final_call and final_put:
-            break
+                    if fresh_return >= min_target_return:
+                        final_call = call_data
+                        final_put = put_data
+                        found_mult = target_mult
+                        print(f"SUCCESS: Found symmetric strikes at {target_mult:.2f}x")
+                        print(f"  Call: ${call_strike} ({call_data['mult']:.2f}x EM)")
+                        print(f"  Put:  ${put_strike} ({put_data['mult']:.2f}x EM)")
+                        print(f"  NET Return: {fresh_return:.2f}%")
+                        break
 
     if not final_call or not final_put:
         print()
-        print("ERROR: No valid strike combinations found after all fallback attempts")
-        print("Tried minimum multipliers: " + ", ".join([f"{m}x" for m in MIN_MULT_ATTEMPTS]))
+        print("ERROR: No symmetric strikes achieve target return")
+        print(f"Scanned from {max_multiplier}x down to {min_mult_absolute}x")
+        print("Current market (low VIX) doesn't support 1% weekly return")
         return
 
     # Calculate final P&L
