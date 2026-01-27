@@ -231,7 +231,13 @@ class ConfigLoader:
             "external_price_feed": bot_config.get("external_price_feed", {
                 "enabled": False,
                 "_note": "External feed disabled in cloud (LIVE mode)"
-            })
+            }),
+
+            # DRY RUN mode (from bot config - allows cloud testing)
+            "dry_run": bot_config.get("dry_run", False),
+
+            # ALERTS config from bot config
+            "alerts": bot_config.get("alerts", {})
         }
 
         # Store sheets credentials for later use by GoogleSheetsLogger
