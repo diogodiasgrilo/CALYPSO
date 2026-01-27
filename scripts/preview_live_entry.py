@@ -19,13 +19,14 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.saxo_client import SaxoClient
+from shared.config_loader import ConfigLoader
 import json
 
 
 def main():
     config_path = "bots/delta_neutral/config/config.json"
-    with open(config_path, "r") as f:
-        config = json.load(f)
+    config_loader = ConfigLoader(local_config_path=config_path)
+    config = config_loader.load_config()
 
     client = SaxoClient(config)
     underlying_uic = config["strategy"]["underlying_uic"]
