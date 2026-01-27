@@ -602,13 +602,16 @@ Examples:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+        # Get dry_run from config if not specified on command line
+        dry_run = args.dry_run or config.get("dry_run", False)
+
         # Execute requested mode
         if args.status:
             show_status(config)
         else:
             run_bot(
                 config=config,
-                dry_run=args.dry_run,
+                dry_run=dry_run,
                 check_interval=args.interval
             )
 
