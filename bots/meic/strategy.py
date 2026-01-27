@@ -33,7 +33,7 @@ import threading
 import fcntl
 from collections import deque
 from datetime import datetime, timedelta, date, time as dt_time
-from typing import Optional, Dict, List, Any, Tuple, Deque
+from typing import Optional, Dict, List, Any, Tuple, Deque, Set
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
@@ -617,8 +617,10 @@ class MEICStrategy:
         # Initialize metrics
         self.cumulative_metrics = self._load_cumulative_metrics()
 
-        # P1: Attempt to recover state from previous session
-        self._recover_state_from_disk()
+        # CRITICAL FIX: Recover positions from Saxo API (not local state file)
+        # Local state files can be wrong if positions are closed manually on Saxo platform
+        # This matches Delta Neutral's foolproof approach of always querying Saxo for truth
+        self._recover_positions_from_saxo()
 
         # TIME-001: Validate system clock on startup
         if CLOCK_SYNC_CHECK_ENABLED:
@@ -2008,6 +2010,9 @@ class MEICStrategy:
 
         logger.critical(f"HANDLING NAKED SHORT: {leg_name} position {pos_id}")
 
+        # Log safety event for audit trail
+        self._log_safety_event("NAKED_SHORT_DETECTED", f"{leg_name} position {pos_id}")
+
         self.alert_service.send_alert(
             AlertType.CIRCUIT_BREAKER,
             AlertPriority.CRITICAL,
@@ -2020,11 +2025,14 @@ class MEICStrategy:
             if result:
                 logger.info(f"Closed naked short {pos_id}")
                 self.registry.unregister(pos_id)
+                self._log_safety_event("NAKED_SHORT_CLOSED", f"{leg_name} position {pos_id} closed successfully")
             else:
                 logger.critical(f"FAILED to close naked short {pos_id}!")
+                self._log_safety_event("NAKED_SHORT_CLOSE_FAILED", f"{leg_name} position {pos_id} - close returned false")
                 self._trigger_critical_intervention(f"Cannot close naked short {pos_id}")
         except Exception as e:
             logger.critical(f"Exception closing naked short: {e}")
+            self._log_safety_event("NAKED_SHORT_EXCEPTION", f"{leg_name} position {pos_id} - {str(e)}")
             self._trigger_critical_intervention(f"Exception closing naked short: {e}")
 
     def _unwind_partial_entry(self, filled_legs: List[Tuple], entry: IronCondorEntry):
@@ -2357,6 +2365,9 @@ class MEICStrategy:
 
         logger.critical(f"CIRCUIT BREAKER OPEN: {reason}")
 
+        # Log safety event for audit trail
+        self._log_safety_event("CIRCUIT_BREAKER_OPEN", reason)
+
         self.alert_service.circuit_breaker(reason, self._consecutive_failures)
 
         # CB-004: Check daily escalation
@@ -2399,6 +2410,9 @@ class MEICStrategy:
 
         logger.critical(f"CRITICAL INTERVENTION REQUIRED: {reason}")
 
+        # Log safety event for audit trail
+        self._log_safety_event("CRITICAL_INTERVENTION", reason)
+
         self.alert_service.send_alert(
             AlertType.CIRCUIT_BREAKER,
             AlertPriority.CRITICAL,
@@ -2433,35 +2447,438 @@ class MEICStrategy:
         return False
 
     # =========================================================================
-    # POSITION RECONCILIATION
+    # POSITION RECOVERY FROM SAXO API (CRITICAL - Source of Truth)
     # =========================================================================
+
+    def _recover_positions_from_saxo(self) -> bool:
+        """
+        CRITICAL: Recover positions from Saxo API - the ONLY source of truth.
+
+        This replaces the local disk state recovery approach. Local state files can be
+        wrong if positions are closed manually on the Saxo trading platform. This follows
+        Delta Neutral's foolproof approach of always querying Saxo for the real positions.
+
+        Process:
+        1. Query Saxo API for all account positions
+        2. Filter to SPX/SPXW options using option_root_uic
+        3. Use Position Registry to identify which positions belong to MEIC
+        4. Use registry metadata to group positions by entry number
+        5. Reconstruct IronCondorEntry objects from actual Saxo data
+        6. Update local state to match Saxo reality
+
+        Returns:
+            bool: True if positions were recovered, False if starting fresh
+        """
+        logger.info("=" * 60)
+        logger.info("POSITION RECOVERY: Querying Saxo API for source of truth...")
+        logger.info("=" * 60)
+
+        try:
+            # Step 1: Get ALL positions from Saxo
+            all_positions = self.client.get_positions()
+            if not all_positions:
+                logger.info("No positions found in Saxo account - starting fresh")
+                return False
+
+            logger.info(f"Found {len(all_positions)} total positions in account")
+
+            # Step 2: Get valid position IDs and clean up registry orphans
+            valid_ids = {str(p.get("PositionBase", {}).get("PositionId")) for p in all_positions}
+            orphans = self.registry.cleanup_orphans(valid_ids)
+            if orphans:
+                logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
+                self._log_safety_event("ORPHAN_CLEANUP", f"Removed {len(orphans)} orphaned positions from registry")
+
+            # Step 3: Get MEIC positions from registry
+            my_position_ids = self.registry.get_positions("MEIC")
+            if not my_position_ids:
+                logger.info("No MEIC positions in registry - starting fresh")
+                return False
+
+            logger.info(f"Found {len(my_position_ids)} MEIC positions in registry")
+
+            # Step 4: Filter Saxo positions to just MEIC positions
+            meic_positions = []
+            for pos in all_positions:
+                pos_id = str(pos.get("PositionBase", {}).get("PositionId"))
+                if pos_id in my_position_ids:
+                    meic_positions.append(pos)
+
+            if not meic_positions:
+                logger.warning("Registry says we have MEIC positions but none found in Saxo! Cleaning registry...")
+                # Clear MEIC positions from registry since they don't exist
+                for pos_id in my_position_ids:
+                    self.registry.unregister(pos_id)
+                self._log_safety_event("REGISTRY_CLEARED", "All MEIC positions removed - not found in Saxo")
+                return False
+
+            logger.info(f"Matched {len(meic_positions)} positions to MEIC in Saxo")
+
+            # Step 5: Group positions by entry number using registry metadata
+            entries_by_number = self._group_positions_by_entry(meic_positions, my_position_ids)
+
+            if not entries_by_number:
+                logger.warning("Could not group positions into entries - manual review needed")
+                self._log_safety_event("RECOVERY_FAILED", "Could not reconstruct entries from positions")
+                return False
+
+            # Step 6: Reconstruct IronCondorEntry objects
+            recovered_entries = []
+            for entry_num, positions in entries_by_number.items():
+                entry = self._reconstruct_entry_from_positions(entry_num, positions)
+                if entry:
+                    recovered_entries.append(entry)
+                    logger.info(
+                        f"  Entry #{entry_num}: "
+                        f"SC={entry.short_call_strike} LC={entry.long_call_strike} "
+                        f"SP={entry.short_put_strike} LP={entry.long_put_strike}"
+                    )
+
+            if not recovered_entries:
+                logger.warning("Failed to reconstruct any entries from Saxo positions")
+                return False
+
+            # Step 7: Update local state to match Saxo
+            today = get_us_market_time().strftime("%Y-%m-%d")
+
+            # Reset daily state but preserve date
+            self.daily_state = MEICDailyState()
+            self.daily_state.date = today
+            self.daily_state.entries = recovered_entries
+            self.daily_state.entries_completed = len(recovered_entries)
+
+            # Determine next entry index (how many entries have we done?)
+            max_entry_num = max(e.entry_number for e in recovered_entries)
+            self._next_entry_index = max_entry_num  # Next entry will be max_entry_num + 1
+
+            # Set state based on recovered positions
+            if recovered_entries:
+                # Check if any entries still have active positions
+                active_entries = [e for e in recovered_entries if not (e.call_side_stopped and e.put_side_stopped)]
+                if active_entries:
+                    self.state = MEICState.MONITORING
+                elif self._next_entry_index < len(self.entry_times):
+                    self.state = MEICState.WAITING_FIRST_ENTRY
+                else:
+                    self.state = MEICState.DAILY_COMPLETE
+
+            # Calculate total credit from recovered entries
+            total_credit = sum(e.total_credit for e in recovered_entries)
+            self.daily_state.total_credit_received = total_credit
+
+            logger.info("=" * 60)
+            logger.info(f"RECOVERY COMPLETE: {len(recovered_entries)} entries recovered")
+            logger.info(f"  State: {self.state.value}")
+            logger.info(f"  Next entry index: {self._next_entry_index}")
+            logger.info(f"  Total credit: ${total_credit:.2f}")
+            logger.info("=" * 60)
+
+            # Send recovery alert
+            self.alert_service.send_alert(
+                alert_type=AlertType.POSITION_OPENED,
+                title="MEIC Position Recovery",
+                message=f"Recovered {len(recovered_entries)} iron condor(s) from Saxo API",
+                priority=AlertPriority.MEDIUM,
+                details={
+                    "entries_recovered": len(recovered_entries),
+                    "state": self.state.value,
+                    "total_credit": total_credit
+                }
+            )
+
+            # Save recovered state to disk
+            self._save_state_to_disk()
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Position recovery failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self._log_safety_event("RECOVERY_ERROR", str(e))
+            return False
+
+    def _group_positions_by_entry(
+        self,
+        saxo_positions: List[Dict],
+        registry_position_ids: Set[str]
+    ) -> Dict[int, List[Dict]]:
+        """
+        Group Saxo positions by entry number using registry metadata.
+
+        Args:
+            saxo_positions: List of Saxo position dicts
+            registry_position_ids: Set of position IDs from registry
+
+        Returns:
+            Dict mapping entry_number -> list of position data dicts
+        """
+        entries_by_number: Dict[int, List[Dict]] = {}
+
+        for pos in saxo_positions:
+            pos_base = pos.get("PositionBase", {})
+            pos_id = str(pos_base.get("PositionId"))
+
+            # Get registry metadata for this position
+            reg_info = self.registry.get_position_details(pos_id)
+            if not reg_info:
+                logger.warning(f"Position {pos_id} in Saxo but no registry info - orphan?")
+                continue
+
+            metadata = reg_info.get("metadata", {})
+            entry_number = metadata.get("entry_number")
+            leg_type = metadata.get("leg_type")
+            strike = metadata.get("strike")
+
+            if entry_number is None:
+                logger.warning(f"Position {pos_id} has no entry_number in metadata")
+                continue
+
+            # Parse position data
+            parsed = self._parse_spx_option_position(pos)
+            if parsed:
+                parsed["leg_type"] = leg_type
+                parsed["entry_number"] = entry_number
+
+                if entry_number not in entries_by_number:
+                    entries_by_number[entry_number] = []
+                entries_by_number[entry_number].append(parsed)
+
+        return entries_by_number
+
+    def _parse_spx_option_position(self, pos: Dict) -> Optional[Dict]:
+        """
+        Parse a Saxo position dict into a standardized format.
+
+        Args:
+            pos: Raw Saxo position dict
+
+        Returns:
+            Parsed position data or None if not valid
+        """
+        try:
+            pos_base = pos.get("PositionBase", {})
+            pos_view = pos.get("PositionView", {})
+
+            position_id = str(pos_base.get("PositionId"))
+            uic = pos_base.get("Uic")
+            amount = pos_base.get("Amount", 0)
+
+            # Get option details
+            options_data = pos_base.get("OptionsData", {})
+            strike = options_data.get("Strike")
+            expiry = options_data.get("ExpiryDate", "")
+            put_call = options_data.get("PutCall")  # "Call" or "Put"
+
+            if not all([position_id, uic, strike, put_call]):
+                return None
+
+            # Determine if long or short based on amount
+            is_long = amount > 0
+
+            # Get prices
+            entry_price = pos_base.get("OpenPrice", 0) or 0
+            current_price = pos_view.get("CurrentPrice", 0) or 0
+
+            return {
+                "position_id": position_id,
+                "uic": uic,
+                "amount": abs(amount),
+                "is_long": is_long,
+                "strike": strike,
+                "expiry": expiry[:10] if expiry else "",  # YYYY-MM-DD
+                "put_call": put_call,
+                "entry_price": entry_price,
+                "current_price": current_price
+            }
+
+        except Exception as e:
+            logger.warning(f"Failed to parse position: {e}")
+            return None
+
+    def _reconstruct_entry_from_positions(
+        self,
+        entry_number: int,
+        positions: List[Dict]
+    ) -> Optional[IronCondorEntry]:
+        """
+        Reconstruct an IronCondorEntry from Saxo position data.
+
+        Args:
+            entry_number: The entry number (1-6)
+            positions: List of parsed position dicts for this entry
+
+        Returns:
+            Reconstructed IronCondorEntry or None if invalid
+        """
+        entry = IronCondorEntry(entry_number=entry_number)
+        entry.strategy_id = f"meic_{get_us_market_time().strftime('%Y%m%d')}_{entry_number:03d}"
+
+        # Categorize positions by leg type
+        for pos in positions:
+            leg_type = pos.get("leg_type")
+            strike = pos.get("strike")
+            is_long = pos.get("is_long")
+            put_call = pos.get("put_call")
+
+            # Validate leg type matches expected
+            expected_long = leg_type in ["long_call", "long_put"]
+            if expected_long != is_long:
+                logger.warning(f"Entry #{entry_number}: Leg {leg_type} direction mismatch!")
+
+            if leg_type == "short_call":
+                entry.short_call_position_id = pos["position_id"]
+                entry.short_call_uic = pos["uic"]
+                entry.short_call_strike = strike
+                entry.short_call_price = pos.get("current_price", 0)
+                # Estimate credit from entry price
+                entry.call_spread_credit = pos.get("entry_price", 0) * 100
+
+            elif leg_type == "long_call":
+                entry.long_call_position_id = pos["position_id"]
+                entry.long_call_uic = pos["uic"]
+                entry.long_call_strike = strike
+                entry.long_call_price = pos.get("current_price", 0)
+                # Subtract long cost from credit
+                entry.call_spread_credit -= pos.get("entry_price", 0) * 100
+
+            elif leg_type == "short_put":
+                entry.short_put_position_id = pos["position_id"]
+                entry.short_put_uic = pos["uic"]
+                entry.short_put_strike = strike
+                entry.short_put_price = pos.get("current_price", 0)
+                entry.put_spread_credit = pos.get("entry_price", 0) * 100
+
+            elif leg_type == "long_put":
+                entry.long_put_position_id = pos["position_id"]
+                entry.long_put_uic = pos["uic"]
+                entry.long_put_strike = strike
+                entry.long_put_price = pos.get("current_price", 0)
+                entry.put_spread_credit -= pos.get("entry_price", 0) * 100
+
+        # Check if entry is complete (all 4 legs)
+        has_all_legs = all([
+            entry.short_call_position_id,
+            entry.long_call_position_id,
+            entry.short_put_position_id,
+            entry.long_put_position_id
+        ])
+
+        if not has_all_legs:
+            # Partial entry - check which legs exist
+            legs_found = []
+            if entry.short_call_position_id:
+                legs_found.append("SC")
+            if entry.long_call_position_id:
+                legs_found.append("LC")
+            if entry.short_put_position_id:
+                legs_found.append("SP")
+            if entry.long_put_position_id:
+                legs_found.append("LP")
+
+            logger.warning(f"Entry #{entry_number} is PARTIAL: only {legs_found}")
+
+            # Determine which side was stopped
+            has_call_side = entry.short_call_position_id and entry.long_call_position_id
+            has_put_side = entry.short_put_position_id and entry.long_put_position_id
+
+            entry.call_side_stopped = not has_call_side
+            entry.put_side_stopped = not has_put_side
+
+        entry.is_complete = has_all_legs
+
+        # Calculate stop levels based on recovered credit
+        total_credit = entry.call_spread_credit + entry.put_spread_credit
+        if self.meic_plus_enabled:
+            # MEIC+ stops at credit - $0.10 for potential small win
+            entry.call_side_stop = (total_credit / 2) - (self.meic_plus_reduction * 100)
+            entry.put_side_stop = (total_credit / 2) - (self.meic_plus_reduction * 100)
+        else:
+            entry.call_side_stop = total_credit / 2
+            entry.put_side_stop = total_credit / 2
+
+        return entry
 
     def _reconcile_positions(self):
         """
-        Reconcile positions with registry on startup.
+        Reconcile positions with registry (called during market hours).
 
-        Handles POS-001: Bot restart recovery
-        Handles POS-003: Positions closed manually
+        This is a lighter-weight check compared to full recovery.
+        Handles POS-003: Positions closed manually during trading.
         """
-        logger.info("Reconciling positions with registry...")
+        logger.info("Reconciling positions with Saxo API...")
 
         # Get all positions from Saxo
         all_positions = self.client.get_positions()
         valid_ids = {str(p.get("PositionBase", {}).get("PositionId")) for p in all_positions}
 
-        # Clean up orphans
+        # Clean up orphans from registry
         orphans = self.registry.cleanup_orphans(valid_ids)
         if orphans:
             logger.warning(f"Cleaned up {len(orphans)} orphaned registrations")
+            self._log_safety_event("ORPHAN_CLEANUP", f"Cleaned {len(orphans)} orphans during reconciliation")
 
-        # Get MEIC positions
-        my_position_ids = self.registry.get_positions("MEIC")
+        # Check if any of our tracked positions are missing from Saxo
+        for entry in self.daily_state.active_entries:
+            missing_legs = []
 
-        if my_position_ids:
-            logger.info(f"Found {len(my_position_ids)} MEIC positions in registry")
-            # TODO: Recover daily state from persisted state file
-        else:
-            logger.info("No existing MEIC positions found")
+            for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
+                pos_id = getattr(entry, f"{leg_name}_position_id")
+                if pos_id and pos_id not in valid_ids:
+                    missing_legs.append(leg_name)
+                    # Unregister the missing position
+                    self.registry.unregister(pos_id)
+                    setattr(entry, f"{leg_name}_position_id", None)
+
+            if missing_legs:
+                logger.warning(f"Entry #{entry.entry_number}: Missing legs in Saxo: {missing_legs}")
+                self._log_safety_event(
+                    "POSITION_MISSING",
+                    f"Entry #{entry.entry_number} missing {missing_legs} - closed externally?"
+                )
+
+                # Determine if entire side was stopped
+                if "short_call" in missing_legs and "long_call" in missing_legs:
+                    entry.call_side_stopped = True
+                    logger.warning(f"Entry #{entry.entry_number}: Call side marked as stopped (external close)")
+
+                if "short_put" in missing_legs and "long_put" in missing_legs:
+                    entry.put_side_stopped = True
+                    logger.warning(f"Entry #{entry.entry_number}: Put side marked as stopped (external close)")
+
+        # Update state file
+        self._save_state_to_disk()
+
+    def verify_positions_before_operation(self, operation: str) -> bool:
+        """
+        POS-002: Verify positions exist in Saxo before any critical operation.
+
+        Call this before placing orders or modifying positions to ensure
+        our local state matches Saxo reality.
+
+        Args:
+            operation: Description of the operation (for logging)
+
+        Returns:
+            bool: True if positions match, False if discrepancy found
+        """
+        logger.debug(f"POS-002: Verifying positions before {operation}")
+
+        all_positions = self.client.get_positions()
+        actual_ids = {str(p.get("PositionBase", {}).get("PositionId")) for p in all_positions}
+
+        for entry in self.daily_state.active_entries:
+            for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
+                pos_id = getattr(entry, f"{leg_name}_position_id")
+                if pos_id and pos_id not in actual_ids:
+                    logger.warning(
+                        f"POS-002: Entry #{entry.entry_number} {leg_name} ({pos_id}) "
+                        f"not found in Saxo - triggering reconciliation"
+                    )
+                    self._reconcile_positions()
+                    return False
+
+        return True
 
     # =========================================================================
     # DAILY RESET
@@ -2535,6 +2952,33 @@ class MEICStrategy:
             })
         except Exception as e:
             logger.error(f"Failed to log entry: {e}")
+
+    def _log_safety_event(self, event_type: str, details: str):
+        """
+        Log safety events to Google Sheets for audit trail.
+
+        This matches Delta Neutral's safety event logging for consistency
+        and provides an auditable record of all safety-related incidents.
+
+        Args:
+            event_type: Type of safety event (e.g., "CIRCUIT_BREAKER_OPEN", "NAKED_SHORT_DETECTED")
+            details: Human-readable description of the event
+        """
+        try:
+            self.trade_logger.log_safety_event({
+                "timestamp": get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_type": event_type,
+                "bot": "MEIC",
+                "state": self.state.value,
+                "spx_price": self.current_price,
+                "vix": self.current_vix,
+                "active_entries": len(self.daily_state.active_entries),
+                "details": details
+            })
+            logger.info(f"Safety event logged: {event_type} - {details}")
+        except Exception as e:
+            # Don't let logging failure affect trading
+            logger.error(f"Failed to log safety event: {e}")
 
     def _send_daily_summary(self):
         """Send daily summary alert."""
@@ -2985,6 +3429,281 @@ class MEICStrategy:
             "vix_average": self.market_data.get_vix_average(),
             "vix_samples": len(self.market_data.vix_samples)
         }
+
+    def get_dashboard_metrics(self) -> Dict[str, Any]:
+        """
+        Get comprehensive MEIC strategy metrics for Looker Studio dashboard.
+
+        Returns all metrics needed for:
+        - Account Summary worksheet (positions, credits, P&L)
+        - Performance Metrics worksheet (entries, stops, win rate)
+        - Position Details worksheet (strikes, spreads, status)
+
+        Returns:
+            dict: Complete strategy metrics for dashboard logging
+        """
+        # Basic status
+        active_entries = len(self.daily_state.active_entries)
+        unrealized = sum(e.unrealized_pnl for e in self.daily_state.active_entries)
+        total_pnl = self.daily_state.total_realized_pnl + unrealized
+
+        # Position counts
+        total_legs = sum(
+            len([1 for leg in ['short_call', 'long_call', 'short_put', 'long_put']
+                 if getattr(e, f'{leg}_position_id')])
+            for e in self.daily_state.active_entries
+        )
+
+        # Calculate average strikes for active entries
+        avg_short_call = 0.0
+        avg_short_put = 0.0
+        avg_spread_width = 0.0
+
+        if active_entries > 0:
+            active = self.daily_state.active_entries
+            avg_short_call = sum(e.short_call_strike for e in active if e.short_call_strike) / active_entries
+            avg_short_put = sum(e.short_put_strike for e in active if e.short_put_strike) / active_entries
+            avg_spread_width = sum(e.spread_width for e in active if e.spread_width) / active_entries
+
+        # Per-entry details
+        entry_details = []
+        for entry in self.daily_state.entries:
+            entry_details.append({
+                "entry_number": entry.entry_number,
+                "entry_time": entry.entry_time.strftime("%H:%M") if entry.entry_time else "",
+                "short_call": entry.short_call_strike,
+                "long_call": entry.long_call_strike,
+                "short_put": entry.short_put_strike,
+                "long_put": entry.long_put_strike,
+                "call_credit": entry.call_spread_credit,
+                "put_credit": entry.put_spread_credit,
+                "total_credit": entry.total_credit,
+                "call_stopped": entry.call_side_stopped,
+                "put_stopped": entry.put_side_stopped,
+                "unrealized_pnl": entry.unrealized_pnl,
+                "is_complete": entry.is_complete
+            })
+
+        # Cumulative metrics
+        cumulative = self.cumulative_metrics or {}
+
+        return {
+            # Timestamp
+            "timestamp": get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
+            "date": self.daily_state.date,
+
+            # State
+            "state": self.state.value,
+            "dry_run": self.dry_run,
+            "circuit_breaker_open": self._circuit_breaker_open,
+            "critical_intervention": self._critical_intervention_required,
+
+            # Market data
+            "spx_price": self.current_price,
+            "vix": self.current_vix,
+            "spx_high": self.market_data.spx_high,
+            "spx_low": self.market_data.spx_low if self.market_data.spx_low != float('inf') else 0,
+            "spx_range": self.market_data.get_spx_range(),
+            "vix_high": self.market_data.vix_high,
+            "vix_average": self.market_data.get_vix_average(),
+
+            # Entry progress
+            "entries_scheduled": len(self.entry_times),
+            "entries_completed": self.daily_state.entries_completed,
+            "entries_failed": self.daily_state.entries_failed,
+            "entries_skipped": self.daily_state.entries_skipped,
+            "next_entry_index": self._next_entry_index,
+            "active_entries": active_entries,
+            "total_legs": total_legs,
+
+            # Position metrics
+            "avg_short_call_strike": avg_short_call,
+            "avg_short_put_strike": avg_short_put,
+            "avg_spread_width": avg_spread_width,
+
+            # P&L metrics
+            "total_credit": self.daily_state.total_credit_received,
+            "realized_pnl": self.daily_state.total_realized_pnl,
+            "unrealized_pnl": unrealized,
+            "total_pnl": total_pnl,
+            "pnl_percent": (total_pnl / self.daily_state.total_credit_received * 100) if self.daily_state.total_credit_received > 0 else 0,
+
+            # Stop metrics
+            "call_stops": self.daily_state.call_stops_triggered,
+            "put_stops": self.daily_state.put_stops_triggered,
+            "total_stops": self.daily_state.total_stops,
+            "double_stops": self.daily_state.double_stops,
+            "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
+
+            # Win/loss metrics (requires stops and entries)
+            "entries_with_no_stops": sum(1 for e in self.daily_state.entries if e.is_complete and not e.call_side_stopped and not e.put_side_stopped),
+            "entries_with_one_stop": sum(1 for e in self.daily_state.entries if e.is_complete and (e.call_side_stopped != e.put_side_stopped)),
+            "entries_with_both_stops": sum(1 for e in self.daily_state.entries if e.is_complete and e.call_side_stopped and e.put_side_stopped),
+
+            # Cumulative metrics
+            "cumulative_pnl": cumulative.get("cumulative_pnl", 0) + total_pnl,
+            "cumulative_entries": cumulative.get("total_entries", 0) + self.daily_state.entries_completed,
+            "cumulative_stops": cumulative.get("total_stops", 0) + self.daily_state.total_stops,
+            "winning_days": cumulative.get("winning_days", 0),
+            "losing_days": cumulative.get("losing_days", 0),
+
+            # Entry details (for detailed logging)
+            "entry_details": entry_details
+        }
+
+    def get_dashboard_metrics_safe(self) -> Dict[str, Any]:
+        """
+        Get dashboard metrics with protection against stale data when market closed.
+
+        When market is closed, P&L calculations may be inaccurate due to stale
+        option prices. This method returns the last known accurate values.
+
+        Returns:
+            dict: Dashboard metrics with corrected values when market closed
+        """
+        metrics = self.get_dashboard_metrics()
+
+        # If market is open, use live values
+        if is_market_open():
+            return metrics
+
+        # Market is closed - note that option values may be stale
+        metrics["market_closed_warning"] = True
+        logger.debug("Market closed: option P&L values may be stale")
+
+        return metrics
+
+    # =========================================================================
+    # PRE-MARKET GAP DETECTION (MKT-001)
+    # =========================================================================
+
+    def get_premarket_analysis(self, current_spx_price: float = 0.0, prev_close: float = 0.0) -> Dict[str, Any]:
+        """
+        MKT-001: Get pre-market gap analysis for SPX.
+
+        Analyzes overnight/weekend gaps to warn about unusual market conditions.
+        While MEIC doesn't actively trade pre-market (0DTE), knowing about gaps
+        helps inform trading decisions at market open.
+
+        Note: For 0DTE strategies, gaps are less relevant since we enter fresh
+        each day. However, large gaps may indicate volatile conditions that
+        could affect stop loss behavior.
+
+        Args:
+            current_spx_price: Current SPX price (will fetch if not provided)
+            prev_close: Previous day's closing price
+
+        Returns:
+            Dict with gap analysis including:
+            - gap_percent: Overnight percentage change
+            - gap_points: Dollar move from previous close
+            - warning_level: "NORMAL", "CAUTION", "WARNING", "CRITICAL"
+            - prev_close: Previous day's closing price
+            - current_price: Current price
+            - is_monday: Whether this is a Monday (weekend gap)
+            - message: Human-readable summary
+        """
+        result = {
+            "gap_percent": 0.0,
+            "gap_points": 0.0,
+            "warning_level": "NORMAL",
+            "prev_close": 0.0,
+            "current_price": 0.0,
+            "is_monday": get_us_market_time().weekday() == 0,
+            "message": ""
+        }
+
+        # Get previous close if not provided
+        if prev_close <= 0:
+            # Try to get from chart data
+            try:
+                chart_data = self.client.get_chart_data(
+                    uic=self.underlying_uic,
+                    asset_type="CfdOnIndex",  # SPX is a CFD on Index
+                    horizon=1440,  # Daily bars
+                    count=2  # Last 2 days
+                )
+                if chart_data and len(chart_data) >= 2:
+                    prev_close = chart_data[-2].get("Close", chart_data[-2].get("C", 0))
+                    logger.debug(f"MKT-001: Fetched previous close from chart data: {prev_close:.2f}")
+            except Exception as e:
+                logger.debug(f"MKT-001: Could not fetch previous close: {e}")
+
+        if prev_close <= 0:
+            result["message"] = "No previous close available"
+            return result
+
+        result["prev_close"] = prev_close
+
+        # Get current price
+        if current_spx_price <= 0:
+            current_spx_price = self.current_price
+            if current_spx_price <= 0:
+                try:
+                    quote = self.client.get_quote(self.underlying_uic)
+                    if quote:
+                        current_spx_price = quote.get("Mid") or quote.get("LastTraded", 0)
+                except Exception:
+                    pass
+
+        if current_spx_price <= 0:
+            result["message"] = "No current price available"
+            return result
+
+        result["current_price"] = current_spx_price
+
+        # Calculate gap
+        gap_points = current_spx_price - prev_close
+        gap_percent = (gap_points / prev_close) * 100
+
+        result["gap_percent"] = gap_percent
+        result["gap_points"] = gap_points
+
+        # Determine warning level
+        # For SPX, typical thresholds:
+        # - NORMAL: < 0.5% (< ~30 points)
+        # - CAUTION: 0.5-1% (~30-60 points)
+        # - WARNING: 1-2% (~60-120 points)
+        # - CRITICAL: > 2% (> ~120 points)
+        abs_gap = abs(gap_percent)
+
+        if abs_gap < 0.5:
+            result["warning_level"] = "NORMAL"
+        elif abs_gap < 1.0:
+            result["warning_level"] = "CAUTION"
+        elif abs_gap < 2.0:
+            result["warning_level"] = "WARNING"
+        else:
+            result["warning_level"] = "CRITICAL"
+
+        # Build message
+        direction = "up" if gap_percent > 0 else "down"
+        gap_type = "weekend" if result["is_monday"] else "overnight"
+
+        if result["warning_level"] == "NORMAL":
+            result["message"] = f"SPX {gap_type} gap: {gap_percent:+.2f}% ({gap_points:+.0f} pts) - normal"
+        else:
+            result["message"] = (
+                f"SPX {gap_type} gap {direction}: {abs_gap:.2f}% ({abs(gap_points):.0f} pts) - "
+                f"{result['warning_level']} - consider wider stops or fewer entries"
+            )
+
+        return result
+
+    def check_pre_market_gap(self) -> Tuple[bool, float, str]:
+        """
+        MKT-001: Quick check for significant pre-market gap.
+
+        Simplified version that returns whether there's a significant gap
+        that warrants attention.
+
+        Returns:
+            Tuple of (is_significant_gap, gap_percent, message)
+        """
+        analysis = self.get_premarket_analysis()
+
+        is_significant = analysis["warning_level"] in ["WARNING", "CRITICAL"]
+        return is_significant, analysis["gap_percent"], analysis["message"]
 
     # =========================================================================
     # ORDER-004: PRE-ENTRY MARGIN CHECK
