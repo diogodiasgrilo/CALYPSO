@@ -4685,11 +4685,10 @@ class IronFlyStrategy:
 
         SAFETY: Checks for orphaned positions before resetting to prevent
         losing track of open positions at the broker.
-        """
-        # Log daily summary before resetting
-        if self.state == IronFlyState.DAILY_COMPLETE:
-            self.log_daily_summary()
 
+        NOTE: Daily summary is handled separately in main.py at market close (4-5 PM ET)
+        to avoid duplicate alerts when calendar day changes at midnight UTC (7 PM ET).
+        """
         # SAFETY: Check for orphaned positions before reset
         if self.position is not None:
             logger.critical(

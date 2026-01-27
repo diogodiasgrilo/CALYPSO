@@ -45,7 +45,7 @@ from shared.saxo_client import SaxoClient
 from shared.logger_service import TradeLoggerService, setup_logging
 from shared.market_hours import (
     is_market_open, get_market_status_message, calculate_sleep_duration,
-    get_holiday_name, get_us_market_time
+    get_holiday_name, get_us_market_time, is_after_hours, is_weekend
 )
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.secret_manager import is_running_on_gcp
@@ -252,10 +252,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     trade_logger.log_event(market_status)
 
                     # Determine reason for closure (for heartbeat messages)
-                    from shared.market_hours import is_weekend, get_us_market_time
                     holiday_name = get_holiday_name()
                     now_et = get_us_market_time()
-                    is_after_hours = now_et.hour >= 16  # 4 PM ET or later
 
                     if holiday_name:
                         close_reason = f"({holiday_name})"
@@ -265,8 +263,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         close_reason = ""
 
                     # Send daily summary once at market close (not on every restart)
+                    # Use is_after_hours() to properly check 4:00-5:00 PM ET window
                     today_date = now_et.date()
-                    if is_after_hours and daily_summary_sent_date != today_date:
+                    if is_after_hours() and daily_summary_sent_date != today_date:
                         trade_logger.log_event("Market closed - sending daily summary...")
                         strategy.log_daily_summary()
                         daily_summary_sent_date = today_date
