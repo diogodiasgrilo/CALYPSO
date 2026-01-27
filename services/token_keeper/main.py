@@ -52,7 +52,7 @@ if _project_root not in sys.path:
 
 from shared.token_coordinator import get_token_coordinator, TokenCoordinator
 from shared.config_loader import ConfigLoader, get_config_loader
-from shared.secret_manager import is_running_on_gcp
+from shared.secret_manager import is_running_on_gcp, get_secret
 
 # Configure logging
 logging.basicConfig(
@@ -76,6 +76,95 @@ def signal_handler(signum, frame):
     global shutdown_requested
     logger.info(f"Shutdown signal received ({signum}). Exiting gracefully...")
     shutdown_requested = True
+
+
+def seed_cache_from_secret_manager(coordinator: TokenCoordinator, config: dict) -> bool:
+    """
+    Seed the local token cache from Secret Manager if cache is stale or missing.
+
+    This is the KEY FIX: Token Keeper was failing because it only read from the
+    local cache file, but never seeded it from Secret Manager. When the cache
+    file was stale (e.g., 14 days old), Token Keeper tried to use invalid tokens.
+
+    Bots work because they load tokens from Secret Manager via ConfigLoader on
+    startup and call coordinator.update_cache() to seed the cache file.
+    Token Keeper needs to do the same thing.
+
+    Args:
+        coordinator: The TokenCoordinator instance
+        config: Configuration dict with Saxo credentials
+
+    Returns:
+        bool: True if cache is now valid, False if seeding failed
+    """
+    import json
+
+    # First, check if cache already has valid tokens
+    cached_tokens = coordinator.get_cached_tokens()
+    if cached_tokens and coordinator.is_token_valid(cached_tokens, buffer_seconds=60):
+        logger.info("Cache already has valid tokens - no seeding needed")
+        return True
+
+    logger.info("Cache is stale or missing - seeding from Secret Manager...")
+
+    # Get Saxo credentials from config (loaded by ConfigLoader which gets them from Secret Manager on GCP)
+    saxo_api_config = config.get("saxo_api", {})
+    environment = saxo_api_config.get("environment", "sim").lower()
+    env_credentials = saxo_api_config.get(environment, {})
+
+    # Extract tokens from config (these come from Secret Manager on GCP)
+    access_token = env_credentials.get("access_token")
+    refresh_token = env_credentials.get("refresh_token")
+    token_expiry = env_credentials.get("token_expiry")
+    app_key = env_credentials.get("app_key")
+    app_secret = env_credentials.get("app_secret")
+
+    if not all([access_token, refresh_token, app_key, app_secret]):
+        logger.warning("Config doesn't have complete token data - trying direct Secret Manager access...")
+
+        # On GCP, try to load directly from Secret Manager
+        if is_running_on_gcp():
+            try:
+                secret_data = get_secret("calypso-saxo-credentials")
+                if secret_data:
+                    secret_json = json.loads(secret_data)
+                    env_secret = secret_json.get(environment, {})
+
+                    access_token = env_secret.get("access_token") or access_token
+                    refresh_token = env_secret.get("refresh_token") or refresh_token
+                    token_expiry = env_secret.get("token_expiry") or token_expiry
+                    app_key = env_secret.get("app_key") or app_key
+                    app_secret = env_secret.get("app_secret") or app_secret
+
+                    logger.info("Loaded tokens directly from Secret Manager")
+            except Exception as e:
+                logger.error(f"Failed to load from Secret Manager: {e}")
+
+    if not all([access_token, refresh_token, app_key, app_secret]):
+        logger.error("Cannot seed cache - missing required credentials")
+        return False
+
+    # Build tokens dict for cache
+    tokens_to_cache = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_expiry": token_expiry,
+        "app_key": app_key,
+        "app_secret": app_secret,
+    }
+
+    # Update the coordinator's cache
+    coordinator.update_cache(tokens_to_cache)
+    logger.info(f"Cache seeded from Secret Manager (expiry: {token_expiry})")
+
+    # Verify the seeding worked
+    new_cached = coordinator.get_cached_tokens()
+    if new_cached and new_cached.get("refresh_token") == refresh_token:
+        logger.info("Cache seeding verified successfully")
+        return True
+    else:
+        logger.error("Cache seeding verification failed")
+        return False
 
 
 def get_token_age_info(coordinator: TokenCoordinator) -> dict:
@@ -350,6 +439,14 @@ def main():
 
     logger.info(f"Saxo environment: {environment.upper()}")
     logger.info(f"Running on GCP: {is_running_on_gcp()}")
+
+    # CRITICAL: Seed cache from Secret Manager before starting
+    # This fixes the issue where Token Keeper failed because it only read from
+    # a stale local cache file instead of getting fresh tokens from Secret Manager
+    coordinator = get_token_coordinator()
+    if not seed_cache_from_secret_manager(coordinator, config):
+        logger.error("Failed to seed cache from Secret Manager - tokens may be stale")
+        logger.error("Token Keeper will try to continue but may fail on refresh")
 
     # Run the main loop
     run_token_keeper(config)
