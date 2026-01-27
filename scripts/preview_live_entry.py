@@ -34,7 +34,7 @@ def main():
     max_vix = config["strategy"]["max_vix_entry"]
     weekly_target_return_pct = config["strategy"].get("weekly_target_return_percent", 1.0)
     max_multiplier = config["strategy"].get("weekly_strangle_multiplier_max", 2.0)
-    entry_fee_per_leg = config["strategy"].get("short_strangle_entry_fee_per_leg", 2.0)
+    fee_per_leg = config["strategy"].get("short_strangle_fee_per_leg", 2.05)
     position_size = config["strategy"]["position_size"]
 
     print("=" * 70)
@@ -140,15 +140,16 @@ def main():
     print()
 
     # Calculate target premium using 1% NET of long straddle cost
+    # Fee calculation: $2.05/leg/direction × 2 legs × 2 directions (entry+exit) = $8.20 round-trip
     target_net = long_straddle_cost * (weekly_target_return_pct / 100)
-    total_entry_fees = entry_fee_per_leg * 2 * position_size
-    required_gross = target_net + weekly_theta + total_entry_fees
+    total_round_trip_fees = fee_per_leg * 2 * position_size * 2  # 2 legs × 2 directions
+    required_gross = target_net + weekly_theta + total_round_trip_fees
 
     print(f"Target Return: {weekly_target_return_pct}% NET of Long Straddle Cost")
     print(f"Long Straddle Cost: ${long_straddle_cost:,.2f}")
     print(f"Target NET: ${target_net:.2f}")
     print(f"+ Weekly Theta: ${weekly_theta:.2f}")
-    print(f"+ Entry Fees: ${total_entry_fees:.2f}")
+    print(f"+ Round-Trip Fees: ${total_round_trip_fees:.2f} (2 legs × $4.10)")
     print(f"= Required Gross: ${required_gross:.2f}")
     print()
 
@@ -301,7 +302,7 @@ def main():
 
         # Calculate NET return
         gross_premium = call_data["premium"] + put_data["premium"]
-        net_premium = gross_premium - weekly_theta - total_entry_fees
+        net_premium = gross_premium - weekly_theta - total_round_trip_fees
         net_return = (net_premium / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
 
         # Check if meets target
@@ -323,7 +324,7 @@ def main():
 
                     # Recalculate with fresh prices
                     fresh_gross = call_data["premium"] + put_data["premium"]
-                    fresh_net = fresh_gross - weekly_theta - total_entry_fees
+                    fresh_net = fresh_gross - weekly_theta - total_round_trip_fees
                     fresh_return = (fresh_net / long_straddle_cost) * 100
 
                     if fresh_return >= min_target_return:
@@ -345,7 +346,7 @@ def main():
 
     # Calculate final P&L
     final_gross = final_call["premium"] + final_put["premium"]
-    final_net = final_gross - weekly_theta - total_entry_fees
+    final_net = final_gross - weekly_theta - total_round_trip_fees
     final_return = (final_net / long_straddle_cost) * 100
 
     print()
@@ -377,7 +378,7 @@ SHORT STRANGLE (Income):
 WEEKLY P&L PROJECTION:
   Gross Premium:     +${final_gross:>8.2f}
   Weekly Theta:      -${weekly_theta:>8.2f}
-  Entry Fees:        -${total_entry_fees:>8.2f}
+  Round-Trip Fees:   -${total_round_trip_fees:>8.2f}  (2 legs × $4.10 = $8.20)
   {'─' * 30}
   NET Premium:       +${final_net:>8.2f}
 
