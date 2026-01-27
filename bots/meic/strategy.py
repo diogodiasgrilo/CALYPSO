@@ -39,7 +39,7 @@ from enum import Enum
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, US_EASTERN, is_market_open, is_early_close_day
-from shared.event_calendar import is_fomc_announcement_day
+from shared.event_calendar import is_fomc_meeting_day
 from shared.position_registry import PositionRegistry
 
 # Configure module logger
@@ -632,9 +632,9 @@ class MEICStrategy:
         logger.info(f"  MEIC+ enabled: {self.meic_plus_enabled}")
         logger.info(f"  Position Registry: {REGISTRY_FILE}")
 
-        # Check for FOMC day
-        if is_fomc_announcement_day():
-            logger.warning("TODAY IS FOMC ANNOUNCEMENT DAY - No entries will be placed")
+        # Check for FOMC day (both days of meeting, not just announcement day)
+        if is_fomc_meeting_day():
+            logger.warning("TODAY IS FOMC MEETING DAY - No entries will be placed")
 
     def _parse_entry_times(self):
         """Parse entry times from config or use defaults."""
@@ -739,11 +739,11 @@ class MEICStrategy:
         # POS-003: Periodic position reconciliation (hourly)
         self._check_hourly_reconciliation()
 
-        # MKT-008: Skip all trading on FOMC days
-        if is_fomc_announcement_day():
+        # MKT-008: Skip all trading on FOMC days (both days of meeting)
+        if is_fomc_meeting_day():
             if self.state != MEICState.DAILY_COMPLETE:
                 self.state = MEICState.DAILY_COMPLETE
-                logger.info("FOMC announcement day - skipping all entries")
+                logger.info("FOMC meeting day - skipping all entries")
             return "FOMC day - no trading"
 
         # State machine

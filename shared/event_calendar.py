@@ -124,9 +124,29 @@ def get_fomc_announcement_dates(year: int) -> List[date]:
     return [d for i, d in enumerate(all_dates) if i % 2 == 1]
 
 
+def is_fomc_meeting_day(check_date: date = None) -> bool:
+    """
+    Check if a specific date is ANY day of an FOMC meeting (day 1 or day 2).
+
+    Use this to block trading on ALL FOMC meeting days. Markets are volatile
+    on both days - day 1 due to anticipation, day 2 due to the announcement.
+
+    Args:
+        check_date: Date to check (defaults to today)
+
+    Returns:
+        True if the date is any FOMC meeting day
+    """
+    if check_date is None:
+        check_date = date.today()
+
+    all_fomc_dates = get_fomc_dates(check_date.year)
+    return check_date in all_fomc_dates
+
+
 def is_fomc_announcement_day(check_date: date = None) -> bool:
     """
-    Check if a specific date is an FOMC announcement day.
+    Check if a specific date is an FOMC announcement day (day 2 only).
 
     Use this to block trading on FOMC days when the Fed releases its decision.
 

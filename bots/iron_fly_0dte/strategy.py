@@ -4093,10 +4093,13 @@ class IronFlyStrategy:
 
     def check_fed_meeting_filter(self) -> Tuple[bool, str]:
         """
-        Check if today is an FOMC announcement day.
+        Check if today is ANY day of an FOMC meeting (day 1 or day 2).
 
         Per Doc Severson: "NEVER trade on FOMC or major economic data days"
         The market will likely trend and blow past stops on Fed days.
+
+        IMPORTANT: Block BOTH days of FOMC meetings, not just the announcement day.
+        Day 1 has anticipation volatility, Day 2 has announcement volatility.
 
         Uses shared/event_calendar.py as single source of truth for FOMC dates.
 
@@ -4108,13 +4111,13 @@ class IronFlyStrategy:
 
         # FILTER-002: Use shared event calendar for FOMC dates
         # Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
-        from shared.event_calendar import is_fomc_announcement_day, get_fomc_announcement_dates
+        from shared.event_calendar import is_fomc_meeting_day, get_fomc_dates
 
         today = get_us_market_time().date()
 
         # Check if calendar has dates for current year
-        announcement_dates = get_fomc_announcement_dates(today.year)
-        if not announcement_dates:
+        fomc_dates = get_fomc_dates(today.year)
+        if not fomc_dates:
             logger.warning(
                 f"FILTER-002: FOMC calendar missing for {today.year}! "
                 f"Update FOMC_DATES_{today.year} in shared/event_calendar.py"
@@ -4122,8 +4125,8 @@ class IronFlyStrategy:
             # Conservative: allow trading but log warning
             return (True, "")
 
-        if is_fomc_announcement_day(today):
-            reason = f"FOMC announcement day ({today.strftime('%b %d')})"
+        if is_fomc_meeting_day(today):
+            reason = f"FOMC meeting day ({today.strftime('%b %d')})"
             logger.warning(f"FOMC BLACKOUT: {reason} - Entry blocked")
             return (False, reason)
 

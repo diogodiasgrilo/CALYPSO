@@ -199,6 +199,7 @@ from shared.market_status_monitor import MarketStatusMonitor
 from shared.event_calendar import (
     get_fomc_dates,
     get_fomc_announcement_dates,
+    is_fomc_meeting_day,
     is_fomc_announcement_day,
     get_next_fomc_date,
     is_fomc_approaching,
@@ -232,8 +233,8 @@ __all__ = [
     # Market Status Monitor (for countdown/open/close/holiday alerts)
     'MarketStatusMonitor',
     # Event Calendar (FOMC dates - single source of truth)
-    'get_fomc_dates', 'get_fomc_announcement_dates', 'is_fomc_announcement_day',
-    'get_next_fomc_date', 'is_fomc_approaching', 'FOMC_DATES_2026',
+    'get_fomc_dates', 'get_fomc_announcement_dates', 'is_fomc_meeting_day',
+    'is_fomc_announcement_day', 'get_next_fomc_date', 'is_fomc_approaching', 'FOMC_DATES_2026',
     # Position Registry (for multi-bot same-underlying support)
     'PositionRegistry',
 ]
