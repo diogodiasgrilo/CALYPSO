@@ -1812,16 +1812,19 @@ class SaxoClient:
         # PRIORITY 1: Check WebSocket streaming cache (no API call, instant)
         if spy_uic_int in self._price_cache:
             cached = self._price_cache[spy_uic_int]
-            if cached and "Quote" in cached:
-                price = (
-                    cached["Quote"].get("Mid") or
-                    cached["Quote"].get("LastTraded") or
-                    cached["Quote"].get("Bid") or
-                    cached["Quote"].get("Ask")
-                )
-                if price and price > 0:
-                    logger.debug(f"{symbol}: Using cached streaming price ${price:.2f}")
-                    return cached
+            # Defensive: check cached is dict and Quote exists and is not None
+            if cached and isinstance(cached, dict) and cached.get("Quote"):
+                quote = cached["Quote"]
+                if isinstance(quote, dict):
+                    price = (
+                        quote.get("Mid") or
+                        quote.get("LastTraded") or
+                        quote.get("Bid") or
+                        quote.get("Ask")
+                    )
+                    if price and price > 0:
+                        logger.debug(f"{symbol}: Using cached streaming price ${price:.2f}")
+                        return cached
 
         # PRIORITY 2: Saxo REST API (fallback if cache miss, invalid, or stale)
         endpoint = "/trade/v1/infoprices/list"

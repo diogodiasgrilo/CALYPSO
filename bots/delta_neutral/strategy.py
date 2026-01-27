@@ -4784,23 +4784,28 @@ class DeltaNeutralStrategy:
         try:
             # Get underlying price (SPY) - with external feed fallback for simulation
             quote = self.client.get_spy_price(self.underlying_uic, symbol=self.underlying_symbol)
-            if quote:
-                quote_data = quote.get("Quote", {})
-                price_info = quote.get("PriceInfo", {})
+            if quote and isinstance(quote, dict):
+                # Defensive: ensure Quote and PriceInfo are dicts (not None)
+                quote_data = quote.get("Quote") or {}
+                price_info = quote.get("PriceInfo") or {}
 
                 # Check if using external source
-                if quote_data.get("_external_source"):
+                if isinstance(quote_data, dict) and quote_data.get("_external_source"):
                     logger.info(f"{self.underlying_symbol}: Using external price feed (simulation only)")
 
                 # Priority: 1. Mid/LastTraded from Quote, 2. Last from PriceInfo
-                self.current_underlying_price = (
-                    quote_data.get("Mid") or
-                    quote_data.get("LastTraded") or
-                    price_info.get("Last") or
-                    quote_data.get("Bid") or
-                    quote_data.get("Ask") or
-                    0.0
-                )
+                # Defensive: handle case where quote_data or price_info might not be dicts
+                self.current_underlying_price = 0.0
+                if isinstance(quote_data, dict):
+                    self.current_underlying_price = (
+                        quote_data.get("Mid") or
+                        quote_data.get("LastTraded") or
+                        quote_data.get("Bid") or
+                        quote_data.get("Ask") or
+                        0.0
+                    )
+                if self.current_underlying_price == 0.0 and isinstance(price_info, dict):
+                    self.current_underlying_price = price_info.get("Last") or 0.0
 
                 if self.current_underlying_price > 0:
                     logger.debug(f"{self.underlying_symbol} price: ${self.current_underlying_price:.2f}")
