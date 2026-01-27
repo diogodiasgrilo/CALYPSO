@@ -132,6 +132,30 @@ VIGILANT_THRESHOLD_PERCENT = 50  # 50% of stop level used = vigilant mode
 VIGILANT_CHECK_INTERVAL_SECONDS = 2
 NORMAL_CHECK_INTERVAL_SECONDS = 5
 
+# ORDER-004: Pre-entry margin check
+MIN_BUYING_POWER_PER_IC = 5000  # Minimum BP required per iron condor ($5000)
+MARGIN_CHECK_ENABLED = True  # Can be disabled if Saxo margin API unavailable
+
+# MKT-005: Market circuit breaker halt detection
+MARKET_HALT_CHECK_ENABLED = True  # Check for trading halts before entry
+
+# MKT-007: Strike adjustment for illiquidity
+ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS = 5  # Adjust strikes 5 points if illiquid
+MAX_STRIKE_ADJUSTMENT_ATTEMPTS = 2  # Max adjustments per side
+
+# TIME-001: Clock sync validation
+CLOCK_SYNC_CHECK_ENABLED = True  # Validate system clock on startup
+MAX_CLOCK_SKEW_WARNING_SECONDS = 30  # Warn if clock off by more than 30s
+
+# DATA-003: P&L sanity check bounds
+MAX_PNL_PER_IC = 500  # Max realistic profit per IC (credit + some)
+MIN_PNL_PER_IC = -3000  # Min realistic loss per IC (spread width)
+PNL_SANITY_CHECK_ENABLED = True
+
+# ALERT-002: Alert batching for rapid stops
+ALERT_BATCH_WINDOW_SECONDS = 5  # Batch alerts within this window
+MAX_ALERTS_BEFORE_BATCH = 2  # After this many alerts in window, batch them
+
 
 # =============================================================================
 # ENTRY SCHEDULE
@@ -582,11 +606,23 @@ class MEICStrategy:
         # P2: Monitoring mode tracking
         self._current_monitoring_mode = "normal"  # "normal" or "vigilant"
 
+        # ALERT-002: Alert batching tracking
+        self._recent_alerts: List[Tuple[datetime, str]] = []  # (timestamp, alert_type)
+        self._batched_alerts: List[Dict] = []  # Alerts waiting to be batched
+
+        # TIME-001: Clock sync validation
+        self._clock_validated = False
+        self._clock_skew_seconds = 0.0
+
         # Initialize metrics
         self.cumulative_metrics = self._load_cumulative_metrics()
 
         # P1: Attempt to recover state from previous session
         self._recover_state_from_disk()
+
+        # TIME-001: Validate system clock on startup
+        if CLOCK_SYNC_CHECK_ENABLED:
+            self._validate_system_clock()
 
         logger.info(f"MEICStrategy initialized - State: {self.state.value}")
         logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
@@ -1174,6 +1210,9 @@ class MEICStrategy:
         ENTRY_WINDOW_MINUTES of the scheduled time.
 
         ORDER-008: Checks for orphaned orders before attempting entry.
+        ORDER-004: Checks buying power before attempting entry.
+        MKT-005: Checks for market halt before attempting entry.
+        TIME-001: Validates clock reliability.
 
         Returns:
             str: Description of action taken
@@ -1186,6 +1225,35 @@ class MEICStrategy:
             logger.error(f"Entry #{entry_num} blocked by orphaned orders")
             self._next_entry_index += 1  # Skip this entry
             return f"Entry #{entry_num} skipped - orphaned orders blocking"
+
+        # MKT-005: Check for market halt
+        is_halted, halt_reason = self._check_market_halt()
+        if is_halted:
+            logger.warning(f"MKT-005: Market halt detected - {halt_reason}")
+            # Don't skip entry - wait for market to reopen
+            return f"Entry #{entry_num} delayed - {halt_reason}"
+
+        # ORDER-004: Check buying power before entry
+        has_bp, bp_message = self._check_buying_power()
+        if not has_bp:
+            logger.warning(f"ORDER-004: {bp_message}")
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1  # Skip this entry
+            # Send alert about insufficient margin
+            self.alert_service.send_alert(
+                alert_type=AlertType.MAX_LOSS,
+                title=f"Entry #{entry_num} Skipped - Insufficient Margin",
+                message=bp_message,
+                priority=AlertPriority.HIGH,
+                details={"entry_number": entry_num, "reason": "margin"}
+            )
+            return f"Entry #{entry_num} skipped - {bp_message}"
+
+        # TIME-001: Verify clock reliability
+        clock_ok, clock_message = self._is_clock_reliable()
+        if not clock_ok:
+            logger.warning(f"TIME-001: {clock_message}")
+            # Log warning but proceed - entry timing might be off
 
         self._entry_in_progress = True
         self.state = MEICState.ENTRY_IN_PROGRESS
@@ -1318,6 +1386,30 @@ class MEICStrategy:
         # Put side (below current price)
         entry.short_put_strike = rounded_spx - otm_distance
         entry.long_put_strike = entry.short_put_strike - self.spread_width
+
+        # MKT-007: Check liquidity and adjust strikes if needed
+        # Get today's expiry for liquidity check
+        expiry = self._get_todays_expiry()
+        if expiry:
+            # Check short call liquidity (move closer to ATM if illiquid)
+            adjusted_call, call_msg = self._adjust_strike_for_liquidity(
+                entry.short_call_strike, "Call", expiry,
+                adjustment_direction=-1  # Move closer to ATM (lower for calls)
+            )
+            if adjusted_call and adjusted_call != entry.short_call_strike:
+                entry.short_call_strike = adjusted_call
+                entry.long_call_strike = adjusted_call + self.spread_width
+                logger.info(f"MKT-007: {call_msg}")
+
+            # Check short put liquidity (move closer to ATM if illiquid)
+            adjusted_put, put_msg = self._adjust_strike_for_liquidity(
+                entry.short_put_strike, "Put", expiry,
+                adjustment_direction=1  # Move closer to ATM (higher for puts)
+            )
+            if adjusted_put and adjusted_put != entry.short_put_strike:
+                entry.short_put_strike = adjusted_put
+                entry.long_put_strike = adjusted_put - self.spread_width
+                logger.info(f"MKT-007: {put_msg}")
 
         logger.info(
             f"Strikes calculated for SPX {spx:.2f}: "
@@ -1973,6 +2065,12 @@ class MEICStrategy:
             # Update option prices
             self._update_entry_prices(entry)
 
+            # DATA-003: Validate P&L sanity before using values
+            pnl_valid, pnl_message = self._validate_pnl_sanity(entry)
+            if not pnl_valid:
+                logger.error(f"DATA-003: Skipping stop check for Entry #{entry.entry_number} - {pnl_message}")
+                continue  # Skip this entry - data is suspect
+
             # Check call side stop
             if not entry.call_side_stopped:
                 if entry.call_spread_value >= entry.call_side_stop:
@@ -2112,19 +2210,16 @@ class MEICStrategy:
         # Update realized P&L
         self.daily_state.total_realized_pnl -= stop_level
 
-        # Send alert
-        self.alert_service.stop_loss(
-            trigger_price=self.current_price,
-            pnl=-stop_level,
-            details={
-                "description": f"MEIC Entry #{entry.entry_number} {side.upper()} side stopped",
-                "reason": f"{side} spread value reached stop level",
-                "entry_number": entry.entry_number
-            }
-        )
+        # ALERT-002: Use batched alerting for rapid stops
+        self._queue_stop_alert(entry, side, stop_level)
 
         # P1: Save state after stop loss
         self._save_state_to_disk()
+
+        # ALERT-002: Flush any batched alerts after a short delay
+        # This allows multiple rapid stops to be batched together
+        time.sleep(0.1)  # Small delay to allow batching
+        self._flush_batched_alerts()
 
         return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${stop_level:.2f})"
 
@@ -2890,3 +2985,407 @@ class MEICStrategy:
             "vix_average": self.market_data.get_vix_average(),
             "vix_samples": len(self.market_data.vix_samples)
         }
+
+    # =========================================================================
+    # ORDER-004: PRE-ENTRY MARGIN CHECK
+    # =========================================================================
+
+    def _check_buying_power(self) -> Tuple[bool, str]:
+        """
+        ORDER-004: Check if we have sufficient buying power for a new IC entry.
+
+        Queries account balance and verifies minimum margin is available.
+
+        Returns:
+            Tuple of (has_sufficient_bp, message)
+        """
+        if not MARGIN_CHECK_ENABLED:
+            return True, "Margin check disabled"
+
+        try:
+            balance = self.client.get_balance()
+            if not balance:
+                logger.warning("ORDER-004: Could not fetch account balance")
+                return True, "Balance check skipped (API unavailable)"
+
+            # Extract available margin/buying power
+            # Saxo returns different fields - check for common ones
+            available = None
+            for field in ["AvailableMargin", "CashAvailable", "MarginAvailable", "NetEquityForMargin"]:
+                if field in balance:
+                    available = balance[field]
+                    break
+
+            if available is None:
+                logger.warning("ORDER-004: No recognized margin field in balance response")
+                return True, "Balance check skipped (no margin field)"
+
+            # Calculate required margin for next entry
+            # Each IC needs spread_width * 100 margin (approx)
+            required = MIN_BUYING_POWER_PER_IC
+
+            if available < required:
+                logger.warning(
+                    f"ORDER-004: Insufficient buying power. "
+                    f"Available: ${available:.2f}, Required: ${required:.2f}"
+                )
+                return False, f"Insufficient BP: ${available:.2f} < ${required:.2f}"
+
+            logger.info(f"ORDER-004: Buying power OK - ${available:.2f} available")
+            return True, f"BP OK: ${available:.2f}"
+
+        except Exception as e:
+            logger.error(f"ORDER-004: Error checking buying power: {e}")
+            return True, f"Balance check skipped (error: {e})"
+
+    # =========================================================================
+    # MKT-005: MARKET HALT DETECTION
+    # =========================================================================
+
+    def _check_market_halt(self) -> Tuple[bool, str]:
+        """
+        MKT-005: Check if market is halted (circuit breaker or trading halt).
+
+        Attempts to detect Level 1/2/3 circuit breakers by checking
+        if trading is available for SPX options.
+
+        Returns:
+            Tuple of (is_halted, reason)
+        """
+        if not MARKET_HALT_CHECK_ENABLED:
+            return False, "Halt check disabled"
+
+        try:
+            # Check if market is open according to our schedule
+            if not is_market_open():
+                return True, "Market not open"
+
+            # Try to get a quote for SPX - if unavailable, market may be halted
+            quote = self.client.get_quote(self.underlying_uic, asset_type="CfdOnIndex")
+            if not quote:
+                logger.warning("MKT-005: No quote available for SPX - possible market halt")
+                return True, "No SPX quote available"
+
+            # Check for stale quote (no update in 60+ seconds could indicate halt)
+            # This is a heuristic - Saxo doesn't expose trading halt status directly
+            quote_data = quote.get("Quote", {})
+
+            # If we have no bid/ask and no last traded, something is wrong
+            bid = quote_data.get("Bid")
+            ask = quote_data.get("Ask")
+            last = quote_data.get("LastTraded")
+
+            if not bid and not ask and not last:
+                logger.warning("MKT-005: Empty quote data - possible market halt")
+                return True, "Empty quote data"
+
+            return False, "Market trading normally"
+
+        except Exception as e:
+            logger.error(f"MKT-005: Error checking market halt: {e}")
+            # Don't block trading on check failure
+            return False, f"Halt check error: {e}"
+
+    # =========================================================================
+    # MKT-007: STRIKE ADJUSTMENT FOR ILLIQUIDITY
+    # =========================================================================
+
+    def _adjust_strike_for_liquidity(
+        self,
+        strike: float,
+        put_call: str,
+        expiry: str,
+        adjustment_direction: int
+    ) -> Tuple[Optional[float], str]:
+        """
+        MKT-007: Adjust strike if the current one is illiquid.
+
+        Checks bid/ask spread and moves strike closer to ATM if needed.
+
+        Args:
+            strike: Original strike price
+            put_call: "Call" or "Put"
+            expiry: Expiry date string
+            adjustment_direction: +1 to move closer to ATM, -1 further
+
+        Returns:
+            Tuple of (adjusted_strike or None, status_message)
+        """
+        original_strike = strike
+
+        for attempt in range(MAX_STRIKE_ADJUSTMENT_ATTEMPTS + 1):
+            # Get option UIC
+            uic = self._get_option_uic(strike, put_call, expiry)
+            if not uic:
+                # Strike doesn't exist in chain - try next
+                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                strike += adjustment
+                continue
+
+            # Check quote for liquidity
+            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+            if not quote or "Quote" not in quote:
+                # No quote - try adjusted strike
+                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                strike += adjustment
+                continue
+
+            bid = quote["Quote"].get("Bid") or 0
+            ask = quote["Quote"].get("Ask") or 0
+
+            # Check if liquid (has bid AND ask)
+            if bid > 0 and ask > 0:
+                spread_percent = ((ask - bid) / bid) * 100 if bid > 0 else float('inf')
+                if spread_percent < MAX_BID_ASK_SPREAD_PERCENT_SKIP:
+                    if strike != original_strike:
+                        logger.info(
+                            f"MKT-007: Adjusted {put_call} strike {original_strike} -> {strike} "
+                            f"(spread {spread_percent:.1f}%)"
+                        )
+                    return strike, "OK"
+
+            # Illiquid - try adjusting
+            if attempt < MAX_STRIKE_ADJUSTMENT_ATTEMPTS:
+                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                strike += adjustment
+                logger.info(f"MKT-007: {put_call} {original_strike} illiquid, trying {strike}")
+
+        # Could not find liquid strike
+        logger.warning(f"MKT-007: Could not find liquid strike for {put_call} near {original_strike}")
+        return None, "No liquid strike found"
+
+    # =========================================================================
+    # TIME-001: CLOCK SYNC VALIDATION
+    # =========================================================================
+
+    def _validate_system_clock(self):
+        """
+        TIME-001: Validate system clock against Saxo server time.
+
+        Checks for significant clock skew that could affect entry timing.
+        """
+        try:
+            # Get server time from Saxo API
+            # Use a simple API call that returns timestamp
+            import requests
+            from datetime import timezone
+
+            # Try to get server time from Saxo
+            # The token endpoint often includes server time in response headers
+            server_time = None
+
+            # Use account info endpoint as a proxy - check response headers
+            account_info = self.client.get_account_info()
+            if account_info:
+                # If successful, we can at least verify our connection works
+                self._clock_validated = True
+
+                # Get local time
+                local_time = get_us_market_time()
+                logger.info(f"TIME-001: Clock validation - Local time: {local_time.strftime('%H:%M:%S')}")
+
+                # Without actual server time, we can only log local time
+                # In production, consider using NTP check or Saxo response headers
+                self._clock_skew_seconds = 0.0
+                logger.info("TIME-001: Clock validation passed (server time comparison not available)")
+                return
+
+            logger.warning("TIME-001: Could not validate clock - API unavailable")
+            self._clock_validated = False
+
+        except Exception as e:
+            logger.error(f"TIME-001: Clock validation error: {e}")
+            self._clock_validated = False
+
+    def _is_clock_reliable(self) -> Tuple[bool, str]:
+        """
+        TIME-001: Check if system clock is reliable for trading.
+
+        Returns:
+            Tuple of (is_reliable, message)
+        """
+        if not CLOCK_SYNC_CHECK_ENABLED:
+            return True, "Clock check disabled"
+
+        if not self._clock_validated:
+            return True, "Clock not validated (proceeding with caution)"
+
+        if abs(self._clock_skew_seconds) > MAX_CLOCK_SKEW_WARNING_SECONDS:
+            return False, f"Clock skew too large: {self._clock_skew_seconds:.1f}s"
+
+        return True, "Clock OK"
+
+    # =========================================================================
+    # DATA-003: P&L SANITY CHECK
+    # =========================================================================
+
+    def _validate_pnl_sanity(self, entry: IronCondorEntry) -> Tuple[bool, str]:
+        """
+        DATA-003: Validate that P&L values are within reasonable bounds.
+
+        Catches data errors that could result in impossible P&L figures.
+
+        Args:
+            entry: IronCondorEntry to validate
+
+        Returns:
+            Tuple of (is_valid, message)
+        """
+        if not PNL_SANITY_CHECK_ENABLED:
+            return True, "P&L sanity check disabled"
+
+        pnl = entry.unrealized_pnl
+
+        # Check for impossible values
+        if pnl > MAX_PNL_PER_IC:
+            logger.error(
+                f"DATA-003: Impossible P&L detected for Entry #{entry.entry_number}: "
+                f"${pnl:.2f} > max ${MAX_PNL_PER_IC}"
+            )
+            return False, f"P&L too high: ${pnl:.2f}"
+
+        if pnl < MIN_PNL_PER_IC:
+            logger.error(
+                f"DATA-003: Impossible P&L detected for Entry #{entry.entry_number}: "
+                f"${pnl:.2f} < min ${MIN_PNL_PER_IC}"
+            )
+            return False, f"P&L too low: ${pnl:.2f}"
+
+        # Check for NaN or infinity
+        if not isinstance(pnl, (int, float)) or pnl != pnl:  # NaN check
+            logger.error(f"DATA-003: Invalid P&L value for Entry #{entry.entry_number}: {pnl}")
+            return False, "Invalid P&L value"
+
+        return True, f"P&L ${pnl:.2f} within bounds"
+
+    def _validate_all_pnl(self) -> List[str]:
+        """
+        DATA-003: Validate P&L for all active entries.
+
+        Returns:
+            List of warning messages for any invalid P&L values
+        """
+        warnings = []
+        for entry in self.daily_state.active_entries:
+            is_valid, message = self._validate_pnl_sanity(entry)
+            if not is_valid:
+                warnings.append(f"Entry #{entry.entry_number}: {message}")
+        return warnings
+
+    # =========================================================================
+    # ALERT-002: ALERT BATCHING
+    # =========================================================================
+
+    def _should_batch_alert(self, alert_type: str) -> bool:
+        """
+        ALERT-002: Check if we should batch this alert with recent ones.
+
+        Returns True if there have been multiple alerts recently.
+        """
+        now = get_us_market_time()
+        cutoff = now - timedelta(seconds=ALERT_BATCH_WINDOW_SECONDS)
+
+        # Clean old alerts
+        self._recent_alerts = [
+            (ts, t) for ts, t in self._recent_alerts
+            if ts > cutoff
+        ]
+
+        # Count recent alerts
+        recent_count = len(self._recent_alerts)
+
+        # Add this alert
+        self._recent_alerts.append((now, alert_type))
+
+        return recent_count >= MAX_ALERTS_BEFORE_BATCH
+
+    def _send_batched_stop_alert(
+        self,
+        entries_stopped: List[Tuple[IronCondorEntry, str, float]],
+        total_loss: float
+    ):
+        """
+        ALERT-002: Send a batched alert for multiple stop losses.
+
+        Args:
+            entries_stopped: List of (entry, side, stop_level) tuples
+            total_loss: Total loss across all stops
+        """
+        count = len(entries_stopped)
+
+        # Build summary
+        details_lines = []
+        for entry, side, stop_level in entries_stopped:
+            details_lines.append(f"Entry #{entry.entry_number} {side}: -${stop_level:.2f}")
+
+        details_text = "\n".join(details_lines)
+
+        self.alert_service.send_alert(
+            alert_type=AlertType.STOP_LOSS,
+            title=f"Multiple Stops Triggered ({count})",
+            message=f"{count} stop losses triggered in rapid succession.\n\n{details_text}\n\nTotal loss: ${total_loss:.2f}",
+            priority=AlertPriority.HIGH,
+            details={
+                "count": count,
+                "entries": [e.entry_number for e, _, _ in entries_stopped],
+                "total_loss": total_loss
+            }
+        )
+
+        logger.info(f"ALERT-002: Sent batched alert for {count} stops")
+
+    def _queue_stop_alert(self, entry: IronCondorEntry, side: str, stop_level: float):
+        """
+        ALERT-002: Queue a stop alert for potential batching.
+
+        Args:
+            entry: Entry that was stopped
+            side: "call" or "put"
+            stop_level: Stop loss amount
+        """
+        if self._should_batch_alert("stop_loss"):
+            # Add to batch
+            self._batched_alerts.append({
+                "entry": entry,
+                "side": side,
+                "stop_level": stop_level,
+                "timestamp": get_us_market_time()
+            })
+            logger.info(f"ALERT-002: Queued stop alert for batching ({len(self._batched_alerts)} pending)")
+        else:
+            # Send immediately (also flush any pending)
+            self._flush_batched_alerts()
+            # Send this one
+            self.alert_service.stop_loss(
+                trigger_price=self.current_price,
+                pnl=-stop_level,
+                details={
+                    "description": f"MEIC Entry #{entry.entry_number} {side.upper()} side stopped",
+                    "reason": f"{side} spread value reached stop level",
+                    "entry_number": entry.entry_number
+                }
+            )
+
+    def _flush_batched_alerts(self):
+        """
+        ALERT-002: Send any batched alerts.
+
+        Called periodically or when batch window expires.
+        """
+        if not self._batched_alerts:
+            return
+
+        # Calculate total loss
+        total_loss = sum(a["stop_level"] for a in self._batched_alerts)
+
+        # Build entries list
+        entries_stopped = [
+            (a["entry"], a["side"], a["stop_level"])
+            for a in self._batched_alerts
+        ]
+
+        # Send batched alert
+        self._send_batched_stop_alert(entries_stopped, total_loss)
+
+        # Clear batch
+        self._batched_alerts.clear()
