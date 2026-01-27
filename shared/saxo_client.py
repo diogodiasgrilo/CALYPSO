@@ -3290,31 +3290,14 @@ class SaxoClient:
         """
         def on_message(ws, message):
             """Handle incoming WebSocket messages (binary or text)."""
-            # Track message count for debugging
-            if not hasattr(self, '_ws_msg_count'):
-                self._ws_msg_count = 0
-            self._ws_msg_count += 1
-
-            # Log first few messages at INFO level to verify WebSocket is working
-            if self._ws_msg_count <= 3:
-                msg_type = "binary" if isinstance(message, bytes) else "text"
-                msg_len = len(message) if message else 0
-                logger.info(f"WebSocket message #{self._ws_msg_count}: type={msg_type}, len={msg_len}")
-
             try:
                 # Saxo sends binary WebSocket frames with a specific format
                 # See: https://www.developer.saxo/openapi/learn/plain-websocket-streaming
                 if isinstance(message, bytes):
                     # Parse binary format using struct
-                    decoded_count = 0
                     for decoded in self._decode_binary_ws_message(message):
-                        decoded_count += 1
                         ref_id = decoded.get('refid', '')
                         msg_data = decoded.get('msg', {})
-
-                        # Log first few decoded messages for debugging
-                        if self._ws_msg_count <= 3:
-                            logger.info(f"  Decoded #{decoded_count}: refid={ref_id}, data_keys={list(msg_data.keys()) if isinstance(msg_data, dict) else 'not-dict'}")
 
                         # Heartbeat messages have special reference ID
                         if ref_id == '_heartbeat':
@@ -3325,6 +3308,7 @@ class SaxoClient:
                             continue
 
                         # Price update messages - pass ref_id so we can extract UIC
+                        # Format: ref_id="ref_36590" contains UIC 36590
                         if isinstance(msg_data, dict):
                             self._handle_streaming_message(msg_data, ref_id)
                             self._record_success()
@@ -3410,10 +3394,6 @@ class SaxoClient:
             data: The parsed message data
             ref_id: Reference ID from binary message (e.g., "ref_36590" for UIC 36590)
         """
-        # Track update count for debugging
-        if not hasattr(self, '_ws_update_count'):
-            self._ws_update_count = 0
-
         # Format 1: Wrapped in "Data" array (from initial snapshot or some updates)
         if "Data" in data:
             for item in data["Data"]:
@@ -3421,28 +3401,16 @@ class SaxoClient:
                 if uic:
                     uic = int(uic)
                     self._price_cache[uic] = item
-                    self._ws_update_count += 1
-
-                    if self._ws_update_count <= 5:
-                        price = self._extract_price_from_data(item, "websocket")
-                        logger.info(f"WebSocket cache update #{self._ws_update_count}: UIC {uic} = ${price}")
-
                     if uic in self.price_callbacks:
                         self.price_callbacks[uic](uic, item)
             return
 
         # Format 2: Direct message with UIC in ref_id (e.g., "ref_36590")
-        # This is the format for streaming price updates
+        # This is the format for streaming price updates after initial snapshot
         if ref_id and ref_id.startswith("ref_"):
             try:
                 uic = int(ref_id.split("_")[1])
                 self._price_cache[uic] = data
-                self._ws_update_count += 1
-
-                if self._ws_update_count <= 5:
-                    price = self._extract_price_from_data(data, "websocket")
-                    logger.info(f"WebSocket cache update #{self._ws_update_count}: UIC {uic} = ${price}")
-
                 if uic in self.price_callbacks:
                     self.price_callbacks[uic](uic, data)
             except (ValueError, IndexError):
