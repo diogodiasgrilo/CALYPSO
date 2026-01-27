@@ -318,7 +318,7 @@ def main():
     # Load configuration
     # Use iron_fly config as it has the Saxo credentials
     # (all bots share the same credentials)
-    config_path = "bots/iron_fly_0dte/config"
+    config_path = "bots/iron_fly_0dte/config/config.json"
 
     try:
         loader = ConfigLoader(config_path)
