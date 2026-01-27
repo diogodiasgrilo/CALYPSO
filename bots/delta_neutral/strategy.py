@@ -125,7 +125,7 @@ Change History:
 
 import logging
 import time
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, date, timezone, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple, Set
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
@@ -1945,8 +1945,8 @@ class DeltaNeutralStrategy:
         now_est = get_us_market_time()
 
         # Market opens at 9:30 AM ET
-        market_open = time(9, 30)
-        delay_end = time(9, 30 + self._market_open_delay_minutes)
+        market_open = dt_time(9, 30)
+        delay_end = dt_time(9, 30 + self._market_open_delay_minutes)
 
         current_time = now_est.time()
 
@@ -8462,6 +8462,12 @@ class DeltaNeutralStrategy:
                     "emergency_mode": emergency_mode
                 }
             )
+
+            # CRITICAL: Reset cycle metrics for new trading cycle
+            # This prevents cumulative metrics from persisting across cycles
+            # Must happen AFTER logging and alerts so they show correct cycle P&L
+            self.metrics.reset_cycle_metrics()
+            self.metrics.save_to_file()  # Persist the reset state
         else:
             # CRITICAL FIX: Restore state based on what positions remain
             # Don't leave in EXITING state which causes the bot to freeze

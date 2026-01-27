@@ -86,6 +86,38 @@ class StrategyMetrics:
         self.daily_roll_count = 0
         self.daily_recenter_count = 0
 
+    def reset_cycle_metrics(self):
+        """
+        Reset cycle-specific metrics when starting a new trading cycle.
+
+        This should be called after exit_all_positions() when the bot returns
+        to IDLE state with no positions. It resets cumulative metrics for the
+        cycle while preserving lifetime statistics.
+
+        RESETS (cycle-specific):
+            - total_premium_collected: Premium from shorts in this cycle
+            - total_straddle_cost: Cost of longs in this cycle
+            - realized_pnl: P&L from closed positions in this cycle
+            - unrealized_pnl: Current open position P&L
+            - recenter_count: Number of recenters this cycle
+            - roll_count: Number of rolls this cycle
+
+        PRESERVES (lifetime stats):
+            - trade_count, winning_trades, losing_trades
+            - best_trade_pnl, worst_trade_pnl, total_trade_pnl
+            - peak_pnl, max_drawdown
+            - daily_* metrics (handled separately by reset_daily_tracking)
+        """
+        logger.info("Resetting cycle metrics for new trading cycle")
+        self.total_premium_collected = 0.0
+        self.total_straddle_cost = 0.0
+        self.realized_pnl = 0.0
+        self.unrealized_pnl = 0.0
+        self.recenter_count = 0
+        self.roll_count = 0
+        # Note: daily_recenter_count and daily_roll_count are NOT reset here
+        # They get reset by reset_daily_tracking() at market open
+
     def update_daily_tracking(self, spy_price: float, vix: float):
         """Update daily high/low tracking."""
         if spy_price > self.spy_high:
