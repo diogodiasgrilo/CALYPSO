@@ -82,11 +82,12 @@ def main():
     print(f"Weekly Expiry: {weekly_expiry} ({weekly_dte} DTE)")
 
     # Calculate expected move from ATM straddle price (accurate market-based calculation)
+    # Use 5-12 DTE to match the DTE of shorts being sold (7+ DTE targeting next Friday)
     expected_move = client.get_expected_move_from_straddle(
         underlying_uic,
         spy_price,
-        target_dte_min=0,
-        target_dte_max=7
+        target_dte_min=5,
+        target_dte_max=12
     )
 
     if not expected_move:

@@ -4020,8 +4020,8 @@ class SaxoClient:
         self,
         underlying_uic: int,
         underlying_price: float,
-        target_dte_min: int = 0,
-        target_dte_max: int = 7,
+        target_dte_min: int = 5,
+        target_dte_max: int = 12,
         for_roll: bool = False,
         option_root_uic: int = None,
         option_asset_type: str = "StockOption"
@@ -4033,12 +4033,21 @@ class SaxoClient:
         accurate way to calculate expected move as it uses actual option prices
         rather than VIX or theoretical IV calculations.
 
+        IMPORTANT: The expected move DTE must match the DTE of the options being
+        sold. For short strangles (7+ DTE targeting next Friday), we use 5-12 DTE
+        for expected move to ensure accurate strike multiplier calculations.
+
+        Bug fix (2026-01-28): Previously defaulted to 0-7 DTE which grabbed the
+        nearest expiration (often 0-1 DTE), causing expected move to be much smaller
+        than the DTE of shorts being sold (~8 DTE). This made strikes appear wider
+        (1.8x) when they were actually much tighter (0.65x).
+
         Args:
             underlying_uic: UIC of the underlying instrument
             underlying_price: Current price of the underlying
-            target_dte_min: Minimum DTE for expiration search
-            target_dte_max: Maximum DTE for expiration search
-            for_roll: If True, look for next week's expiry (5-12 DTE)
+            target_dte_min: Minimum DTE for expiration search (default 5)
+            target_dte_max: Maximum DTE for expiration search (default 12)
+            for_roll: If True, look for next week's expiry (5-12 DTE) - same as default
             option_root_uic: Optional UIC of the option root (for StockIndexOptions like SPXW)
 
         Returns:
@@ -4054,12 +4063,11 @@ class SaxoClient:
         today = datetime.now().date()
         target_expiration = None
 
-        if for_roll:
-            # Rolling: look for next week (5-12 DTE)
-            dte_min, dte_max = 5, 12
-        else:
-            # Normal: use provided range
-            dte_min, dte_max = target_dte_min, target_dte_max
+        # Use 5-12 DTE for both first entry and roll - this matches the DTE of
+        # short strangles being sold (7+ DTE targeting next Friday).
+        # The for_roll parameter is kept for backwards compatibility but no longer
+        # changes the DTE range since both cases should use the same range.
+        dte_min, dte_max = target_dte_min, target_dte_max
 
         for exp_data in expirations:
             exp_date_str = exp_data.get("Expiry")
