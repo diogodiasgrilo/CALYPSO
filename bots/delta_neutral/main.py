@@ -2,7 +2,7 @@
 """
 main.py - Delta Neutral Trading Bot Entry Point
 
-Version: 2.0.0
+Version: 2.0.1
 Last Updated: 2026-01-28
 
 This is the main entry point for the Delta Neutral Trading Bot.
@@ -18,6 +18,10 @@ Strategy Summary:
 
 Version History:
 ----------------
+2.0.1 (2026-01-28): REST-only mode (WebSocket disabled for reliability)
+    - Disabled WebSocket streaming, use REST API for all price fetching
+    - VIGILANT mode now 2s interval (30 calls/min vs 60 at 1s)
+    - WebSocket code preserved for future use if 4+ bots need rate limit relief
 2.0.0 (2026-01-28): 10 WebSocket reliability fixes (CONN-007 to CONN-016)
 1.0.0 (2026-01-23): Initial production release
 
@@ -67,6 +71,31 @@ from bots.delta_neutral.models import MonitoringMode
 
 # Configure main logger
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# WEBSOCKET STREAMING TOGGLE
+# =============================================================================
+# Set to False for REST-only mode (more reliable, recommended for <= 3 bots)
+# Set to True to enable WebSocket streaming (needed for 4+ bots to avoid rate limits)
+#
+# REST-only mode (USE_WEBSOCKET_STREAMING = False):
+#   - All price fetching uses REST API directly
+#   - NORMAL mode: 6 calls/min per bot (10s interval)
+#   - VIGILANT mode: 30 calls/min per bot (2s interval)
+#   - 3 bots worst case: 90 calls/min (75% of 120/min limit)
+#   - Guaranteed fresh prices, no stale cache issues
+#
+# WebSocket mode (USE_WEBSOCKET_STREAMING = True):
+#   - Price fetching checks WebSocket cache first, REST fallback
+#   - 0 API calls for cached prices
+#   - Required for 4+ bots to stay under rate limits
+#   - Risk: Cache can become stale if WebSocket disconnects silently
+#
+# History: Disabled 2026-01-28 after WebSocket stale cache caused $0 price
+# orders on 2026-01-27. The 10 fixes (CONN-007 to CONN-016) improved reliability
+# but REST-only is simpler and sufficient for our 3-bot setup.
+# =============================================================================
+USE_WEBSOCKET_STREAMING = False  # REST-only mode for reliability
 
 # Global flag for graceful shutdown
 shutdown_requested = False
@@ -410,37 +439,47 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     except Exception as e:
         trade_logger.log_error(f"Failed to log dashboard metrics: {e}")
 
-    # Start real-time price streaming
-    # FIXED: Define full subscription details with correct AssetTypes to avoid 404 errors
-    subscriptions = [
-        {"uic": config["strategy"]["underlying_uic"], "asset_type": "Etf"},
-        {"uic": config["strategy"]["vix_uic"], "asset_type": "StockIndex"} # Keep as StockIndex
-    ]
+    # =============================================================================
+    # WEBSOCKET STREAMING SETUP (disabled by default - see USE_WEBSOCKET_STREAMING)
+    # =============================================================================
+    # This code is preserved for future use if we need 4+ bots and hit rate limits.
+    # Currently disabled because REST-only is more reliable for our 3-bot setup.
+    subscriptions = []
+    streaming_started = False
 
-    # Also subscribe to existing position option UICs for real-time quotes
-    # This ensures close operations have streaming data available
-    if strategy.long_straddle:
-        if strategy.long_straddle.call and strategy.long_straddle.call.uic:
-            subscriptions.append({"uic": strategy.long_straddle.call.uic, "asset_type": "StockOption"})
-        if strategy.long_straddle.put and strategy.long_straddle.put.uic:
-            subscriptions.append({"uic": strategy.long_straddle.put.uic, "asset_type": "StockOption"})
+    if USE_WEBSOCKET_STREAMING:
+        # Define full subscription details with correct AssetTypes to avoid 404 errors
+        subscriptions = [
+            {"uic": config["strategy"]["underlying_uic"], "asset_type": "Etf"},
+            {"uic": config["strategy"]["vix_uic"], "asset_type": "StockIndex"}
+        ]
 
-    if strategy.short_strangle:
-        if strategy.short_strangle.call and strategy.short_strangle.call.uic:
-            subscriptions.append({"uic": strategy.short_strangle.call.uic, "asset_type": "StockOption"})
-        if strategy.short_strangle.put and strategy.short_strangle.put.uic:
-            subscriptions.append({"uic": strategy.short_strangle.put.uic, "asset_type": "StockOption"})
+        # Also subscribe to existing position option UICs for real-time quotes
+        # This ensures close operations have streaming data available
+        if strategy.long_straddle:
+            if strategy.long_straddle.call and strategy.long_straddle.call.uic:
+                subscriptions.append({"uic": strategy.long_straddle.call.uic, "asset_type": "StockOption"})
+            if strategy.long_straddle.put and strategy.long_straddle.put.uic:
+                subscriptions.append({"uic": strategy.long_straddle.put.uic, "asset_type": "StockOption"})
 
-    trade_logger.log_event(f"Starting price streaming for {len(subscriptions)} instruments...")
+        if strategy.short_strangle:
+            if strategy.short_strangle.call and strategy.short_strangle.call.uic:
+                subscriptions.append({"uic": strategy.short_strangle.call.uic, "asset_type": "StockOption"})
+            if strategy.short_strangle.put and strategy.short_strangle.put.uic:
+                subscriptions.append({"uic": strategy.short_strangle.put.uic, "asset_type": "StockOption"})
 
-    def price_update_handler(uic: int, data: dict):
-        """Handle real-time price updates."""
-        strategy.handle_price_update(uic, data)
+        trade_logger.log_event(f"Starting price streaming for {len(subscriptions)} instruments...")
 
-    # FIXED: Pass the list of dicts to the new start_price_streaming method
-    streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
-    if not streaming_started:
-        trade_logger.log_event("Warning: Real-time streaming not started. Using polling mode.")
+        def price_update_handler(uic: int, data: dict):
+            """Handle real-time price updates."""
+            strategy.handle_price_update(uic, data)
+
+        streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
+        if not streaming_started:
+            trade_logger.log_event("Warning: Real-time streaming not started. Using polling mode.")
+    else:
+        trade_logger.log_event("REST-only mode: WebSocket streaming disabled (USE_WEBSOCKET_STREAMING=False)")
+        trade_logger.log_event("All price fetching will use REST API directly (more reliable)")
 
     # Main trading loop
     trade_logger.log_event("Entering main trading loop...")
@@ -448,7 +487,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
     trade_logger.log_event("-" * 60)
 
     last_status_time = datetime.now()
-    status_interval = 60  # Log status every 60 seconds (reduced from 5min with WebSocket cache)
+    status_interval = 60  # Log status every 60 seconds
     last_daily_summary_date = None  # Track last daily summary logged (trading days only)
     last_performance_metrics_date = None  # Track last performance metrics logged (every day)
     trading_day_started = False  # Track if we've started tracking for today
@@ -538,7 +577,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
 
                         # Disconnect WebSocket before sleeping to avoid timeout errors
                         # Saxo closes idle connections anyway, so disconnect cleanly
-                        if client.is_streaming:
+                        if USE_WEBSOCKET_STREAMING and client.is_streaming:
                             client.stop_price_streaming()
 
                         # Force refresh token BEFORE sleeping to get fresh expiry
@@ -559,8 +598,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         # This prevents false circuit breaker triggers from long sleep periods
                         client.circuit_breaker.last_successful_connection = datetime.now()
 
-                        # Reconnect WebSocket after waking (will reconnect when market opens)
-                        if not shutdown_requested and not client.is_streaming:
+                        # Reconnect WebSocket after waking (only if WebSocket mode enabled)
+                        if USE_WEBSOCKET_STREAMING and not shutdown_requested and not client.is_streaming:
                             logger.debug("Reconnecting WebSocket after sleep")
                             client.start_price_streaming(subscriptions, price_update_handler)
                     else:
@@ -602,8 +641,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         break  # Shutdown requested
                     continue
 
-                # CRITICAL: Check and reconnect WebSocket if it dropped during market hours
-                if subscriptions and not client.is_streaming:
+                # Check and reconnect WebSocket if it dropped during market hours (only if WebSocket mode enabled)
+                if USE_WEBSOCKET_STREAMING and subscriptions and not client.is_streaming:
                     trade_logger.log_event("WebSocket disconnected during market hours - reconnecting...")
                     try:
                         # First, clean up any stale subscriptions on Saxo's side
@@ -749,8 +788,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                         break  # Shutdown requested
                 elif monitoring_mode == MonitoringMode.VIGILANT:
                     # VIGILANT MODE: 60-75% cushion consumed (adaptive) or 0.1%-0.5% from strike (static fallback)
-                    # Use fast 1-second interval to catch any move toward ITM (WebSocket cache, no API cost)
-                    vigilant_interval = monitoring_mode.value  # 1 second
+                    # Use fast 2-second interval to catch any move toward ITM (REST API, 30 calls/min)
+                    vigilant_interval = monitoring_mode.value  # 2 seconds
 
                     # Include cushion % in vigilant heartbeat for real-time visibility
                     cushion_info = ""
@@ -774,9 +813,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     # This saves resources since we won't be trading anyway
                     fomc_interval = monitoring_mode.value  # 3600 seconds (1 hour)
 
-                    # Disconnect WebSocket during FOMC blackout to save resources
+                    # Disconnect WebSocket during FOMC blackout to save resources (only if WebSocket mode enabled)
                     # We're not trading, so no need for real-time prices
-                    if client.is_streaming:
+                    if USE_WEBSOCKET_STREAMING and client.is_streaming:
                         logger.info("FOMC blackout: disconnecting WebSocket (not needed)")
                         client.stop_price_streaming()
 
@@ -790,13 +829,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     if not interruptible_sleep(fomc_interval):
                         break  # Shutdown requested
 
-                    # After waking, reconnect WebSocket if still in blackout (for price data in logs)
+                    # After waking, reconnect WebSocket if still in blackout (only if WebSocket mode enabled)
                     # But only if market is still open - check first
-                    if not shutdown_requested and is_market_open():
+                    if USE_WEBSOCKET_STREAMING and not shutdown_requested and is_market_open():
                         if not client.is_streaming:
                             client.start_price_streaming(subscriptions, price_update_handler)
                 else:
-                    # NORMAL MODE: Use MonitoringMode.NORMAL interval (10s with WebSocket cache)
+                    # NORMAL MODE: Use MonitoringMode.NORMAL interval (10s, REST API)
                     normal_interval = MonitoringMode.NORMAL.value
                     trade_logger.log_event(
                         f"{mode_prefix}HEARTBEAT | State: {status['state']} | "
@@ -825,9 +864,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
         trade_logger.log_event("INITIATING GRACEFUL SHUTDOWN")
         trade_logger.log_event("=" * 60)
 
-        # Stop price streaming
-        trade_logger.log_event("Stopping price streaming...")
-        client.stop_price_streaming()
+        # Stop price streaming (only if WebSocket mode was enabled)
+        if USE_WEBSOCKET_STREAMING:
+            trade_logger.log_event("Stopping price streaming...")
+            client.stop_price_streaming()
 
         # Log final status
         status = strategy.get_status_summary()

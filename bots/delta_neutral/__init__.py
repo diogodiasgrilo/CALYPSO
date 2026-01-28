@@ -1,7 +1,7 @@
 """
 Delta Neutral Strategy Bot (Brian Terry's Strategy from Theta Profits)
 
-Version: 2.0.0
+Version: 2.0.1
 Last Updated: 2026-01-28
 
 SPY Long Straddle + Weekly Short Strangles with 5-Point Recentering
@@ -29,26 +29,24 @@ Configuration:
 - recenter_threshold_points: 5.0 (recenter when SPY moves ±$5)
 
 Version History:
-- 2.0.0 (2026-01-28): Major WebSocket reliability + adaptive roll trigger
+- 2.0.1 (2026-01-28): REST-only mode for reliability
+  - Disabled WebSocket streaming (USE_WEBSOCKET_STREAMING=False)
+  - All price fetching now uses REST API directly
+  - VIGILANT mode changed from 1s to 2s (30 calls/min, under rate limits)
+  - WebSocket code preserved for future use if 4+ bots need rate limit relief
+- 2.0.0 (2026-01-28): Adaptive roll trigger + WebSocket fixes
   - Adaptive cushion-based roll trigger (75% consumed = roll, 60% = vigilant)
   - Immediate next-week shorts entry after scheduled debit skip
   - entry_underlying_price tracking on StranglePosition for cushion calculation
   - Cushion % consumed visible in terminal status, heartbeat, and Google Sheets
-  - 10 critical fixes for WebSocket price streaming
-  - Cache invalidation on disconnect
-  - Timestamp-based staleness detection (60s max)
-  - Thread-safe cache access with locking
-  - Binary message parser bounds checking
-  - Limit order $0 price validation fix
-  - WebSocket health monitoring
-  - Heartbeat timeout detection
+  - 10 critical fixes for WebSocket price streaming (kept but disabled)
 - 1.0.0 (2026-01-23): Initial production release
   - Proactive restart check logic
   - 1% weekly target return mode
   - Config key standardization
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState
 

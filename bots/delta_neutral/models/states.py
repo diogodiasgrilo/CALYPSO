@@ -46,7 +46,7 @@ class MonitoringMode(Enum):
 
     Adaptive vigilant monitoring system (Updated 2026-01-28):
     - NORMAL: 10-second check interval (< 60% of original cushion consumed)
-    - VIGILANT: 1-second monitoring (60-75% cushion consumed)
+    - VIGILANT: 2-second monitoring (60-75% cushion consumed)
     - FOMC_BLACKOUT: 3600-second (1 hour) heartbeat when in FOMC blackout with no positions
 
     Thresholds are adaptive — they scale with the original distance from entry
@@ -57,9 +57,11 @@ class MonitoringMode(Enum):
     trigger (75% cushion consumed) fires from should_roll_shorts().
     Emergency close at 0.1% from strike (absolute safety floor, stays static).
 
-    Note: Both intervals are safe because price data comes from WebSocket cache
-    (no API calls), eliminating rate limit concerns. Reduced NORMAL from 30s to 10s
-    for faster detection of price movements toward short strikes.
+    Rate Limit Consideration (2026-01-28):
+    - Switched from WebSocket to REST-only for price fetching (more reliable)
+    - VIGILANT uses 2s interval (30 calls/min) instead of 1s (60 calls/min)
+    - With 3 bots max: worst case 90 calls/min (75% of 120/min limit)
+    - REST API provides guaranteed fresh prices for order placement
 
     FOMC_BLACKOUT mode is used when:
     - It's an FOMC meeting day (within blackout period)
@@ -67,6 +69,6 @@ class MonitoringMode(Enum):
     - Trading is blocked for the entire day
     This saves resources by only checking hourly for heartbeat/state changes.
     """
-    NORMAL = 10      # 10 seconds between checks (was 30s, reduced with WebSocket fix)
-    VIGILANT = 1     # 1 second between checks (watching closely, uses cached price)
+    NORMAL = 10      # 10 seconds between checks (6 calls/min per bot)
+    VIGILANT = 2     # 2 seconds between checks (30 calls/min per bot, REST API)
     FOMC_BLACKOUT = 3600  # 1 hour between checks when in FOMC blackout with no positions
