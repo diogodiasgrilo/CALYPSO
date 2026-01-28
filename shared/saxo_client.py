@@ -17,9 +17,20 @@ AssetType enum includes:
 
 Author: Trading Bot Developer
 Date: 2024
-Last Updated: 2026-01-26
+Last Updated: 2026-01-28
 
-Code Audit: 2026-01-26
+Code Audit: 2026-01-28
+- CRITICAL FIX: Cache invalidation on WebSocket disconnect (Issue #1)
+- CRITICAL FIX: Cache timestamps and staleness detection (Issue #2)
+- CRITICAL FIX: Limit order price validation - $0 bug (Issue #3)
+- HIGH FIX: WebSocket thread health monitoring (Issue #5)
+- HIGH FIX: Heartbeat timeout detection (Issue #6)
+- HIGH FIX: Clear cache on reconnection (Issue #7)
+- MEDIUM FIX: Thread-safe cache access with locking (Issue #8)
+- MEDIUM FIX: Improved on_error handler (Issue #9)
+- MEDIUM FIX: Bounds checking in binary parser (Issue #10)
+
+Previous Audit: 2026-01-26
 - Added STOCK_INDEX_OPTION and CFD_ON_INDEX to AssetType enum
 - Removed duplicate get_open_orders() definition (kept /orders/me endpoint version)
 """
@@ -212,8 +223,10 @@ class SaxoClient:
         # Circuit breaker for error handling
         self.circuit_breaker = CircuitBreakerState()
 
-        # Heartbeat tracking for debugging
+        # Heartbeat tracking for debugging and health monitoring
         self._heartbeat_count = 0
+        self._last_heartbeat_time: Optional[datetime] = None  # Fix #6: Heartbeat timeout detection
+        self._last_message_time: Optional[datetime] = None    # Fix #5: Message freshness tracking
 
         # WebSocket connection state
         self.ws_connection: Optional[websocket.WebSocketApp] = None
@@ -222,8 +235,13 @@ class SaxoClient:
         self.subscription_context_id = f"ctx_{int(time.time())}"
         self.is_streaming = False
 
-        # Price cache for subscription snapshots (UIC -> latest price data)
+        # Fix #8: Thread-safe price cache with locking
+        # Cache structure: {uic: {'data': {...}, 'timestamp': datetime}}
         self._price_cache: Dict[int, Dict] = {}
+        self._price_cache_lock = threading.Lock()
+
+        # Fix #2: Cache staleness configuration (seconds)
+        self._cache_max_age_seconds = 60  # Consider cached data stale after 60s
 
         # Account information - auto-select based on environment
         account_config = config.get("account", {})
@@ -919,6 +937,75 @@ class SaxoClient:
             self._record_error()
             return None
 
+    def _get_from_cache(self, uic: int, max_age_seconds: Optional[int] = None) -> Optional[Dict]:
+        """
+        Get data from price cache with staleness check (Fix #2).
+
+        Thread-safe cache access with timestamp validation.
+
+        Args:
+            uic: Unique Instrument Code
+            max_age_seconds: Maximum age in seconds before data is considered stale.
+                           If None, uses self._cache_max_age_seconds (default 60s).
+
+        Returns:
+            dict: Cached quote data if valid and not stale, None otherwise.
+        """
+        if max_age_seconds is None:
+            max_age_seconds = self._cache_max_age_seconds
+
+        with self._price_cache_lock:
+            if uic not in self._price_cache:
+                return None
+
+            cache_entry = self._price_cache[uic]
+            if not cache_entry:
+                return None
+
+            # Check staleness (Fix #2)
+            timestamp = cache_entry.get('timestamp')
+            if timestamp:
+                age = (datetime.now() - timestamp).total_seconds()
+                if age > max_age_seconds:
+                    logger.debug(f"Cache stale for UIC {uic}: {age:.1f}s old > {max_age_seconds}s max")
+                    return None
+
+            data = cache_entry.get('data')
+            if not data:
+                return None
+
+            # Return a copy to prevent mutation issues
+            return data.copy() if isinstance(data, dict) else data
+
+    def _update_cache(self, uic: int, data: Dict) -> None:
+        """
+        Update price cache with timestamp (Fix #2).
+
+        Thread-safe cache update with automatic timestamping.
+
+        Args:
+            uic: Unique Instrument Code
+            data: Quote data to cache
+        """
+        with self._price_cache_lock:
+            self._price_cache[uic] = {
+                'data': data,
+                'timestamp': datetime.now()
+            }
+
+    def _clear_cache(self) -> None:
+        """
+        Clear all cached price data (Fix #1, #7).
+
+        Thread-safe cache clearing. Called on WebSocket disconnect
+        and before reconnection to prevent stale data usage.
+        """
+        with self._price_cache_lock:
+            cache_size = len(self._price_cache)
+            self._price_cache.clear()
+            if cache_size > 0:
+                logger.info(f"Cleared {cache_size} entries from price cache")
+
     def get_quote(self, uic: int, asset_type: str = "Stock", skip_cache: bool = False) -> Optional[Dict]:
         """
         Get current quote for an instrument.
@@ -938,10 +1025,11 @@ class SaxoClient:
         Returns:
             dict: Quote data including Bid, Ask, LastTraded prices.
         """
-        # First check streaming cache for real-time data (unless skip_cache is True)
         uic_int = int(uic)
-        if not skip_cache and uic_int in self._price_cache:
-            cached = self._price_cache[uic_int]
+
+        # Fix #5: Check WebSocket health before trusting cache
+        if not skip_cache and self.is_websocket_healthy():
+            cached = self._get_from_cache(uic_int)
             if cached and "Quote" in cached:
                 bid = cached["Quote"].get("Bid", 0)
                 ask = cached["Quote"].get("Ask", 0)
@@ -950,6 +1038,11 @@ class SaxoClient:
                 if (bid > 0 and ask > 0) or mid > 0:
                     logger.debug(f"get_quote: Using cached streaming data for UIC {uic}")
                     return cached
+                else:
+                    logger.debug(f"get_quote: Cache has invalid prices for UIC {uic} (bid={bid}, ask={ask}, mid={mid})")
+        elif not skip_cache and self.is_streaming and not self.is_websocket_healthy():
+            # WebSocket claims to be streaming but is unhealthy - log warning
+            logger.warning(f"WebSocket unhealthy, forcing REST API fallback for UIC {uic}")
 
         # Fallback to infoprices REST API
         # Use /infoprices/list with AccountKey - required for sim environment
@@ -2219,7 +2312,17 @@ class SaxoClient:
             "ToOpenClose": to_open_close
         }
 
-        if order_type == OrderType.LIMIT and limit_price:
+        # Fix #3: CRITICAL - Validate limit price before placing order
+        # Previous bug: `and limit_price` evaluated to False when limit_price=0.0
+        # This caused OrderPrice to not be set, and Saxo rejected with:
+        # "OrderPrice must be set for orders that are not of type Market"
+        if order_type == OrderType.LIMIT:
+            if limit_price is None or limit_price <= 0:
+                logger.error(
+                    f"Fix #3: Invalid limit price ${limit_price} for LIMIT order on UIC {uic}. "
+                    f"Cannot place order with price <= $0.00"
+                )
+                return None
             order_data["OrderPrice"] = limit_price
 
         # Add ExternalReference for position tracking (max 50 chars per Saxo API)
@@ -3127,6 +3230,10 @@ class SaxoClient:
 
         # 1. Start the WebSocket thread if it's not running
         if not self.ws_connection:
+            # Fix #7: Clear cache on reconnection to prevent stale data usage
+            # This ensures we start fresh when establishing a new connection
+            self._clear_cache()
+
             # CRITICAL FIX (2026-01-23): Ensure token is fresh BEFORE starting WebSocket
             # This prevents 401 Unauthorized errors when waking from sleep.
             # The WebSocket handshake uses self.access_token directly (not _make_request),
@@ -3139,6 +3246,11 @@ class SaxoClient:
 
             # Generate fresh context ID to avoid "Subscription Key already in use" errors on reconnect
             self.subscription_context_id = f"ctx_{int(time.time())}"
+
+            # Reset health monitoring timestamps
+            self._last_message_time = None
+            self._last_heartbeat_time = None
+
             self._start_websocket()
             # Give the socket a moment to connect
             time.sleep(2)
@@ -3181,13 +3293,15 @@ class SaxoClient:
                 success_count += 1
 
                 # Cache the snapshot price data for later retrieval
+                # Fix #2: Use timestamp-aware cache update
                 snapshot = response["Snapshot"]
-                self._price_cache[uic] = snapshot
+                self._update_cache(uic, snapshot)
 
                 # Log the snapshot structure for debugging
                 snapshot_keys = list(snapshot.keys()) if isinstance(snapshot, dict) else str(type(snapshot))
                 logger.debug(f"  Cached UIC {uic} (type={type(uic).__name__}), keys: {snapshot_keys}")
-                logger.debug(f"  Cache now contains UICs: {list(self._price_cache.keys())}")
+                with self._price_cache_lock:
+                    logger.debug(f"  Cache now contains UICs: {list(self._price_cache.keys())}")
                 # Show price data if available
                 if isinstance(snapshot, dict):
                     if "Quote" in snapshot:
@@ -3216,12 +3330,24 @@ class SaxoClient:
 
         A single raw message can contain multiple data messages.
 
+        Fix #10: Added bounds checking to prevent memory exhaustion from malformed messages.
+
         Yields:
             dict: Decoded message with 'refid', 'msgId', and 'msg' keys
         """
+        # Fix #10: Bounds checking constants
+        MAX_REF_ID_LEN = 256  # Reference IDs should never be this long
+        MAX_PAYLOAD_SIZE = 10_000_000  # 10 MB max payload
+
         pos = 0
-        while pos < len(raw):
+        raw_len = len(raw)
+
+        while pos < raw_len:
             try:
+                # Fix #10: Ensure we have enough bytes for header (8+2+1 = 11 bytes minimum before ref_id)
+                if pos + 11 > raw_len:
+                    break
+
                 # Message ID (8 bytes, uint64 little-endian)
                 msg_id = struct.unpack_from('<Q', raw, pos)[0]
                 pos += 8
@@ -3233,9 +3359,21 @@ class SaxoClient:
                 ref_id_len = struct.unpack_from('B', raw, pos)[0]
                 pos += 1
 
+                # Fix #10: Bounds check ref_id_len
+                if ref_id_len > MAX_REF_ID_LEN:
+                    logger.error(f"Binary parser: ref_id_len {ref_id_len} exceeds max {MAX_REF_ID_LEN}")
+                    break
+                if pos + ref_id_len > raw_len:
+                    logger.error(f"Binary parser: ref_id extends beyond message (pos={pos}, len={ref_id_len}, raw_len={raw_len})")
+                    break
+
                 # Reference ID (variable length ASCII)
                 ref_id = raw[pos:pos + ref_id_len].decode('ascii')
                 pos += ref_id_len
+
+                # Fix #10: Ensure we have enough bytes for payload header (1+4 = 5 bytes)
+                if pos + 5 > raw_len:
+                    break
 
                 # Payload format (1 byte: 0=JSON, 1=Protobuf)
                 payload_format = struct.unpack_from('B', raw, pos)[0]
@@ -3244,6 +3382,14 @@ class SaxoClient:
                 # Payload size (4 bytes, int32 little-endian)
                 payload_size = struct.unpack_from('<i', raw, pos)[0]
                 pos += 4
+
+                # Fix #10: Bounds check payload_size
+                if payload_size < 0 or payload_size > MAX_PAYLOAD_SIZE:
+                    logger.error(f"Binary parser: payload_size {payload_size} is invalid (max {MAX_PAYLOAD_SIZE})")
+                    break
+                if pos + payload_size > raw_len:
+                    logger.error(f"Binary parser: payload extends beyond message (pos={pos}, size={payload_size}, raw_len={raw_len})")
+                    break
 
                 # Payload data
                 payload_data = raw[pos:pos + payload_size]
@@ -3294,6 +3440,9 @@ class SaxoClient:
         def on_message(ws, message):
             """Handle incoming WebSocket messages (binary or text)."""
             try:
+                # Fix #5: Track last message time for health monitoring
+                self._last_message_time = datetime.now()
+
                 # Saxo sends binary WebSocket frames with a specific format
                 # See: https://www.developer.saxo/openapi/learn/plain-websocket-streaming
                 if isinstance(message, bytes):
@@ -3305,6 +3454,8 @@ class SaxoClient:
                         # Heartbeat messages have special reference ID
                         if ref_id == '_heartbeat':
                             self._heartbeat_count += 1
+                            # Fix #6: Track last heartbeat time for timeout detection
+                            self._last_heartbeat_time = datetime.now()
                             self._record_success()
                             if self._heartbeat_count % 10 == 0:
                                 logger.debug(f"WebSocket heartbeat #{self._heartbeat_count} received")
@@ -3320,6 +3471,8 @@ class SaxoClient:
                     data = json.loads(message)
                     if "ReferenceId" in data and data["ReferenceId"] == "_heartbeat":
                         self._heartbeat_count += 1
+                        # Fix #6: Track last heartbeat time for timeout detection
+                        self._last_heartbeat_time = datetime.now()
                         self._record_success()
                         return
                     self._handle_streaming_message(data)
@@ -3334,7 +3487,11 @@ class SaxoClient:
                     logger.warning(f"WebSocket message decode error #{self._ws_error_count}: {e}")
 
         def on_error(ws, error):
+            # Fix #9: Improved error handler - update state and clear cache
             logger.error(f"WebSocket error: {error}")
+            self.is_streaming = False
+            self._clear_cache()  # Fix #1: Clear potentially corrupted cache
+            self._record_error()  # Update circuit breaker
 
         def on_close(ws, close_status_code, close_msg):
             # Only log warning if this was an unexpected close
@@ -3343,6 +3500,9 @@ class SaxoClient:
                 self._intentional_ws_close = False
             else:
                 logger.warning(f"WebSocket closed unexpectedly: code={close_status_code}, reason={close_msg}")
+
+            # Fix #1: CRITICAL - Clear cache on disconnect to prevent stale data usage
+            self._clear_cache()
             self.is_streaming = False
 
         def on_open(ws):
@@ -3403,7 +3563,8 @@ class SaxoClient:
                 uic = item.get("Uic")
                 if uic:
                     uic = int(uic)
-                    self._price_cache[uic] = item
+                    # Fix #2: Use timestamp-aware cache update
+                    self._update_cache(uic, item)
                     if uic in self.price_callbacks:
                         self.price_callbacks[uic](uic, item)
             return
@@ -3413,11 +3574,69 @@ class SaxoClient:
         if ref_id and ref_id.startswith("ref_"):
             try:
                 uic = int(ref_id.split("_")[1])
-                self._price_cache[uic] = data
+                # Fix #2: Use timestamp-aware cache update
+                self._update_cache(uic, data)
                 if uic in self.price_callbacks:
                     self.price_callbacks[uic](uic, data)
             except (ValueError, IndexError):
                 logger.debug(f"Could not extract UIC from ref_id: {ref_id}")
+
+    def is_websocket_healthy(self) -> bool:
+        """
+        Check if WebSocket connection is truly healthy (Fix #5).
+
+        This method performs comprehensive health checks:
+        1. is_streaming flag is True
+        2. WebSocket thread is alive
+        3. Received a message in last 60 seconds
+        4. Received a heartbeat in last 60 seconds
+
+        Returns:
+            bool: True if WebSocket is healthy, False otherwise.
+        """
+        # Check streaming flag
+        if not self.is_streaming:
+            return False
+
+        # Fix #5: Check if WebSocket thread is alive
+        if self.ws_thread and not self.ws_thread.is_alive():
+            logger.warning("WebSocket thread is dead but is_streaming was True!")
+            self.is_streaming = False
+            self._clear_cache()  # Fix #1: Clear stale cache
+            return False
+
+        # Fix #6: Check heartbeat freshness (expect heartbeat every ~15s, timeout at 60s)
+        if self._last_heartbeat_time:
+            heartbeat_age = (datetime.now() - self._last_heartbeat_time).total_seconds()
+            if heartbeat_age > 60:
+                logger.warning(f"No WebSocket heartbeat in {heartbeat_age:.0f}s - connection may be zombie")
+                return False
+
+        # Fix #5: Check message freshness
+        if self._last_message_time:
+            message_age = (datetime.now() - self._last_message_time).total_seconds()
+            if message_age > 60:
+                logger.warning(f"No WebSocket messages in {message_age:.0f}s - connection may be zombie")
+                return False
+
+        return True
+
+    def is_heartbeat_alive(self, max_age_seconds: int = 60) -> bool:
+        """
+        Check if heartbeat was received recently (Fix #6).
+
+        Args:
+            max_age_seconds: Maximum age in seconds before heartbeat is considered dead.
+
+        Returns:
+            bool: True if heartbeat is alive, False otherwise.
+        """
+        if not self._last_heartbeat_time:
+            # Not yet started or never received
+            return self.is_streaming  # Trust is_streaming if no heartbeat yet
+
+        age = (datetime.now() - self._last_heartbeat_time).total_seconds()
+        return age <= max_age_seconds
 
     def stop_price_streaming(self):
         """Stop WebSocket streaming and clean up subscriptions."""
@@ -3428,6 +3647,9 @@ class SaxoClient:
 
         self.is_streaming = False
         self.price_callbacks.clear()
+
+        # Fix #7: Clear cache on stop to prevent stale data if restarted later
+        self._clear_cache()
 
         # Delete subscription via REST
         endpoint = f"/trade/v1/prices/subscriptions/{self.subscription_context_id}"

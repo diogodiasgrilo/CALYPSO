@@ -826,7 +826,7 @@ SCRIPT
 | `docs/VM_COMMANDS.md` | VM administration commands |
 | `.claude/settings.local.json` | Full command reference (also readable)
 
-### Key Lessons Learned (2026-01-27)
+### Key Lessons Learned (2026-01-28)
 
 These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
 
@@ -845,3 +845,15 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 7. **Daily Summary Only at Market Close, Not Calendar Day Reset** - Calendar days change at midnight UTC (7 PM EST), but trading days end at 4 PM EST. Never send daily summaries from `reset_for_new_day()` - only from main.py after-hours check. (Cost: Duplicate alert spam, user confusion)
 
 8. **WebSocket Streaming Updates Use ref_id Format** - Initial snapshot wraps data in `{"Data": [{"Uic": 123, ...}]}` but streaming updates use `{"Quote": {...}}` with UIC in ref_id as `ref_<UIC>`. Must handle both formats in `_handle_streaming_message()`. (Cost: SPY/VIX prices stuck at stale values, fixed 2026-01-27)
+
+9. **WebSocket Cache Must Be Invalidated on Disconnect (Fix #1, 2026-01-28)** - When WebSocket disconnects, always clear `_price_cache`. Without this, bot uses stale cached data after reconnection. (Cost: 2026-01-27 order failures with DATA-004 errors)
+
+10. **Cache Needs Timestamps for Staleness Detection (Fix #2, 2026-01-28)** - Each cache entry now stores `{'data': {...}, 'timestamp': datetime}`. `get_quote()` rejects cached data older than 60 seconds and forces REST API fallback. (Cost: Using outdated prices for order placement)
+
+11. **Limit Order Price $0 Bug (Fix #3, 2026-01-28)** - The check `if order_type == OrderType.LIMIT and limit_price:` evaluated False when `limit_price=0.0`. Changed to `if limit_price is None or limit_price <= 0`. (Cost: "OrderPrice must be set" errors on 2026-01-27)
+
+12. **Never Use $0.00 Fallback Price (Fix #4, 2026-01-28)** - In Delta Neutral strategy, if quote is invalid AND `leg_price` is $0, skip to next retry instead of placing order at $0.00. (Cost: 2026-01-27 order rejections)
+
+13. **WebSocket Thread Health Monitoring (Fix #5, 2026-01-28)** - Added `is_websocket_healthy()` that checks: thread alive, last message < 60s ago, last heartbeat < 60s ago. `get_quote()` now forces REST fallback if WebSocket unhealthy. (Cost: Using stale cache when WebSocket silently died)
+
+14. **Heartbeat Timeout Detection (Fix #6, 2026-01-28)** - Track `_last_heartbeat_time` on every heartbeat. If no heartbeat in 60+ seconds, connection is zombie. Saxo sends heartbeats every ~15 seconds. (Cost: Zombie connections going undetected)

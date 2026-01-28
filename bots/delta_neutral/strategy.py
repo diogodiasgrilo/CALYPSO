@@ -2650,7 +2650,16 @@ class DeltaNeutralStrategy:
                             base_price = bid
                     else:
                         logger.warning(f"  ⚠️ DATA-004: Invalid quote for UIC {leg_uic}: Bid=${bid:.2f}, Ask=${ask:.2f}")
-                        logger.warning(f"     Using fallback price ${leg_price:.2f} from original leg data")
+                        # Fix #4: CRITICAL - Never use $0.00 as fallback price
+                        # This was the root cause of "OrderPrice must be set" errors on 2026-01-27
+                        if leg_price and leg_price > 0:
+                            logger.warning(f"     Using fallback price ${leg_price:.2f} from original leg data")
+                        else:
+                            # leg_price is $0 or None - cannot use as fallback
+                            logger.error(f"  ✗ DATA-004: No valid price available (quote invalid, leg_price=${leg_price})")
+                            logger.error(f"     Skipping to next retry attempt with fresh quote...")
+                            # Set base_price to None to signal invalid price
+                            base_price = None
 
                 # MARKET ORDER attempt (last resort in progressive sequence)
                 if is_market:
@@ -2714,6 +2723,12 @@ class DeltaNeutralStrategy:
                         continue  # Will exit loop since this is last attempt
 
                 # LIMIT ORDER attempt
+                # Fix #4: Skip limit order attempt if we have no valid price
+                if base_price is None or base_price <= 0:
+                    logger.warning(f"  ⚠ Fix #4: No valid price for leg {i+1} (base_price={base_price}) - skipping to next retry")
+                    time.sleep(1)  # Brief pause before retry
+                    continue
+
                 # Apply slippage
                 if current_slippage > 0:
                     if leg_buy_sell == BuySell.BUY:
@@ -2725,6 +2740,11 @@ class DeltaNeutralStrategy:
                     adjusted_price = round(adjusted_price, 2)
                 else:
                     adjusted_price = base_price
+
+                # Fix #4: Final validation before placing order
+                if adjusted_price <= 0:
+                    logger.error(f"  ✗ Fix #4: Adjusted price ${adjusted_price} is invalid - skipping")
+                    continue
 
                 attempt_str = f" (attempt {attempt+1}/{len(retry_sequence)}, {current_slippage}% slippage)"
                 logger.info(f"  Leg {i+1}/{len(legs)}: {leg_buy_sell.value} {leg_amount} x UIC {leg_uic} @ ${adjusted_price:.2f} ({leg_to_open_close}){attempt_str}")
