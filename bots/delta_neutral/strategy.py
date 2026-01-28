@@ -6310,7 +6310,10 @@ class DeltaNeutralStrategy:
         # =====================================================================
 
         max_mult = self.strangle_multiplier_max  # From config (default 2.0x)
-        min_mult_absolute = 0.5  # Absolute floor - never go below this
+        # Brian Terry: "shorts should be at least the expected move away"
+        # Research: 1.0x = 16 delta = 1 standard deviation (tastytrade standard)
+        # Going below 1.0x erodes the protection from the long straddle hedge
+        min_mult_absolute = 1.0  # Absolute floor - never go below 1.0x expected move
         min_target_return = self.weekly_target_return_pct
 
         # Build strike->data mappings for quick lookup
@@ -6325,6 +6328,11 @@ class DeltaNeutralStrategy:
         final_call = None
         final_put = None
         found_mult = None
+
+        # Track best available at floor (in case we can't hit target return)
+        floor_call = None
+        floor_put = None
+        floor_return = None
 
         # Test multipliers from max down to min in 0.01 increments for precision
         # This allows us to find the exact highest multiplier that achieves target return
@@ -6407,11 +6415,46 @@ class DeltaNeutralStrategy:
                             logger.info(f"SUCCESS: Found symmetric strikes at {target_mult}x with {fresh_return:.2f}% NET return")
                             break
 
+            # Track best available at floor (1.0x) in case we can't hit target
+            # This ensures we use 1.0x strikes even with lower return rather than failing
+            if target_mult <= 1.05 and net_return > 0:  # At or near floor
+                if floor_return is None or net_return > floor_return:
+                    floor_call = call_data.copy()
+                    floor_put = put_data.copy()
+                    floor_return = net_return
+
+        # If we didn't find strikes meeting target, use floor strikes (1.0x) with lower return
         if not final_call or not final_put:
-            logger.error("No symmetric strikes found that achieve target return")
-            logger.error(f"Scanned multipliers from {max_mult}x down to {min_mult_absolute}x")
-            logger.error("Current market conditions (likely low VIX) do not support the target return")
-            return False
+            if floor_call and floor_put and floor_return is not None and floor_return > 0:
+                # Accept the 1.0x floor strikes with whatever return they provide
+                # Research: IV overstates RV 85% of time, so even lower returns are profitable long-term
+                logger.warning(f"Could not achieve {min_target_return}% target at any multiplier")
+                logger.warning(f"Using 1.0x floor strikes with {floor_return:.2f}% return instead")
+                logger.warning("This is within Brian Terry's guidelines ('at least expected move away')")
+
+                # Get fresh quotes for floor strikes
+                call_quote = self.client.get_quote(floor_call["uic"], "StockOption")
+                put_quote = self.client.get_quote(floor_put["uic"], "StockOption")
+
+                if call_quote and put_quote:
+                    call_bid = call_quote["Quote"].get("Bid", 0) or 0
+                    put_bid = put_quote["Quote"].get("Bid", 0) or 0
+
+                    if call_bid > 0 and put_bid > 0:
+                        floor_call["bid"] = call_bid
+                        floor_call["premium"] = call_bid * 100 * self.position_size
+                        floor_put["bid"] = put_bid
+                        floor_put["premium"] = put_bid * 100 * self.position_size
+
+                        final_call = floor_call
+                        final_put = floor_put
+                        found_mult = 1.0
+
+            if not final_call or not final_put:
+                logger.error("No valid strikes found even at 1.0x floor")
+                logger.error(f"Scanned multipliers from {max_mult}x down to {min_mult_absolute}x")
+                logger.error("Current market conditions do not support any entry")
+                return False
 
         # =====================================================================
         # STEP 5: Calculate final P&L and log results
