@@ -168,14 +168,14 @@ def get_live_option_prices(client, spy_uic: int, spy_price: float, dte: int = 9)
     # Get all options for this expiration
     specific_options = friday_exp.get("SpecificOptions", [])
 
-    # Scan strikes within reasonable range
+    # Scan strikes within reasonable range (7% to cover 2x expected move)
     for opt in specific_options:
         strike = opt.get("StrikePrice", 0)
         uic = opt.get("Uic")
         put_call = opt.get("PutCall")
 
-        # Only look at strikes within 5% of current price
-        if abs(strike - spy_price) / spy_price > 0.05:
+        # Only look at strikes within 7% of current price (covers ~2x expected move)
+        if abs(strike - spy_price) / spy_price > 0.07:
             continue
 
         quote = client.get_quote(uic, "StockOption")
@@ -183,7 +183,8 @@ def get_live_option_prices(client, spy_uic: int, spy_price: float, dte: int = 9)
             continue
 
         bid = quote["Quote"].get("Bid", 0) or 0
-        if bid <= 0:
+        # Accept bids as low as $0.05 for far OTM options
+        if bid < 0.05:
             continue
 
         if strike not in prices:
