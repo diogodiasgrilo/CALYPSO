@@ -2,11 +2,20 @@
     "_comment": "EXAMPLE CONFIGURATION - Copy this file to config.json and fill in your credentials",
 
     "saxo_api": {
-        "app_key": "YOUR_SAXO_APP_KEY",
-        "app_secret": "YOUR_SAXO_APP_SECRET",
-        "access_token": "YOUR_ACCESS_TOKEN",
-        "refresh_token": "YOUR_REFRESH_TOKEN",
-        "token_expiry": null,
+        "sim": {
+            "app_key": "YOUR_SIM_APP_KEY",
+            "app_secret": "YOUR_SIM_APP_SECRET",
+            "access_token": "YOUR_SIM_ACCESS_TOKEN",
+            "refresh_token": "YOUR_SIM_REFRESH_TOKEN",
+            "token_expiry": null
+        },
+        "live": {
+            "app_key": "YOUR_LIVE_APP_KEY",
+            "app_secret": "YOUR_LIVE_APP_SECRET",
+            "access_token": "YOUR_LIVE_ACCESS_TOKEN",
+            "refresh_token": "YOUR_LIVE_REFRESH_TOKEN",
+            "token_expiry": null
+        },
         "environment": "sim",
         "_environment_options": "sim (paper trading) or live",
         "base_url_sim": "https://gateway.saxobank.com/sim/openapi",
@@ -14,8 +23,10 @@
         "streaming_url_sim": "wss://streaming.saxobank.com/sim/openapi/streamingws/connect",
         "streaming_url_live": "wss://streaming.saxobank.com/openapi/streamingws/connect",
         "redirect_uri": "http://localhost:8080/callback",
-        "auth_url": "https://sim.logonvalidation.net/authorize",
-        "token_url": "https://sim.logonvalidation.net/token"
+        "auth_url_sim": "https://sim.logonvalidation.net/authorize",
+        "token_url_sim": "https://sim.logonvalidation.net/token",
+        "auth_url_live": "https://live.logonvalidation.net/authorize",
+        "token_url_live": "https://live.logonvalidation.net/token"
     },
 
     "strategy": {

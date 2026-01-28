@@ -114,13 +114,22 @@ REPORTING
 =============================================================================
 Author: Trading Bot Developer
 Date: 2024
-Last Updated: 2026-01-26
+Last Updated: 2026-01-28
 
 Change History:
 - 2026-01-22: Added 42 edge case handlers (see docs/DELTA_NEUTRAL_EDGE_CASES.md)
 - 2026-01-26: Code Audit fixes:
   * Fixed undefined _get_underlying_price() calls (replaced with client.get_quote())
 - 2026-01-27: Removed pre-market gap detection (unreliable data from Saxo LastClose field)
+- 2026-01-28 (v2.0.0): Adaptive roll trigger + WebSocket fixes
+  * Added entry_underlying_price to StranglePosition for cushion calculation
+  * Adaptive roll trigger (75% cushion consumed) in should_roll_shorts()
+  * Adaptive vigilant monitoring (60% cushion consumed) in get_monitoring_mode()
+  * Immediate next-week shorts entry after scheduled debit skip
+  * 10 WebSocket reliability fixes (CONN-007 through CONN-016)
+- 2026-01-28 (v2.0.1): REST-only mode for reliability
+  * VIGILANT mode changed from 1s to 2s (30 REST API calls/min, under rate limits)
+  * WebSocket code preserved but disabled (USE_WEBSOCKET_STREAMING=False)
 """
 
 import logging
@@ -5125,7 +5134,7 @@ class DeltaNeutralStrategy:
         The full threshold layering is:
 
         - NORMAL (10s):       < 60% cushion consumed (see get_monitoring_mode())
-        - VIGILANT (1s):      60-75% cushion consumed (see get_monitoring_mode())
+        - VIGILANT (2s):      60-75% cushion consumed (see get_monitoring_mode())
         - CHALLENGED ROLL:    >= 75% cushion consumed (see should_roll_shorts())
         - DANGER/ITM CLOSE:   0.1% from strike — THIS METHOD (absolute, stays static)
 
@@ -5136,7 +5145,7 @@ class DeltaNeutralStrategy:
         The 0.1% threshold is safe because:
         - MARKET orders execute in <1 second
         - SPY would need to move $0.70 in <1 second to beat us
-        - With 1-second monitoring in VIGILANT zone, we have multiple checks
+        - With 2-second monitoring in VIGILANT zone (REST-only mode), we have multiple checks
 
         Returns:
             bool: True if shorts need IMMEDIATE close (0.1% from strike), False otherwise.
@@ -5186,7 +5195,7 @@ class DeltaNeutralStrategy:
 
         Threshold layering (based on % of original cushion consumed):
         - NORMAL (10s): < 60% cushion consumed (> 40% remaining)
-        - VIGILANT (1s): 60-75% cushion consumed (25-40% remaining)
+        - VIGILANT (2s): 60-75% cushion consumed (25-40% remaining)
         - CHALLENGED ROLL: >= 75% consumed (triggered by should_roll_shorts())
         - DANGER/ITM CLOSE: 0.1% from strike (absolute safety floor, stays static)
 
@@ -5238,12 +5247,12 @@ class DeltaNeutralStrategy:
                 if entry_price > 0:
                     logger.warning(
                         f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - {call_consumed_pct:.1f}% cushion consumed "
-                        f"(${call_distance:.2f} remaining). Roll triggers at 75%. Monitoring every 1 second."
+                        f"(${call_distance:.2f} remaining). Roll triggers at 75%. Monitoring every 2 seconds."
                     )
                 else:
                     logger.warning(
                         f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - price ${price:.2f} is "
-                        f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 1 second."
+                        f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 2 seconds."
                     )
                 # Send WhatsApp/Email alert for vigilant entry
                 cushion_msg = f"Cushion consumed: {call_consumed_pct:.1f}% (roll at 75%)\n" if entry_price > 0 else ""
@@ -5254,7 +5263,7 @@ class DeltaNeutralStrategy:
                         f"SPY ${price:.2f} approaching short call ${call_strike:.0f}\n"
                         f"{cushion_msg}"
                         f"Distance: ${call_distance:.2f} ({pct_from_strike:.2f}% from strike)\n"
-                        f"Monitoring every 1 second. Emergency close at 0.1% (~${call_strike * 0.001:.2f})."
+                        f"Monitoring every 2 seconds. Emergency close at 0.1% (~${call_strike * 0.001:.2f})."
                     ),
                     details={
                         "strike_type": "call",
@@ -5285,12 +5294,12 @@ class DeltaNeutralStrategy:
                 if entry_price > 0:
                     logger.warning(
                         f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - {put_consumed_pct:.1f}% cushion consumed "
-                        f"(${put_distance:.2f} remaining). Roll triggers at 75%. Monitoring every 1 second."
+                        f"(${put_distance:.2f} remaining). Roll triggers at 75%. Monitoring every 2 seconds."
                     )
                 else:
                     logger.warning(
                         f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - price ${price:.2f} is "
-                        f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 1 second."
+                        f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 2 seconds."
                     )
                 # Send WhatsApp/Email alert for vigilant entry
                 cushion_msg = f"Cushion consumed: {put_consumed_pct:.1f}% (roll at 75%)\n" if entry_price > 0 else ""
@@ -5301,7 +5310,7 @@ class DeltaNeutralStrategy:
                         f"SPY ${price:.2f} approaching short put ${put_strike:.0f}\n"
                         f"{cushion_msg}"
                         f"Distance: ${put_distance:.2f} ({pct_from_strike:.2f}% from strike)\n"
-                        f"Monitoring every 1 second. Emergency close at 0.1% (~${put_strike * 0.001:.2f})."
+                        f"Monitoring every 2 seconds. Emergency close at 0.1% (~${put_strike * 0.001:.2f})."
                     ),
                     details={
                         "strike_type": "put",
@@ -8810,7 +8819,7 @@ class DeltaNeutralStrategy:
         Returns:
             Tuple[str, MonitoringMode]: (action_description, monitoring_mode)
             - action_description: What action was taken, if any
-            - monitoring_mode: NORMAL (10s) or VIGILANT (1s) based on ITM proximity
+            - monitoring_mode: NORMAL (10s) or VIGILANT (2s) based on ITM proximity
         """
         # TIME-001: Check operation lock to prevent concurrent strategy checks
         if self._operation_in_progress:

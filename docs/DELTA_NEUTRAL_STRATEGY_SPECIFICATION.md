@@ -1,7 +1,7 @@
 # Delta Neutral Strategy Specification
 
 **Strategy Source:** Brian Terry (Theta Profits)
-**Bot Version:** 2.0.0
+**Bot Version:** 2.0.1
 **Last Updated:** 2026-01-28
 **Research Date:** 2026-01-27
 
@@ -9,7 +9,8 @@
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2.0.0 | 2026-01-28 | 10 WebSocket reliability fixes (see DELTA_NEUTRAL_EDGE_CASES.md CONN-007 through CONN-016) |
+| 2.0.1 | 2026-01-28 | REST-only mode for reliability. Disabled WebSocket streaming (`USE_WEBSOCKET_STREAMING=False`). VIGILANT monitoring: 2-second intervals (30 REST API calls/min, within rate limits). WebSocket code preserved for future use if 4+ bots need rate limit relief. |
+| 2.0.0 | 2026-01-28 | Adaptive cushion-based roll trigger (75% consumed = roll, 60% = vigilant). Immediate next-week shorts entry after scheduled debit skip. Added `entry_underlying_price` tracking to StranglePosition for cushion calculations. 10 WebSocket reliability fixes (CONN-007 through CONN-016). |
 | 1.0.0 | 2026-01-23 | Initial production release with proactive restart check |
 
 ## Overview

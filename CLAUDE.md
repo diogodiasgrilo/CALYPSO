@@ -117,7 +117,7 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
-- **Version:** 2.0.0 (Updated 2026-01-28 with adaptive roll trigger + WebSocket fixes)
+- **Version:** 2.0.1 (Updated 2026-01-28 with REST-only mode, adaptive roll trigger, and WebSocket fixes)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
