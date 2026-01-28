@@ -83,26 +83,42 @@ def main():
 
     # Calculate expected move from ATM straddle price (accurate market-based calculation)
     # Use 5-12 DTE to match the DTE of shorts being sold (7+ DTE targeting next Friday)
+    # This ensures we're using the right expected move for the options we're selling
+    expected_move_dte_min = 5
+    expected_move_dte_max = 12
     expected_move = client.get_expected_move_from_straddle(
         underlying_uic,
         spy_price,
-        target_dte_min=5,
-        target_dte_max=12
+        target_dte_min=expected_move_dte_min,
+        target_dte_max=expected_move_dte_max
     )
+
+    # Find actual DTE used for expected move calculation
+    expected_move_dte_used = None
+    for exp_data in expirations:
+        exp_date_str = exp_data.get("Expiry")
+        if exp_date_str:
+            exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+            if expected_move_dte_min <= dte <= expected_move_dte_max:
+                expected_move_dte_used = dte
+                break
 
     if not expected_move:
         # Fallback to VIX-based calculation if straddle not available
         print("\nWARNING: Could not get expected move from ATM straddle, falling back to VIX")
         iv = vix_value / 100
         expected_move = client.calculate_expected_move(spy_price, iv, days=weekly_dte)
+        expected_move_dte_used = weekly_dte
 
     print(f"\n{'='*60}")
     print(f"EXPECTED MOVE CALCULATION")
     print(f"{'='*60}")
     print(f"Method: ATM Straddle Price (market-implied)")
     print(f"VIX (for reference): {vix_value:.2f}%")
-    print(f"Days: {weekly_dte}")
-    print(f"Expected Move: ±${expected_move:.2f}")
+    print(f"Expected Move DTE: {expected_move_dte_used} (from {expected_move_dte_min}-{expected_move_dte_max} range)")
+    print(f"Weekly Expiry DTE: {weekly_dte}")
+    print(f"Expected Move: ±${expected_move:.2f} ({expected_move/spy_price*100:.2f}%)")
 
     # Strategy uses 1.5-2.0x multiplier, middle = 1.75
     multiplier_min = config["strategy"].get("strangle_multiplier_min", 1.5)
@@ -208,6 +224,22 @@ def main():
             print(f"\n  Premium collected gives you ${total_premium/100:.2f} points of cushion on each side")
             print(f"  Breakeven on call side: ${strangle['call']['strike'] + total_premium/100:.2f}")
             print(f"  Breakeven on put side:  ${strangle['put']['strike'] - total_premium/100:.2f}")
+
+            # Show expected move multipliers
+            call_distance = strangle['call']['strike'] - spy_price
+            put_distance = spy_price - strangle['put']['strike']
+            call_mult = call_distance / expected_move if expected_move > 0 else 0
+            put_mult = put_distance / expected_move if expected_move > 0 else 0
+
+            print(f"\n{'='*60}")
+            print(f"EXPECTED MOVE MULTIPLIER ANALYSIS")
+            print(f"{'='*60}")
+            print(f"  Expected Move (ATM Straddle): ${expected_move:.2f}")
+            print(f"  Call Strike Distance: ${call_distance:.2f} = {call_mult:.2f}x Expected Move")
+            print(f"  Put Strike Distance:  ${put_distance:.2f} = {put_mult:.2f}x Expected Move")
+            print(f"\n  IMPORTANT: Multiplier should be >= 1.0x for safety!")
+            print(f"  Current configuration targets {multiplier:.2f}x expected move")
+
         else:
             print("\n  Could not get option quotes (market may be closed)")
             print("  Bid/Ask prices only available during market hours")
