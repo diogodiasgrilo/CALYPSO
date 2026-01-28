@@ -769,6 +769,32 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     )
                     if not interruptible_sleep(vigilant_interval):
                         break  # Shutdown requested
+                elif monitoring_mode == MonitoringMode.FOMC_BLACKOUT:
+                    # FOMC BLACKOUT MODE: No positions, FOMC day - use hourly heartbeat
+                    # This saves resources since we won't be trading anyway
+                    fomc_interval = monitoring_mode.value  # 3600 seconds (1 hour)
+
+                    # Disconnect WebSocket during FOMC blackout to save resources
+                    # We're not trading, so no need for real-time prices
+                    if client.is_streaming:
+                        logger.info("FOMC blackout: disconnecting WebSocket (not needed)")
+                        client.stop_price_streaming()
+
+                    trade_logger.log_event(
+                        f"{mode_prefix}📅 FOMC BLACKOUT | State: {status['state']} | "
+                        f"No positions, FOMC day - trading blocked | "
+                        f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
+                        f"Next heartbeat in {fomc_interval // 60}m"
+                    )
+
+                    if not interruptible_sleep(fomc_interval):
+                        break  # Shutdown requested
+
+                    # After waking, reconnect WebSocket if still in blackout (for price data in logs)
+                    # But only if market is still open - check first
+                    if not shutdown_requested and is_market_open():
+                        if not client.is_streaming:
+                            client.start_price_streaming(subscriptions, price_update_handler)
                 else:
                     # NORMAL MODE: Use MonitoringMode.NORMAL interval (10s with WebSocket cache)
                     normal_interval = MonitoringMode.NORMAL.value

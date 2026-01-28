@@ -23,6 +23,7 @@ class StrategyState(Enum):
     State Machine Flow:
     - IDLE: No positions, waiting for entry conditions
     - WAITING_VIX: VIX too high, waiting for VIX < threshold
+    - FOMC_BLACKOUT: FOMC day with no positions - trading blocked all day
     - LONG_STRADDLE_ACTIVE: Long straddle entered, no short strangle yet
     - FULL_POSITION: Both long straddle and short strangle active
     - RECENTERING: In process of 5-point recentering
@@ -31,6 +32,7 @@ class StrategyState(Enum):
     """
     IDLE = "Idle"
     WAITING_VIX = "WaitingForVIX"
+    FOMC_BLACKOUT = "FOMCBlackout"
     LONG_STRADDLE_ACTIVE = "LongStraddleActive"
     FULL_POSITION = "FullPosition"
     RECENTERING = "Recentering"
@@ -45,6 +47,7 @@ class MonitoringMode(Enum):
     Adaptive vigilant monitoring system (Updated 2026-01-28):
     - NORMAL: 10-second check interval (< 60% of original cushion consumed)
     - VIGILANT: 1-second monitoring (60-75% cushion consumed)
+    - FOMC_BLACKOUT: 3600-second (1 hour) heartbeat when in FOMC blackout with no positions
 
     Thresholds are adaptive — they scale with the original distance from entry
     price to short strikes. Falls back to static 0.5% from strike if
@@ -57,6 +60,13 @@ class MonitoringMode(Enum):
     Note: Both intervals are safe because price data comes from WebSocket cache
     (no API calls), eliminating rate limit concerns. Reduced NORMAL from 30s to 10s
     for faster detection of price movements toward short strikes.
+
+    FOMC_BLACKOUT mode is used when:
+    - It's an FOMC meeting day (within blackout period)
+    - The bot has no open positions
+    - Trading is blocked for the entire day
+    This saves resources by only checking hourly for heartbeat/state changes.
     """
     NORMAL = 10      # 10 seconds between checks (was 30s, reduced with WebSocket fix)
     VIGILANT = 1     # 1 second between checks (watching closely, uses cached price)
+    FOMC_BLACKOUT = 3600  # 1 hour between checks when in FOMC blackout with no positions

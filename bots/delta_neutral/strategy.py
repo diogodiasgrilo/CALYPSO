@@ -5054,6 +5054,62 @@ class DeltaNeutralStrategy:
 
         return True
 
+    def is_fomc_blackout_day(self) -> bool:
+        """
+        Check if today is an FOMC day that should trigger all-day blackout.
+
+        This is used to put the bot into FOMC_BLACKOUT state when:
+        - It's an FOMC meeting day (within blackout period)
+        - The bot has NO open positions
+
+        When in FOMC_BLACKOUT state, the bot will only send hourly heartbeats
+        instead of checking every 10 seconds, saving resources.
+
+        Returns:
+            bool: True if today is in FOMC blackout period, False otherwise.
+        """
+        from shared.event_calendar import get_fomc_announcement_dates
+
+        today = datetime.now().date()
+        blackout_days = self.strategy_config.get("fed_blackout_days", 2)
+
+        # Get FOMC announcement dates from shared calendar
+        fomc_dates = get_fomc_announcement_dates(today.year)
+        if not fomc_dates:
+            return False
+
+        for meeting_date in fomc_dates:
+            days_until_meeting = (meeting_date - today).days
+
+            if 0 <= days_until_meeting <= blackout_days:
+                return True
+
+        return False
+
+    def get_fomc_blackout_info(self) -> str:
+        """
+        Get a human-readable description of the current FOMC blackout status.
+
+        Returns:
+            str: Description of why trading is blocked.
+        """
+        from shared.event_calendar import get_fomc_announcement_dates
+
+        today = datetime.now().date()
+        blackout_days = self.strategy_config.get("fed_blackout_days", 2)
+
+        fomc_dates = get_fomc_announcement_dates(today.year)
+        for meeting_date in fomc_dates:
+            days_until_meeting = (meeting_date - today).days
+
+            if 0 <= days_until_meeting <= blackout_days:
+                if days_until_meeting == 0:
+                    return f"FOMC announcement day ({meeting_date}) - trading blocked"
+                else:
+                    return f"FOMC meeting in {days_until_meeting} day(s) ({meeting_date}) - within {blackout_days}-day blackout"
+
+        return "Not in FOMC blackout"
+
     # =========================================================================
     # SAFETY CHECKS
     # =========================================================================
@@ -8771,8 +8827,12 @@ class DeltaNeutralStrategy:
 
         try:
             action = self._run_strategy_check_impl()
-            # Determine monitoring mode based on ITM proximity
-            monitoring_mode = self.get_monitoring_mode()
+            # Determine monitoring mode based on state and ITM proximity
+            # FOMC_BLACKOUT state gets special hourly monitoring mode
+            if self.state == StrategyState.FOMC_BLACKOUT:
+                monitoring_mode = MonitoringMode.FOMC_BLACKOUT
+            else:
+                monitoring_mode = self.get_monitoring_mode()
             return (action, monitoring_mode)
         finally:
             # TIME-001: Release operation lock
@@ -8863,6 +8923,27 @@ class DeltaNeutralStrategy:
         # Skip this check if we already have positions (only affects new entries)
         if self.state == StrategyState.IDLE and self._is_within_market_open_delay():
             return "⏳ TIME-005: Waiting for quotes to stabilize after market open"
+
+        # FOMC-001: Check for FOMC blackout day when we have NO positions
+        # This puts the bot into a low-resource state with hourly heartbeats
+        # Only applies when IDLE/WAITING_VIX with no positions - if we have positions, continue monitoring
+        if self.state in [StrategyState.IDLE, StrategyState.WAITING_VIX, StrategyState.FOMC_BLACKOUT]:
+            if not self.long_straddle and not self.short_strangle:
+                if self.is_fomc_blackout_day():
+                    if self.state != StrategyState.FOMC_BLACKOUT:
+                        # First time detecting FOMC blackout - log prominently
+                        fomc_info = self.get_fomc_blackout_info()
+                        logger.warning("=" * 70)
+                        logger.warning(f"📅 FOMC-001: {fomc_info}")
+                        logger.warning("   No positions open. Trading BLOCKED for the entire day.")
+                        logger.warning("   Bot will send hourly heartbeats only.")
+                        logger.warning("=" * 70)
+                        self.state = StrategyState.FOMC_BLACKOUT
+                    return f"📅 FOMC-001: FOMC blackout day - no trading (hourly heartbeat)"
+                elif self.state == StrategyState.FOMC_BLACKOUT:
+                    # Was in FOMC blackout but no longer (e.g., day changed)
+                    logger.info("FOMC blackout ended - resuming normal operations")
+                    self.state = StrategyState.IDLE
 
         # CRITICAL: Handle stuck states (RECENTERING, EXITING, ROLLING_SHORTS)
         # These states should only be transient - if we're stuck, something went wrong
