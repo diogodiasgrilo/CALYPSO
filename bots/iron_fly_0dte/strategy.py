@@ -2232,6 +2232,28 @@ class IronFlyStrategy:
 
         We transition to WAITING_OPENING_RANGE at 9:30 AM EST.
         """
+        # FOMC-001: Check for FOMC blackout day FIRST (before all other checks)
+        # Per Doc Severson: "NEVER trade on FOMC or major economic data days"
+        # On FOMC days, skip the entire day immediately with clear logging
+        if self.fed_meeting_blackout:
+            from shared.event_calendar import is_fomc_meeting_day
+            today = current_time.date()
+            if is_fomc_meeting_day(today):
+                fomc_msg = f"FOMC meeting day ({today.strftime('%b %d, %Y')})"
+
+                # Log prominently (only on first detection - when state is not yet DAILY_COMPLETE)
+                if self.state != IronFlyState.DAILY_COMPLETE:
+                    logger.warning("=" * 70)
+                    logger.warning(f"📅 FOMC-001: {fomc_msg}")
+                    logger.warning("   Trading BLOCKED for the entire day.")
+                    logger.warning("   Bot will send hourly heartbeats only.")
+                    logger.warning("=" * 70)
+                    self.trade_logger.log_event(f"FOMC BLACKOUT: {fomc_msg} - Trading blocked for today")
+                    self._log_filter_event("FOMC_BLACKOUT", fomc_msg)
+                    self.state = IronFlyState.DAILY_COMPLETE
+
+                return f"📅 FOMC-001: FOMC blackout day - no trading (hourly heartbeat)"
+
         market_open = dt_time(9, 30)
 
         # Check if it's a new trading day (reset state)
@@ -4447,6 +4469,11 @@ class IronFlyStrategy:
     def handle_price_update(self, uic: int, data: Dict[str, Any]):
         """
         Handle real-time price updates from WebSocket streaming.
+
+        NOTE: This method is currently unused since REST-only mode was enabled.
+        WebSocket streaming was disabled because the strategy already uses
+        skip_cache=True for all price fetches in update_market_data().
+        Kept for potential future use if WebSocket is re-enabled.
 
         Updates underlying price, VIX, and option leg prices for P&L calculation.
         """
