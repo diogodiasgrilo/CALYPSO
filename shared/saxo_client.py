@@ -1903,7 +1903,8 @@ class SaxoClient:
         spy_uic_int = int(spy_uic)
 
         # PRIORITY 1: Check WebSocket streaming cache (no API call, instant)
-        if spy_uic_int in self._price_cache:
+        # Only use cache if WebSocket is healthy (Fix: match get_quote() pattern)
+        if self.is_websocket_healthy() and spy_uic_int in self._price_cache:
             cached = self._price_cache[spy_uic_int]
             # Defensive: check cached is dict and Quote exists and is not None
             if cached and isinstance(cached, dict) and cached.get("Quote"):
@@ -1918,6 +1919,9 @@ class SaxoClient:
                     if price and price > 0:
                         logger.debug(f"{symbol}: Using cached streaming price ${price:.2f}")
                         return cached
+        elif self.is_streaming and not self.is_websocket_healthy():
+            # WebSocket claims to be streaming but is unhealthy - log warning
+            logger.warning(f"{symbol}: WebSocket unhealthy, forcing REST API fallback")
 
         # PRIORITY 2: Saxo REST API (fallback if cache miss, invalid, or stale)
         endpoint = "/trade/v1/infoprices/list"
@@ -2015,14 +2019,19 @@ class SaxoClient:
         sources_tried = []
 
         # 1. Check the price cache (from subscription snapshots)
-        if vix_uic in self._price_cache:
+        # Only use cache if WebSocket is healthy (Fix: match get_quote() pattern)
+        if self.is_websocket_healthy() and vix_uic in self._price_cache:
             cached_data = self._price_cache[vix_uic]
             price = self._extract_price_from_data(cached_data, "VIX cache")
             if price:
                 return price
             sources_tried.append("cache(no valid price)")
+        elif self.is_streaming and not self.is_websocket_healthy():
+            # WebSocket claims to be streaming but is unhealthy - log warning
+            logger.warning("VIX: WebSocket unhealthy, forcing REST API fallback")
+            sources_tried.append("cache(websocket unhealthy)")
         else:
-            sources_tried.append("cache(not in cache)")
+            sources_tried.append("cache(not streaming or not in cache)")
 
         # 2. REST API - Try Saxo with extended fields for index data
         endpoint = "/trade/v1/infoprices/list"
