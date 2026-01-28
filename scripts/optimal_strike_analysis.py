@@ -339,20 +339,28 @@ def main():
             print(f"  Using LIVE theta from API: ${daily_theta:.2f}/day")
         else:
             # Fallback: Estimate theta from straddle cost and DTE
-            # Theta approximation for ATM straddle: ~(straddle_premium / DTE) * decay_factor
-            # At 120 DTE, daily theta is roughly straddle_cost / (DTE * 1.5) for ATM options
-            # More accurate: theta ≈ -0.5 * S * sigma * e^(-d1^2/2) / sqrt(2*pi*T)
-            # Simplified: daily_theta ≈ straddle_cost / (2 * sqrt(DTE))
+            # For ATM straddle, theta decay is approximately:
+            #   theta ≈ straddle_value / (2 * T) where T is time to expiry in days
+            # But theta is NOT linear - it accelerates as expiration approaches
+            # At 120 DTE, daily theta is roughly 0.3-0.5% of straddle value
+            # Industry standard: ~0.4% per day for 120 DTE ATM straddle
+            # This means weekly theta = straddle_cost * 0.004 * 7 = ~2.8% per week
             actual_dte = 120  # Target DTE
-            daily_theta = (long_straddle_cost / (2 * math.sqrt(actual_dte)))
+            # More accurate formula: theta_pct = 1 / (2 * sqrt(T/365))
+            # At 120 DTE: theta_pct = 1 / (2 * sqrt(0.329)) = 0.87% per day
+            # But that's for the last day - at 120 DTE, it's much lower
+            # Empirical: ~0.35-0.45% per day for 120 DTE ATM straddle
+            daily_theta_pct = 0.004  # 0.4% of straddle value per day
+            daily_theta = long_straddle_cost * daily_theta_pct
             weekly_theta = daily_theta * 7
-            print(f"  Using ESTIMATED theta (API returned no data): ${daily_theta:.2f}/day")
+            print(f"  Using ESTIMATED theta (API returned no data): ${daily_theta:.2f}/day (~{daily_theta_pct*100:.1f}%/day)")
     else:
         # Fallback to estimate when no options found
         straddle_per_contract = spy_price * (vix / 100) * math.sqrt(120 / 365) * 0.85 * 100
         long_straddle_cost = straddle_per_contract * position_size
-        # Same theta estimate formula
-        daily_theta = long_straddle_cost / (2 * math.sqrt(120))
+        # Same theta estimate: ~0.4% per day for 120 DTE ATM straddle
+        daily_theta_pct = 0.004
+        daily_theta = long_straddle_cost * daily_theta_pct
         weekly_theta = daily_theta * 7
         print(f"  Using ESTIMATED values (no ATM options found): cost=${long_straddle_cost:.2f}, theta=${daily_theta:.2f}/day")
 
