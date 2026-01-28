@@ -332,13 +332,29 @@ def main():
         # Get actual theta from greeks
         call_greeks = client.get_option_greeks(atm_options["call"]["uic"])
         put_greeks = client.get_option_greeks(atm_options["put"]["uic"])
-        daily_theta = (abs(call_greeks.get("Theta", 0)) + abs(put_greeks.get("Theta", 0))) * 100 * position_size if call_greeks and put_greeks else 0
-        weekly_theta = daily_theta * 7
+
+        if call_greeks and put_greeks and call_greeks.get("Theta") and put_greeks.get("Theta"):
+            daily_theta = (abs(call_greeks.get("Theta", 0)) + abs(put_greeks.get("Theta", 0))) * 100 * position_size
+            weekly_theta = daily_theta * 7
+            print(f"  Using LIVE theta from API: ${daily_theta:.2f}/day")
+        else:
+            # Fallback: Estimate theta from straddle cost and DTE
+            # Theta approximation for ATM straddle: ~(straddle_premium / DTE) * decay_factor
+            # At 120 DTE, daily theta is roughly straddle_cost / (DTE * 1.5) for ATM options
+            # More accurate: theta ≈ -0.5 * S * sigma * e^(-d1^2/2) / sqrt(2*pi*T)
+            # Simplified: daily_theta ≈ straddle_cost / (2 * sqrt(DTE))
+            actual_dte = 120  # Target DTE
+            daily_theta = (long_straddle_cost / (2 * math.sqrt(actual_dte)))
+            weekly_theta = daily_theta * 7
+            print(f"  Using ESTIMATED theta (API returned no data): ${daily_theta:.2f}/day")
     else:
-        # Fallback to estimate
+        # Fallback to estimate when no options found
         straddle_per_contract = spy_price * (vix / 100) * math.sqrt(120 / 365) * 0.85 * 100
         long_straddle_cost = straddle_per_contract * position_size
-        weekly_theta = long_straddle_cost * 0.03
+        # Same theta estimate formula
+        daily_theta = long_straddle_cost / (2 * math.sqrt(120))
+        weekly_theta = daily_theta * 7
+        print(f"  Using ESTIMATED values (no ATM options found): cost=${long_straddle_cost:.2f}, theta=${daily_theta:.2f}/day")
 
     # Round-trip fees
     round_trip_fees = fee_per_leg * 2 * position_size * 2
@@ -350,7 +366,7 @@ def main():
     print(f"  VIX:                 {vix:.2f}")
     print(f"  Expected Move:       ±${expected_move:.2f} ({expected_move/spy_price*100:.2f}%)")
     print(f"  Position Size:       {position_size} contracts")
-    print(f"  Long Straddle Cost:  ${long_straddle_cost:,.2f} (estimated)")
+    print(f"  Long Straddle Cost:  ${long_straddle_cost:,.2f}")
     print(f"  Weekly Theta:        ${weekly_theta:.2f}")
     print(f"  Round-Trip Fees:     ${round_trip_fees:.2f}")
     print()
