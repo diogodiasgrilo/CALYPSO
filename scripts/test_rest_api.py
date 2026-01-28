@@ -118,35 +118,48 @@ def main():
     # =========================================================================
     # TEST 4: Option Chain
     # =========================================================================
-    print_header("4. OPTION CHAIN (get_option_chain)")
+    print_header("4. OPTION CHAIN (get_option_root_id + get_option_chain)")
+
+    chain = None
+    option_root_id = None
 
     try:
-        # Get SPY option chain for ~30 DTE
-        from datetime import timedelta
-        target_date = datetime.now() + timedelta(days=30)
+        # First get the option root ID for SPY
+        option_root_id = client.get_option_root_id(underlying_uic)
 
-        chain = client.get_option_chain(
-            underlying_uic=underlying_uic,
-            expiry_date=target_date.strftime("%Y-%m-%d"),
-            asset_type="StockOption"
-        )
+        if option_root_id:
+            print(f"      Option Root ID: {option_root_id}")
 
-        if chain and len(chain) > 0:
-            # Count calls and puts
-            calls = [o for o in chain if o.get("PutCall") == "Call"]
-            puts = [o for o in chain if o.get("PutCall") == "Put"]
+            # Get option chain
+            chain_response = client.get_option_chain(option_root_id)
 
-            print_result("Option Chain Fetch", True, f"{len(chain)} options ({len(calls)} calls, {len(puts)} puts)")
+            if chain_response and "OptionSpace" in chain_response:
+                option_space = chain_response["OptionSpace"]
+                total_options = 0
 
-            # Show sample strikes
-            strikes = sorted(set(o.get("Strike", 0) for o in chain))
-            if len(strikes) > 5:
-                sample = strikes[len(strikes)//2-2:len(strikes)//2+3]
-                print(f"      Sample strikes near ATM: {sample}")
+                # Count total options across all expiries
+                for expiry in option_space:
+                    specific_options = expiry.get("SpecificOptions", [])
+                    total_options += len(specific_options)
 
-            results["passed"] += 1
+                print_result("Option Chain Fetch", True, f"{len(option_space)} expiries, {total_options} options")
+
+                # Show first expiry details
+                if option_space:
+                    first_expiry = option_space[0]
+                    exp_date = first_expiry.get("Expiry", "Unknown")
+                    opts = first_expiry.get("SpecificOptions", [])
+                    print(f"      First expiry: {exp_date} ({len(opts)} options)")
+
+                    # Store for later tests
+                    chain = opts
+
+                results["passed"] += 1
+            else:
+                print_result("Option Chain Fetch", False, f"No OptionSpace in response")
+                results["failed"] += 1
         else:
-            print_result("Option Chain Fetch", False, f"Empty chain returned")
+            print_result("Option Chain Fetch", False, "Could not get option root ID")
             results["failed"] += 1
     except Exception as e:
         print_result("Option Chain Fetch", False, str(e))
@@ -156,6 +169,8 @@ def main():
     # TEST 5: Single Option Quote
     # =========================================================================
     print_header("5. SINGLE OPTION QUOTE (get_quote)")
+
+    option_uic = None
 
     try:
         # Find an ATM option to quote
@@ -185,7 +200,7 @@ def main():
                         print(f"      UIC={option_uic}, Bid=${bid:.2f}, Ask=${ask:.2f}, Mid=${mid:.2f}")
                         results["passed"] += 1
                     else:
-                        print_result("Option Quote Fetch", False, f"All prices are 0")
+                        print_result("Option Quote Fetch", False, f"All prices are 0 (may be outside market hours)")
                         results["failed"] += 1
                 else:
                     print_result("Option Quote Fetch", False, f"No Quote in response")
@@ -262,10 +277,10 @@ def main():
     # =========================================================================
     # TEST 8: Open Orders
     # =========================================================================
-    print_header("8. OPEN ORDERS (get_orders)")
+    print_header("8. OPEN ORDERS (get_open_orders)")
 
     try:
-        orders = client.get_orders()
+        orders = client.get_open_orders()
 
         if orders is not None:
             print_result("Orders Fetch", True, f"{len(orders)} open orders")
