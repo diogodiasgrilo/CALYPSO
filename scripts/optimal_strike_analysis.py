@@ -319,13 +319,26 @@ def main():
     dte = 9  # Typical weekly DTE
     expected_move = calculate_weekly_expected_move(spy_price, vix, dte)
 
-    # Estimate long straddle cost (from config or rough estimate)
-    # Using ~120 DTE ATM straddle approximation
-    straddle_per_contract = spy_price * (vix / 100) * math.sqrt(120 / 365) * 0.85 * 100
-    long_straddle_cost = straddle_per_contract * position_size * 2  # call + put
+    # Get ACTUAL long straddle cost from ~120 DTE ATM options
+    print("  Fetching 120 DTE straddle prices...")
+    atm_options = client.find_atm_options(spy_uic, spy_price, target_dte=120)
+    if atm_options:
+        call_quote = client.get_quote(atm_options["call"]["uic"], "StockOption")
+        put_quote = client.get_quote(atm_options["put"]["uic"], "StockOption")
+        call_ask = call_quote["Quote"].get("Ask", 0) if call_quote else 0
+        put_ask = put_quote["Quote"].get("Ask", 0) if put_quote else 0
+        long_straddle_cost = (call_ask + put_ask) * 100 * position_size
 
-    # Weekly theta (~3% of straddle value)
-    weekly_theta = long_straddle_cost * 0.03
+        # Get actual theta from greeks
+        call_greeks = client.get_option_greeks(atm_options["call"]["uic"])
+        put_greeks = client.get_option_greeks(atm_options["put"]["uic"])
+        daily_theta = (abs(call_greeks.get("Theta", 0)) + abs(put_greeks.get("Theta", 0))) * 100 * position_size if call_greeks and put_greeks else 0
+        weekly_theta = daily_theta * 7
+    else:
+        # Fallback to estimate
+        straddle_per_contract = spy_price * (vix / 100) * math.sqrt(120 / 365) * 0.85 * 100
+        long_straddle_cost = straddle_per_contract * position_size
+        weekly_theta = long_straddle_cost * 0.03
 
     # Round-trip fees
     round_trip_fees = fee_per_leg * 2 * position_size * 2
