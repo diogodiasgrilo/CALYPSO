@@ -360,25 +360,24 @@ def main():
             # At 120 DTE: theta ≈ straddle_per_share / (2 * sqrt(120)) ≈ $51.40 / 21.9 = $2.35/share/day
             # Per contract = $235/day, for 2 contracts = $470/day -- still too high!
             #
-            # BLACK-SCHOLES THETA for ATM straddle at 120 DTE:
-            # theta_daily ≈ S * sigma / (2 * sqrt(2*pi*T)) where T is in years
-            # For SPY ~$695, VIX ~17%, T = 120/365:
-            #   theta ≈ 695 * 0.17 / (2 * sqrt(2*pi*0.329)) = ~$0.23/share/day
-            # As percentage of straddle (~$51): 0.23/51 = 0.45%/day
+            # ACTUAL THETA from bot logs (Jan 2026):
+            # Long Call theta: -$0.14/share/day
+            # Long Put theta:  -$0.07/share/day
+            # Total: -$0.21/share/day for ~$48/share straddle = 0.44%/day
             #
-            # Using Black-Scholes derived rate of ~0.42%/day for 120 DTE ATM straddle
+            # This matches Black-Scholes theory for 120 DTE ATM straddle
             straddle_per_share = (call_ask + put_ask)  # ~$51
-            theta_per_share_per_day = straddle_per_share * 0.0042  # 0.42% of straddle value per day (B-S)
+            theta_per_share_per_day = straddle_per_share * 0.0044  # 0.44% of straddle value per day
             daily_theta = theta_per_share_per_day * 100 * position_size
             weekly_theta = daily_theta * 7
-            print(f"  Using ESTIMATED theta (B-S model, API unavailable): ${daily_theta:.2f}/day (~0.42%/day)")
+            print(f"  Using ESTIMATED theta (from historical data): ${daily_theta:.2f}/day (~0.44%/day)")
     else:
         # Fallback to estimate when no options found
         # Estimate straddle price using Black-Scholes approximation: straddle ≈ S * sigma * sqrt(T) * 0.8
         straddle_per_share = spy_price * (vix / 100) * math.sqrt(120 / 365) * 0.8
         long_straddle_cost = straddle_per_share * 100 * position_size
-        # B-S theta: ~0.42% of straddle value per day for 120 DTE ATM
-        theta_per_share_per_day = straddle_per_share * 0.0042
+        # Theta: ~0.44% of straddle value per day for 120 DTE ATM (from historical data)
+        theta_per_share_per_day = straddle_per_share * 0.0044
         daily_theta = theta_per_share_per_day * 100 * position_size
         weekly_theta = daily_theta * 7
         print(f"  Using ESTIMATED values (no ATM options found): cost=${long_straddle_cost:.2f}, theta=${daily_theta:.2f}/day")
