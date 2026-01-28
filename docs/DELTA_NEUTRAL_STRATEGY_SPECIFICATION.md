@@ -59,8 +59,8 @@ The Delta Neutral strategy consists of a long-term ATM straddle against which yo
 
 #### When to Roll
 - **Scheduled Roll:** Every Friday (or Thursday if Friday is holiday)
-- **Challenged Roll:** When price moves within 0.5% of a short strike (Updated 2026-01-27)
-- **Emergency Close:** When price is within 0.1% of ITM (close shorts, keep longs)
+- **Challenged Roll:** When price consumes >= 75% of the original cushion to a short strike (Updated 2026-01-28, adaptive)
+- **Emergency Close:** When price is within 0.1% of ITM (close shorts, keep longs — absolute safety floor, stays static)
 
 #### Roll Mechanics: BOTH LEGS, NOT SINGLE LEG
 
@@ -184,7 +184,7 @@ RESULT: Roll REJECTED → Close entire position
 - Recenter only affects LONGS (straddle)
 - Shorts (strangle) remain in place until:
   - Friday roll day
-  - OR challenged (price within 0.3% of strike)
+  - OR challenged (>= 75% of original cushion consumed)
   - OR emergency (price within 0.1% of ITM)
 
 **Exception:** If recenter happens on Friday roll day, handle both:
@@ -195,36 +195,54 @@ RESULT: Roll REJECTED → Close entire position
 
 ### 3. ITM Risk Monitoring (Vigilant Mode)
 
-#### Monitoring Thresholds (Updated 2026-01-27)
+#### Monitoring Thresholds (Updated 2026-01-28 — Adaptive Cushion-Based)
 
-| Threshold | Distance from Strike | Action | Alert Priority |
-|-----------|----------------------|--------|----------------|
-| **Safe Zone** | > 0.5% | Normal monitoring (10s intervals) | None |
-| **Vigilant Zone** | 0.1% - 0.5% | Heightened monitoring (1s intervals) + Challenged roll attempt | HIGH |
-| **Danger Zone** | < 0.1% | Emergency close shorts | CRITICAL |
+The monitoring system now uses **adaptive thresholds** based on the percentage of the original entry cushion that has been consumed, rather than fixed percentage distances from the strike. This matches the adaptive entry logic (1% NET symmetric scanning) which places shorts closer in low-vol and further in high-vol environments.
 
-**Key Changes (2026-01-27):**
-- Challenged roll threshold widened from 0.3% to 0.5%
-- With proper 1.5x-2.0x strike selection, 0.5% allows time to roll for credit
-- 0.3% was too tight, resulting in debit rolls with suboptimal strikes
+| Threshold | Cushion Consumed | Action | Alert Priority |
+|-----------|------------------|--------|----------------|
+| **Normal Zone** | < 60% consumed | Normal monitoring (10s intervals) | None |
+| **Vigilant Zone** | 60% - 75% consumed | Heightened monitoring (1s intervals) | HIGH |
+| **Challenged Roll** | >= 75% consumed | Immediate roll attempt | HIGH |
+| **Danger Zone** | 0.1% from strike (static) | Emergency close shorts | CRITICAL |
+
+**How Cushion Is Calculated:**
+- `entry_underlying_price`: SPY price when shorts were placed (stored on `StranglePosition`)
+- `original_distance`: Strike - entry price (for calls) or entry price - strike (for puts)
+- `current_distance`: Strike - current price (for calls) or current price - strike (for puts)
+- `cushion_consumed`: `1 - (current_distance / original_distance)`
+
+**Example (Low Vol vs High Vol):**
+- Low vol: Shorts at 1.2x EM, $7 from price → triggers at $1.75 remaining ($5.25 consumed = 75%)
+- High vol: Shorts at 2.0x EM, $20 from price → triggers at $5.00 remaining ($15 consumed = 75%)
+- The trigger naturally scales with the original placement distance
+
+**Why 75% for Roll Trigger:**
+- Roll = 4 legs of fees, Hard exit (Path A) = 8 legs of fees
+- At 75%, the short is still OTM with decent extrinsic value → credit roll is likely to succeed
+- Waiting longer (80-85%) risks credit failure → triggers the expensive 8-leg hard exit
+- Falls back to static 0.5% threshold for legacy positions without `entry_underlying_price`
+
+**Key Changes History:**
+- (2026-01-28): Replaced static 0.5% with adaptive cushion-based trigger (75% consumed = roll, 60% consumed = vigilant entry). Added immediate next-week shorts entry after scheduled debit skip.
+- (2026-01-27): Challenged roll threshold widened from 0.3% to 0.5%
 
 #### Vigilant Mode Entry/Exit
 
 **Entry (HIGH Alert):**
 ```
-Distance % = |SPY Price - Strike| / Strike × 100
-If Distance % ≤ 0.5%:
-  - Enter VIGILANT mode
-  - Increase monitoring to 1-second intervals
-  - Send alert: "Short [call/put] CHALLENGED"
+Cushion Consumed = 1 - (Current Distance / Original Distance)
+If Cushion Consumed >= 60%:
+  - Enter VIGILANT mode (1-second monitoring)
+  - Alert: "X% cushion consumed ($Y remaining). Roll triggers at 75%."
 ```
 
 **Exit (LOW Alert):**
 ```
-If Distance % > 0.5%:
+If Cushion Consumed < 60%:
   - Exit VIGILANT mode
   - Resume normal 10-second intervals
-  - Send alert: "Moved away from strike - returned to safe zone"
+  - Alert: "Moved away from strike - returned to safe zone"
 ```
 
 #### Emergency Close (0.1% Threshold)
@@ -384,7 +402,7 @@ When closing shorts, use progressive slippage:
 
 **Conditions:**
 - SPY moved up significantly
-- Short call within 0.3% of strike
+- Short call cushion >= 75% consumed (adaptive trigger)
 - Shorts still have 5+ DTE remaining
 
 **Actions:**
@@ -554,7 +572,7 @@ When closing shorts, use progressive slippage:
 **Impact:**
 - Future shorts will be properly placed at 1.5x-2.0x expected move
 - Symmetric strikes maintain delta neutrality
-- Challenged rolls at 0.5% more likely to succeed for credit
+- Adaptive roll trigger (75% cushion consumed) more likely to succeed for credit
 
 ### Issue 4: Challenged Roll Threshold Too Tight
 
@@ -568,15 +586,24 @@ When closing shorts, use progressive slippage:
 - At 0.5% away (with 1.5x strikes): Roll yields +$30 credit
 - At 0.5% away (with 2.0x strikes): Roll yields +$110 credit
 
-**Solution:**
+**Solution (2026-01-27):**
 - Updated challenged roll threshold from 0.3% to 0.5%
 - Updated vigilant monitoring threshold from 0.3% to 0.5%
 - Kept emergency close threshold at 0.1% (already correct)
 
+**Further Improvement (2026-01-28) — Adaptive Cushion Trigger:**
+- Replaced static 0.5% with adaptive 75% cushion-consumed trigger
+- The entry is adaptive (1% NET symmetric scanning places shorts closer in low-vol, further in high-vol)
+- The roll trigger now adapts the same way: triggers when 75% of original cushion is consumed
+- Low vol ($7 cushion): triggers at $1.75 remaining. High vol ($20 cushion): triggers at $5.00 remaining
+- 60% consumed → vigilant mode (1s checks), 75% consumed → challenged roll trigger
+- Falls back to static 0.5% for legacy positions without entry_underlying_price
+
 **Impact:**
-- With proper 1.5x-2.0x strikes, challenged rolls at 0.5% can achieve credit
-- If roll still fails (debit), exit entire position per Brian Terry guidance
-- Emergency at 0.1% catches edge cases (gaps, bot downtime)
+- Roll trigger naturally scales with market conditions (matches adaptive entry logic)
+- Credit rolls more likely to succeed because triggered at optimal distance
+- Avoids 8-leg hard exit (2x fees) by triggering early enough for credit
+- Emergency at 0.1% stays as absolute safety floor (about execution speed, not market conditions)
 
 ---
 

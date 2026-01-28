@@ -717,6 +717,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-28 | RESOLVED CONN-014: Fixed $0 limit price validation (Python truthiness bug) | Claude |
 | 2026-01-28 | RESOLVED CONN-015: Added skip-to-retry when both quote and leg_price are $0 | Claude |
 | 2026-01-28 | RESOLVED CONN-016: Added _last_message_time tracking for health monitoring | Claude |
+| 2026-01-28 | UPDATED ITM/ROLL: Replaced static 0.5% roll trigger with adaptive 75% cushion-consumed trigger | Claude |
+| 2026-01-28 | UPDATED VIGILANT: Replaced static 0.5% vigilant entry with adaptive 60% cushion-consumed threshold | Claude |
+| 2026-01-28 | ADDED: Immediate next-week shorts entry after scheduled debit skip (Path B) | Claude |
+| 2026-01-28 | ADDED: entry_underlying_price field on StranglePosition for cushion tracking | Claude |
+| 2026-01-28 | ADDED: Cushion % consumed visible in terminal status, heartbeat, Google Sheets, and alerts | Claude |
 | 2026-01-28 | **55 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 
 ---

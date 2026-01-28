@@ -29,7 +29,11 @@ Configuration:
 - recenter_threshold_points: 5.0 (recenter when SPY moves ±$5)
 
 Version History:
-- 2.0.0 (2026-01-28): Major WebSocket reliability fixes
+- 2.0.0 (2026-01-28): Major WebSocket reliability + adaptive roll trigger
+  - Adaptive cushion-based roll trigger (75% consumed = roll, 60% = vigilant)
+  - Immediate next-week shorts entry after scheduled debit skip
+  - entry_underlying_price tracking on StranglePosition for cushion calculation
+  - Cushion % consumed visible in terminal status, heartbeat, and Google Sheets
   - 10 critical fixes for WebSocket price streaming
   - Cache invalidation on disconnect
   - Timestamp-based staleness detection (60s max)

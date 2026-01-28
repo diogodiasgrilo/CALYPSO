@@ -97,6 +97,10 @@ class StranglePosition:
         put_strike: Put strike price
         expiry: Expiration date
         entry_date: Date when the position was opened (for theta tracking)
+        entry_underlying_price: Underlying (SPY) price when shorts were placed.
+            Used by adaptive roll trigger to calculate how much of the original
+            cushion has been consumed. After bot restart, approximated as midpoint
+            of call_strike and put_strike.
     """
     call: Optional[OptionPosition] = None
     put: Optional[OptionPosition] = None
@@ -104,6 +108,7 @@ class StranglePosition:
     put_strike: float = 0.0
     expiry: str = ""
     entry_date: str = ""  # Format: YYYY-MM-DD
+    entry_underlying_price: float = 0.0
 
     @property
     def is_complete(self) -> bool:

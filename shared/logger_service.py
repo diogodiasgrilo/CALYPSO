@@ -2190,6 +2190,12 @@ class GoogleSheetsLogger:
                 short_call_strike = strategy_data.get("short_call_strike", 0)
                 short_put_strike = strategy_data.get("short_put_strike", 0)
 
+                # Cushion consumption (adaptive roll trigger)
+                call_cushion = strategy_data.get("call_cushion_consumed_pct", 0) or 0
+                put_cushion = strategy_data.get("put_cushion_consumed_pct", 0) or 0
+                call_dist = strategy_data.get("call_distance_to_strike", 0) or 0
+                put_dist = strategy_data.get("put_distance_to_strike", 0) or 0
+
                 row = [
                     # Market Data
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2208,11 +2214,16 @@ class GoogleSheetsLogger:
                     f"{long_put_strike:.0f}" if long_put_strike else "N/A",
                     f"{short_call_strike:.0f}" if short_call_strike else "N/A",
                     f"{short_put_strike:.0f}" if short_put_strike else "N/A",
+                    # Cushion (adaptive roll trigger — roll at 75%)
+                    f"{call_cushion:.1f}" if short_call_strike else "N/A",
+                    f"{put_cushion:.1f}" if short_put_strike else "N/A",
+                    f"{call_dist:.2f}" if short_call_strike else "N/A",
+                    f"{put_dist:.2f}" if short_put_strike else "N/A",
                     # Meta
                     f"{exchange_rate:.6f}" if exchange_rate else "N/A",
                     environment
                 ]
-                col_range = "A2:O2"  # 15 columns
+                col_range = "A2:S2"  # 19 columns (was 15, added 4 cushion columns)
 
             # Update row 2 (single row for current snapshot) instead of appending
             if worksheet.row_count < 2:
@@ -3113,7 +3124,28 @@ class TradeLoggerService:
         logger.info(f"  Initial Strike: ${status.get('initial_strike', 0):.2f}")
         logger.info(f"  Distance from Strike: ${status.get('price_from_strike', 0):.2f}")
         logger.info(f"  Long Straddle: {'Active' if status.get('has_long_straddle') else 'None'}")
-        logger.info(f"  Short Strangle: {'Active' if status.get('has_short_strangle') else 'None'}")
+
+        # Short strangle with cushion detail
+        if status.get('has_short_strangle'):
+            call_strike = status.get('short_call_strike', 0)
+            put_strike = status.get('short_put_strike', 0)
+            call_consumed = status.get('call_cushion_consumed_pct')
+            put_consumed = status.get('put_cushion_consumed_pct')
+            call_dist = status.get('call_distance', 0)
+            put_dist = status.get('put_distance', 0)
+
+            logger.info(f"  Short Strangle: Active (Put ${put_strike:.0f} / Call ${call_strike:.0f})")
+            if call_consumed is not None:
+                # Adaptive cushion info available
+                logger.info(f"    Call cushion: {call_consumed:.1f}% consumed (${call_dist:.2f} remaining) — roll at 75%")
+                logger.info(f"    Put cushion:  {put_consumed:.1f}% consumed (${put_dist:.2f} remaining) — roll at 75%")
+            else:
+                # No entry price — show distance only
+                logger.info(f"    Call distance: ${call_dist:.2f} from strike")
+                logger.info(f"    Put distance:  ${put_dist:.2f} from strike")
+        else:
+            logger.info(f"  Short Strangle: None")
+
         logger.info(f"  Total Delta: {status.get('total_delta', 0):.4f}")
         logger.info(f"  Total P&L: ${status.get('total_pnl', 0):.2f}")
         logger.info(f"  Realized P&L: ${status.get('realized_pnl', 0):.2f}")

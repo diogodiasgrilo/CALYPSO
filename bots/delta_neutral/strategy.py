@@ -84,8 +84,8 @@ MARKET DATA
 
 ENTRY CONDITIONS
     check_vix_entry_condition           ~3591   VIX check
-    check_shorts_itm_risk               ~5013   ITM risk (0.1% danger threshold)
-    get_monitoring_mode                 ~5060   Vigilant monitoring (0.3% threshold)
+    check_shorts_itm_risk               ~5013   ITM risk (0.1% danger — absolute safety floor)
+    get_monitoring_mode                 ~5060   Vigilant monitoring (adaptive 60% cushion consumed)
     check_emergency_exit_condition      ~5140   5%+ move
 
 STRADDLE OPERATIONS
@@ -3546,7 +3546,8 @@ class DeltaNeutralStrategy:
             call=call_option,
             put=None,  # Missing leg
             expiry=call_data["expiry"],
-            entry_date=datetime.now().isoformat()
+            entry_date=datetime.now().isoformat(),
+            entry_underlying_price=self.current_underlying_price or call_data["strike"]
         )
         logger.critical(f"Created PARTIAL strangle (short CALL only) at ${call_data['strike']:.0f}")
 
@@ -3569,7 +3570,8 @@ class DeltaNeutralStrategy:
             call=None,  # Missing leg
             put=put_option,
             expiry=put_data["expiry"],
-            entry_date=datetime.now().isoformat()
+            entry_date=datetime.now().isoformat(),
+            entry_underlying_price=self.current_underlying_price or put_data["strike"]
         )
         logger.critical(f"Created PARTIAL strangle (short PUT only) at ${put_data['strike']:.0f}")
 
@@ -3800,13 +3802,18 @@ class DeltaNeutralStrategy:
                 except ValueError:
                     pass  # Keep today as default
 
+                # Approximate entry_underlying_price as midpoint of strikes
+                # (actual entry price not persisted in Saxo, this is best estimate)
+                approx_entry_price = (call_data["strike"] + put_data["strike"]) / 2
+
                 self.short_strangle = StranglePosition(
                     call=call_option,
                     put=put_option,
                     call_strike=call_data["strike"],
                     put_strike=put_data["strike"],
                     expiry=expiry,
-                    entry_date=entry_date
+                    entry_date=entry_date,
+                    entry_underlying_price=approx_entry_price
                 )
 
                 # Set metrics for recovered strangle (entry prices * 100 * quantity for total value)
@@ -3819,7 +3826,8 @@ class DeltaNeutralStrategy:
                 logger.info(
                     f"Recovered short strangle: Call ${call_data['strike']:.2f}, "
                     f"Put ${put_data['strike']:.2f}, Expiry {expiry}, Entry {entry_date}, "
-                    f"Qty {qty}, Premium ${premium_collected:.2f}"
+                    f"Qty {qty}, Premium ${premium_collected:.2f}, "
+                    f"Approx entry price ${approx_entry_price:.2f}"
                 )
                 return True
 
@@ -4177,13 +4185,17 @@ class DeltaNeutralStrategy:
                 except ValueError:
                     pass
 
+                # Approximate entry_underlying_price as midpoint of strikes
+                approx_entry_price = (call_data["strike"] + put_data["strike"]) / 2
+
                 self.short_strangle = StranglePosition(
                     call=call_option,
                     put=put_option,
                     call_strike=call_data["strike"],
                     put_strike=put_data["strike"],
                     expiry=expiry,
-                    entry_date=entry_date
+                    entry_date=entry_date,
+                    entry_underlying_price=approx_entry_price
                 )
 
                 qty = call_data["quantity"]
@@ -4194,7 +4206,8 @@ class DeltaNeutralStrategy:
                 logger.info(
                     f"Recovered short strangle (COMPLETE): Call ${call_data['strike']:.2f}, "
                     f"Put ${put_data['strike']:.2f}, Expiry {expiry}, Entry {entry_date}, "
-                    f"Qty {qty}, Premium ${premium_collected:.2f}"
+                    f"Qty {qty}, Premium ${premium_collected:.2f}, "
+                    f"Approx entry price ${approx_entry_price:.2f}"
                 )
                 return True, used_position_ids
 
@@ -4238,7 +4251,8 @@ class DeltaNeutralStrategy:
                 call_strike=call_data["strike"],
                 put_strike=0.0,  # Unknown until we add the put
                 expiry=call_data["expiry"],
-                entry_date=datetime.now().strftime("%Y-%m-%d")
+                entry_date=datetime.now().strftime("%Y-%m-%d"),
+                entry_underlying_price=self.current_underlying_price or call_data["strike"]
             )
 
             logger.warning(
@@ -4274,7 +4288,8 @@ class DeltaNeutralStrategy:
                 call_strike=0.0,  # Unknown until we add the call
                 put_strike=put_data["strike"],
                 expiry=put_data["expiry"],
-                entry_date=datetime.now().strftime("%Y-%m-%d")
+                entry_date=datetime.now().strftime("%Y-%m-%d"),
+                entry_underlying_price=self.current_underlying_price or put_data["strike"]
             )
 
             logger.warning(
@@ -4316,7 +4331,8 @@ class DeltaNeutralStrategy:
                     call_strike=0.0,
                     put_strike=put_data["strike"],
                     expiry=put_data["expiry"],
-                    entry_date=datetime.now().strftime("%Y-%m-%d")
+                    entry_date=datetime.now().strftime("%Y-%m-%d"),
+                    entry_underlying_price=self.current_underlying_price or put_data["strike"]
                 )
 
                 logger.warning(
@@ -5048,13 +5064,18 @@ class DeltaNeutralStrategy:
 
         Video rule: "Never let the shorts go In-The-Money (ITM)"
 
-        VIGILANT MONITORING SYSTEM (Updated 2026-01-27):
-        - 0.1% threshold (DANGER): Immediate MARKET close (~$0.70 at SPY $695)
-        - 0.5% threshold (VIGILANT): Switch to fast 1-second monitoring
-        - > 0.5% (NORMAL): Standard 10-second monitoring
+        ADAPTIVE MONITORING SYSTEM (Updated 2026-01-28):
+        This is the absolute safety floor — the last line of defense.
+        The full threshold layering is:
 
-        This method only triggers at 0.1% (DANGER zone).
-        Use get_monitoring_mode() to check if we're in VIGILANT zone.
+        - NORMAL (10s):       < 60% cushion consumed (see get_monitoring_mode())
+        - VIGILANT (1s):      60-75% cushion consumed (see get_monitoring_mode())
+        - CHALLENGED ROLL:    >= 75% cushion consumed (see should_roll_shorts())
+        - DANGER/ITM CLOSE:   0.1% from strike — THIS METHOD (absolute, stays static)
+
+        The 0.1% DANGER threshold is intentionally NOT adaptive. It's about
+        execution speed (can we close before ITM?), not market conditions.
+        At ~$0.70 from the strike on SPY, we close regardless of original placement.
 
         The 0.1% threshold is safe because:
         - MARKET orders execute in <1 second
@@ -5104,14 +5125,16 @@ class DeltaNeutralStrategy:
         """
         Determine the appropriate monitoring mode based on ITM proximity.
 
-        VIGILANT MONITORING SYSTEM (Updated 2026-01-27 with 0.5% thresholds):
-        - NORMAL (10s): Price is > 0.5% from both short strikes (safe)
-        - VIGILANT (1s): Price is 0.1% - 0.5% from a short strike (watching closely)
+        ADAPTIVE VIGILANT MONITORING SYSTEM (Updated 2026-01-28):
+        Uses cushion-based thresholds that scale with original short placement distance.
 
-        This allows the bot to:
-        1. Monitor more frequently when price approaches danger
-        2. Provide time for challenged roll attempt at 0.5% threshold
-        3. Only close at the last safe moment (0.1%)
+        Threshold layering (based on % of original cushion consumed):
+        - NORMAL (10s): < 60% cushion consumed (> 40% remaining)
+        - VIGILANT (1s): 60-75% cushion consumed (25-40% remaining)
+        - CHALLENGED ROLL: >= 75% consumed (triggered by should_roll_shorts())
+        - DANGER/ITM CLOSE: 0.1% from strike (absolute safety floor, stays static)
+
+        Falls back to static 0.5% threshold if entry_underlying_price is unavailable.
 
         Returns:
             MonitoringMode: NORMAL or VIGILANT based on proximity to strikes.
@@ -5122,41 +5145,60 @@ class DeltaNeutralStrategy:
         call_strike = self.short_strangle.call_strike
         put_strike = self.short_strangle.put_strike
         price = self.current_underlying_price
-
-        # Thresholds
-        # UPDATED (2026-01-27): Vigilant mode at 0.5% aligns with challenged roll threshold
-        # This provides fast monitoring when price approaches strike, giving time for
-        # challenged roll attempt before emergency close at 0.1%
-        vigilant_threshold_pct = 0.005  # 0.5% - enter vigilant mode (aligned with challenged roll)
-        danger_threshold_pct = 0.001    # 0.1% - would trigger close (handled by check_shorts_itm_risk)
-
-        call_vigilant_threshold = call_strike * vigilant_threshold_pct
-        put_vigilant_threshold = put_strike * vigilant_threshold_pct
+        entry_price = self.short_strangle.entry_underlying_price
 
         # Distance from current price to strikes
         call_distance = call_strike - price
         put_distance = price - put_strike
 
-        # Check if we're in VIGILANT zone (0.1% - 0.5% from strike)
+        # Calculate vigilant thresholds (adaptive or static fallback)
+        if entry_price > 0 and call_strike > 0 and put_strike > 0:
+            # ADAPTIVE MODE: Enter vigilant when 60% of cushion consumed (40% remaining)
+            # This gives a buffer before the 75% roll trigger in should_roll_shorts()
+            original_call_distance = call_strike - entry_price
+            original_put_distance = entry_price - put_strike
+
+            # Vigilant threshold = 40% of original distance (i.e., enter vigilant at 60% consumed)
+            call_vigilant_threshold = original_call_distance * 0.40 if original_call_distance > 0 else call_strike * 0.005
+            put_vigilant_threshold = original_put_distance * 0.40 if original_put_distance > 0 else put_strike * 0.005
+        else:
+            # FALLBACK: Static 0.5% threshold (backward compatibility)
+            call_vigilant_threshold = call_strike * 0.005
+            put_vigilant_threshold = put_strike * 0.005
+
+        # Check if we're in VIGILANT zone
         call_in_vigilant = call_distance <= call_vigilant_threshold and call_distance > 0
         put_in_vigilant = put_distance <= put_vigilant_threshold and put_distance > 0
 
         if call_in_vigilant:
             pct_from_strike = (call_distance / call_strike) * 100
+            # Calculate cushion consumed for adaptive display
+            call_consumed_pct = 0.0
+            if entry_price > 0:
+                orig_dist = call_strike - entry_price
+                call_consumed_pct = (1.0 - (call_distance / orig_dist)) * 100 if orig_dist > 0 else 0
             # Only alert once when ENTERING vigilant mode (not on every check)
             if not hasattr(self, '_vigilant_alert_sent_call'):
-                logger.warning(
-                    f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - price ${price:.2f} is "
-                    f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 1 second."
-                )
+                if entry_price > 0:
+                    logger.warning(
+                        f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - {call_consumed_pct:.1f}% cushion consumed "
+                        f"(${call_distance:.2f} remaining). Roll triggers at 75%. Monitoring every 1 second."
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - price ${price:.2f} is "
+                        f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 1 second."
+                    )
                 # Send WhatsApp/Email alert for vigilant entry
+                cushion_msg = f"Cushion consumed: {call_consumed_pct:.1f}% (roll at 75%)\n" if entry_price > 0 else ""
                 self.alert_service.send_alert(
                     alert_type=AlertType.VIGILANT_ENTERED,
                     title="VIGILANT: Price Near Short Call",
                     message=(
-                        f"SPY ${price:.2f} is {pct_from_strike:.2f}% from short call ${call_strike:.0f}\n"
-                        f"Distance: ${call_distance:.2f}\n"
-                        f"Monitoring every 1 second. Close at 0.1% (~${call_strike * 0.001:.2f})."
+                        f"SPY ${price:.2f} approaching short call ${call_strike:.0f}\n"
+                        f"{cushion_msg}"
+                        f"Distance: ${call_distance:.2f} ({pct_from_strike:.2f}% from strike)\n"
+                        f"Monitoring every 1 second. Emergency close at 0.1% (~${call_strike * 0.001:.2f})."
                     ),
                     details={
                         "strike_type": "call",
@@ -5164,7 +5206,9 @@ class DeltaNeutralStrategy:
                         "price": price,
                         "distance_dollars": round(call_distance, 2),
                         "distance_pct": round(pct_from_strike, 3),
-                        "threshold_pct": 0.5
+                        "cushion_consumed_pct": round(call_consumed_pct, 1),
+                        "roll_trigger_pct": 75.0,
+                        "entry_underlying_price": entry_price
                     }
                 )
                 self._vigilant_alert_sent_call = True
@@ -5175,20 +5219,33 @@ class DeltaNeutralStrategy:
 
         if put_in_vigilant:
             pct_from_strike = (put_distance / put_strike) * 100
+            # Calculate cushion consumed for adaptive display
+            put_consumed_pct = 0.0
+            if entry_price > 0:
+                orig_dist = entry_price - put_strike
+                put_consumed_pct = (1.0 - (put_distance / orig_dist)) * 100 if orig_dist > 0 else 0
             # Only alert once when ENTERING vigilant mode (not on every check)
             if not hasattr(self, '_vigilant_alert_sent_put'):
-                logger.warning(
-                    f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - price ${price:.2f} is "
-                    f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 1 second."
-                )
+                if entry_price > 0:
+                    logger.warning(
+                        f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - {put_consumed_pct:.1f}% cushion consumed "
+                        f"(${put_distance:.2f} remaining). Roll triggers at 75%. Monitoring every 1 second."
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - price ${price:.2f} is "
+                        f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 1 second."
+                    )
                 # Send WhatsApp/Email alert for vigilant entry
+                cushion_msg = f"Cushion consumed: {put_consumed_pct:.1f}% (roll at 75%)\n" if entry_price > 0 else ""
                 self.alert_service.send_alert(
                     alert_type=AlertType.VIGILANT_ENTERED,
                     title="VIGILANT: Price Near Short Put",
                     message=(
-                        f"SPY ${price:.2f} is {pct_from_strike:.2f}% from short put ${put_strike:.0f}\n"
-                        f"Distance: ${put_distance:.2f}\n"
-                        f"Monitoring every 1 second. Close at 0.1% (~${put_strike * 0.001:.2f})."
+                        f"SPY ${price:.2f} approaching short put ${put_strike:.0f}\n"
+                        f"{cushion_msg}"
+                        f"Distance: ${put_distance:.2f} ({pct_from_strike:.2f}% from strike)\n"
+                        f"Monitoring every 1 second. Emergency close at 0.1% (~${put_strike * 0.001:.2f})."
                     ),
                     details={
                         "strike_type": "put",
@@ -5196,7 +5253,9 @@ class DeltaNeutralStrategy:
                         "price": price,
                         "distance_dollars": round(put_distance, 2),
                         "distance_pct": round(pct_from_strike, 3),
-                        "threshold_pct": 0.5
+                        "cushion_consumed_pct": round(put_consumed_pct, 1),
+                        "roll_trigger_pct": 75.0,
+                        "entry_underlying_price": entry_price
                     }
                 )
                 self._vigilant_alert_sent_put = True
@@ -6479,7 +6538,8 @@ class DeltaNeutralStrategy:
                 ),
                 call_strike=call_option["strike"],
                 put_strike=put_option["strike"],
-                expiry=call_option["expiry"]
+                expiry=call_option["expiry"],
+                entry_underlying_price=self.current_underlying_price or 0.0
             )
             # Return True to indicate quotes were successfully fetched
             return True
@@ -6562,7 +6622,8 @@ class DeltaNeutralStrategy:
             ),
             call_strike=call_option["strike"],
             put_strike=put_option["strike"],
-            expiry=call_option["expiry"]
+            expiry=call_option["expiry"],
+            entry_underlying_price=self.current_underlying_price or 0.0
         )
 
         # Update metrics
@@ -7608,7 +7669,7 @@ class DeltaNeutralStrategy:
         # =====================================================================
         # PARTIAL STRADDLE HANDLING
         # If we have a partial straddle (one leg missing) with shorts:
-        # - Check if shorts are in danger (within 0.3% of strike)
+        # - Check if shorts are in danger (within 0.1% of strike — absolute safety floor)
         # - If YES: Close ALL positions (emergency) and start fresh
         # - If NO: Just close the orphaned long leg and recenter straddle, keep shorts
         # =====================================================================
@@ -7630,14 +7691,14 @@ class DeltaNeutralStrategy:
                 logger.info(f"   Has short PUT: ${self.short_strangle.put.strike:.0f}")
             logger.info(f"   SPY price: ${self.current_underlying_price:.2f}")
 
-            # Check if shorts are actually in danger (within 0.3% of strike)
+            # Check if shorts are in DANGER zone (within 0.1% of strike — absolute safety floor)
             shorts_in_danger = self.check_shorts_itm_risk()
 
             if shorts_in_danger:
                 # =============================================================
                 # EMERGENCY PATH: Shorts are in danger - close everything
                 # =============================================================
-                logger.critical("🚨 SHORTS IN DANGER (within 0.3% of strike) - closing ALL positions")
+                logger.critical("🚨 SHORTS IN DANGER (within 0.1% of strike) - closing ALL positions")
                 logger.warning("   Action: Close ALL positions, then do fresh entry")
 
                 self.state = StrategyState.RECENTERING
@@ -7714,7 +7775,7 @@ class DeltaNeutralStrategy:
                 # =============================================================
                 # SAFE PATH: Shorts are NOT in danger - keep them, just fix straddle
                 # =============================================================
-                logger.info("✅ Shorts are SAFE (>0.3% from strikes) - keeping them")
+                logger.info("✅ Shorts are SAFE (>0.1% from strikes) - keeping them")
                 logger.info("   Action: Close orphaned long leg, recenter straddle only")
 
                 self.state = StrategyState.RECENTERING
@@ -8017,8 +8078,15 @@ class DeltaNeutralStrategy:
         """
         Check if weekly shorts should be rolled.
 
-        Shorts should be rolled on Thursday 3PM EST, Friday 10AM EST, or if challenged
-        (price approaching short strikes).
+        Two roll triggers:
+        1. SCHEDULED: Thursday 3PM EST or Friday 10AM EST (weekly cycle)
+        2. CHALLENGED: Price has consumed >= 75% of the original cushion to a short strike
+
+        The challenged trigger is adaptive — it scales with how far OTM the shorts
+        were originally placed. In low-vol markets (shorts closer), the trigger fires
+        at a smaller dollar distance; in high-vol markets (shorts further), it allows
+        more movement before triggering. Falls back to static 0.5% if
+        entry_underlying_price is unavailable (e.g., legacy positions).
 
         Returns:
             tuple: (should_roll: bool, challenged_side: str or None)
@@ -8054,34 +8122,74 @@ class DeltaNeutralStrategy:
                     pass  # If we can't parse expiry, proceed with roll check
             return (True, None)  # Scheduled roll, no specific challenge
 
-        # Check if shorts are being challenged
-        # UPDATED (2026-01-27): Changed from 0.3% to 0.5% based on analysis:
-        # - With proper 1.5x-2.0x strikes, 0.3% was too tight (rolls often failed for debit)
-        # - 0.5% allows time to roll for credit while still protecting from ITM risk
-        # - Analysis showed rolls at 0.5% away have good chance of credit with symmetric strikes
+        # Check if shorts are being challenged using ADAPTIVE CUSHION threshold.
+        # UPDATED (2026-01-28): Replaced static 0.5% with adaptive cushion-based trigger.
+        #
+        # The roll trigger now scales with how far OTM the shorts were originally placed:
+        # - Low vol (shorts at 1.2x EM, ~$7 away): triggers at $1.75 remaining
+        # - High vol (shorts at 2.0x EM, ~$20 away): triggers at $5.00 remaining
+        #
+        # This matches the adaptive entry logic (1% NET symmetric scanning) which places
+        # shorts closer in low-vol and further in high-vol environments.
+        #
+        # Trigger at 75% cushion consumed (25% remaining) because:
+        # - Roll = 4 legs of fees, Hard exit (Path A) = 8 legs of fees
+        # - At 75%, short is still OTM with decent extrinsic → credit roll likely succeeds
+        # - Waiting longer (80-85%) risks credit failure → triggers expensive hard exit
         if self.short_strangle and self.current_underlying_price:
             call_strike = self.short_strangle.call_strike
             put_strike = self.short_strangle.put_strike
             price = self.current_underlying_price
+            entry_price = self.short_strangle.entry_underlying_price
 
-            # Calculate 0.5% threshold for each strike
-            call_threshold = call_strike * 0.005  # 0.5% of call strike (~$3.50 at $700)
-            put_threshold = put_strike * 0.005    # 0.5% of put strike
-
-            # Distance from current price to strikes
+            # Current distances from price to strikes
             call_distance = call_strike - price
             put_distance = price - put_strike
 
-            # If price is within 0.5% of either strike, attempt challenged roll
-            if call_distance <= call_threshold:
-                pct_from_strike = (call_distance / call_strike) * 100
-                logger.warning(f"Short call CHALLENGED! Price ${price:.2f} within {pct_from_strike:.2f}% of call strike ${call_strike:.2f}")
-                return (True, "call")
+            if entry_price > 0 and call_strike > 0 and put_strike > 0:
+                # ADAPTIVE MODE: Use original cushion distances
+                original_call_distance = call_strike - entry_price
+                original_put_distance = entry_price - put_strike
 
-            if put_distance <= put_threshold:
-                pct_from_strike = (put_distance / put_strike) * 100
-                logger.warning(f"Short put CHALLENGED! Price ${price:.2f} within {pct_from_strike:.2f}% of put strike ${put_strike:.2f}")
-                return (True, "put")
+                # Trigger when 75% of original cushion is consumed (only 25% remains)
+                cushion_trigger = 0.75
+
+                if original_call_distance > 0:
+                    call_consumed = 1.0 - (call_distance / original_call_distance)
+                    if call_consumed >= cushion_trigger:
+                        remaining_pct = (1.0 - call_consumed) * 100
+                        logger.warning(
+                            f"Short call CHALLENGED! Price ${price:.2f} has consumed {call_consumed:.0%} of "
+                            f"original ${original_call_distance:.2f} cushion to call strike ${call_strike:.2f}. "
+                            f"Only {remaining_pct:.1f}% (${call_distance:.2f}) remaining."
+                        )
+                        return (True, "call")
+
+                if original_put_distance > 0:
+                    put_consumed = 1.0 - (put_distance / original_put_distance)
+                    if put_consumed >= cushion_trigger:
+                        remaining_pct = (1.0 - put_consumed) * 100
+                        logger.warning(
+                            f"Short put CHALLENGED! Price ${price:.2f} has consumed {put_consumed:.0%} of "
+                            f"original ${original_put_distance:.2f} cushion to put strike ${put_strike:.2f}. "
+                            f"Only {remaining_pct:.1f}% (${put_distance:.2f}) remaining."
+                        )
+                        return (True, "put")
+            else:
+                # FALLBACK: No entry price available (legacy position or recovery edge case)
+                # Use static 0.5% threshold for backward compatibility
+                call_threshold = call_strike * 0.005
+                put_threshold = put_strike * 0.005
+
+                if call_distance <= call_threshold:
+                    pct_from_strike = (call_distance / call_strike) * 100
+                    logger.warning(f"Short call CHALLENGED (static fallback)! Price ${price:.2f} within {pct_from_strike:.2f}% of call strike ${call_strike:.2f}")
+                    return (True, "call")
+
+                if put_distance <= put_threshold:
+                    pct_from_strike = (put_distance / put_strike) * 100
+                    logger.warning(f"Short put CHALLENGED (static fallback)! Price ${price:.2f} within {pct_from_strike:.2f}% of put strike ${put_strike:.2f}")
+                    return (True, "put")
 
         return (False, None)
 
@@ -8939,10 +9047,12 @@ class DeltaNeutralStrategy:
                             action_taken = f"Short entry blocked - past {self.shorts_cutoff_minutes}-min cutoff"
                         else:
                             # Clear the flag and try to enter new shorts
-                            logger.info("Attempting to enter fresh short strangle (new weekly cycle)")
+                            # Always use for_roll=True: after a debit skip the old week's
+                            # shorts have expired, we want NEXT week's expiry (5-12 DTE)
+                            logger.info("Attempting to enter next-week short strangle after debit skip")
                             self._shorts_closed_date = None
-                            if self.enter_short_strangle(for_roll=False):
-                                action_taken = "Added short strangle (new weekly cycle)"
+                            if self.enter_short_strangle(for_roll=True):
+                                action_taken = "Added short strangle (next-week expiry after debit skip)"
                             else:
                                 # Still can't get credit - set flag again and wait
                                 logger.warning("Still cannot enter for credit - will try Monday")
@@ -9041,6 +9151,19 @@ class DeltaNeutralStrategy:
 
                                 # Log safety event
                                 if self.trade_logger:
+                                    # Include cushion consumption data for post-mortem analysis
+                                    cushion_detail = ""
+                                    if self.short_strangle and self.short_strangle.entry_underlying_price > 0:
+                                        ep = self.short_strangle.entry_underlying_price
+                                        cs = self.short_strangle.call_strike
+                                        ps = self.short_strangle.put_strike
+                                        p = self.current_underlying_price
+                                        orig_c = cs - ep if cs > 0 else 0
+                                        orig_p = ep - ps if ps > 0 else 0
+                                        c_consumed = (1.0 - ((cs - p) / orig_c)) * 100 if orig_c > 0 else 0
+                                        p_consumed = (1.0 - ((p - ps) / orig_p)) * 100 if orig_p > 0 else 0
+                                        cushion_detail = f" Call cushion: {c_consumed:.1f}% consumed, Put cushion: {p_consumed:.1f}% consumed."
+
                                     self.trade_logger.log_safety_event({
                                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                         "event_type": "HARD_EXIT_CHALLENGED_ROLL_FAILED",
@@ -9049,7 +9172,7 @@ class DeltaNeutralStrategy:
                                         "initial_strike": self.initial_straddle_strike,
                                         "vix": self.current_vix,
                                         "action_taken": "Exited all positions - challenged roll could not be done for credit",
-                                        "description": f"Challenged side: {challenged_side}. Longs likely profitable. Cycle complete.",
+                                        "description": f"Challenged side: {challenged_side}. Longs likely profitable. Cycle complete.{cushion_detail}",
                                         "result": "HARD_EXIT"
                                     })
                             else:
@@ -9058,35 +9181,45 @@ class DeltaNeutralStrategy:
                                 logger.critical("MANUAL INTERVENTION REQUIRED - Could not exit positions!")
                         else:
                             # UNCHALLENGED + DEBIT (scheduled roll on Thurs/Fri)
-                            # Per Brian Terry: "Let current shorts expire worthless, wait until
-                            # Friday/Monday to open new shorts - you aren't rolling, you're
-                            # starting a new weekly cycle with a clean net credit"
+                            # UPDATED (2026-01-28): Close old shorts and immediately enter next-week shorts
+                            # instead of waiting until Friday/Monday. The old shorts are nearly worthless
+                            # (that's why the roll was a debit), and next week's options already have premium.
+                            # Waiting leaves the long straddle unhedged, bleeding ~$15-20/day in theta.
                             logger.warning("=" * 60)
                             logger.warning("SCHEDULED ROLL SKIPPED - Cannot roll for credit (low IV)")
-                            logger.warning("Shorts are NOT challenged - letting them expire worthless")
-                            logger.warning("Will open fresh shorts Friday/Monday for next week")
+                            logger.warning("Shorts are NOT challenged - closing and entering next-week shorts immediately")
                             logger.warning("=" * 60)
 
-                            # Close the current shorts for pennies (or let expire)
-                            # Then transition to LONG_STRADDLE_ACTIVE so bot enters new shorts next week
                             now_est = get_us_market_time()
                             if self.close_short_strangle():
-                                action_taken = "Closed shorts for pennies - will open new cycle next week"
                                 logger.info("Short strangle closed. Longs remain active.")
-                                # Clear short strangle reference
                                 self.short_strangle = None
-                                # Mark the date - won't enter new shorts until after this week's expiry
-                                self._shorts_closed_date = now_est.date()
-                                # Transition back to LONG_STRADDLE_ACTIVE
-                                # Bot will check _shorts_closed_date before entering new shorts
-                                self.state = StrategyState.LONG_STRADDLE_ACTIVE
-                                logger.info(f"State -> LONG_STRADDLE_ACTIVE (will enter new shorts Monday)")
+
+                                # Immediately try to enter next-week shorts to minimize unhedged theta decay
+                                # for_roll=True → looks for 5-12 DTE (next week's expiry)
+                                if not self._is_past_shorts_cutoff():
+                                    logger.info("Attempting immediate entry of next-week shorts after scheduled skip...")
+                                    if self.enter_short_strangle(for_roll=True):
+                                        self.state = StrategyState.FULL_POSITION
+                                        action_taken = "Scheduled roll skipped (debit) - entered next-week shorts immediately"
+                                        logger.info("Next-week shorts entered successfully - back to FULL_POSITION")
+                                    else:
+                                        # Couldn't enter next-week shorts either - wait for Friday/Monday
+                                        self._shorts_closed_date = now_est.date()
+                                        self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                                        action_taken = "Scheduled roll skipped - next-week entry also failed, waiting Friday/Monday"
+                                        logger.warning("Next-week short entry failed - will retry Friday/Monday")
+                                else:
+                                    # Past cutoff (within 10 min of close), set flag to try tomorrow
+                                    self._shorts_closed_date = now_est.date()
+                                    self.state = StrategyState.LONG_STRADDLE_ACTIVE
+                                    action_taken = "Scheduled roll skipped - past cutoff, will enter next-week shorts tomorrow"
+                                    logger.info("Past shorts cutoff - will enter next-week shorts tomorrow")
                             else:
-                                action_taken = "Letting shorts expire naturally - new cycle next week"
-                                # Mark the date anyway - shorts will expire worthless
+                                action_taken = "Letting shorts expire naturally - will enter next-week shorts tomorrow"
+                                # Mark the date - shorts will expire worthless
                                 self._shorts_closed_date = now_est.date()
                                 # Even if close fails, shorts will expire worthless
-                                # Bot will detect no shorts and re-enter on Monday
 
                             # Log as INFO event, not critical
                             if self.trade_logger:
@@ -9097,14 +9230,54 @@ class DeltaNeutralStrategy:
                                     "spy_price": self.current_underlying_price,
                                     "initial_strike": self.initial_straddle_strike,
                                     "vix": self.current_vix,
-                                    "action_taken": "Letting shorts expire - low IV environment",
-                                    "description": "Scheduled roll resulted in debit. Shorts unchallenged and will expire worthless. New shorts will be opened Friday/Monday.",
-                                    "result": "SKIPPED"
+                                    "action_taken": action_taken,
+                                    "description": "Scheduled roll resulted in debit. Attempted immediate next-week entry to minimize unhedged theta.",
+                                    "result": "IMMEDIATE_ENTRY" if "immediately" in action_taken else "DEFERRED"
                                 })
 
         logger.info(f"Strategy check: {action_taken} | State: {self.state.value}")
 
         return action_taken
+
+    def _get_cushion_consumed(self, side: str) -> float:
+        """Get percentage of original cushion consumed for a short strike side.
+
+        Args:
+            side: "call" or "put"
+
+        Returns:
+            Percentage consumed (0-100+), or 0.0 if not calculable.
+        """
+        if not self.short_strangle or not self.current_underlying_price:
+            return 0.0
+        entry_price = self.short_strangle.entry_underlying_price
+        if entry_price <= 0:
+            return 0.0
+        price = self.current_underlying_price
+        if side == "call":
+            orig = self.short_strangle.call_strike - entry_price
+            curr = self.short_strangle.call_strike - price
+            return round((1.0 - (curr / orig)) * 100, 1) if orig > 0 else 0.0
+        else:
+            orig = entry_price - self.short_strangle.put_strike
+            curr = price - self.short_strangle.put_strike
+            return round((1.0 - (curr / orig)) * 100, 1) if orig > 0 else 0.0
+
+    def _get_distance_to_strike(self, side: str) -> float:
+        """Get dollar distance from current price to a short strike.
+
+        Args:
+            side: "call" or "put"
+
+        Returns:
+            Dollar distance (positive = OTM), or 0.0 if not calculable.
+        """
+        if not self.short_strangle or not self.current_underlying_price:
+            return 0.0
+        if side == "call":
+            return round(self.short_strangle.call_strike - self.current_underlying_price, 2)
+        else:
+            return round(self.current_underlying_price - self.short_strangle.put_strike, 2)
 
     def get_status_summary(self) -> Dict:
         """
@@ -9133,6 +9306,38 @@ class DeltaNeutralStrategy:
             "recenter_count": self.metrics.recenter_count,
             "roll_count": self.metrics.roll_count
         }
+
+        # Add short strangle cushion info for monitoring visibility
+        if self.short_strangle and self.current_underlying_price:
+            price = self.current_underlying_price
+            call_strike = self.short_strangle.call_strike
+            put_strike = self.short_strangle.put_strike
+            entry_price = self.short_strangle.entry_underlying_price
+
+            summary["short_call_strike"] = call_strike
+            summary["short_put_strike"] = put_strike
+
+            if call_strike > 0 and put_strike > 0:
+                call_distance = call_strike - price
+                put_distance = price - put_strike
+
+                if entry_price > 0:
+                    original_call_distance = call_strike - entry_price
+                    original_put_distance = entry_price - put_strike
+
+                    call_consumed = (1.0 - (call_distance / original_call_distance)) * 100 if original_call_distance > 0 else 0
+                    put_consumed = (1.0 - (put_distance / original_put_distance)) * 100 if original_put_distance > 0 else 0
+
+                    summary["call_cushion_consumed_pct"] = round(call_consumed, 1)
+                    summary["put_cushion_consumed_pct"] = round(put_consumed, 1)
+                    summary["call_distance"] = round(call_distance, 2)
+                    summary["put_distance"] = round(put_distance, 2)
+                else:
+                    # No entry price — show distance only
+                    summary["call_cushion_consumed_pct"] = None
+                    summary["put_cushion_consumed_pct"] = None
+                    summary["call_distance"] = round(call_distance, 2)
+                    summary["put_distance"] = round(put_distance, 2)
 
         # Add currency conversion if enabled
         if self.trade_logger and self.trade_logger.currency_enabled:
@@ -9333,6 +9538,12 @@ class DeltaNeutralStrategy:
             "state": self.state.value,
             "has_long_straddle": self.long_straddle is not None and self.long_straddle.is_complete,
             "has_short_strangle": self.short_strangle is not None and self.short_strangle.is_complete,
+
+            # Cushion consumption (adaptive roll trigger visibility)
+            "call_cushion_consumed_pct": self._get_cushion_consumed("call"),
+            "put_cushion_consumed_pct": self._get_cushion_consumed("put"),
+            "call_distance_to_strike": self._get_distance_to_strike("call"),
+            "put_distance_to_strike": self._get_distance_to_strike("put"),
         }
 
     def get_dashboard_metrics_safe(self) -> Dict[str, Any]:

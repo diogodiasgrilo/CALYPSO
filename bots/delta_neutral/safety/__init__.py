@@ -9,7 +9,7 @@ For detailed edge case analysis, see: docs/DELTA_NEUTRAL_EDGE_CASES.md
 
 =============================================================================
 SAFETY ARCHITECTURE OVERVIEW (55 Edge Cases - 100% Coverage)
-Bot Version: 2.0.0 (Updated 2026-01-28 with 10 WebSocket reliability fixes)
+Bot Version: 2.0.0 (Updated 2026-01-28 with adaptive roll trigger + WebSocket fixes)
 =============================================================================
 
 1. CIRCUIT BREAKER (strategy.py ~1053-1127)
@@ -78,9 +78,13 @@ Bot Version: 2.0.0 (Updated 2026-01-28 with 10 WebSocket reliability fixes)
 
 7. ITM RISK DETECTION (strategy.py ~4936-4990)
    - check_shorts_itm_risk(): Monitors short strikes vs SPY price
-   - Triggers emergency roll if price approaches strike
-   - Uses percentage-based threshold (0.3% with 10s check interval, 1s in VIGILANT mode)
-   - At SPY ~$690, 0.3% = ~$2.07 buffer from strike
+   - Triggers emergency close if price within 0.1% of strike (absolute safety floor)
+   - ADAPTIVE CUSHION-BASED MONITORING (Updated 2026-01-28):
+     * NORMAL (10s): < 60% of original cushion consumed
+     * VIGILANT (1s): 60-75% cushion consumed (get_monitoring_mode())
+     * CHALLENGED ROLL: >= 75% cushion consumed (should_roll_shorts())
+     * DANGER/ITM CLOSE: 0.1% from strike — stays static, about execution speed
+   - Falls back to static 0.5% threshold if entry_underlying_price unavailable
 
 =============================================================================
 EDGE CASE HANDLERS (Added 2026-01-22)

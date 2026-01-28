@@ -42,13 +42,17 @@ class MonitoringMode(Enum):
     """
     Monitoring frequency modes for ITM risk detection.
 
-    Vigilant monitoring system (2026-01-26: optimized for WebSocket streaming):
-    - NORMAL: 10-second check interval (> 0.3% from strike)
-    - VIGILANT: 1-second monitoring (0.1% - 0.3% from strike)
+    Adaptive vigilant monitoring system (Updated 2026-01-28):
+    - NORMAL: 10-second check interval (< 60% of original cushion consumed)
+    - VIGILANT: 1-second monitoring (60-75% cushion consumed)
 
-    When price enters VIGILANT zone, we watch closely but don't act.
-    This avoids unnecessary closes when price bounces back.
-    Only close when price actually reaches 0.1% (DANGER zone).
+    Thresholds are adaptive — they scale with the original distance from entry
+    price to short strikes. Falls back to static 0.5% from strike if
+    entry_underlying_price is unavailable.
+
+    When price enters VIGILANT zone, we watch closely. The challenged roll
+    trigger (75% cushion consumed) fires from should_roll_shorts().
+    Emergency close at 0.1% from strike (absolute safety floor, stays static).
 
     Note: Both intervals are safe because price data comes from WebSocket cache
     (no API calls), eliminating rate limit concerns. Reduced NORMAL from 30s to 10s

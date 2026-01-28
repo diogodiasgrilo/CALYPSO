@@ -748,13 +748,24 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     if not interruptible_sleep(retry_interval):
                         break  # Shutdown requested
                 elif monitoring_mode == MonitoringMode.VIGILANT:
-                    # VIGILANT MODE: Price is 0.1%-0.3% from short strike
+                    # VIGILANT MODE: 60-75% cushion consumed (adaptive) or 0.1%-0.5% from strike (static fallback)
                     # Use fast 1-second interval to catch any move toward ITM (WebSocket cache, no API cost)
                     vigilant_interval = monitoring_mode.value  # 1 second
+
+                    # Include cushion % in vigilant heartbeat for real-time visibility
+                    cushion_info = ""
+                    call_consumed = status.get('call_cushion_consumed_pct')
+                    put_consumed = status.get('put_cushion_consumed_pct')
+                    if call_consumed is not None and put_consumed is not None:
+                        # Show the more threatened side prominently
+                        threatened = max(call_consumed, put_consumed)
+                        side = "Call" if call_consumed >= put_consumed else "Put"
+                        cushion_info = f" | {side} cushion: {threatened:.0f}% consumed (roll at 75%)"
+
                     trade_logger.log_event(
                         f"{mode_prefix}⚠️ VIGILANT | State: {status['state']} | "
-                        f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
-                        f"Next check in {vigilant_interval}s (ITM proximity monitoring)"
+                        f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f}{cushion_info} | "
+                        f"Next check in {vigilant_interval}s"
                     )
                     if not interruptible_sleep(vigilant_interval):
                         break  # Shutdown requested

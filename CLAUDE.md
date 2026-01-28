@@ -117,12 +117,14 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
-- **Version:** 2.0.0 (Updated 2026-01-28 with 10 WebSocket reliability fixes)
+- **Version:** 2.0.0 (Updated 2026-01-28 with adaptive roll trigger + WebSocket fixes)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
 - **Long Exit:** 60 DTE threshold - close everything when longs reach this point
 - **Shorts Roll:** Weekly (Thursday/Friday) to next week's expiry for continued premium collection
+- **Adaptive Roll Trigger:** Rolls shorts when 75% of original cushion is consumed (scales with market conditions)
+- **Immediate Re-Entry:** After scheduled debit skip, enters next-week shorts immediately (no 19-hour gap)
 - **Recenter:** When SPY moves ±$5 from initial strike, rebalance long straddle strikes
 - **Edge cases:** 55 analyzed, all resolved (see `docs/DELTA_NEUTRAL_EDGE_CASES.md`)
 - **Full specification:** See [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md)
@@ -264,10 +266,10 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail →
 - Market close notification (at 4:00 PM ET or early close)
 - Holiday notifications (weekday market closures)
 
-**Delta Neutral ITM Monitoring Alerts** (2026-01-26):
-- VIGILANT_ENTERED (HIGH): Price enters 0.1%-0.3% danger zone near short strike
-- VIGILANT_EXITED (LOW): Price moves back to safe zone (>0.3% from strikes)
-- ITM_RISK_CLOSE (CRITICAL): Shorts emergency closed at 0.1% threshold
+**Delta Neutral ITM Monitoring Alerts** (Updated 2026-01-28):
+- VIGILANT_ENTERED (HIGH): 60-75% of original cushion consumed (adaptive threshold)
+- VIGILANT_EXITED (LOW): Cushion consumption drops below 60% (back to safe zone)
+- ITM_RISK_CLOSE (CRITICAL): Shorts emergency closed at 0.1% from strike (absolute safety floor)
 - ROLL_COMPLETED (MEDIUM): Weekly shorts rolled successfully
 - RECENTER (MEDIUM): Long straddle recentered to new ATM strike
 
