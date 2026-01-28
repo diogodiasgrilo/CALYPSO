@@ -145,20 +145,25 @@ def get_live_option_prices(client, spy_uic: int, spy_price: float, dte: int = 9)
     expirations = client.get_option_expirations(spy_uic)
     today = datetime.now().date()
 
-    # Find next Friday with 7+ DTE
-    friday_exp = None
+    # Build list of Friday expirations with 7+ DTE, then sort by DTE
+    friday_candidates = []
     for exp_data in expirations:
         exp_str = exp_data.get("Expiry", "")[:10]
         if exp_str:
             exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
             days_to_exp = (exp_date - today).days
             if exp_date.weekday() == 4 and days_to_exp >= 7:
-                friday_exp = exp_data
-                break
+                friday_candidates.append((days_to_exp, exp_str, exp_data))
 
-    if not friday_exp:
-        print("  WARNING: Could not find Friday expiration")
+    # Sort by DTE to get the NEAREST Friday
+    friday_candidates.sort(key=lambda x: x[0])
+
+    if not friday_candidates:
+        print("  WARNING: Could not find Friday expiration with 7+ DTE")
         return prices
+
+    nearest_dte, nearest_expiry, friday_exp = friday_candidates[0]
+    print(f"  Using expiration: {nearest_expiry} ({nearest_dte} DTE)")
 
     # Get all options for this expiration
     specific_options = friday_exp.get("SpecificOptions", [])
