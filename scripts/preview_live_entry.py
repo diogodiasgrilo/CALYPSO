@@ -363,22 +363,22 @@ def main():
     print("=" * 70)
     print(f"""
 LONG STRADDLE (Hedge):
-  Buy 1 SPY ${call_option['strike']:.0f} Call @ ${call_ask:.2f} = ${call_ask * 100:.2f}
-  Buy 1 SPY ${put_option['strike']:.0f} Put  @ ${put_ask:.2f} = ${put_ask * 100:.2f}
+  Buy {position_size} SPY ${call_option['strike']:.0f} Call @ ${call_ask:.2f} = ${call_ask * 100 * position_size:.2f}
+  Buy {position_size} SPY ${put_option['strike']:.0f} Put  @ ${put_ask:.2f} = ${put_ask * 100 * position_size:.2f}
   Expiry: {call_option['expiry'][:10]} ({dte} DTE)
   Total Cost: ${long_straddle_cost:,.2f}
   Weekly Theta Decay: -${weekly_theta:.2f}
 
 SHORT STRANGLE (Income):
-  Sell 1 SPY ${final_call['strike']:.0f} Call @ ${final_call['bid']:.2f} = ${final_call['premium']:.2f}
-  Sell 1 SPY ${final_put['strike']:.0f} Put  @ ${final_put['bid']:.2f} = ${final_put['premium']:.2f}
+  Sell {position_size} SPY ${final_call['strike']:.0f} Call @ ${final_call['bid']:.2f} = ${final_call['premium']:.2f}
+  Sell {position_size} SPY ${final_put['strike']:.0f} Put  @ ${final_put['bid']:.2f} = ${final_put['premium']:.2f}
   Expiry: {weekly_expiry} ({weekly_dte} DTE)
   Total Premium: ${final_gross:.2f}
 
 WEEKLY P&L PROJECTION:
   Gross Premium:     +${final_gross:>8.2f}
   Weekly Theta:      -${weekly_theta:>8.2f}
-  Round-Trip Fees:   -${total_round_trip_fees:>8.2f}  (2 legs × $4.10 = $8.20)
+  Round-Trip Fees:   -${total_round_trip_fees:>8.2f}  ({position_size} contracts × 2 legs × $4.10 round-trip)
   {'─' * 30}
   NET Premium:       +${final_net:>8.2f}
 
