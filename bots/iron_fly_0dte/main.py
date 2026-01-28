@@ -370,8 +370,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                 # Use different intervals based on state for optimal responsiveness
                 status = strategy.get_status_summary()
                 if status['state'] == 'DailyComplete':
-                    # Daily trading done - just check every 60s until market close
-                    if not interruptible_sleep(60):
+                    # Daily trading done - use hourly heartbeats until market close
+                    # No need to check frequently since we won't trade again today
+                    if not interruptible_sleep(3600):  # 1 hour
                         break
                 elif status.get('position_active'):
                     # POSITION OPEN: Use 2s interval for faster stop-loss reaction
