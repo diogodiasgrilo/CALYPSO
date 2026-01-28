@@ -48,9 +48,10 @@ def main():
 
     try:
         from shared.saxo_client import SaxoClient
-        from shared.config_loader import get_config_loader
+        from shared.config_loader import ConfigLoader
 
-        config_loader = get_config_loader("bots/delta_neutral/config")
+        # Load config from Delta Neutral bot's config directory
+        config_loader = ConfigLoader("bots/delta_neutral/config/config.json")
         config = config_loader.load_config()
         client = SaxoClient(config)
         client.authenticate()
