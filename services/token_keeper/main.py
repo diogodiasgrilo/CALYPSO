@@ -128,15 +128,31 @@ def seed_cache_from_secret_manager(coordinator: TokenCoordinator, config: dict) 
                 secret_data = get_secret("calypso-saxo-credentials")
                 if secret_data:
                     secret_json = json.loads(secret_data)
-                    env_secret = secret_json.get(environment, {})
 
-                    access_token = env_secret.get("access_token") or access_token
-                    refresh_token = env_secret.get("refresh_token") or refresh_token
-                    token_expiry = env_secret.get("token_expiry") or token_expiry
-                    app_key = env_secret.get("app_key") or app_key
-                    app_secret = env_secret.get("app_secret") or app_secret
+                    # Secret Manager structure is FLAT (not nested by environment):
+                    # {"app_key": "...", "access_token": "...", "refresh_token": "...", "token_expiry": "..."}
+                    # NOT: {"live": {...}, "sim": {...}}
+                    # This is because we only store credentials for the active environment
 
-                    logger.info("Loaded tokens directly from Secret Manager")
+                    # Try flat structure first (current format)
+                    if "access_token" in secret_json:
+                        access_token = secret_json.get("access_token") or access_token
+                        refresh_token = secret_json.get("refresh_token") or refresh_token
+                        token_expiry = secret_json.get("token_expiry") or token_expiry
+                        app_key = secret_json.get("app_key") or app_key
+                        app_secret = secret_json.get("app_secret") or app_secret
+                        logger.info("Loaded tokens from Secret Manager (flat structure)")
+                    # Fall back to nested structure (legacy format)
+                    elif environment in secret_json:
+                        env_secret = secret_json.get(environment, {})
+                        access_token = env_secret.get("access_token") or access_token
+                        refresh_token = env_secret.get("refresh_token") or refresh_token
+                        token_expiry = env_secret.get("token_expiry") or token_expiry
+                        app_key = env_secret.get("app_key") or app_key
+                        app_secret = env_secret.get("app_secret") or app_secret
+                        logger.info(f"Loaded tokens from Secret Manager (nested {environment} structure)")
+                    else:
+                        logger.warning(f"Secret Manager data has unexpected structure: {list(secret_json.keys())}")
             except Exception as e:
                 logger.error(f"Failed to load from Secret Manager: {e}")
 
