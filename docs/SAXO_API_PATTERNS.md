@@ -1,6 +1,6 @@
 # Saxo Bank OpenAPI - Critical Patterns and Gotchas
 
-**Last Updated:** 2026-01-26
+**Last Updated:** 2026-01-28
 **Purpose:** Document proven patterns for Saxo API integration to avoid repeating mistakes.
 
 ---
@@ -17,6 +17,7 @@
 8. [Common Mistakes](#8-common-mistakes)
 9. [Chart API for Historical OHLC Data](#9-chart-api-for-historical-ohlc-data)
 10. [Extended Hours Trading](#10-extended-hours-trading-pre-market--after-hours)
+11. [WebSocket Reliability Fixes (2026-01-28)](#11-websocket-reliability-fixes-2026-01-28)
 
 ---
 
@@ -673,6 +674,157 @@ if is_saxo_price_available():  # True only between 7 AM - 5 PM ET
 
 ---
 
+## 11. WebSocket Reliability Fixes (2026-01-28)
+
+### Background
+
+On 2026-01-27, production trading experienced multiple order failures due to WebSocket streaming issues that went undetected. This section documents the 10 critical fixes implemented to prevent these issues.
+
+**Root Cause Analysis:** The WebSocket cache was returning stale data after disconnects, and the system had no way to detect when the WebSocket was unhealthy or when cached data was too old.
+
+### Fix #1: Cache Invalidation on Disconnect (CONN-007)
+
+**Problem:** When WebSocket disconnected, cached prices remained in `_price_cache`. Bot continued using stale data after reconnection.
+
+**Fix:** Clear cache in all disconnect paths:
+```python
+def _on_ws_close(self, ws, close_status_code, close_msg):
+    self._clear_cache()  # NEW: Prevent stale data usage
+
+def _on_ws_error(self, ws, error):
+    self._clear_cache()  # NEW: Prevent stale data usage
+```
+
+### Fix #2: Timestamp-Based Staleness Detection (CONN-008)
+
+**Problem:** Cached data could be arbitrarily old with no way to detect it.
+
+**Fix:** Each cache entry now includes a timestamp:
+```python
+# Cache format changed from:
+self._price_cache[uic] = quote_data
+
+# To:
+self._price_cache[uic] = {'timestamp': datetime.now(), 'data': quote_data}
+
+# get_quote() now checks:
+cache_age = (datetime.now() - entry['timestamp']).total_seconds()
+if cache_age > 60:  # Max 60 seconds
+    # Force REST fallback
+```
+
+### Fix #3: Limit Order $0 Price Bug (CONN-014)
+
+**Problem:** Python truthiness: `if limit_price:` evaluates False when `limit_price=0.0`.
+
+**Fix:** Explicit None/zero check:
+```python
+# OLD (buggy):
+if order_type == OrderType.LIMIT and limit_price:
+    # Never executed when limit_price=0.0!
+
+# NEW (fixed):
+if limit_price is None or limit_price <= 0:
+    raise ValueError("Limit price must be positive")
+```
+
+### Fix #4: Never Use $0.00 Fallback Price (CONN-015)
+
+**Problem:** When quote failed AND `leg_price` was $0, bot placed order at $0.00.
+
+**Fix:** Skip to retry if both are invalid:
+```python
+if quote is None or not self._validate_quote(quote):
+    if leg_price and leg_price > 0:
+        price = leg_price  # Use fallback
+    else:
+        logger.warning("DATA-004: Both quote and leg_price invalid, skipping to retry")
+        continue  # Don't place order at $0
+```
+
+### Fix #5: WebSocket Health Monitoring (CONN-009)
+
+**Problem:** No way to detect if WebSocket thread died silently.
+
+**Fix:** New health check method:
+```python
+def is_websocket_healthy(self) -> bool:
+    """Check if WebSocket is alive and receiving data."""
+    if not self._ws_thread or not self._ws_thread.is_alive():
+        return False
+    if self._last_message_time:
+        age = (datetime.now() - self._last_message_time).total_seconds()
+        if age > 60:  # No message in 60s = unhealthy
+            return False
+    return True
+```
+
+### Fix #6: Heartbeat Timeout Detection (CONN-010)
+
+**Problem:** Saxo sends heartbeats every ~15 seconds. Zombie connections showed no heartbeat.
+
+**Fix:** Track heartbeat timestamps:
+```python
+# On heartbeat received:
+self._last_heartbeat_time = datetime.now()
+
+# In health check:
+if self._last_heartbeat_time:
+    age = (datetime.now() - self._last_heartbeat_time).total_seconds()
+    if age > 60:  # Saxo sends every 15s, so 60s = zombie
+        return False
+```
+
+### Fix #8: Thread-Safe Cache Locking (CONN-012)
+
+**Problem:** Race condition between WebSocket callback thread and main trading thread.
+
+**Fix:** Mutex for all cache operations:
+```python
+self._price_cache_lock = threading.Lock()
+
+# All cache read/write:
+with self._price_cache_lock:
+    self._price_cache[uic] = data
+
+with self._price_cache_lock:
+    return self._price_cache.get(uic)
+```
+
+### Fix #10: Binary Parser Bounds Checking (CONN-011)
+
+**Problem:** Malformed message could cause array index out of bounds.
+
+**Fix:** Validate lengths at each step:
+```python
+def _decode_binary_ws_message(self, raw):
+    if len(raw) < 12:  # Minimum header size
+        return None
+    # Check bounds before each unpack...
+    if pos + ref_id_len > len(raw):
+        return None
+```
+
+### Impact
+
+These fixes apply to ALL bots using `SaxoClient`:
+- **Delta Neutral:** ITM monitoring now reliable at 1-second intervals
+- **Iron Fly:** Price updates for P&L tracking now work correctly
+- **Rolling Put Diagonal:** Entry price checks use fresh data
+
+### Testing
+
+22 unit tests in `scripts/test_websocket_fixes.py` validate all fixes:
+```bash
+python scripts/test_websocket_fixes.py
+```
+
+### Reference
+
+Full edge case documentation: [DELTA_NEUTRAL_EDGE_CASES.md](./DELTA_NEUTRAL_EDGE_CASES.md) (CONN-007 through CONN-016)
+
+---
+
 ## Quick Reference: File Locations
 
 | Pattern | File | Line(s) |
@@ -697,7 +849,8 @@ if is_saxo_price_available():  # True only between 7 AM - 5 PM ET
 
 ---
 
-**Document Version:** 1.3
+**Document Version:** 1.4
 **Created:** 2026-01-23
-**Updated:** 2026-01-26 - Added WebSocket binary parsing documentation (Section 5), Mistake 7
+**Updated:** 2026-01-28 - Added Section 11: WebSocket Reliability Fixes (10 critical fixes)
+**Previous Update:** 2026-01-26 - Added WebSocket binary parsing documentation (Section 5), Mistake 7
 **Author:** Claude (learned from production bugs)

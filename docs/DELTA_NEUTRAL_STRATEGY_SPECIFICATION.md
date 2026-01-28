@@ -1,8 +1,16 @@
 # Delta Neutral Strategy Specification
 
 **Strategy Source:** Brian Terry (Theta Profits)
-**Last Updated:** 2026-01-27
+**Bot Version:** 2.0.0
+**Last Updated:** 2026-01-28
 **Research Date:** 2026-01-27
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 2.0.0 | 2026-01-28 | 10 WebSocket reliability fixes (see DELTA_NEUTRAL_EDGE_CASES.md CONN-007 through CONN-016) |
+| 1.0.0 | 2026-01-23 | Initial production release with proactive restart check |
 
 ## Overview
 

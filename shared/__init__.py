@@ -15,7 +15,7 @@ This package contains common utilities used by all trading strategies:
 - alert_service: SMS/Email alerting via Google Cloud Pub/Sub
 - position_registry: Multi-bot position ownership tracking (for same underlying)
 
-Last Updated: 2026-01-27 (Added PositionRegistry for multi-bot same-underlying support, Token Keeper service)
+Last Updated: 2026-01-28 (10 WebSocket reliability fixes - CONN-007 through CONN-016)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -169,6 +169,44 @@ Full documentation: docs/SAXO_API_PATTERNS.md
    get_vix_price() - eliminating rate limit concerns for 1-second monitoring.
 
    See: docs/SAXO_API_PATTERNS.md Section 5
+
+8. WEBSOCKET RELIABILITY (2026-01-28)
+   ------------------------------------
+   10 critical fixes for production WebSocket streaming (CONN-007 to CONN-016):
+
+   Fix #1 (CONN-007): Clear cache on disconnect
+   - _clear_cache() called in all disconnect paths
+   - Prevents using stale data after reconnection
+
+   Fix #2 (CONN-008): Timestamp-based staleness detection
+   - Cache format: {'timestamp': datetime, 'data': quote_data}
+   - Rejects data older than 60 seconds, forces REST fallback
+
+   Fix #3 (CONN-014): Limit order $0 price bug
+   - Changed: `if limit_price:` to `if limit_price is None or limit_price <= 0:`
+   - Python truthiness treats 0.0 as False
+
+   Fix #4 (CONN-015): Never use $0.00 fallback price
+   - If quote invalid AND leg_price is $0, skip to retry
+   - Prevents placing orders at $0.00
+
+   Fix #5 (CONN-009): WebSocket health monitoring
+   - is_websocket_healthy() checks thread alive, last message < 60s
+   - get_quote() forces REST fallback if unhealthy
+
+   Fix #6 (CONN-010): Heartbeat timeout detection
+   - Track _last_heartbeat_time (Saxo sends every ~15s)
+   - Connection is zombie if no heartbeat in 60+ seconds
+
+   Fix #8 (CONN-012): Thread-safe cache locking
+   - _price_cache_lock mutex protects all cache operations
+   - Prevents race conditions between threads
+
+   Fix #10 (CONN-011): Binary parser bounds checking
+   - Validates message length at each parsing step
+   - Returns None on parse error instead of crashing
+
+   See: docs/DELTA_NEUTRAL_EDGE_CASES.md for all 10 fixes
 ================================================================================
 """
 

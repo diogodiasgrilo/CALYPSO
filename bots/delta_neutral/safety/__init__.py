@@ -8,7 +8,8 @@ but this documentation helps future developers understand the safety systems.
 For detailed edge case analysis, see: docs/DELTA_NEUTRAL_EDGE_CASES.md
 
 =============================================================================
-SAFETY ARCHITECTURE OVERVIEW (44 Edge Cases - 100% Coverage)
+SAFETY ARCHITECTURE OVERVIEW (55 Edge Cases - 100% Coverage)
+Bot Version: 2.0.0 (Updated 2026-01-28 with 10 WebSocket reliability fixes)
 =============================================================================
 
 1. CIRCUIT BREAKER (strategy.py ~1053-1127)
@@ -105,6 +106,21 @@ CONN-006: Rate Limiting (saxo_client.py ~860)
    - 429 detection with exponential backoff (1s, 2s, 4s, 8s, 16s)
    - Respects Retry-After header if present
    - Max 5 retries before failing
+
+CONN-007 to CONN-016: WebSocket Reliability (saxo_client.py) [Added 2026-01-28]
+   CONN-007: Cache cleared on disconnect (_clear_cache in all disconnect paths)
+   CONN-008: Timestamp-based staleness detection (60s max age, then REST fallback)
+   CONN-009: WebSocket health monitoring (is_websocket_healthy() checks thread/heartbeat)
+   CONN-010: Heartbeat timeout detection (_last_heartbeat_time, 60s threshold)
+   CONN-011: Binary parser bounds checking (validates lengths at each step)
+   CONN-012: Thread-safe cache locking (_price_cache_lock mutex)
+   CONN-013: Dual format handling (snapshot Data[] vs streaming ref_id format)
+   CONN-014: Limit order $0 price fix (limit_price is None or <= 0)
+   CONN-015: Never use $0 fallback price (skip to retry if both quote and leg_price zero)
+   CONN-016: Last message time tracking (_last_message_time for health check)
+
+   These fixes address production issues from 2026-01-27 trading session.
+   See: docs/DELTA_NEUTRAL_EDGE_CASES.md for detailed documentation.
 
 ORDER EXECUTION (ORDER-*)
 -------------------------
@@ -289,7 +305,8 @@ SAFETY CHECK ORDER IN run_strategy_check() (~8350+)
 11. Normal strategy logic proceeds...
 
 =============================================================================
-Last Updated: 2026-01-26
+Last Updated: 2026-01-28
+Bot Version: 2.0.0 (55 edge cases documented)
 =============================================================================
 """
 

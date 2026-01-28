@@ -117,12 +117,14 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
+- **Version:** 2.0.0 (Updated 2026-01-28 with 10 WebSocket reliability fixes)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
 - **Long Exit:** 60 DTE threshold - close everything when longs reach this point
 - **Shorts Roll:** Weekly (Thursday/Friday) to next week's expiry for continued premium collection
 - **Recenter:** When SPY moves ±$5 from initial strike, rebalance long straddle strikes
+- **Edge cases:** 55 analyzed, all resolved (see `docs/DELTA_NEUTRAL_EDGE_CASES.md`)
 - **Full specification:** See [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md)
 
 #### Delta Neutral Key Logic (2026-01-23)
@@ -818,7 +820,7 @@ SCRIPT
 | `docs/IRON_FLY_EDGE_CASES.md` | 63 edge cases analyzed for Iron Fly bot |
 | `docs/MEIC_STRATEGY_SPECIFICATION.md` | **MEIC strategy** - Full Tammy Chambless MEIC implementation spec |
 | `docs/MEIC_EDGE_CASES.md` | 75 edge cases analyzed for MEIC bot |
-| `docs/DELTA_NEUTRAL_EDGE_CASES.md` | Edge cases for Delta Neutral bot |
+| `docs/DELTA_NEUTRAL_EDGE_CASES.md` | **55 edge cases** for Delta Neutral bot (updated 2026-01-28) |
 | `docs/ROLLING_PUT_DIAGONAL_EDGE_CASES.md` | Edge cases for Rolling Put Diagonal bot |
 | `docs/ALERTING_SETUP.md` | SMS/Email alert system deployment guide |
 | `docs/DEPLOYMENT.md` | Deployment procedures |

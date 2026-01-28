@@ -1,8 +1,8 @@
 # Delta Neutral Bot - Edge Case Analysis Report
 
-**Analysis Date:** 2026-01-22
+**Analysis Date:** 2026-01-22 (Updated 2026-01-28)
 **Analyst:** Claude (Devil's Advocate Review)
-**Bot Version:** 3.1.0
+**Bot Version:** 2.0.0
 **Status:** Living Document - Update as fixes are implemented
 
 ---
@@ -11,12 +11,14 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 45
-**Well-Handled/Resolved:** 45 (100%)
+**Total Scenarios Analyzed:** 55
+**Well-Handled/Resolved:** 55 (100%)
 **Medium Risk:** 0 (0%)
 **High Risk:** 0 (0%) ✅
 
 🎉 **ALL EDGE CASES RESOLVED!**
+
+**Major Update (2026-01-28):** Added 10 new WebSocket/quote edge cases (CONN-007 through CONN-016) based on production issues encountered on 2026-01-27.
 
 ---
 
@@ -96,6 +98,116 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Status** | RESOLVED |
 | **Resolution** | Added 429 detection in `_make_request()` in `saxo_client.py`. On rate limit: tracks retry count, implements exponential backoff (1s, 2s, 4s, 8s, 16s), respects Retry-After header if present, retries up to 5 times before failing. Instance variables: `_rate_limit_backoff_until`, `_rate_limit_retry_count`, `_rate_limit_max_retries`, `_rate_limit_base_delay`. Resets on successful request. |
 | **Fixed In** | 2026-01-22 |
+
+### 1.7 WebSocket Cache Not Cleared on Disconnect
+| | |
+|---|---|
+| **ID** | CONN-007 |
+| **Trigger** | WebSocket disconnects, bot continues using stale cached prices |
+| **Current Handling** | **Cache invalidation** on disconnect - `_clear_cache()` called in all disconnect paths. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_clear_cache()` calls in `_cleanup_websocket()`, `_on_ws_close()`, `_on_ws_error()`, and `_reconnect_with_backoff()` in `saxo_client.py`. Ensures stale data is never used after reconnection. |
+| **Fixed In** | 2026-01-28 |
+
+### 1.8 WebSocket Cache Staleness Not Detected
+| | |
+|---|---|
+| **ID** | CONN-008 |
+| **Trigger** | Cached price data is old but still used for order placement |
+| **Current Handling** | **Timestamp-based staleness detection** - each cache entry includes timestamp, rejected if >60s old. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Changed cache format to `{'timestamp': datetime, 'data': quote_data}` in `saxo_client.py`. `get_quote()` checks timestamp age before returning cached data. If >60 seconds old, forces REST API fallback. Prevents using outdated prices. |
+| **Fixed In** | 2026-01-28 |
+
+### 1.9 WebSocket Thread Dies Silently
+| | |
+|---|---|
+| **ID** | CONN-009 |
+| **Trigger** | WebSocket thread crashes but bot doesn't detect it |
+| **Current Handling** | **Health monitoring** - `is_websocket_healthy()` checks thread alive, last message time, last heartbeat time. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `is_websocket_healthy()` method in `saxo_client.py`. Checks: (1) thread is alive, (2) last message <60s ago via `_last_message_time`, (3) last heartbeat <60s ago via `_last_heartbeat_time`. `get_quote()` forces REST fallback if WebSocket unhealthy. |
+| **Fixed In** | 2026-01-28 |
+
+### 1.10 WebSocket Heartbeat Timeout Not Detected
+| | |
+|---|---|
+| **ID** | CONN-010 |
+| **Trigger** | Saxo stops sending heartbeats but connection appears alive (zombie connection) |
+| **Current Handling** | **Heartbeat timeout detection** - tracks `_last_heartbeat_time`, alerts if >60s without heartbeat. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_last_heartbeat_time` tracking in `saxo_client.py`. Updated on every heartbeat message. Saxo sends heartbeats every ~15 seconds. If no heartbeat in 60+ seconds, `is_websocket_healthy()` returns False, forcing REST fallback. |
+| **Fixed In** | 2026-01-28 |
+
+### 1.11 WebSocket Binary Message Parsing Overflow
+| | |
+|---|---|
+| **ID** | CONN-011 |
+| **Trigger** | Malformed binary WebSocket message causes bounds overflow |
+| **Current Handling** | **Bounds checking** in binary parser - validates message length at each parsing step. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added comprehensive bounds checking in `_decode_binary_ws_message()` in `saxo_client.py`. Validates: minimum header length (12 bytes), ref_id_len within bounds, payload_size within remaining data. Returns None on any parse error instead of crashing. |
+| **Fixed In** | 2026-01-28 |
+
+### 1.12 WebSocket Cache Race Condition
+| | |
+|---|---|
+| **ID** | CONN-012 |
+| **Trigger** | Multiple threads reading/writing cache simultaneously |
+| **Current Handling** | **Thread-safe locking** - `_price_cache_lock` mutex protects all cache operations. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_price_cache_lock = threading.Lock()` in `saxo_client.py`. All cache read/write operations wrapped in `with self._price_cache_lock:`. Prevents race conditions between WebSocket callback thread and main trading thread. |
+| **Fixed In** | 2026-01-28 |
+
+### 1.13 WebSocket Streaming Update Format Mismatch
+| | |
+|---|---|
+| **ID** | CONN-013 |
+| **Trigger** | Initial snapshot vs streaming update have different JSON structures |
+| **Current Handling** | **Dual format handling** - detects snapshot (Data array) vs update (ref_id format) messages. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Updated `_handle_streaming_message()` in `saxo_client.py`. Initial snapshot: `{"Data": [{"Uic": 123, ...}]}`. Streaming updates: `{"Quote": {...}}` with UIC extracted from ref_id as `ref_<UIC>`. Both formats now correctly update the cache. |
+| **Fixed In** | 2026-01-27 |
+
+### 1.14 Limit Order with $0.00 Price
+| | |
+|---|---|
+| **ID** | CONN-014 |
+| **Trigger** | Python truthiness treats `limit_price=0.0` as False, omits price from order |
+| **Current Handling** | **Explicit None check** - uses `if limit_price is None or limit_price <= 0` instead of `if limit_price`. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Fixed validation in `place_order()` in `saxo_client.py` at line 2320. Changed from `if order_type == OrderType.LIMIT and limit_price:` to `if limit_price is None or limit_price <= 0:` followed by raising ValueError. Prevents "OrderPrice must be set" errors. |
+| **Fixed In** | 2026-01-28 |
+
+### 1.15 $0.00 Fallback Price Used for Order
+| | |
+|---|---|
+| **ID** | CONN-015 |
+| **Trigger** | Quote invalid AND leg_price is $0, bot uses $0.00 as fallback |
+| **Current Handling** | **Skip to next retry** if both quote and leg_price are invalid/zero. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Updated `strategy.py` order placement logic. If quote fetch fails AND `leg_price` is 0.0, logs DATA-004 warning and continues to next retry instead of placing order at $0.00. Only uses leg_price as fallback when it's a valid non-zero value. |
+| **Fixed In** | 2026-01-28 |
+
+### 1.16 WebSocket Message Time Not Tracked
+| | |
+|---|---|
+| **ID** | CONN-016 |
+| **Trigger** | No way to know when last WebSocket message was received |
+| **Current Handling** | **Last message timestamp** - `_last_message_time` updated on every message for health monitoring. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_last_message_time` tracking in `saxo_client.py`. Updated on every message received (data or heartbeat). Used by `is_websocket_healthy()` to detect stale connections. If no message in 60+ seconds, connection considered unhealthy. |
+| **Fixed In** | 2026-01-28 |
 
 ---
 
@@ -546,14 +658,14 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 | Category | Total | ✅ Resolved | ⚠️ Medium | 🔴 High |
 |----------|-------|-------------|-----------|---------|
-| Connection/API | 6 | 6 | 0 | 0 |
+| Connection/API | 16 | 16 | 0 | 0 |
 | Order Execution | 7 | 7 | 0 | 0 |
 | Position State | 6 | 6 | 0 | 0 |
 | Market Conditions | 6 | 6 | 0 | 0 |
 | Timing/Race | 7 | 7 | 0 | 0 |
 | State Machine | 4 | 4 | 0 | 0 |
 | Data Integrity | 6 | 6 | 0 | 0 |
-| **TOTAL** | **45** | **45** | **0** | **0** |
+| **TOTAL** | **55** | **55** | **0** | **0** |
 
 🎉 **100% COVERAGE ACHIEVED!**
 
@@ -595,6 +707,17 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-22 | **44 EDGE CASES - 100% COVERAGE ACHIEVED** | Claude |
 | 2026-01-25 | RESOLVED TIME-007: Added proactive restart check to prevent wasting theta on shorts | Claude |
 | 2026-01-25 | **45 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
+| 2026-01-28 | RESOLVED CONN-007: Added cache invalidation on WebSocket disconnect | Claude |
+| 2026-01-28 | RESOLVED CONN-008: Added timestamp-based cache staleness detection (60s max) | Claude |
+| 2026-01-28 | RESOLVED CONN-009: Added WebSocket health monitoring (thread alive check) | Claude |
+| 2026-01-28 | RESOLVED CONN-010: Added heartbeat timeout detection (60s threshold) | Claude |
+| 2026-01-28 | RESOLVED CONN-011: Added bounds checking in binary message parser | Claude |
+| 2026-01-28 | RESOLVED CONN-012: Added thread-safe cache locking (_price_cache_lock) | Claude |
+| 2026-01-28 | RESOLVED CONN-013: Fixed dual format handling for snapshot vs streaming updates | Claude |
+| 2026-01-28 | RESOLVED CONN-014: Fixed $0 limit price validation (Python truthiness bug) | Claude |
+| 2026-01-28 | RESOLVED CONN-015: Added skip-to-retry when both quote and leg_price are $0 | Claude |
+| 2026-01-28 | RESOLVED CONN-016: Added _last_message_time tracking for health monitoring | Claude |
+| 2026-01-28 | **55 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 
 ---
 
@@ -621,5 +744,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 1.1
-**Last Updated:** 2026-01-25
+**Document Version:** 2.0
+**Last Updated:** 2026-01-28

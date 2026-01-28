@@ -2,6 +2,9 @@
 """
 main.py - Delta Neutral Trading Bot Entry Point
 
+Version: 2.0.0
+Last Updated: 2026-01-28
+
 This is the main entry point for the Delta Neutral Trading Bot.
 It orchestrates all components and runs the main trading loop.
 
@@ -11,7 +14,12 @@ Strategy Summary:
 2. Sell weekly Short Strangles at 1.5-2x expected move
 3. Recenter if SPY moves 5 points from initial strike
 4. Roll weekly shorts on Friday
-5. Exit when 30-60 DTE remains on Longs
+5. Exit when 60 DTE remains on Longs
+
+Version History:
+----------------
+2.0.0 (2026-01-28): 10 WebSocket reliability fixes (CONN-007 to CONN-016)
+1.0.0 (2026-01-23): Initial production release
 
 Usage:
 ------
@@ -23,7 +31,6 @@ Usage:
     python main.py --config my.json   # Use custom config file
 
 Author: Trading Bot Developer
-Date: 2024
 """
 
 import os
@@ -232,7 +239,7 @@ def print_banner():
     ║         Strategy: SPY Long Straddle + Weekly Short Strangles  ║
     ║         5-Point Recentering Rule                              ║
     ║                                                               ║
-    ║         Version: 1.0.0                                        ║
+    ║         Version: 2.0.0                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝

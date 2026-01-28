@@ -1,6 +1,9 @@
 """
 Delta Neutral Strategy Bot (Brian Terry's Strategy from Theta Profits)
 
+Version: 2.0.0
+Last Updated: 2026-01-28
+
 SPY Long Straddle + Weekly Short Strangles with 5-Point Recentering
 
 Strategy Overview:
@@ -25,9 +28,24 @@ Configuration:
 - weekly_strangle_multiplier_max: 2.0 (max multiplier for strike distance)
 - recenter_threshold_points: 5.0 (recenter when SPY moves ±$5)
 
-Updated: 2026-01-26 (Code Audit - fixed config key name)
+Version History:
+- 2.0.0 (2026-01-28): Major WebSocket reliability fixes
+  - 10 critical fixes for WebSocket price streaming
+  - Cache invalidation on disconnect
+  - Timestamp-based staleness detection (60s max)
+  - Thread-safe cache access with locking
+  - Binary message parser bounds checking
+  - Limit order $0 price validation fix
+  - WebSocket health monitoring
+  - Heartbeat timeout detection
+- 1.0.0 (2026-01-23): Initial production release
+  - Proactive restart check logic
+  - 1% weekly target return mode
+  - Config key standardization
 """
+
+__version__ = "2.0.0"
 
 from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState
 
-__all__ = ['DeltaNeutralStrategy', 'StrategyState']
+__all__ = ['DeltaNeutralStrategy', 'StrategyState', '__version__']
