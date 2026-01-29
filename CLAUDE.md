@@ -40,6 +40,51 @@ services/             # Standalone services (independent of trading bots)
 
 cloud_functions/      # Google Cloud Functions
   alert_processor/    # Processes alerts from Pub/Sub, sends SMS/Email
+
+scripts/              # Utility scripts (see scripts/README.md for full list)
+  preview_live_entry.py    # PRIMARY: Shows what bot would do right now
+  weekly_projection.py     # Compare multipliers side-by-side with P&L
+  optimal_strike_analysis.py # Deep analysis with historical research
+  check_short_strikes.py   # Quick strike check
+  test_rest_api.py         # API connectivity test (pre-flight check)
+  calculate_net_return.py  # Quick NET return calculation
+```
+
+---
+
+## CRITICAL: Check Existing Scripts First
+
+**BEFORE creating ANY new script (temporary or permanent) for any bot, you MUST:**
+
+1. **Check `scripts/README.md`** - Contains a quick reference table of which script to use for common tasks
+2. **List existing scripts**: `ls scripts/*.py scripts/**/*.py`
+3. **Search for similar functionality**: Many analysis tasks already have dedicated scripts
+
+### Script Quick Reference
+
+| If you want to... | Use this (don't create new!) |
+|-------------------|------------------------------|
+| See what bot would do NOW | `preview_live_entry.py` |
+| Compare premium at different multipliers | `weekly_projection.py` |
+| Deep strategy analysis | `optimal_strike_analysis.py` |
+| Quick strike check | `check_short_strikes.py` |
+| Test API connectivity | `test_rest_api.py` |
+| Calculate NET return | `calculate_net_return.py` |
+| Find optimal symmetric strikes | `find_optimal_mult.py` |
+| Calculate 1% target strikes | `calculate_1pct_target.py` |
+
+### If Existing Script Needs Modification
+
+If an existing script is close but needs small changes:
+1. **Modify the existing script** rather than creating a new one
+2. Document the change in git commit message
+3. Update `scripts/README.md` if the script's purpose changed
+
+### Running Scripts on VM
+
+Scripts must run on VM to access Saxo API (local tokens are often expired):
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/SCRIPT_NAME.py'"
 ```
 
 ---

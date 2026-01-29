@@ -18,15 +18,22 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.saxo_client import SaxoClient
-import json
+from shared.config_loader import ConfigLoader
 
 
 def main():
     config_path = "bots/delta_neutral/config/config.json"
-    with open(config_path, "r") as f:
-        config = json.load(f)
+    loader = ConfigLoader(config_path)
+    config = loader.load_config()
 
     client = SaxoClient(config)
+
+    # Authenticate (required for API calls)
+    print("Authenticating with Saxo API...")
+    if not client.authenticate():
+        print("ERROR: Failed to authenticate with Saxo API")
+        return
+
     underlying_uic = config["strategy"]["underlying_uic"]
     target_dte = config["strategy"]["long_straddle_target_dte"]
 
