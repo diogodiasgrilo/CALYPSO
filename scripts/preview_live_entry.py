@@ -399,6 +399,7 @@ def main():
 
         # Track best available at config floor (min_multiplier + 0.05) in case we can't hit target
         # This matches bot logic: track at or near the config floor (e.g., 1.33x + 0.05 = 1.38x)
+        # IMPORTANT: This is INSIDE the for loop - runs for each multiplier tested
         if target_mult <= min_multiplier + 0.05:
             if floor_return is None or net_return > floor_return:
                 floor_call = call_data.copy()
