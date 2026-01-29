@@ -309,8 +309,10 @@ class DeltaNeutralStrategy:
         self.vix_defensive_threshold = self.strategy_config.get("vix_defensive_threshold", 25.0)
         self.target_dte = self.strategy_config.get("long_straddle_target_dte", 120)
         self.exit_dte_threshold = self.strategy_config.get("exit_dte_max", 60)  # Exit when longs reach this DTE
-        self.strangle_multiplier_min = self.strategy_config["weekly_strangle_multiplier_min"]
-        self.strangle_multiplier_max = self.strategy_config["weekly_strangle_multiplier_max"]
+        # Expected move multiplier range for short strangle strikes
+        # Bot scans from max (widest/safest) down to min (tightest allowed)
+        self.strangle_multiplier_max = self.strategy_config.get("short_strangle_multiplier_max", 2.0)
+        self.strangle_multiplier_min = self.strategy_config.get("short_strangle_multiplier_min", 1.0)
         self.weekly_target_return_pct = self.strategy_config.get("weekly_target_return_percent", None)
         self.short_strangle_entry_fee_per_leg = self.strategy_config.get("short_strangle_entry_fee_per_leg", 2.0)
         self.position_size = self.strategy_config["position_size"]
@@ -6313,7 +6315,7 @@ class DeltaNeutralStrategy:
         # Brian Terry: "shorts should be at least the expected move away"
         # Research: 1.0x = 16 delta = 1 standard deviation (tastytrade standard)
         # Going below 1.0x erodes the protection from the long straddle hedge
-        min_mult_absolute = 1.0  # Absolute floor - never go below 1.0x expected move
+        min_mult = self.strangle_multiplier_min  # From config (default 1.0x) - absolute floor
         min_target_return = self.weekly_target_return_pct
 
         # Build strike->data mappings for quick lookup
@@ -6323,7 +6325,7 @@ class DeltaNeutralStrategy:
         all_put_strikes = sorted(put_by_strike.keys(), reverse=True)
 
         logger.info(f"Available strikes: {len(all_call_strikes)} calls, {len(all_put_strikes)} puts")
-        logger.info(f"Scanning from {max_mult}x down to {min_mult_absolute}x for symmetric strikes with >= {min_target_return}% NET return")
+        logger.info(f"Scanning from {max_mult}x down to {min_mult}x for symmetric strikes with >= {min_target_return}% NET return")
 
         final_call = None
         final_put = None
@@ -6338,7 +6340,7 @@ class DeltaNeutralStrategy:
         # This allows us to find the exact highest multiplier that achieves target return
         test_multipliers = []
         mult = max_mult
-        while mult >= min_mult_absolute:
+        while mult >= min_mult:
             test_multipliers.append(round(mult, 2))
             mult -= 0.01
 
@@ -6452,7 +6454,7 @@ class DeltaNeutralStrategy:
 
             if not final_call or not final_put:
                 logger.error("No valid strikes found even at 1.0x floor")
-                logger.error(f"Scanned multipliers from {max_mult}x down to {min_mult_absolute}x")
+                logger.error(f"Scanned multipliers from {max_mult}x down to {min_mult}x")
                 logger.error("Current market conditions do not support any entry")
                 return False
 
@@ -6898,8 +6900,8 @@ class DeltaNeutralStrategy:
             logger.error("Failed to get expected move")
             return False
 
-        # Calculate target strike based on multiplier
-        multiplier = self.short_strangle_multiplier or 1.5
+        # Calculate target strike based on multiplier (use midpoint of configured range)
+        multiplier = (self.strangle_multiplier_min + self.strangle_multiplier_max) / 2
         target_distance = expected_move * multiplier
 
         if need_call:
