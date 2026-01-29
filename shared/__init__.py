@@ -15,7 +15,7 @@ This package contains common utilities used by all trading strategies:
 - alert_service: SMS/Email alerting via Google Cloud Pub/Sub
 - position_registry: Multi-bot position ownership tracking (for same underlying)
 
-Last Updated: 2026-01-29 (Delta Neutral v2.0.2 - safety extension, 1.5% target, 1.33x floor)
+Last Updated: 2026-01-29 (Session capability auto-recovery for VIX NoAccess)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -207,6 +207,28 @@ Full documentation: docs/SAXO_API_PATTERNS.md
    - Returns None on parse error instead of crashing
 
    See: docs/DELTA_NEUTRAL_EDGE_CASES.md for all 10 fixes
+
+9. SESSION CAPABILITY AUTO-RECOVERY (2026-01-29)
+   -----------------------------------------------
+   VIX (CBOE data) requires FullTradingAndChat session capability.
+   When another Saxo session (SaxoTraderGO, Token Keeper) connects,
+   it can steal this capability, causing VIX to return NoAccess.
+
+   Symptoms: VIX REST response shows PriceTypeAsk: NoAccess, PriceTypeBid: NoAccess
+   Root cause: Session capability race condition (last session wins)
+
+   Solution in get_vix_price():
+   1. Detect NoAccess in REST response
+   2. Call signal_session_downgrade() to flag issue
+   3. Call _ensure_session_capabilities(force_check=True) to auto-upgrade
+   4. Retry VIX request after session recovery
+   5. Fall back to Yahoo Finance if recovery fails
+
+   New methods added:
+   - _ensure_session_capabilities(force_check): Check/upgrade session (5 min throttle)
+   - signal_session_downgrade(): Flag for immediate capability check
+
+   See: saxo_client.py get_vix_price() and _ensure_session_capabilities()
 ================================================================================
 """
 

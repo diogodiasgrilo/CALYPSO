@@ -924,3 +924,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 13. **WebSocket Thread Health Monitoring (Fix #5, 2026-01-28)** - Added `is_websocket_healthy()` that checks: thread alive, last message < 60s ago, last heartbeat < 60s ago. `get_quote()` now forces REST fallback if WebSocket unhealthy. (Cost: Using stale cache when WebSocket silently died)
 
 14. **Heartbeat Timeout Detection (Fix #6, 2026-01-28)** - Track `_last_heartbeat_time` on every heartbeat. If no heartbeat in 60+ seconds, connection is zombie. Saxo sends heartbeats every ~15 seconds. (Cost: Zombie connections going undetected)
+
+15. **VIX NoAccess Requires Session Capability Recovery (Fix #11, 2026-01-29)** - When another Saxo session (SaxoTraderGO, Token Keeper) connects with `FullTradingAndChat`, the bot's session gets downgraded and VIX returns `NoAccess` (CBOE data requires premium capabilities). Solution: Detect `PriceTypeAsk: NoAccess` in REST response, auto-upgrade session via `PATCH /root/v1/sessions/capabilities`, retry VIX request. Yahoo Finance fallback works as safety net. (Cost: Unnecessary Yahoo fallbacks, potential stale VIX data)

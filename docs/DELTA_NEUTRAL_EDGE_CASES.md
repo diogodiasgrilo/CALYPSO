@@ -11,8 +11,8 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 56
-**Well-Handled/Resolved:** 56 (100%)
+**Total Scenarios Analyzed:** 57
+**Well-Handled/Resolved:** 57 (100%)
 **Medium Risk:** 0 (0%)
 **High Risk:** 0 (0%) ✅
 
@@ -210,6 +210,17 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Status** | RESOLVED |
 | **Resolution** | Added `_last_message_time` tracking in `saxo_client.py`. Updated on every message received (data or heartbeat). Used by `is_websocket_healthy()` to detect stale connections. If no message in 60+ seconds, connection considered unhealthy. |
 | **Fixed In** | 2026-01-28 |
+
+### 1.17 VIX Returns NoAccess (Session Capability Stolen)
+| | |
+|---|---|
+| **ID** | CONN-017 |
+| **Trigger** | Another Saxo session (SaxoTraderGO, Token Keeper) claims FullTradingAndChat, bot's session gets downgraded |
+| **Current Handling** | **Auto-recovery** - Detect NoAccess in VIX REST response, re-upgrade session capability, retry VIX request, fall back to Yahoo if recovery fails. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added session capability auto-recovery in `saxo_client.py`. New methods: `_ensure_session_capabilities()` checks/upgrades session (5-min throttle), `signal_session_downgrade()` flags for immediate check. In `get_vix_price()`, detect `PriceTypeAsk: NoAccess` or `PriceTypeBid: NoAccess`, call `signal_session_downgrade()`, attempt session upgrade via `PATCH /root/v1/sessions/capabilities`, retry VIX REST call. Falls back to Yahoo Finance if recovery fails. VIX requires CBOE data (premium subscription) while SPY is NYSE Arca (basic). |
+| **Fixed In** | 2026-01-29 |
 
 ---
 
@@ -741,6 +752,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-29 | ADDED: WAITING_OPENING_RANGE state with MonitoringMode.OPENING_RANGE (60s heartbeats) | Claude |
 | 2026-01-29 | ADDED: fresh_entry_delay_minutes config option (default 30 min = 10:00 AM entry) | Claude |
 | 2026-01-29 | **56 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
+| 2026-01-29 | RESOLVED CONN-017: Added VIX NoAccess detection with session capability auto-recovery | Claude |
+| 2026-01-29 | **57 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 
 ---
 
@@ -767,5 +780,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 2.0
-**Last Updated:** 2026-01-28
+**Document Version:** 2.1
+**Last Updated:** 2026-01-29
