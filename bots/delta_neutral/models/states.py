@@ -23,6 +23,7 @@ class StrategyState(Enum):
     State Machine Flow:
     - IDLE: No positions, waiting for entry conditions
     - WAITING_VIX: VIX too high, waiting for VIX < threshold
+    - WAITING_OPENING_RANGE: 9:30-10:00 AM opening range, waiting for market to settle
     - FOMC_BLACKOUT: FOMC day with no positions - trading blocked all day
     - LONG_STRADDLE_ACTIVE: Long straddle entered, no short strangle yet
     - FULL_POSITION: Both long straddle and short strangle active
@@ -32,6 +33,7 @@ class StrategyState(Enum):
     """
     IDLE = "Idle"
     WAITING_VIX = "WaitingForVIX"
+    WAITING_OPENING_RANGE = "WaitingOpeningRange"
     FOMC_BLACKOUT = "FOMCBlackout"
     LONG_STRADDLE_ACTIVE = "LongStraddleActive"
     FULL_POSITION = "FullPosition"
@@ -48,6 +50,7 @@ class MonitoringMode(Enum):
     - NORMAL: 10-second check interval (< 60% of original cushion consumed)
     - VIGILANT: 2-second monitoring (60-75% cushion consumed)
     - FOMC_BLACKOUT: 3600-second (1 hour) heartbeat when in FOMC blackout with no positions
+    - OPENING_RANGE: 60-second (1 min) heartbeat when waiting for opening range to end
 
     Thresholds are adaptive — they scale with the original distance from entry
     price to short strikes. Falls back to static 0.5% from strike if
@@ -68,7 +71,14 @@ class MonitoringMode(Enum):
     - The bot has no open positions
     - Trading is blocked for the entire day
     This saves resources by only checking hourly for heartbeat/state changes.
+
+    OPENING_RANGE mode is used when:
+    - Bot has 0 positions (fresh start)
+    - It's 9:30-10:00 AM ET (first 30 min after open)
+    - Bot is waiting for market to settle before entering fresh positions
+    This uses 1-minute heartbeats since we're just waiting for time to pass.
     """
     NORMAL = 10      # 10 seconds between checks (6 calls/min per bot)
     VIGILANT = 2     # 2 seconds between checks (30 calls/min per bot, REST API)
     FOMC_BLACKOUT = 3600  # 1 hour between checks when in FOMC blackout with no positions
+    OPENING_RANGE = 60   # 1 minute between checks when waiting for opening range to end

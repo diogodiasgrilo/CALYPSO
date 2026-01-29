@@ -297,6 +297,13 @@ class DeltaNeutralStrategy:
         # At 9:30:00 exactly, option quotes are often Bid=0/Ask=0 or wildly inaccurate
         self._market_open_delay_minutes: int = self.strategy_config.get("market_open_delay_minutes", 3)
 
+        # TIME-006: Fresh entry delay (opening range)
+        # When bot has 0 positions and wants to enter a FULL position from scratch,
+        # wait until the opening range period ends (e.g., 30 min = 10:00 AM)
+        # This avoids volatile VIX readings and whipsaws in the first 30 minutes.
+        # Only applies to fresh entries (0 positions) - NOT to re-entries after ITM close.
+        self._fresh_entry_delay_minutes: int = self.strategy_config.get("fresh_entry_delay_minutes", 30)
+
         # ACTION COOLDOWN: Prevent rapid retry of same failed action
         # Maps action_type -> last_attempt_time
         # Configurable via config.json circuit_breaker.cooldown_minutes (default: 5)
@@ -1968,6 +1975,61 @@ class DeltaNeutralStrategy:
             logger.info(
                 f"⏳ TIME-005: Within market open delay ({minutes_left} min remaining). "
                 f"Waiting for quotes to stabilize..."
+            )
+            return True
+
+        return False
+
+    def _is_within_opening_range(self) -> bool:
+        """
+        TIME-006: Check if we're within the opening range period for FRESH entries.
+
+        When the bot has 0 positions and wants to enter a full position from scratch,
+        it should wait until the opening range period ends. The first 30 minutes
+        after market open (9:30-10:00 AM ET) are notoriously volatile:
+        - VIX can spike and drop misleadingly
+        - Spreads are wider
+        - Prices whipsaw as the market finds direction
+
+        This ONLY applies to fresh entries (starting from 0 positions).
+        It does NOT apply to:
+        - Re-entering shorts after an ITM close (we already have longs)
+        - Rolling shorts (we already have positions)
+        - Any operation when we already have positions
+
+        Returns:
+            bool: True if we should wait (in opening range with no positions)
+        """
+        if self._fresh_entry_delay_minutes <= 0:
+            return False
+
+        # Only applies when we have no positions at all
+        if self.long_straddle or self.short_strangle:
+            return False
+
+        now_est = get_us_market_time()
+
+        # Market opens at 9:30 AM ET
+        market_open = dt_time(9, 30)
+
+        # Calculate when opening range ends
+        delay_end_minutes = 30 + self._fresh_entry_delay_minutes
+        delay_end_hour = 9 + (delay_end_minutes // 60)
+        delay_end_minute = delay_end_minutes % 60
+        delay_end = dt_time(delay_end_hour, delay_end_minute)
+
+        current_time = now_est.time()
+
+        # Check if we're in the opening range window
+        if market_open <= current_time < delay_end:
+            # Calculate time remaining
+            current_minutes = current_time.hour * 60 + current_time.minute
+            end_minutes = delay_end_hour * 60 + delay_end_minute
+            minutes_left = end_minutes - current_minutes
+
+            logger.info(
+                f"⏳ TIME-006: Opening range ({minutes_left} min remaining until {delay_end_hour}:{delay_end_minute:02d} AM). "
+                f"Waiting for market to settle before fresh entry..."
             )
             return True
 
@@ -8963,8 +9025,11 @@ class DeltaNeutralStrategy:
             action = self._run_strategy_check_impl()
             # Determine monitoring mode based on state and ITM proximity
             # FOMC_BLACKOUT state gets special hourly monitoring mode
+            # WAITING_OPENING_RANGE state gets 1-minute monitoring (just waiting for time to pass)
             if self.state == StrategyState.FOMC_BLACKOUT:
                 monitoring_mode = MonitoringMode.FOMC_BLACKOUT
+            elif self.state == StrategyState.WAITING_OPENING_RANGE:
+                monitoring_mode = MonitoringMode.OPENING_RANGE
             else:
                 monitoring_mode = self.get_monitoring_mode()
             return (action, monitoring_mode)
@@ -9057,6 +9122,33 @@ class DeltaNeutralStrategy:
         # Skip this check if we already have positions (only affects new entries)
         if self.state == StrategyState.IDLE and self._is_within_market_open_delay():
             return "⏳ TIME-005: Waiting for quotes to stabilize after market open"
+
+        # TIME-006: Check if we're within opening range for FRESH entries (0 positions)
+        # The first 30 minutes after open (9:30-10:00 AM) are volatile - VIX can be misleading
+        # Only applies when starting fresh (no positions) - NOT to re-entries after ITM close
+        if self.state in [StrategyState.IDLE, StrategyState.WAITING_VIX, StrategyState.WAITING_OPENING_RANGE]:
+            if self._is_within_opening_range():
+                if self.state != StrategyState.WAITING_OPENING_RANGE:
+                    # First time entering opening range state - log prominently
+                    now_est = get_us_market_time()
+                    delay_end_minutes = 30 + self._fresh_entry_delay_minutes
+                    delay_end_hour = 9 + (delay_end_minutes // 60)
+                    delay_end_minute = delay_end_minutes % 60
+                    logger.warning("=" * 70)
+                    logger.warning(f"⏳ TIME-006: OPENING RANGE - Market settling period")
+                    logger.warning(f"   No positions. Waiting until {delay_end_hour}:{delay_end_minute:02d} AM ET")
+                    logger.warning(f"   VIX: {self.current_vix:.2f} (not acting on this yet)")
+                    logger.warning("   Reason: First 30 min volatility can give misleading signals")
+                    logger.warning("=" * 70)
+                    self.state = StrategyState.WAITING_OPENING_RANGE
+                return f"⏳ TIME-006: Opening range - waiting for market to settle ({self._fresh_entry_delay_minutes} min after open)"
+            elif self.state == StrategyState.WAITING_OPENING_RANGE:
+                # Opening range ended - transition to IDLE to check VIX
+                logger.info("=" * 70)
+                logger.info("✅ TIME-006: Opening range ended - market settled")
+                logger.info(f"   Now checking VIX: {self.current_vix:.2f}")
+                logger.info("=" * 70)
+                self.state = StrategyState.IDLE
 
         # FOMC-001: Check for FOMC blackout day when we have NO positions
         # This puts the bot into a low-resource state with hourly heartbeats

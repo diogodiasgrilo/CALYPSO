@@ -1,8 +1,8 @@
 # Delta Neutral Bot - Edge Case Analysis Report
 
-**Analysis Date:** 2026-01-22 (Updated 2026-01-28)
+**Analysis Date:** 2026-01-22 (Updated 2026-01-29)
 **Analyst:** Claude (Devil's Advocate Review)
-**Bot Version:** 2.0.0
+**Bot Version:** 2.0.3
 **Status:** Living Document - Update as fixes are implemented
 
 ---
@@ -11,12 +11,14 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 55
-**Well-Handled/Resolved:** 55 (100%)
+**Total Scenarios Analyzed:** 56
+**Well-Handled/Resolved:** 56 (100%)
 **Medium Risk:** 0 (0%)
 **High Risk:** 0 (0%) ✅
 
 🎉 **ALL EDGE CASES RESOLVED!**
+
+**Major Update (2026-01-29):** Added TIME-006 (Opening Range Delay) for fresh entries from 0 positions.
 
 **Major Update (2026-01-28):** Added 10 new WebSocket/quote edge cases (CONN-007 through CONN-016) based on production issues encountered on 2026-01-27.
 
@@ -502,6 +504,17 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Resolution** | Added `_get_long_straddle_dte()`, `_get_new_shorts_dte()`, and `_should_close_and_restart_before_shorts()` methods in `strategy.py` (~8240-8336). Before opening shorts, calculates: days_until_exit = long_dte - 60. Gets expected DTE for new shorts (5-12 days). If new_shorts_dte > days_until_exit, returns True to trigger proactive close. Caller (enter_short_strangle) closes everything via exit_all_positions() and starts fresh with new 120 DTE longs. Prevents wasting theta on shorts that would be abandoned. |
 | **Fixed In** | 2026-01-25 |
 
+### 5.8 Opening Range Volatility (Fresh Entry from 0 Positions)
+| | |
+|---|---|
+| **ID** | TIME-008 |
+| **Trigger** | Bot has 0 positions, wants to enter fresh at 9:30 AM when VIX is volatile and misleading |
+| **Current Handling** | **Opening range delay** prevents fresh entries until 10:00 AM (configurable via `fresh_entry_delay_minutes`). |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_is_within_opening_range()` method in `strategy.py`. When bot has 0 positions and it's 9:30-10:00 AM ET, the bot enters `WAITING_OPENING_RANGE` state and displays clear terminal messages showing: 0 positions open, waiting until 10:00 AM, current VIX (but not acting on it). Uses `MonitoringMode.OPENING_RANGE` with 60-second heartbeats. Does NOT apply to re-entries (when we already have longs from an ITM close). Prevents entering on volatile/misleading opening VIX readings. |
+| **Fixed In** | 2026-01-29 |
+
 ---
 
 ## 6. STATE MACHINE EDGE CASES
@@ -653,6 +666,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 | DATA-003 | Invalid option chain | ✅ RESOLVED | Low |
 | DATA-004 | Invalid quote detection | ✅ RESOLVED | Medium |
 | TIME-005 | Market open delay | ✅ RESOLVED | Medium |
+| TIME-008 | Opening range delay (fresh entries) | ✅ RESOLVED | Medium |
 
 ### 8.3 Statistics by Category
 
@@ -662,10 +676,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Order Execution | 7 | 7 | 0 | 0 |
 | Position State | 6 | 6 | 0 | 0 |
 | Market Conditions | 6 | 6 | 0 | 0 |
-| Timing/Race | 7 | 7 | 0 | 0 |
+| Timing/Race | 8 | 8 | 0 | 0 |
 | State Machine | 4 | 4 | 0 | 0 |
 | Data Integrity | 6 | 6 | 0 | 0 |
-| **TOTAL** | **55** | **55** | **0** | **0** |
+| **TOTAL** | **56** | **56** | **0** | **0** |
 
 🎉 **100% COVERAGE ACHIEVED!**
 
@@ -723,6 +737,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-28 | ADDED: entry_underlying_price field on StranglePosition for cushion tracking | Claude |
 | 2026-01-28 | ADDED: Cushion % consumed visible in terminal status, heartbeat, Google Sheets, and alerts | Claude |
 | 2026-01-28 | **55 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
+| 2026-01-29 | RESOLVED TIME-008: Added opening range delay for fresh entries from 0 positions | Claude |
+| 2026-01-29 | ADDED: WAITING_OPENING_RANGE state with MonitoringMode.OPENING_RANGE (60s heartbeats) | Claude |
+| 2026-01-29 | ADDED: fresh_entry_delay_minutes config option (default 30 min = 10:00 AM entry) | Claude |
+| 2026-01-29 | **56 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 
 ---
 

@@ -840,6 +840,31 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     if USE_WEBSOCKET_STREAMING and not shutdown_requested and is_market_open():
                         if not client.is_streaming:
                             client.start_price_streaming(subscriptions, price_update_handler)
+                elif monitoring_mode == MonitoringMode.OPENING_RANGE:
+                    # OPENING RANGE MODE: 0 positions, waiting for market to settle (9:30-10:00 AM)
+                    # First 30 minutes are volatile - VIX can be misleading
+                    # Use 1-minute interval since we're just waiting for time to pass
+                    opening_range_interval = monitoring_mode.value  # 60 seconds
+
+                    # Calculate time remaining until opening range ends
+                    now_est = get_us_market_time()
+                    fresh_entry_delay = strategy._fresh_entry_delay_minutes
+                    delay_end_minutes = 30 + fresh_entry_delay
+                    delay_end_hour = 9 + (delay_end_minutes // 60)
+                    delay_end_minute = delay_end_minutes % 60
+                    current_minutes = now_est.hour * 60 + now_est.minute
+                    end_minutes = delay_end_hour * 60 + delay_end_minute
+                    minutes_remaining = max(0, end_minutes - current_minutes)
+
+                    trade_logger.log_event(
+                        f"{mode_prefix}⏳ OPENING RANGE | State: {status['state']} | "
+                        f"0 positions - waiting for market to settle | "
+                        f"SPY: ${status['underlying_price']:.2f} | VIX: {status['vix']:.2f} | "
+                        f"Entry after {delay_end_hour}:{delay_end_minute:02d} AM ({minutes_remaining} min remaining)"
+                    )
+
+                    if not interruptible_sleep(opening_range_interval):
+                        break  # Shutdown requested
                 else:
                     # NORMAL MODE: Use MonitoringMode.NORMAL interval (10s, REST API)
                     normal_interval = MonitoringMode.NORMAL.value

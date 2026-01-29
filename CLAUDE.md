@@ -162,20 +162,28 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
-- **Version:** 2.0.2 (Updated 2026-01-29 with safety extension, 1.5% target return, 1.33x floor)
+- **Version:** 2.0.3 (Updated 2026-01-29 with opening range delay, safety extension, 1.5% target return)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
 - **Long Exit:** 60 DTE threshold - close everything when longs reach this point
 - **Shorts Roll:** Weekly (Thursday/Friday) to next week's expiry for continued premium collection
 - **Strike Selection:** Scan 2.0x→1.33x for 1.5% NET return, safety extension to 1.0x if floor gives negative
+- **Opening Range Delay:** Wait until 10:00 AM for fresh entries (0 positions) - first 30 min are volatile
 - **Adaptive Roll Trigger:** Rolls shorts when 75% of original cushion is consumed (scales with market conditions)
 - **Immediate Re-Entry:** After scheduled debit skip, enters next-week shorts immediately (no 19-hour gap)
 - **Recenter:** When SPY moves ±$5 from initial strike, rebalance long straddle strikes
-- **Edge cases:** 55 analyzed, all resolved (see `docs/DELTA_NEUTRAL_EDGE_CASES.md`)
+- **Edge cases:** 56 analyzed, all resolved (see `docs/DELTA_NEUTRAL_EDGE_CASES.md`)
 - **Full specification:** See [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md)
 
 #### Delta Neutral Key Logic
+
+**Opening Range Delay (2026-01-29):**
+When bot has 0 positions and wants to enter from scratch:
+- Wait until 10:00 AM ET (configurable via `fresh_entry_delay_minutes: 30`)
+- First 30 minutes after open are volatile - VIX can spike/drop misleadingly
+- State: `WAITING_OPENING_RANGE` until delay ends
+- Does NOT apply to re-entries when we already have longs (e.g., after ITM close)
 
 **Strike Selection Priority (2026-01-29):**
 Bot uses 3-tier fallback to balance profit target vs safety:

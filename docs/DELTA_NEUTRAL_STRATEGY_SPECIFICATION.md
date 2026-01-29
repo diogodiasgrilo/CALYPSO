@@ -1,7 +1,7 @@
 # Delta Neutral Strategy Specification
 
 **Strategy Source:** Brian Terry (Theta Profits)
-**Bot Version:** 2.0.2
+**Bot Version:** 2.0.3
 **Last Updated:** 2026-01-29
 **Research Date:** 2026-01-27
 
@@ -9,6 +9,7 @@
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.0.3 | 2026-01-29 | Opening range delay: When bot has 0 positions, waits until 10:00 AM ET before entering (configurable via `fresh_entry_delay_minutes`). Prevents entering on volatile/misleading opening VIX readings. New `WAITING_OPENING_RANGE` state with 1-minute heartbeats. Does NOT apply to re-entries when we already have longs. |
 | 2.0.2 | 2026-01-29 | Safety extension: If 1.33x floor gives zero/negative return, scan extends to 1.0x. Target return updated from 1.0% to 1.5% (optimal EV based on IV>RV premium analysis). Strike selection now has 3-tier priority system. |
 | 2.0.1 | 2026-01-28 | REST-only mode for reliability. Disabled WebSocket streaming (`USE_WEBSOCKET_STREAMING=False`). VIGILANT monitoring: 2-second intervals (30 REST API calls/min, within rate limits). WebSocket code preserved for future use if 4+ bots need rate limit relief. |
 | 2.0.0 | 2026-01-28 | Adaptive cushion-based roll trigger (75% consumed = roll, 60% = vigilant). Immediate next-week shorts entry after scheduled debit skip. Added `entry_underlying_price` tracking to StranglePosition for cushion calculations. 10 WebSocket reliability fixes (CONN-007 through CONN-016). |
@@ -67,9 +68,18 @@ The bot uses a 3-tier fallback system to balance profit target vs safety:
 - **Rationale:** Low VIX = cheaper long straddle. If VIX then spikes, straddle gains value
 - **Implementation:** Check VIX before entering long straddle
 
+### Opening Range Delay (Added 2026-01-29)
+- **Rule:** When bot has 0 positions and wants to enter fresh, wait until **10:00 AM ET**
+- **Rationale:** First 30 minutes after market open are volatile - VIX can spike/drop misleadingly
+- **Implementation:** `_is_within_opening_range()` checks current time and position status
+- **State:** Bot enters `WAITING_OPENING_RANGE` state during delay period
+- **Terminal Output:** Shows "0 positions - waiting for market to settle | Entry after 10:00 AM"
+- **Config:** `fresh_entry_delay_minutes: 30` (default) - adjustable
+- **Does NOT apply to:** Re-entries after ITM close (when we already have longs)
+
 ### Market Conditions
 - **No FOMC days:** Avoid high volatility events
-- **Regular trading hours:** Enter during normal market hours (9:30 AM - 4:00 PM ET)
+- **Regular trading hours:** Enter during normal market hours (after opening range, 10:00 AM - 4:00 PM ET)
 - **No early close days:** Avoid half-days before holidays
 
 ---

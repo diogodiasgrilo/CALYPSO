@@ -1,7 +1,7 @@
 """
 Delta Neutral Strategy Bot (Brian Terry's Strategy from Theta Profits)
 
-Version: 2.0.2
+Version: 2.0.3
 Last Updated: 2026-01-29
 
 SPY Long Straddle + Weekly Short Strangles with 5-Point Recentering
@@ -17,6 +17,9 @@ Strategy Overview:
 5. Exit entire position when long straddle reaches 60 DTE
 
 Key Logic:
+- Opening Range Delay (2026-01-29): When bot has 0 positions, wait until 10:00 AM
+  before entering. The first 30 min after open are volatile - VIX can be misleading.
+  Does NOT apply to re-entries (when we already have longs from an ITM close).
 - Proactive Restart Check (2026-01-23): Before opening/rolling shorts, check if
   new shorts would outlive the longs hitting 60 DTE. If so, close everything NOW
   and start fresh with new 120 DTE longs + new shorts.
@@ -27,6 +30,7 @@ Configuration (see config/config.json for full list):
 - weekly_target_return_percent: 1.5 (target 1.5% NET weekly return on straddle cost)
 - short_strangle_multiplier_min: 1.33 (safety floor - roll trigger at 1.0x when breached)
 - short_strangle_multiplier_max: 2.0 (scan starting point - widest/safest strikes)
+- fresh_entry_delay_minutes: 30 (wait 30 min after open for fresh entries from 0 positions)
 - exit_dte_max: 60 (close entire position when longs reach this DTE)
 - recenter_threshold_points: 5.0 (recenter when SPY moves ±$5)
 
@@ -37,6 +41,11 @@ Strike Selection Priority:
 4. Skip entry if no positive return found even at 1.0x
 
 Version History:
+- 2.0.3 (2026-01-29): Opening range delay for fresh entries
+  - New WAITING_OPENING_RANGE state when bot has 0 positions
+  - Waits until 10:00 AM before entering (configurable via fresh_entry_delay_minutes)
+  - Avoids volatile first 30 minutes where VIX can be misleading
+  - Does NOT apply to re-entries after ITM close (we already have longs)
 - 2.0.2 (2026-01-29): Safety extension for low-return scenarios
   - If 1.33x floor gives zero/negative return, extends scan to 1.0x
   - Target return changed from 1.0% to 1.5% (optimal EV based on IV>RV analysis)
@@ -58,7 +67,7 @@ Version History:
   - Config key standardization
 """
 
-__version__ = "2.0.2"
+__version__ = "2.0.3"
 
 from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState
 
