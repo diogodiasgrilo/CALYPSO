@@ -162,19 +162,29 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
-- **Version:** 2.0.1 (Updated 2026-01-28 with REST-only mode, adaptive roll trigger, and WebSocket fixes)
+- **Version:** 2.0.2 (Updated 2026-01-29 with safety extension, 1.5% target return, 1.33x floor)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
 - **Long Exit:** 60 DTE threshold - close everything when longs reach this point
 - **Shorts Roll:** Weekly (Thursday/Friday) to next week's expiry for continued premium collection
+- **Strike Selection:** Scan 2.0x→1.33x for 1.5% NET return, safety extension to 1.0x if floor gives negative
 - **Adaptive Roll Trigger:** Rolls shorts when 75% of original cushion is consumed (scales with market conditions)
 - **Immediate Re-Entry:** After scheduled debit skip, enters next-week shorts immediately (no 19-hour gap)
 - **Recenter:** When SPY moves ±$5 from initial strike, rebalance long straddle strikes
 - **Edge cases:** 55 analyzed, all resolved (see `docs/DELTA_NEUTRAL_EDGE_CASES.md`)
 - **Full specification:** See [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md)
 
-#### Delta Neutral Key Logic (2026-01-23)
+#### Delta Neutral Key Logic
+
+**Strike Selection Priority (2026-01-29):**
+Bot uses 3-tier fallback to balance profit target vs safety:
+1. **Optimal:** Find highest multiplier (2.0x→1.33x) achieving 1.5% NET return (widest = safest)
+2. **Fallback:** Use 1.33x floor with whatever positive return (safe roll trigger at 1.0x EM)
+3. **Safety Extension:** If floor gives zero/negative, scan 1.33x→1.0x for first positive
+4. **Abort:** Skip entry if no positive return found even at 1.0x
+
+**Why 1.33x Floor?** Formula: `1.0 / 0.75 = 1.33` ensures roll trigger (at 75% cushion consumed) lands exactly at 1.0x expected move boundary.
 
 **Proactive Restart Check:**
 Instead of waiting for longs to hit 60 DTE and then closing (which wastes recently opened shorts), the bot checks BEFORE opening/rolling shorts:

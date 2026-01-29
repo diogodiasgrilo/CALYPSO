@@ -1,14 +1,15 @@
 # Delta Neutral Strategy Specification
 
 **Strategy Source:** Brian Terry (Theta Profits)
-**Bot Version:** 2.0.1
-**Last Updated:** 2026-01-28
+**Bot Version:** 2.0.2
+**Last Updated:** 2026-01-29
 **Research Date:** 2026-01-27
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.0.2 | 2026-01-29 | Safety extension: If 1.33x floor gives zero/negative return, scan extends to 1.0x. Target return updated from 1.0% to 1.5% (optimal EV based on IV>RV premium analysis). Strike selection now has 3-tier priority system. |
 | 2.0.1 | 2026-01-28 | REST-only mode for reliability. Disabled WebSocket streaming (`USE_WEBSOCKET_STREAMING=False`). VIGILANT monitoring: 2-second intervals (30 REST API calls/min, within rate limits). WebSocket code preserved for future use if 4+ bots need rate limit relief. |
 | 2.0.0 | 2026-01-28 | Adaptive cushion-based roll trigger (75% consumed = roll, 60% = vigilant). Immediate next-week shorts entry after scheduled debit skip. Added `entry_underlying_price` tracking to StranglePosition for cushion calculations. 10 WebSocket reliability fixes (CONN-007 through CONN-016). |
 | 1.0.0 | 2026-01-23 | Initial production release with proactive restart check |
@@ -31,12 +32,31 @@ The Delta Neutral strategy consists of a long-term ATM straddle against which yo
 ### Short Position (Shorts)
 - **Structure:** OTM Strangle (1 Call + 1 Put at different strikes)
 - **DTE on Entry:** 5-12 DTE (typically target next Friday)
-- **Strike Selection:** 1.5x - 2.0x expected move from ATM (Updated 2026-01-27)
-  - **Minimum:** 1.5x expected move (ENFORCED - no fallback to lower multipliers)
-  - **Maximum:** 2.0x expected move (capped for premium collection)
+- **Strike Selection:** 1.33x - 2.0x expected move from ATM (Updated 2026-01-29)
+  - **Maximum:** 2.0x expected move (scan starting point - widest/safest strikes)
+  - **Minimum Floor:** 1.33x expected move (ensures roll trigger lands at 1.0x EM when 75% consumed)
+  - **Safety Extension:** If 1.33x gives zero/negative return, scan extends to 1.0x
   - **Symmetry:** Both legs within 0.3x of each other (for delta neutrality)
   - **Expected Move:** Calculated from ATM straddle price (Call mid + Put mid)
-- **Purpose:** Collect weekly premium to offset long theta cost and generate 1% NET return
+- **Purpose:** Collect weekly premium to offset long theta cost and generate 1.5% NET return
+
+### Strike Selection Priority (2026-01-29)
+
+The bot uses a 3-tier fallback system to balance profit target vs safety:
+
+1. **Optimal:** Find highest symmetric multiplier (2.0x→1.33x) achieving 1.5% NET return
+   - Result: Widest strikes = safest, still hitting target return
+2. **Fallback:** If target can't be met, use 1.33x floor strikes with whatever positive return
+   - Result: Safe roll trigger (75% cushion consumed → 1.0x EM boundary), lower return
+3. **Safety Extension:** If floor strikes give zero/negative return, scan 1.33x→1.0x for first positive
+   - Result: Extends closer to ATM if needed, ensures positive expectancy
+   - Note: Roll trigger will be closer than 1.0x EM, less safe but still profitable
+4. **Abort:** If no positive return found even at 1.0x, skip entry for that week
+
+**Why 1.33x Floor?**
+- Formula: `roll_trigger = multiplier × 0.75` (roll triggers at 75% cushion consumed)
+- At 1.33x multiplier: `1.33 × 0.75 = 1.0x` (roll triggers exactly at expected move boundary)
+- This is the mathematical minimum to ensure rolls happen before statistically likely breaches
 
 ---
 
@@ -609,6 +629,6 @@ When closing shorts, use progressive slippage:
 ---
 
 **Last Research Date:** 2026-01-27
-**Last Updated:** 2026-01-27 (Strike selection and threshold fixes)
+**Last Updated:** 2026-01-29 (Safety extension: 1.0x scan fallback, 1.5% target return, 1.33x floor)
 **Researcher:** AI Assistant via Web Search + Trade Analysis
-**Implementation Status:** Active in LIVE trading (CALYPSO Delta Neutral bot)
+**Implementation Status:** Active in LIVE trading (CALYPSO Delta Neutral bot v2.0.2)

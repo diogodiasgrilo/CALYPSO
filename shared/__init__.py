@@ -15,7 +15,7 @@ This package contains common utilities used by all trading strategies:
 - alert_service: SMS/Email alerting via Google Cloud Pub/Sub
 - position_registry: Multi-bot position ownership tracking (for same underlying)
 
-Last Updated: 2026-01-28 (10 WebSocket reliability fixes - CONN-007 through CONN-016)
+Last Updated: 2026-01-29 (Delta Neutral v2.0.2 - safety extension, 1.5% target, 1.33x floor)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -39,11 +39,11 @@ Alert Responsibilities by Bot:
     Delta Neutral:      AlertService + MarketStatusMonitor + SPY gap alerts + ITM monitoring alerts
     Rolling Put Diag:   AlertService + QQQ gap alerts
 
-Delta Neutral ITM Monitoring Alerts (2026-01-26):
-    - VIGILANT_ENTERED (HIGH): Price enters 0.1%-0.3% danger zone near short strike
-    - VIGILANT_EXITED (LOW): Price moves back to safe zone (>0.3% from strikes)
-    - ITM_RISK_CLOSE (CRITICAL): Shorts emergency closed at 0.1% threshold
-    - ROLL_COMPLETED (MEDIUM): Weekly shorts rolled (scheduled, challenged, or emergency)
+Delta Neutral ITM Monitoring Alerts (Updated 2026-01-28):
+    - VIGILANT_ENTERED (HIGH): 60-75% of original cushion consumed (adaptive threshold)
+    - VIGILANT_EXITED (LOW): Cushion consumption drops below 60% (back to safe zone)
+    - ITM_RISK_CLOSE (CRITICAL): Shorts emergency closed at 0.1% from strike (absolute safety floor)
+    - ROLL_COMPLETED (MEDIUM): Weekly shorts rolled (scheduled, challenged at 75% cushion, or emergency)
     - RECENTER (MEDIUM): Long straddle recentered to new ATM strike
 
 MarketStatusMonitor (runs ONLY on Delta Neutral to avoid duplicates):

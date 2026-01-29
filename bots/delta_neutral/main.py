@@ -2,8 +2,8 @@
 """
 main.py - Delta Neutral Trading Bot Entry Point
 
-Version: 2.0.1
-Last Updated: 2026-01-28
+Version: 2.0.2
+Last Updated: 2026-01-29
 
 This is the main entry point for the Delta Neutral Trading Bot.
 It orchestrates all components and runs the main trading loop.
@@ -11,13 +11,19 @@ It orchestrates all components and runs the main trading loop.
 Strategy Summary:
 -----------------
 1. Buy ATM Long Straddle (90-120 DTE) when VIX < 18
-2. Sell weekly Short Strangles at 1.5-2x expected move
+2. Sell weekly Short Strangles targeting 1.5% NET return
+   - Scan from 2.0x down to 1.33x expected move for target return
+   - Safety extension: scan to 1.0x if floor gives zero/negative return
 3. Recenter if SPY moves 5 points from initial strike
 4. Roll weekly shorts on Friday
 5. Exit when 60 DTE remains on Longs
 
 Version History:
 ----------------
+2.0.2 (2026-01-29): Safety extension + 1.5% target return
+    - If 1.33x floor gives zero/negative return, extends scan to 1.0x
+    - Target return changed from 1.0% to 1.5% (optimal EV)
+    - 3-tier strike selection priority system
 2.0.1 (2026-01-28): REST-only mode (WebSocket disabled for reliability)
     - Disabled WebSocket streaming, use REST API for all price fetching
     - VIGILANT mode now 2s interval (30 calls/min vs 60 at 1s)
@@ -46,7 +52,7 @@ import argparse
 import logging
 import subprocess
 from datetime import datetime
-from typing import Optional
+# typing imports removed - not currently needed
 
 # Ensure project root is in path for imports when running as script
 # This allows both `python bots/delta_neutral/main.py` and `python -m bots.delta_neutral.main` to work

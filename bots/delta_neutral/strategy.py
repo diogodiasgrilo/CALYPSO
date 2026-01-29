@@ -1862,8 +1862,7 @@ class DeltaNeutralStrategy:
         Returns:
             time: 13:00 (1pm) for early close days, 16:00 (4pm) otherwise
         """
-        from datetime import time as dt_time
-
+        # dt_time imported at module level (line 137)
         is_early, reason = self.is_early_close_day()
         if is_early:
             logger.info(f"⏰ TIME-003: Early close day ({reason}) - market closes at 1:00 PM ET")
