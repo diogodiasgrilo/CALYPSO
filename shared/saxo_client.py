@@ -17,7 +17,14 @@ AssetType enum includes:
 
 Author: Trading Bot Developer
 Date: 2024
-Last Updated: 2026-01-28
+Last Updated: 2026-01-29
+
+Code Audit: 2026-01-29
+- HIGH FIX: Session capability auto-recovery for VIX NoAccess (Issue #11)
+  - Detects NoAccess in REST responses (indicates session downgrade)
+  - Auto-upgrades session to FullTradingAndChat via PATCH /root/v1/sessions/capabilities
+  - Retries VIX request after session recovery before falling back to Yahoo
+  - Root cause: Another session (SaxoTraderGO/Token Keeper) taking priority
 
 Code Audit: 2026-01-28
 - CRITICAL FIX: Cache invalidation on WebSocket disconnect (Issue #1)
@@ -272,6 +279,12 @@ class SaxoClient:
         self._rate_limit_retry_count: int = 0
         self._rate_limit_max_retries: int = 5
         self._rate_limit_base_delay: float = 1.0  # Start with 1 second
+
+        # Session capability auto-recovery (Fix for VIX NoAccess issues)
+        # Tracks when we last checked/upgraded session capabilities
+        self._last_session_capability_check: Optional[datetime] = None
+        self._session_check_interval_seconds: int = 300  # Check every 5 minutes
+        self._session_downgrade_detected: bool = False  # Flag to trigger immediate re-check
 
         # Update coordinator cache with current tokens if we have them
         if self.access_token and self.refresh_token:
@@ -732,6 +745,96 @@ class SaxoClient:
             logger.warning(f"Failed to upgrade session for real-time data: {e}")
             # Don't fail authentication just because upgrade failed
             return False
+
+    def _ensure_session_capabilities(self, force_check: bool = False) -> bool:
+        """
+        Ensure session has FullTradingAndChat capabilities for real-time data.
+
+        This method implements auto-recovery for session capability downgrades.
+        Saxo Bank allows only one session per user to have FullTradingAndChat.
+        If another session (like SaxoTraderGO or another API app) connects,
+        it may downgrade this session, causing "NoAccess" errors for market data.
+
+        Per Saxo documentation: "If you set trade level to FullTradingAndChat,
+        you will degrade the trade level for other sessions for the same user.
+        This might log off other Saxo trading applications or downgrades the
+        sessions to delayed prices."
+
+        This method:
+        1. Checks if enough time has passed since last check (5 min interval)
+        2. Verifies current session capabilities
+        3. Re-upgrades to FullTradingAndChat if downgraded
+
+        Args:
+            force_check: If True, bypass the time interval check
+
+        Returns:
+            bool: True if session has FullTradingAndChat, False otherwise
+        """
+        now = datetime.now()
+
+        # Skip if we checked recently (unless forced or downgrade detected)
+        if not force_check and not self._session_downgrade_detected:
+            if self._last_session_capability_check:
+                elapsed = (now - self._last_session_capability_check).total_seconds()
+                if elapsed < self._session_check_interval_seconds:
+                    return True  # Assume OK, checked recently
+
+        try:
+            # Check current capabilities
+            response = requests.get(
+                f"{self.base_url}/root/v1/sessions/capabilities",
+                headers=self._get_auth_headers(),
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                caps = response.json()
+                current_trade_level = caps.get("TradeLevel", "Unknown")
+
+                self._last_session_capability_check = now
+
+                if current_trade_level == "FullTradingAndChat":
+                    if self._session_downgrade_detected:
+                        logger.info("Session capabilities restored to FullTradingAndChat")
+                        self._session_downgrade_detected = False
+                    return True
+                else:
+                    # Session was downgraded! Log and attempt to re-upgrade
+                    logger.warning(
+                        f"Session capability downgrade detected! "
+                        f"TradeLevel={current_trade_level} (expected FullTradingAndChat). "
+                        f"Attempting to re-upgrade..."
+                    )
+                    self._session_downgrade_detected = True
+
+                    # Attempt to re-upgrade
+                    if self._upgrade_session_for_realtime_data():
+                        logger.info("Session successfully re-upgraded to FullTradingAndChat")
+                        self._session_downgrade_detected = False
+                        return True
+                    else:
+                        logger.error("Failed to re-upgrade session capabilities")
+                        return False
+            else:
+                logger.warning(f"Failed to check session capabilities: {response.status_code}")
+                return False
+
+        except Exception as e:
+            logger.warning(f"Error checking session capabilities: {e}")
+            return False
+
+    def signal_session_downgrade(self):
+        """
+        Signal that a session downgrade may have occurred.
+
+        Call this when receiving "NoAccess" errors for market data.
+        It sets a flag that triggers an immediate capability check
+        on the next _ensure_session_capabilities() call.
+        """
+        if not self._session_downgrade_detected:
+            logger.info("NoAccess detected - flagging potential session downgrade for check")
+            self._session_downgrade_detected = True
 
     # =========================================================================
     # CIRCUIT BREAKER METHODS
@@ -2046,17 +2149,48 @@ class SaxoClient:
 
         if response and "Data" in response and len(response["Data"]) > 0:
             data = response["Data"][0]
-            price = self._extract_price_from_data(data, "VIX API")
-            if price:
-                return price
-            # Log full response at WARNING level for diagnosis
-            logger.warning(
-                f"VIX REST response had no extractable price. "
-                f"Quote: {data.get('Quote')}, "
-                f"PriceInfoDetails: {data.get('PriceInfoDetails')}, "
-                f"PriceInfo: {data.get('PriceInfo')}"
-            )
-            sources_tried.append("REST(no valid price in response)")
+
+            # Check for NoAccess (session capability downgrade indicator)
+            # This happens when another session gets FullTradingAndChat priority
+            quote = data.get("Quote", {})
+            price_type_bid = quote.get("PriceTypeBid", "")
+            price_type_ask = quote.get("PriceTypeAsk", "")
+
+            if price_type_bid == "NoAccess" or price_type_ask == "NoAccess":
+                logger.warning(
+                    f"VIX: NoAccess detected (PriceTypeBid={price_type_bid}, "
+                    f"PriceTypeAsk={price_type_ask}) - session capability may be downgraded"
+                )
+                # Signal session downgrade and attempt auto-recovery
+                self.signal_session_downgrade()
+                if self._ensure_session_capabilities(force_check=True):
+                    logger.info("VIX: Session capabilities restored, retrying REST API")
+                    # Retry the REST call after session recovery
+                    retry_response = self._make_request("GET", endpoint, params=params)
+                    if retry_response and "Data" in retry_response and len(retry_response["Data"]) > 0:
+                        retry_data = retry_response["Data"][0]
+                        retry_price = self._extract_price_from_data(retry_data, "VIX API (retry)")
+                        if retry_price:
+                            logger.info(f"VIX: Session recovery successful, got price {retry_price}")
+                            return retry_price
+                        sources_tried.append("REST(NoAccess, recovery failed to get price)")
+                    else:
+                        sources_tried.append("REST(NoAccess, recovery retry failed)")
+                else:
+                    sources_tried.append("REST(NoAccess, session recovery failed)")
+            else:
+                # Normal case - try to extract price
+                price = self._extract_price_from_data(data, "VIX API")
+                if price:
+                    return price
+                # Log full response at WARNING level for diagnosis
+                logger.warning(
+                    f"VIX REST response had no extractable price. "
+                    f"Quote: {data.get('Quote')}, "
+                    f"PriceInfoDetails: {data.get('PriceInfoDetails')}, "
+                    f"PriceInfo: {data.get('PriceInfo')}"
+                )
+                sources_tried.append("REST(no valid price in response)")
         else:
             # Log empty/failed response for diagnosis
             logger.warning(f"VIX REST call failed or empty. Response: {response}")
