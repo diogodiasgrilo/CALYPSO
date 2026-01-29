@@ -6956,8 +6956,8 @@ class DeltaNeutralStrategy:
             })
 
         # ALERT: Full position opened (straddle + strangle)
-        straddle_strike = self.long_straddle.strike if self.long_straddle else "N/A"
-        straddle_dte = self.long_straddle.dte if self.long_straddle else 0
+        straddle_strike = self.long_straddle.initial_strike if self.long_straddle else "N/A"
+        straddle_dte = self._get_long_straddle_dte() if self.long_straddle else 0
         net_cost = (self.long_straddle.net_cost if self.long_straddle else 0) - self.short_strangle.premium_collected
         self.alert_service.position_opened(
             position_summary=f"DN Full Position: Straddle ${straddle_strike} ({straddle_dte} DTE) + Strangle ${put_option['strike']}p/${call_option['strike']}c",
