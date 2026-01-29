@@ -174,7 +174,7 @@ class SaxoClient:
         """
         self.config = config
         self.saxo_config = config["saxo_api"]
-        self.circuit_config = config["circuit_breaker"]
+        self.circuit_config = config.get("circuit_breaker", {})
 
         # Determine environment (simulation or live)
         self.environment = self.saxo_config.get("environment", "sim")
@@ -747,7 +747,7 @@ class SaxoClient:
         self.circuit_breaker.consecutive_errors += 1
         self.circuit_breaker.last_error_time = datetime.now()
 
-        max_errors = self.circuit_config["max_consecutive_errors"]
+        max_errors = self.circuit_config.get("max_consecutive_errors", 5)
 
         if self.circuit_breaker.consecutive_errors >= max_errors:
             self._open_circuit()
@@ -770,7 +770,7 @@ class SaxoClient:
         until the cooldown period expires.
         """
         self.circuit_breaker.is_open = True
-        cooldown_minutes = self.circuit_config["cooldown_minutes"]
+        cooldown_minutes = self.circuit_config.get("cooldown_minutes", 15)
         self.circuit_breaker.cooldown_until = datetime.now() + timedelta(minutes=cooldown_minutes)
 
         logger.critical(
