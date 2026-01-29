@@ -25,10 +25,17 @@ import json
 
 def main():
     config_path = "bots/delta_neutral/config/config.json"
-    config_loader = ConfigLoader(local_config_path=config_path)
+    config_loader = ConfigLoader(config_path)
     config = config_loader.load_config()
 
     client = SaxoClient(config)
+
+    # Authenticate (required for API calls)
+    print("Authenticating with Saxo API...")
+    if not client.authenticate():
+        print("ERROR: Failed to authenticate with Saxo API")
+        return
+
     underlying_uic = config["strategy"]["underlying_uic"]
     target_dte = config["strategy"].get("long_straddle_target_dte", 120)  # Target ~120 DTE for longs
     max_vix = config["strategy"]["max_vix_entry"]
@@ -52,6 +59,9 @@ def main():
         return
 
     spy_price = quote["Quote"].get("Mid") or quote["Quote"].get("LastTraded", 0)
+    if spy_price <= 0:
+        print("ERROR: Could not get valid SPY price (market may be closed)")
+        return
     print(f"SPY Price: ${spy_price:.2f}")
 
     # Get VIX
@@ -88,14 +98,35 @@ def main():
     call_option = atm_options["call"]
     put_option = atm_options["put"]
 
-    # Get quotes for pricing
+    # Get quotes for pricing (use LastTraded as fallback when market is closed)
     call_quote = client.get_quote(call_option["uic"], "StockOption")
     put_quote = client.get_quote(put_option["uic"], "StockOption")
 
-    call_ask = call_quote["Quote"].get("Ask", 0) if call_quote else 0
-    put_ask = put_quote["Quote"].get("Ask", 0) if put_quote else 0
+    call_ask = 0
+    put_ask = 0
+    using_last_traded = False
+
+    if call_quote:
+        call_ask = call_quote["Quote"].get("Ask", 0) or 0
+        if call_ask <= 0:
+            # Fallback to LastTraded when market is closed
+            call_ask = call_quote["Quote"].get("LastTraded", 0) or 0
+            using_last_traded = True
+
+    if put_quote:
+        put_ask = put_quote["Quote"].get("Ask", 0) or 0
+        if put_ask <= 0:
+            put_ask = put_quote["Quote"].get("LastTraded", 0) or 0
+            using_last_traded = True
+
+    if call_ask <= 0 or put_ask <= 0:
+        print("ERROR: Could not get valid long straddle prices")
+        return
 
     long_straddle_cost = (call_ask + put_ask) * 100 * position_size
+
+    if using_last_traded:
+        print("NOTE: Using LastTraded prices (market may be closed)")
 
     # Calculate DTE
     exp_date = datetime.strptime(call_option["expiry"][:10], "%Y-%m-%d").date()
@@ -205,7 +236,10 @@ def main():
         if not q:
             continue
 
+        # Use Bid if available, otherwise fall back to LastTraded (market closed)
         bid = q["Quote"].get("Bid", 0) or 0
+        if bid <= 0:
+            bid = q["Quote"].get("LastTraded", 0) or 0
         if bid <= 0:
             continue
 
@@ -322,6 +356,12 @@ def main():
                 call_bid = call_quote["Quote"].get("Bid", 0) or 0
                 put_bid = put_quote["Quote"].get("Bid", 0) or 0
 
+                # Fallback to LastTraded when market is closed
+                if call_bid <= 0:
+                    call_bid = call_quote["Quote"].get("LastTraded", 0) or 0
+                if put_bid <= 0:
+                    put_bid = put_quote["Quote"].get("LastTraded", 0) or 0
+
                 if call_bid > 0 and put_bid > 0:
                     # Update with fresh prices
                     call_data["bid"] = call_bid
@@ -367,6 +407,12 @@ def main():
             if call_quote and put_quote:
                 call_bid = call_quote["Quote"].get("Bid", 0) or 0
                 put_bid = put_quote["Quote"].get("Bid", 0) or 0
+
+                # Fallback to LastTraded when market is closed
+                if call_bid <= 0:
+                    call_bid = call_quote["Quote"].get("LastTraded", 0) or 0
+                if put_bid <= 0:
+                    put_bid = put_quote["Quote"].get("LastTraded", 0) or 0
 
                 if call_bid > 0 and put_bid > 0:
                     floor_call["bid"] = call_bid

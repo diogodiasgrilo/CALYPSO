@@ -4141,7 +4141,16 @@ class SaxoClient:
             put_mid = (put_bid + put_ask) / 2 if put_bid > 0 and put_ask > 0 else 0
 
         if call_mid <= 0 or put_mid <= 0:
-            logger.error("Invalid ATM option prices")
+            # Last resort: use LastTraded prices (market may be closed)
+            call_last = call_quote.get("Quote", {}).get("LastTraded", 0) or 0
+            put_last = put_quote.get("Quote", {}).get("LastTraded", 0) or 0
+            if call_last > 0 and put_last > 0:
+                call_mid = call_last
+                put_mid = put_last
+                logger.info("Using LastTraded prices for expected move (market may be closed)")
+
+        if call_mid <= 0 or put_mid <= 0:
+            logger.error("Invalid ATM option prices (no Mid, Bid/Ask, or LastTraded available)")
             return None
 
         # ATM straddle price = expected move
