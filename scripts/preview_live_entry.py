@@ -2,10 +2,19 @@
 """
 Preview what the Delta Neutral bot would do in LIVE mode right now.
 
+Version: 2.0.2 (matches bot logic exactly)
+Last Updated: 2026-01-29
+
 Shows exactly:
 1. Long Straddle: Strike, Expiry, Cost
 2. Short Strangle: Strikes, Expiry, Premium, Expected Move multiplier
 3. P&L projections: Gross, Theta, Fees, NET Return
+
+Strike Selection (matches bot v2.0.2):
+1. Scan 2.0x -> min_mult (config, default 1.33x) for target NET return (1.5%)
+2. If no target found, use min_mult floor with whatever positive return
+3. SAFETY EXTENSION: If floor gives zero/negative, scan min_mult -> 1.0x
+4. Skip entry if no positive return even at 1.0x
 
 This is a READ-ONLY preview - no orders are placed.
 
@@ -39,9 +48,9 @@ def main():
     underlying_uic = config["strategy"]["underlying_uic"]
     target_dte = config["strategy"].get("long_straddle_target_dte", 120)  # Target ~120 DTE for longs
     max_vix = config["strategy"]["max_vix_entry"]
-    weekly_target_return_pct = config["strategy"].get("weekly_target_return_percent", 1.0)
+    weekly_target_return_pct = config["strategy"].get("weekly_target_return_percent", 1.5)
     max_multiplier = config["strategy"].get("short_strangle_multiplier_max", 2.0)
-    min_multiplier = config["strategy"].get("short_strangle_multiplier_min", 1.0)  # Absolute floor from config
+    min_multiplier = config["strategy"].get("short_strangle_multiplier_min", 1.33)  # Config floor (1.33x ensures roll trigger at 1.0x)
     fee_per_leg = config["strategy"].get("short_strangle_entry_fee_per_leg", 2.05)
     position_size = config["strategy"]["position_size"]
 
@@ -265,14 +274,18 @@ def main():
     puts.sort(key=lambda x: x["strike"], reverse=True)
 
     # =========================================================================
-    # STEP 4: Find highest SYMMETRIC multiplier achieving >= 1% NET return
+    # STEP 4: Find highest SYMMETRIC multiplier achieving target NET return
     # =========================================================================
-    # NEW STRATEGY (2026-01-27):
+    # STRATEGY v2.0.2 (2026-01-29):
     # 1. Start from MAX multiplier (2.0x) and work DOWN in 0.01 increments
     # 2. At each level, find symmetric strikes (same multiplier for both legs)
-    # 3. Stop at FIRST (highest) multiplier that achieves >= 1% NET return
-    # 4. This gives the safest/widest strikes that still hit premium target
-    # 5. If target can't be hit, use floor (1.0x) strikes anyway (per Brian Terry)
+    # 3. Stop at FIRST (highest) multiplier that achieves >= target NET return
+    # 4. If target can't be hit, use min_mult floor (1.33x) with positive return
+    # 5. SAFETY EXTENSION: If floor gives zero/negative, extend scan to 1.0x
+    # 6. Skip entry if no positive return found even at 1.0x
+    #
+    # Why 1.33x floor? Formula: 1.0 / 0.75 = 1.33
+    # This ensures roll trigger (at 75% cushion consumed) lands at 1.0x expected move
     #
     # Benefits:
     # - Always symmetric (true delta neutral)
@@ -384,21 +397,21 @@ def main():
                         print(f"  NET Return: {fresh_return:.2f}%")
                         break
 
-        # Track best available at floor (~1.0x) in case we can't hit target
-        if target_mult <= 1.05 and net_return > 0:
+        # Track best available at config floor (min_multiplier + 0.05) in case we can't hit target
+        # This matches bot logic: track at or near the config floor (e.g., 1.33x + 0.05 = 1.38x)
+        if target_mult <= min_multiplier + 0.05:
             if floor_return is None or net_return > floor_return:
                 floor_call = call_data.copy()
                 floor_put = put_data.copy()
                 floor_return = net_return
 
     # If we didn't find strikes meeting target, use floor strikes with lower return
-    # This matches bot behavior: proceed with 1.0x floor even if < 1% return
     if not final_call or not final_put:
         if floor_call and floor_put and floor_return is not None and floor_return > 0:
             print()
             print(f"WARNING: Could not achieve {min_target_return}% target at any multiplier")
-            print(f"Using 1.0x floor strikes with {floor_return:.2f}% return instead")
-            print("(Per Brian Terry: 'shorts should be at least the expected move away')")
+            print(f"Using {min_multiplier}x floor strikes with {floor_return:.2f}% return instead")
+            print(f"(Roll trigger will land at {min_multiplier * 0.75:.2f}x expected move)")
 
             # Get fresh quotes for floor strikes
             call_quote = client.get_quote(floor_call["uic"], "StockOption")
@@ -422,12 +435,96 @@ def main():
 
                     final_call = floor_call
                     final_put = floor_put
-                    found_mult = 1.0
+                    found_mult = min_multiplier
+
+        # SAFETY EXTENSION: If floor (e.g., 1.33x) gives zero/negative return, extend scan to 1.0x
+        # This prioritizes: positive return > target return > optimal trigger placement
+        if not final_call or not final_put:
+            if min_multiplier > 1.0:
+                print()
+                print(f"WARNING: Floor {min_multiplier}x gives zero/negative return")
+                print(f"SAFETY EXTENSION: Scanning from {min_multiplier}x down to 1.0x for first positive return...")
+
+                # Scan from min_multiplier down to 1.0x looking for first positive return
+                extended_multipliers = []
+                ext_mult = min_multiplier - 0.01
+                while ext_mult >= 1.0:
+                    extended_multipliers.append(round(ext_mult, 2))
+                    ext_mult -= 0.01
+
+                for target_mult in extended_multipliers:
+                    target_distance = expected_move * target_mult
+
+                    target_call_strike = spy_price + target_distance
+                    call_strike = None
+                    for s in all_call_strikes:
+                        if s >= target_call_strike:
+                            call_strike = s
+                            break
+
+                    target_put_strike = spy_price - target_distance
+                    put_strike = None
+                    for s in all_put_strikes:
+                        if s <= target_put_strike:
+                            put_strike = s
+                            break
+
+                    if not call_strike or not put_strike:
+                        continue
+
+                    call_data = call_by_strike.get(call_strike)
+                    put_data = put_by_strike.get(put_strike)
+
+                    if not call_data or not put_data:
+                        continue
+
+                    # Check symmetry
+                    mult_diff = abs(call_data["mult"] - put_data["mult"])
+                    if mult_diff > 0.3:
+                        continue
+
+                    # Calculate NET return
+                    gross_premium = call_data["premium"] + put_data["premium"]
+                    net_premium = gross_premium - weekly_theta - total_round_trip_fees
+                    net_return = (net_premium / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+
+                    if net_return > 0:
+                        # Found positive return - get fresh quotes
+                        call_quote = client.get_quote(call_data["uic"], "StockOption")
+                        put_quote = client.get_quote(put_data["uic"], "StockOption")
+
+                        if call_quote and put_quote:
+                            call_bid = call_quote["Quote"].get("Bid", 0) or 0
+                            put_bid = put_quote["Quote"].get("Bid", 0) or 0
+
+                            if call_bid <= 0:
+                                call_bid = call_quote["Quote"].get("LastTraded", 0) or 0
+                            if put_bid <= 0:
+                                put_bid = put_quote["Quote"].get("LastTraded", 0) or 0
+
+                            if call_bid > 0 and put_bid > 0:
+                                call_data["bid"] = call_bid
+                                call_data["premium"] = call_bid * 100 * position_size
+                                put_data["bid"] = put_bid
+                                put_data["premium"] = put_bid * 100 * position_size
+
+                                # Recalculate with fresh prices
+                                fresh_gross = call_data["premium"] + put_data["premium"]
+                                fresh_net = fresh_gross - weekly_theta - total_round_trip_fees
+                                fresh_return = (fresh_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+
+                                if fresh_return > 0:
+                                    final_call = call_data
+                                    final_put = put_data
+                                    found_mult = target_mult
+                                    print(f"Extended scan found positive return at {target_mult}x: {fresh_return:.2f}%")
+                                    print(f"Note: Roll trigger will be at {target_mult * 0.75:.2f}x EM (below 1.0x - less safe)")
+                                    break
 
         if not final_call or not final_put:
             print()
-            print("ERROR: No valid strikes found even at 1.0x floor")
-            print(f"Scanned from {max_multiplier}x down to {min_multiplier}x")
+            print("ERROR: No valid strikes found even at 1.0x absolute floor")
+            print(f"Scanned multipliers from {max_multiplier}x down to 1.0x")
             print("Current market conditions do not support any entry")
             return
 
