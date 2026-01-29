@@ -2049,10 +2049,17 @@ class SaxoClient:
             price = self._extract_price_from_data(data, "VIX API")
             if price:
                 return price
-            # Log the actual data for debugging
-            logger.debug(f"VIX REST response had no extractable price. Keys: {list(data.keys())}, PriceInfoDetails: {data.get('PriceInfoDetails')}")
+            # Log full response at WARNING level for diagnosis
+            logger.warning(
+                f"VIX REST response had no extractable price. "
+                f"Quote: {data.get('Quote')}, "
+                f"PriceInfoDetails: {data.get('PriceInfoDetails')}, "
+                f"PriceInfo: {data.get('PriceInfo')}"
+            )
             sources_tried.append("REST(no valid price in response)")
         else:
+            # Log empty/failed response for diagnosis
+            logger.warning(f"VIX REST call failed or empty. Response: {response}")
             sources_tried.append(f"REST(empty response: {response})" if response else "REST(request failed)")
 
         # 3. Last resort: Yahoo Finance fallback with retry
