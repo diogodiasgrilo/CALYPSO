@@ -813,7 +813,7 @@ class SaxoClient:
         Returns:
             bool: True if connection timeout exceeded, False otherwise.
         """
-        max_disconnection = self.circuit_config["max_disconnection_seconds"]
+        max_disconnection = self.circuit_config.get("max_disconnection_seconds", 60)
         last_success = self.circuit_breaker.last_successful_connection
 
         if last_success:
