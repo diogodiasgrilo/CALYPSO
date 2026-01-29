@@ -17,7 +17,7 @@ from shared.saxo_client import SaxoClient
 
 def main():
     # Load config
-    config_path = "config/config.json"
+    config_path = "bots/delta_neutral/config/config.json"
     loader = ConfigLoader(config_path)
     config = loader.load_config()
 

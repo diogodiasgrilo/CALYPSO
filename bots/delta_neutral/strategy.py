@@ -6173,19 +6173,21 @@ class DeltaNeutralStrategy:
             return False
 
         weekly_theta_cost = self._get_long_straddle_weekly_theta()
-        total_entry_fees = self.short_strangle_entry_fee_per_leg * 2 * self.position_size
+        # Round-trip fees for shorts: entry ($2.05 × 2 legs) + exit ($2.05 × 2 legs) = $8.20
+        # This properly accounts for the full cost of a weekly strangle cycle
+        total_round_trip_fees = self.short_strangle_entry_fee_per_leg * 2 * self.position_size * 2
 
         # Target NET = 1% of long straddle cost
         target_net = long_straddle_cost * (self.weekly_target_return_pct / 100)
 
-        # Required gross = target NET + theta + fees
-        required_gross = target_net + weekly_theta_cost + total_entry_fees
+        # Required gross = target NET + theta + round-trip fees
+        required_gross = target_net + weekly_theta_cost + total_round_trip_fees
 
         logger.info(f"SPY: ${self.current_underlying_price:.2f}")
         logger.info(f"Long Straddle Cost: ${long_straddle_cost:,.2f}")
         logger.info(f"Target NET ({self.weekly_target_return_pct}%): ${target_net:.2f}")
         logger.info(f"Weekly Theta Cost: ${weekly_theta_cost:.2f}")
-        logger.info(f"Entry Fees: ${total_entry_fees:.2f}")
+        logger.info(f"Round-Trip Fees: ${total_round_trip_fees:.2f} (entry + exit)")
         logger.info(f"REQUIRED GROSS PREMIUM: ${required_gross:.2f}")
 
         # =====================================================================
@@ -6379,9 +6381,9 @@ class DeltaNeutralStrategy:
                 # Strikes are asymmetric, skip this multiplier
                 continue
 
-            # Calculate NET return
+            # Calculate NET return (gross minus theta minus round-trip fees)
             gross_premium = call_data["premium"] + put_data["premium"]
-            net_premium = gross_premium - weekly_theta_cost - total_entry_fees
+            net_premium = gross_premium - weekly_theta_cost - total_round_trip_fees
             net_return = (net_premium / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
 
             # Only log every 0.1x to avoid spam (we're testing at 0.01x increments)
@@ -6407,7 +6409,7 @@ class DeltaNeutralStrategy:
 
                         # Recalculate with fresh prices
                         fresh_gross = call_data["premium"] + put_data["premium"]
-                        fresh_net = fresh_gross - weekly_theta_cost - total_entry_fees
+                        fresh_net = fresh_gross - weekly_theta_cost - total_round_trip_fees
                         fresh_return = (fresh_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
 
                         if fresh_return >= min_target_return:
@@ -6462,7 +6464,7 @@ class DeltaNeutralStrategy:
         # STEP 5: Calculate final P&L and log results
         # =====================================================================
         final_gross = final_call["premium"] + final_put["premium"]
-        final_net = final_gross - weekly_theta_cost - total_entry_fees
+        final_net = final_gross - weekly_theta_cost - total_round_trip_fees
         final_return = (final_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
 
         logger.info("=" * 70)
@@ -6473,7 +6475,7 @@ class DeltaNeutralStrategy:
         logger.info("-" * 70)
         logger.info(f"Gross Premium:     +${final_gross:.2f}")
         logger.info(f"Weekly Theta:      -${weekly_theta_cost:.2f}")
-        logger.info(f"Entry Fees:        -${total_entry_fees:.2f}")
+        logger.info(f"Round-Trip Fees:   -${total_round_trip_fees:.2f}")
         logger.info(f"NET Premium:       +${final_net:.2f}")
         logger.info(f"NET Return:        {final_return:.2f}% (target was {self.weekly_target_return_pct}%)")
         logger.info(f"Profit Zone: ${final_put['strike']:.0f} - ${final_call['strike']:.0f} (${final_call['strike'] - final_put['strike']:.0f} points)")
@@ -7423,7 +7425,9 @@ class DeltaNeutralStrategy:
                 put_quote["Quote"].get("Ask", 0)
             ) * self.position_size * 100
 
-        realized_pnl = premium_received - close_cost
+        # Exit fees: $2.05 × 2 legs = $4.10 (must be deducted from P&L)
+        exit_fees = self.short_strangle_entry_fee_per_leg * 2 * self.position_size
+        realized_pnl = premium_received - close_cost - exit_fees
         self.metrics.realized_pnl += realized_pnl
         self.metrics.record_trade(realized_pnl)
         if not self.dry_run:
@@ -7431,7 +7435,7 @@ class DeltaNeutralStrategy:
 
         logger.info(
             f"Short strangle closed. Premium: ${premium_received:.2f}, "
-            f"Close cost: ${close_cost:.2f}, P&L: ${realized_pnl:.2f}"
+            f"Close cost: ${close_cost:.2f}, Exit fees: ${exit_fees:.2f}, P&L: ${realized_pnl:.2f}"
         )
 
         # Log individual leg closures with P&L (capture before clearing position)

@@ -30,11 +30,12 @@ def main():
 
     client = SaxoClient(config)
     underlying_uic = config["strategy"]["underlying_uic"]
-    target_dte = config["strategy"].get("long_straddle_max_dte", 120)  # Target ~120 DTE for longs
+    target_dte = config["strategy"].get("long_straddle_target_dte", 120)  # Target ~120 DTE for longs
     max_vix = config["strategy"]["max_vix_entry"]
     weekly_target_return_pct = config["strategy"].get("weekly_target_return_percent", 1.0)
-    max_multiplier = config["strategy"].get("weekly_strangle_multiplier_max", 2.0)
-    fee_per_leg = config["strategy"].get("short_strangle_fee_per_leg", 2.05)
+    max_multiplier = config["strategy"].get("short_strangle_multiplier_max", 2.0)
+    min_multiplier = config["strategy"].get("short_strangle_multiplier_min", 1.0)  # Absolute floor from config
+    fee_per_leg = config["strategy"].get("short_strangle_entry_fee_per_leg", 2.05)
     position_size = config["strategy"]["position_size"]
 
     print("=" * 70)
@@ -140,16 +141,17 @@ def main():
     print()
 
     # Calculate target premium using 1% NET of long straddle cost
-    # Fee calculation: $2.05/leg/direction × 2 legs × 2 directions (entry+exit) = $8.20 round-trip
+    # Bot uses ROUND-TRIP FEES when calculating required gross
+    # Fee calculation: $2.05/leg × 2 legs × 2 directions = $8.20 round-trip fees
     target_net = long_straddle_cost * (weekly_target_return_pct / 100)
-    total_round_trip_fees = fee_per_leg * 2 * position_size * 2  # 2 legs × 2 directions
+    total_round_trip_fees = fee_per_leg * 2 * position_size * 2  # Entry + Exit fees
     required_gross = target_net + weekly_theta + total_round_trip_fees
 
     print(f"Target Return: {weekly_target_return_pct}% NET of Long Straddle Cost")
     print(f"Long Straddle Cost: ${long_straddle_cost:,.2f}")
     print(f"Target NET: ${target_net:.2f}")
     print(f"+ Weekly Theta: ${weekly_theta:.2f}")
-    print(f"+ Round-Trip Fees: ${total_round_trip_fees:.2f} (2 legs × $4.10)")
+    print(f"+ Round-Trip Fees: ${total_round_trip_fees:.2f} (2 legs × ${fee_per_leg:.2f} × 2 directions)")
     print(f"= Required Gross: ${required_gross:.2f}")
     print()
 
@@ -236,6 +238,7 @@ def main():
     # 2. At each level, find symmetric strikes (same multiplier for both legs)
     # 3. Stop at FIRST (highest) multiplier that achieves >= 1% NET return
     # 4. This gives the safest/widest strikes that still hit premium target
+    # 5. If target can't be hit, use floor (1.0x) strikes anyway (per Brian Terry)
     #
     # Benefits:
     # - Always symmetric (true delta neutral)
@@ -243,7 +246,6 @@ def main():
     # - Low VIX: goes to lower multipliers to hit target
     # - High VIX: stays at higher multipliers for safety
 
-    min_mult_absolute = 0.5  # Absolute floor
     min_target_return = weekly_target_return_pct
 
     # Build strike->data mappings
@@ -253,17 +255,22 @@ def main():
     all_put_strikes = sorted(put_by_strike.keys(), reverse=True)
 
     print(f"Available: {len(all_call_strikes)} call strikes, {len(all_put_strikes)} put strikes")
-    print(f"Scanning from {max_multiplier}x down to {min_mult_absolute}x for symmetric strikes >= {min_target_return}% NET")
+    print(f"Scanning from {max_multiplier}x down to {min_multiplier}x for symmetric strikes >= {min_target_return}% NET")
     print()
 
     final_call = None
     final_put = None
     found_mult = None
 
+    # Track best available at floor (in case we can't hit target)
+    floor_call = None
+    floor_put = None
+    floor_return = None
+
     # Test multipliers from max down to min in 0.01 increments
     test_multipliers = []
     mult = max_multiplier
-    while mult >= min_mult_absolute:
+    while mult >= min_multiplier:
         test_multipliers.append(round(mult, 2))
         mult -= 0.01
 
@@ -337,12 +344,46 @@ def main():
                         print(f"  NET Return: {fresh_return:.2f}%")
                         break
 
+        # Track best available at floor (~1.0x) in case we can't hit target
+        if target_mult <= 1.05 and net_return > 0:
+            if floor_return is None or net_return > floor_return:
+                floor_call = call_data.copy()
+                floor_put = put_data.copy()
+                floor_return = net_return
+
+    # If we didn't find strikes meeting target, use floor strikes with lower return
+    # This matches bot behavior: proceed with 1.0x floor even if < 1% return
     if not final_call or not final_put:
-        print()
-        print("ERROR: No symmetric strikes achieve target return")
-        print(f"Scanned from {max_multiplier}x down to {min_mult_absolute}x")
-        print("Current market (low VIX) doesn't support 1% weekly return")
-        return
+        if floor_call and floor_put and floor_return is not None and floor_return > 0:
+            print()
+            print(f"WARNING: Could not achieve {min_target_return}% target at any multiplier")
+            print(f"Using 1.0x floor strikes with {floor_return:.2f}% return instead")
+            print("(Per Brian Terry: 'shorts should be at least the expected move away')")
+
+            # Get fresh quotes for floor strikes
+            call_quote = client.get_quote(floor_call["uic"], "StockOption")
+            put_quote = client.get_quote(floor_put["uic"], "StockOption")
+
+            if call_quote and put_quote:
+                call_bid = call_quote["Quote"].get("Bid", 0) or 0
+                put_bid = put_quote["Quote"].get("Bid", 0) or 0
+
+                if call_bid > 0 and put_bid > 0:
+                    floor_call["bid"] = call_bid
+                    floor_call["premium"] = call_bid * 100 * position_size
+                    floor_put["bid"] = put_bid
+                    floor_put["premium"] = put_bid * 100 * position_size
+
+                    final_call = floor_call
+                    final_put = floor_put
+                    found_mult = 1.0
+
+        if not final_call or not final_put:
+            print()
+            print("ERROR: No valid strikes found even at 1.0x floor")
+            print(f"Scanned from {max_multiplier}x down to {min_multiplier}x")
+            print("Current market conditions do not support any entry")
+            return
 
     # Calculate final P&L
     final_gross = final_call["premium"] + final_put["premium"]
@@ -378,7 +419,7 @@ SHORT STRANGLE (Income):
 WEEKLY P&L PROJECTION:
   Gross Premium:     +${final_gross:>8.2f}
   Weekly Theta:      -${weekly_theta:>8.2f}
-  Round-Trip Fees:   -${total_round_trip_fees:>8.2f}  ({position_size} contracts × 2 legs × $4.10 round-trip)
+  Round-Trip Fees:   -${total_round_trip_fees:>8.2f}  ({position_size} contracts × 2 legs × ${fee_per_leg:.2f} × 2 directions)
   {'─' * 30}
   NET Premium:       +${final_net:>8.2f}
 
