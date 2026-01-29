@@ -3,9 +3,10 @@
 Weekly Projection Calculator for Delta Neutral Strategy.
 
 Calculates expected premium and NET return for next week based on
-current market conditions, matching your actual trading style.
+current market conditions, MATCHING THE ACTUAL BOT LOGIC.
 
-Shows strikes at different expected move multipliers so you can choose.
+Scans from max multiplier (2.0x) down to min (1.0x) in 0.01 increments
+to find the highest multiplier achieving the target NET return.
 
 Usage:
     python scripts/weekly_projection.py
@@ -118,38 +119,53 @@ def main():
     print(f"Round-Trip Fees: ${total_round_trip_fees:.2f}")
 
     # =========================================================================
-    # SHORT STRANGLE OPTIONS AT DIFFERENT MULTIPLIERS
+    # BOT SIMULATION - Scan from max to min multiplier in 0.01 increments
     # =========================================================================
-    print("\n" + "-" * 70)
-    print("SHORT STRANGLE OPTIONS FOR NEXT FRIDAY")
-    print("-" * 70)
-    print()
-    print(f"{'Mult':<6} {'Put':<8} {'Call':<8} {'Width':<8} {'Gross':<10} {'Costs':<10} {'NET':<10} {'Return':<8}")
-    print("-" * 70)
+    # Read config values (same as actual bot)
+    max_mult = config["strategy"].get("short_strangle_multiplier_max", 2.0)
+    min_mult = config["strategy"].get("short_strangle_multiplier_min", 1.0)
+    target_return_pct = config["strategy"].get("weekly_target_return_percent", 1.0)
 
-    results = []
+    print("\n" + "-" * 70)
+    print("BOT STRIKE SELECTION (matching actual bot logic)")
+    print("-" * 70)
+    print(f"Config: max_mult={max_mult}x, min_mult={min_mult}x, target_return={target_return_pct}%")
+    print(f"Scanning from {max_mult}x down to {min_mult}x in 0.01 increments...")
+    print()
+
     total_costs = weekly_theta + total_round_trip_fees
 
-    for mult in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0]:
+    # Generate test multipliers from max down to min in 0.01 increments (same as bot)
+    test_multipliers = []
+    mult = max_mult
+    while mult >= min_mult:
+        test_multipliers.append(round(mult, 2))
+        mult -= 0.01
+
+    best = None
+    floor_option = None  # Track option at min multiplier floor
+
+    for mult in test_multipliers:
         strangle = client.find_strangle_options(
             underlying_uic, spy_price, expected_move, mult,
             weekly=True, for_roll=True
         )
 
         if not strangle:
-            print(f"{mult:<6.2f}x  -- Could not find options --")
             continue
 
         call_q = client.get_quote(strangle["call"]["uic"], "StockOption")
         put_q = client.get_quote(strangle["put"]["uic"], "StockOption")
 
         if not call_q or not put_q:
-            print(f"{mult:<6.2f}x  -- Could not get quotes --")
             continue
 
         # Use Bid, fallback to LastTraded when market is closed
         call_bid = call_q["Quote"].get("Bid", 0) or call_q["Quote"].get("LastTraded", 0) or 0
         put_bid = put_q["Quote"].get("Bid", 0) or put_q["Quote"].get("LastTraded", 0) or 0
+
+        if call_bid <= 0 or put_bid <= 0:
+            continue
 
         call_strike = strangle["call"]["strike"]
         put_strike = strangle["put"]["strike"]
@@ -157,10 +173,9 @@ def main():
 
         gross = (call_bid + put_bid) * 100 * position_size
         net = gross - total_costs
-        # Return calculated vs long straddle cost (per strategy spec)
         net_return = (net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
 
-        results.append({
+        result = {
             "mult": mult,
             "put": put_strike,
             "call": call_strike,
@@ -170,37 +185,39 @@ def main():
             "return": net_return,
             "call_bid": call_bid,
             "put_bid": put_bid
-        })
+        }
 
-        marker = ""
-        if 0.9 <= mult <= 1.1:
-            marker = " ← ~like last week"
+        # Track floor option (at min multiplier)
+        if mult == min_mult or floor_option is None:
+            floor_option = result
 
-        print(f"{mult:<6.2f}x ${put_strike:<7.0f} ${call_strike:<7.0f} ${width:<7.0f} ${gross:<9.2f} ${total_costs:<9.2f} ${net:<9.2f} {net_return:>6.2f}%{marker}")
+        # First multiplier that achieves target return wins (highest safe multiplier)
+        if net_return >= target_return_pct and best is None:
+            best = result
+            print(f"✓ Found at {mult:.2f}x: Put ${put_strike:.0f} / Call ${call_strike:.0f} = {net_return:.2f}% NET")
+            break  # Stop scanning, we found the highest multiplier meeting target
+
+    # If nothing meets target, use floor multiplier
+    if not best:
+        best = floor_option
+        if best:
+            print(f"⚠ No multiplier achieves {target_return_pct}% target")
+            print(f"  Using floor ({min_mult}x): Put ${best['put']:.0f} / Call ${best['call']:.0f} = {best['return']:.2f}% NET")
 
     # =========================================================================
-    # RECOMMENDATION - Find highest multiplier achieving 1% target
+    # RESULT - What the bot would select
     # =========================================================================
     print("\n" + "=" * 70)
-    print("RECOMMENDATION - BEST OPTION ACHIEVING 1% TARGET")
+    print("BOT SELECTION RESULT")
     print("=" * 70)
 
-    # Find highest multiplier that achieves >= 1% return (safest strikes)
-    target_return = 1.0
-    best = None
-    for r in results:
-        if r["return"] >= target_return:
-            if best is None or r["mult"] > best["mult"]:
-                best = r
-
-    # If nothing meets target, find closest to target
-    if not best and results:
-        best = max(results, key=lambda r: r["return"])
-        print(f"\nWARNING: No option achieves {target_return}% target return")
-        print(f"Showing best available: {best['mult']:.2f}x with {best['return']:.2f}% return")
-
     if best:
+        meets_target = best['return'] >= target_return_pct
+        status = "✓ MEETS TARGET" if meets_target else f"⚠ BELOW TARGET (floor at {min_mult}x)"
+
         print(f"""
+{status}
+
 SELECTED STRIKES ({position_size} contract(s)):
   Short ${best['call']:.0f} Call @ ${best['call_bid']:.2f} = ${best['call_bid']*100*position_size:.2f}
   Short ${best['put']:.0f} Put  @ ${best['put_bid']:.2f} = ${best['put_bid']*100*position_size:.2f}
@@ -212,7 +229,7 @@ WEEKLY P&L PROJECTION:
   Round-Trip Fees:    -${total_round_trip_fees:>8.2f}
   ─────────────────────────────
   NET Premium:        +${best['net']:>8.2f}
-  NET Return:          {best['return']:>8.2f}% (target: {target_return}%)
+  NET Return:          {best['return']:>8.2f}% (target: {target_return_pct}%)
 
 RISK ANALYSIS:
   Strikes at {best['mult']:.2f}x expected move
@@ -220,6 +237,8 @@ RISK ANALYSIS:
   Call ${best['call']:.0f} is ${best['call'] - spy_price:.2f} above SPY ({(best['call'] - spy_price)/expected_move:.1f}x exp move)
   Profit Zone: ${best['put']:.0f} - ${best['call']:.0f} (${best['width']:.0f} points wide)
 """)
+    else:
+        print("\nERROR: Could not find any valid strangle options")
 
     # =========================================================================
     # PROBABILITY REFERENCE
