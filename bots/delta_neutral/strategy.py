@@ -6419,22 +6419,22 @@ class DeltaNeutralStrategy:
                             logger.info(f"SUCCESS: Found symmetric strikes at {target_mult}x with {fresh_return:.2f}% NET return")
                             break
 
-            # Track best available at floor (1.0x) in case we can't hit target
-            # This ensures we use 1.0x strikes even with lower return rather than failing
-            if target_mult <= 1.05 and net_return > 0:  # At or near floor
+            # Track best available at config floor (1.33x) in case we can't hit target
+            # This ensures we use floor strikes even with lower return rather than failing
+            if target_mult <= min_mult + 0.05:  # At or near config floor
                 if floor_return is None or net_return > floor_return:
                     floor_call = call_data.copy()
                     floor_put = put_data.copy()
                     floor_return = net_return
 
-        # If we didn't find strikes meeting target, use floor strikes (1.0x) with lower return
+        # If we didn't find strikes meeting target, use floor strikes with lower return
         if not final_call or not final_put:
             if floor_call and floor_put and floor_return is not None and floor_return > 0:
-                # Accept the 1.0x floor strikes with whatever return they provide
+                # Accept the floor strikes (1.33x) with whatever return they provide
                 # Research: IV overstates RV 85% of time, so even lower returns are profitable long-term
                 logger.warning(f"Could not achieve {min_target_return}% target at any multiplier")
-                logger.warning(f"Using 1.0x floor strikes with {floor_return:.2f}% return instead")
-                logger.warning("This is within Brian Terry's guidelines ('at least expected move away')")
+                logger.warning(f"Using {min_mult}x floor strikes with {floor_return:.2f}% return instead")
+                logger.warning("Roll trigger will land at 1.0x expected move (safe boundary)")
 
                 # Get fresh quotes for floor strikes
                 call_quote = self.client.get_quote(floor_call["uic"], "StockOption")
@@ -6452,11 +6452,88 @@ class DeltaNeutralStrategy:
 
                         final_call = floor_call
                         final_put = floor_put
-                        found_mult = 1.0
+                        found_mult = min_mult
+
+            # SAFETY EXTENSION: If floor (1.33x) gives zero/negative return, extend scan to 1.0x
+            # This prioritizes: positive return > target return > optimal trigger placement
+            if not final_call or not final_put:
+                if min_mult > 1.0:
+                    logger.warning(f"Floor {min_mult}x gives zero/negative return - extending scan to 1.0x")
+
+                    # Scan from min_mult down to 1.0x looking for first positive return
+                    extended_multipliers = []
+                    ext_mult = min_mult - 0.01
+                    while ext_mult >= 1.0:
+                        extended_multipliers.append(round(ext_mult, 2))
+                        ext_mult -= 0.01
+
+                    for target_mult in extended_multipliers:
+                        target_distance = expected_move * target_mult
+
+                        target_call_strike = self.current_underlying_price + target_distance
+                        call_strike = None
+                        for s in all_call_strikes:
+                            if s >= target_call_strike:
+                                call_strike = s
+                                break
+
+                        target_put_strike = self.current_underlying_price - target_distance
+                        put_strike = None
+                        for s in all_put_strikes:
+                            if s <= target_put_strike:
+                                put_strike = s
+                                break
+
+                        if not call_strike or not put_strike:
+                            continue
+
+                        call_data = call_by_strike.get(call_strike)
+                        put_data = put_by_strike.get(put_strike)
+
+                        if not call_data or not put_data:
+                            continue
+
+                        # Check symmetry
+                        mult_diff = abs(call_data["mult"] - put_data["mult"])
+                        if mult_diff > 0.3:
+                            continue
+
+                        # Calculate NET return
+                        gross_premium = call_data["premium"] + put_data["premium"]
+                        net_premium = gross_premium - weekly_theta_cost - total_round_trip_fees
+                        net_return = (net_premium / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+
+                        if net_return > 0:
+                            # Found positive return - get fresh quotes
+                            call_quote = self.client.get_quote(call_data["uic"], "StockOption")
+                            put_quote = self.client.get_quote(put_data["uic"], "StockOption")
+
+                            if call_quote and put_quote:
+                                call_bid = call_quote["Quote"].get("Bid", 0) or 0
+                                put_bid = put_quote["Quote"].get("Bid", 0) or 0
+
+                                if call_bid > 0 and put_bid > 0:
+                                    call_data["bid"] = call_bid
+                                    call_data["premium"] = call_bid * 100 * self.position_size
+                                    put_data["bid"] = put_bid
+                                    put_data["premium"] = put_bid * 100 * self.position_size
+
+                                    # Recalculate with fresh prices
+                                    fresh_gross = call_data["premium"] + put_data["premium"]
+                                    fresh_net = fresh_gross - weekly_theta_cost - total_round_trip_fees
+                                    fresh_return = (fresh_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+
+                                    if fresh_return > 0:
+                                        final_call = call_data
+                                        final_put = put_data
+                                        found_mult = target_mult
+                                        logger.warning(f"Extended scan found positive return at {target_mult}x: {fresh_return:.2f}%")
+                                        logger.warning("Note: Roll trigger will be below 1.0x EM - less safe but still profitable")
+                                        break
 
             if not final_call or not final_put:
-                logger.error("No valid strikes found even at 1.0x floor")
-                logger.error(f"Scanned multipliers from {max_mult}x down to {min_mult}x")
+                logger.error("No valid strikes found even at 1.0x absolute floor")
+                logger.error(f"Scanned multipliers from {max_mult}x down to 1.0x")
                 logger.error("Current market conditions do not support any entry")
                 return False
 
