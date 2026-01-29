@@ -36,11 +36,14 @@ def main():
 
     underlying_uic = config["strategy"]["underlying_uic"]
     target_dte = config["strategy"]["long_straddle_target_dte"]
+    position_size = config["strategy"]["position_size"]
+    fee_per_leg = config["strategy"].get("short_strangle_entry_fee_per_leg", 2.05)
 
     print("=" * 70)
     print("WEEKLY PROJECTION - DELTA NEUTRAL STRATEGY")
     print("=" * 70)
     print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"Position Size: {position_size} contract(s)")
     print()
 
     # Get SPY price
@@ -51,10 +54,6 @@ def main():
 
     spy_price = quote["Quote"].get("Mid") or quote["Quote"].get("LastTraded", 0)
     print(f"SPY Price: ${spy_price:.2f}")
-
-    # Margin calculation
-    margin = spy_price * 100 * 0.20
-    print(f"Margin (20% notional): ${margin:,.2f}")
 
     # =========================================================================
     # EXPECTED MOVE
@@ -76,10 +75,10 @@ def main():
     print(f"Expected Range: ${spy_price - expected_move:.2f} - ${spy_price + expected_move:.2f}")
 
     # =========================================================================
-    # LONG STRADDLE THETA
+    # LONG STRADDLE COST & THETA
     # =========================================================================
     print("\n" + "-" * 70)
-    print("LONG STRADDLE THETA COST")
+    print("LONG STRADDLE COST & THETA")
     print("-" * 70)
 
     atm_options = client.find_atm_options(underlying_uic, spy_price, target_dte=target_dte)
@@ -87,18 +86,36 @@ def main():
         print("ERROR: Could not find ATM options for long straddle")
         return
 
+    # Get quotes for long straddle cost
+    call_quote = client.get_quote(atm_options["call"]["uic"], "StockOption")
+    put_quote = client.get_quote(atm_options["put"]["uic"], "StockOption")
+
+    call_ask = 0
+    put_ask = 0
+    if call_quote:
+        call_ask = call_quote["Quote"].get("Ask", 0) or call_quote["Quote"].get("LastTraded", 0) or 0
+    if put_quote:
+        put_ask = put_quote["Quote"].get("Ask", 0) or put_quote["Quote"].get("LastTraded", 0) or 0
+
+    long_straddle_cost = (call_ask + put_ask) * 100 * position_size
+
     print(f"Long Straddle: ${atm_options['call']['strike']:.0f} @ {atm_options['call']['expiry'][:10]}")
+    print(f"Long Straddle Cost: ${long_straddle_cost:,.2f} ({position_size} contract(s))")
 
     call_greeks = client.get_option_greeks(atm_options["call"]["uic"])
     put_greeks = client.get_option_greeks(atm_options["put"]["uic"])
 
     call_theta = abs(call_greeks.get("Theta", 0)) if call_greeks else 0
     put_theta = abs(put_greeks.get("Theta", 0)) if put_greeks else 0
-    daily_theta = (call_theta + put_theta) * 100
+    daily_theta = (call_theta + put_theta) * 100 * position_size
     weekly_theta = daily_theta * 7
+
+    # Round-trip fees (entry + exit)
+    total_round_trip_fees = fee_per_leg * 2 * position_size * 2
 
     print(f"Daily Theta: ${daily_theta:.2f}/day")
     print(f"Weekly Theta (7 days): ${weekly_theta:.2f}")
+    print(f"Round-Trip Fees: ${total_round_trip_fees:.2f}")
 
     # =========================================================================
     # SHORT STRANGLE OPTIONS AT DIFFERENT MULTIPLIERS
@@ -107,10 +124,11 @@ def main():
     print("SHORT STRANGLE OPTIONS FOR NEXT FRIDAY")
     print("-" * 70)
     print()
-    print(f"{'Mult':<6} {'Put':<8} {'Call':<8} {'Width':<8} {'Gross':<10} {'Theta':<10} {'NET':<10} {'Return':<8}")
+    print(f"{'Mult':<6} {'Put':<8} {'Call':<8} {'Width':<8} {'Gross':<10} {'Costs':<10} {'NET':<10} {'Return':<8}")
     print("-" * 70)
 
     results = []
+    total_costs = weekly_theta + total_round_trip_fees
 
     for mult in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0]:
         strangle = client.find_strangle_options(
@@ -129,16 +147,18 @@ def main():
             print(f"{mult:<6.2f}x  -- Could not get quotes --")
             continue
 
-        call_bid = call_q["Quote"].get("Bid", 0) or 0
-        put_bid = put_q["Quote"].get("Bid", 0) or 0
+        # Use Bid, fallback to LastTraded when market is closed
+        call_bid = call_q["Quote"].get("Bid", 0) or call_q["Quote"].get("LastTraded", 0) or 0
+        put_bid = put_q["Quote"].get("Bid", 0) or put_q["Quote"].get("LastTraded", 0) or 0
 
         call_strike = strangle["call"]["strike"]
         put_strike = strangle["put"]["strike"]
         width = call_strike - put_strike
 
-        gross = (call_bid + put_bid) * 100
-        net = gross - weekly_theta
-        net_return = (net / margin) * 100
+        gross = (call_bid + put_bid) * 100 * position_size
+        net = gross - total_costs
+        # Return calculated vs long straddle cost (per strategy spec)
+        net_return = (net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
 
         results.append({
             "mult": mult,
@@ -156,46 +176,48 @@ def main():
         if 0.9 <= mult <= 1.1:
             marker = " ← ~like last week"
 
-        print(f"{mult:<6.2f}x ${put_strike:<7.0f} ${call_strike:<7.0f} ${width:<7.0f} ${gross:<9.2f} ${weekly_theta:<9.2f} ${net:<9.2f} {net_return:>6.2f}%{marker}")
+        print(f"{mult:<6.2f}x ${put_strike:<7.0f} ${call_strike:<7.0f} ${width:<7.0f} ${gross:<9.2f} ${total_costs:<9.2f} ${net:<9.2f} {net_return:>6.2f}%{marker}")
 
     # =========================================================================
-    # RECOMMENDATION (matching last week's ~$300 gross)
+    # RECOMMENDATION - Find highest multiplier achieving 1% target
     # =========================================================================
     print("\n" + "=" * 70)
-    print("RECOMMENDATION - MATCHING LAST WEEK'S PERFORMANCE")
+    print("RECOMMENDATION - BEST OPTION ACHIEVING 1% TARGET")
     print("=" * 70)
 
-    # Find the option closest to $300 gross (like last week)
-    target_gross = 300
+    # Find highest multiplier that achieves >= 1% return (safest strikes)
+    target_return = 1.0
     best = None
     for r in results:
-        if best is None or abs(r["gross"] - target_gross) < abs(best["gross"] - target_gross):
-            best = r
+        if r["return"] >= target_return:
+            if best is None or r["mult"] > best["mult"]:
+                best = r
+
+    # If nothing meets target, find closest to target
+    if not best and results:
+        best = max(results, key=lambda r: r["return"])
+        print(f"\nWARNING: No option achieves {target_return}% target return")
+        print(f"Showing best available: {best['mult']:.2f}x with {best['return']:.2f}% return")
 
     if best:
         print(f"""
-LAST WEEK YOU HAD:
-  Short $701 Call @ $1.28 = $128
-  Short $687 Put  @ $1.72 = $172
-  Total Gross: $300
-
-THIS WEEK TO MATCH (~${target_gross} gross):
-  Short ${best['call']:.0f} Call @ ${best['call_bid']:.2f} = ${best['call_bid']*100:.2f}
-  Short ${best['put']:.0f} Put  @ ${best['put_bid']:.2f} = ${best['put_bid']*100:.2f}
-  Total Gross: ${best['gross']:.2f}
+SELECTED STRIKES ({position_size} contract(s)):
+  Short ${best['call']:.0f} Call @ ${best['call_bid']:.2f} = ${best['call_bid']*100*position_size:.2f}
+  Short ${best['put']:.0f} Put  @ ${best['put_bid']:.2f} = ${best['put_bid']*100*position_size:.2f}
+  Multiplier: {best['mult']:.2f}x expected move
 
 WEEKLY P&L PROJECTION:
-  Gross Premium:    +${best['gross']:>8.2f}
-  Theta Cost:       -${weekly_theta:>8.2f}
-  ─────────────────────────
-  NET Premium:      +${best['net']:>8.2f}
-  NET Return:        {best['return']:>8.2f}%
+  Gross Premium:      +${best['gross']:>8.2f}
+  Weekly Theta:       -${weekly_theta:>8.2f}
+  Round-Trip Fees:    -${total_round_trip_fees:>8.2f}
+  ─────────────────────────────
+  NET Premium:        +${best['net']:>8.2f}
+  NET Return:          {best['return']:>8.2f}% (target: {target_return}%)
 
 RISK ANALYSIS:
   Strikes at {best['mult']:.2f}x expected move
   Put ${best['put']:.0f} is ${spy_price - best['put']:.2f} below SPY ({(spy_price - best['put'])/expected_move:.1f}x exp move)
   Call ${best['call']:.0f} is ${best['call'] - spy_price:.2f} above SPY ({(best['call'] - spy_price)/expected_move:.1f}x exp move)
-
   Profit Zone: ${best['put']:.0f} - ${best['call']:.0f} (${best['width']:.0f} points wide)
 """)
 

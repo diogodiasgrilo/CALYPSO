@@ -33,6 +33,7 @@ def main():
     # Get current prices
     underlying_uic = config["strategy"]["underlying_uic"]  # SPY
     vix_uic = config["strategy"]["vix_uic"]  # VIX
+    position_size = config["strategy"]["position_size"]
 
     spy_quote = client.get_quote(underlying_uic, "Etf")
     vix_quote = client.get_quote(vix_uic, "StockIndex")
@@ -56,6 +57,7 @@ def main():
     print(f"SHORT STRANGLE STRIKE CALCULATOR")
     print(f"{'='*60}")
     print(f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Position Size: {position_size} contract(s)")
     print(f"SPY Price: ${spy_price:.2f}")
     print(f"VIX: {vix_value:.2f}")
 
@@ -203,12 +205,12 @@ def main():
             print(f"  Mid: ${(put_bid + put_ask) / 2:.2f}")
 
             # Calculate premiums (selling at bid)
-            call_premium = call_bid * 100  # Per contract
-            put_premium = put_bid * 100
+            call_premium = call_bid * 100 * position_size
+            put_premium = put_bid * 100 * position_size
             total_premium = call_premium + put_premium
 
             print(f"\n{'='*60}")
-            print(f"PREMIUM YOU WOULD RECEIVE (selling at bid)")
+            print(f"PREMIUM YOU WOULD RECEIVE ({position_size} contract(s), selling at bid)")
             print(f"{'='*60}")
             print(f"  Call Premium: ${call_premium:.2f}")
             print(f"  Put Premium:  ${put_premium:.2f}")
