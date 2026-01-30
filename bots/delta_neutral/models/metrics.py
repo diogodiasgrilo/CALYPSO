@@ -68,14 +68,35 @@ class StrategyMetrics:
     # Daily roll/recenter tracking (reset each day)
     daily_roll_count: int = 0
     daily_recenter_count: int = 0
+    # Flag to track if daily tracking was already initialized today (prevents reset on restart)
+    daily_tracking_initialized: bool = False
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.vix_samples is None:
             self.vix_samples = []
 
-    def reset_daily_tracking(self, current_pnl: float, spy_price: float, vix: float):
-        """Reset daily tracking at start of trading day."""
+    def reset_daily_tracking(self, current_pnl: float, spy_price: float, vix: float, force: bool = False):
+        """
+        Reset daily tracking at start of trading day.
+
+        Args:
+            current_pnl: Current P&L to set as daily start
+            spy_price: Current SPY price
+            vix: Current VIX level
+            force: If True, reset even if already initialized today (for testing/manual reset)
+
+        Returns:
+            bool: True if reset was performed, False if skipped (already initialized)
+        """
+        # Skip if already initialized today (prevents incorrect reset on bot restart)
+        if self.daily_tracking_initialized and not force:
+            logger.info(
+                f"Daily tracking already initialized today (daily_pnl_start=${self.daily_pnl_start:.2f}) - "
+                f"skipping reset to preserve correct Daily P&L calculation"
+            )
+            return False
+
         self.daily_pnl_start = current_pnl
         self.spy_open = spy_price
         self.spy_high = spy_price
@@ -85,6 +106,9 @@ class StrategyMetrics:
         # Reset daily roll/recenter counts
         self.daily_roll_count = 0
         self.daily_recenter_count = 0
+        # Mark as initialized
+        self.daily_tracking_initialized = True
+        return True
 
     def reset_cycle_metrics(self):
         """
@@ -192,6 +216,7 @@ class StrategyMetrics:
             # Daily metrics (only valid for same trading day)
             "daily_recenter_count": self.daily_recenter_count,
             "daily_roll_count": self.daily_roll_count,
+            "daily_tracking_initialized": self.daily_tracking_initialized,
             "daily_pnl_start": self.daily_pnl_start,
             "spy_open": self.spy_open,
             "spy_high": self.spy_high,
@@ -229,13 +254,19 @@ class StrategyMetrics:
         if saved_date == today:
             metrics.daily_recenter_count = data.get("daily_recenter_count", 0)
             metrics.daily_roll_count = data.get("daily_roll_count", 0)
+            metrics.daily_tracking_initialized = data.get("daily_tracking_initialized", False)
             metrics.daily_pnl_start = data.get("daily_pnl_start", 0.0)
             metrics.spy_open = data.get("spy_open", 0.0)
             metrics.spy_high = data.get("spy_high", 0.0)
             metrics.spy_low = data.get("spy_low", 0.0)
             metrics.vix_high = data.get("vix_high", 0.0)
             metrics.vix_samples = data.get("vix_samples", [])
-        # else: daily metrics stay at default (new day - will be initialized at market open)
+            if metrics.daily_tracking_initialized:
+                logger.info(f"Restored daily tracking from earlier today: daily_pnl_start=${metrics.daily_pnl_start:.2f}")
+        else:
+            # New day - reset the initialized flag so tracking will be set up fresh
+            metrics.daily_tracking_initialized = False
+        # Note: daily metrics stay at default for new days - will be initialized at market open
 
         metrics.trade_count = data.get("trade_count", 0)
         metrics.winning_trades = data.get("winning_trades", 0)

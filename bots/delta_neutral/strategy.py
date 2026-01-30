@@ -6928,7 +6928,10 @@ class DeltaNeutralStrategy:
                 premium_received=put_price * self.position_size * 100
             )
 
-            logger.info(f"Logged short strangle legs to Trades: Call ${call_option['strike']} (+${call_price * 100:.2f}), Put ${put_option['strike']} (+${put_price * 100:.2f})")
+            # Show total premium (per-contract × position_size × 100) to match what's logged to Sheets
+            call_total = call_price * self.position_size * 100
+            put_total = put_price * self.position_size * 100
+            logger.info(f"Logged short strangle legs to Trades: Call ${call_option['strike']} (+${call_total:.2f}), Put ${put_option['strike']} (+${put_total:.2f})")
 
             # Add positions to Positions sheet
             call_dte = self._calculate_dte(call_option['expiry'])
@@ -10123,8 +10126,9 @@ class DeltaNeutralStrategy:
             # Calculate daily P&L
             daily_pnl = self.metrics.total_pnl - self.metrics.daily_pnl_start
 
-            # Use vix_avg if available (tracked during market hours), otherwise fall back to current VIX
-            vix_value = self.metrics.vix_avg if self.metrics.vix_avg > 0 else (self.current_vix or 0)
+            # Use current VIX (closing value) for Daily Summary - more intuitive than daily average
+            # The vix_avg is tracked but we show closing VIX which matches what user sees at market close
+            vix_value = self.current_vix or 0
 
             # Get theta tracking values from dashboard metrics
             net_theta = metrics.get("net_theta", 0)

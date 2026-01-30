@@ -70,7 +70,7 @@ class TradeRecord:
         trade_reason: Optional[str] = None,  # "Entry", "Roll", "ITM Risk", "Fed Filter", etc.
         greeks: Optional[Dict[str, float]] = None  # "delta", "gamma", "theta", "vega"
     ):
-        self.timestamp = timestamp or datetime.now()
+        self.timestamp = timestamp or get_us_market_time()
         self.action = action
         self.strike = strike
         self.price = price
