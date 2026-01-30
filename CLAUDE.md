@@ -162,7 +162,7 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
-- **Version:** 2.0.3 (Updated 2026-01-29 with opening range delay, safety extension, 1.5% target return)
+- **Version:** 2.0.4 (Updated 2026-01-30 with fresh quote strike selection, dynamic strike range)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
@@ -893,7 +893,7 @@ SCRIPT
 | `docs/VM_COMMANDS.md` | VM administration commands |
 | `.claude/settings.local.json` | Full command reference (also readable)
 
-### Key Lessons Learned (2026-01-28)
+### Key Lessons Learned (2026-01-30)
 
 These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
 
@@ -926,3 +926,7 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 14. **Heartbeat Timeout Detection (Fix #6, 2026-01-28)** - Track `_last_heartbeat_time` on every heartbeat. If no heartbeat in 60+ seconds, connection is zombie. Saxo sends heartbeats every ~15 seconds. (Cost: Zombie connections going undetected)
 
 15. **VIX NoAccess Requires Session Capability Recovery (Fix #11, 2026-01-29)** - When another Saxo session (SaxoTraderGO, Token Keeper) connects with `FullTradingAndChat`, the bot's session gets downgraded and VIX returns `NoAccess` (CBOE data requires premium capabilities). Solution: Detect `PriceTypeAsk: NoAccess` in REST response, auto-upgrade session via `PATCH /root/v1/sessions/capabilities`, retry VIX request. Yahoo Finance fallback works as safety net. (Cost: Unnecessary Yahoo fallbacks, potential stale VIX data)
+
+16. **Strike Selection Must Use Fresh Quotes, Not Cached (Fix #12, 2026-01-30)** - The strike selection code was using cached prices to decide if a multiplier met the target return. If cached return < target, it never fetched fresh quotes (which might be higher). Solution: Two-phase scan that always fetches fresh quotes before making decisions. (Cost: Bot selected 1.35x strikes instead of 1.5x+ on 2026-01-29, reducing cushion/safety)
+
+17. **Dynamic Strike Range, Not Hardcoded (Fix #13, 2026-01-30)** - Strike fetching used hardcoded ±20 points, but at 2.0x expected move with EM=$12.37, the required range is $24.74. Solution: `max_range = expected_move * max_mult * 1.2` dynamically scales with market conditions. (Cost: Strikes at 1.6x-2.0x were never even fetched from the API)

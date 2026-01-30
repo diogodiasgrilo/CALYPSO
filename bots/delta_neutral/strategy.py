@@ -114,7 +114,7 @@ REPORTING
 =============================================================================
 Author: Trading Bot Developer
 Date: 2024
-Last Updated: 2026-01-28
+Last Updated: 2026-01-30
 
 Change History:
 - 2026-01-22: Added 42 edge case handlers (see docs/DELTA_NEUTRAL_EDGE_CASES.md)
@@ -130,6 +130,12 @@ Change History:
 - 2026-01-28 (v2.0.1): REST-only mode for reliability
   * VIGILANT mode changed from 1s to 2s (30 REST API calls/min, under rate limits)
   * WebSocket code preserved but disabled (USE_WEBSOCKET_STREAMING=False)
+- 2026-01-30 (v2.0.4): Strike selection fixes for widest strikes at target return
+  * CRITICAL FIX: Dynamic strike range (was hardcoded ±20 points, now based on max_mult × EM)
+  * CRITICAL FIX: Two-phase scan with fresh quotes (was using stale cached prices)
+  * Phase 1: Coarse scan (0.1x increments) finds approximate target multiplier
+  * Phase 2: Fine scan (0.01x increments) refines to find exact widest multiplier
+  * API efficient: ~16-36 calls total (well under 120/min limit)
 """
 
 import logging
@@ -6306,7 +6312,13 @@ class DeltaNeutralStrategy:
             logger.error("Could not find next Friday expiration (7+ DTE)")
             return False
 
-        # Collect all OTM options with their premiums
+        # Collect all OTM options with their UICs (no quote fetching yet - we'll get fresh quotes during scan)
+        # FIX (2026-01-30): Dynamic range based on max multiplier × expected move instead of hardcoded 20 points
+        # This ensures we can find strikes at 2.0x expected move even when EM is large (e.g., $12.37 × 2.0 = $24.74)
+        max_mult = self.strangle_multiplier_max  # From config (default 2.0x)
+        max_range = expected_move * max_mult * 1.2  # 20% buffer to ensure we capture all needed strikes
+        logger.info(f"Strike range: ±${max_range:.2f} from ${self.current_underlying_price:.2f} (based on {max_mult}x × ${expected_move:.2f} EM + 20% buffer)")
+
         calls = []
         puts = []
         specific_options = weekly_exp.get("SpecificOptions", [])
@@ -6316,27 +6328,17 @@ class DeltaNeutralStrategy:
             uic = opt.get("Uic")
             put_call = opt.get("PutCall")
 
-            # Only look at strikes within reasonable range (20 points)
-            if strike < self.current_underlying_price - 20 or strike > self.current_underlying_price + 20:
-                continue
-
-            quote = self.client.get_quote(uic, "StockOption")
-            if not quote:
-                continue
-
-            bid = quote["Quote"].get("Bid", 0) or 0
-            if bid <= 0:
+            # Dynamic range based on max multiplier × expected move (FIX 2026-01-30)
+            if strike < self.current_underlying_price - max_range or strike > self.current_underlying_price + max_range:
                 continue
 
             distance = abs(strike - self.current_underlying_price)
             mult = distance / expected_move if expected_move > 0 else 0
-            premium = bid * 100 * self.position_size
 
+            # Store basic data - we'll fetch fresh quotes during the scan
             data = {
                 "strike": strike,
                 "uic": uic,
-                "bid": bid,
-                "premium": premium,
                 "distance": distance,
                 "mult": mult,
                 "expiry": weekly_exp.get("Expiry", "")[:10]
@@ -6359,26 +6361,27 @@ class DeltaNeutralStrategy:
         logger.info(f"Found {len(calls)} OTM calls, {len(puts)} OTM puts")
 
         # =====================================================================
-        # STEP 4: Find optimal SYMMETRIC strikes using dynamic multiplier
+        # STEP 4: Find optimal SYMMETRIC strikes using TWO-PHASE SCAN
         # =====================================================================
-        # NEW STRATEGY (2026-01-27):
-        # 1. Start from MAX multiplier (2.0x) and work DOWN
-        # 2. At each level, find symmetric strikes (same multiplier for both legs)
-        # 3. Stop at the FIRST (highest) multiplier that achieves >= 1% NET return
-        # 4. This ensures we always get the safest/widest strikes that hit target
+        # FIX (2026-01-30): Always use FRESH quotes for decision making
+        # Previous bug: Used cached prices to decide if target was met, only fetching
+        # fresh quotes if cached return >= target. This caused us to skip wider strikes
+        # that would have met target with fresh prices.
+        #
+        # NEW STRATEGY:
+        # Phase 1: Coarse scan (0.1x increments) with fresh quotes to find approximate target
+        # Phase 2: Fine scan (0.01x increments) to find exact widest multiplier
         #
         # Benefits:
-        # - Always symmetric (delta neutral)
-        # - Dynamically adapts to market conditions (VIX, expected move)
-        # - In low VIX: goes to lower multipliers to hit premium target
-        # - In high VIX: stays at higher multipliers for safety
+        # - Always uses fresh prices for decisions (accurate)
+        # - Limits API calls (~16-36 total vs 134 for brute force)
+        # - Finds widest strikes that achieve target return
         # =====================================================================
 
-        max_mult = self.strangle_multiplier_max  # From config (default 2.0x)
         # Brian Terry: "shorts should be at least the expected move away"
         # Research: 1.0x = 16 delta = 1 standard deviation (tastytrade standard)
         # Going below 1.0x erodes the protection from the long straddle hedge
-        min_mult = self.strangle_multiplier_min  # From config (default 1.0x) - absolute floor
+        min_mult = self.strangle_multiplier_min  # From config (default 1.33x)
         min_target_return = self.weekly_target_return_pct
 
         # Build strike->data mappings for quick lookup
@@ -6389,6 +6392,7 @@ class DeltaNeutralStrategy:
 
         logger.info(f"Available strikes: {len(all_call_strikes)} calls, {len(all_put_strikes)} puts")
         logger.info(f"Scanning from {max_mult}x down to {min_mult}x for symmetric strikes with >= {min_target_return}% NET return")
+        logger.info(f"Using TWO-PHASE scan with fresh quotes (FIX 2026-01-30)")
 
         final_call = None
         final_put = None
@@ -6399,15 +6403,8 @@ class DeltaNeutralStrategy:
         floor_put = None
         floor_return = None
 
-        # Test multipliers from max down to min in 0.01 increments for precision
-        # This allows us to find the exact highest multiplier that achieves target return
-        test_multipliers = []
-        mult = max_mult
-        while mult >= min_mult:
-            test_multipliers.append(round(mult, 2))
-            mult -= 0.01
-
-        for target_mult in test_multipliers:
+        def find_strikes_at_multiplier(target_mult: float) -> tuple:
+            """Find call and put strikes at the given multiplier."""
             target_distance = expected_move * target_mult
 
             # Find call strike at or above target distance from current price
@@ -6426,69 +6423,142 @@ class DeltaNeutralStrategy:
                     put_strike = s
                     break
 
-            if not call_strike or not put_strike:
-                continue
+            return call_strike, put_strike
 
-            # Get the option data
+        def get_fresh_return_for_strikes(call_strike: float, put_strike: float) -> tuple:
+            """
+            Fetch fresh quotes and calculate NET return for the given strikes.
+            Returns (call_data, put_data, net_return) or (None, None, None) if quotes unavailable.
+            """
             call_data = call_by_strike.get(call_strike)
             put_data = put_by_strike.get(put_strike)
 
             if not call_data or not put_data:
-                continue
+                return None, None, None
 
-            # Check symmetry - both should be at similar multipliers
+            # Check symmetry first (free - no API call needed)
             mult_diff = abs(call_data["mult"] - put_data["mult"])
             if mult_diff > 0.3:
-                # Strikes are asymmetric, skip this multiplier
+                return None, None, None  # Asymmetric, skip
+
+            # Fetch fresh quotes
+            call_quote = self.client.get_quote(call_data["uic"], "StockOption")
+            put_quote = self.client.get_quote(put_data["uic"], "StockOption")
+
+            if not call_quote or not put_quote:
+                return None, None, None
+
+            call_bid = call_quote["Quote"].get("Bid", 0) or 0
+            put_bid = put_quote["Quote"].get("Bid", 0) or 0
+
+            if call_bid <= 0 or put_bid <= 0:
+                return None, None, None
+
+            # Update data with fresh prices
+            call_data = call_data.copy()
+            put_data = put_data.copy()
+            call_data["bid"] = call_bid
+            call_data["premium"] = call_bid * 100 * self.position_size
+            put_data["bid"] = put_bid
+            put_data["premium"] = put_bid * 100 * self.position_size
+
+            # Calculate NET return with fresh prices
+            fresh_gross = call_data["premium"] + put_data["premium"]
+            fresh_net = fresh_gross - weekly_theta_cost - total_round_trip_fees
+            fresh_return = (fresh_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+
+            return call_data, put_data, fresh_return
+
+        # =====================================================================
+        # PHASE 1: Coarse scan (0.1x increments) to find approximate target
+        # =====================================================================
+        # This limits API calls while finding the general range
+        coarse_multipliers = []
+        mult = max_mult
+        while mult >= min_mult:
+            coarse_multipliers.append(round(mult, 2))
+            mult -= 0.1
+        # Ensure min_mult is included
+        if coarse_multipliers[-1] != min_mult:
+            coarse_multipliers.append(min_mult)
+
+        logger.info(f"Phase 1: Coarse scan at {len(coarse_multipliers)} multipliers: {coarse_multipliers}")
+
+        coarse_hit_mult = None
+        previous_mult = None
+
+        for target_mult in coarse_multipliers:
+            call_strike, put_strike = find_strikes_at_multiplier(target_mult)
+
+            if not call_strike or not put_strike:
+                previous_mult = target_mult
                 continue
 
-            # Calculate NET return (gross minus theta minus round-trip fees)
-            gross_premium = call_data["premium"] + put_data["premium"]
-            net_premium = gross_premium - weekly_theta_cost - total_round_trip_fees
-            net_return = (net_premium / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+            call_data, put_data, fresh_return = get_fresh_return_for_strikes(call_strike, put_strike)
 
-            # Only log every 0.1x to avoid spam (we're testing at 0.01x increments)
-            if abs(target_mult * 10 - round(target_mult * 10)) < 0.01:
-                logger.debug(f"  {target_mult:.1f}x: Call ${call_strike} ({call_data['mult']:.2f}x) / Put ${put_strike} ({put_data['mult']:.2f}x) = {net_return:.2f}% NET")
+            if call_data is None:
+                previous_mult = target_mult
+                continue
 
-            # Check if this meets our target
-            if net_return >= min_target_return:
-                # Verify we can get fresh quotes
-                call_quote = self.client.get_quote(call_data["uic"], "StockOption")
-                put_quote = self.client.get_quote(put_data["uic"], "StockOption")
+            logger.info(f"  {target_mult:.1f}x: Call ${call_strike} ({call_data['mult']:.2f}x) / Put ${put_strike} ({put_data['mult']:.2f}x) = {fresh_return:.2f}% NET")
 
-                if call_quote and put_quote:
-                    call_bid = call_quote["Quote"].get("Bid", 0) or 0
-                    put_bid = put_quote["Quote"].get("Bid", 0) or 0
+            if fresh_return >= min_target_return:
+                coarse_hit_mult = target_mult
+                # Store as potential final result (will refine in Phase 2)
+                final_call = call_data
+                final_put = put_data
+                found_mult = target_mult
+                logger.info(f"  → Target met at {target_mult}x! Will refine to find widest.")
+                break
 
-                    if call_bid > 0 and put_bid > 0:
-                        # Update with fresh prices and recalculate
-                        call_data["bid"] = call_bid
-                        call_data["premium"] = call_bid * 100 * self.position_size
-                        put_data["bid"] = put_bid
-                        put_data["premium"] = put_bid * 100 * self.position_size
+            # Track floor strikes
+            if target_mult <= min_mult + 0.05:
+                if floor_return is None or fresh_return > floor_return:
+                    floor_call = call_data
+                    floor_put = put_data
+                    floor_return = fresh_return
 
-                        # Recalculate with fresh prices
-                        fresh_gross = call_data["premium"] + put_data["premium"]
-                        fresh_net = fresh_gross - weekly_theta_cost - total_round_trip_fees
-                        fresh_return = (fresh_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
+            previous_mult = target_mult
 
-                        if fresh_return >= min_target_return:
-                            final_call = call_data
-                            final_put = put_data
-                            found_mult = target_mult
-                            logger.info(f"SUCCESS: Found symmetric strikes at {target_mult}x with {fresh_return:.2f}% NET return")
-                            break
+        # =====================================================================
+        # PHASE 2: Fine scan (0.01x increments) to find exact widest multiplier
+        # =====================================================================
+        # Only run if we found a hit in Phase 1 - scan between previous_mult and coarse_hit_mult
+        if coarse_hit_mult is not None and previous_mult is not None and previous_mult > coarse_hit_mult:
+            logger.info(f"Phase 2: Fine scan between {previous_mult}x and {coarse_hit_mult}x")
 
-            # Track best available at config floor (1.33x) in case we can't hit target
-            # This ensures we use floor strikes even with lower return rather than failing
-            if target_mult <= min_mult + 0.05:  # At or near config floor
-                if floor_return is None or net_return > floor_return:
-                    floor_call = call_data.copy()
-                    floor_put = put_data.copy()
-                    floor_return = net_return
+            fine_multipliers = []
+            mult = previous_mult - 0.01  # Start just below the previous coarse step
+            while mult > coarse_hit_mult:
+                fine_multipliers.append(round(mult, 2))
+                mult -= 0.01
 
-        # If we didn't find strikes meeting target, use floor strikes with lower return
+            for target_mult in fine_multipliers:
+                call_strike, put_strike = find_strikes_at_multiplier(target_mult)
+
+                if not call_strike or not put_strike:
+                    continue
+
+                call_data, put_data, fresh_return = get_fresh_return_for_strikes(call_strike, put_strike)
+
+                if call_data is None:
+                    continue
+
+                logger.debug(f"  {target_mult:.2f}x: {fresh_return:.2f}% NET")
+
+                if fresh_return >= min_target_return:
+                    # Found a wider multiplier that still meets target!
+                    final_call = call_data
+                    final_put = put_data
+                    found_mult = target_mult
+                    logger.info(f"  → Refined to {target_mult}x with {fresh_return:.2f}% NET (wider than {coarse_hit_mult}x)")
+                else:
+                    # Return dropped below target, stop refining
+                    break
+
+        # =====================================================================
+        # FALLBACK: Use floor strikes if target wasn't met
+        # =====================================================================
         if not final_call or not final_put:
             if floor_call and floor_put and floor_return is not None and floor_return > 0:
                 # Accept the floor strikes (1.33x) with whatever return they provide
@@ -6497,23 +6567,9 @@ class DeltaNeutralStrategy:
                 logger.warning(f"Using {min_mult}x floor strikes with {floor_return:.2f}% return instead")
                 logger.warning("Roll trigger will land at 1.0x expected move (safe boundary)")
 
-                # Get fresh quotes for floor strikes
-                call_quote = self.client.get_quote(floor_call["uic"], "StockOption")
-                put_quote = self.client.get_quote(floor_put["uic"], "StockOption")
-
-                if call_quote and put_quote:
-                    call_bid = call_quote["Quote"].get("Bid", 0) or 0
-                    put_bid = put_quote["Quote"].get("Bid", 0) or 0
-
-                    if call_bid > 0 and put_bid > 0:
-                        floor_call["bid"] = call_bid
-                        floor_call["premium"] = call_bid * 100 * self.position_size
-                        floor_put["bid"] = put_bid
-                        floor_put["premium"] = put_bid * 100 * self.position_size
-
-                        final_call = floor_call
-                        final_put = floor_put
-                        found_mult = min_mult
+                final_call = floor_call
+                final_put = floor_put
+                found_mult = min_mult
 
             # SAFETY EXTENSION: If floor (1.33x) gives zero/negative return, extend scan to 1.0x
             # This prioritizes: positive return > target return > optimal trigger placement
@@ -6521,76 +6577,23 @@ class DeltaNeutralStrategy:
                 if min_mult > 1.0:
                     logger.warning(f"Floor {min_mult}x gives zero/negative return - extending scan to 1.0x")
 
-                    # Scan from min_mult down to 1.0x looking for first positive return
-                    extended_multipliers = []
-                    ext_mult = min_mult - 0.01
+                    # Scan from min_mult down to 1.0x in 0.1x increments
+                    ext_mult = min_mult - 0.1
                     while ext_mult >= 1.0:
-                        extended_multipliers.append(round(ext_mult, 2))
-                        ext_mult -= 0.01
+                        call_strike, put_strike = find_strikes_at_multiplier(ext_mult)
 
-                    for target_mult in extended_multipliers:
-                        target_distance = expected_move * target_mult
+                        if call_strike and put_strike:
+                            call_data, put_data, fresh_return = get_fresh_return_for_strikes(call_strike, put_strike)
 
-                        target_call_strike = self.current_underlying_price + target_distance
-                        call_strike = None
-                        for s in all_call_strikes:
-                            if s >= target_call_strike:
-                                call_strike = s
+                            if call_data is not None and fresh_return > 0:
+                                final_call = call_data
+                                final_put = put_data
+                                found_mult = ext_mult
+                                logger.warning(f"Extended scan found positive return at {ext_mult}x: {fresh_return:.2f}%")
+                                logger.warning("Note: Roll trigger will be below 1.0x EM - less safe but still profitable")
                                 break
 
-                        target_put_strike = self.current_underlying_price - target_distance
-                        put_strike = None
-                        for s in all_put_strikes:
-                            if s <= target_put_strike:
-                                put_strike = s
-                                break
-
-                        if not call_strike or not put_strike:
-                            continue
-
-                        call_data = call_by_strike.get(call_strike)
-                        put_data = put_by_strike.get(put_strike)
-
-                        if not call_data or not put_data:
-                            continue
-
-                        # Check symmetry
-                        mult_diff = abs(call_data["mult"] - put_data["mult"])
-                        if mult_diff > 0.3:
-                            continue
-
-                        # Calculate NET return
-                        gross_premium = call_data["premium"] + put_data["premium"]
-                        net_premium = gross_premium - weekly_theta_cost - total_round_trip_fees
-                        net_return = (net_premium / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
-
-                        if net_return > 0:
-                            # Found positive return - get fresh quotes
-                            call_quote = self.client.get_quote(call_data["uic"], "StockOption")
-                            put_quote = self.client.get_quote(put_data["uic"], "StockOption")
-
-                            if call_quote and put_quote:
-                                call_bid = call_quote["Quote"].get("Bid", 0) or 0
-                                put_bid = put_quote["Quote"].get("Bid", 0) or 0
-
-                                if call_bid > 0 and put_bid > 0:
-                                    call_data["bid"] = call_bid
-                                    call_data["premium"] = call_bid * 100 * self.position_size
-                                    put_data["bid"] = put_bid
-                                    put_data["premium"] = put_bid * 100 * self.position_size
-
-                                    # Recalculate with fresh prices
-                                    fresh_gross = call_data["premium"] + put_data["premium"]
-                                    fresh_net = fresh_gross - weekly_theta_cost - total_round_trip_fees
-                                    fresh_return = (fresh_net / long_straddle_cost) * 100 if long_straddle_cost > 0 else 0
-
-                                    if fresh_return > 0:
-                                        final_call = call_data
-                                        final_put = put_data
-                                        found_mult = target_mult
-                                        logger.warning(f"Extended scan found positive return at {target_mult}x: {fresh_return:.2f}%")
-                                        logger.warning("Note: Roll trigger will be below 1.0x EM - less safe but still profitable")
-                                        break
+                        ext_mult = round(ext_mult - 0.1, 2)
 
             if not final_call or not final_put:
                 logger.error("No valid strikes found even at 1.0x absolute floor")
