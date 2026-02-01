@@ -337,6 +337,24 @@ class DeltaNeutralStrategy:
         # If bid-ask spread exceeds this dollar amount, abort rather than use MARKET order
         self._max_absolute_slippage: float = self.strategy_config.get("max_absolute_slippage", 2.00)
 
+        # ORDER-006: Order size validation - prevents bugs from placing massive orders
+        order_limits = self.strategy_config.get("order_limits", {})
+        self._max_contracts_per_order: int = order_limits.get("max_contracts_per_order", 10)
+        self._max_contracts_per_underlying: int = order_limits.get("max_contracts_per_underlying", 20)
+
+        # ORDER-007: Fill price slippage monitoring
+        slippage_config = self.strategy_config.get("slippage_monitoring", {})
+        self._slippage_warning_threshold_pct: float = slippage_config.get("warning_threshold_percent", 5.0)
+        self._slippage_critical_threshold_pct: float = slippage_config.get("critical_threshold_percent", 15.0)
+
+        # ORDER-008: Emergency close configuration
+        emergency_config = self.strategy_config.get("emergency_close", {})
+        self._max_emergency_close_attempts: int = emergency_config.get("max_attempts", 5)
+        self._emergency_close_retry_delay: int = emergency_config.get("retry_delay_seconds", 5)
+        self._max_emergency_spread_pct: float = emergency_config.get("max_spread_percent", 50.0)
+        self._spread_normalization_wait: int = emergency_config.get("spread_normalization_wait_seconds", 30)
+        self._spread_normalization_attempts: int = emergency_config.get("spread_normalization_max_attempts", 3)
+
         # Trading cutoff times (minutes before market close)
         self.recenter_cutoff_minutes = self.strategy_config.get("recenter_cutoff_minutes_before_close", 15)
         self.shorts_cutoff_minutes = self.strategy_config.get("shorts_cutoff_minutes_before_close", 10)
@@ -539,7 +557,11 @@ class DeltaNeutralStrategy:
             logger.critical("⚠️ SCENARIO 1: Partial strangle with complete straddle")
             logger.critical("   Action: Close the naked short leg, keep straddle intact")
 
-            if self._close_partial_strangle_emergency():
+            # ORDER-008: Use retry wrapper for emergency close
+            if self._emergency_close_with_retries(
+                self._close_partial_strangle_emergency,
+                "CLOSE_NAKED_SHORT"
+            ):
                 actions.append("Closed naked short leg (partial strangle)")
             else:
                 actions.append("FAILED to close naked short leg - MANUAL INTERVENTION REQUIRED")
@@ -551,7 +573,11 @@ class DeltaNeutralStrategy:
             logger.critical("🚨 SCENARIO 2: Partial straddle with shorts - VERY DANGEROUS")
             logger.critical("   Action: Close ALL positions (shorts not protected)")
 
-            if self._emergency_close_all():
+            # ORDER-008: Use retry wrapper for emergency close
+            if self._emergency_close_with_retries(
+                self._emergency_close_all,
+                "CLOSE_ALL_POSITIONS"
+            ):
                 actions.append("CLOSED ALL POSITIONS (incomplete straddle with shorts)")
             else:
                 actions.append("FAILED to close all positions - MANUAL INTERVENTION REQUIRED")
@@ -562,7 +588,11 @@ class DeltaNeutralStrategy:
             logger.critical("🚨 SCENARIO 3: Short positions with NO long protection")
             logger.critical("   Action: Close ALL short positions")
 
-            if self._close_short_strangle_emergency():
+            # ORDER-008: Use retry wrapper for emergency close
+            if self._emergency_close_with_retries(
+                self._close_short_strangle_emergency,
+                "CLOSE_ALL_SHORTS"
+            ):
                 actions.append("Closed all short positions (no long protection)")
             else:
                 actions.append("FAILED to close shorts - MANUAL INTERVENTION REQUIRED")
@@ -611,6 +641,9 @@ class DeltaNeutralStrategy:
 
         leg_type = "CALL" if self.short_strangle.call else "PUT"
         logger.critical(f"🚨 EMERGENCY: Closing naked short {leg_type} at ${naked_leg.strike:.0f}")
+
+        # ORDER-008: Wait for spread normalization before emergency close
+        self._wait_for_spread_normalization(naked_leg.uic, "StockOption")
 
         try:
             # Get current ask price for buying back
@@ -681,6 +714,12 @@ class DeltaNeutralStrategy:
             return True  # Nothing to close
 
         logger.critical("🚨 EMERGENCY: Closing ALL short positions")
+
+        # ORDER-008: Wait for spread normalization on all legs before emergency close
+        if self.short_strangle.call:
+            self._wait_for_spread_normalization(self.short_strangle.call.uic, "StockOption")
+        if self.short_strangle.put:
+            self._wait_for_spread_normalization(self.short_strangle.put.uic, "StockOption")
 
         try:
             legs = []
@@ -2521,6 +2560,340 @@ class DeltaNeutralStrategy:
         return False
 
     # =========================================================================
+    # ORDER SAFETY VALIDATIONS (ORDER-006, ORDER-007, ORDER-008)
+    # =========================================================================
+
+    def _validate_order_size(self, legs: List[Dict], order_description: str) -> Tuple[bool, str]:
+        """
+        ORDER-006: Validate order sizes are within acceptable limits.
+
+        Prevents bugs from placing massive orders that could drain the account.
+
+        Checks:
+        1. Per-leg maximum (catches single-leg bugs)
+        2. Total order maximum (catches multi-leg bugs)
+        3. Underlying position limit (prevents over-concentration)
+
+        Args:
+            legs: List of order legs with 'amount' field
+            order_description: Description for logging
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        total_contracts = 0
+
+        for i, leg in enumerate(legs):
+            amount = abs(leg.get("amount", 0))
+
+            # Check 1: Per-leg maximum
+            if amount > self._max_contracts_per_order:
+                error = (
+                    f"ORDER SIZE REJECTED: Leg {i+1} has {amount} contracts "
+                    f"(max: {self._max_contracts_per_order}). Order: {order_description}"
+                )
+                logger.critical(f"🚨 ORDER-006: {error}")
+
+                self.alert_service.send_alert(
+                    alert_type=AlertType.CIRCUIT_BREAKER,
+                    title="ORDER SIZE LIMIT EXCEEDED",
+                    message=error,
+                    priority=AlertPriority.CRITICAL
+                )
+
+                if self.trade_logger:
+                    self.trade_logger.log_safety_event({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "event_type": "ORDER_SIZE_REJECTED",
+                        "severity": "CRITICAL",
+                        "spy_price": self.current_underlying_price,
+                        "vix": self.current_vix,
+                        "action_taken": f"Rejected order: {order_description}",
+                        "description": error,
+                        "result": "REJECTED"
+                    })
+
+                return (False, error)
+
+            total_contracts += amount
+
+        # Check 2: Total order maximum
+        max_total = self._max_contracts_per_order * len(legs)
+        if total_contracts > max_total:
+            error = (
+                f"ORDER SIZE REJECTED: Total {total_contracts} contracts "
+                f"exceeds limit ({max_total}). Order: {order_description}"
+            )
+            logger.critical(f"🚨 ORDER-006: {error}")
+            return (False, error)
+
+        # Check 3: Would this exceed underlying position limit?
+        current_size = self._get_current_position_size()
+        # Only check for opening orders (ToOpen), not closing
+        is_opening = any(leg.get("to_open_close", "ToOpen") == "ToOpen" for leg in legs)
+        if is_opening:
+            projected_size = current_size + total_contracts
+            if projected_size > self._max_contracts_per_underlying:
+                error = (
+                    f"POSITION LIMIT EXCEEDED: Current={current_size}, "
+                    f"Adding={total_contracts}, Projected={projected_size} "
+                    f"(max: {self._max_contracts_per_underlying})"
+                )
+                logger.critical(f"🚨 ORDER-006: {error}")
+                return (False, error)
+
+        logger.debug(f"ORDER-006: Order size validated - {total_contracts} contracts for {order_description}")
+        return (True, "")
+
+    def _get_current_position_size(self) -> int:
+        """Calculate total contracts currently held across all positions."""
+        total = 0
+
+        if self.long_straddle:
+            if self.long_straddle.call:
+                total += abs(self.long_straddle.call.quantity)
+            if self.long_straddle.put:
+                total += abs(self.long_straddle.put.quantity)
+
+        if self.short_strangle:
+            if self.short_strangle.call:
+                total += abs(self.short_strangle.call.quantity)
+            if self.short_strangle.put:
+                total += abs(self.short_strangle.put.quantity)
+
+        return total
+
+    def _check_fill_slippage(
+        self,
+        expected_price: float,
+        actual_price: float,
+        order_id: str,
+        order_description: str
+    ) -> Optional[str]:
+        """
+        ORDER-007: Check for excessive slippage between expected and actual fill prices.
+
+        Args:
+            expected_price: Price we expected to fill at
+            actual_price: Actual fill price from broker
+            order_id: Order ID for logging
+            order_description: Description for context
+
+        Returns:
+            Slippage description if significant, None if acceptable
+        """
+        if expected_price <= 0 or actual_price <= 0:
+            logger.debug(f"Cannot calculate slippage: expected=${expected_price:.2f}, actual=${actual_price:.2f}")
+            return None
+
+        # Calculate slippage percentage
+        slippage_pct = abs(actual_price - expected_price) / expected_price * 100
+        slippage_direction = "FAVORABLE" if actual_price < expected_price else "UNFAVORABLE"
+
+        # Log any slippage > 0.5%
+        if slippage_pct > 0.5:
+            logger.info(
+                f"ORDER-007: Fill slippage {slippage_pct:.2f}% {slippage_direction} "
+                f"(expected=${expected_price:.2f}, actual=${actual_price:.2f})"
+            )
+
+        # Check thresholds
+        if slippage_pct >= self._slippage_critical_threshold_pct:
+            message = (
+                f"CRITICAL SLIPPAGE: {slippage_pct:.1f}% {slippage_direction}\n"
+                f"Expected: ${expected_price:.2f}\n"
+                f"Actual: ${actual_price:.2f}\n"
+                f"Order: {order_description}"
+            )
+            logger.critical(f"🚨 ORDER-007: {message}")
+
+            self.alert_service.send_alert(
+                alert_type=AlertType.GAP_WARNING,
+                title="CRITICAL FILL SLIPPAGE",
+                message=message,
+                priority=AlertPriority.CRITICAL
+            )
+
+            if self.trade_logger:
+                self.trade_logger.log_safety_event({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_type": "CRITICAL_SLIPPAGE",
+                    "severity": "CRITICAL",
+                    "spy_price": self.current_underlying_price,
+                    "vix": self.current_vix,
+                    "action_taken": f"Logged slippage for {order_description}",
+                    "description": f"Slippage {slippage_pct:.1f}%: ${expected_price:.2f} -> ${actual_price:.2f}",
+                    "result": "LOGGED"
+                })
+
+            return message
+
+        elif slippage_pct >= self._slippage_warning_threshold_pct:
+            message = (
+                f"High slippage: {slippage_pct:.1f}% {slippage_direction} "
+                f"(expected=${expected_price:.2f}, actual=${actual_price:.2f})"
+            )
+            logger.warning(f"⚠️ ORDER-007: {message}")
+
+            self.alert_service.send_alert(
+                alert_type=AlertType.GAP_WARNING,
+                title="HIGH FILL SLIPPAGE",
+                message=f"{message}\nOrder: {order_description}",
+                priority=AlertPriority.HIGH
+            )
+
+            return message
+
+        return None
+
+    def _check_spread_for_emergency_close(self, uic: int, asset_type: str = "StockOption") -> Tuple[bool, float]:
+        """
+        ORDER-008: Check if spread is acceptable for emergency close.
+
+        During extreme volatility, spreads can be 50%+. MARKET orders in these
+        conditions cause massive slippage.
+
+        Args:
+            uic: The instrument UIC to check
+            asset_type: Asset type for quote
+
+        Returns:
+            Tuple of (is_acceptable, spread_percent)
+        """
+        try:
+            quote = self.client.get_quote(uic, asset_type)
+            if not quote or "Quote" not in quote:
+                logger.warning(f"ORDER-008: No quote for UIC {uic} - proceeding with emergency close")
+                return (True, 0.0)
+
+            bid = quote["Quote"].get("Bid", 0) or 0
+            ask = quote["Quote"].get("Ask", 0) or 0
+
+            if bid <= 0 or ask <= 0:
+                logger.warning(f"ORDER-008: Invalid bid/ask for UIC {uic} - proceeding with emergency close")
+                return (True, 0.0)
+
+            mid = (bid + ask) / 2
+            spread_pct = ((ask - bid) / mid) * 100
+
+            if spread_pct > self._max_emergency_spread_pct:
+                logger.critical(
+                    f"🚨 ORDER-008: EXTREME SPREAD {spread_pct:.1f}% for UIC {uic} "
+                    f"(max: {self._max_emergency_spread_pct}%)"
+                )
+                return (False, spread_pct)
+
+            return (True, spread_pct)
+
+        except Exception as e:
+            logger.error(f"ORDER-008: Spread check failed for UIC {uic}: {e}")
+            # On error, proceed with close (safety > slippage)
+            return (True, 0.0)
+
+    def _wait_for_spread_normalization(self, uic: int, asset_type: str = "StockOption") -> bool:
+        """
+        ORDER-008: Wait for spread to normalize before emergency close.
+
+        Args:
+            uic: The instrument UIC
+            asset_type: Asset type for quote
+
+        Returns:
+            True if spread normalized, False if still extreme after max attempts
+        """
+        for attempt in range(self._spread_normalization_attempts):
+            is_acceptable, spread_pct = self._check_spread_for_emergency_close(uic, asset_type)
+
+            if is_acceptable:
+                if attempt > 0:
+                    logger.info(f"ORDER-008: Spread normalized to {spread_pct:.1f}% after {attempt} wait(s)")
+                return True
+
+            logger.warning(
+                f"ORDER-008: Waiting {self._spread_normalization_wait}s for spread normalization "
+                f"(attempt {attempt + 1}/{self._spread_normalization_attempts})"
+            )
+
+            # Alert on first attempt
+            if attempt == 0:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.GAP_WARNING,
+                    title="EXTREME SPREAD - Delaying Emergency Close",
+                    message=f"Spread is {spread_pct:.0f}%. Waiting for normalization before closing UIC {uic}.",
+                    priority=AlertPriority.HIGH
+                )
+
+            time.sleep(self._spread_normalization_wait)
+
+        # Max attempts reached
+        logger.critical(
+            f"ORDER-008: Spread still extreme after {self._spread_normalization_attempts} attempts. "
+            f"Proceeding with emergency close anyway (naked position = unlimited risk)."
+        )
+        return False
+
+    def _emergency_close_with_retries(
+        self,
+        close_func: callable,
+        description: str
+    ) -> bool:
+        """
+        ORDER-008: Attempt emergency close with max retries and escalating alerts.
+
+        Args:
+            close_func: The closure function to call (returns bool)
+            description: Description for logging/alerting
+
+        Returns:
+            True if closed successfully, False if all attempts failed
+        """
+        for attempt in range(1, self._max_emergency_close_attempts + 1):
+            logger.info(
+                f"ORDER-008: Emergency close attempt {attempt}/{self._max_emergency_close_attempts}: {description}"
+            )
+
+            try:
+                if close_func():
+                    logger.info(f"✅ ORDER-008: Emergency close succeeded on attempt {attempt}")
+                    return True
+
+                logger.warning(f"ORDER-008: Emergency close attempt {attempt} failed")
+
+            except Exception as e:
+                logger.error(f"ORDER-008: Emergency close attempt {attempt} exception: {e}")
+
+            # Escalating alerts based on attempt number
+            if attempt == 2:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.EMERGENCY_EXIT,
+                    title="EMERGENCY CLOSE RETRY",
+                    message=f"{description}: Attempt {attempt} failed, retrying...",
+                    priority=AlertPriority.HIGH
+                )
+            elif attempt >= 3:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.CRITICAL_INTERVENTION,
+                    title="EMERGENCY CLOSE FAILING",
+                    message=f"{description}: Attempt {attempt}/{self._max_emergency_close_attempts} failed!",
+                    priority=AlertPriority.CRITICAL
+                )
+
+            # Wait before retry (except on last attempt)
+            if attempt < self._max_emergency_close_attempts:
+                time.sleep(self._emergency_close_retry_delay)
+
+        # All attempts exhausted
+        logger.critical(
+            f"🚨 ORDER-008: EMERGENCY CLOSE FAILED after {self._max_emergency_close_attempts} attempts: {description}"
+        )
+
+        self._set_critical_intervention(
+            f"Emergency close failed after {self._max_emergency_close_attempts} attempts: {description}"
+        )
+
+        return False
+
+    # =========================================================================
     # SLIPPAGE PROTECTION - ORDER PLACEMENT WITH TIMEOUT
     # =========================================================================
 
@@ -2599,6 +2972,17 @@ class DeltaNeutralStrategy:
                 "message": "[DRY RUN] Order simulated successfully"
             }
 
+        # ORDER-006: Validate order size before placing
+        is_valid, size_error = self._validate_order_size(legs, order_description)
+        if not is_valid:
+            return {
+                "success": False,
+                "filled": False,
+                "order_id": None,
+                "message": size_error,
+                "rejected_reason": "SIZE_LIMIT"
+            }
+
         # Place each leg as an individual order
         filled_orders = []
         filled_legs_info = []
@@ -2664,6 +3048,15 @@ class DeltaNeutralStrategy:
                     filled_orders.append(result["order_id"])
                     filled_legs_info.append({"index": i, "leg": leg, "order_id": result["order_id"]})
                     logger.info(f"  ✓ Leg {i+1} MARKET filled: {result['order_id']}")
+
+                    # ORDER-007: Check fill slippage for MARKET orders
+                    actual_fill_price = result.get("fill_price", 0)
+                    expected_price = leg_price
+                    if actual_fill_price > 0 and expected_price > 0:
+                        self._check_fill_slippage(
+                            expected_price, actual_fill_price,
+                            result["order_id"], f"{order_description}_leg_{i+1}"
+                        )
                 else:
                     failed = True
                     failed_leg_index = i
@@ -2785,6 +3178,16 @@ class DeltaNeutralStrategy:
                         filled_orders.append(result["order_id"])
                         filled_legs_info.append({"index": i, "leg": leg, "order_id": result["order_id"]})
                         logger.info(f"  ✓ Leg {i+1} MARKET filled (last resort): {result['order_id']}")
+
+                        # ORDER-007: Check fill slippage for MARKET fallback orders
+                        actual_fill_price = result.get("fill_price", 0)
+                        expected_price = base_price if base_price and base_price > 0 else leg_price
+                        if actual_fill_price > 0 and expected_price > 0:
+                            self._check_fill_slippage(
+                                expected_price, actual_fill_price,
+                                result["order_id"], f"{order_description}_leg_{i+1}_market_fallback"
+                            )
+
                         leg_filled = True
                         break
                     else:
@@ -2842,6 +3245,16 @@ class DeltaNeutralStrategy:
                     filled_orders.append(result["order_id"])
                     filled_legs_info.append({"index": i, "leg": leg, "order_id": result["order_id"]})
                     logger.info(f"  ✓ Leg {i+1} filled: {result['order_id']}")
+
+                    # ORDER-007: Check fill slippage for LIMIT orders
+                    actual_fill_price = result.get("fill_price", 0)
+                    expected_price = adjusted_price  # The limit price we set
+                    if actual_fill_price > 0 and expected_price > 0:
+                        self._check_fill_slippage(
+                            expected_price, actual_fill_price,
+                            result["order_id"], f"{order_description}_leg_{i+1}"
+                        )
+
                     leg_filled = True
                     break  # Success, move to next leg
                 else:

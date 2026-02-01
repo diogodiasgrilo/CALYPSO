@@ -2803,7 +2803,13 @@ class SaxoClient:
 
         return None
 
-    def check_order_filled_by_activity(self, order_id: str, uic: int) -> Tuple[bool, Optional[Dict]]:
+    def check_order_filled_by_activity(
+        self,
+        order_id: str,
+        uic: int,
+        max_retries: int = 3,
+        retry_delay: float = 1.0
+    ) -> Tuple[bool, Optional[Dict]]:
         """
         Check if an order was filled by querying the order activities endpoint.
 
@@ -2814,9 +2820,14 @@ class SaxoClient:
         CRITICAL FIX (2026-01-23): This prevents duplicate orders when market orders
         fill faster than our polling can detect via get_order_status().
 
+        FIX (2026-02-01): Added retry logic with delay to handle activities endpoint
+        sync delay. Saxo activities endpoint may have 1-3 second lag after order fill.
+
         Args:
             order_id: The order ID to check
             uic: The instrument UIC (to verify the fill is for the right instrument)
+            max_retries: Maximum number of retry attempts (default: 3)
+            retry_delay: Seconds to wait between retries (default: 1.0)
 
         Returns:
             Tuple of (filled: bool, fill_details: Optional[Dict])
@@ -2835,36 +2846,51 @@ class SaxoClient:
             "$top": 50  # Recent activities
         }
 
-        try:
-            response = self._make_request("GET", endpoint, params=params)
-            if response and "Data" in response:
-                for activity in response["Data"]:
-                    activity_order_id = str(activity.get("OrderId", ""))
-                    activity_uic = activity.get("Uic")
-                    activity_status = activity.get("Status", "")
+        # FIX (2026-02-01): Retry logic for activities endpoint sync delay
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self._make_request("GET", endpoint, params=params)
+                if response and "Data" in response:
+                    for activity in response["Data"]:
+                        activity_order_id = str(activity.get("OrderId", ""))
+                        activity_uic = activity.get("Uic")
+                        activity_status = activity.get("Status", "")
 
-                    # Check if this activity matches our order
-                    if activity_order_id == str(order_id):
-                        if activity_status in ["FinalFill", "Fill"]:
-                            # FIX (2026-01-31): Saxo activities endpoint uses "FilledPrice", not "Price"
-                            # Also check "Price" as fallback for backwards compatibility
-                            fill_price = activity.get("FilledPrice") or activity.get("Price", 0)
-                            fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
-                            logger.info(
-                                f"Order {order_id} confirmed FILLED via activities: "
-                                f"FilledPrice={fill_price}, Amount={fill_amount}"
-                            )
-                            return True, {
-                                "status": "Filled",
-                                "fill_price": fill_price,
-                                "fill_amount": fill_amount,
-                                "order_id": order_id,
-                                "source": "order_activities"
-                            }
-        except Exception as e:
-            logger.warning(f"Error checking order activities for {order_id}: {e}")
+                        # Check if this activity matches our order
+                        if activity_order_id == str(order_id):
+                            if activity_status in ["FinalFill", "Fill"]:
+                                # FIX (2026-01-31): Saxo activities endpoint uses "FilledPrice", not "Price"
+                                # Also check "Price" as fallback for backwards compatibility
+                                fill_price = activity.get("FilledPrice") or activity.get("Price", 0)
+                                fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
 
-        # Also check if a position exists for this UIC (confirms fill)
+                                if fill_price > 0:
+                                    logger.info(
+                                        f"Order {order_id} confirmed FILLED via activities (attempt {attempt}): "
+                                        f"FilledPrice={fill_price}, Amount={fill_amount}"
+                                    )
+                                    return True, {
+                                        "status": "Filled",
+                                        "fill_price": fill_price,
+                                        "fill_amount": fill_amount,
+                                        "order_id": order_id,
+                                        "source": "order_activities"
+                                    }
+                                else:
+                                    # Activity found but no price yet - keep retrying
+                                    logger.debug(
+                                        f"Activity found for {order_id} but no FilledPrice (attempt {attempt})"
+                                    )
+
+            except Exception as e:
+                logger.warning(f"Error checking order activities for {order_id} (attempt {attempt}): {e}")
+
+            # Wait before retry (except on last attempt)
+            if attempt < max_retries:
+                logger.debug(f"Waiting {retry_delay}s before activities retry {attempt + 1}/{max_retries}")
+                time.sleep(retry_delay)
+
+        # Activities check exhausted - also check if a position exists for this UIC (confirms fill)
         try:
             positions = self.get_positions(include_greeks=False)
             if positions:
@@ -2887,6 +2913,9 @@ class SaxoClient:
         except Exception as e:
             logger.warning(f"Error checking positions for UIC {uic}: {e}")
 
+        logger.warning(
+            f"Could not confirm fill for order {order_id} after {max_retries} attempts"
+        )
         return False, None
 
     def get_open_orders(self) -> List[Dict]:
