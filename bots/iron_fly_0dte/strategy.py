@@ -660,6 +660,12 @@ class IronFlyStrategy:
         self.max_hold_minutes = self.strategy_config.get("max_hold_minutes", 60)
         self.position_size = self.strategy_config.get("position_size", 1)
 
+        # Commission tracking (2026-02-01)
+        # Iron Fly has 4 legs, each with $2.50 open + $2.50 close = $5 round-trip per leg
+        # Total commission per trade = 4 legs × $5 = $20
+        self.commission_per_leg = self.strategy_config.get("commission_per_leg", 5.0)
+        self.num_legs = 4  # Iron Fly always has 4 legs
+
         # Calibration mode: allow manual expected move override
         self.manual_expected_move = self.strategy_config.get("manual_expected_move", None)
 
@@ -806,23 +812,54 @@ class IronFlyStrategy:
         Calculate the profit target based on configuration.
 
         FIX (2026-01-31): Supports dynamic profit target as percentage of credit.
+        FIX (2026-02-01): Now accounts for commission costs in target calculation.
 
         Returns:
-            float: Profit target in dollars
+            float: Profit target in dollars (NET after commissions)
         """
         if not self.position:
             return self.profit_target_fixed
 
+        # Calculate total commission for the trade (entry + exit)
+        total_commission = self._calculate_total_commission()
+
         if self.profit_target_percent is not None:
             # Dynamic: percentage of credit received (credit_received is in cents)
             credit_dollars = self.position.credit_received / 100
-            return max(
+            gross_target = max(
                 credit_dollars * (self.profit_target_percent / 100),
                 self.profit_target_min * self.position.quantity  # Floor
             )
+            # Add commission to target so NET profit equals the intended target
+            # e.g., if we want $25 net profit with $20 commission, need $45 gross
+            return gross_target + total_commission
         else:
-            # Fixed: dollar amount per contract
-            return self.profit_target_fixed * self.position.quantity
+            # Fixed: dollar amount per contract + commission
+            return (self.profit_target_fixed * self.position.quantity) + total_commission
+
+    def _calculate_total_commission(self) -> float:
+        """
+        Calculate total commission cost for the trade.
+
+        Iron Fly has 4 legs, each with round-trip commission.
+        Default: $5 per leg ($2.50 open + $2.50 close) = $20 total.
+
+        Returns:
+            float: Total commission in dollars
+        """
+        return self.commission_per_leg * self.num_legs
+
+    def _calculate_net_pnl(self, gross_pnl_dollars: float) -> float:
+        """
+        Calculate net P&L after subtracting commissions.
+
+        Args:
+            gross_pnl_dollars: Gross P&L in dollars (before commissions)
+
+        Returns:
+            float: Net P&L in dollars (after commissions)
+        """
+        return gross_pnl_dollars - self._calculate_total_commission()
 
     def _increment_failure_count(self, reason: str) -> None:
         """Increment consecutive failure counter and open circuit breaker if threshold reached."""
@@ -2517,22 +2554,14 @@ class IronFlyStrategy:
 
         # EXIT CHECK 2: Profit target
         # FIX (2026-01-31): Dynamic profit target based on credit received
-        # If profit_target_percent is configured, use percentage of credit
-        # Otherwise fall back to fixed dollar amount per contract
-        if self.profit_target_percent is not None:
-            # Dynamic: percentage of credit received (credit_received is in cents)
-            credit_dollars = self.position.credit_received / 100
-            profit_target_total = max(
-                credit_dollars * (self.profit_target_percent / 100),
-                self.profit_target_min * self.position.quantity  # Floor
-            )
-        else:
-            # Fixed: dollar amount per contract
-            profit_target_total = self.profit_target_fixed * self.position.quantity
+        # FIX (2026-02-01): Profit target now includes commission to ensure net profit
+        # Use _calculate_profit_target() which adds commission to the target
+        profit_target_total = self._calculate_profit_target()
+        net_pnl_dollars = self._calculate_net_pnl(pnl_dollars)
 
         if pnl_dollars >= profit_target_total:
             return self._close_position("PROFIT_TARGET",
-                f"Profit target reached: ${pnl_dollars:.2f} >= ${profit_target_total:.2f}")
+                f"Profit target reached: Gross ${pnl_dollars:.2f} >= ${profit_target_total:.2f} (Net ${net_pnl_dollars:.2f})")
 
         # EXIT CHECK 3: Time exit
         if self.position.hold_time_minutes >= self.max_hold_minutes:
@@ -2543,7 +2572,7 @@ class IronFlyStrategy:
         self.state = IronFlyState.MONITORING_EXIT
         distance, wing = self.position.distance_to_wing(self.current_price)
 
-        return (f"Monitoring - P&L: ${pnl_dollars:.2f}, "
+        return (f"Monitoring - Gross P&L: ${pnl_dollars:.2f}, Net: ${net_pnl_dollars:.2f}, "
                 f"Distance to {wing} wing: {distance:.2f} pts, "
                 f"Hold time: {self.position.hold_time_minutes} min")
 
@@ -3509,13 +3538,17 @@ class IronFlyStrategy:
         }
 
         # Log the close trade to Google Sheets (convert cents to dollars)
-        pnl_dollars = pnl / 100
+        # FIX (2026-02-01): Calculate both gross and net P&L with commission
+        pnl_dollars = pnl / 100  # Gross P&L
+        net_pnl_dollars = self._calculate_net_pnl(pnl_dollars)  # Net P&L after commission
+        total_commission = self._calculate_total_commission()
+
         self.trade_logger.log_trade(
             action=f"CLOSE_IRON_FLY_{reason}",
             strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
             price=self.position.credit_received / 100,  # Convert cents to dollars
             delta=0.0,
-            pnl=pnl_dollars,  # Convert cents to dollars
+            pnl=net_pnl_dollars,  # Log NET P&L (after commission)
             saxo_client=self.client,
             underlying_price=self.current_price,
             vix=self.current_vix,
@@ -3523,11 +3556,12 @@ class IronFlyStrategy:
             expiry_date=self.position.expiry,
             dte=0,
             premium_received=self.position.credit_received / 100,  # Convert cents to dollars
-            trade_reason=description
+            trade_reason=f"{description} | Commission: ${total_commission:.2f}"
         )
 
         logger.info(
-            f"IRON FLY CLOSE INITIATED: {reason} - P&L=${pnl_dollars:.2f}, "
+            f"IRON FLY CLOSE INITIATED: {reason} - Gross P&L=${pnl_dollars:.2f}, "
+            f"Commission=${total_commission:.2f}, Net P&L=${net_pnl_dollars:.2f}, "
             f"Hold time={hold_time} min, Close orders={close_order_ids}"
         )
 
@@ -3541,20 +3575,23 @@ class IronFlyStrategy:
             "wings": f"{self.position.lower_wing}/{self.position.upper_wing}",
             "hold_time_minutes": hold_time,
             "spy_price": self.current_price,
-            "legs_closed": len(close_orders)
+            "legs_closed": len(close_orders),
+            "gross_pnl": pnl_dollars,
+            "net_pnl": net_pnl_dollars,
+            "commission": total_commission
         }
 
         if reason == "PROFIT_TARGET":
             self.alert_service.profit_target(
                 target_amount=self._calculate_profit_target(),
-                actual_pnl=pnl_dollars,
+                actual_pnl=net_pnl_dollars,  # Use net P&L for alerts
                 details=alert_details
             )
         elif reason == "TIME_EXIT":
             self.alert_service.send_alert(
                 alert_type=AlertType.TIME_EXIT,
                 title="Time Exit - Max Hold Reached",
-                message=f"Max hold time {self.max_hold_minutes} min reached.\nP&L: ${pnl_dollars:.2f}",
+                message=f"Max hold time {self.max_hold_minutes} min reached.\nGross P&L: ${pnl_dollars:.2f}\nNet P&L: ${net_pnl_dollars:.2f} (after ${total_commission:.2f} commission)",
                 priority=AlertPriority.MEDIUM,
                 details=alert_details
             )
@@ -3562,12 +3599,12 @@ class IronFlyStrategy:
             self.alert_service.send_alert(
                 alert_type=AlertType.MAX_LOSS,
                 title="Max Loss Triggered",
-                message=f"Max loss threshold breached.\nP&L: ${pnl_dollars:.2f}",
+                message=f"Max loss threshold breached.\nGross P&L: ${pnl_dollars:.2f}\nNet P&L: ${net_pnl_dollars:.2f} (after ${total_commission:.2f} commission)",
                 priority=AlertPriority.HIGH,
                 details=alert_details
             )
 
-        return f"Closing position ({reason}): P&L=${pnl_dollars:.2f}, {len(close_orders)}/4 orders placed"
+        return f"Closing position ({reason}): Gross P&L=${pnl_dollars:.2f}, Net P&L=${net_pnl_dollars:.2f}, {len(close_orders)}/4 orders placed"
 
     def _close_position_with_retries(self, reason: str, description: str, pnl: float, hold_time: float) -> str:
         """
@@ -3703,12 +3740,17 @@ class IronFlyStrategy:
         }
 
         # Log the close trade - convert cents to dollars for logging
+        # FIX (2026-02-01): Include commission in P&L tracking
+        pnl_dollars = pnl / 100  # Gross P&L
+        net_pnl_dollars = self._calculate_net_pnl(pnl_dollars)  # Net P&L after commission
+        total_commission = self._calculate_total_commission()
+
         self.trade_logger.log_trade(
             action=f"CLOSE_IRON_FLY_{reason}",
             strike=f"{self.position.lower_wing}/{self.position.atm_strike}/{self.position.upper_wing}",
             price=self.position.credit_received / 100,  # Cents to dollars
             delta=0.0,
-            pnl=pnl / 100,  # Cents to dollars
+            pnl=net_pnl_dollars,  # Log NET P&L (after commission)
             saxo_client=self.client,
             underlying_price=self.current_price,
             vix=self.current_vix,
@@ -3716,27 +3758,28 @@ class IronFlyStrategy:
             expiry_date=self.position.expiry,
             dte=0,
             premium_received=self.position.credit_received / 100,  # Cents to dollars
-            trade_reason=f"STOP-002: {description} (retries used)"
+            trade_reason=f"STOP-002: {description} (retries used) | Commission: ${total_commission:.2f}"
         )
 
         self.state = IronFlyState.CLOSING
         self.closing_started_at = get_eastern_timestamp()
 
         # ALERT: Send stop loss alert AFTER close is complete with actual results
-        pnl_dollars = pnl / 100
         if failed_legs:
             # Critical alert if legs failed to close
             self.alert_service.send_alert(
                 alert_type=AlertType.STOP_LOSS,
                 title="STOP LOSS PARTIAL FAILURE",
-                message=f"{description}\n{len(close_orders)}/4 legs closed, {len(failed_legs)} FAILED\nP&L: ${pnl_dollars:.2f}\nCritical intervention required!",
+                message=f"{description}\n{len(close_orders)}/4 legs closed, {len(failed_legs)} FAILED\nGross P&L: ${pnl_dollars:.2f}\nNet P&L: ${net_pnl_dollars:.2f} (after ${total_commission:.2f} commission)\nCritical intervention required!",
                 priority=AlertPriority.CRITICAL,
                 details={
                     "spy_price": self.current_price,
                     "reason": reason,
                     "legs_closed": len(close_orders),
                     "legs_failed": len(failed_legs),
-                    "pnl": pnl_dollars,
+                    "gross_pnl": pnl_dollars,
+                    "net_pnl": net_pnl_dollars,
+                    "commission": total_commission,
                     "hold_time_minutes": hold_time
                 }
             )
@@ -3745,15 +3788,18 @@ class IronFlyStrategy:
         # Successful stop loss
         self.alert_service.stop_loss(
             trigger_price=self.current_price,
-            pnl=pnl_dollars,
+            pnl=net_pnl_dollars,  # Use net P&L
             details={
                 "strike": self.position.atm_strike,
                 "wings": f"{self.position.lower_wing}/{self.position.upper_wing}",
                 "hold_time_minutes": hold_time,
-                "reason": description
+                "reason": description,
+                "gross_pnl": pnl_dollars,
+                "net_pnl": net_pnl_dollars,
+                "commission": total_commission
             }
         )
-        return f"STOP-002: Stop loss executed ({reason}): P&L=${pnl_dollars:.2f}, all legs closed with retries"
+        return f"STOP-002: Stop loss executed ({reason}): Gross P&L=${pnl_dollars:.2f}, Net P&L=${net_pnl_dollars:.2f}, all legs closed with retries"
 
     def _check_and_log_extreme_spread(self, uic: int, leg_name: str, asset_type: str) -> None:
         """
