@@ -1,8 +1,8 @@
 """
 Delta Neutral Strategy Bot (Brian Terry's Strategy from Theta Profits)
 
-Version: 2.0.3
-Last Updated: 2026-01-29
+Version: 2.0.4
+Last Updated: 2026-02-01
 
 SPY Long Straddle + Weekly Short Strangles with 5-Point Recentering
 
@@ -40,7 +40,18 @@ Strike Selection Priority:
 3. Positive return at 1.0x-1.33x range via safety extension (less safe but profitable)
 4. Skip entry if no positive return found even at 1.0x
 
+Safety Features (see config/config.json for limits):
+- order_limits: Max contracts per order (10) and per underlying (20) - ORDER-006
+- slippage_monitoring: Warning (5%) and critical (15%) thresholds - ORDER-007
+- emergency_close: Max retries (5), spread normalization wait, max spread % - ORDER-008
+
 Version History:
+- 2.0.4 (2026-02-01): Enhanced safety features
+  - ORDER-006: Order size validation (max 10 contracts/order, 20 per underlying)
+  - ORDER-007: Fill price slippage monitoring (warning at 5%, critical at 15%)
+  - ORDER-008: Emergency close retries with spread normalization wait
+  - Activities endpoint retry logic (3 attempts with 1s delay for sync delay)
+  - Spread validation before emergency MARKET orders
 - 2.0.3 (2026-01-29): Opening range delay for fresh entries
   - New WAITING_OPENING_RANGE state when bot has 0 positions
   - Waits until 10:00 AM before entering (configurable via fresh_entry_delay_minutes)
@@ -67,7 +78,7 @@ Version History:
   - Config key standardization
 """
 
-__version__ = "2.0.3"
+__version__ = "2.0.4"
 
 from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState
 

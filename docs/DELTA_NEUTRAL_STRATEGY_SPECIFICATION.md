@@ -1,14 +1,15 @@
 # Delta Neutral Strategy Specification
 
 **Strategy Source:** Brian Terry (Theta Profits)
-**Bot Version:** 2.0.3
-**Last Updated:** 2026-01-29
+**Bot Version:** 2.0.4
+**Last Updated:** 2026-02-01
 **Research Date:** 2026-01-27
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.0.4 | 2026-02-01 | Enhanced safety features: ORDER-006 order size validation (max 10 contracts/order, 20 per underlying), ORDER-007 fill price slippage monitoring (5% warning, 15% critical), ORDER-008 emergency close retries with spread normalization wait. Activities endpoint retry logic for sync delays. |
 | 2.0.3 | 2026-01-29 | Opening range delay: When bot has 0 positions, waits until 10:00 AM ET before entering (configurable via `fresh_entry_delay_minutes`). Prevents entering on volatile/misleading opening VIX readings. New `WAITING_OPENING_RANGE` state with 1-minute heartbeats. Does NOT apply to re-entries when we already have longs. |
 | 2.0.2 | 2026-01-29 | Safety extension: If 1.33x floor gives zero/negative return, scan extends to 1.0x. Target return updated from 1.0% to 1.5% (optimal EV based on IV>RV premium analysis). Strike selection now has 3-tier priority system. |
 | 2.0.1 | 2026-01-28 | REST-only mode for reliability. Disabled WebSocket streaming (`USE_WEBSOCKET_STREAMING=False`). VIGILANT monitoring: 2-second intervals (30 REST API calls/min, within rate limits). WebSocket code preserved for future use if 4+ bots need rate limit relief. |
@@ -378,6 +379,18 @@ If VIX spikes ≥ 25 while positions open:
 - **Max position size:** 1 contract per leg (for $50K account)
 - **Max margin used:** ~$15K for long straddle + $3K for shorts = $18K
 - **Remaining capital:** $32K buffer for safety
+- **Order size limits (ORDER-006):** Max 10 contracts per order, 20 per underlying
+
+### Slippage Monitoring (ORDER-007)
+- **Warning threshold:** 5% slippage from expected price (configurable)
+- **Critical threshold:** 15% slippage from expected price (configurable)
+- **Behavior:** Logs HIGH/CRITICAL alerts when fills deviate significantly
+
+### Emergency Close Safety (ORDER-008)
+- **Max retry attempts:** 5 attempts with escalating alerts
+- **Retry delay:** 5 seconds between attempts
+- **Spread normalization:** Wait up to 30 seconds for spread < 50%
+- **Max normalization attempts:** 3 attempts before proceeding
 
 ### Key Safety Rules
 
@@ -386,6 +399,7 @@ If VIX spikes ≥ 25 while positions open:
 3. **Never roll for debit:** Exit if can't collect credit
 4. **Never skip VIX filter:** Only enter when VIX < 18
 5. **Never hold longs past 60 DTE:** Exit to avoid gamma risk
+6. **Never place oversized orders:** ORDER-006 validates before placement
 
 ---
 
@@ -639,6 +653,6 @@ When closing shorts, use progressive slippage:
 ---
 
 **Last Research Date:** 2026-01-27
-**Last Updated:** 2026-01-29 (Safety extension: 1.0x scan fallback, 1.5% target return, 1.33x floor)
+**Last Updated:** 2026-02-01 (Enhanced safety features: ORDER-006, ORDER-007, ORDER-008)
 **Researcher:** AI Assistant via Web Search + Trade Analysis
-**Implementation Status:** Active in LIVE trading (CALYPSO Delta Neutral bot v2.0.2)
+**Implementation Status:** Active in LIVE trading (CALYPSO Delta Neutral bot v2.0.4)

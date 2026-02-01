@@ -162,7 +162,7 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
-- **Version:** 2.0.4 (Updated 2026-01-30 with fresh quote strike selection, dynamic strike range)
+- **Version:** 2.0.4 (Updated 2026-02-01 with enhanced safety features)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
@@ -173,8 +173,16 @@ All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `Sta
 - **Adaptive Roll Trigger:** Rolls shorts when 75% of original cushion is consumed (scales with market conditions)
 - **Immediate Re-Entry:** After scheduled debit skip, enters next-week shorts immediately (no 19-hour gap)
 - **Recenter:** When SPY moves ±$5 from initial strike, rebalance long straddle strikes
-- **Edge cases:** 56 analyzed, all resolved (see `docs/DELTA_NEUTRAL_EDGE_CASES.md`)
+- **Edge cases:** 61 analyzed, all resolved (see `docs/DELTA_NEUTRAL_EDGE_CASES.md`)
 - **Full specification:** See [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md)
+
+#### Delta Neutral Safety Features (Added 2026-02-01)
+| Feature | Description | Config Key |
+|---------|-------------|------------|
+| ORDER-006 | Order size validation (max 10/order, 20/underlying) | `order_limits.*` |
+| ORDER-007 | Fill slippage monitoring (5% warning, 15% critical) | `slippage_monitoring.*` |
+| ORDER-008 | Emergency close retries with spread wait | `emergency_close.*` |
+| Activities Retry | 3 attempts × 1s delay for sync issues | Built-in |
 
 #### Delta Neutral Key Logic
 

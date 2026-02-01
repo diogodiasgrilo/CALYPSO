@@ -8,8 +8,8 @@ but this documentation helps future developers understand the safety systems.
 For detailed edge case analysis, see: docs/DELTA_NEUTRAL_EDGE_CASES.md
 
 =============================================================================
-SAFETY ARCHITECTURE OVERVIEW (55 Edge Cases - 100% Coverage)
-Bot Version: 2.0.1 (Updated 2026-01-28 - REST-only mode for reliability)
+SAFETY ARCHITECTURE OVERVIEW (60 Edge Cases - 100% Coverage)
+Bot Version: 2.0.4 (Updated 2026-02-01 - Enhanced safety features)
 =============================================================================
 
 1. CIRCUIT BREAKER (strategy.py ~1053-1127)
@@ -141,7 +141,29 @@ ORDER-005: Wide Bid-Ask Spread (strategy.py ~2628-2660)
    - Emergency close: Logs warning but PROCEEDS (closing priority > slippage)
    - Both paths log safety events for tracking
 
-ORDER-007: Order Rejection Handling (strategy.py ~2721-2760)
+ORDER-006: Order Size Validation (strategy.py - Added 2026-02-01)
+   - _validate_order_size(): Validates order sizes before placement
+   - _get_current_position_size(): Calculates current position size for underlying
+   - Default limits: 10 contracts per order, 20 per underlying
+   - Prevents bugs from placing massive orders
+   - Configurable via order_limits.max_contracts_per_order/per_underlying
+
+ORDER-007: Fill Price Slippage Monitoring (strategy.py - Added 2026-02-01)
+   - _check_fill_slippage(): Compares expected vs actual fill prices
+   - Warning threshold: 5% slippage (configurable)
+   - Critical threshold: 15% slippage (configurable)
+   - Logs HIGH alert for warning, CRITICAL alert for critical slippage
+   - Configurable via slippage_monitoring.warning_threshold_percent/critical_threshold_percent
+
+ORDER-008: Emergency Close Max Retries (strategy.py - Added 2026-02-01)
+   - _emergency_close_with_retries(): Retry wrapper for emergency closes
+   - _check_spread_for_emergency_close(): Validates spread before MARKET orders
+   - _wait_for_spread_normalization(): Waits for extreme spreads to normalize
+   - Max 5 attempts with escalating alerts (default)
+   - Spread normalization: Wait up to 30s × 3 attempts for spread < 50%
+   - Configurable via emergency_close.max_attempts/retry_delay_seconds/max_spread_percent
+
+ORDER-009: Order Rejection Handling (strategy.py ~2721-2760)
    - Explicit rejection detection (vs timeout)
    - Partial fill tracking for each leg
    - Returns detailed rejection status to calling code
@@ -310,8 +332,50 @@ SAFETY CHECK ORDER IN run_strategy_check() (~8350+)
 11. Normal strategy logic proceeds...
 
 =============================================================================
-Last Updated: 2026-01-28
-Bot Version: 2.0.1 (55 edge cases documented, REST-only mode)
+Last Updated: 2026-02-01
+Bot Version: 2.0.4 (60 edge cases documented, enhanced safety features)
+=============================================================================
+
+NEW SAFETY FEATURES (2026-02-01)
+================================
+
+ORDER-006: Order Size Validation
+   Purpose: Prevent bugs from placing massive orders
+   Config:
+     order_limits:
+       max_contracts_per_order: 10
+       max_contracts_per_underlying: 20
+   Methods:
+     - _validate_order_size(legs, description) -> (is_valid, error_message)
+     - _get_current_position_size(underlying) -> int
+
+ORDER-007: Fill Price Slippage Monitoring
+   Purpose: Alert when fills are worse than expected
+   Config:
+     slippage_monitoring:
+       warning_threshold_percent: 5.0
+       critical_threshold_percent: 15.0
+   Methods:
+     - _check_fill_slippage(expected_price, actual_price, leg_type, order_description)
+
+ORDER-008: Emergency Close Max Retries with Spread Normalization
+   Purpose: Retry emergency closes with spread checks, prevent infinite loops
+   Config:
+     emergency_close:
+       max_attempts: 5
+       retry_delay_seconds: 5
+       max_spread_percent: 50.0
+       spread_normalization_wait_seconds: 30
+       spread_normalization_max_attempts: 3
+   Methods:
+     - _check_spread_for_emergency_close(uic, asset_type) -> (is_acceptable, spread_pct)
+     - _wait_for_spread_normalization(uic, asset_type) -> normalized
+     - _emergency_close_with_retries(close_func, description, ...) -> success
+
+Activities Endpoint Retry Logic
+   Purpose: Handle Saxo API sync delay (1-3 seconds) for fill data
+   Location: shared/saxo_client.py check_order_filled_by_activity()
+   Behavior: Retry up to 3 times with 1s delay before fallback to quoted prices
 =============================================================================
 """
 

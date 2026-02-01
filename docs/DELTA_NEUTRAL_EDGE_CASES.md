@@ -1,8 +1,8 @@
 # Delta Neutral Bot - Edge Case Analysis Report
 
-**Analysis Date:** 2026-01-22 (Updated 2026-01-29)
+**Analysis Date:** 2026-01-22 (Updated 2026-02-01)
 **Analyst:** Claude (Devil's Advocate Review)
-**Bot Version:** 2.0.3
+**Bot Version:** 2.0.4
 **Status:** Living Document - Update as fixes are implemented
 
 ---
@@ -11,12 +11,14 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 57
-**Well-Handled/Resolved:** 57 (100%)
+**Total Scenarios Analyzed:** 61
+**Well-Handled/Resolved:** 61 (100%)
 **Medium Risk:** 0 (0%)
 **High Risk:** 0 (0%) ✅
 
 🎉 **ALL EDGE CASES RESOLVED!**
+
+**Major Update (2026-02-01):** Added 4 new safety edge cases (ORDER-006 through ORDER-009) for order size validation, slippage monitoring, and emergency close retries.
 
 **Major Update (2026-01-29):** Added TIME-006 (Opening Range Delay) for fresh entries from 0 positions.
 
@@ -288,16 +290,60 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Status** | RESOLVED |
 | **Notes** | Fresh quote fetched at each retry attempt `strategy.py:1438`. |
 
-### 2.7 Order Rejected by Exchange
+### 2.7 Order Size Exceeds Safe Limits
+| | |
+|---|---|
+| **ID** | ORDER-006 |
+| **Trigger** | Bug or misconfiguration causes order for too many contracts |
+| **Current Handling** | **Order size validation** before every order placement. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_validate_order_size()` method in `strategy.py`. Validates: (1) Total contracts per order ≤ max_contracts_per_order (default 10), (2) Total position size for underlying ≤ max_contracts_per_underlying (default 20). Uses `_get_current_position_size()` to calculate existing exposure. Returns (False, error_message) if limits exceeded, blocking the order. Configurable via `order_limits.max_contracts_per_order` and `order_limits.max_contracts_per_underlying`. |
+| **Fixed In** | 2026-02-01 |
+
+### 2.8 Fill Price Significantly Worse Than Expected
 | | |
 |---|---|
 | **ID** | ORDER-007 |
+| **Trigger** | Market order fills at price far from quoted bid/ask |
+| **Current Handling** | **Slippage monitoring** checks fill prices after each order. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_check_fill_slippage()` method in `strategy.py`. Compares expected_price vs actual_price after fills. If slippage > warning_threshold_percent (default 5%), logs HIGH alert. If slippage > critical_threshold_percent (default 15%), logs CRITICAL alert and safety event. Configurable via `slippage_monitoring.warning_threshold_percent` and `slippage_monitoring.critical_threshold_percent`. |
+| **Fixed In** | 2026-02-01 |
+
+### 2.9 Emergency Close Fails Repeatedly
+| | |
+|---|---|
+| **ID** | ORDER-008 |
+| **Trigger** | Emergency close order keeps failing due to wide spreads or market conditions |
+| **Current Handling** | **Retry wrapper with spread normalization** prevents infinite loops. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `_emergency_close_with_retries()` wrapper in `strategy.py`. Max 5 attempts with 5-second delays (configurable). Before each MARKET order, calls `_check_spread_for_emergency_close()` to validate spread < max_spread_percent (default 50%). If spread too wide, calls `_wait_for_spread_normalization()` which waits up to 30 seconds × 3 attempts for spread to normalize. Escalating alerts on each failure. After max attempts, sets critical intervention flag. |
+| **Fixed In** | 2026-02-01 |
+
+### 2.10 Order Rejected by Exchange
+| | |
+|---|---|
+| **ID** | ORDER-009 |
 | **Trigger** | Exchange rejects order (position limits, market closed, invalid strike) |
 | **Current Handling** | **Explicit rejection detection** with logging. Rejection triggers same partial fill logic as timeout. |
 | **Risk Level** | ✅ RESOLVED |
 | **Status** | RESOLVED |
-| **Resolution** | Added explicit rejection detection in `_place_protected_multi_leg_order()`. When `order_id` is None (rejection vs timeout where order_id exists), logs "ORDER-007: REJECTED by exchange/API". Both rejections and timeouts trigger identical partial fill handling - `partial_fill: True` is set if any legs filled. Fallback handlers are invoked for all partial fill scenarios. |
+| **Resolution** | Added explicit rejection detection in `_place_protected_multi_leg_order()`. When `order_id` is None (rejection vs timeout where order_id exists), logs "ORDER-009: REJECTED by exchange/API". Both rejections and timeouts trigger identical partial fill handling - `partial_fill: True` is set if any legs filled. Fallback handlers are invoked for all partial fill scenarios. |
 | **Fixed In** | 2026-01-22 |
+
+### 2.11 Activities Endpoint Sync Delay
+| | |
+|---|---|
+| **ID** | ORDER-010 |
+| **Trigger** | Order fills but activities endpoint doesn't have fill data immediately |
+| **Current Handling** | **Retry logic** in activities endpoint query. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Modified `check_order_filled_by_activity()` in `saxo_client.py`. Retries up to 3 times with 1-second delay if no fill data found. Handles Saxo API sync delay of 1-3 seconds after fill. If still no data after retries, logs warning and falls back to quoted prices for P&L calculation. |
+| **Fixed In** | 2026-02-01 |
 
 ---
 
@@ -683,14 +729,14 @@ This document catalogs all identified edge cases and potential failure scenarios
 
 | Category | Total | ✅ Resolved | ⚠️ Medium | 🔴 High |
 |----------|-------|-------------|-----------|---------|
-| Connection/API | 16 | 16 | 0 | 0 |
-| Order Execution | 7 | 7 | 0 | 0 |
+| Connection/API | 17 | 17 | 0 | 0 |
+| Order Execution | 11 | 11 | 0 | 0 |
 | Position State | 6 | 6 | 0 | 0 |
 | Market Conditions | 6 | 6 | 0 | 0 |
 | Timing/Race | 8 | 8 | 0 | 0 |
 | State Machine | 4 | 4 | 0 | 0 |
 | Data Integrity | 6 | 6 | 0 | 0 |
-| **TOTAL** | **56** | **56** | **0** | **0** |
+| **TOTAL** | **61** | **61** | **0** | **0** |
 
 🎉 **100% COVERAGE ACHIEVED!**
 
@@ -754,6 +800,12 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-29 | **56 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 | 2026-01-29 | RESOLVED CONN-017: Added VIX NoAccess detection with session capability auto-recovery | Claude |
 | 2026-01-29 | **57 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
+| 2026-02-01 | RESOLVED ORDER-006: Added order size validation (max contracts per order/underlying) | Claude |
+| 2026-02-01 | RESOLVED ORDER-007: Added fill price slippage monitoring (5% warning, 15% critical) | Claude |
+| 2026-02-01 | RESOLVED ORDER-008: Added emergency close retries with spread normalization wait | Claude |
+| 2026-02-01 | RESOLVED ORDER-010: Added activities endpoint retry logic for sync delay (3 retries × 1s) | Claude |
+| 2026-02-01 | RENUMBERED ORDER-007→ORDER-009 (order rejection handling) | Claude |
+| 2026-02-01 | **61 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 
 ---
 
@@ -780,5 +832,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 2.1
-**Last Updated:** 2026-01-29
+**Document Version:** 2.2
+**Last Updated:** 2026-02-01
