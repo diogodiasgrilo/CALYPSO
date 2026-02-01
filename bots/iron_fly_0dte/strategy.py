@@ -1653,19 +1653,31 @@ class IronFlyStrategy:
             logger.info(f"Order {order_id} not in open orders - checking activities for fill confirmation...")
 
             if uic:
-                filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
-                if filled:
-                    fill_price = fill_details.get("fill_price") if fill_details else None
-                    if fill_price:
-                        logger.info(f"✓ {leg_name} order {order_id} FILLED @ ${fill_price:.2f} (verified via activity)")
-                    else:
-                        logger.info(f"✓ {leg_name} order {order_id} FILLED (verified via activity/position)")
-                    return True, fill_details
+                # FIX (2026-02-01): Try multiple times to get fill price from activities
+                # Activities endpoint may have slight delay in syncing fill data
+                for activity_attempt in range(3):
+                    filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
+                    if filled:
+                        fill_price = fill_details.get("fill_price") if fill_details else None
+                        if fill_price and fill_price > 0:
+                            logger.info(f"✓ {leg_name} order {order_id} FILLED @ ${fill_price:.2f} (verified via activity)")
+                            return True, fill_details
+                        elif activity_attempt < 2:
+                            # Got fill confirmation but no price - wait and retry
+                            logger.info(f"Fill confirmed but no price yet, waiting 1s (attempt {activity_attempt + 1}/3)...")
+                            time.sleep(1)
+                        else:
+                            # Last attempt - accept fill without price (will fall back to quote)
+                            logger.warning(f"✓ {leg_name} order {order_id} FILLED but no fill price available after 3 attempts")
+                            return True, fill_details
+                    elif activity_attempt < 2:
+                        # Not found in activities yet - wait and retry
+                        time.sleep(0.5)
 
-            # Order not open AND not in activities - assume filled (market orders always fill)
-            # This matches Delta Neutral's logic in place_market_order_immediate
-            logger.info(f"✓ {leg_name} order {order_id} executed (no activity details available)")
-            return True, {"status": "Filled", "order_id": order_id, "source": "assumed_filled"}
+            # Order not open AND not in activities after retries - assume filled
+            # WARNING: This path means we'll fall back to quoted prices for P&L
+            logger.warning(f"⚠ {leg_name} order {order_id} assumed filled (no activity data - P&L may use quoted price)")
+            return True, {"status": "Filled", "order_id": order_id, "source": "assumed_filled", "fill_price": 0}
 
         # Step 3: Order still open - unusual for market order, poll until timeout
         logger.warning(f"⚠ Market order {order_id} still open after 1s - unusual, polling...")
