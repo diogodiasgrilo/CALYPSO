@@ -540,6 +540,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
                     # Log Daily Summary every day (uses last known Net Theta on weekends/holidays)
                     if last_daily_summary_date != today and is_after_close:
                         trade_logger.log_event(f"Logging daily summary ({day_type})...")
+                        strategy.refresh_position_prices()  # Refresh prices for accurate P&L
                         strategy.log_daily_summary()
                         last_daily_summary_date = today
                         if is_trading_day:
@@ -547,6 +548,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
 
                     # Log Performance Metrics every day
                     if last_performance_metrics_date != today and is_after_close:
+                        # Refresh prices for accurate P&L before EOD logging
+                        strategy.refresh_position_prices()
                         # Use safe metrics that correct for stale data when market is closed
                         dashboard_metrics = strategy.get_dashboard_metrics_safe()
                         period = "End of Day" if is_trading_day else day_type.title()
