@@ -2482,6 +2482,9 @@ class MEICStrategy:
         # Update realized P&L
         self.daily_state.total_realized_pnl -= stop_level
 
+        # Log stop loss to Google Sheets
+        self._log_stop_loss(entry, side, stop_level, stop_level)
+
         # ALERT-002: Use batched alerting for rapid stops
         self._queue_stop_alert(entry, side, stop_level)
 
@@ -3407,24 +3410,61 @@ class MEICStrategy:
     # =========================================================================
 
     def _log_entry(self, entry: IronCondorEntry):
-        """Log entry to Google Sheets."""
+        """Log entry to Google Sheets using correct TradeLoggerService API."""
         try:
-            self.trade_logger.log_trade({
-                "timestamp": entry.entry_time.isoformat() if entry.entry_time else "",
-                "action": f"MEIC Entry #{entry.entry_number}",
-                "underlying_price": self.current_price,
-                "short_call": entry.short_call_strike,
-                "long_call": entry.long_call_strike,
-                "short_put": entry.short_put_strike,
-                "long_put": entry.long_put_strike,
-                "call_credit": entry.call_spread_credit,
-                "put_credit": entry.put_spread_credit,
-                "total_credit": entry.total_credit,
-                "call_stop": entry.call_side_stop,
-                "put_stop": entry.put_side_stop
-            })
+            # Format strikes as readable string for the strike field
+            strike_str = (
+                f"C:{entry.short_call_strike}/{entry.long_call_strike} "
+                f"P:{entry.short_put_strike}/{entry.long_put_strike}"
+            )
+
+            self.trade_logger.log_trade(
+                action=f"MEIC Entry #{entry.entry_number}",
+                strike=strike_str,
+                price=entry.total_credit,
+                delta=0.0,  # Iron condors are delta neutral
+                pnl=0.0,  # At entry, no P&L yet
+                underlying_price=self.current_price,
+                vix=self.current_vix,
+                option_type="Iron Condor",
+                premium_received=entry.total_credit,
+                trade_reason=f"Entry | Call Credit: ${entry.call_spread_credit:.2f} | Put Credit: ${entry.put_spread_credit:.2f}"
+            )
+
+            logger.info(
+                f"Entry #{entry.entry_number} logged to Sheets: "
+                f"SPX={self.current_price:.2f}, Credit=${entry.total_credit:.2f}, "
+                f"Strikes: {strike_str}"
+            )
         except Exception as e:
             logger.error(f"Failed to log entry: {e}")
+
+    def _log_stop_loss(self, entry: IronCondorEntry, side: str, stop_level: float, realized_loss: float):
+        """Log stop loss to Google Sheets."""
+        try:
+            if side == "call":
+                strike_str = f"C:{entry.short_call_strike}/{entry.long_call_strike}"
+            else:
+                strike_str = f"P:{entry.short_put_strike}/{entry.long_put_strike}"
+
+            self.trade_logger.log_trade(
+                action=f"MEIC Stop #{entry.entry_number} ({side.upper()})",
+                strike=strike_str,
+                price=stop_level,
+                delta=0.0,
+                pnl=-realized_loss,  # Negative because it's a loss
+                underlying_price=self.current_price,
+                vix=self.current_vix,
+                option_type=f"IC {side.title()} Spread",
+                trade_reason=f"Stop Loss | Level: ${stop_level:.2f}"
+            )
+
+            logger.info(
+                f"Stop logged to Sheets: Entry #{entry.entry_number} {side} side, "
+                f"Loss: ${realized_loss:.2f}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to log stop loss: {e}")
 
     def _log_safety_event(self, event_type: str, details: str):
         """
