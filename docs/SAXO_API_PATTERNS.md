@@ -126,6 +126,18 @@ fill_price = activity.get("FilledPrice") or activity.get("Price", 0)  # FilledPr
 fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
 ```
 
+**Activities Endpoint Sync Delay (Fixed 2026-02-01):** The activities endpoint may have a slight
+delay (~1-3 seconds) before fill data appears. If you check immediately after order placement,
+the fill may not be there yet. Solution: Retry up to 3 times with 1 second delay between attempts.
+```python
+for attempt in range(3):
+    filled, fill_details = check_order_filled_by_activity(order_id, uic)
+    if filled and fill_details.get("fill_price", 0) > 0:
+        return True, fill_details  # Got actual fill price
+    time.sleep(1)  # Wait for sync
+# If still no price, log warning and fall back to quote (last resort)
+```
+
 **Order Details Response (`/port/v1/orders/{clientKey}/{orderId}`):**
 ```json
 {

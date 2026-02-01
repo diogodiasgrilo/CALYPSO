@@ -8,9 +8,15 @@ Strategy Overview:
 2. VIX filter: abort if VIX > 20 or spiking > 5%
 3. Opening range filter: price must be within 9:30-10:00 high/low
 4. Sell ATM straddle, buy wings at expected move distance
-5. Take profit: Dynamic (30% of credit) or fixed ($75) per contract
+5. Take profit: Dynamic (30% of credit + commission) with $25 minimum floor
 6. Stop loss: when SPX touches either wing strike (market order)
 7. Max hold time: 60 minutes (11:00 AM rule)
+
+P&L Tracking (Updated 2026-02-01):
+- Uses actual fill prices from Saxo activities endpoint (not quoted bid/ask)
+- Tracks commission: $5 per leg round-trip ($20 total per trade)
+- Shows both Gross P&L and Net P&L (after commission) in logs/alerts
+- Profit target factors in commission to ensure actual net profit
 
 Safety Features:
 - Circuit breaker with sliding window failure detection
@@ -26,7 +32,7 @@ Safety Features:
 - Multiple iron fly detection and auto-selection
 
 Edge Cases: 63 analyzed, 59 LOW / 3 MEDIUM / 1 HIGH by design (see docs/IRON_FLY_EDGE_CASES.md)
-Last Updated: 2026-01-31 (Fixed fill price extraction, dynamic profit target, faster order verification)
+Last Updated: 2026-02-01 (Commission tracking, fill price retry, activities sync delay handling)
 """
 
 from bots.iron_fly_0dte.strategy import IronFlyStrategy, IronFlyState

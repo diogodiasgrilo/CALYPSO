@@ -1046,6 +1046,11 @@ The only remaining MEDIUM item is SIM-001 (Simulated P&L Accuracy), which is mar
 | 2026-01-23 | **Added FILTER-006**: Midpoint proximity filter - blocks entries when price is at range extremes (directional bias) | Claude |
 | 2026-01-23 | Created `docs/SAXO_API_PATTERNS.md` - comprehensive Saxo API integration patterns from production learnings | Claude |
 | 2026-01-23 | Updated statistics: 64 total (60 LOW, 3 MEDIUM, 1 HIGH - BY DESIGN) | Claude |
+| 2026-01-31 | **Fixed P&L-002**: `check_order_filled_by_activity()` used wrong field name (`Price` instead of `FilledPrice`) | Claude |
+| 2026-02-01 | **Fixed ORDER-010**: Faster order fill verification - matches Delta Neutral pattern (1s wait + open orders check) | Claude |
+| 2026-02-01 | **Added FEE-001**: Commission tracking - $5 per leg round-trip, shows gross/net P&L in logs and alerts | Claude |
+| 2026-02-01 | **Fixed P&L-003**: Activities endpoint sync delay - retry 3x with 1s delay to get actual fill prices | Claude |
+| 2026-02-01 | **Added EXIT-001**: Dynamic profit target - percentage of credit (30%) with minimum floor ($25) + commission | Claude |
 
 ---
 

@@ -15,7 +15,7 @@ This package contains common utilities used by all trading strategies:
 - alert_service: SMS/Email alerting via Google Cloud Pub/Sub
 - position_registry: Multi-bot position ownership tracking (for same underlying)
 
-Last Updated: 2026-01-31 (Fixed FilledPrice field extraction in check_order_filled_by_activity)
+Last Updated: 2026-02-01 (Added activities sync delay retry, commission tracking support)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -93,6 +93,10 @@ Full documentation: docs/SAXO_API_PATTERNS.md
    activity.get("Price", 0) but Saxo returns "FilledPrice" not "Price".
    This caused P&L to always fall back to quoted prices, showing wrong values.
    Example: Real P&L +$10, Bot showed +$160.
+
+   ACTIVITIES SYNC DELAY (2026-02-01): The activities endpoint may take 1-3
+   seconds to sync fill data. Retry up to 3 times with 1s delay before
+   giving up and falling back to quoted prices. Log warning if fallback used.
 
    See: docs/SAXO_API_PATTERNS.md Section 2
 
