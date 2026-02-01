@@ -52,6 +52,7 @@ See docs/IRON_FLY_EDGE_CASES.md for full analysis.
 
 import json
 import logging
+import math
 import os
 import time
 from collections import deque
@@ -62,7 +63,7 @@ from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
-from shared.market_hours import get_us_market_time, US_EASTERN
+from shared.market_hours import get_us_market_time
 
 # Path for persistent metrics storage
 METRICS_FILE = os.path.join(
@@ -651,7 +652,11 @@ class IronFlyStrategy:
         self.vix_spike_threshold = self.strategy_config.get("vix_spike_threshold_percent", 5.0)
 
         # Exit parameters
-        self.profit_target = self.strategy_config.get("profit_target_per_contract", 75.0)
+        # FIX (2026-01-31): Support dynamic profit target as percentage of credit
+        # If profit_target_percent is set, use that. Otherwise fall back to fixed dollar amount.
+        self.profit_target_percent = self.strategy_config.get("profit_target_percent", None)
+        self.profit_target_fixed = self.strategy_config.get("profit_target_per_contract", 75.0)
+        self.profit_target_min = self.strategy_config.get("profit_target_min", 25.0)  # Floor
         self.max_hold_minutes = self.strategy_config.get("max_hold_minutes", 60)
         self.position_size = self.strategy_config.get("position_size", 1)
 
@@ -738,7 +743,10 @@ class IronFlyStrategy:
         logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
         logger.info(f"  Entry time: {self.entry_time} EST")
         logger.info(f"  Max VIX: {self.max_vix}, Spike threshold: {self.vix_spike_threshold}%")
-        logger.info(f"  Profit target: ${self.profit_target}, Max hold: {self.max_hold_minutes} min")
+        if self.profit_target_percent is not None:
+            logger.info(f"  Profit target: {self.profit_target_percent}% of credit (min ${self.profit_target_min}), Max hold: {self.max_hold_minutes} min")
+        else:
+            logger.info(f"  Profit target: ${self.profit_target_fixed}/contract, Max hold: {self.max_hold_minutes} min")
         logger.info(f"  FOMC blackout: {'ENABLED' if self.fed_meeting_blackout else 'DISABLED'}")
         logger.info(f"  Economic calendar check: {'ENABLED' if self.economic_calendar_check else 'DISABLED'}")
         if self.manual_expected_move:
@@ -792,6 +800,29 @@ class IronFlyStrategy:
                 self._open_circuit_breaker(
                     f"Intermittent failures: {failure_count}/{SLIDING_WINDOW_SIZE} recent calls failed"
                 )
+
+    def _calculate_profit_target(self) -> float:
+        """
+        Calculate the profit target based on configuration.
+
+        FIX (2026-01-31): Supports dynamic profit target as percentage of credit.
+
+        Returns:
+            float: Profit target in dollars
+        """
+        if not self.position:
+            return self.profit_target_fixed
+
+        if self.profit_target_percent is not None:
+            # Dynamic: percentage of credit received (credit_received is in cents)
+            credit_dollars = self.position.credit_received / 100
+            return max(
+                credit_dollars * (self.profit_target_percent / 100),
+                self.profit_target_min * self.position.quantity  # Floor
+            )
+        else:
+            # Fixed: dollar amount per contract
+            return self.profit_target_fixed * self.position.quantity
 
     def _increment_failure_count(self, reason: str) -> None:
         """Increment consecutive failure counter and open circuit breaker if threshold reached."""
@@ -1544,64 +1575,84 @@ class IronFlyStrategy:
         order_id: str,
         leg_name: str,
         uic: int = None,
-        timeout_seconds: int = 30
+        timeout_seconds: int = 5
     ) -> Tuple[bool, Optional[Dict]]:
         """
         Verify that a market order has been filled.
 
-        For market orders, this should be fast, but we still verify to catch
-        any edge cases (partial fills, rejections, etc.)
+        FIX (2026-02-01): Completely rewritten to match Delta Neutral's efficient pattern.
+        Market orders fill in ~1-3 seconds and DISAPPEAR from /orders/ endpoint.
+        The old approach polled get_order_status() which was slow and inefficient.
 
-        CRITICAL FIX (2026-01-23): When order status returns None (order not found),
-        check activities/positions IMMEDIATELY to confirm if order filled. Market orders
-        fill in ~3 seconds and disappear from the orders endpoint before we poll.
+        New approach (matches place_market_order_immediate in saxo_client.py):
+        1. Wait 1 second for order to process
+        2. Check if order is still in open orders (if not = filled)
+        3. Verify fill via activities endpoint to get actual fill price
+        4. Only poll if order is still open (unusual for market orders)
 
         Args:
             order_id: The order ID to verify
             leg_name: Name of the leg (for logging)
             uic: Instrument UIC (used to verify fills via position check)
-            timeout_seconds: How long to wait for fill confirmation
+            timeout_seconds: Max wait time (default 5s - market orders should fill in ~1s)
 
         Returns:
             Tuple of (success: bool, fill_details: Optional[Dict])
         """
         logger.info(f"Verifying fill for {leg_name} order {order_id}...")
 
-        start_time = time.time()
-        poll_interval = 1  # Check every 1 second for market orders (should be fast)
+        # Step 1: Brief delay to let order process (market orders fill in ~1-3s)
+        time.sleep(1)
 
+        # Step 2: Check if order is still in open orders
+        # If NOT in open orders, it likely filled (market orders disappear after fill)
+        open_orders = self.client.get_open_orders()
+        order_still_open = any(
+            str(o.get("OrderId")) == str(order_id) for o in open_orders
+        )
+
+        if not order_still_open:
+            # Order not in open orders - likely filled, verify via activities
+            logger.info(f"Order {order_id} not in open orders - checking activities for fill confirmation...")
+
+            if uic:
+                filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
+                if filled:
+                    fill_price = fill_details.get("fill_price") if fill_details else None
+                    if fill_price:
+                        logger.info(f"✓ {leg_name} order {order_id} FILLED @ ${fill_price:.2f} (verified via activity)")
+                    else:
+                        logger.info(f"✓ {leg_name} order {order_id} FILLED (verified via activity/position)")
+                    return True, fill_details
+
+            # Order not open AND not in activities - assume filled (market orders always fill)
+            # This matches Delta Neutral's logic in place_market_order_immediate
+            logger.info(f"✓ {leg_name} order {order_id} executed (no activity details available)")
+            return True, {"status": "Filled", "order_id": order_id, "source": "assumed_filled"}
+
+        # Step 3: Order still open - unusual for market order, poll until timeout
+        logger.warning(f"⚠ Market order {order_id} still open after 1s - unusual, polling...")
+
+        start_time = time.time()
         while time.time() - start_time < timeout_seconds:
             try:
                 order_status = self.client.get_order_status(order_id)
 
-                # CRITICAL FIX: If order_status is None, the order may have already filled
-                # and been removed from the orders endpoint. Check activities IMMEDIATELY.
-                # Market orders fill in ~3 seconds - don't wait, check right away!
                 if order_status is None:
-                    logger.info(
-                        f"Order {order_id} not found in orders endpoint - "
-                        f"checking activities/positions immediately..."
-                    )
-
-                    # Check activities/positions IMMEDIATELY on first "not found"
+                    # Order disappeared - check if it filled
                     if uic:
                         filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
                         if filled:
-                            logger.info(f"✓ {leg_name} order {order_id} confirmed FILLED via activity/position check")
+                            logger.info(f"✓ {leg_name} order {order_id} confirmed FILLED via activity")
                             return True, fill_details
-                        else:
-                            # Not found in activities yet - wait a moment and continue loop
-                            logger.debug(f"Order {order_id} not yet in activities, will retry...")
+                    # Assume filled
+                    return True, {"status": "Filled", "order_id": order_id, "source": "assumed_filled"}
 
-                    time.sleep(poll_interval)
-                    continue
-
-                # Check the status field - Saxo uses "Status" not "status"
                 status = order_status.get("Status") or order_status.get("status", "Unknown")
 
                 if status == "Filled":
                     fill_price = order_status.get("FilledPrice") or order_status.get("fill_price", 0)
-                    logger.info(f"✓ {leg_name} order {order_id} FILLED at {fill_price}")
+                    logger.info(f"✓ {leg_name} order {order_id} FILLED at ${fill_price}")
                     return True, order_status
 
                 elif status in ["Cancelled", "Rejected"]:
@@ -1609,49 +1660,41 @@ class IronFlyStrategy:
                     return False, order_status
 
                 elif status == "PartiallyFilled":
-                    filled_qty = order_status.get("FilledAmount") or order_status.get("filled_quantity", 0)
-                    total_qty = order_status.get("Amount") or order_status.get("total_quantity", 0)
+                    filled_qty = order_status.get("FilledAmount", 0)
+                    total_qty = order_status.get("Amount", 0)
                     logger.warning(f"⚠ {leg_name} order {order_id} partially filled: {filled_qty}/{total_qty}")
-                    # Continue waiting for full fill
-                    time.sleep(poll_interval)
 
-                else:
-                    # Still working/pending - log the actual status for debugging
-                    logger.debug(f"Order {order_id} status: {status}")
-                    time.sleep(poll_interval)
+                time.sleep(1)
 
             except Exception as e:
                 logger.error(f"Error checking {leg_name} order status: {e}")
-                time.sleep(poll_interval)
+                time.sleep(1)
 
-        # Timeout reached - but BEFORE cancelling, do a final check for fills
-        logger.warning(f"{leg_name} order {order_id} verification timeout after {timeout_seconds}s")
+        # Timeout - do final check
+        elapsed = time.time() - start_time + 1  # +1 for initial sleep
+        logger.warning(f"{leg_name} order {order_id} verification timeout after {elapsed:.1f}s")
 
-        # CRITICAL: Final check - order may have filled but we missed it
+        # Final activity check
         if uic:
-            logger.info(f"Final activity/position check for order {order_id}...")
             filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
             if filled:
                 logger.info(f"✓ {leg_name} order {order_id} confirmed FILLED on final check!")
                 return True, fill_details
 
-        # Order didn't fill - actively cancel it
-        logger.error(f"✗ {leg_name} order {order_id} NOT filled - attempting to cancel")
-
         # Try to cancel the unfilled order
+        logger.error(f"✗ {leg_name} order {order_id} NOT filled - attempting to cancel")
         if self._cancel_order_with_retry(order_id, f"{leg_name} fill timeout"):
             logger.info(f"Timed-out order {order_id} cancelled successfully")
         else:
-            # If cancel fails, the order may have filled - do one more check
-            logger.warning(f"Failed to cancel order {order_id} - checking if it filled...")
+            # If cancel fails, order may have filled
             if uic:
                 filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
                 if filled:
-                    logger.info(f"✓ {leg_name} order {order_id} WAS filled (cancel failed because order no longer exists)")
+                    logger.info(f"✓ {leg_name} order {order_id} WAS filled (cancel failed)")
                     return True, fill_details
 
-            # Still couldn't confirm fill - track as orphaned
-            logger.warning(f"Failed to cancel timed-out order {order_id} - tracking as orphaned")
+            # Track as orphaned
+            logger.warning(f"Failed to cancel order {order_id} - tracking as orphaned")
             self._add_orphaned_order({
                 "order_id": order_id,
                 "leg_name": leg_name,
@@ -2472,8 +2515,21 @@ class IronFlyStrategy:
             return self._close_position("MAX_LOSS",
                 f"Max loss breaker: P&L ${pnl_dollars:.2f} <= ${max_loss_threshold:.2f}")
 
-        # EXIT CHECK 2: Profit target (profit_target is in dollars)
-        profit_target_total = self.profit_target * self.position.quantity  # In dollars
+        # EXIT CHECK 2: Profit target
+        # FIX (2026-01-31): Dynamic profit target based on credit received
+        # If profit_target_percent is configured, use percentage of credit
+        # Otherwise fall back to fixed dollar amount per contract
+        if self.profit_target_percent is not None:
+            # Dynamic: percentage of credit received (credit_received is in cents)
+            credit_dollars = self.position.credit_received / 100
+            profit_target_total = max(
+                credit_dollars * (self.profit_target_percent / 100),
+                self.profit_target_min * self.position.quantity  # Floor
+            )
+        else:
+            # Fixed: dollar amount per contract
+            profit_target_total = self.profit_target_fixed * self.position.quantity
+
         if pnl_dollars >= profit_target_total:
             return self._close_position("PROFIT_TARGET",
                 f"Profit target reached: ${pnl_dollars:.2f} >= ${profit_target_total:.2f}")
@@ -3232,7 +3288,7 @@ class IronFlyStrategy:
                 "vix": self.current_vix,
                 "expiry": str(self.position.expiry),
                 "quantity": self.position.quantity,
-                "profit_target": self.profit_target * self.position.quantity,
+                "profit_target": self._calculate_profit_target(),
                 "max_hold_minutes": self.max_hold_minutes
             }
         )
@@ -3490,7 +3546,7 @@ class IronFlyStrategy:
 
         if reason == "PROFIT_TARGET":
             self.alert_service.profit_target(
-                target_amount=self.profit_target * self.position.quantity,
+                target_amount=self._calculate_profit_target(),
                 actual_pnl=pnl_dollars,
                 details=alert_details
             )
@@ -3939,7 +3995,6 @@ class IronFlyStrategy:
         Per Doc Severson's bias rule: use the first strike ABOVE current price
         to compensate for put skew.
         """
-        import math
         return math.ceil(price / increment) * increment
 
     def _round_to_strike(self, price: float, increment: float = 5.0) -> float:
@@ -3989,7 +4044,6 @@ class IronFlyStrategy:
 
         # Fallback to VIX-based calculation if straddle pricing fails
         logger.warning("Could not get straddle price, falling back to VIX calculation")
-        import math
         daily_vol = self.current_vix / math.sqrt(252)
         expected_move = self.current_price * (daily_vol / 100)
 

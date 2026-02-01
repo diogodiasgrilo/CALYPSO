@@ -15,7 +15,7 @@ This package contains common utilities used by all trading strategies:
 - alert_service: SMS/Email alerting via Google Cloud Pub/Sub
 - position_registry: Multi-bot position ownership tracking (for same underlying)
 
-Last Updated: 2026-01-29 (Session capability auto-recovery for VIX NoAccess)
+Last Updated: 2026-01-31 (Fixed FilledPrice field extraction in check_order_filled_by_activity)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -76,8 +76,8 @@ CRITICAL IMPLEMENTATION NOTES - READ BEFORE MODIFYING SAXO API CODE
 ================================================================================
 Full documentation: docs/SAXO_API_PATTERNS.md
 
-1. ORDER FILL PRICES (2026-01-23)
-   ------------------------------
+1. ORDER FILL PRICES (2026-01-31 - CRITICAL BUG FIX)
+   --------------------------------------------------
    NEVER use quoted bid/ask prices for P&L calculation!
    Market orders fill at actual prices which may differ from quotes.
 
@@ -85,9 +85,14 @@ Full documentation: docs/SAXO_API_PATTERNS.md
    RIGHT: credit = fill_details.get("FilledPrice") - ...
 
    Fill price fields (check in order):
+   - fill_details.get("FilledPrice")   # From /activities/ endpoint (MOST COMMON)
    - fill_details.get("fill_price")    # Normalized field
-   - fill_details.get("FilledPrice")   # From /activities/ endpoint
    - fill_details.get("Price")         # From order details
+
+   BUG FIXED (2026-01-31): check_order_filled_by_activity() was using
+   activity.get("Price", 0) but Saxo returns "FilledPrice" not "Price".
+   This caused P&L to always fall back to quoted prices, showing wrong values.
+   Example: Real P&L +$10, Bot showed +$160.
 
    See: docs/SAXO_API_PATTERNS.md Section 2
 

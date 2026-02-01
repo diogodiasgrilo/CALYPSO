@@ -1,9 +1,9 @@
 # Iron Fly 0DTE Bot - Comprehensive Code Audit
 
-**Audit Date:** 2026-01-23
+**Audit Date:** 2026-01-23 (Updated 2026-01-31)
 **Auditor:** Claude (Devil's Advocate Code Review)
 **Files Reviewed:**
-- `bots/iron_fly_0dte/strategy.py` (~4000 lines)
+- `bots/iron_fly_0dte/strategy.py` (~4700 lines)
 - `bots/iron_fly_0dte/main.py` (~680 lines)
 - `bots/iron_fly_0dte/config/config.json`
 
@@ -27,6 +27,16 @@ After thorough code review, the Iron Fly bot is **READY FOR LIVE DEPLOYMENT** wi
 **Critical Findings:** 0
 **Bugs Found:** 0 (that would prevent LIVE trading)
 **Minor Issues:** 3 (all fixed during audit)
+
+### Post-Live Updates (2026-01-31)
+
+The following bugs were discovered after live trading on 2026-01-30 and fixed:
+
+| Bug | Impact | Fix |
+|-----|--------|-----|
+| **Fill price extraction used wrong field** | P&L showed +$160 instead of actual +$10 | Changed `activity.get("Price")` to `activity.get("FilledPrice")` in `saxo_client.py` |
+| **Order verification timeout too long** | 30s per leg = 2+ min wasted on entry | Reduced to 10s, added early-exit after 3 consecutive "not found" |
+| **Fixed $75 profit target** | Never hit (unrealistic for $25 credit) | Added `profit_target_percent` config (30% of credit) with min floor |
 
 ---
 

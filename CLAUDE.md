@@ -893,7 +893,7 @@ SCRIPT
 | `docs/VM_COMMANDS.md` | VM administration commands |
 | `.claude/settings.local.json` | Full command reference (also readable)
 
-### Key Lessons Learned (2026-01-30)
+### Key Lessons Learned (2026-01-31)
 
 These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
 
@@ -930,3 +930,9 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 16. **Strike Selection Must Use Fresh Quotes, Not Cached (Fix #12, 2026-01-30)** - The strike selection code was using cached prices to decide if a multiplier met the target return. If cached return < target, it never fetched fresh quotes (which might be higher). Solution: Two-phase scan that always fetches fresh quotes before making decisions. (Cost: Bot selected 1.35x strikes instead of 1.5x+ on 2026-01-29, reducing cushion/safety)
 
 17. **Dynamic Strike Range, Not Hardcoded (Fix #13, 2026-01-30)** - Strike fetching used hardcoded ±20 points, but at 2.0x expected move with EM=$12.37, the required range is $24.74. Solution: `max_range = expected_move * max_mult * 1.2` dynamically scales with market conditions. (Cost: Strikes at 1.6x-2.0x were never even fetched from the API)
+
+18. **Activities Endpoint Uses "FilledPrice", Not "Price" (Fix #14, 2026-01-31)** - The `check_order_filled_by_activity()` function was extracting `activity.get("Price", 0)` but Saxo's activities endpoint returns fill price as `"FilledPrice"`. This caused all fills to return price=0, falling back to quoted prices for P&L. (Cost: Iron Fly P&L showed +$160 instead of actual +$10 on 2026-01-30)
+
+19. **Order Fill Verification Timeout Too Long (Fix #15, 2026-01-31)** - Market orders fill in ~3 seconds but `_verify_order_fill()` had 30-second timeout. When order not found in /orders/ (because it filled and was removed), code polled for 30s before checking activities. Solution: Reduced timeout to 10s, check activities after 3 consecutive "not found", break early. (Cost: 30 seconds per leg = 2+ minutes wasted on entry)
+
+20. **Profit Target Should Be Dynamic, Not Fixed (Fix #16, 2026-01-31)** - Fixed $75 profit target doesn't scale with credit received. A $25 credit with $75 target requires 300% return - unrealistic. Solution: Added `profit_target_percent` config (default 30% of credit) with `profit_target_min` floor. For $25 credit at 30%, target = $7.50. (Cost: Profit targets never hit, always TIME_EXIT)

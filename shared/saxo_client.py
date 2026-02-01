@@ -2846,11 +2846,13 @@ class SaxoClient:
                     # Check if this activity matches our order
                     if activity_order_id == str(order_id):
                         if activity_status in ["FinalFill", "Fill"]:
-                            fill_price = activity.get("Price", 0)
-                            fill_amount = activity.get("Amount", 0)
+                            # FIX (2026-01-31): Saxo activities endpoint uses "FilledPrice", not "Price"
+                            # Also check "Price" as fallback for backwards compatibility
+                            fill_price = activity.get("FilledPrice") or activity.get("Price", 0)
+                            fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
                             logger.info(
                                 f"Order {order_id} confirmed FILLED via activities: "
-                                f"Price={fill_price}, Amount={fill_amount}"
+                                f"FilledPrice={fill_price}, Amount={fill_amount}"
                             )
                             return True, {
                                 "status": "Filled",

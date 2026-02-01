@@ -1,6 +1,6 @@
 # Saxo Bank OpenAPI - Critical Patterns and Gotchas
 
-**Last Updated:** 2026-01-28
+**Last Updated:** 2026-01-31
 **Purpose:** Document proven patterns for Saxo API integration to avoid repeating mistakes.
 
 ---
@@ -107,18 +107,26 @@ def get_fill_price(fill_detail: Optional[Dict], fallback: float) -> float:
 
 ### Where Fill Details Come From
 
-**Activities Endpoint Response:**
+**Activities Endpoint Response (`/cs/v1/audit/orderactivities`):**
 ```json
 {
     "OrderId": "123456",
     "FilledAmount": 1.0,
-    "FilledPrice": 12.50,        // <-- ACTUAL FILL PRICE
+    "FilledPrice": 12.50,        // <-- ACTUAL FILL PRICE (use this!)
     "Status": "FinalFill",
     "ActivityTime": "2026-01-23T15:00:00Z"
 }
 ```
 
-**Order Details Response:**
+**CRITICAL BUG (Fixed 2026-01-31):** The activities endpoint uses `"FilledPrice"`, NOT `"Price"`.
+Previous code used `activity.get("Price", 0)` which always returned 0, causing P&L to use
+quoted prices as fallback. Correct extraction:
+```python
+fill_price = activity.get("FilledPrice") or activity.get("Price", 0)  # FilledPrice FIRST
+fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
+```
+
+**Order Details Response (`/port/v1/orders/{clientKey}/{orderId}`):**
 ```json
 {
     "OrderId": "123456",
