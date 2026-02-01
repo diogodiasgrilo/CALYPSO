@@ -23,6 +23,22 @@ Usage:
 Author: Trading Bot Developer
 Date: 2026-01-27
 
+Changelog:
+----------
+1.1.0 (2026-02-01): REST-only mode + Safety features
+    - Disabled WebSocket streaming, use REST API for all price fetching
+    - Added USE_WEBSOCKET_STREAMING toggle (default: False)
+    - Added Order Size Validation (ORDER-006)
+    - Added Emergency Close Max Retries
+    - Added Spread Validation Before Emergency Close
+    - Added Fill Price Slippage Monitoring (ORDER-007)
+    - Added Duplicate Bot Prevention
+
+1.0.0 (2026-01-27): Initial implementation
+    - 6 scheduled iron condor entries per day
+    - Position Registry integration for multi-bot support
+    - Circuit breaker and critical intervention safety
+
 See docs/MEIC_STRATEGY_SPECIFICATION.md for full details.
 See docs/MEIC_EDGE_CASES.md for edge case analysis.
 """
@@ -33,8 +49,8 @@ import time
 import signal
 import argparse
 import logging
+import subprocess
 from datetime import datetime
-from typing import Optional
 
 # Ensure project root is in path for imports when running as script
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,19 +59,42 @@ if _project_root not in sys.path:
 
 # Import shared modules
 from shared.saxo_client import SaxoClient
-from shared.logger_service import TradeLoggerService, setup_logging
+from shared.logger_service import setup_logging
 from shared.market_hours import (
     is_market_open, get_market_status_message, calculate_sleep_duration,
     get_holiday_name, get_us_market_time, is_after_hours, is_weekend
 )
-from shared.config_loader import ConfigLoader, get_config_loader
+from shared.config_loader import ConfigLoader
 from shared.secret_manager import is_running_on_gcp
 
 # Import bot-specific strategy
-from bots.meic.strategy import MEICStrategy, MEICState
+from bots.meic.strategy import MEICStrategy
 
 # Configure main logger
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# WEBSOCKET STREAMING TOGGLE
+# =============================================================================
+# Set to False for REST-only mode (more reliable, recommended)
+# Set to True to enable WebSocket streaming (only if needed for rate limits)
+#
+# REST-only mode (USE_WEBSOCKET_STREAMING = False):
+#   - All price fetching uses REST API directly
+#   - NORMAL mode: ~12 calls/min per bot (5s interval)
+#   - VIGILANT mode: ~30 calls/min per bot (2s interval)
+#   - Guaranteed fresh prices, no stale cache issues
+#
+# WebSocket mode (USE_WEBSOCKET_STREAMING = True):
+#   - Price fetching checks WebSocket cache first, REST fallback
+#   - 0 API calls for cached prices
+#   - Risk: Stale cache can cause incorrect stop monitoring
+#
+# History: Set to False after Delta Neutral WebSocket issues on 2026-01-27.
+# WebSocket streaming was buggy and unreliable. REST-only is simpler and
+# sufficient for our bot setup.
+# =============================================================================
+USE_WEBSOCKET_STREAMING = False  # REST-only mode for reliability
 
 # Global flag for graceful shutdown
 shutdown_requested = False
@@ -90,6 +129,61 @@ def interruptible_sleep(seconds: int, check_interval: int = 1) -> bool:
     return not shutdown_requested
 
 
+def kill_existing_meic_instances() -> int:
+    """
+    DUPLICATE-001: Find and kill any existing MEIC bot instances before starting a new one.
+
+    This prevents multiple MEIC bot instances from running simultaneously,
+    which could cause duplicate trades, position conflicts, and circuit breaker issues.
+
+    Uses a specific pattern to match only MEIC bot processes (not Delta Neutral
+    or other bots).
+
+    Returns:
+        int: Number of processes killed
+    """
+    current_pid = os.getpid()
+    killed_count = 0
+
+    try:
+        # Find all Python processes running meic/main.py specifically
+        # This pattern is more specific than just "main.py" to avoid killing other bots
+        result = subprocess.run(
+            ["pgrep", "-f", "meic[./]main\\.py"],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+
+            for pid_str in pids:
+                try:
+                    pid = int(pid_str.strip())
+                    # Don't kill ourselves
+                    if pid != current_pid:
+                        logger.info(f"DUPLICATE-001: Found existing MEIC instance (PID: {pid}), terminating...")
+                        os.kill(pid, signal.SIGTERM)
+                        killed_count += 1
+                        # Give it a moment to shut down gracefully
+                        time.sleep(1)
+                except (ValueError, ProcessLookupError):
+                    pass  # Process already terminated or invalid PID
+
+        if killed_count > 0:
+            logger.info(f"DUPLICATE-001: Terminated {killed_count} existing MEIC instance(s)")
+            # Extra wait for graceful cleanup
+            time.sleep(2)
+
+    except FileNotFoundError:
+        # pgrep not available (Windows or unusual system)
+        logger.warning("DUPLICATE-001: pgrep not available - cannot check for existing instances")
+    except Exception as e:
+        logger.warning(f"DUPLICATE-001: Error checking for existing instances: {e}")
+
+    return killed_count
+
+
 def load_config(config_path: str = "bots/meic/config/config.json") -> dict:
     """
     Load configuration from appropriate source (cloud or local).
@@ -119,7 +213,7 @@ def print_banner():
     ║         Entries: 10:00, 10:30, 11:00, 11:30, 12:00, 12:30     ║
     ║         Expected: 20.7% CAGR, 4.31% max drawdown              ║
     ║                                                               ║
-    ║         Version: 1.0.0                                        ║
+    ║         Version: 1.1.0                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
@@ -188,44 +282,53 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     except Exception as e:
         trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
 
-    # Start real-time price streaming for underlying and VIX
+    # ==========================================================================
+    # WEBSOCKET STREAMING SETUP (disabled by default - see USE_WEBSOCKET_STREAMING)
+    # ==========================================================================
+    # This code is preserved for future use if we hit rate limits with many bots.
+    # Currently disabled because REST-only is more reliable.
     subscriptions = []
-    underlying_uic = config.get("strategy", {}).get("underlying_uic")
-    vix_uic = config.get("strategy", {}).get("vix_spot_uic", 10606)
+    streaming_started = False
 
-    if underlying_uic:
-        # US500.I is CfdOnIndex (tracks SPX)
-        underlying_symbol = config.get("strategy", {}).get("underlying_symbol", "")
-        if "US500" in underlying_symbol or underlying_symbol.endswith(".I"):
-            underlying_type = "CfdOnIndex"
-        else:
-            underlying_type = "StockIndex"
-        subscriptions.append({"uic": underlying_uic, "asset_type": underlying_type})
+    if USE_WEBSOCKET_STREAMING:
+        underlying_uic = config.get("strategy", {}).get("underlying_uic")
+        vix_uic = config.get("strategy", {}).get("vix_spot_uic", 10606)
 
-    if vix_uic:
-        subscriptions.append({"uic": vix_uic, "asset_type": "StockIndex"})
+        if underlying_uic:
+            # US500.I is CfdOnIndex (tracks SPX)
+            underlying_symbol = config.get("strategy", {}).get("underlying_symbol", "")
+            if "US500" in underlying_symbol or underlying_symbol.endswith(".I"):
+                underlying_type = "CfdOnIndex"
+            else:
+                underlying_type = "StockIndex"
+            subscriptions.append({"uic": underlying_uic, "asset_type": underlying_type})
 
-    if subscriptions:
-        trade_logger.log_event(f"Starting price streaming for {len(subscriptions)} instruments...")
+        if vix_uic:
+            subscriptions.append({"uic": vix_uic, "asset_type": "StockIndex"})
 
-        def price_update_handler(uic: int, data: dict):
-            """Handle real-time price updates."""
-            strategy.handle_price_update(uic, data)
+        if subscriptions:
+            trade_logger.log_event(f"Starting price streaming for {len(subscriptions)} instruments...")
 
-            # P2: Update WebSocket price cache for fast stop monitoring
-            # Extract mid price and cache it
-            quote = data.get("Quote", {})
-            bid = quote.get("Bid")
-            ask = quote.get("Ask")
-            if bid and ask:
-                mid_price = (bid + ask) / 2
-                strategy.update_ws_price_cache(uic, mid_price)
-            elif quote.get("LastTraded"):
-                strategy.update_ws_price_cache(uic, quote["LastTraded"])
+            def price_update_handler(uic: int, data: dict):
+                """Handle real-time price updates."""
+                strategy.handle_price_update(uic, data)
 
-        streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
-        if not streaming_started:
-            trade_logger.log_event("Warning: Real-time streaming not started. Using polling mode.")
+                # Update WebSocket price cache for fast stop monitoring
+                quote = data.get("Quote", {})
+                bid = quote.get("Bid")
+                ask = quote.get("Ask")
+                if bid and ask:
+                    mid_price = (bid + ask) / 2
+                    strategy.update_ws_price_cache(uic, mid_price)
+                elif quote.get("LastTraded"):
+                    strategy.update_ws_price_cache(uic, quote["LastTraded"])
+
+            streaming_started = client.start_price_streaming(subscriptions, price_update_handler)
+            if not streaming_started:
+                trade_logger.log_event("Warning: Real-time streaming not started. Using polling mode.")
+    else:
+        trade_logger.log_event("REST-only mode: WebSocket streaming disabled (USE_WEBSOCKET_STREAMING=False)")
+        trade_logger.log_event("All price fetching will use REST API directly (more reliable)")
 
     # Main trading loop
     trade_logger.log_event("Entering main trading loop...")
@@ -289,8 +392,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     if sleep_time > 0:
                         minutes = sleep_time // 60
 
-                        # Stop streaming during market close
-                        if client.is_streaming:
+                        # Stop streaming during market close (only if WebSocket mode enabled)
+                        if USE_WEBSOCKET_STREAMING and client.is_streaming:
                             client.stop_price_streaming()
 
                         # Refresh token before sleeping
@@ -301,8 +404,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         if not interruptible_sleep(sleep_time):
                             break
 
-                        # Reconnect streaming after waking
-                        if not shutdown_requested and subscriptions:
+                        # Reconnect streaming after waking (only if WebSocket mode enabled)
+                        if USE_WEBSOCKET_STREAMING and not shutdown_requested and subscriptions:
                             client.start_price_streaming(subscriptions, price_update_handler)
                     else:
                         trade_logger.log_event(f"HEARTBEAT | Market closed {close_reason} - rechecking in 60s")
@@ -310,8 +413,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                             break
                     continue
 
-                # Reconnect WebSocket if disconnected during market hours
-                if subscriptions and not client.is_streaming:
+                # Reconnect WebSocket if disconnected during market hours (only if WebSocket mode enabled)
+                if USE_WEBSOCKET_STREAMING and subscriptions and not client.is_streaming:
                     trade_logger.log_event("WebSocket disconnected - reconnecting...")
                     try:
                         client.stop_price_streaming()
@@ -421,9 +524,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
         trade_logger.log_event("INITIATING GRACEFUL SHUTDOWN")
         trade_logger.log_event("=" * 60)
 
-        # Stop price streaming
-        trade_logger.log_event("Stopping price streaming...")
-        client.stop_price_streaming()
+        # Stop price streaming (only if WebSocket mode was enabled)
+        if USE_WEBSOCKET_STREAMING:
+            trade_logger.log_event("Stopping price streaming...")
+            client.stop_price_streaming()
 
         # Log final status
         status = strategy.get_status_summary()
@@ -489,13 +593,13 @@ def show_status(config: dict):
     print(f"  State: {status['state']}")
     print(f"  SPX Price: {status['underlying_price']:.2f}")
     print(f"  VIX: {status['vix']:.2f}")
-    print(f"\n  Entry Schedule:")
+    print("\n  Entry Schedule:")
     for i, entry_time in enumerate(strategy.entry_times):
         completed = i < status['entries_completed']
         marker = "✓" if completed else "○"
         print(f"    {marker} Entry #{i+1}: {entry_time.strftime('%H:%M')} ET")
 
-    print(f"\n  Today's Stats:")
+    print("\n  Today's Stats:")
     print(f"    Entries Completed: {status['entries_completed']}")
     print(f"    Entries Failed: {status['entries_failed']}")
     print(f"    Active ICs: {status['active_entries']}")
@@ -510,6 +614,10 @@ def show_status(config: dict):
 
 def main():
     """Main entry point."""
+    # DUPLICATE-001: Kill any existing MEIC instances before starting
+    # This prevents duplicate trades and circuit breaker issues from zombie processes
+    kill_existing_meic_instances()
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(
         description="MEIC 0DTE Trading Bot - Tammy Chambless's Strategy",

@@ -119,6 +119,11 @@ class AlertType(Enum):
     API_ERROR = "api_error"
     CONNECTION_RESTORED = "connection_restored"
 
+    # Order Quality Events (added 2026-02-01 for MEIC safety features)
+    SLIPPAGE_ALERT = "slippage_alert"        # Fill price slippage detected
+    EMERGENCY_CLOSE = "emergency_close"      # Emergency position close event
+    DATA_QUALITY = "data_quality"            # Data quality issue (stale quotes, invalid P&L)
+
     # Market Status Events (WhatsApp only by default)
     MARKET_OPENING_SOON = "market_opening_soon"  # 1h, 30m, 15m countdown
     MARKET_OPEN = "market_open"                   # Market just opened
@@ -147,6 +152,9 @@ DEFAULT_PRIORITIES = {
     AlertType.PREMARKET_GAP: AlertPriority.HIGH,  # Big gap affects positions
     AlertType.VIGILANT_ENTERED: AlertPriority.HIGH,  # Price near short strike
     AlertType.ITM_RISK_CLOSE: AlertPriority.CRITICAL,  # Emergency close of shorts
+    AlertType.SLIPPAGE_ALERT: AlertPriority.HIGH,  # Fill slippage detected
+    AlertType.EMERGENCY_CLOSE: AlertPriority.HIGH,  # Emergency position close
+    AlertType.DATA_QUALITY: AlertPriority.MEDIUM,  # Data quality issue
 
     AlertType.POSITION_OPENED: AlertPriority.MEDIUM,
     AlertType.POSITION_CLOSED: AlertPriority.MEDIUM,

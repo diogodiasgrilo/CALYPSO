@@ -31,14 +31,14 @@ import os
 import time
 import threading
 from collections import deque
-from datetime import datetime, timedelta, date, time as dt_time
+from datetime import datetime, timedelta, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple, Deque, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
-from shared.market_hours import get_us_market_time, US_EASTERN, is_market_open, is_early_close_day
+from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day
 from shared.event_calendar import is_fomc_meeting_day
 from shared.position_registry import PositionRegistry
 
@@ -154,6 +154,26 @@ PNL_SANITY_CHECK_ENABLED = True
 # ALERT-002: Alert batching for rapid stops
 ALERT_BATCH_WINDOW_SECONDS = 5  # Batch alerts within this window
 MAX_ALERTS_BEFORE_BATCH = 2  # After this many alerts in window, batch them
+
+# ORDER-006: Order size validation (bug protection)
+# Prevents catastrophic losses from quantity calculation bugs
+MAX_CONTRACTS_PER_ORDER = 10  # Max contracts in a single order
+MAX_CONTRACTS_PER_UNDERLYING = 30  # Max total contracts (6 ICs × 4 legs × ~1 contract)
+
+# ORDER-007: Fill price slippage monitoring
+SLIPPAGE_WARNING_THRESHOLD_PERCENT = 5.0   # Warn at 5% slippage
+SLIPPAGE_CRITICAL_THRESHOLD_PERCENT = 15.0  # Critical at 15% slippage
+
+# EMERGENCY-001: Emergency close retry settings
+EMERGENCY_CLOSE_MAX_ATTEMPTS = 5
+EMERGENCY_CLOSE_RETRY_DELAY_SECONDS = 3
+EMERGENCY_SPREAD_MAX_PERCENT = 50.0  # Max acceptable spread for emergency close
+EMERGENCY_SPREAD_WAIT_SECONDS = 10  # Wait time for spread normalization
+EMERGENCY_SPREAD_MAX_WAIT_ATTEMPTS = 3
+
+# ACTIVITIES-001: Fill verification retry
+ACTIVITIES_RETRY_ATTEMPTS = 3
+ACTIVITIES_RETRY_DELAY_SECONDS = 1.0
 
 
 # =============================================================================
@@ -442,12 +462,10 @@ class MarketData:
 
         # Find the oldest price in the velocity window
         oldest_price = None
-        oldest_time = None
         for ts, price in self.price_history:
             if ts >= window_start:
                 if oldest_price is None:
                     oldest_price = price
-                    oldest_time = ts
                 break
 
         if oldest_price is None or oldest_price == 0:
@@ -516,6 +534,10 @@ class MEICStrategy:
         self.trade_logger = logger_service
         self.dry_run = dry_run
 
+        # CONFIG-001: Validate configuration on startup
+        # Note: _validate_config is called later after self is fully initialized
+        # We store config first, validate after alert_service is ready
+
         # Alert service
         if alert_service:
             self.alert_service = alert_service
@@ -527,6 +549,13 @@ class MEICStrategy:
 
         # Strategy configuration
         self.strategy_config = config.get("strategy", {})
+
+        # CONFIG-001: Validate configuration early
+        config_valid, config_errors = self._validate_config()
+        if not config_valid:
+            error_msg = f"Configuration validation failed: {'; '.join(config_errors)}"
+            logger.critical(error_msg)
+            raise ValueError(error_msg)
 
         # Underlying (SPX via US500.I CFD)
         self.underlying_symbol = self.strategy_config.get("underlying_symbol", "US500.I")
@@ -1501,8 +1530,6 @@ class MEICStrategy:
         Returns:
             True if all 4 legs filled successfully
         """
-        today_str = get_us_market_time().strftime("%Y-%m-%d")
-
         # Get option expiry (today for 0DTE)
         expiry = self._get_todays_expiry()
         if not expiry:
@@ -1652,9 +1679,15 @@ class MEICStrategy:
             logger.error(f"Could not find UIC for {put_call} {strike} {expiry}")
             return None
 
-        timeout = ORDER_TIMEOUT_EMERGENCY_SECONDS if emergency_mode else self._order_timeout
-        last_result = None
         leg_description = f"{put_call} {strike}"
+
+        # ORDER-006: Validate order size before placing
+        is_valid, error = self._validate_order_size(self.contracts_per_entry, leg_description)
+        if not is_valid:
+            logger.error(f"ORDER-006: Order size validation failed for {leg_description}")
+            return None
+
+        timeout = ORDER_TIMEOUT_EMERGENCY_SECONDS if emergency_mode else self._order_timeout
 
         # Progressive retry sequence
         for attempt, (slippage_percent, is_market) in enumerate(PROGRESSIVE_RETRY_SEQUENCE):
@@ -1678,12 +1711,19 @@ class MEICStrategy:
                 elif spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_WARNING:
                     logger.warning(f"  ORDER-006: Wide spread warning: {spread_percent:.1f}%")
 
+            # ORDER-007: Track expected price for slippage monitoring
+            expected_price = 0.0
+
             if is_market:
                 # ORDER-005: Check absolute spread before MARKET order
                 if spread > self._max_absolute_slippage:
                     logger.critical(f"  ORDER-005: Spread ${spread:.2f} > max ${self._max_absolute_slippage:.2f}")
                     logger.critical(f"  ABORTING MARKET order for {leg_description}")
                     continue
+
+                # For MARKET orders, expected price is mid
+                mid_price = (bid + ask) / 2 if bid and ask else ask or bid
+                expected_price = mid_price
 
                 # Place MARKET order
                 logger.info(f"  Attempt {attempt + 1}: MARKET order for {leg_description}")
@@ -1710,6 +1750,9 @@ class MEICStrategy:
                 else:
                     limit_price = round(mid_price, 2)
 
+                # For LIMIT orders, expected price is the limit price
+                expected_price = limit_price
+
                 logger.info(
                     f"  Attempt {attempt + 1}: LIMIT @ ${limit_price:.2f} "
                     f"({slippage_percent}% slippage) for {leg_description}"
@@ -1727,12 +1770,18 @@ class MEICStrategy:
                     external_reference=external_ref
                 )
 
-            last_result = result
-
             if result and result.get("filled"):
                 # Order filled - verify position exists
                 position_id = self._get_position_id_from_order(result)
                 fill_price = self._get_fill_price(result)
+
+                # ORDER-007: Monitor fill price slippage
+                self._monitor_fill_slippage(
+                    expected_price=expected_price,
+                    actual_fill_price=fill_price,
+                    buy_sell=buy_sell,
+                    leg_description=leg_description
+                )
 
                 # CONN-005: Verify position exists
                 if position_id and not self._verify_position_exists(uic, position_id, buy_sell):
@@ -1860,7 +1909,7 @@ class MEICStrategy:
 
         # Get current open orders
         try:
-            open_orders = self.client.get_orders()
+            open_orders = self.client.get_open_orders()
             open_order_ids = {str(o.get("OrderId")) for o in (open_orders or [])}
         except Exception as e:
             logger.error(f"Failed to fetch open orders for orphan cleanup: {e}")
@@ -1890,6 +1939,192 @@ class MEICStrategy:
 
         if self._orphaned_orders:
             logger.warning(f"ORDER-008: {len(self._orphaned_orders)} orphaned orders remain")
+
+    # =========================================================================
+    # ORDER SIZE VALIDATION (ORDER-006)
+    # =========================================================================
+
+    def _validate_order_size(self, amount: int, order_description: str) -> Tuple[bool, str]:
+        """
+        ORDER-006: Validate order size is within acceptable limits.
+
+        Protections:
+        1. Per-order maximum (catches single-order bugs)
+        2. Total position limit (prevents over-concentration)
+
+        This is a critical bug protection - a calculation error could cause
+        the bot to order 100 or 1000 contracts instead of 1.
+
+        Args:
+            amount: Number of contracts to order
+            order_description: Description for logging
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        # Check 1: Per-order maximum
+        if amount > MAX_CONTRACTS_PER_ORDER:
+            error = (
+                f"ORDER-006 REJECTED: Order size {amount} contracts exceeds "
+                f"max {MAX_CONTRACTS_PER_ORDER}. Order: {order_description}"
+            )
+            logger.critical(error)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CIRCUIT_BREAKER,
+                title="ORDER SIZE LIMIT EXCEEDED",
+                message=error,
+                priority=AlertPriority.CRITICAL
+            )
+            self._log_safety_event("ORDER_SIZE_REJECTED", error)
+            return (False, error)
+
+        # Check 2: Would this exceed total position limit?
+        current_position_size = self._get_current_position_size()
+        projected_size = current_position_size + amount
+
+        if projected_size > MAX_CONTRACTS_PER_UNDERLYING:
+            error = (
+                f"ORDER-006 REJECTED: Position limit exceeded. "
+                f"Current={current_position_size}, Adding={amount}, "
+                f"Projected={projected_size}, Max={MAX_CONTRACTS_PER_UNDERLYING}"
+            )
+            logger.critical(error)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CIRCUIT_BREAKER,
+                title="POSITION LIMIT EXCEEDED",
+                message=error,
+                priority=AlertPriority.CRITICAL
+            )
+            self._log_safety_event("POSITION_LIMIT_REJECTED", error)
+            return (False, error)
+
+        # All checks passed
+        logger.debug(f"ORDER-006: Order size validated: {amount} contracts for {order_description}")
+        return (True, "")
+
+    def _get_current_position_size(self) -> int:
+        """
+        Calculate total contracts currently held across all entries.
+
+        Returns:
+            Total number of contracts (absolute sum across all legs)
+        """
+        total = 0
+
+        for entry in self.daily_state.entries:
+            if not entry.is_complete:
+                continue
+
+            # Count each open leg as 1 contract
+            if not entry.call_side_stopped:
+                if entry.short_call_position_id:
+                    total += self.contracts_per_entry
+                if entry.long_call_position_id:
+                    total += self.contracts_per_entry
+
+            if not entry.put_side_stopped:
+                if entry.short_put_position_id:
+                    total += self.contracts_per_entry
+                if entry.long_put_position_id:
+                    total += self.contracts_per_entry
+
+        return total
+
+    # =========================================================================
+    # FILL PRICE SLIPPAGE MONITORING (ORDER-007)
+    # =========================================================================
+
+    def _monitor_fill_slippage(
+        self,
+        expected_price: float,
+        actual_fill_price: float,
+        buy_sell: BuySell,
+        leg_description: str
+    ) -> None:
+        """
+        ORDER-007: Monitor fill price slippage and alert if excessive.
+
+        Compares the expected fill price (limit or mid price) with the actual
+        fill price to detect and log slippage events. Excessive slippage may
+        indicate market conditions, liquidity issues, or execution problems.
+
+        Slippage direction depends on buy/sell:
+        - BUY: Slippage = (actual - expected) / expected (paying more = positive)
+        - SELL: Slippage = (expected - actual) / expected (receiving less = positive)
+
+        Args:
+            expected_price: The price we expected to fill at (limit or mid)
+            actual_fill_price: The actual fill price from the exchange
+            buy_sell: BuySell direction
+            leg_description: Description for logging (e.g., "Call 6050")
+        """
+        if expected_price <= 0 or actual_fill_price <= 0:
+            logger.warning(
+                f"ORDER-007: Cannot calculate slippage for {leg_description} - "
+                f"expected=${expected_price:.2f}, actual=${actual_fill_price:.2f}"
+            )
+            return
+
+        # Calculate slippage percentage (positive = worse for us)
+        if buy_sell == BuySell.BUY:
+            # Buying: paying more is bad
+            slippage_pct = ((actual_fill_price - expected_price) / expected_price) * 100
+        else:
+            # Selling: receiving less is bad
+            slippage_pct = ((expected_price - actual_fill_price) / expected_price) * 100
+
+        slippage_dollar = abs(actual_fill_price - expected_price) * 100  # Per contract
+
+        # Log and alert based on severity
+        if slippage_pct >= SLIPPAGE_CRITICAL_THRESHOLD_PERCENT:
+            # CRITICAL slippage
+            logger.critical(
+                f"ORDER-007 CRITICAL SLIPPAGE: {leg_description} - "
+                f"Expected ${expected_price:.2f}, Got ${actual_fill_price:.2f} "
+                f"({slippage_pct:+.1f}%, ${slippage_dollar:.2f}/contract)"
+            )
+            self.alert_service.send_alert(
+                alert_type=AlertType.SLIPPAGE_ALERT,
+                title="CRITICAL FILL SLIPPAGE",
+                message=(
+                    f"HIGH slippage on {leg_description}:\n"
+                    f"Expected: ${expected_price:.2f}\n"
+                    f"Actual: ${actual_fill_price:.2f}\n"
+                    f"Slippage: {slippage_pct:+.1f}% (${slippage_dollar:.2f}/contract)"
+                ),
+                priority=AlertPriority.HIGH
+            )
+            self._log_safety_event(
+                "CRITICAL_SLIPPAGE",
+                f"{leg_description}: {slippage_pct:+.1f}% (${slippage_dollar:.2f})"
+            )
+
+        elif slippage_pct >= SLIPPAGE_WARNING_THRESHOLD_PERCENT:
+            # WARNING level slippage
+            logger.warning(
+                f"ORDER-007 SLIPPAGE WARNING: {leg_description} - "
+                f"Expected ${expected_price:.2f}, Got ${actual_fill_price:.2f} "
+                f"({slippage_pct:+.1f}%, ${slippage_dollar:.2f}/contract)"
+            )
+            self._log_safety_event(
+                "SLIPPAGE_WARNING",
+                f"{leg_description}: {slippage_pct:+.1f}% (${slippage_dollar:.2f})"
+            )
+
+        elif slippage_pct > 0:
+            # Minor slippage - just debug log
+            logger.debug(
+                f"ORDER-007: Minor slippage on {leg_description} - "
+                f"{slippage_pct:+.1f}% (${slippage_dollar:.2f}/contract)"
+            )
+
+        elif slippage_pct < 0:
+            # Negative slippage means we got a BETTER price than expected
+            logger.info(
+                f"ORDER-007: Favorable fill on {leg_description} - "
+                f"Expected ${expected_price:.2f}, Got ${actual_fill_price:.2f} "
+                f"({slippage_pct:+.1f}% BETTER)"
+            )
 
     def _get_option_uic(self, strike: float, put_call: str, expiry: str) -> Optional[int]:
         """
@@ -1929,42 +2164,80 @@ class MEICStrategy:
         Get position ID from order result or activities.
 
         Args:
-            order_result: Result from place_order()
+            order_result: Result from place_order() or place_limit_order_with_timeout()
 
         Returns:
             Position ID or None
         """
-        # Check if directly in result
+        # Check if directly in result (common path)
         if "PositionId" in order_result:
             return str(order_result["PositionId"])
 
-        # Get from order ID via activities
-        order_id = order_result.get("OrderId")
-        if order_id:
-            # Query activities endpoint
-            activities = self.client.get_recent_activities(minutes=5)
-            for activity in activities:
-                if activity.get("OrderId") == order_id:
-                    pos_id = activity.get("PositionId")
-                    if pos_id:
-                        return str(pos_id)
+        # Check position_id (lowercase, from place_limit_order_with_timeout)
+        if "position_id" in order_result:
+            return str(order_result["position_id"])
+
+        # Fallback: Try to get from activities via order_id and uic
+        order_id = order_result.get("OrderId") or order_result.get("order_id")
+        uic = order_result.get("Uic") or order_result.get("uic")
+
+        if order_id and uic:
+            # Use check_order_filled_by_activity which has retry logic
+            filled, fill_details = self.client.check_order_filled_by_activity(str(order_id), uic)
+            if filled and fill_details:
+                pos_id = fill_details.get("position_id") or fill_details.get("PositionId")
+                if pos_id:
+                    return str(pos_id)
 
         return None
 
     def _get_fill_price(self, order_result: Dict) -> float:
-        """Get fill price from order result."""
-        # Try various field names
+        """
+        ACTIVITIES-001: Get fill price from order result with proper fallback chain.
+
+        The shared saxo_client.place_limit_order_with_timeout() uses
+        check_order_filled_by_activity() which has built-in retry logic
+        (3 attempts with 1s delay) to handle activities endpoint sync delays.
+
+        Fill price priority:
+        1. fill_price - from place_limit_order_with_timeout() via activity check
+        2. FilledPrice - direct from Saxo order response
+        3. Price - legacy field name
+        4. ExecutionPrice - alternative field name
+        5. Fallback to order details API call
+
+        Args:
+            order_result: Order result dict from place_order or place_limit_order_with_timeout
+
+        Returns:
+            Fill price (float), or 0 if not found
+        """
+        # Priority 1: fill_price from place_limit_order_with_timeout (via activity check with retry)
+        if "fill_price" in order_result:
+            price = order_result["fill_price"]
+            if price and price > 0:
+                return float(price)
+
+        # Priority 2-4: Try various direct field names
         for field in ["FilledPrice", "Price", "ExecutionPrice"]:
             if field in order_result:
-                return float(order_result[field])
+                price = order_result[field]
+                if price and price > 0:
+                    return float(price)
 
-        # Fallback to getting from order details
-        order_id = order_result.get("OrderId")
+        # Priority 5: Fallback to getting from order status
+        order_id = order_result.get("OrderId") or order_result.get("order_id")
         if order_id:
-            order_details = self.client.get_order(order_id)
-            if order_details:
-                return order_details.get("FilledPrice", 0)
+            order_status = self.client.get_order_status(order_id)
+            if order_status:
+                fill_price = order_status.get("FilledPrice", 0)
+                if fill_price and fill_price > 0:
+                    return float(fill_price)
 
+        logger.warning(
+            f"ACTIVITIES-001: Could not extract fill price from order result. "
+            f"Keys available: {list(order_result.keys())}"
+        )
         return 0
 
     def _get_todays_expiry(self) -> Optional[str]:
@@ -2094,53 +2367,43 @@ class MEICStrategy:
         """
         Update option prices for an entry.
 
-        P2: Uses WebSocket cache first, falls back to REST API if cache miss.
-        This allows fast 2-second monitoring without API rate limits.
+        REST-only mode: Always fetches fresh prices from REST API.
+        This is more reliable than WebSocket caching which can have stale data.
+
+        History: Switched from WebSocket cache to REST-only on 2026-02-01 after
+        Delta Neutral experienced stale cache issues on 2026-01-27 that caused
+        $0 price orders. REST-only is simpler and more reliable.
+
+        Note: WebSocket cache methods are preserved in case rate limits become
+        an issue with many bots in the future.
         """
         if self.dry_run:
             # Simulate price movement based on SPX movement
             self._simulate_entry_prices(entry)
             return
 
-        # P2: Try WebSocket cache first for each leg
-        # Max age of 5 seconds for cached prices
-        cache_max_age = 5
+        # REST-only mode: Always fetch fresh prices from REST API
+        # This avoids stale WebSocket cache issues
 
         # Short Call
         if entry.short_call_uic:
-            cached = self._get_cached_price(entry.short_call_uic, cache_max_age)
-            if cached:
-                entry.short_call_price = cached
-            else:
-                quote = self.client.get_quote(entry.short_call_uic, asset_type="StockIndexOption")
-                entry.short_call_price = self._extract_mid_price(quote) or 0
+            quote = self.client.get_quote(entry.short_call_uic, asset_type="StockIndexOption")
+            entry.short_call_price = self._extract_mid_price(quote) or 0
 
         # Long Call
         if entry.long_call_uic:
-            cached = self._get_cached_price(entry.long_call_uic, cache_max_age)
-            if cached:
-                entry.long_call_price = cached
-            else:
-                quote = self.client.get_quote(entry.long_call_uic, asset_type="StockIndexOption")
-                entry.long_call_price = self._extract_mid_price(quote) or 0
+            quote = self.client.get_quote(entry.long_call_uic, asset_type="StockIndexOption")
+            entry.long_call_price = self._extract_mid_price(quote) or 0
 
         # Short Put
         if entry.short_put_uic:
-            cached = self._get_cached_price(entry.short_put_uic, cache_max_age)
-            if cached:
-                entry.short_put_price = cached
-            else:
-                quote = self.client.get_quote(entry.short_put_uic, asset_type="StockIndexOption")
-                entry.short_put_price = self._extract_mid_price(quote) or 0
+            quote = self.client.get_quote(entry.short_put_uic, asset_type="StockIndexOption")
+            entry.short_put_price = self._extract_mid_price(quote) or 0
 
         # Long Put
         if entry.long_put_uic:
-            cached = self._get_cached_price(entry.long_put_uic, cache_max_age)
-            if cached:
-                entry.long_put_price = cached
-            else:
-                quote = self.client.get_quote(entry.long_put_uic, asset_type="StockIndexOption")
-                entry.long_put_price = self._extract_mid_price(quote) or 0
+            quote = self.client.get_quote(entry.long_put_uic, asset_type="StockIndexOption")
+            entry.long_put_price = self._extract_mid_price(quote) or 0
 
     def _extract_mid_price(self, quote: Optional[Dict]) -> Optional[float]:
         """Extract mid price from quote for option pricing."""
@@ -2187,17 +2450,19 @@ class MEICStrategy:
         if side == "call":
             entry.call_side_stopped = True
             self.daily_state.call_stops_triggered += 1
+            # EMERGENCY-001: Include UICs for spread checking during close
             positions_to_close = [
-                (entry.short_call_position_id, "short_call"),
-                (entry.long_call_position_id, "long_call")
+                (entry.short_call_position_id, "short_call", entry.short_call_uic),
+                (entry.long_call_position_id, "long_call", entry.long_call_uic)
             ]
             stop_level = entry.call_side_stop
         else:
             entry.put_side_stopped = True
             self.daily_state.put_stops_triggered += 1
+            # EMERGENCY-001: Include UICs for spread checking during close
             positions_to_close = [
-                (entry.short_put_position_id, "short_put"),
-                (entry.long_put_position_id, "long_put")
+                (entry.short_put_position_id, "short_put", entry.short_put_uic),
+                (entry.long_put_position_id, "long_put", entry.long_put_uic)
             ]
             stop_level = entry.put_side_stop
 
@@ -2209,10 +2474,10 @@ class MEICStrategy:
         if self.dry_run:
             logger.info(f"[DRY RUN] Would close {side} side of Entry #{entry.entry_number}")
         else:
-            # Close positions with retry logic
-            for pos_id, leg_name in positions_to_close:
+            # EMERGENCY-001: Close positions with enhanced retry logic and spread validation
+            for pos_id, leg_name, uic in positions_to_close:
                 if pos_id:
-                    self._close_position_with_retry(pos_id, leg_name)
+                    self._close_position_with_retry(pos_id, leg_name, uic=uic)
 
         # Update realized P&L
         self.daily_state.total_realized_pnl -= stop_level
@@ -2230,31 +2495,164 @@ class MEICStrategy:
 
         return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${stop_level:.2f})"
 
-    def _close_position_with_retry(self, position_id: str, leg_name: str) -> bool:
+    def _close_position_with_retry(self, position_id: str, leg_name: str, uic: int = None) -> bool:
         """
-        Close a position with retry logic.
+        EMERGENCY-001: Close a position with enhanced retry logic and spread validation.
+
+        Enhanced emergency close that:
+        1. Checks bid-ask spread before closing (wide spreads = bad fills)
+        2. Waits for spread normalization if too wide
+        3. Uses progressive retry with escalating alerts
+        4. Tracks slippage for monitoring
 
         Args:
             position_id: Saxo position ID
-            leg_name: Name for logging
+            leg_name: Name for logging (e.g., "short_call", "long_put")
+            uic: Option UIC for spread checking (optional but recommended)
 
         Returns:
             True if closed successfully
         """
-        for attempt in range(STOP_LOSS_MAX_RETRIES):
+        for attempt in range(EMERGENCY_CLOSE_MAX_ATTEMPTS):
+            attempt_num = attempt + 1
+
             try:
+                # EMERGENCY-001: Check spread before closing (if UIC available)
+                if uic and attempt > 0:  # Skip spread check on first attempt
+                    spread_ok, spread_pct = self._check_spread_for_emergency_close(uic)
+                    if not spread_ok:
+                        logger.warning(
+                            f"EMERGENCY-001: Wide spread ({spread_pct:.1f}%) on {leg_name}, "
+                            f"waiting for normalization..."
+                        )
+                        self._wait_for_spread_normalization(uic, leg_name)
+
+                # Attempt the close
                 result = self.client.close_position(position_id)
                 if result:
                     self.registry.unregister(position_id)
-                    logger.info(f"Closed {leg_name}: {position_id}")
+                    logger.info(f"EMERGENCY-001: Closed {leg_name} on attempt {attempt_num}: {position_id}")
                     return True
+
             except Exception as e:
-                logger.error(f"Close {leg_name} attempt {attempt + 1} failed: {e}")
+                logger.error(f"EMERGENCY-001: Close {leg_name} attempt {attempt_num} failed: {e}")
 
-            if attempt < STOP_LOSS_MAX_RETRIES - 1:
-                time.sleep(STOP_LOSS_RETRY_DELAY_SECONDS)
+                # Escalating alerts based on attempt number
+                if attempt_num == 3:
+                    logger.warning(f"EMERGENCY-001: {leg_name} close failed 3 times, continuing retries...")
+                elif attempt_num >= 4:
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.EMERGENCY_CLOSE,
+                        title="EMERGENCY CLOSE STRUGGLING",
+                        message=f"Failed to close {leg_name} after {attempt_num} attempts. "
+                                f"Position ID: {position_id}. Error: {e}",
+                        priority=AlertPriority.HIGH if attempt_num == 4 else AlertPriority.CRITICAL
+                    )
 
-        logger.critical(f"FAILED to close {leg_name} after {STOP_LOSS_MAX_RETRIES} attempts!")
+            if attempt < EMERGENCY_CLOSE_MAX_ATTEMPTS - 1:
+                time.sleep(EMERGENCY_CLOSE_RETRY_DELAY_SECONDS)
+
+        # All attempts exhausted
+        error_msg = (
+            f"EMERGENCY-001 CRITICAL: FAILED to close {leg_name} after "
+            f"{EMERGENCY_CLOSE_MAX_ATTEMPTS} attempts! Position ID: {position_id}"
+        )
+        logger.critical(error_msg)
+        self.alert_service.send_alert(
+            alert_type=AlertType.CIRCUIT_BREAKER,
+            title="EMERGENCY CLOSE FAILED",
+            message=error_msg,
+            priority=AlertPriority.CRITICAL
+        )
+        self._log_safety_event("EMERGENCY_CLOSE_FAILED", error_msg)
+        return False
+
+    def _check_spread_for_emergency_close(self, uic: int) -> Tuple[bool, float]:
+        """
+        EMERGENCY-001: Check if bid-ask spread is acceptable for emergency close.
+
+        Wide spreads during emergency closes result in bad fill prices.
+        This method checks if the spread is within acceptable limits.
+
+        Args:
+            uic: Option UIC to check
+
+        Returns:
+            Tuple of (is_acceptable, spread_percent)
+        """
+        try:
+            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+            if not quote:
+                logger.warning(f"EMERGENCY-001: No quote for UIC {uic}, proceeding anyway")
+                return (True, 0.0)  # Proceed if no quote available
+
+            bid = quote.get("Quote", {}).get("Bid", 0)
+            ask = quote.get("Quote", {}).get("Ask", 0)
+
+            if bid <= 0 or ask <= 0:
+                logger.warning(f"EMERGENCY-001: Invalid bid/ask for UIC {uic}, proceeding anyway")
+                return (True, 0.0)
+
+            mid = (bid + ask) / 2
+            spread = ask - bid
+            spread_pct = (spread / mid) * 100 if mid > 0 else 0
+
+            is_acceptable = spread_pct <= EMERGENCY_SPREAD_MAX_PERCENT
+
+            if not is_acceptable:
+                logger.warning(
+                    f"EMERGENCY-001: Wide spread detected - UIC {uic}: "
+                    f"bid=${bid:.2f}, ask=${ask:.2f}, spread={spread_pct:.1f}% "
+                    f"(max={EMERGENCY_SPREAD_MAX_PERCENT}%)"
+                )
+
+            return (is_acceptable, spread_pct)
+
+        except Exception as e:
+            logger.error(f"EMERGENCY-001: Error checking spread for UIC {uic}: {e}")
+            return (True, 0.0)  # Proceed on error
+
+    def _wait_for_spread_normalization(self, uic: int, leg_name: str) -> bool:
+        """
+        EMERGENCY-001: Wait for bid-ask spread to normalize before closing.
+
+        If spread is too wide, wait a short time for it to normalize.
+        This helps avoid extremely bad fills during volatile moments.
+
+        Args:
+            uic: Option UIC to monitor
+            leg_name: Name for logging
+
+        Returns:
+            True if spread normalized, False if still wide after waiting
+        """
+        for wait_attempt in range(EMERGENCY_SPREAD_MAX_WAIT_ATTEMPTS):
+            wait_num = wait_attempt + 1
+            logger.info(
+                f"EMERGENCY-001: Waiting {EMERGENCY_SPREAD_WAIT_SECONDS}s for {leg_name} "
+                f"spread to normalize (attempt {wait_num}/{EMERGENCY_SPREAD_MAX_WAIT_ATTEMPTS})..."
+            )
+
+            time.sleep(EMERGENCY_SPREAD_WAIT_SECONDS)
+
+            spread_ok, spread_pct = self._check_spread_for_emergency_close(uic)
+            if spread_ok:
+                logger.info(
+                    f"EMERGENCY-001: Spread normalized for {leg_name} "
+                    f"(now {spread_pct:.1f}%), proceeding with close"
+                )
+                return True
+
+            logger.warning(
+                f"EMERGENCY-001: Spread still wide for {leg_name} ({spread_pct:.1f}%), "
+                f"will retry..."
+            )
+
+        # Spread still wide after all wait attempts
+        logger.warning(
+            f"EMERGENCY-001: Spread did not normalize for {leg_name} after "
+            f"{EMERGENCY_SPREAD_MAX_WAIT_ATTEMPTS} waits, proceeding with close anyway"
+        )
         return False
 
     # =========================================================================
@@ -2266,7 +2664,7 @@ class MEICStrategy:
         # US500.I is a CFD that tracks SPX - use CfdOnIndex asset type
         quote = self.client.get_quote(self.underlying_uic, asset_type="CfdOnIndex")
         if quote:
-            price = self._extract_price(quote)
+            price = self._extract_price(quote, context="SPX")
             if price:
                 self.market_data.update_spx(price)
                 self.current_price = price
@@ -2277,8 +2675,22 @@ class MEICStrategy:
             self.market_data.update_vix(vix)
             self.current_vix = vix
 
-    def _extract_price(self, quote: Dict) -> Optional[float]:
-        """Extract price from quote response."""
+    def _extract_price(self, quote: Dict, context: str = "price") -> Optional[float]:
+        """
+        Extract price from quote response with freshness check.
+
+        DATA-001: Checks quote staleness and logs warnings if data is old.
+
+        Args:
+            quote: Quote response from Saxo API
+            context: Description for logging (e.g., "SPX", "short_call")
+
+        Returns:
+            Mid price, last traded, or None if no valid price
+        """
+        # DATA-001: Check quote freshness
+        self._check_quote_freshness(quote, context)
+
         # Try mid price first
         bid = quote.get("Quote", {}).get("Bid")
         ask = quote.get("Quote", {}).get("Ask")
@@ -2291,6 +2703,68 @@ class MEICStrategy:
             return last
 
         return None
+
+    def _check_quote_freshness(self, quote: Dict, context: str = "quote") -> bool:
+        """
+        DATA-001: Check if quote data is fresh (< 60 seconds old).
+
+        Logs warnings when quotes are stale, which could indicate API issues
+        or slow data feeds that might affect trading decisions.
+
+        Args:
+            quote: Quote response from Saxo API
+            context: Description for logging
+
+        Returns:
+            True if quote is fresh, False if stale or unknown
+        """
+        # Try to extract timestamp from quote
+        # Saxo returns timestamps in various fields
+        timestamp_str = None
+
+        # Check common timestamp locations
+        quote_block = quote.get("Quote", {})
+        price_info = quote.get("PriceInfo", {})
+        price_info_details = quote.get("PriceInfoDetails", {})
+
+        # Try different timestamp fields
+        for block in [quote_block, price_info, price_info_details]:
+            for field in ["LastUpdated", "LastTradedAt", "DateTime"]:
+                if field in block:
+                    timestamp_str = block[field]
+                    break
+            if timestamp_str:
+                break
+
+        if not timestamp_str:
+            # No timestamp found - can't determine freshness
+            logger.debug(f"DATA-001: No timestamp in quote for {context}, cannot verify freshness")
+            return True  # Assume fresh if we can't check
+
+        try:
+            # Parse ISO format timestamp
+            from datetime import datetime, timezone
+            if timestamp_str.endswith('Z'):
+                timestamp_str = timestamp_str[:-1] + '+00:00'
+
+            quote_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+            age_seconds = (now - quote_time).total_seconds()
+
+            if age_seconds > MAX_DATA_STALENESS_SECONDS:
+                logger.warning(
+                    f"DATA-001 STALE QUOTE: {context} quote is {age_seconds:.1f}s old "
+                    f"(max {MAX_DATA_STALENESS_SECONDS}s). Consider refreshing."
+                )
+                self._log_safety_event("STALE_QUOTE", f"{context}: {age_seconds:.1f}s old")
+                return False
+
+            logger.debug(f"DATA-001: {context} quote is {age_seconds:.1f}s old (fresh)")
+            return True
+
+        except Exception as e:
+            logger.debug(f"DATA-001: Could not parse quote timestamp for {context}: {e}")
+            return True  # Assume fresh if parsing fails
 
     def handle_price_update(self, uic: int, data: Dict):
         """
@@ -2627,7 +3101,7 @@ class MEICStrategy:
             metadata = reg_info.get("metadata", {})
             entry_number = metadata.get("entry_number")
             leg_type = metadata.get("leg_type")
-            strike = metadata.get("strike")
+            # Note: strike from metadata not used - actual strike comes from parsed position
 
             if entry_number is None:
                 logger.warning(f"Position {pos_id} has no entry_number in metadata")
@@ -2718,7 +3192,7 @@ class MEICStrategy:
             leg_type = pos.get("leg_type")
             strike = pos.get("strike")
             is_long = pos.get("is_long")
-            put_call = pos.get("put_call")
+            # Note: put_call available in pos but leg_type is sufficient
 
             # Validate leg type matches expected
             expected_long = leg_type in ["long_call", "long_put"]
@@ -2997,6 +3471,9 @@ class MEICStrategy:
         unrealized = sum(e.unrealized_pnl for e in self.daily_state.active_entries)
         total_pnl = self.daily_state.total_realized_pnl + unrealized
 
+        # PNL-001: Sanity check the P&L values
+        self._check_pnl_sanity(total_pnl, "daily_total")
+
         return {
             "date": self.daily_state.date,
             "entries_completed": self.daily_state.entries_completed,
@@ -3205,14 +3682,19 @@ class MEICStrategy:
             logger.error(f"Failed to save state: {e}")
 
     # =========================================================================
-    # WEBSOCKET PRICE CACHE (P2)
+    # WEBSOCKET PRICE CACHE (PRESERVED - NOT USED IN REST-ONLY MODE)
     # =========================================================================
+    # These methods are preserved for potential future use if we need to enable
+    # WebSocket streaming due to API rate limits with many bots.
+    # Currently disabled: main.py has USE_WEBSOCKET_STREAMING = False
+    # and _update_entry_prices() fetches from REST API directly.
 
     def update_ws_price_cache(self, uic: int, price: float):
         """
-        P2: Update WebSocket price cache for fast stop monitoring.
+        Update WebSocket price cache for fast stop monitoring.
 
-        Called by main.py's price callback.
+        Called by main.py's price callback when WebSocket mode is enabled.
+        Currently not used in REST-only mode.
         """
         if price > 0:
             self._ws_price_cache[uic] = (price, get_us_market_time())
@@ -3635,14 +4117,7 @@ class MEICStrategy:
         try:
             # Get server time from Saxo API
             # Use a simple API call that returns timestamp
-            import requests
-            from datetime import timezone
-
-            # Try to get server time from Saxo
-            # The token endpoint often includes server time in response headers
-            server_time = None
-
-            # Use account info endpoint as a proxy - check response headers
+            # Use account info endpoint as a proxy to verify API connectivity
             account_info = self.client.get_account_info()
             if account_info:
                 # If successful, we can at least verify our connection works
@@ -3682,6 +4157,95 @@ class MEICStrategy:
             return False, f"Clock skew too large: {self._clock_skew_seconds:.1f}s"
 
         return True, "Clock OK"
+
+    # =========================================================================
+    # CONFIG-001: CONFIGURATION VALIDATION
+    # =========================================================================
+
+    def _validate_config(self) -> Tuple[bool, List[str]]:
+        """
+        CONFIG-001: Validate configuration on startup.
+
+        Checks for required fields and sensible values to catch config
+        errors early rather than during trading.
+
+        Returns:
+            Tuple of (is_valid, list of error messages)
+        """
+        errors = []
+        warnings = []
+
+        # Required top-level sections
+        required_sections = ["saxo_api", "strategy"]
+        for section in required_sections:
+            if section not in self.config:
+                errors.append(f"Missing required config section: {section}")
+
+        # Saxo API config validation
+        saxo_config = self.config.get("saxo_api", {})
+        if not saxo_config.get("app_key"):
+            errors.append("Missing saxo_api.app_key")
+        if not saxo_config.get("app_secret"):
+            errors.append("Missing saxo_api.app_secret")
+
+        # Strategy config validation
+        strategy = self.config.get("strategy", {})
+
+        # UIC validation (must be positive integers)
+        uic_fields = ["underlying_uic", "option_root_uic", "vix_spot_uic"]
+        for field in uic_fields:
+            uic = strategy.get(field)
+            if uic is not None and (not isinstance(uic, int) or uic <= 0):
+                errors.append(f"Invalid {field}: must be a positive integer")
+
+        # Spread width validation
+        spread_width = strategy.get("spread_width", 50)
+        if not (10 <= spread_width <= 100):
+            warnings.append(f"Unusual spread_width: {spread_width} (expected 10-100)")
+
+        # Delta validation
+        min_delta = strategy.get("min_delta", 5)
+        max_delta = strategy.get("max_delta", 15)
+        target_delta = strategy.get("target_delta", 8)
+        if not (1 <= min_delta <= max_delta <= 50):
+            errors.append(f"Invalid delta range: min={min_delta}, max={max_delta}")
+        if not (min_delta <= target_delta <= max_delta):
+            warnings.append(f"target_delta ({target_delta}) outside min/max range")
+
+        # Contracts validation
+        contracts = strategy.get("contracts_per_entry", 1)
+        if contracts < 1 or contracts > MAX_CONTRACTS_PER_ORDER:
+            errors.append(f"Invalid contracts_per_entry: {contracts} (must be 1-{MAX_CONTRACTS_PER_ORDER})")
+
+        # Credit validation
+        min_credit = strategy.get("min_credit_per_side", 1.00)
+        max_credit = strategy.get("max_credit_per_side", 1.75)
+        if min_credit <= 0 or max_credit <= 0:
+            errors.append("Credit values must be positive")
+        if min_credit > max_credit:
+            errors.append(f"min_credit ({min_credit}) > max_credit ({max_credit})")
+
+        # VIX threshold validation
+        max_vix = strategy.get("max_vix_entry", 25)
+        if max_vix < 10 or max_vix > 50:
+            warnings.append(f"Unusual max_vix_entry: {max_vix} (expected 10-50)")
+
+        # Log results
+        if errors:
+            for error in errors:
+                logger.error(f"CONFIG-001 ERROR: {error}")
+        if warnings:
+            for warning in warnings:
+                logger.warning(f"CONFIG-001 WARNING: {warning}")
+
+        is_valid = len(errors) == 0
+
+        if is_valid:
+            logger.info("CONFIG-001: Configuration validation passed")
+        else:
+            logger.critical(f"CONFIG-001: Configuration validation FAILED with {len(errors)} error(s)")
+
+        return is_valid, errors
 
     # =========================================================================
     # DATA-003: P&L SANITY CHECK
@@ -3725,6 +4289,74 @@ class MEICStrategy:
             return False, "Invalid P&L value"
 
         return True, f"P&L ${pnl:.2f} within bounds"
+
+    def _check_pnl_sanity(self, total_pnl: float, context: str = "total") -> bool:
+        """
+        PNL-001: Check if total daily P&L is within realistic bounds.
+
+        Called when calculating daily summary to catch calculation errors
+        or data issues that result in impossible P&L figures.
+
+        Args:
+            total_pnl: The total P&L value to check
+            context: Context description for logging (e.g., "daily_total")
+
+        Returns:
+            True if P&L is within bounds, False otherwise
+        """
+        if not PNL_SANITY_CHECK_ENABLED:
+            return True
+
+        # Calculate max possible P&L based on entries completed
+        # Each IC can make at most MAX_PNL_PER_IC and lose at most MIN_PNL_PER_IC
+        num_entries = max(1, self.daily_state.entries_completed)
+        max_possible = MAX_PNL_PER_IC * num_entries
+        min_possible = MIN_PNL_PER_IC * num_entries
+
+        # Check for NaN or infinity
+        import math
+        if math.isnan(total_pnl) or math.isinf(total_pnl):
+            logger.critical(f"PNL-001 CRITICAL: Invalid P&L value detected ({context}): {total_pnl}")
+            self.alert_service.send_alert(
+                alert_type=AlertType.DATA_QUALITY,
+                title="INVALID P&L DETECTED",
+                message=f"P&L calculation returned invalid value: {total_pnl}. Check price data and calculations.",
+                priority=AlertPriority.HIGH
+            )
+            self._log_safety_event("PNL_INVALID", f"{context}: {total_pnl}")
+            return False
+
+        # Check bounds
+        if total_pnl > max_possible:
+            logger.warning(
+                f"PNL-001 WARNING: Unusually high P&L ({context}): ${total_pnl:.2f} "
+                f"exceeds expected max ${max_possible:.2f} for {num_entries} entries"
+            )
+            self.alert_service.send_alert(
+                alert_type=AlertType.DATA_QUALITY,
+                title="UNUSUALLY HIGH P&L",
+                message=f"Daily P&L ${total_pnl:.2f} exceeds expected maximum ${max_possible:.2f}. Verify trade data.",
+                priority=AlertPriority.MEDIUM
+            )
+            self._log_safety_event("PNL_HIGH", f"{context}: ${total_pnl:.2f} > ${max_possible:.2f}")
+            return False
+
+        if total_pnl < min_possible:
+            logger.warning(
+                f"PNL-001 WARNING: Unusually low P&L ({context}): ${total_pnl:.2f} "
+                f"below expected min ${min_possible:.2f} for {num_entries} entries"
+            )
+            self.alert_service.send_alert(
+                alert_type=AlertType.DATA_QUALITY,
+                title="UNUSUALLY LOW P&L",
+                message=f"Daily P&L ${total_pnl:.2f} below expected minimum ${min_possible:.2f}. Verify trade data.",
+                priority=AlertPriority.MEDIUM
+            )
+            self._log_safety_event("PNL_LOW", f"{context}: ${total_pnl:.2f} < ${min_possible:.2f}")
+            return False
+
+        logger.debug(f"PNL-001: P&L sanity check passed ({context}): ${total_pnl:.2f}")
+        return True
 
     # =========================================================================
     # ALERT-002: ALERT BATCHING

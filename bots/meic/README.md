@@ -1,8 +1,8 @@
 # MEIC (Multiple Entry Iron Condors) Trading Bot
 
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-02-01
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Ready for Dry-Run Testing
+**Status:** IMPLEMENTED - Production Ready (v1.1.0)
 
 ---
 
@@ -67,12 +67,30 @@ The `models/` directory contains standalone definitions that can be imported wit
 
 ## Safety Features
 
-### 5 Layers of Protection
+### Core Safety (v1.0.0)
 1. **Circuit Breaker** - Halts on 5 consecutive failures or 5-of-10 sliding window
 2. **Naked Short Detection** - Immediate close if short fills without hedge
 3. **Position Registry** - Isolates MEIC positions from other bots (Iron Fly)
 4. **Per-entry Stops** - Independent stop monitoring for each IC
 5. **Safety Event Logging** - Audit trail in Google Sheets
+
+### Enhanced Safety (v1.1.0)
+| Feature | Code | Description |
+|---------|------|-------------|
+| **Order Size Validation** | ORDER-006 | Max 10 contracts/order, 30 total |
+| **Emergency Close Retries** | EMERGENCY-001 | 5 attempts with spread validation |
+| **Fill Slippage Monitoring** | ORDER-007 | Alerts at 5% warn, 15% critical |
+| **Activities Retry Logic** | ACTIVITIES-001 | 3 attempts × 1s for fill prices |
+| **Duplicate Bot Prevention** | DUPLICATE-001 | Kills existing instances on startup |
+| **Config Validation** | CONFIG-001 | Validates config on startup |
+| **P&L Sanity Check** | PNL-001 | Alerts on unrealistic P&L values |
+| **Quote Freshness Warnings** | DATA-001 | Logs when quotes > 30s old |
+
+### REST-Only Mode (v1.1.0)
+MEIC uses **REST API only** for all price fetching (no WebSocket streaming). This provides:
+- Guaranteed fresh quotes for every check
+- Simpler code with fewer failure modes
+- More reliable than WebSocket which had stale cache issues
 
 ### Position Recovery
 MEIC uses **Saxo API as the single source of truth** for position recovery:
@@ -149,9 +167,10 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 ## Revision History
 
-| Date | Changes |
-|------|---------|
-| 2026-01-27 | Initial implementation with full strategy logic |
-| 2026-01-27 | Added position recovery from Saxo API (critical fix) |
-| 2026-01-27 | Added safety event logging, dashboard metrics, pre-market gap detection |
-| 2026-01-27 | Code audit: removed dead code, verified all method references |
+| Date | Version | Changes |
+|------|---------|---------|
+| 2026-02-01 | 1.1.0 | REST-only mode, 8 new safety features (ORDER-006, ORDER-007, EMERGENCY-001, etc.) |
+| 2026-02-01 | 1.1.0 | Full code audit: fixed undefined method calls, removed dead code |
+| 2026-01-27 | 1.0.0 | Initial implementation with full strategy logic |
+| 2026-01-27 | 1.0.0 | Added position recovery from Saxo API (critical fix) |
+| 2026-01-27 | 1.0.0 | Added safety event logging, dashboard metrics, pre-market gap detection |
