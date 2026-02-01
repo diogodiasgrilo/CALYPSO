@@ -4222,11 +4222,14 @@ class MEICStrategy:
                 errors.append(f"Missing required config section: {section}")
 
         # Saxo API config validation
+        # Config structure: saxo_api.{environment}.app_key where environment is "live" or "sim"
         saxo_config = self.config.get("saxo_api", {})
-        if not saxo_config.get("app_key"):
-            errors.append("Missing saxo_api.app_key")
-        if not saxo_config.get("app_secret"):
-            errors.append("Missing saxo_api.app_secret")
+        environment = saxo_config.get("environment", "sim")  # Default to sim for safety
+        env_config = saxo_config.get(environment, {})
+        if not env_config.get("app_key"):
+            errors.append(f"Missing saxo_api.{environment}.app_key")
+        if not env_config.get("app_secret"):
+            errors.append(f"Missing saxo_api.{environment}.app_secret")
 
         # Strategy config validation
         strategy = self.config.get("strategy", {})
