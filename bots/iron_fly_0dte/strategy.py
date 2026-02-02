@@ -386,6 +386,25 @@ class OpeningRange:
         """Calculate distance from range midpoint (positive = above, negative = below)."""
         return price - self.midpoint
 
+    def price_position_percent(self, price: float) -> float:
+        """
+        Calculate where price is within the opening range as a percentage.
+
+        Returns:
+            float: Percentage position within the range:
+                - 0% = at the low
+                - 50% = at the midpoint (ideal for entry)
+                - 100% = at the high
+                - <0% = below the range (bearish breakout - trend day)
+                - >100% = above the range (bullish breakout - trend day)
+
+        If range is not yet established (high=0 or low=inf), returns 50% (neutral).
+        """
+        if self.high <= 0 or self.low == float('inf') or self.range_width <= 0:
+            return 50.0  # Neutral if range not established
+
+        return ((price - self.low) / self.range_width) * 100
+
 
 @dataclass
 class IronFlyPosition:
@@ -830,9 +849,17 @@ class IronFlyStrategy:
 
         FIX (2026-01-31): Supports dynamic profit target as percentage of credit.
         FIX (2026-02-01): Now accounts for commission costs in target calculation.
+        FIX (2026-02-02): Cap target at max possible profit (credit - commission).
+                         Previous bug: $25 floor + $20 commission = $45 target,
+                         but if credit is only $30, max profit is $30 - impossible!
+
+        The target is now capped so it never exceeds what's achievable:
+        - Max possible gross profit = credit received (100% premium capture)
+        - Max possible net profit = credit - commission
+        - Target = min(calculated_target, credit) so it's always reachable
 
         Returns:
-            float: Profit target in dollars (NET after commissions)
+            float: Profit target in dollars (GROSS - what we need to close the spread for)
         """
         if not self.position:
             return self.profit_target_fixed
@@ -840,19 +867,46 @@ class IronFlyStrategy:
         # Calculate total commission for the trade (entry + exit)
         total_commission = self._calculate_total_commission()
 
+        # Credit received is the maximum possible gross profit (in dollars)
+        credit_dollars = self.position.credit_received / 100
+        max_achievable_gross = credit_dollars  # Can never make more than 100% of credit
+
         if self.profit_target_percent is not None:
-            # Dynamic: percentage of credit received (credit_received is in cents)
-            credit_dollars = self.position.credit_received / 100
-            gross_target = max(
-                credit_dollars * (self.profit_target_percent / 100),
-                self.profit_target_min * self.position.quantity  # Floor
+            # Dynamic: percentage of credit received
+            percent_target = credit_dollars * (self.profit_target_percent / 100)
+            floor_target = self.profit_target_min * self.position.quantity
+
+            # Use the higher of percent or floor, but NEVER exceed credit
+            gross_target = min(
+                max(percent_target, floor_target),
+                max_achievable_gross  # Cap at max possible profit
             )
+
             # Add commission to target so NET profit equals the intended target
-            # e.g., if we want $25 net profit with $20 commission, need $45 gross
-            return gross_target + total_commission
+            # But also ensure the final target doesn't exceed credit (which would be impossible)
+            target_with_commission = gross_target + total_commission
+
+            # If target with commission exceeds credit, we need to lower expectations
+            # The best we can do is credit (100% capture) which gives net = credit - commission
+            if target_with_commission > max_achievable_gross:
+                self.logger.warning(
+                    f"Profit target ${target_with_commission:.2f} exceeds max profit ${credit_dollars:.2f}. "
+                    f"Capping at ${credit_dollars:.2f} (net profit will be ${credit_dollars - total_commission:.2f})"
+                )
+                return max_achievable_gross
+
+            return target_with_commission
         else:
             # Fixed: dollar amount per contract + commission
-            return (self.profit_target_fixed * self.position.quantity) + total_commission
+            fixed_target = (self.profit_target_fixed * self.position.quantity) + total_commission
+            # Also cap fixed target at max achievable
+            if fixed_target > max_achievable_gross:
+                self.logger.warning(
+                    f"Fixed profit target ${fixed_target:.2f} exceeds max profit ${credit_dollars:.2f}. "
+                    f"Capping at ${credit_dollars:.2f}"
+                )
+                return max_achievable_gross
+            return fixed_target
 
     def _calculate_total_commission(self) -> float:
         """
@@ -4171,6 +4225,9 @@ class IronFlyStrategy:
         current_time = get_us_market_time()
 
         # Build opening range data dict
+        # Calculate price position percentage (0%=low, 50%=mid, 100%=high, <0 or >100 = outside range)
+        price_position_pct = self.opening_range.price_position_percent(self.current_price)
+
         data = {
             "date": current_time.strftime("%Y-%m-%d"),
             "start_time": self.opening_range.start_time.strftime("%H:%M:%S") if self.opening_range.start_time else "",
@@ -4181,6 +4238,7 @@ class IronFlyStrategy:
             "range_width": self.opening_range.range_width,
             "current_price": self.current_price,
             "price_in_range": self.opening_range.is_price_in_range(self.current_price),
+            "price_position_pct": price_position_pct,
             "opening_vix": self.opening_range.opening_vix,
             "vix_high": self.opening_range.vix_high,
             "current_vix": self.current_vix,
@@ -4212,6 +4270,9 @@ class IronFlyStrategy:
         current_time = get_us_market_time()
 
         # Build snapshot data
+        # Calculate price position percentage (0%=low, 50%=mid, 100%=high, <0 or >100 = outside range)
+        price_position_pct = self.opening_range.price_position_percent(self.current_price)
+
         data = {
             "date": current_time.strftime("%Y-%m-%d"),
             "start_time": self.opening_range.start_time.strftime("%H:%M:%S") if self.opening_range.start_time else "",
@@ -4222,6 +4283,7 @@ class IronFlyStrategy:
             "range_width": self.opening_range.range_width,
             "current_price": self.current_price,
             "price_in_range": self.opening_range.is_price_in_range(self.current_price) if self.opening_range.high > 0 else True,
+            "price_position_pct": price_position_pct,
             "opening_vix": self.opening_range.opening_vix,
             "vix_high": self.opening_range.vix_high,
             "current_vix": self.current_vix,
@@ -4573,6 +4635,8 @@ class IronFlyStrategy:
             "opening_range_low": self.opening_range.low if self.opening_range.low < float('inf') else None,
             "opening_range_width": self.opening_range.range_width,
             "opening_range_complete": self.opening_range.is_complete,
+            "price_in_range": self.opening_range.is_price_in_range(self.current_price) if self.opening_range.high > 0 else True,
+            "price_position_pct": self.opening_range.price_position_percent(self.current_price),
             "vix_spike_percent": self.opening_range.vix_spike_percent,
             "trades_today": self.trades_today,
             "daily_pnl": self.daily_pnl / 100,  # Convert cents to dollars

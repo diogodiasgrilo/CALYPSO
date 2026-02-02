@@ -24,6 +24,7 @@ P&L Tracking (Updated 2026-02-02):
 - Tracks commission: $5 per leg round-trip ($20 total per trade)
 - Shows both Gross P&L and Net P&L (after commission) in logs/alerts
 - Profit target factors in commission to ensure actual net profit
+- Profit target capped at max achievable (credit received) - never asks for impossible targets
 
 Safety Features:
 - Circuit breaker with sliding window failure detection

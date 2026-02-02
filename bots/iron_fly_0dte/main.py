@@ -326,13 +326,40 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                             f"P&L: ${unrealized:.2f}"
                         )
                     else:
-                        # No position - show basic market info
-                        heartbeat_msg = (
-                            f"{mode_prefix}HEARTBEAT | {status['state']} | "
-                            f"{underlying_symbol}: {status['underlying_price']:.2f} | "
-                            f"VIX: {status['vix']:.2f} | "
-                            f"Trades: {status['trades_today']} | Daily P&L: ${status['daily_pnl']:.2f}"
-                        )
+                        # No position - show different info based on state
+                        if status['state'] == 'WaitingOpeningRange':
+                            # During opening range monitoring, show range position percentage
+                            # 0%=low, 50%=mid (ideal), 100%=high, <0/>100 = outside (trend day)
+                            price_pct = status.get('price_position_pct', 50.0)
+                            in_range = status.get('price_in_range', True)
+                            range_high = status.get('opening_range_high', 0) or 0
+                            range_low = status.get('opening_range_low', 0) or 0
+
+                            # Format range status indicator
+                            if not in_range:
+                                range_status = "OUT"  # Trend day - will NOT enter
+                            elif price_pct < 30:
+                                range_status = "LOW"  # Near low of range
+                            elif price_pct > 70:
+                                range_status = "HIGH"  # Near high of range
+                            else:
+                                range_status = "MID"  # Near midpoint (ideal)
+
+                            heartbeat_msg = (
+                                f"{mode_prefix}HEARTBEAT | {status['state']} | "
+                                f"{underlying_symbol}: {status['underlying_price']:.2f} | "
+                                f"Range: {range_low:.0f}-{range_high:.0f} | "
+                                f"Pos: {price_pct:.0f}% ({range_status}) | "
+                                f"VIX: {status['vix']:.2f}"
+                            )
+                        else:
+                            # Other states without position - show basic market info
+                            heartbeat_msg = (
+                                f"{mode_prefix}HEARTBEAT | {status['state']} | "
+                                f"{underlying_symbol}: {status['underlying_price']:.2f} | "
+                                f"VIX: {status['vix']:.2f} | "
+                                f"Trades: {status['trades_today']} | Daily P&L: ${status['daily_pnl']:.2f}"
+                            )
 
                     trade_logger.log_event(heartbeat_msg)
 

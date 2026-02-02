@@ -713,6 +713,10 @@ class GoogleSheetsLogger:
             return False
 
         try:
+            # Format price position: 0%=low, 50%=mid (ideal), 100%=high, <0/>100 = outside range
+            price_pct = data.get('price_position_pct')
+            price_pct_str = f"{price_pct:.0f}%" if price_pct is not None else ""
+
             row = [
                 data.get("date", ""),
                 data.get("start_time", ""),
@@ -723,6 +727,7 @@ class GoogleSheetsLogger:
                 f"{data.get('range_width', 0):.2f}" if data.get('range_width') else "",
                 f"{data.get('current_price', 0):.2f}" if data.get('current_price') else "",
                 "Yes" if data.get("price_in_range") else "No",
+                price_pct_str,  # NEW: Price position within range (0%=low, 50%=mid, 100%=high)
                 f"{data.get('opening_vix', 0):.2f}" if data.get('opening_vix') else "",
                 f"{data.get('vix_high', 0):.2f}" if data.get('vix_high') else "",
                 f"{data.get('current_vix', 0):.2f}" if data.get('current_vix') else "",
@@ -761,6 +766,10 @@ class GoogleSheetsLogger:
             worksheet = self.worksheets["Opening Range"]
             today_date = data.get("date", "")
 
+            # Format price position: 0%=low, 50%=mid (ideal), 100%=high, <0/>100 = outside range
+            price_pct = data.get('price_position_pct')
+            price_pct_str = f"{price_pct:.0f}%" if price_pct is not None else ""
+
             # Build the row data
             row = [
                 today_date,
@@ -772,6 +781,7 @@ class GoogleSheetsLogger:
                 f"{data.get('range_width', 0):.2f}" if data.get('range_width') else "",
                 f"{data.get('current_price', 0):.2f}" if data.get('current_price') else "",
                 "Yes" if data.get("price_in_range") else "No",
+                price_pct_str,  # NEW: Price position within range (0%=low, 50%=mid, 100%=high)
                 f"{data.get('opening_vix', 0):.2f}" if data.get('opening_vix') else "",
                 f"{data.get('vix_high', 0):.2f}" if data.get('vix_high') else "",
                 f"{data.get('current_vix', 0):.2f}" if data.get('current_vix') else "",
@@ -795,7 +805,7 @@ class GoogleSheetsLogger:
 
             if row_num:
                 # Update existing row
-                col_range = f"A{row_num}:R{row_num}"  # 18 columns (A-R)
+                col_range = f"A{row_num}:S{row_num}"  # 19 columns (A-S) - added price_position_pct
                 worksheet.update(col_range, [row])
                 logger.debug(f"Opening range updated (row {row_num}): {data.get('entry_decision', 'N/A')}")
             else:

@@ -138,12 +138,20 @@ Jim Olson's rule of thumb: **Credit should be 30-35% of wing width**
 
 | Credit Received | 30% Target | + Commission | Gross Target |
 |-----------------|------------|--------------|--------------|
-| $15.00 | $4.50 | $20.00 | $24.50 |
-| $20.00 | $6.00 | $20.00 | $26.00 |
-| $25.00 | $7.50 | $20.00 | $27.50 |
+| $15.00 | $4.50 | $20.00 | $24.50 (capped at $15) |
+| $20.00 | $6.00 | $20.00 | $26.00 (capped at $20) |
+| $25.00 | $7.50 | $20.00 | $27.50 (capped at $25) |
 | $30.00 | $9.00 | $20.00 | $29.00 |
+| $50.00 | $15.00 | $20.00 | $35.00 |
 
 **Minimum Target:** $25 per contract (floor)
+
+**CRITICAL (Fix #22, 2026-02-02):** Profit target is CAPPED at credit received!
+- Max possible profit on an Iron Fly = 100% of credit (if expires at ATM)
+- If calculated target > credit, we cap it at credit
+- Example: $15 credit → 30% = $4.50 → floor max($4.50, $25) = $25 → + $20 = $45
+  - But $45 > $15 credit → IMPOSSIBLE! → Cap at $15 (100% capture)
+- This ensures the target is always achievable
 
 ### 4.2 Stop Loss
 
@@ -320,3 +328,15 @@ Manual halt requiring explicit reset. Triggered by:
 **Problem:** P&L showed wrong values during trade because fill prices weren't fetched correctly.
 
 **Fix:** Increased retry time for activities endpoint to allow Saxo's sync delay.
+
+### 2026-02-02: Fill Price Source Fix
+
+**Problem:** Bot showed -$22 P&L but actual Saxo P&L was -$150. The code was falling back to `PositionView.AverageOpenPrice` which is ALWAYS 0 for all positions.
+
+**Fix:** Changed to use `PositionBase.OpenPrice` which contains actual fill prices for both long AND short positions.
+
+### 2026-02-02: Profit Target Cap Fix
+
+**Problem:** With $25 minimum floor + $20 commission = $45 target. But if credit is only $15-$30, the max possible profit is the credit (100% capture), making $45 impossible.
+
+**Fix:** Profit target is now CAPPED at credit received. If calculated target exceeds max possible profit, bot logs a warning and uses credit as target instead.
