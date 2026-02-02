@@ -2207,7 +2207,7 @@ class MEICStrategy:
         # Query option chain
         chain = self.client.get_option_chain(
             option_root_id=self.option_root_uic,
-            expiry_date=expiry
+            expiry_dates=[expiry]
         )
 
         if not chain:

@@ -2986,7 +2986,8 @@ class SaxoClient:
         amount: int,
         limit_price: float,
         timeout_seconds: int = 60,
-        to_open_close: str = "ToOpen"
+        to_open_close: str = "ToOpen",
+        external_reference: Optional[str] = None
     ) -> Dict:
         """
         Place a limit order and wait for fill with timeout.
@@ -3002,6 +3003,7 @@ class SaxoClient:
             limit_price: Limit price for the order
             timeout_seconds: Maximum time to wait for fill (default 60s)
             to_open_close: ToOpen or ToClose (required for options)
+            external_reference: Optional client-defined identifier for position tracking
 
         Returns:
             dict: {
@@ -3026,7 +3028,8 @@ class SaxoClient:
             order_type=OrderType.LIMIT,
             limit_price=limit_price,
             duration_type="DayOrder",
-            to_open_close=to_open_close
+            to_open_close=to_open_close,
+            external_reference=external_reference
         )
 
         if not order_response or "OrderId" not in order_response:
