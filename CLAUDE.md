@@ -6,6 +6,33 @@
 
 ---
 
+## CRITICAL: Shared Code Change Policy
+
+**Before modifying any code in `shared/`, STOP and consider:**
+
+1. **Which bots use this code?** Check with `grep -r "function_name" bots/`
+2. **Are those bots working correctly?** If Delta Neutral is working great, don't touch code it depends on unless absolutely necessary.
+3. **Is this change surgical or broad?** Fix the specific bug, don't "improve" surrounding code.
+4. **Get explicit approval** before changing shared code that affects working bots.
+
+**The principle: Working code earns trust. Don't touch it without a clear reason.**
+
+### When Fixing a Bug in One Bot:
+- ✅ **DO**: Make the minimal change needed to fix that bot's issue
+- ✅ **DO**: Keep changes isolated to that bot's code when possible
+- ❌ **DON'T**: "Improve" shared code that other working bots depend on
+- ❌ **DON'T**: Refactor or add defensive code to paths used by working bots
+
+### If Shared Code Change Is Truly Necessary:
+1. Explicitly state: "This change affects Delta Neutral / MEIC / etc."
+2. Explain why the change is safe for those bots
+3. Get user approval before proceeding
+4. Test that all affected bots still work after deployment
+
+**Example (2026-02-02):** When fixing Iron Fly's P&L calculation, changes were made to `saxo_client.py` that also affected Delta Neutral. While the changes were backwards-compatible, they should have been flagged for approval since Delta Neutral was working correctly.
+
+---
+
 ## Project Overview
 
 CALYPSO is a monorepo containing multiple automated options trading bots that trade SPX 0DTE options via Saxo Bank's OpenAPI. All bots run on a Google Cloud VM and use:
