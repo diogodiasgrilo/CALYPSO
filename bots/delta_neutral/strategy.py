@@ -5146,7 +5146,9 @@ class DeltaNeutralStrategy:
             if any([gamma, theta, vega]):
                 logger.info(f"Greeks for {symbol}: Delta={delta:.4f}, Gamma={gamma:.4f}, Theta={theta:.4f}, Vega={vega:.4f}")
 
-            entry_price = pos_base.get("OpenPrice", 0) or pos_view.get("AverageOpenPrice", 0)
+            # FIX (2026-02-02): Use ONLY PositionBase.OpenPrice - works for both long and short
+            # Do NOT use PositionView.AverageOpenPrice - it's ALWAYS 0 for all positions
+            entry_price = pos_base.get("OpenPrice", 0)
             current_price = pos_view.get("CurrentPrice", 0) or pos_view.get("MarketValue", 0)
 
             # Get entry date from ExecutionTimeOpen (for historical P&L tracking)
