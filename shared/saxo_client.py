@@ -2807,8 +2807,8 @@ class SaxoClient:
         self,
         order_id: str,
         uic: int,
-        max_retries: int = 5,
-        retry_delay: float = 2.0
+        max_retries: int = 4,
+        retry_delay: float = 1.5
     ) -> Tuple[bool, Optional[Dict]]:
         """
         Check if an order was filled by querying the order activities endpoint.
@@ -2823,10 +2823,11 @@ class SaxoClient:
         FIX (2026-02-01): Added retry logic with delay to handle activities endpoint
         sync delay. Saxo activities endpoint may have 1-3 second lag after order fill.
 
-        FIX (2026-02-02): Increased retries to 5 × 2s = 10s total. Friday 2026-01-30
-        showed FilledPrice=0 after 3×1s retries, causing fallback to quoted prices
-        and P&L errors of $1.30 per trade. Also added explicit position lookup for
-        AverageOpenPrice as secondary source.
+        FIX (2026-02-02): Increased retries to 4 × 1.5s = 6s total (was 3 × 1s = 3s).
+        Friday 2026-01-30 showed FilledPrice=0 after 3s, causing fallback to quoted
+        prices and P&L errors of $1.30 per trade. Also added explicit position lookup
+        for AverageOpenPrice as secondary source. Note: Iron Fly has its own retry
+        loop on top of this, so keeping client retries moderate (6s not 10s).
 
         Args:
             order_id: The order ID to check
@@ -2901,6 +2902,7 @@ class SaxoClient:
 
         # Activities check exhausted - check if a position exists for this UIC
         # This confirms fill AND gives us AverageOpenPrice as fill price fallback
+        # NOTE: This won't work for CLOSE orders (position is gone after fill)
         try:
             positions = self.get_positions(include_greeks=False)
             if positions:
@@ -2909,12 +2911,12 @@ class SaxoClient:
                     if pos_uic == uic:
                         amount = pos.get("PositionBase", {}).get("Amount", 0)
                         # FIX (2026-02-02): Try multiple price fields from position
-                        avg_price = (
-                            pos.get("PositionView", {}).get("AverageOpenPrice") or
-                            pos.get("PositionView", {}).get("MarketValue", 0) / max(abs(amount), 1) / 100
-                            if amount else 0
-                        )
-                        if avg_price > 0:
+                        avg_price = pos.get("PositionView", {}).get("AverageOpenPrice", 0)
+                        if not avg_price and amount:
+                            # Fallback: calculate from MarketValue (less accurate)
+                            market_value = pos.get("PositionView", {}).get("MarketValue", 0)
+                            avg_price = market_value / max(abs(amount), 1) / 100
+                        if avg_price and avg_price > 0:
                             logger.info(
                                 f"Position exists for UIC {uic}: Amount={amount}, AvgPrice={avg_price:.2f} "
                                 f"- order {order_id} confirmed filled"
@@ -3056,7 +3058,10 @@ class SaxoClient:
                 # FAST-FILL-001: Use activity check to confirm fill and get actual price
                 filled, fill_details = self.check_order_filled_by_activity(order_id, uic)
                 if filled:
-                    actual_price = fill_details.get("fill_price", limit_price) if fill_details else limit_price
+                    # FIX (2026-02-02): Handle fill_price=0 by falling back to limit_price
+                    actual_price = fill_details.get("fill_price") if fill_details else None
+                    if not actual_price or actual_price <= 0:
+                        actual_price = limit_price
                     logger.info(f"✓ Limit order verified FILLED via activity check in {elapsed:.1f}s @ ${actual_price:.2f}")
                     return {
                         "success": True,
@@ -3119,7 +3124,10 @@ class SaxoClient:
             logger.warning(f"Order {order_id} not found after cancel - checking if it filled...")
             filled, fill_details = self.check_order_filled_by_activity(order_id, uic)
             if filled:
-                actual_price = fill_details.get("fill_price", limit_price) if fill_details else limit_price
+                # FIX (2026-02-02): Handle fill_price=0 by falling back to limit_price
+                actual_price = fill_details.get("fill_price") if fill_details else None
+                if not actual_price or actual_price <= 0:
+                    actual_price = limit_price
                 logger.info(f"✓ Order {order_id} WAS FILLED (cancel failed because order completed) @ ${actual_price:.2f}")
                 return {
                     "success": True,
