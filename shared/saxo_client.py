@@ -1644,8 +1644,12 @@ class SaxoClient:
             return None
 
         # Find appropriate expiration (0DTE for iron fly)
+        # IMPORTANT: Prefer exact 0 DTE when available, only fall back to 1 DTE if needed
+        # Bug fix (2026-02-02): Previous code took first match in 0-1 DTE range, which could
+        # be 1 DTE depending on how Saxo sorts expirations. Now we prefer 0 DTE explicitly.
         today = datetime.now().date()
         target_expiration = None
+        fallback_expiration = None  # 1 DTE fallback if no 0 DTE found
 
         for exp_data in expirations:
             exp_date_str = exp_data.get("Expiry")
@@ -1655,14 +1659,24 @@ class SaxoClient:
             exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
             dte = (exp_date - today).days
 
-            if target_dte_min <= dte <= target_dte_max:
+            if dte == 0:  # Prefer exact 0 DTE
                 target_expiration = exp_data
-                logger.info(f"Found 0DTE expiration for iron fly: {exp_date_str} with {dte} DTE")
+                logger.info(f"Found 0DTE expiration for iron fly: {exp_date_str} (0 DTE)")
                 break
+            elif target_dte_min <= dte <= target_dte_max and fallback_expiration is None:
+                # Save first match in range as fallback (in case no 0 DTE exists)
+                fallback_expiration = exp_data
+                logger.debug(f"Found fallback expiration for iron fly: {exp_date_str} ({dte} DTE)")
 
+        # Use 0 DTE if found, otherwise fall back to 1 DTE
         if not target_expiration:
-            logger.warning(f"No expiration found within {target_dte_min}-{target_dte_max} DTE range for iron fly")
-            return None
+            if fallback_expiration:
+                target_expiration = fallback_expiration
+                exp_date_str = fallback_expiration.get("Expiry", "")[:10]
+                logger.warning(f"No 0DTE expiration found, using fallback: {exp_date_str} (1 DTE)")
+            else:
+                logger.warning(f"No expiration found within {target_dte_min}-{target_dte_max} DTE range for iron fly")
+                return None
 
         # Get all options for this expiration
         specific_options = target_expiration.get("SpecificOptions", [])
@@ -4289,11 +4303,15 @@ class SaxoClient:
         today = datetime.now().date()
         target_expiration = None
 
-        # Use 5-12 DTE for both first entry and roll - this matches the DTE of
-        # short strangles being sold (7+ DTE targeting next Friday).
+        # Use the specified DTE range.
         # The for_roll parameter is kept for backwards compatibility but no longer
         # changes the DTE range since both cases should use the same range.
+        #
+        # IMPORTANT: For 0DTE Iron Fly (target_dte_min=0, target_dte_max=1), prefer
+        # exact 0 DTE when available. Bug fix (2026-02-02): Previous code took first
+        # match in range which could be 1 DTE depending on how Saxo sorts expirations.
         dte_min, dte_max = target_dte_min, target_dte_max
+        fallback_expiration = None  # Fallback if exact target DTE not found
 
         for exp_data in expirations:
             exp_date_str = exp_data.get("Expiry")
@@ -4302,10 +4320,27 @@ class SaxoClient:
             exp_date = datetime.strptime(exp_date_str[:10], "%Y-%m-%d").date()
             dte = (exp_date - today).days
 
-            if dte_min <= dte <= dte_max:
+            # For 0DTE case (min=0, max=1), prefer exact 0 DTE
+            if dte_min == 0 and dte == 0:
                 target_expiration = exp_data
                 logger.info(f"Expected move: using expiration {exp_date_str[:10]} ({dte} DTE)")
                 break
+            elif dte_min <= dte <= dte_max:
+                if fallback_expiration is None:
+                    fallback_expiration = exp_data
+                # For non-0DTE case, take first match
+                if dte_min > 0:
+                    target_expiration = exp_data
+                    logger.info(f"Expected move: using expiration {exp_date_str[:10]} ({dte} DTE)")
+                    break
+
+        # Use fallback if no exact match found
+        if not target_expiration and fallback_expiration:
+            target_expiration = fallback_expiration
+            exp_date_str = fallback_expiration.get("Expiry", "")[:10]
+            exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+            logger.warning(f"Expected move: no exact 0DTE found, using fallback {exp_date_str} ({dte} DTE)")
 
         if not target_expiration:
             logger.warning(f"No expiration found for expected move ({dte_min}-{dte_max} DTE)")
