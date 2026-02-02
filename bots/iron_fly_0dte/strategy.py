@@ -669,6 +669,12 @@ class IronFlyStrategy:
         # Calibration mode: allow manual expected move override
         self.manual_expected_move = self.strategy_config.get("manual_expected_move", None)
 
+        # Wing width configuration (Jim Olson rules)
+        # Minimum wing width: If expected move is low, enforce a floor (default 40 points)
+        self.min_wing_width = self.strategy_config.get("min_wing_width", 40)
+        # Target credit as percentage of wing width (Jim Olson: 30-35%)
+        self.target_credit_percent = self.strategy_config.get("target_credit_percent", 30)
+
         # ORDER-005: Bid-ask spread validation
         self.max_bid_ask_spread_percent = self.strategy_config.get(
             "max_bid_ask_spread_percent", DEFAULT_MAX_BID_ASK_SPREAD_PERCENT
@@ -755,6 +761,7 @@ class IronFlyStrategy:
             logger.info(f"  Profit target: ${self.profit_target_fixed}/contract, Max hold: {self.max_hold_minutes} min")
         logger.info(f"  FOMC blackout: {'ENABLED' if self.fed_meeting_blackout else 'DISABLED'}")
         logger.info(f"  Economic calendar check: {'ENABLED' if self.economic_calendar_check else 'DISABLED'}")
+        logger.info(f"  Wing width: min {self.min_wing_width}pt, target credit {self.target_credit_percent}% of width")
         if self.manual_expected_move:
             logger.info(f"  Manual expected move: {self.manual_expected_move} points (calibration mode)")
 
@@ -4061,26 +4068,26 @@ class IronFlyStrategy:
 
     def _calculate_expected_move(self) -> float:
         """
-        Calculate expected daily move from ATM straddle price.
+        Calculate wing width for Iron Fly based on expected move and Jim Olson's rules.
 
-        The ATM 0DTE straddle price IS the market's expected move for the day.
-        This is more accurate than VIX-based calculations.
+        Strategy (combining Doc Severson + Jim Olson):
+        1. Get expected move from ATM 0DTE straddle price (Doc Severson)
+        2. Enforce minimum wing width of 40 points (Jim Olson: use 50pt if EM < 30)
+        3. Target credit should be ~30% of wing width (Jim Olson's rule of thumb)
 
-        Alternative methods (per Doc Severson):
-        1. Use broker's "Expected Move" indicator if available
-        2. Use cost of ATM straddle as proxy (THIS IS WHAT WE DO)
-        3. Manual calibration mode
+        Jim Olson's key insight: "If the Implied Move is under $30, I will simply
+        use $50 wings." This ensures adequate credit collection even on low-vol days.
 
         Returns:
-            float: Expected move rounded to strike increment
+            float: Wing width in points (rounded to strike increment)
         """
         # Check for manual override (calibration mode)
         if self.manual_expected_move:
-            logger.info(f"Using manual expected move: {self.manual_expected_move}")
+            logger.info(f"Using manual expected move: {self.manual_expected_move} points")
             return self._round_to_strike(self.manual_expected_move)
 
         # Get expected move from 0DTE ATM straddle price
-        expected_move = self.client.get_expected_move_from_straddle(
+        raw_expected_move = self.client.get_expected_move_from_straddle(
             self.underlying_uic,
             self.current_price,
             target_dte_min=0,
@@ -4089,34 +4096,35 @@ class IronFlyStrategy:
             option_asset_type="StockIndexOption"
         )
 
-        if expected_move:
-            # Round to nearest strike increment
-            rounded_move = self._round_to_strike(expected_move)
-
-            # Minimum wing width of 5 points
-            if rounded_move < 5:
-                rounded_move = 5.0
-
-            logger.info(f"Expected move from 0DTE straddle: ${expected_move:.2f}, Rounded: ${rounded_move:.2f}")
-            return rounded_move
-
-        # Fallback to VIX-based calculation if straddle pricing fails
-        logger.warning("Could not get straddle price, falling back to VIX calculation")
-        daily_vol = self.current_vix / math.sqrt(252)
-        expected_move = self.current_price * (daily_vol / 100)
+        if not raw_expected_move:
+            # Fallback to VIX-based calculation if straddle pricing fails
+            logger.warning("Could not get straddle price, falling back to VIX calculation")
+            daily_vol = self.current_vix / math.sqrt(252)
+            raw_expected_move = self.current_price * (daily_vol / 100)
 
         # Round to nearest strike increment
-        rounded_move = self._round_to_strike(expected_move)
+        expected_move = self._round_to_strike(raw_expected_move)
 
-        # Minimum wing width of 5 points
-        if rounded_move < 5:
-            rounded_move = 5.0
+        # Jim Olson Rule: Enforce minimum wing width
+        # "If the Implied Move is under $30, I will simply use $50 wings"
+        # We use configurable minimum (default 40 points) for safety
+        if expected_move < self.min_wing_width:
+            logger.info(
+                f"Expected move ${expected_move:.0f} < min wing width ${self.min_wing_width}. "
+                f"Using minimum wing width of {self.min_wing_width} points (Jim Olson rule)."
+            )
+            wing_width = float(self.min_wing_width)
+        else:
+            wing_width = expected_move
 
-        logger.debug(f"Fallback expected move: VIX={self.current_vix:.2f}, "
-                     f"Daily vol={daily_vol:.4f}%, Raw={expected_move:.2f}, "
-                     f"Rounded={rounded_move}")
+        # Log the calculation details
+        logger.info(
+            f"Wing width calculation: Raw EM=${raw_expected_move:.2f}, "
+            f"Rounded=${expected_move:.0f}, Min=${self.min_wing_width}, "
+            f"Final wing width={wing_width:.0f} points"
+        )
 
-        return rounded_move
+        return wing_width
 
     def _log_filter_event(self, event_type: str, description: str):
         """Log a filter event to the Safety Events sheet."""

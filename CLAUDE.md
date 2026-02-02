@@ -173,10 +173,12 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 ### Iron Fly Bot Details
 - **Entry:** 10:00 AM EST (after 30-min opening range)
-- **Exit:** Wing touch (stop loss) or $75 profit target
+- **Exit:** Wing touch (stop loss) or 30% of credit profit target
 - **Max hold:** 60 minutes (11:00 AM rule)
+- **Wing width:** Minimum 40 points (Jim Olson rule), or expected move if higher
 - **Filters:** VIX < 20, no FOMC days, price in opening range
-- **Edge cases:** 63 analyzed, all resolved (see `docs/IRON_FLY_EDGE_CASES.md`)
+- **Strategy spec:** Full strategy specification (see `docs/IRON_FLY_STRATEGY_SPECIFICATION.md`)
+- **Edge cases:** 64 analyzed, all resolved (see `docs/IRON_FLY_EDGE_CASES.md`)
 - **Code audit:** Comprehensive review completed (see `docs/IRON_FLY_CODE_AUDIT.md`)
 
 #### Iron Fly Safety Features
@@ -186,12 +188,13 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 - **Wing breach tolerance:** $0.10 buffer to avoid floating-point issues
 - **Circuit breaker:** 5 consecutive failures or 5-of-10 sliding window triggers halt
 
-#### Iron Fly Typical P&L (1 contract, ~30pt wings)
+#### Iron Fly Typical P&L (1 contract, 40pt wings)
 | Scenario | P&L | Notes |
 |----------|-----|-------|
 | Max profit (expires at ATM) | ~$1,500 | Rare - would hold to 4:00 PM |
-| Profit target hit | +$75 | Target exit |
-| Stop loss (wing touch) | -$250 to -$350 | Typical stop-out |
+| Profit target hit (30% of credit) | +$5 to +$15 net | Target exit |
+| Time exit (11:00 AM rule) | +$0 to +$10 net | Small profit or breakeven |
+| Stop loss (wing touch) | -$300 to -$350 | Typical stop-out |
 | Max loss (circuit breaker) | -$400 | Safety cap |
 
 ### MEIC Bot Details (v1.2.0 - Updated 2026-02-02)
@@ -933,7 +936,8 @@ SCRIPT
 | Wrong asset type errors | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 4: Asset Type Mapping |
 | WebSocket 401 errors | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 8.5: WebSocket Token Refresh |
 | Entry filter questions | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 6: Filter Implementation |
-| Edge case handling | [IRON_FLY_EDGE_CASES.md](docs/IRON_FLY_EDGE_CASES.md) | All 63 documented cases |
+| Edge case handling | [IRON_FLY_EDGE_CASES.md](docs/IRON_FLY_EDGE_CASES.md) | All 64 documented cases |
+| **Iron Fly strategy** | [IRON_FLY_STRATEGY_SPECIFICATION.md](docs/IRON_FLY_STRATEGY_SPECIFICATION.md) | Wing width rules, profit targets, Doc Severson + Jim Olson |
 | **Delta Neutral strategy** | [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md) | Roll mechanics, credit/debit logic, full spec |
 | **MEIC strategy spec** | [MEIC_STRATEGY_SPECIFICATION.md](docs/MEIC_STRATEGY_SPECIFICATION.md) | Full MEIC implementation details |
 | **MEIC edge cases** | [MEIC_EDGE_CASES.md](docs/MEIC_EDGE_CASES.md) | 75 edge cases for MEIC bot |
@@ -951,8 +955,9 @@ SCRIPT
 | `docs/PORTFOLIO_ALLOCATION_ANALYSIS.md` | **Capital allocation** - $50K optimal split across bots |
 | `docs/MULTI_BOT_POSITION_MANAGEMENT.md` | **Position Registry** - Running multiple bots on same underlying |
 | `docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md` | **Delta Neutral strategy** - Full Brian Terry spec with roll mechanics |
+| `docs/IRON_FLY_STRATEGY_SPECIFICATION.md` | **Iron Fly strategy** - Doc Severson + Jim Olson rules, wing width calculation |
 | `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
-| `docs/IRON_FLY_EDGE_CASES.md` | 63 edge cases analyzed for Iron Fly bot |
+| `docs/IRON_FLY_EDGE_CASES.md` | 64 edge cases analyzed for Iron Fly bot |
 | `docs/MEIC_STRATEGY_SPECIFICATION.md` | **MEIC strategy** - Full Tammy Chambless MEIC implementation spec |
 | `docs/MEIC_EDGE_CASES.md` | 75 edge cases analyzed for MEIC bot |
 | `docs/DELTA_NEUTRAL_EDGE_CASES.md` | **55 edge cases** for Delta Neutral bot (updated 2026-01-28) |
