@@ -2915,8 +2915,17 @@ class SaxoClient:
                 time.sleep(retry_delay)
 
         # Activities check exhausted - check if a position exists for this UIC
-        # This confirms fill AND gives us AverageOpenPrice as fill price fallback
+        # This confirms fill AND gives us the actual fill price
         # NOTE: This won't work for CLOSE orders (position is gone after fill)
+        #
+        # FIX (2026-02-02): Use PositionBase.OpenPrice instead of PositionView.AverageOpenPrice
+        # Investigation showed that for SHORT positions (negative Amount), Saxo does NOT populate
+        # AverageOpenPrice in PositionView. However, the actual fill price is ALWAYS in
+        # PositionBase.OpenPrice for both long and short positions.
+        #
+        # Example from live data:
+        #   Short position (Amount=-2.0): PositionBase.OpenPrice = 1.77 (correct fill price)
+        #   Long position (Amount=2.0): PositionBase.OpenPrice = 21.525 (correct fill price)
         try:
             positions = self.get_positions(include_greeks=False)
             if positions:
@@ -2924,20 +2933,16 @@ class SaxoClient:
                     pos_uic = pos.get("PositionBase", {}).get("Uic")
                     if pos_uic == uic:
                         amount = pos.get("PositionBase", {}).get("Amount", 0)
-                        # FIX (2026-02-02): Try multiple price fields from position
-                        avg_price = pos.get("PositionView", {}).get("AverageOpenPrice", 0)
-                        if not avg_price and amount:
-                            # Fallback: calculate from MarketValue (less accurate)
-                            market_value = pos.get("PositionView", {}).get("MarketValue", 0)
-                            avg_price = market_value / max(abs(amount), 1) / 100
-                        if avg_price and avg_price > 0:
+                        # FIX (2026-02-02): PositionBase.OpenPrice works for BOTH long and short
+                        open_price = pos.get("PositionBase", {}).get("OpenPrice", 0)
+                        if open_price and open_price > 0:
                             logger.info(
-                                f"Position exists for UIC {uic}: Amount={amount}, AvgPrice={avg_price:.2f} "
+                                f"Position exists for UIC {uic}: Amount={amount}, OpenPrice={open_price:.2f} "
                                 f"- order {order_id} confirmed filled"
                             )
                             return True, {
                                 "status": "Filled",
-                                "fill_price": avg_price,
+                                "fill_price": open_price,
                                 "fill_amount": abs(amount),
                                 "order_id": order_id,
                                 "source": "position_check"
@@ -2946,7 +2951,7 @@ class SaxoClient:
                             # We know it filled but have no price - log warning
                             logger.warning(
                                 f"Order {order_id} FILLED but no price available (activities FilledPrice=0, "
-                                f"position AvgPrice=0). Using fill_amount={fill_amount_found}."
+                                f"position OpenPrice=0). Using fill_amount={fill_amount_found}."
                             )
                             return True, {
                                 "status": "Filled",
@@ -2961,8 +2966,8 @@ class SaxoClient:
         # If we confirmed fill via activity but never got price, still return filled
         if fill_confirmed:
             logger.warning(
-                f"Order {order_id} confirmed FILLED via activities but FilledPrice=0 after {max_retries} attempts. "
-                f"P&L will use quoted prices as fallback."
+                f"Order {order_id} confirmed FILLED via activities but no price available after {max_retries} attempts. "
+                f"Position lookup also failed. P&L will use quoted prices as fallback."
             )
             return True, {
                 "status": "Filled",
