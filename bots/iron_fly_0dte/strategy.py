@@ -1,17 +1,19 @@
 """
-strategy.py - 0DTE Iron Fly Strategy Implementation (Doc Severson)
+strategy.py - 0DTE Iron Fly Strategy Implementation (Doc Severson + Jim Olson)
 
 This module implements the 0DTE Iron Fly strategy:
 - Entry at 10:00 AM EST after opening range check
-- Iron Butterfly: Sell ATM call+put, buy wings at expected move
+- Iron Butterfly: Sell ATM call+put, buy wings at expected move OR min 40pt (Jim Olson)
 - VIX filter: abort if VIX > 20 or spiking 5%+
 - Opening range filter: price must be within 9:30-10:00 high/low
-- Take profit: $50-$100 per contract (limit order)
+- Take profit: 30% of credit received (dynamic) with $25 minimum floor
 - Stop loss: when SPX touches wing strikes (market order)
-- Max hold: 18 minutes to 1 hour
+- Max hold: 60 minutes (11:00 AM rule)
 
-Strategy Source: Doc Severson 0DTE Iron Fly
-Video: https://www.youtube.com/watch?v=ad27qIuhgQ4
+Strategy Sources:
+- Doc Severson 0DTE Iron Fly: https://www.youtube.com/watch?v=ad27qIuhgQ4
+- Jim Olson Wing Width Rules: https://0dte.com/jim-olson-iron-butterfly-0dte-trade-plan
+- Full spec: docs/IRON_FLY_STRATEGY_SPECIFICATION.md
 
 Author: Trading Bot Developer
 Date: 2025
@@ -26,7 +28,7 @@ Security Audit: 2026-01-19
 - Fixed dry-run simulation for realistic P&L
 
 Edge Case Audit: 2026-01-22 to 2026-01-23
-- 52 edge cases analyzed and resolved (100% LOW risk)
+- 64 edge cases analyzed and resolved
 - Added circuit breaker with sliding window failure detection (CONN-002)
 - Added critical intervention flag for unrecoverable errors (ORDER-004)
 - Added partial fill auto-unwind with actual UICs (ORDER-001, CB-001)
@@ -47,7 +49,15 @@ Code Audit: 2026-01-26
 - Consolidated duplicate get_us_market_time() to use shared.market_hours
 - Removed unused json import from main.py
 
-See docs/IRON_FLY_EDGE_CASES.md for full analysis.
+Code Audit: 2026-02-02 (Wing Width + P&L Fixes)
+- Added minimum wing width enforcement (Jim Olson: 40pt floor)
+- Added dynamic profit target (30% of credit instead of fixed $75)
+- Fixed fill price extraction from activities endpoint (FilledPrice field)
+- Added commission tracking for accurate net P&L
+- Added activities endpoint retry for sync delay (4 retries x 1.5s)
+
+See docs/IRON_FLY_EDGE_CASES.md for full edge case analysis.
+See docs/IRON_FLY_STRATEGY_SPECIFICATION.md for full strategy rules.
 """
 
 import json

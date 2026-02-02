@@ -3,16 +3,16 @@
 main.py - 0DTE Iron Fly Trading Bot Entry Point
 
 This is the main entry point for the 0DTE Iron Fly Trading Bot
-implementing Doc Severson's strategy.
+implementing Doc Severson's strategy with Jim Olson's wing width rules.
 
 Strategy Summary:
 -----------------
 1. Monitor opening range (9:30-10:00 AM EST)
 2. Enter at 10:00 AM if VIX < 20 and price within range
-3. Sell ATM Iron Butterfly with wings at expected move
-4. Take profit at $50-$100 per contract
+3. Sell ATM Iron Butterfly with wings at expected move OR min 40pt (Jim Olson)
+4. Take profit at 30% of credit received (dynamic target)
 5. Stop loss when price touches wing strikes
-6. Average hold time: 18 minutes
+6. Max hold time: 60 minutes (11:00 AM rule)
 
 Usage:
 ------
@@ -24,6 +24,7 @@ Usage:
 
 Author: Trading Bot Developer
 Date: 2025
+Last Updated: 2026-02-02 (Wing width minimum, dynamic profit target)
 """
 
 import os
@@ -113,11 +114,12 @@ def print_banner():
     ║         0DTE IRON FLY TRADING BOT                             ║
     ║         ═════════════════════════                             ║
     ║                                                               ║
-    ║         Strategy: Doc Severson's 0DTE Iron Butterfly          ║
+    ║         Strategy: Doc Severson + Jim Olson                    ║
     ║         Entry: 10:00 AM EST after Opening Range               ║
-    ║         Target: $50-$100 profit in 18 minutes                 ║
+    ║         Target: 30% of credit (dynamic)                       ║
+    ║         Wings: Min 40pt (Jim Olson rule)                      ║
     ║                                                               ║
-    ║         Version: 1.0.0                                        ║
+    ║         Version: 1.1.0                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
