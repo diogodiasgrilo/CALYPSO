@@ -1845,7 +1845,7 @@ class MEICStrategy:
 
                 # Place MARKET order
                 logger.info(f"  Attempt {attempt + 1}: MARKET order for {leg_description}")
-                result = self.client.place_order(
+                market_result = self.client.place_order(
                     uic=uic,
                     asset_type="StockIndexOption",
                     buy_sell=buy_sell,
@@ -1854,6 +1854,35 @@ class MEICStrategy:
                     to_open_close="ToOpen",
                     external_reference=external_ref
                 )
+
+                # MARKET orders return {"OrderId": "..."} not {"filled": True}
+                # Convert to same format as place_limit_order_with_timeout for uniform handling
+                if market_result and market_result.get("OrderId"):
+                    order_id = market_result.get("OrderId")
+                    # Market orders fill immediately - verify via activities
+                    import time
+                    time.sleep(1)  # Brief wait for activity sync
+                    filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
+                    if filled:
+                        fill_price = fill_details.get("fill_price") if fill_details else expected_price
+                        result = {
+                            "success": True,
+                            "filled": True,
+                            "order_id": order_id,
+                            "fill_price": fill_price or expected_price,
+                            "position_id": fill_details.get("position_id") if fill_details else None
+                        }
+                    else:
+                        # Market order should always fill - treat as success with expected price
+                        logger.warning(f"  MARKET order {order_id} - no fill activity found, assuming filled")
+                        result = {
+                            "success": True,
+                            "filled": True,
+                            "order_id": order_id,
+                            "fill_price": expected_price
+                        }
+                else:
+                    result = {"success": False, "filled": False, "message": "MARKET order failed"}
             else:
                 # Calculate limit price with slippage
                 mid_price = (bid + ask) / 2 if bid and ask else ask or bid
@@ -2282,8 +2311,9 @@ class MEICStrategy:
             return None
 
         # Search for matching strike and type
+        # NOTE: Saxo API uses "StrikePrice" not "Strike" (verified in saxo_client.py)
         for option in specific_options:
-            opt_strike = option.get("Strike")
+            opt_strike = option.get("StrikePrice")
             opt_type = option.get("PutCall")
 
             if opt_strike == strike and opt_type == put_call:
