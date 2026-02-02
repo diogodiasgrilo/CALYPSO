@@ -14,16 +14,31 @@ Key Performance Metrics (Tammy Chambless, Jan 2023 - present):
 
 Strategy Details:
 - Entry times: 10:00, 10:30, 11:00, 11:30, 12:00, 12:30 AM ET
-- Strike selection: 5-15 delta, 50-60 point spreads
-- Credit target: $1.00 - $1.75 per side
-- Stop loss: Total credit per side (MEIC+ subtracts $0.10)
+- Strike selection: VIX-adjusted for ~8 delta, 50-point spreads
+- Credit target: $1.00 - $1.75 per side (validated at runtime)
+- Stop loss: Total credit per side (MEIC+ subtracts configurable amount)
+
+Version History:
+- 1.2.0 (2026-02-02): VIX-adjusted strike selection, credit validation, code audit fixes
+- 1.1.0 (2026-02-01): REST-only mode, enhanced safety features
+- 1.0.0 (2026-01-27): Initial implementation
 
 See docs/MEIC_STRATEGY_SPECIFICATION.md for full details.
 See docs/MEIC_EDGE_CASES.md for edge case analysis.
-
-Last Updated: 2026-01-27 (Initial implementation)
 """
 
-from bots.meic.strategy import MEICStrategy, MEICState
+from bots.meic.strategy import (
+    MEICStrategy,
+    MEICState,
+    IronCondorEntry,
+    MEICDailyState,
+    MarketData,
+)
 
-__all__ = ['MEICStrategy', 'MEICState']
+__all__ = [
+    'MEICStrategy',
+    'MEICState',
+    'IronCondorEntry',
+    'MEICDailyState',
+    'MarketData',
+]

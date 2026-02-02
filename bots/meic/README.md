@@ -1,8 +1,8 @@
 # MEIC (Multiple Entry Iron Condors) Trading Bot
 
-**Last Updated:** 2026-02-01
+**Last Updated:** 2026-02-02
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.1.0)
+**Status:** IMPLEMENTED - Production Ready (v1.2.0)
 
 ---
 
@@ -35,10 +35,10 @@ MEIC implements Tammy Chambless's 0DTE SPX iron condor strategy, featuring **6 s
 
 ### Iron Condor Structure
 Each entry places a complete iron condor:
-- **Call Spread:** Sell OTM call, Buy higher strike call (50-60pt wide)
-- **Put Spread:** Sell OTM put, Buy lower strike put (50-60pt wide)
-- **Target Delta:** 5-15 delta (OTM strikes)
-- **Credit Target:** $1.00-$1.75 per side
+- **Call Spread:** Sell OTM call, Buy higher strike call (50pt wide)
+- **Put Spread:** Sell OTM put, Buy lower strike put (50pt wide)
+- **Target Delta:** ~8 delta (VIX-adjusted strike selection)
+- **Credit Target:** $1.00-$1.75 per side (validated at runtime)
 
 ### Stop Loss Rules
 - **Per-side stop:** Total credit received per side
@@ -51,13 +51,14 @@ Each entry places a complete iron condor:
 
 | File | Purpose |
 |------|---------|
-| `strategy.py` | Main strategy logic with state machine |
+| `strategy.py` | Main strategy logic with state machine and all data models |
 | `main.py` | Entry point and trading loop |
-| `models/` | Standalone data model definitions |
+| `__init__.py` | Package exports (MEICStrategy, MEICState, IronCondorEntry, etc.) |
 | `config/config.json` | Configuration (gitignored) |
 
-### Models Package
-The `models/` directory contains standalone definitions that can be imported without loading the full strategy module:
+### Exported Classes
+Import from `bots.meic`:
+- `MEICStrategy` - Main strategy class
 - `MEICState` - Strategy state machine enum
 - `IronCondorEntry` - Single IC position with 4 legs
 - `MEICDailyState` - Daily trading state
@@ -113,16 +114,24 @@ Legs are placed in safe order (longs before shorts):
 ```json
 {
     "dry_run": true,
-    "underlying_uic": 4913,
-    "option_root_uic": 128,
-    "vix_uic": 10606,
-    "entry_times": ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30"],
-    "spread_width": 50,
-    "contracts_per_entry": 1,
-    "max_vix_entry": 25,
-    "max_daily_loss_percent": 3.0,
-    "meic_plus_enabled": true,
-    "meic_plus_reduction": 0.10,
+    "strategy": {
+        "underlying_uic": 4913,
+        "option_root_uic": 128,
+        "vix_spot_uic": 10606,
+        "entry_times": ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30"],
+        "spread_width": 50,
+        "target_delta": 8,
+        "min_delta": 5,
+        "max_delta": 15,
+        "min_credit_per_side": 1.00,
+        "max_credit_per_side": 1.75,
+        "contracts_per_entry": 1,
+        "max_vix_entry": 25,
+        "max_daily_loss_percent": 2.0,
+        "meic_plus_enabled": true,
+        "meic_plus_reduction": 0.10,
+        "meic_plus_min_credit": 1.50
+    },
     "alerts": {
         "enabled": true,
         "phone_number": "+1XXXXXXXXXX",
@@ -130,6 +139,14 @@ Legs are placed in safe order (longs before shorts):
     }
 }
 ```
+
+### New in v1.2.0
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `target_delta` | 8 | Target delta for short strikes |
+| `min_credit_per_side` | 1.00 | Minimum acceptable credit per side (logs warning) |
+| `max_credit_per_side` | 1.75 | Target max credit per side (logs info if exceeded) |
+| `meic_plus_min_credit` | 1.50 | Minimum credit to apply MEIC+ reduction |
 
 ---
 
@@ -169,8 +186,10 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-02-02 | 1.2.0 | VIX-adjusted strike selection for consistent delta targeting |
+| 2026-02-02 | 1.2.0 | Added credit validation (min/max credit per side now enforced) |
+| 2026-02-02 | 1.2.0 | Made MEIC+ threshold configurable (`meic_plus_min_credit`) |
+| 2026-02-02 | 1.2.0 | Fixed send_alert() calls with wrong signature (would crash) |
+| 2026-02-02 | 1.2.0 | Removed dead code: models/ package, unused functions |
 | 2026-02-01 | 1.1.0 | REST-only mode, 8 new safety features (ORDER-006, ORDER-007, EMERGENCY-001, etc.) |
-| 2026-02-01 | 1.1.0 | Full code audit: fixed undefined method calls, removed dead code |
 | 2026-01-27 | 1.0.0 | Initial implementation with full strategy logic |
-| 2026-01-27 | 1.0.0 | Added position recovery from Saxo API (critical fix) |
-| 2026-01-27 | 1.0.0 | Added safety event logging, dashboard metrics, pre-market gap detection |

@@ -1,9 +1,9 @@
 # MEIC (Multiple Entry Iron Condors) Strategy Specification
 
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-02-02
 **Purpose:** Complete implementation specification for the MEIC 0DTE trading bot
 **Strategy Creator:** Tammy Chambless (the "Queen of 0DTE")
-**Status:** IMPLEMENTED - Ready for Dry-Run Testing
+**Status:** IMPLEMENTED - v1.2.0 (VIX-adjusted strikes)
 
 ---
 
@@ -563,7 +563,9 @@ def get_my_positions(self):
 
         "meic_plus_enabled": true,
         "meic_plus_reduction": 0.10,
+        "meic_plus_min_credit": 1.50,
 
+        "max_vix_entry": 25,
         "max_daily_loss_percent": 2.0,
         "max_positions_at_risk": 4,
         "contracts_per_entry": 1

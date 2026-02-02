@@ -494,16 +494,22 @@ class MEICStrategy:
     MEIC (Multiple Entry Iron Condors) Strategy Implementation.
 
     Implements Tammy Chambless's strategy with:
-    - 6 scheduled iron condor entries per day
-    - Per-side stop losses equal to total credit
-    - MEIC+ modification for better breakeven days
+    - 6 scheduled iron condor entries per day (10:00-12:30 AM ET)
+    - VIX-adjusted strike selection for consistent ~8 delta targeting
+    - Per-side stop losses equal to total credit (breakeven design)
+    - MEIC+ modification for better breakeven days (configurable threshold)
+    - Credit validation against configured min/max bounds
     - Position Registry integration for multi-bot support
 
     Key Features:
     - Safe partial fill handling (never leave naked shorts)
     - Automatic orphan cleanup on restart
     - Independent stop monitoring per IC
+    - VIX filtering (skip entries if VIX > max_vix_entry)
+    - FOMC blackout (skip all entries on Fed announcement days)
     - Comprehensive edge case handling (75 cases analyzed)
+
+    Version: 1.2.0 (2026-02-02)
     """
 
     def __init__(

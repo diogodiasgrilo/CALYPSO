@@ -2,9 +2,9 @@
 
 **Analysis Date:** 2026-01-27
 **Analyst:** Claude (Pre-Implementation Analysis)
-**Bot Version:** 1.0.0 (Implemented)
+**Bot Version:** 1.2.0 (VIX-adjusted strikes)
 **Status:** Living Document - Updated after implementation audit
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-02-02
 
 ---
 
