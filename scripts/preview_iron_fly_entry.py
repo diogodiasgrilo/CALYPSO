@@ -26,7 +26,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.saxo_client import SaxoClient
 from shared.config_loader import ConfigLoader
-from shared.market_hours import is_market_open, get_market_open_time, get_market_close_time
 import json
 
 
