@@ -2807,8 +2807,8 @@ class SaxoClient:
         self,
         order_id: str,
         uic: int,
-        max_retries: int = 3,
-        retry_delay: float = 1.0
+        max_retries: int = 5,
+        retry_delay: float = 2.0
     ) -> Tuple[bool, Optional[Dict]]:
         """
         Check if an order was filled by querying the order activities endpoint.
@@ -2823,11 +2823,16 @@ class SaxoClient:
         FIX (2026-02-01): Added retry logic with delay to handle activities endpoint
         sync delay. Saxo activities endpoint may have 1-3 second lag after order fill.
 
+        FIX (2026-02-02): Increased retries to 5 × 2s = 10s total. Friday 2026-01-30
+        showed FilledPrice=0 after 3×1s retries, causing fallback to quoted prices
+        and P&L errors of $1.30 per trade. Also added explicit position lookup for
+        AverageOpenPrice as secondary source.
+
         Args:
             order_id: The order ID to check
             uic: The instrument UIC (to verify the fill is for the right instrument)
-            max_retries: Maximum number of retry attempts (default: 3)
-            retry_delay: Seconds to wait between retries (default: 1.0)
+            max_retries: Maximum number of retry attempts (default: 5)
+            retry_delay: Seconds to wait between retries (default: 2.0)
 
         Returns:
             Tuple of (filled: bool, fill_details: Optional[Dict])
@@ -2846,7 +2851,10 @@ class SaxoClient:
             "$top": 50  # Recent activities
         }
 
-        # FIX (2026-02-01): Retry logic for activities endpoint sync delay
+        fill_confirmed = False
+        fill_amount_found = 0
+
+        # FIX (2026-02-02): Increased retry time to handle Saxo's sync delay
         for attempt in range(1, max_retries + 1):
             try:
                 response = self._make_request("GET", endpoint, params=params)
@@ -2863,6 +2871,8 @@ class SaxoClient:
                                 # Also check "Price" as fallback for backwards compatibility
                                 fill_price = activity.get("FilledPrice") or activity.get("Price", 0)
                                 fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
+                                fill_confirmed = True
+                                fill_amount_found = fill_amount
 
                                 if fill_price > 0:
                                     logger.info(
@@ -2878,8 +2888,8 @@ class SaxoClient:
                                     }
                                 else:
                                     # Activity found but no price yet - keep retrying
-                                    logger.debug(
-                                        f"Activity found for {order_id} but no FilledPrice (attempt {attempt})"
+                                    logger.info(
+                                        f"Activity found for {order_id} but FilledPrice=0 (attempt {attempt}/{max_retries})"
                                     )
 
             except Exception as e:
@@ -2887,10 +2897,10 @@ class SaxoClient:
 
             # Wait before retry (except on last attempt)
             if attempt < max_retries:
-                logger.debug(f"Waiting {retry_delay}s before activities retry {attempt + 1}/{max_retries}")
                 time.sleep(retry_delay)
 
-        # Activities check exhausted - also check if a position exists for this UIC (confirms fill)
+        # Activities check exhausted - check if a position exists for this UIC
+        # This confirms fill AND gives us AverageOpenPrice as fill price fallback
         try:
             positions = self.get_positions(include_greeks=False)
             if positions:
@@ -2898,20 +2908,53 @@ class SaxoClient:
                     pos_uic = pos.get("PositionBase", {}).get("Uic")
                     if pos_uic == uic:
                         amount = pos.get("PositionBase", {}).get("Amount", 0)
-                        avg_price = pos.get("PositionView", {}).get("AverageOpenPrice", 0)
-                        logger.info(
-                            f"Position exists for UIC {uic}: Amount={amount}, AvgPrice={avg_price} "
-                            f"- order {order_id} likely filled"
+                        # FIX (2026-02-02): Try multiple price fields from position
+                        avg_price = (
+                            pos.get("PositionView", {}).get("AverageOpenPrice") or
+                            pos.get("PositionView", {}).get("MarketValue", 0) / max(abs(amount), 1) / 100
+                            if amount else 0
                         )
-                        return True, {
-                            "status": "Filled",
-                            "fill_price": avg_price,
-                            "fill_amount": amount,
-                            "order_id": order_id,
-                            "source": "position_check"
-                        }
+                        if avg_price > 0:
+                            logger.info(
+                                f"Position exists for UIC {uic}: Amount={amount}, AvgPrice={avg_price:.2f} "
+                                f"- order {order_id} confirmed filled"
+                            )
+                            return True, {
+                                "status": "Filled",
+                                "fill_price": avg_price,
+                                "fill_amount": abs(amount),
+                                "order_id": order_id,
+                                "source": "position_check"
+                            }
+                        elif fill_confirmed:
+                            # We know it filled but have no price - log warning
+                            logger.warning(
+                                f"Order {order_id} FILLED but no price available (activities FilledPrice=0, "
+                                f"position AvgPrice=0). Using fill_amount={fill_amount_found}."
+                            )
+                            return True, {
+                                "status": "Filled",
+                                "fill_price": 0,
+                                "fill_amount": fill_amount_found,
+                                "order_id": order_id,
+                                "source": "position_check_no_price"
+                            }
         except Exception as e:
             logger.warning(f"Error checking positions for UIC {uic}: {e}")
+
+        # If we confirmed fill via activity but never got price, still return filled
+        if fill_confirmed:
+            logger.warning(
+                f"Order {order_id} confirmed FILLED via activities but FilledPrice=0 after {max_retries} attempts. "
+                f"P&L will use quoted prices as fallback."
+            )
+            return True, {
+                "status": "Filled",
+                "fill_price": 0,
+                "fill_amount": fill_amount_found,
+                "order_id": order_id,
+                "source": "activities_no_price"
+            }
 
         logger.warning(
             f"Could not confirm fill for order {order_id} after {max_retries} attempts"
