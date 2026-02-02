@@ -767,7 +767,8 @@ def main():
         sys.exit(1)
 
     # Get dry_run from config if not specified on command line
-    dry_run = args.dry_run or config.get("strategy", {}).get("dry_run", False)
+    # CLI flag takes priority, then config file (root level), default is False
+    dry_run = args.dry_run or config.get("dry_run", False)
 
     # Show environment info
     env = config["saxo_api"].get("environment", "sim")

@@ -110,6 +110,40 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `StartLimitBurst=5`
 
+### Dry-Run vs Live Mode (Standardized)
+
+**All bots use the same pattern for mode control:**
+
+1. **Config file is the source of truth** - Add `"dry_run": true` or `"dry_run": false` at the root level of `config.json`
+2. **CLI flag takes priority** - Running with `--dry-run` flag overrides the config setting
+3. **Default is false (LIVE)** - If neither config nor CLI flag is set, bot runs in LIVE mode
+
+**To switch a bot between modes:**
+```bash
+# Edit config on VM (no service file changes needed)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
+import json
+with open(\"bots/BOT_NAME/config/config.json\", \"r\") as f:
+    config = json.load(f)
+config[\"dry_run\"] = True  # or False for LIVE
+with open(\"bots/BOT_NAME/config/config.json\", \"w\") as f:
+    json.dump(config, f, indent=2)
+print(\"Updated dry_run to:\", config[\"dry_run\"])
+SCRIPT
+'"
+
+# Then restart the bot
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart BOT_SERVICE_NAME"
+```
+
+**Current Mode Status:**
+| Bot | Config `dry_run` | Mode |
+|-----|------------------|------|
+| Iron Fly | `false` | LIVE |
+| Delta Neutral | `false` | LIVE |
+| MEIC | `true` | DRY-RUN |
+| Rolling Put Diagonal | `true` | DRY-RUN |
+
 ### Iron Fly Bot Details
 - **Entry:** 10:00 AM EST (after 30-min opening range)
 - **Exit:** Wing touch (stop loss) or $75 profit target

@@ -29,10 +29,12 @@ Environment="PATH=/opt/calypso/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="PYTHONPATH=/opt/calypso"
 Environment="GOOGLE_APPLICATION_CREDENTIALS=/opt/calypso/credentials/service-account.json"
 
-# Run the MEIC bot in LIVE mode
-# Remove --live for SIM mode
-# Add --dry-run for simulation without real orders
-ExecStart=/opt/calypso/.venv/bin/python -m bots.meic.main --live
+# Run the MEIC bot
+# Mode is controlled by config.json "dry_run" field:
+#   "dry_run": true  = simulation (no real orders)
+#   "dry_run": false = live trading
+# CLI flag --dry-run also works and takes priority over config
+ExecStart=/opt/calypso/.venv/bin/python -m bots.meic.main
 
 # Graceful shutdown - send SIGTERM, wait 60s for cleanup
 KillMode=mixed

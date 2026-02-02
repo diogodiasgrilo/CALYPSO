@@ -7,6 +7,8 @@
         "4. Set 'dry_run': true for testing (no real orders)",
         "5. Set 'environment': 'sim' for simulation mode"
     ],
+    "dry_run": true,
+    "_dry_run_note": "When true, logs all actions but does not place real orders. CLI --dry-run flag also works.",
     "saxo_api": {
         "sim": {
             "app_key": "YOUR_SIM_APP_KEY",
@@ -37,8 +39,6 @@
         "underlying_symbol": "QQQ",
         "underlying_uic": 4328771,
         "_uic_note": "QQQ:xnas - Invesco QQQ Trust, Series 1 ETF on NASDAQ",
-        "dry_run": true,
-        "_dry_run_note": "When true, logs all actions but does not place real orders",
         "long_put": {
             "target_dte": 14,
             "_target_dte_note": "Target 14 DTE for long put per Bill Belt [06:05]",
