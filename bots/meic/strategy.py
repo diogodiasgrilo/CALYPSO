@@ -1045,8 +1045,15 @@ class MEICStrategy:
         Handle WAITING_FIRST_ENTRY state - waiting for 10:00 AM.
 
         Transitions to ENTRY_IN_PROGRESS when first entry time arrives.
+
+        TIME-002: On startup/restart, skips past any entry times whose windows
+        have already passed (e.g., if bot restarts at 10:37, skip 10:00 and 10:30
+        entries and wait for 11:00).
         """
         now = get_us_market_time()
+
+        # TIME-002: Skip past any missed entry windows (e.g., after restart)
+        self._skip_missed_entries(now)
 
         # Check if we should attempt next entry
         if self._should_attempt_entry(now):
@@ -1085,6 +1092,8 @@ class MEICStrategy:
         Handle MONITORING state - watching positions for stop losses.
 
         Also checks for next scheduled entry time.
+
+        TIME-002: Skips past any missed entry windows on each tick.
         """
         now = get_us_market_time()
 
@@ -1107,6 +1116,9 @@ class MEICStrategy:
                 self.daily_state.entries_skipped += (len(self.entry_times) - self._next_entry_index)
                 self._next_entry_index = len(self.entry_times)  # Skip remaining
                 return f"VIX too high ({self.current_vix:.1f}) - skipping remaining entries"
+
+        # TIME-002: Skip past any missed entry windows (e.g., after restart)
+        self._skip_missed_entries(now)
 
         # Check if we should attempt next entry
         if self._should_attempt_entry(now):
@@ -1192,6 +1204,46 @@ class MEICStrategy:
         if self._next_entry_index >= len(self.entry_times):
             return None
         return self.entry_times[self._next_entry_index]
+
+    def _skip_missed_entries(self, now: datetime) -> None:
+        """
+        TIME-002: Skip past any entry times whose windows have already passed.
+
+        This handles the case where the bot restarts mid-day (e.g., at 10:37 AM)
+        and needs to skip the 10:00 and 10:30 entries to wait for 11:00.
+
+        Without this fix, the bot would get stuck forever waiting for the
+        10:00 entry window that already passed.
+
+        Args:
+            now: Current time (US Eastern)
+        """
+        skipped = 0
+        while self._next_entry_index < len(self.entry_times):
+            scheduled_time = self.entry_times[self._next_entry_index]
+            scheduled_datetime = now.replace(
+                hour=scheduled_time.hour,
+                minute=scheduled_time.minute,
+                second=0,
+                microsecond=0
+            )
+            window_end = scheduled_datetime + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+
+            # If current time is past the entry window, skip this entry
+            if now > window_end:
+                skipped += 1
+                logger.info(
+                    f"TIME-002: Skipping missed Entry #{self._next_entry_index + 1} "
+                    f"at {scheduled_time.strftime('%H:%M')} (window ended at {window_end.strftime('%H:%M:%S')})"
+                )
+                self.daily_state.entries_skipped += 1
+                self._next_entry_index += 1
+            else:
+                # Entry is either in the future or currently in its window
+                break
+
+        if skipped > 0:
+            logger.info(f"TIME-002: Skipped {skipped} missed entries, next is Entry #{self._next_entry_index + 1}")
 
     def _minutes_until(self, target_time: dt_time) -> float:
         """Calculate minutes until a target time (today)."""
