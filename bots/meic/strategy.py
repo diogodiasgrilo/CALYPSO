@@ -189,13 +189,8 @@ DEFAULT_ENTRY_TIMES = [
     dt_time(12, 30),  # Entry 6: 12:30 PM ET
 ]
 
-# TIME-003: Early close day truncated schedule (1:00 PM close)
-EARLY_CLOSE_ENTRY_TIMES = [
-    dt_time(10, 0),   # Entry 1
-    dt_time(10, 30),  # Entry 2
-    # Skip 11:00+ entries to allow time for theta decay
-]
-
+# Note: Early close day handling is done dynamically in _parse_entry_times()
+# by filtering DEFAULT_ENTRY_TIMES to only include entries before 11:00 AM.
 
 # =============================================================================
 # STATE MANAGEMENT
@@ -1382,9 +1377,13 @@ class MEICStrategy:
 
     def _calculate_strikes(self, entry: IronCondorEntry) -> bool:
         """
-        Calculate iron condor strikes based on current SPX price.
+        Calculate iron condor strikes based on current SPX price and VIX.
 
-        Uses delta targeting and spread width from config.
+        Uses VIX-adjusted distance to approximate target delta (from config).
+        Higher VIX = wider strikes needed to maintain same delta.
+
+        The relationship: at VIX 15, ~40 points OTM gives ~8 delta for 0DTE.
+        Scale linearly with VIX to maintain consistent probability.
 
         Args:
             entry: IronCondorEntry to populate with strikes
@@ -1397,17 +1396,39 @@ class MEICStrategy:
             logger.error("Cannot calculate strikes - no SPX price")
             return False
 
+        vix = self.current_vix
+        if vix <= 0:
+            logger.warning("No VIX available - using default VIX=15 for strike calculation")
+            vix = 15.0
+
         # Round SPX to nearest 5 (SPX strikes are 5-point increments)
         rounded_spx = round(spx / 5) * 5
 
-        # For ~8 delta, typically 40-60 points OTM at typical IV
-        # This should be calibrated based on actual option chain data
-        # For now, use a simple distance based on target delta
-        # Higher delta = closer to ATM, lower delta = further OTM
-        # ~10 delta is typically around 1% OTM (0DTE with normal IV)
-        otm_distance = int(rounded_spx * 0.007)  # ~0.7% OTM as starting point
-        otm_distance = round(otm_distance / 5) * 5  # Round to 5
-        otm_distance = max(35, min(65, otm_distance))  # Clamp to 35-65
+        # VIX-adjusted OTM distance for target delta
+        # Base calibration: At VIX 15, ~40 points OTM gives ~8 delta for 0DTE SPX
+        # The relationship is roughly linear: distance scales with VIX
+        #
+        # Delta adjustment: target_delta of 8 = base, adjust for other targets
+        # Lower target delta (e.g., 5) = further OTM = multiply by (8/5) = 1.6
+        # Higher target delta (e.g., 15) = closer to ATM = multiply by (8/15) = 0.53
+        base_distance_at_vix15 = 40  # Points OTM for ~8 delta at VIX 15
+        delta_adjustment = 8.0 / self.target_delta  # Scale for target delta
+
+        # VIX scaling factor (clamped to reasonable range)
+        # Min 0.7 (VIX ~10) to prevent strikes too close
+        # Max 2.5 (VIX ~37) to prevent strikes too far
+        vix_factor = max(0.7, min(2.5, vix / 15.0))
+
+        # Calculate OTM distance
+        otm_distance = base_distance_at_vix15 * vix_factor * delta_adjustment
+        otm_distance = round(otm_distance / 5) * 5  # Round to 5-point strikes
+        otm_distance = max(25, min(120, otm_distance))  # Clamp to 25-120 points
+
+        logger.info(
+            f"Strike calculation: VIX={vix:.1f}, target_delta={self.target_delta}, "
+            f"vix_factor={vix_factor:.2f}, delta_adj={delta_adjustment:.2f}, "
+            f"otm_distance={otm_distance} pts"
+        )
 
         # Call side (above current price)
         entry.short_call_strike = rounded_spx + otm_distance
@@ -1456,19 +1477,28 @@ class MEICStrategy:
         MEIC Rule: Stop on each side = Total credit received
         MEIC+ Modification: Stop = Total credit - $0.10
 
+        Also validates that credit received is within configured bounds.
+
         Args:
             entry: IronCondorEntry to calculate stops for
         """
         total_credit = entry.total_credit
 
+        # Validate credit per side against configured bounds
+        # This ensures we're getting adequate premium for the risk taken
+        self._validate_entry_credit(entry)
+
         if self.meic_plus_enabled:
             # MEIC+ modification - smaller stop for breakeven days -> small wins
-            # STOP-002: Don't apply if stop would be too tight
-            if total_credit > 1.50:  # Only apply if credit > $1.50
+            # STOP-002: Don't apply if stop would be too tight (credit < $1.50)
+            # Note: $1.50 is a safety threshold - with thin credits, reducing
+            # the stop by $0.10 makes it proportionally too tight
+            min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50)
+            if total_credit > min_credit_for_meic_plus:
                 stop_level = total_credit - self.meic_plus_reduction
             else:
                 stop_level = total_credit
-                logger.info(f"MEIC+ not applied - credit ${total_credit:.2f} too small")
+                logger.info(f"MEIC+ not applied - credit ${total_credit:.2f} < ${min_credit_for_meic_plus:.2f}")
         else:
             stop_level = total_credit
 
@@ -1480,6 +1510,36 @@ class MEICStrategy:
             f"Stop levels set for Entry #{entry.entry_number}: "
             f"${stop_level:.2f} per side (credit: ${total_credit:.2f})"
         )
+
+    def _validate_entry_credit(self, entry: IronCondorEntry):
+        """
+        Validate that entry credit is within configured bounds.
+
+        Logs warnings for credits outside the target range. Credits below
+        minimum indicate potential liquidity issues or strike selection
+        problems. Credits above maximum are unusual but acceptable.
+
+        Args:
+            entry: IronCondorEntry to validate
+        """
+        for side, credit in [("Call", entry.call_spread_credit),
+                             ("Put", entry.put_spread_credit)]:
+            if credit < self.min_credit_per_side:
+                logger.warning(
+                    f"LOW CREDIT: {side} credit ${credit:.2f} < minimum ${self.min_credit_per_side:.2f} - "
+                    f"Entry #{entry.entry_number} may have insufficient premium protection"
+                )
+                # Log to safety events for tracking
+                self._log_safety_event(
+                    "LOW_CREDIT_WARNING",
+                    f"Entry #{entry.entry_number} {side} credit ${credit:.2f} < ${self.min_credit_per_side:.2f}"
+                )
+            elif credit > self.max_credit_per_side:
+                # High credit is unusual but not dangerous - just log info
+                logger.info(
+                    f"HIGH CREDIT: {side} credit ${credit:.2f} > target ${self.max_credit_per_side:.2f} - "
+                    f"Entry #{entry.entry_number} (higher IV environment)"
+                )
 
     def _simulate_entry(self, entry: IronCondorEntry) -> bool:
         """
@@ -2286,9 +2346,10 @@ class MEICStrategy:
         self._log_safety_event("NAKED_SHORT_DETECTED", f"{leg_name} position {pos_id}")
 
         self.alert_service.send_alert(
-            AlertType.CIRCUIT_BREAKER,
-            AlertPriority.CRITICAL,
-            f"NAKED SHORT: {leg_name} - closing immediately"
+            alert_type=AlertType.CIRCUIT_BREAKER,
+            title="NAKED SHORT DETECTED",
+            message=f"NAKED SHORT: {leg_name} (position {pos_id}) - closing immediately",
+            priority=AlertPriority.CRITICAL
         )
 
         # Attempt to close the naked short
@@ -2890,9 +2951,10 @@ class MEICStrategy:
         self._log_safety_event("CRITICAL_INTERVENTION", reason)
 
         self.alert_service.send_alert(
-            AlertType.CIRCUIT_BREAKER,
-            AlertPriority.CRITICAL,
-            f"MEIC HALTED: {reason}"
+            alert_type=AlertType.CRITICAL_INTERVENTION,
+            title="MEIC BOT HALTED",
+            message=f"MEIC HALTED: {reason}. Manual intervention required.",
+            priority=AlertPriority.CRITICAL
         )
 
     # =========================================================================
@@ -3325,36 +3387,8 @@ class MEICStrategy:
         # Update state file
         self._save_state_to_disk()
 
-    def verify_positions_before_operation(self, operation: str) -> bool:
-        """
-        POS-002: Verify positions exist in Saxo before any critical operation.
-
-        Call this before placing orders or modifying positions to ensure
-        our local state matches Saxo reality.
-
-        Args:
-            operation: Description of the operation (for logging)
-
-        Returns:
-            bool: True if positions match, False if discrepancy found
-        """
-        logger.debug(f"POS-002: Verifying positions before {operation}")
-
-        all_positions = self.client.get_positions()
-        actual_ids = {str(p.get("PositionBase", {}).get("PositionId")) for p in all_positions}
-
-        for entry in self.daily_state.active_entries:
-            for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
-                pos_id = getattr(entry, f"{leg_name}_position_id")
-                if pos_id and pos_id not in actual_ids:
-                    logger.warning(
-                        f"POS-002: Entry #{entry.entry_number} {leg_name} ({pos_id}) "
-                        f"not found in Saxo - triggering reconciliation"
-                    )
-                    self._reconcile_positions()
-                    return False
-
-        return True
+    # Note: POS-002 position verification is handled by _reconcile_positions()
+    # which is called hourly and on state transitions.
 
     # =========================================================================
     # DAILY RESET
@@ -3813,25 +3847,9 @@ class MEICStrategy:
             return VIGILANT_CHECK_INTERVAL_SECONDS
         return NORMAL_CHECK_INTERVAL_SECONDS
 
-    # =========================================================================
-    # INTRADAY STATS (P3)
-    # =========================================================================
-
-    def get_intraday_stats(self) -> Dict:
-        """
-        P3: Get intraday market statistics.
-
-        Returns:
-            Dict with SPX high/low/range and VIX high/average
-        """
-        return {
-            "spx_high": self.market_data.spx_high,
-            "spx_low": self.market_data.spx_low if self.market_data.spx_low != float('inf') else 0,
-            "spx_range": self.market_data.get_spx_range(),
-            "vix_high": self.market_data.vix_high,
-            "vix_average": self.market_data.get_vix_average(),
-            "vix_samples": len(self.market_data.vix_samples)
-        }
+    # Note: Intraday stats (SPX high/low, VIX average) are tracked in MarketData
+    # and can be accessed via market_data.get_spx_range(), market_data.get_vix_average()
+    # when needed for future dashboard features.
 
     def get_dashboard_metrics(self) -> Dict[str, Any]:
         """

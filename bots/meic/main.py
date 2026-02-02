@@ -25,6 +25,17 @@ Date: 2026-01-27
 
 Changelog:
 ----------
+1.2.0 (2026-02-02): VIX-adjusted strikes + Code audit fixes
+    - Strike distance now scales with VIX for consistent delta targeting
+    - Higher VIX = wider strikes (maintains ~8 delta probability)
+    - Uses config target_delta value (min_delta, max_delta for validation)
+    - OTM distance range expanded from 35-65 to 25-120 points
+    - BUGFIX: Fixed send_alert() calls with wrong argument order (would crash)
+    - BUGFIX: Added credit validation (min_credit_per_side, max_credit_per_side now used)
+    - BUGFIX: Made MEIC+ $1.50 threshold configurable (meic_plus_min_credit)
+    - CLEANUP: Removed dead code (models/ package, unused functions)
+    - CLEANUP: Removed unused EARLY_CLOSE_ENTRY_TIMES constant
+
 1.1.0 (2026-02-01): REST-only mode + Safety features
     - Disabled WebSocket streaming, use REST API for all price fetching
     - Added USE_WEBSOCKET_STREAMING toggle (default: False)

@@ -184,13 +184,20 @@ For each iron condor entry:
 
 ### Strike Selection Algorithm
 
+The bot uses **VIX-adjusted strike selection** to maintain consistent delta across different volatility environments. Higher VIX means wider strikes are needed to achieve the same delta.
+
 ```python
-def select_strikes(spx_price: float, spread_width: int = 50) -> dict:
+def select_strikes(spx_price: float, vix: float, target_delta: int = 8, spread_width: int = 50) -> dict:
     """
-    Select iron condor strikes based on current SPX price.
+    Select iron condor strikes based on current SPX price and VIX.
+
+    Uses VIX-adjusted distance to approximate target delta.
+    Base calibration: At VIX 15, ~40 points OTM gives ~8 delta for 0DTE.
 
     Args:
         spx_price: Current SPX index level
+        vix: Current VIX level
+        target_delta: Target delta for short strikes (default 8)
         spread_width: Distance between short and long strikes (default 50)
 
     Returns:
@@ -199,9 +206,14 @@ def select_strikes(spx_price: float, spread_width: int = 50) -> dict:
     # Round SPX price to nearest 5 (SPX strikes are in 5-point increments)
     rounded_price = round(spx_price / 5) * 5
 
-    # Find strikes that give ~5-15 delta (typically 30-60 points OTM)
-    # This should be calibrated based on current VIX/IV
-    otm_distance = 40  # Start with 40 points OTM
+    # VIX-adjusted OTM distance
+    base_distance_at_vix15 = 40  # Points OTM for ~8 delta at VIX 15
+    delta_adjustment = 8.0 / target_delta  # Scale for target delta
+    vix_factor = max(0.7, min(2.5, vix / 15.0))  # Clamp to 0.7-2.5
+
+    otm_distance = base_distance_at_vix15 * vix_factor * delta_adjustment
+    otm_distance = round(otm_distance / 5) * 5  # Round to 5-point strikes
+    otm_distance = max(25, min(120, otm_distance))  # Clamp to 25-120 points
 
     # Call side (above current price)
     short_call = rounded_price + otm_distance
@@ -216,13 +228,28 @@ def select_strikes(spx_price: float, spread_width: int = 50) -> dict:
         "long_call": long_call,
         "short_put": short_put,
         "long_put": long_put,
-        "spread_width": spread_width
+        "spread_width": spread_width,
+        "otm_distance": otm_distance
     }
 ```
 
+#### VIX-Adjusted Distance Table
+
+| VIX | VIX Factor | OTM Distance | Approx Delta |
+|-----|------------|--------------|--------------|
+| 10 | 0.70 | 30 pts | ~10-12 |
+| 12 | 0.80 | 30 pts | ~8-10 |
+| 15 | 1.00 | 40 pts | ~8 |
+| 20 | 1.33 | 55 pts | ~8 |
+| 25 | 1.67 | 65 pts | ~8 |
+| 30 | 2.00 | 80 pts | ~6-8 |
+| 35 | 2.33 | 95 pts | ~6-8 |
+
+This ensures consistent probability (~85-92% OTM) across all market conditions.
+
 ### Practical Example
 
-SPX at 6000:
+SPX at 6000, VIX at 15 (normal volatility):
 
 | Leg | Strike | Delta | Position |
 |-----|--------|-------|----------|
@@ -232,6 +259,17 @@ SPX at 6000:
 | Long Put | 5910 | ~2 | Buy 1 |
 
 Credit received: ~$1.25 per side = $2.50 total
+
+SPX at 6000, VIX at 25 (elevated volatility):
+
+| Leg | Strike | Delta | Position |
+|-----|--------|-------|----------|
+| Long Call | 6115 | ~2 | Buy 1 |
+| Short Call | 6065 | ~8 | Sell 1 |
+| Short Put | 5935 | ~8 | Sell 1 |
+| Long Put | 5885 | ~2 | Buy 1 |
+
+Credit received: ~$1.75 per side = $3.50 total (higher premium in high VIX)
 
 ---
 
