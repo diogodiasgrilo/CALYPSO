@@ -24,7 +24,7 @@ Usage:
 
 Author: Trading Bot Developer
 Date: 2025
-Last Updated: 2026-02-02 (Wing width minimum, dynamic profit target)
+Last Updated: 2026-02-02 (P&L fix, 0 DTE preference, wing width, dynamic profit target)
 """
 
 import os

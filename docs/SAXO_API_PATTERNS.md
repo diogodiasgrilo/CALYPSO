@@ -126,16 +126,22 @@ fill_price = activity.get("FilledPrice") or activity.get("Price", 0)  # FilledPr
 fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
 ```
 
-**Activities Endpoint Sync Delay (Fixed 2026-02-01):** The activities endpoint may have a slight
-delay (~1-3 seconds) before fill data appears. If you check immediately after order placement,
-the fill may not be there yet. Solution: Retry up to 3 times with 1 second delay between attempts.
+**Activities Endpoint Sync Delay (Fixed 2026-02-02):** The activities endpoint may have a
+delay (~3-10 seconds) before fill data appears. Solution: Retry with configurable delay.
+
+**Current implementation (saxo_client.py):**
+- 4 retries × 1.5s = 6s total in `check_order_filled_by_activity()`
+- Iron Fly adds its own 3-attempt loop on top = ~18s worst case
+- Falls back to `PositionBase.OpenPrice` if activities have no price
+
 ```python
-for attempt in range(3):
+# check_order_filled_by_activity() - 4 retries × 1.5s = 6s
+for attempt in range(1, max_retries + 1):  # max_retries=4, retry_delay=1.5
     filled, fill_details = check_order_filled_by_activity(order_id, uic)
     if filled and fill_details.get("fill_price", 0) > 0:
         return True, fill_details  # Got actual fill price
-    time.sleep(1)  # Wait for sync
-# If still no price, log warning and fall back to quote (last resort)
+    time.sleep(retry_delay)  # 1.5s between retries
+# Falls back to position lookup for PositionBase.OpenPrice
 ```
 
 **Order Details Response (`/port/v1/orders/{clientKey}/{orderId}`):**
@@ -162,6 +168,40 @@ actual_sp = get_fill_price(fill_details.get("short_put"), sp_bid)
 actual_lc = get_fill_price(fill_details.get("long_call"), lc_ask)
 actual_lp = get_fill_price(fill_details.get("long_put"), lp_ask)
 credit = (actual_sc + actual_sp - actual_lc - actual_lp) * 100
+```
+
+### Position Fill Price Extraction (CRITICAL FIX 2026-02-02)
+
+When the activities endpoint returns `FilledPrice=0` (sync delay), fall back to position lookup.
+
+**CRITICAL:** Use `PositionBase.OpenPrice`, NOT `PositionView.AverageOpenPrice`!
+
+| Field | Location | Works For | Notes |
+|-------|----------|-----------|-------|
+| `OpenPrice` | `PositionBase` | BOTH long AND short | **ALWAYS USE THIS** |
+| `AverageOpenPrice` | `PositionView` | **NEITHER** | Always returns 0, do NOT use |
+
+**Investigation (2026-02-02):** We tested all 5 positions on the live account:
+- Long positions (Amount=+2): `PositionBase.OpenPrice` = 21.525, 28.4 ✓
+- Short positions (Amount=-2): `PositionBase.OpenPrice` = 1.77, 0.385 ✓
+- **ALL positions:** `PositionView.AverageOpenPrice` = 0 ✗
+
+```python
+# WRONG - AverageOpenPrice is ALWAYS zero
+avg_price = pos.get("PositionView", {}).get("AverageOpenPrice", 0)  # Returns 0!
+
+# RIGHT - OpenPrice works for both long and short positions
+open_price = pos.get("PositionBase", {}).get("OpenPrice", 0)  # Returns actual fill price
+```
+
+**Position Lookup as Fill Price Fallback:**
+```python
+# When activities endpoint has no price, check position
+for pos in get_positions():
+    if pos.get("PositionBase", {}).get("Uic") == uic:
+        open_price = pos.get("PositionBase", {}).get("OpenPrice", 0)
+        if open_price > 0:
+            return True, {"fill_price": open_price, "source": "position_check"}
 ```
 
 ---

@@ -2840,14 +2840,15 @@ class SaxoClient:
         FIX (2026-02-02): Increased retries to 4 × 1.5s = 6s total (was 3 × 1s = 3s).
         Friday 2026-01-30 showed FilledPrice=0 after 3s, causing fallback to quoted
         prices and P&L errors of $1.30 per trade. Also added explicit position lookup
-        for AverageOpenPrice as secondary source. Note: Iron Fly has its own retry
-        loop on top of this, so keeping client retries moderate (6s not 10s).
+        for PositionBase.OpenPrice as secondary source (NOT PositionView.AverageOpenPrice,
+        which is always 0 for all positions). Note: Iron Fly has its own retry loop on
+        top of this, so keeping client retries moderate (6s not 10s).
 
         Args:
             order_id: The order ID to check
             uic: The instrument UIC (to verify the fill is for the right instrument)
-            max_retries: Maximum number of retry attempts (default: 5)
-            retry_delay: Seconds to wait between retries (default: 2.0)
+            max_retries: Maximum number of retry attempts (default: 4)
+            retry_delay: Seconds to wait between retries (default: 1.5)
 
         Returns:
             Tuple of (filled: bool, fill_details: Optional[Dict])

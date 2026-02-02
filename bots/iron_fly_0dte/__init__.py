@@ -17,8 +17,10 @@ Wing Width Calculation (Updated 2026-02-02):
 - Enforces minimum 40-point wing width (Jim Olson rule: "If EM < $30, use $50 wings")
 - Target credit should be ~30% of wing width for adequate premium collection
 
-P&L Tracking (Updated 2026-02-01):
+P&L Tracking (Updated 2026-02-02):
 - Uses actual fill prices from Saxo activities endpoint (not quoted bid/ask)
+- Falls back to PositionBase.OpenPrice when activities endpoint has no price
+  (NOT PositionView.AverageOpenPrice which is always 0)
 - Tracks commission: $5 per leg round-trip ($20 total per trade)
 - Shows both Gross P&L and Net P&L (after commission) in logs/alerts
 - Profit target factors in commission to ensure actual net profit
@@ -36,9 +38,14 @@ Safety Features:
 - Position metadata persistence for crash recovery
 - Multiple iron fly detection and auto-selection
 
+Expiration Selection (Updated 2026-02-02):
+- Always prefers exact 0 DTE (same-day expiry) for maximum theta decay
+- Only falls back to 1 DTE if no 0 DTE options available
+- Code explicitly checks for dte==0 before accepting dte==1
+
 Edge Cases: 64 analyzed, 60 LOW / 3 MEDIUM / 1 HIGH by design (see docs/IRON_FLY_EDGE_CASES.md)
 Strategy Spec: See docs/IRON_FLY_STRATEGY_SPECIFICATION.md for full rules
-Last Updated: 2026-02-02 (Wing width minimum, Jim Olson rules)
+Last Updated: 2026-02-02 (P&L fix, 0 DTE preference, wing width minimum)
 """
 
 from bots.iron_fly_0dte.strategy import IronFlyStrategy, IronFlyState

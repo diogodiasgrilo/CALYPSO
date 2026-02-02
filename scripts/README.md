@@ -6,10 +6,27 @@ Utility scripts for analysis, testing, and diagnostics. All scripts are run from
 
 | If you want to... | Run this |
 |-------------------|----------|
-| See what the bot would do RIGHT NOW | `python scripts/preview_live_entry.py` |
+| See what Delta Neutral bot would do NOW | `python scripts/preview_live_entry.py` |
+| See what Iron Fly bot would do NOW | `python scripts/preview_iron_fly_entry.py` |
 | Deep analysis with historical research | `python scripts/optimal_strike_analysis.py` |
 | Check if API is working before trading | `python scripts/test_rest_api.py` |
 | Quick NET return calculation | `python scripts/calculate_net_return.py` |
+
+---
+
+## Iron Fly Strategy Scripts
+
+| Script | Purpose | When to Use |
+|--------|---------|-------------|
+| `preview_iron_fly_entry.py` | Shows what Iron Fly bot would do now: VIX check, 0 DTE expiry, expected move, wing width, pricing | **PRIMARY** - Run daily to verify Iron Fly logic |
+
+**Key checks in preview_iron_fly_entry.py:**
+1. VIX filter (must be < 20)
+2. 0 DTE vs 1 DTE expiration verification
+3. Expected move from ATM straddle
+4. Wing width (Jim Olson 40pt minimum rule)
+5. Complete Iron Fly structure and pricing
+6. P&L projections with commission
 
 ---
 
@@ -142,4 +159,4 @@ pytest tests/test_position_registry.py -v
 
 ---
 
-**Last Updated:** 2026-01-29
+**Last Updated:** 2026-02-02
