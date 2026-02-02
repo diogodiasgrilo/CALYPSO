@@ -233,7 +233,7 @@ def main():
     print("STEP 6: IRON FLY OPTIONS LOOKUP")
     print("-" * 70)
 
-    iron_fly_options = client.get_iron_fly_options(
+    iron_fly_options = client.find_iron_fly_options(
         underlying_uic,
         atm_strike,
         upper_wing,
