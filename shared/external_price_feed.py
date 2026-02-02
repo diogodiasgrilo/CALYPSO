@@ -15,8 +15,7 @@ Fallback is used only when:
 import requests
 import json
 import time
-from typing import Optional, Dict
-from datetime import datetime
+from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)

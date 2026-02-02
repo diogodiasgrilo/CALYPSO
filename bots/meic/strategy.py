@@ -1860,8 +1860,7 @@ class MEICStrategy:
                 if market_result and market_result.get("OrderId"):
                     order_id = market_result.get("OrderId")
                     # Market orders fill immediately - verify via activities
-                    import time
-                    time.sleep(1)  # Brief wait for activity sync
+                    time.sleep(1)  # Brief wait for activity sync (uses module-level import)
                     filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
                     if filled:
                         fill_price = fill_details.get("fill_price") if fill_details else expected_price
@@ -3307,7 +3306,7 @@ class MEICStrategy:
 
             # Get option details
             options_data = pos_base.get("OptionsData", {})
-            strike = options_data.get("Strike")
+            strike = options_data.get("StrikePrice")  # NOTE: Saxo API uses "StrikePrice" not "Strike"
             expiry = options_data.get("ExpiryDate", "")
             put_call = options_data.get("PutCall")  # "Call" or "Put"
 
