@@ -2257,24 +2257,39 @@ class MEICStrategy:
             Option UIC or None if not found
         """
         # Query option chain
-        chain = self.client.get_option_chain(
+        chain_response = self.client.get_option_chain(
             option_root_id=self.option_root_uic,
             expiry_dates=[expiry]
         )
 
-        if not chain:
+        if not chain_response:
             logger.error(f"Could not fetch option chain for {expiry}")
             return None
 
+        # Extract OptionSpace from response (get_option_chain returns a dict, not a list)
+        # Structure: {"OptionSpace": [{"Expiry": "...", "SpecificOptions": [...]}]}
+        option_space = chain_response.get("OptionSpace", [])
+        if not option_space:
+            logger.error(f"No OptionSpace in chain response for {expiry}")
+            return None
+
+        # Get the first (and typically only) expiration date's options
+        expiry_data = option_space[0] if option_space else {}
+        specific_options = expiry_data.get("SpecificOptions", [])
+
+        if not specific_options:
+            logger.error(f"No SpecificOptions in chain for {expiry}")
+            return None
+
         # Search for matching strike and type
-        for option in chain:
+        for option in specific_options:
             opt_strike = option.get("Strike")
             opt_type = option.get("PutCall")
 
             if opt_strike == strike and opt_type == put_call:
                 return option.get("Uic")
 
-        logger.error(f"Strike {strike} {put_call} not found in chain")
+        logger.error(f"Strike {strike} {put_call} not found in chain for {expiry}")
         return None
 
     def _get_position_id_from_order(self, order_result: Dict) -> Optional[str]:
