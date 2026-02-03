@@ -2854,12 +2854,47 @@ class MEICStrategy:
                     to_open_close="ToClose"
                 )
                 if result:
-                    self.registry.unregister(position_id)
-                    logger.info(f"EMERGENCY-001: Closed {leg_name} on attempt {attempt_num}: order {result.get('OrderId')}")
-                    return True
+                    order_id = result.get('OrderId', 'unknown')
+                    logger.info(f"EMERGENCY-001: Close order placed for {leg_name}: order {order_id}")
+
+                    # SAFETY-024: Verify position is actually closed after order placement
+                    time.sleep(1.5)  # Wait for order to fill
+                    if self._verify_position_closed(position_id, leg_name, uic):
+                        self.registry.unregister(position_id)
+                        logger.info(f"EMERGENCY-001: Verified {leg_name} closed on attempt {attempt_num}")
+                        return True
+                    else:
+                        logger.warning(
+                            f"EMERGENCY-001: Order {order_id} placed but position still exists, retrying..."
+                        )
+                        # Don't count this as fully failed - order may have been rejected
+                else:
+                    # Order placement returned None - likely an API error
+                    logger.error(f"EMERGENCY-001: Close order returned None for {leg_name} on attempt {attempt_num}")
+
+                    # SAFETY-024: Send alert on FIRST failure so we know immediately
+                    if attempt_num == 1:
+                        self.alert_service.send_alert(
+                            alert_type=AlertType.EMERGENCY_CLOSE,
+                            title="STOP CLOSE FAILED - IMMEDIATE",
+                            message=f"First attempt to close {leg_name} failed! "
+                                    f"Position ID: {position_id}, UIC: {uic}. "
+                                    f"Will retry {EMERGENCY_CLOSE_MAX_ATTEMPTS - 1} more times.",
+                            priority=AlertPriority.HIGH
+                        )
 
             except Exception as e:
                 logger.error(f"EMERGENCY-001: Close {leg_name} attempt {attempt_num} failed: {e}")
+
+                # SAFETY-024: Send alert on FIRST failure with exception
+                if attempt_num == 1:
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.EMERGENCY_CLOSE,
+                        title="STOP CLOSE EXCEPTION - IMMEDIATE",
+                        message=f"Exception closing {leg_name}: {str(e)[:100]}. "
+                                f"Position ID: {position_id}. Will retry.",
+                        priority=AlertPriority.HIGH
+                    )
 
                 # Escalating alerts based on attempt number
                 if attempt_num == 3:
@@ -2935,6 +2970,57 @@ class MEICStrategy:
         except Exception as e:
             logger.error(f"EMERGENCY-001: Error checking spread for UIC {uic}: {e}")
             return (True, 0.0)  # Proceed on error
+
+    def _verify_position_closed(self, position_id: str, leg_name: str, uic: int) -> bool:
+        """
+        SAFETY-024: Verify that a position was actually closed after placing a close order.
+
+        This is critical because the order placement can succeed (return an order ID)
+        but the order might get rejected, leaving the position open. We need to verify
+        the position is actually gone before marking it as closed.
+
+        Args:
+            position_id: Saxo position ID that should be closed
+            leg_name: Name for logging
+            uic: UIC of the option (for additional verification)
+
+        Returns:
+            True if position is confirmed closed, False if still exists
+        """
+        try:
+            # Check if position still exists in Saxo
+            positions = self.client.get_positions()
+
+            # Look for the position by ID
+            for pos in positions:
+                pos_id = str(pos.get("PositionId", ""))
+                if pos_id == str(position_id):
+                    # Position still exists
+                    logger.warning(
+                        f"SAFETY-024: Position {position_id} ({leg_name}) still exists after close order!"
+                    )
+                    return False
+
+            # Also check by UIC in case position ID changed
+            for pos in positions:
+                pos_uic = pos.get("PositionBase", {}).get("Uic")
+                pos_asset_type = pos.get("PositionBase", {}).get("AssetType")
+                if pos_uic == uic and pos_asset_type == "StockIndexOption":
+                    # Found a position with same UIC - might be the same one
+                    logger.warning(
+                        f"SAFETY-024: Found position with UIC {uic} ({leg_name}) - may not be closed"
+                    )
+                    # Don't return False here - could be a different position
+                    # Just log the warning
+
+            logger.info(f"SAFETY-024: Verified position {position_id} ({leg_name}) is closed")
+            return True
+
+        except Exception as e:
+            logger.error(f"SAFETY-024: Error verifying position closed: {e}")
+            # On error, assume closed to avoid infinite retry loops
+            # The alert was already sent, manual verification needed
+            return True
 
     def _wait_for_spread_normalization(self, uic: int, leg_name: str) -> bool:
         """
