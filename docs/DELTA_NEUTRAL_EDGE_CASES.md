@@ -1,8 +1,8 @@
 # Delta Neutral Bot - Edge Case Analysis Report
 
-**Analysis Date:** 2026-01-22 (Updated 2026-02-01)
+**Analysis Date:** 2026-01-22 (Updated 2026-02-03)
 **Analyst:** Claude (Devil's Advocate Review)
-**Bot Version:** 2.0.4
+**Bot Version:** 2.0.5
 **Status:** Living Document - Update as fixes are implemented
 
 ---
@@ -11,12 +11,14 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 61
-**Well-Handled/Resolved:** 61 (100%)
+**Total Scenarios Analyzed:** 63
+**Well-Handled/Resolved:** 63 (100%)
 **Medium Risk:** 0 (0%)
 **High Risk:** 0 (0%) ✅
 
 🎉 **ALL EDGE CASES RESOLVED!**
+
+**Major Update (2026-02-03):** Added 2 new state machine edge cases (STATE-005, STATE-006) for SHORT_STRANGLE_ONLY recovery state and recenter/roll abort callbacks.
 
 **Major Update (2026-02-01):** Added 4 new safety edge cases (ORDER-006 through ORDER-009) for order size validation, slippage monitoring, and emergency close retries.
 
@@ -617,6 +619,28 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Status** | RESOLVED |
 | **Notes** | Previously had bugs (NO_POSITION, SHORT_STRANGLE_ACTIVE) - now fixed in refactoring. All state references verified against enum. |
 
+### 6.5 Recenter Fails Mid-Way Leaving Only Shorts
+| | |
+|---|---|
+| **ID** | STATE-005 |
+| **Trigger** | Recenter closes long straddle successfully, then fails to re-enter new longs (network error, no liquidity, partial fill) |
+| **Current Handling** | **SHORT_STRANGLE_ONLY recovery state** automatically enters longs on next strategy check. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `SHORT_STRANGLE_ONLY` state to StrategyState enum. Recovery logic at `strategy.py:3600` now sets this state (instead of FULL_POSITION) when only shorts exist. Main loop handler at `strategy.py:9900` enters longs normally, then transitions to FULL_POSITION. Typical recovery time: 10-60 seconds. Abort callbacks also prevent unnecessary recenters when price bounces back. |
+| **Fixed In** | 2026-02-03 |
+
+### 6.6 Recenter/Roll Continues When No Longer Needed
+| | |
+|---|---|
+| **ID** | STATE-006 |
+| **Trigger** | Recenter triggered (price touched ±$5 threshold), but price bounces back during retry attempts |
+| **Current Handling** | **Abort callbacks** re-check condition before each retry on leg 1. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added `abort_check_callback` parameter to `_place_protected_multi_leg_order()`. `execute_recenter()` passes `should_abort_recenter()` callback that checks `_check_recenter_condition()`. `roll_weekly_shorts()` passes `should_abort_roll()` callback that checks `should_roll_shorts()`. Callbacks only checked on leg 1 (once leg 1 fills, operation must complete). This prevents unnecessary operations when price briefly touches threshold then bounces back within retry window. |
+| **Fixed In** | 2026-02-03 |
+
 ---
 
 ## 7. DATA INTEGRITY ISSUES
@@ -734,9 +758,9 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Position State | 6 | 6 | 0 | 0 |
 | Market Conditions | 6 | 6 | 0 | 0 |
 | Timing/Race | 8 | 8 | 0 | 0 |
-| State Machine | 4 | 4 | 0 | 0 |
+| State Machine | 6 | 6 | 0 | 0 |
 | Data Integrity | 6 | 6 | 0 | 0 |
-| **TOTAL** | **61** | **61** | **0** | **0** |
+| **TOTAL** | **63** | **63** | **0** | **0** |
 
 🎉 **100% COVERAGE ACHIEVED!**
 
@@ -806,6 +830,11 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-02-01 | RESOLVED ORDER-010: Added activities endpoint retry logic for sync delay (3 retries × 1s) | Claude |
 | 2026-02-01 | RENUMBERED ORDER-007→ORDER-009 (order rejection handling) | Claude |
 | 2026-02-01 | **61 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
+| 2026-02-03 | RESOLVED STATE-005: Added SHORT_STRANGLE_ONLY recovery state for failed recenter scenarios | Claude |
+| 2026-02-03 | RESOLVED STATE-006: Added abort callbacks for recenter/roll when condition no longer met | Claude |
+| 2026-02-03 | ADDED: Abort callbacks re-check recenter/roll conditions before each retry on leg 1 | Claude |
+| 2026-02-03 | ADDED: SHORT_STRANGLE_ONLY state handler enters longs normally on next strategy check | Claude |
+| 2026-02-03 | **63 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 
 ---
 
@@ -832,5 +861,5 @@ When fixing a scenario:
 
 ---
 
-**Document Version:** 2.2
-**Last Updated:** 2026-02-01
+**Document Version:** 2.3
+**Last Updated:** 2026-02-03

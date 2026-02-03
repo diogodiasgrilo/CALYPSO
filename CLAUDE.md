@@ -227,7 +227,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
-- **Version:** 2.0.4 (Updated 2026-02-01 with enhanced safety features)
+- **Version:** 2.0.5 (Updated 2026-02-03 with abort callbacks and SHORT_STRANGLE_ONLY recovery)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
@@ -279,6 +279,21 @@ Instead of waiting for longs to hit 60 DTE and then closing (which wastes recent
 **Why this matters:**
 - Without this: Bot opens shorts on Thursday, longs hit 60 DTE on Monday → exit everything → wasted 4 days of theta on shorts
 - With this: Bot detects the conflict BEFORE opening shorts → closes everything → starts fresh → maximizes theta collection
+
+**Abort Callbacks for Recenter/Roll (2026-02-03):**
+When executing recenter or roll operations, the bot re-checks conditions before each retry attempt on the first leg:
+- **Recenter:** If SPY price bounces back and distance to strike drops below threshold, abort the recenter
+- **Roll:** If price moves away from the challenged strike (cushion consumption drops below 75%), abort the roll
+- This prevents unnecessary operations when price briefly touches a threshold then bounces back
+- Only checked during close phase (leg 1) - once leg 1 fills, we're committed to completing the operation
+
+**SHORT_STRANGLE_ONLY Recovery State (2026-02-03):**
+A recovery state for when the bot has only short strangle positions (no longs):
+- **Trigger:** Recenter fails mid-way - closes longs successfully but fails to re-enter new longs
+- **Behavior:** Bot sets state to `SHORT_STRANGLE_ONLY` and enters longs normally on next cycle
+- **Recovery:** Automatically transitions to `FULL_POSITION` once longs are entered
+- **Duration:** Typically resolved within 10-60 seconds (next strategy check)
+- **Note:** Previously, shorts-only incorrectly set `FULL_POSITION` which caused the bot to skip entering longs
 
 ### Bot Isolation
 Iron Fly (SPX/SPXW) and Delta Neutral (SPY) are mostly independent:

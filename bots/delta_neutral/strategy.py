@@ -143,7 +143,7 @@ import time
 from datetime import datetime, timedelta, date, timezone, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple, Set, Callable
 
-from shared.saxo_client import SaxoClient, BuySell, OrderType
+from shared.saxo_client import SaxoClient, BuySell
 from shared.market_hours import get_us_market_time, is_weekend, is_market_holiday, is_market_open
 from shared.alert_service import AlertService, AlertType, AlertPriority
 
@@ -2834,7 +2834,7 @@ class DeltaNeutralStrategy:
 
     def _emergency_close_with_retries(
         self,
-        close_func: callable,
+        close_func: Callable[[], bool],
         description: str
     ) -> bool:
         """
