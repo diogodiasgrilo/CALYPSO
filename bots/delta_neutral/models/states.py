@@ -26,6 +26,7 @@ class StrategyState(Enum):
     - WAITING_OPENING_RANGE: 9:30-10:00 AM opening range, waiting for market to settle
     - FOMC_BLACKOUT: FOMC day with no positions - trading blocked all day
     - LONG_STRADDLE_ACTIVE: Long straddle entered, no short strangle yet
+    - SHORT_STRANGLE_ONLY: Only short strangle exists, need to enter longs (recovery state)
     - FULL_POSITION: Both long straddle and short strangle active
     - RECENTERING: In process of 5-point recentering
     - ROLLING_SHORTS: Rolling weekly short strangle
@@ -36,6 +37,7 @@ class StrategyState(Enum):
     WAITING_OPENING_RANGE = "WaitingOpeningRange"
     FOMC_BLACKOUT = "FOMCBlackout"
     LONG_STRADDLE_ACTIVE = "LongStraddleActive"
+    SHORT_STRANGLE_ONLY = "ShortStrangleOnly"
     FULL_POSITION = "FullPosition"
     RECENTERING = "Recentering"
     ROLLING_SHORTS = "RollingShorts"

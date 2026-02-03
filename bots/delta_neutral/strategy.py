@@ -141,7 +141,7 @@ Change History:
 import logging
 import time
 from datetime import datetime, timedelta, date, timezone, time as dt_time
-from typing import Optional, Dict, List, Any, Tuple, Set
+from typing import Optional, Dict, List, Any, Tuple, Set, Callable
 
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.market_hours import get_us_market_time, is_weekend, is_market_holiday, is_market_open
@@ -2904,7 +2904,8 @@ class DeltaNeutralStrategy:
         order_description: str,
         emergency_mode: bool = False,
         use_market_orders: bool = False,
-        progressive_completion: bool = True
+        progressive_completion: bool = True,
+        abort_check_callback: Optional[Callable[[], bool]] = None
     ) -> Dict:
         """
         Place individual orders for each leg with slippage protection and progressive retry.
@@ -2921,6 +2922,13 @@ class DeltaNeutralStrategy:
 
         This ensures that once leg 1 fills, leg 2 WILL fill (preventing partial fills).
 
+        ABORT CHECK CALLBACK (2026-02-03):
+        Optional callback called before each retry attempt on LEG 1 ONLY.
+        If the callback returns True, the operation is aborted early.
+        Used by recenter to re-check if recenter is still needed (SPY may have bounced back).
+        Used by roll to re-check if roll is still needed.
+        NOT called on leg 2+ because once leg 1 fills, we're committed.
+
         Args:
             legs: List of leg dictionaries with uic, asset_type, buy_sell, amount, price
             total_limit_price: Total limit price (for logging only)
@@ -2930,6 +2938,9 @@ class DeltaNeutralStrategy:
                               WARNING: Only use for CLOSING positions in emergency!
             progressive_completion: If True (default), use progressive retry sequence
                                    to ensure legs complete even if initial attempts fail.
+            abort_check_callback: Optional callback that returns True if operation should abort.
+                                 Only called during retries on leg 1 (not leg 2+).
+                                 Used for recenter/roll condition re-checks.
 
         Returns:
             dict: {
@@ -2939,7 +2950,8 @@ class DeltaNeutralStrategy:
                 "message": str,
                 "partial_fill": bool (if some legs filled but not all),
                 "filled_leg_index": int (which leg filled, 0-indexed, only on partial),
-                "filled_leg_info": dict (info about the filled leg, only on partial)
+                "filled_leg_info": dict (info about the filled leg, only on partial),
+                "aborted": bool (if operation was aborted by callback)
             }
         """
         from shared.saxo_client import BuySell
@@ -3103,6 +3115,24 @@ class DeltaNeutralStrategy:
             cancel_failed = False
 
             for attempt, (current_slippage, is_market) in enumerate(retry_sequence):
+                # =============================================================
+                # ABORT CHECK (2026-02-03): Re-check condition before each retry
+                # Only for LEG 1 (i == 0) - once leg 1 fills, we're committed
+                # =============================================================
+                if i == 0 and attempt > 0 and abort_check_callback:
+                    # Update market data before checking condition
+                    self.update_market_data()
+                    if abort_check_callback():
+                        logger.warning(f"  ⚠️ ABORT: Condition no longer met - aborting {order_description}")
+                        logger.info(f"     Checked before attempt {attempt + 1} on leg 1")
+                        return {
+                            "success": False,
+                            "filled": False,
+                            "order_id": None,
+                            "message": "Operation aborted - condition no longer met",
+                            "aborted": True
+                        }
+
                 # Get fresh quote for accurate limit price
                 quote = self.client.get_quote(leg_uic, leg_asset_type)
                 base_price = leg_price
@@ -3569,13 +3599,14 @@ class DeltaNeutralStrategy:
                 logger.warning(f"RECOVERED: PARTIAL long straddle (missing {missing}) - will complete")
         elif strangle_recovered:
             # Unusual state - short strangle without long straddle
+            # Set to SHORT_STRANGLE_ONLY so bot enters longs normally (not close shorts)
             if strangle_complete:
-                self.state = StrategyState.FULL_POSITION
-                logger.warning("RECOVERED: Short strangle without long straddle (unusual) - COMPLETE")
+                self.state = StrategyState.SHORT_STRANGLE_ONLY
+                logger.warning("RECOVERED: Short strangle without long straddle - will enter longs")
             else:
-                self.state = StrategyState.FULL_POSITION
+                self.state = StrategyState.SHORT_STRANGLE_ONLY
                 missing = "CALL" if self.needs_strangle_call() else "PUT"
-                logger.warning(f"RECOVERED: PARTIAL short strangle (missing {missing}) without long straddle")
+                logger.warning(f"RECOVERED: PARTIAL short strangle (missing {missing}) without long straddle - will complete strangle then enter longs")
         else:
             logger.info("Could not reconstruct strategy positions - starting fresh")
             return False
@@ -6341,12 +6372,19 @@ class DeltaNeutralStrategy:
 
         return True
 
-    def close_long_straddle(self, emergency_mode: bool = False) -> bool:
+    def close_long_straddle(
+        self,
+        emergency_mode: bool = False,
+        abort_check_callback: Optional[Callable[[], bool]] = None
+    ) -> bool:
         """
         Close the current long straddle position with slippage protection.
 
         Args:
             emergency_mode: If True, use aggressive pricing for faster fills.
+            abort_check_callback: Optional callback that returns True if operation should abort.
+                                 Only called during retries on leg 1. Used for recenter
+                                 to re-check if recenter is still needed (SPY may have bounced back).
 
         Returns:
             bool: True if closed successfully, False otherwise.
@@ -6395,8 +6433,14 @@ class DeltaNeutralStrategy:
             legs=legs,
             total_limit_price=total_limit_price,
             order_description=order_description,
-            emergency_mode=emergency_mode
+            emergency_mode=emergency_mode,
+            abort_check_callback=abort_check_callback
         )
+
+        # Check if operation was aborted (condition no longer met)
+        if order_result.get("aborted"):
+            logger.info("Close straddle aborted - condition no longer met (e.g., recenter no longer needed)")
+            return False
 
         if not order_result["filled"]:
             logger.error("Failed to close straddle - all progressive retries exhausted")
@@ -7891,13 +7935,20 @@ class DeltaNeutralStrategy:
         logger.info(f"✅ Successfully added missing straddle {'CALL' if need_call else 'PUT'} leg: ${matching_option['strike']:.0f}")
         return True
 
-    def close_short_strangle(self, emergency_mode: bool = False) -> bool:
+    def close_short_strangle(
+        self,
+        emergency_mode: bool = False,
+        abort_check_callback: Optional[Callable[[], bool]] = None
+    ) -> bool:
         """
         Close the current short strangle position with slippage protection.
 
         Args:
             emergency_mode: If True, use aggressive pricing and shorter timeouts
                            for urgent situations (ITM risk, circuit breaker).
+            abort_check_callback: Optional callback that returns True if the operation
+                                 should be aborted (e.g., roll condition no longer met).
+                                 Only checked during retries on leg 1 of close phase.
 
         Returns:
             bool: True if closed successfully, False otherwise.
@@ -7948,8 +7999,14 @@ class DeltaNeutralStrategy:
             total_limit_price=total_limit_price,
             order_description=order_description,
             emergency_mode=emergency_mode,
-            use_market_orders=emergency_mode  # MARKET orders for emergency closing shorts!
+            use_market_orders=emergency_mode,  # MARKET orders for emergency closing shorts!
+            abort_check_callback=abort_check_callback
         )
+
+        # Check if operation was aborted (condition no longer met)
+        if order_result.get("aborted"):
+            logger.info("Close strangle aborted - condition no longer met")
+            return False
 
         if not order_result["filled"]:
             logger.error("Failed to close strangle - all progressive retries exhausted")
@@ -8599,9 +8656,27 @@ class DeltaNeutralStrategy:
         # If recenter fails, we need to restore the state to avoid being stuck
         previous_state = StrategyState.FULL_POSITION if self.short_strangle else StrategyState.LONG_STRADDLE_ACTIVE
 
+        # =================================================================
+        # ABORT CALLBACK (2026-02-03): Re-check recenter condition before each retry
+        # If SPY bounces back and recenter is no longer needed, abort early
+        # This prevents unnecessary recenters when price briefly touches threshold
+        # =================================================================
+        def should_abort_recenter() -> bool:
+            """Return True if recenter is no longer needed (should abort)."""
+            # Update market data to get fresh SPY price
+            self.update_market_data()
+            # If recenter condition is no longer met, abort
+            if not self._check_recenter_condition():
+                logger.info(f"  ✓ Recenter no longer needed - SPY at ${self.current_underlying_price:.2f}, "
+                           f"strike ${self.initial_straddle_strike:.2f}, "
+                           f"distance ${abs(self.current_underlying_price - self.initial_straddle_strike):.2f} < {self.recenter_threshold}")
+                return True
+            return False
+
         # Step 1: Close current long straddle
+        # Pass the abort callback to re-check recenter condition during retries on leg 1
         if self.long_straddle:
-            if not self.close_long_straddle():
+            if not self.close_long_straddle(abort_check_callback=should_abort_recenter):
                 logger.error("Failed to close long straddle during recenter")
                 # CRITICAL FIX: Restore state before returning to avoid stuck RECENTERING
                 self.state = previous_state
@@ -8966,7 +9041,25 @@ class DeltaNeutralStrategy:
         # Step 5: Now actually close current shorts
         # Use emergency mode for aggressive pricing when rolling due to ITM risk
         if self.short_strangle:
-            if not self.close_short_strangle(emergency_mode=emergency_mode):
+            # =============================================================
+            # ABORT CALLBACK (2026-02-03): Re-check roll condition before each retry
+            # Only aborts during leg 1 of close phase (leg 2 must complete)
+            # =============================================================
+            def should_abort_roll() -> bool:
+                """Return True if roll is no longer needed (should abort)."""
+                self.update_market_data()
+                should_roll, challenged = self.should_roll_shorts()
+                if not should_roll:
+                    logger.info(f"  ✓ Roll no longer needed - price moved away from danger zone")
+                    return True
+                return False
+
+            if not self.close_short_strangle(
+                emergency_mode=emergency_mode,
+                abort_check_callback=should_abort_roll
+            ):
+                # Check if it was aborted vs failed
+                # If aborted, the condition is no longer met - return gracefully
                 logger.error("Failed to close shorts for rolling")
                 # CRITICAL FIX: Restore state to avoid stuck ROLLING_SHORTS
                 self.state = StrategyState.FULL_POSITION
@@ -9803,6 +9896,37 @@ class DeltaNeutralStrategy:
                             logger.info("Roll time detected during entry - entering shorts with NEXT WEEK expiry")
                         if self.enter_short_strangle(for_roll=should_roll):
                             action_taken = "Added short strangle"
+
+        elif self.state == StrategyState.SHORT_STRANGLE_ONLY:
+            # =============================================================
+            # SHORT_STRANGLE_ONLY: Recovery state - have shorts but no longs
+            # Bot should enter longs normally, then transition to FULL_POSITION
+            # Added 2026-02-03 to handle failed recenter leaving only shorts
+            # =============================================================
+            logger.info("SHORT_STRANGLE_ONLY state - attempting to enter long straddle")
+
+            # First check if short strangle needs to be completed (partial fill scenario)
+            if self.short_strangle and not self.short_strangle.is_complete:
+                if self.needs_strangle_call():
+                    if self.add_missing_short_call():
+                        logger.info("Completed partial short strangle (added call)")
+                    else:
+                        action_taken = "Failed to complete partial short strangle (call)"
+                elif self.needs_strangle_put():
+                    if self.add_missing_short_put():
+                        logger.info("Completed partial short strangle (added put)")
+                    else:
+                        action_taken = "Failed to complete partial short strangle (put)"
+
+            # Now enter long straddle
+            if self.enter_long_straddle():
+                # Straddle entered - now we have full position
+                self.state = StrategyState.FULL_POSITION
+                action_taken = "Entered long straddle (recovery from SHORT_STRANGLE_ONLY)"
+                logger.info("✅ Recovery complete: Entered longs, now in FULL_POSITION")
+            else:
+                action_taken = "Failed to enter long straddle (SHORT_STRANGLE_ONLY recovery)"
+                logger.error("Could not enter long straddle for recovery - will retry")
 
         elif self.state == StrategyState.FULL_POSITION:
             # Check exit condition first
