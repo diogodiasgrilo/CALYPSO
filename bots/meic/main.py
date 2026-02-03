@@ -462,7 +462,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     status = strategy.get_status_summary()
                     mode_prefix = "[DRY RUN] " if dry_run else ""
 
-                    # Main heartbeat line
+                    # Main heartbeat line (P&L moved to visual divider)
                     total_pnl = status['realized_pnl'] + status['unrealized_pnl']
                     pnl_sign = "+" if total_pnl >= 0 else ""
                     heartbeat_msg = (
@@ -470,8 +470,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         f"SPX: {status['underlying_price']:.2f} | "
                         f"VIX: {status['vix']:.2f} | "
                         f"Entries: {status['entries_completed']}/{len(strategy.entry_times)} | "
-                        f"Active ICs: {status['active_entries']} | "
-                        f"P&L: {pnl_sign}${total_pnl:.2f}"
+                        f"Active ICs: {status['active_entries']}"
                     )
                     trade_logger.log_event(heartbeat_msg)
 
@@ -480,10 +479,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     for line in position_lines:
                         trade_logger.log_event(line)
 
-                    # Visual divider after heartbeat for log readability
-                    trade_logger.log_event("[▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓]")
-                    trade_logger.log_event("[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]")
-                    trade_logger.log_event("[▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓]")
+                    # Visual divider with P&L centered in middle bar
+                    pnl_text = f" {pnl_sign}${total_pnl:.2f} "
+                    bar_width = 50
+                    pnl_len = len(pnl_text)
+                    side_len = (bar_width - pnl_len) // 2
+                    middle_bar = f"[{'░' * side_len}{pnl_text}{'░' * side_len}]"
+                    trade_logger.log_event("[▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓]")
+                    trade_logger.log_event(middle_bar)
+                    trade_logger.log_event("[▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓]")
 
                     # Log to Google Sheets
                     strategy.log_account_summary()
