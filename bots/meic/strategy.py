@@ -3929,9 +3929,15 @@ class MEICStrategy:
         if not self.daily_state.active_entries:
             return lines
 
+        # Fetch positions once for all entries (avoid N API calls)
+        try:
+            positions = self.client.get_positions()
+        except Exception:
+            positions = []
+
         for entry in self.daily_state.active_entries:
             # FIX (2026-02-03): Use Saxo's authoritative P&L for display
-            total_pnl = self._get_saxo_pnl_for_entry(entry)
+            total_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions)
 
             # For stop distance calculation, still use mid-price based calc
             # (this is what the stop logic uses, so it should match)
@@ -4024,7 +4030,7 @@ class MEICStrategy:
             pass
         return None
 
-    def _get_saxo_pnl_for_entry(self, entry: IronCondorEntry) -> float:
+    def _get_saxo_pnl_for_entry(self, entry: IronCondorEntry, positions: Optional[List] = None) -> float:
         """
         Get the actual P&L for an entry directly from Saxo positions.
 
@@ -4036,13 +4042,16 @@ class MEICStrategy:
 
         Args:
             entry: The IronCondorEntry to get P&L for
+            positions: Optional pre-fetched positions list (to avoid multiple API calls)
 
         Returns:
             Total P&L in dollars (positive = profit, negative = loss)
         """
         try:
-            # Get all positions from Saxo
-            positions = self.client.get_positions()
+            # Get positions from Saxo (or use provided list)
+            if positions is None:
+                positions = self.client.get_positions()
+
             total_pnl = 0.0
 
             # Map position IDs to their P&L
@@ -4077,10 +4086,17 @@ class MEICStrategy:
         Returns:
             Total unrealized P&L in dollars
         """
-        total = 0.0
-        for entry in self.daily_state.active_entries:
-            total += self._get_saxo_pnl_for_entry(entry)
-        return total
+        try:
+            # Fetch positions once and reuse for all entries
+            positions = self.client.get_positions()
+            total = 0.0
+            for entry in self.daily_state.active_entries:
+                total += self._get_saxo_pnl_for_entry(entry, positions=positions)
+            return total
+        except Exception as e:
+            logger.debug(f"Error getting total Saxo P&L: {e}")
+            # Fall back to mid-price calculation
+            return sum(e.unrealized_pnl for e in self.daily_state.active_entries)
 
     # =========================================================================
     # METRICS PERSISTENCE
@@ -4406,10 +4422,18 @@ class MEICStrategy:
         Returns:
             dict: Complete strategy metrics for dashboard logging
         """
+        # Fetch positions once and reuse (avoid multiple API calls)
+        try:
+            positions = self.client.get_positions()
+        except Exception:
+            positions = []
+
         # Basic status
         active_entries = len(self.daily_state.active_entries)
-        # FIX (2026-02-03): Use Saxo's authoritative P&L
-        unrealized = self._get_total_saxo_pnl()
+        # FIX (2026-02-03): Use Saxo's authoritative P&L (pass positions to avoid re-fetch)
+        unrealized = 0.0
+        for entry in self.daily_state.active_entries:
+            unrealized += self._get_saxo_pnl_for_entry(entry, positions=positions)
         total_pnl = self.daily_state.total_realized_pnl + unrealized
 
         # Position counts
@@ -4430,11 +4454,11 @@ class MEICStrategy:
             avg_short_put = sum(e.short_put_strike for e in active if e.short_put_strike) / active_entries
             avg_spread_width = sum(e.spread_width for e in active if e.spread_width) / active_entries
 
-        # Per-entry details (use Saxo P&L for each entry)
+        # Per-entry details (use Saxo P&L for each entry, reuse positions)
         entry_details = []
         for entry in self.daily_state.entries:
-            # Get Saxo P&L if entry has positions
-            entry_pnl = self._get_saxo_pnl_for_entry(entry) if entry.is_complete else 0
+            # Get Saxo P&L if entry has positions (pass positions to avoid re-fetch)
+            entry_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions) if entry.is_complete else 0
             entry_details.append({
                 "entry_number": entry.entry_number,
                 "entry_time": entry.entry_time.strftime("%H:%M") if entry.entry_time else "",
