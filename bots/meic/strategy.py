@@ -3989,8 +3989,10 @@ class MEICStrategy:
             # FIX (2026-02-03): Must specify asset_type for SPX options
             quote = self.client.get_quote(uic, asset_type="StockIndexOption")
             if quote:
-                bid = quote.get("Bid", 0) or 0
-                ask = quote.get("Ask", 0) or 0
+                # FIX (2026-02-03): Bid/Ask are inside Quote nested object, not at top level
+                quote_data = quote.get("Quote", {})
+                bid = quote_data.get("Bid", 0) or 0
+                ask = quote_data.get("Ask", 0) or 0
                 if bid > 0 and ask > 0:
                     return (bid + ask) / 2
                 return ask or bid
