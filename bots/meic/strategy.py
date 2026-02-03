@@ -2054,7 +2054,8 @@ class MEICStrategy:
 
         for pos in positions:
             pos_base = pos.get("PositionBase", {})
-            pos_id = str(pos_base.get("PositionId", ""))
+            # FIX (2026-02-03): PositionId is at TOP LEVEL, not in PositionBase
+            pos_id = str(pos.get("PositionId", ""))
             pos_uic = pos_base.get("Uic")
             amount = pos_base.get("Amount", 0)
 
@@ -3409,7 +3410,8 @@ class MEICStrategy:
                         matched_count += 1
 
                         # Re-register this position with correct ID
-                        pos_id = str(pos_base.get("PositionId"))
+                        # FIX (2026-02-03): PositionId is at TOP LEVEL, not in PositionBase
+                        pos_id = str(pos.get("PositionId"))
                         if pos_id and pos_id != "None":
                             # Find the entry data to get strategy_id
                             for entry_data in entries_data:
@@ -3455,8 +3457,8 @@ class MEICStrategy:
         entries_by_number: Dict[int, List[Dict]] = {}
 
         for pos in saxo_positions:
-            pos_base = pos.get("PositionBase", {})
-            pos_id = str(pos_base.get("PositionId"))
+            # FIX (2026-02-03): PositionId is at TOP LEVEL, not in PositionBase
+            pos_id = str(pos.get("PositionId"))
 
             # Get registry metadata for this position
             reg_info = self.registry.get_position_details(pos_id)
@@ -3499,7 +3501,8 @@ class MEICStrategy:
             pos_base = pos.get("PositionBase", {})
             pos_view = pos.get("PositionView", {})
 
-            position_id = str(pos_base.get("PositionId"))
+            # FIX (2026-02-03): PositionId is at TOP LEVEL, not in PositionBase
+            position_id = str(pos.get("PositionId"))
             uic = pos_base.get("Uic")
             amount = pos_base.get("Amount", 0)
 
