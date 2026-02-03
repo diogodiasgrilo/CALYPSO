@@ -60,7 +60,7 @@ def test_raw_infoprices_response(client: SaxoClient, uic: int, asset_type: str, 
     }
 
     headers = {
-        "Authorization": f"Bearer {client._get_access_token()}",
+        "Authorization": f"Bearer {client.access_token}",
         "Content-Type": "application/json"
     }
 
