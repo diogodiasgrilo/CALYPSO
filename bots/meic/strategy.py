@@ -408,8 +408,33 @@ class MEICDailyState:
 
     @property
     def active_entries(self) -> List[IronCondorEntry]:
-        """Get entries that have open positions."""
-        return [e for e in self.entries if e.is_complete and not (e.call_side_stopped and e.put_side_stopped)]
+        """Get entries that have open positions.
+
+        An entry is active if:
+        - It's complete (all 4 legs) and not fully stopped, OR
+        - It's partial (only call or put side remains) after the other side was stopped
+
+        CRITICAL FIX (2026-02-03): Partial entries should still be monitored until expiry.
+        """
+        active = []
+        for e in self.entries:
+            if e.call_side_stopped and e.put_side_stopped:
+                # Both sides stopped - no active positions
+                continue
+            if e.is_complete:
+                # Full IC with at least one side still open
+                active.append(e)
+            else:
+                # Partial entry - check if ANY position ID exists
+                has_any_position = any([
+                    e.short_call_position_id,
+                    e.long_call_position_id,
+                    e.short_put_position_id,
+                    e.long_put_position_id
+                ])
+                if has_any_position:
+                    active.append(e)
+        return active
 
 
 # =============================================================================
@@ -2228,25 +2253,23 @@ class MEICStrategy:
 
         Returns:
             Total number of contracts (absolute sum across all legs)
+
+        FIX (2026-02-03): Include partial entries (where one side was stopped).
+        Previously skipped entries where is_complete=False, undercounting positions.
         """
         total = 0
 
         for entry in self.daily_state.entries:
-            if not entry.is_complete:
-                continue
-
-            # Count each open leg as 1 contract
-            if not entry.call_side_stopped:
-                if entry.short_call_position_id:
-                    total += self.contracts_per_entry
-                if entry.long_call_position_id:
-                    total += self.contracts_per_entry
-
-            if not entry.put_side_stopped:
-                if entry.short_put_position_id:
-                    total += self.contracts_per_entry
-                if entry.long_put_position_id:
-                    total += self.contracts_per_entry
+            # Count each open leg that has a position ID
+            # Works for both complete and partial entries
+            if entry.short_call_position_id:
+                total += self.contracts_per_entry
+            if entry.long_call_position_id:
+                total += self.contracts_per_entry
+            if entry.short_put_position_id:
+                total += self.contracts_per_entry
+            if entry.long_put_position_id:
+                total += self.contracts_per_entry
 
         return total
 
@@ -4505,8 +4528,15 @@ class MEICStrategy:
         # Per-entry details (use Saxo P&L for each entry, reuse positions)
         entry_details = []
         for entry in self.daily_state.entries:
-            # Get Saxo P&L if entry has positions (pass positions to avoid re-fetch)
-            entry_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions) if entry.is_complete else 0
+            # Get Saxo P&L if entry has any positions (pass positions to avoid re-fetch)
+            # FIX (2026-02-03): Calculate P&L for partial entries too, not just complete ones
+            has_any_positions = any([
+                entry.short_call_position_id,
+                entry.long_call_position_id,
+                entry.short_put_position_id,
+                entry.long_put_position_id
+            ])
+            entry_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions) if has_any_positions else 0
             entry_details.append({
                 "entry_number": entry.entry_number,
                 "entry_time": entry.entry_time.strftime("%H:%M") if entry.entry_time else "",
@@ -4574,10 +4604,11 @@ class MEICStrategy:
             "double_stops": self.daily_state.double_stops,
             "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
 
-            # Win/loss metrics (requires stops and entries)
-            "entries_with_no_stops": sum(1 for e in self.daily_state.entries if e.is_complete and not e.call_side_stopped and not e.put_side_stopped),
-            "entries_with_one_stop": sum(1 for e in self.daily_state.entries if e.is_complete and (e.call_side_stopped != e.put_side_stopped)),
-            "entries_with_both_stops": sum(1 for e in self.daily_state.entries if e.is_complete and e.call_side_stopped and e.put_side_stopped),
+            # Win/loss metrics - count entries by stop status
+            # FIX (2026-02-03): Include partial entries (is_complete was excluding stopped entries)
+            "entries_with_no_stops": sum(1 for e in self.daily_state.entries if not e.call_side_stopped and not e.put_side_stopped),
+            "entries_with_one_stop": sum(1 for e in self.daily_state.entries if e.call_side_stopped != e.put_side_stopped),
+            "entries_with_both_stops": sum(1 for e in self.daily_state.entries if e.call_side_stopped and e.put_side_stopped),
 
             # Cumulative metrics
             "cumulative_pnl": cumulative.get("cumulative_pnl", 0) + total_pnl,
