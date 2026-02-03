@@ -1457,6 +1457,16 @@ class MEICStrategy:
                     self._record_api_result(True)
                     self._next_entry_index += 1
 
+                    # FIX (2026-02-03): Clear entry flag on SUCCESS (was only cleared on failure)
+                    self._entry_in_progress = False
+                    self._current_entry = None
+
+                    # Transition to appropriate state after entry
+                    if self._next_entry_index < len(self.entry_times):
+                        self.state = MEICState.MONITORING  # More entries to come
+                    else:
+                        self.state = MEICState.MONITORING  # All entries done, just monitor
+
                     # P1: Save state after successful entry
                     self._save_state_to_disk()
 
