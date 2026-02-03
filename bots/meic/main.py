@@ -444,13 +444,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                 # Reset consecutive errors on successful check
                 consecutive_errors = 0
 
-                # Log action if something happened
-                if action != "No action" and "Waiting" not in action and "Monitoring" not in action[:10]:
-                    if "Waiting for" not in action:  # Don't spam waiting messages
-                        if dry_run:
-                            trade_logger.log_event(f"[DRY RUN] {action}")
-                        else:
-                            trade_logger.log_event(action)
+                # Log action if something meaningful happened (filter out status messages)
+                skip_logging = (
+                    action == "No action" or
+                    "Waiting" in action or
+                    "Monitoring" in action[:10]
+                )
+                if not skip_logging:
+                    if dry_run:
+                        trade_logger.log_event(f"[DRY RUN] {action}")
+                    else:
+                        trade_logger.log_event(action)
 
                 # Periodic status logging
                 now = datetime.now()
@@ -475,6 +479,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     position_lines = strategy.get_detailed_position_status()
                     for line in position_lines:
                         trade_logger.log_event(line)
+
+                    # Visual divider after heartbeat for log readability
+                    trade_logger.log_event("· · ·")
 
                     # Log to Google Sheets
                     strategy.log_account_summary()
