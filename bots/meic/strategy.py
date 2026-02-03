@@ -3631,15 +3631,25 @@ class MEICStrategy:
         entry.is_complete = has_all_legs
 
         # Calculate stop levels based on recovered credit
+        # FIX (2026-02-03): Per MEIC spec, stop per side = TOTAL credit, NOT half
+        # "Stop loss on each side = Total credit received for the FULL iron condor"
+        # This ensures breakeven when one side stops and other expires worthless
         total_credit = entry.call_spread_credit + entry.put_spread_credit
         if self.meic_plus_enabled:
             # MEIC+ stops at credit - reduction for potential small win
-            # Note: meic_plus_reduction is already in total dollars (was multiplied by 100 at load time)
-            entry.call_side_stop = (total_credit / 2) - self.meic_plus_reduction
-            entry.put_side_stop = (total_credit / 2) - self.meic_plus_reduction
+            # STOP-002: Don't apply if stop would be too tight (credit < $1.50)
+            # Must match logic in _calculate_stop_levels()
+            min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
+            if total_credit > min_credit_for_meic_plus:
+                stop_level = total_credit - self.meic_plus_reduction
+            else:
+                stop_level = total_credit
+                logger.info(f"Recovery: MEIC+ not applied - credit ${total_credit:.2f} < ${min_credit_for_meic_plus:.2f}")
+            entry.call_side_stop = stop_level
+            entry.put_side_stop = stop_level
         else:
-            entry.call_side_stop = total_credit / 2
-            entry.put_side_stop = total_credit / 2
+            entry.call_side_stop = total_credit
+            entry.put_side_stop = total_credit
 
         return entry
 
@@ -4775,9 +4785,11 @@ class MEICStrategy:
 
     def _validate_pnl_sanity(self, entry: IronCondorEntry) -> Tuple[bool, str]:
         """
-        DATA-003: Validate that P&L values are within reasonable bounds.
+        DATA-003/DATA-004: Validate that P&L values are within reasonable bounds
+        and that option prices are valid (not zero).
 
-        Catches data errors that could result in impossible P&L figures.
+        Catches data errors that could result in impossible P&L figures or
+        false stop triggers from invalid price data.
 
         Args:
             entry: IronCondorEntry to validate
@@ -4788,9 +4800,42 @@ class MEICStrategy:
         if not PNL_SANITY_CHECK_ENABLED:
             return True, "P&L sanity check disabled"
 
+        # DATA-004: Check for zero/invalid option prices FIRST
+        # This prevents false stops when API returns $0.00 for option prices
+        # FIX (2026-02-03): Added per user request to match Delta Neutral's DATA-004 pattern
+        if not entry.call_side_stopped:
+            if entry.short_call_price == 0 and entry.long_call_price == 0:
+                logger.warning(
+                    f"DATA-004: Entry #{entry.entry_number} call side has zero prices "
+                    f"(SC=${entry.short_call_price:.2f}, LC=${entry.long_call_price:.2f}) - skipping stop check"
+                )
+                return False, "Call side prices are zero"
+            # If only one leg is zero, that's suspicious too
+            if entry.short_call_price == 0 or entry.long_call_price == 0:
+                logger.warning(
+                    f"DATA-004: Entry #{entry.entry_number} call side has partial zero prices "
+                    f"(SC=${entry.short_call_price:.2f}, LC=${entry.long_call_price:.2f}) - skipping stop check"
+                )
+                return False, "Call side has partial zero price"
+
+        if not entry.put_side_stopped:
+            if entry.short_put_price == 0 and entry.long_put_price == 0:
+                logger.warning(
+                    f"DATA-004: Entry #{entry.entry_number} put side has zero prices "
+                    f"(SP=${entry.short_put_price:.2f}, LP=${entry.long_put_price:.2f}) - skipping stop check"
+                )
+                return False, "Put side prices are zero"
+            # If only one leg is zero, that's suspicious too
+            if entry.short_put_price == 0 or entry.long_put_price == 0:
+                logger.warning(
+                    f"DATA-004: Entry #{entry.entry_number} put side has partial zero prices "
+                    f"(SP=${entry.short_put_price:.2f}, LP=${entry.long_put_price:.2f}) - skipping stop check"
+                )
+                return False, "Put side has partial zero price"
+
         pnl = entry.unrealized_pnl
 
-        # Check for impossible values
+        # DATA-003: Check for impossible P&L values
         if pnl > MAX_PNL_PER_IC:
             logger.error(
                 f"DATA-003: Impossible P&L detected for Entry #{entry.entry_number}: "
