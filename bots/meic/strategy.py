@@ -2541,11 +2541,20 @@ class MEICStrategy:
             priority=AlertPriority.CRITICAL
         )
 
-        # Attempt to close the naked short
+        # Attempt to close the naked short using market order (not DELETE endpoint)
+        # CRITICAL FIX (2026-02-03): Saxo DELETE endpoint returns 404 for SPX options
         try:
-            result = self.client.close_position(pos_id)
+            # Naked shorts need BUY to close
+            result = self.client.place_emergency_order(
+                uic=uic,
+                asset_type="StockIndexOption",
+                buy_sell=BuySell.BUY,
+                amount=self.contracts_per_entry,
+                order_type=OrderType.MARKET,
+                to_open_close="ToClose"
+            )
             if result:
-                logger.info(f"Closed naked short {pos_id}")
+                logger.info(f"Closed naked short {pos_id} via order {result.get('OrderId')}")
                 self.registry.unregister(pos_id)
                 self._log_safety_event("NAKED_SHORT_CLOSED", f"{leg_name} position {pos_id} closed successfully")
             else:
@@ -2568,11 +2577,24 @@ class MEICStrategy:
         logger.warning(f"Unwinding {len(filled_legs)} partially filled legs")
 
         for leg_name, pos_id, uic in filled_legs:
-            if pos_id:
+            if pos_id and uic:
                 try:
-                    self.client.close_position(pos_id)
-                    self.registry.unregister(pos_id)
-                    logger.info(f"Unwound {leg_name}: {pos_id}")
+                    # CRITICAL FIX (2026-02-03): Use market order instead of DELETE endpoint
+                    # Determine direction: short positions need BUY to close, long positions need SELL
+                    buy_sell = BuySell.BUY if leg_name.startswith("short") else BuySell.SELL
+                    result = self.client.place_emergency_order(
+                        uic=uic,
+                        asset_type="StockIndexOption",
+                        buy_sell=buy_sell,
+                        amount=self.contracts_per_entry,
+                        order_type=OrderType.MARKET,
+                        to_open_close="ToClose"
+                    )
+                    if result:
+                        self.registry.unregister(pos_id)
+                        logger.info(f"Unwound {leg_name}: {pos_id} via order {result.get('OrderId')}")
+                    else:
+                        logger.error(f"Failed to unwind {leg_name}: no result from close order")
                 except Exception as e:
                     logger.error(f"Failed to unwind {leg_name}: {e}")
 
@@ -2758,20 +2780,34 @@ class MEICStrategy:
         3. Uses progressive retry with escalating alerts
         4. Tracks slippage for monitoring
 
+        CRITICAL FIX (2026-02-03): Saxo's DELETE /trade/v2/positions/{id} endpoint
+        returns 404 for SPX options. Must use place_emergency_order with ToClose instead.
+
         Args:
             position_id: Saxo position ID
             leg_name: Name for logging (e.g., "short_call", "long_put")
-            uic: Option UIC for spread checking (optional but recommended)
+            uic: Option UIC for spread checking (required for placing close order)
 
         Returns:
             True if closed successfully
         """
+        # UIC is REQUIRED now - we need it to place the close order
+        if not uic:
+            logger.error(f"EMERGENCY-001: Cannot close {leg_name} without UIC!")
+            return False
+
+        # Determine direction: short positions need BUY to close, long positions need SELL to close
+        if leg_name.startswith("short"):
+            buy_sell = BuySell.BUY  # Buy back the short position
+        else:
+            buy_sell = BuySell.SELL  # Sell the long position
+
         for attempt in range(EMERGENCY_CLOSE_MAX_ATTEMPTS):
             attempt_num = attempt + 1
 
             try:
                 # EMERGENCY-001: Check spread before closing (if UIC available)
-                if uic and attempt > 0:  # Skip spread check on first attempt
+                if attempt > 0:  # Skip spread check on first attempt
                     spread_ok, spread_pct = self._check_spread_for_emergency_close(uic)
                     if not spread_ok:
                         logger.warning(
@@ -2780,11 +2816,23 @@ class MEICStrategy:
                         )
                         self._wait_for_spread_normalization(uic, leg_name)
 
-                # Attempt the close
-                result = self.client.close_position(position_id)
+                # CRITICAL FIX: Use place_emergency_order with ToClose instead of DELETE endpoint
+                # This is how Iron Fly and Delta Neutral successfully close positions
+                logger.info(
+                    f"EMERGENCY-001: Closing {leg_name} via market order "
+                    f"(UIC={uic}, {buy_sell.value}, amount={self.contracts_per_entry})"
+                )
+                result = self.client.place_emergency_order(
+                    uic=uic,
+                    asset_type="StockIndexOption",  # SPX options
+                    buy_sell=buy_sell,
+                    amount=self.contracts_per_entry,
+                    order_type=OrderType.MARKET,
+                    to_open_close="ToClose"
+                )
                 if result:
                     self.registry.unregister(position_id)
-                    logger.info(f"EMERGENCY-001: Closed {leg_name} on attempt {attempt_num}: {position_id}")
+                    logger.info(f"EMERGENCY-001: Closed {leg_name} on attempt {attempt_num}: order {result.get('OrderId')}")
                     return True
 
             except Exception as e:
