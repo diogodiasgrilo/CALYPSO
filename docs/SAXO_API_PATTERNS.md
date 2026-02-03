@@ -576,6 +576,42 @@ def detect_multiple_iron_flies(self, positions):
 
 **Impact:** WebSocket cache never updates, stale prices, unnecessary REST API calls.
 
+### Mistake 8: Using DELETE Endpoint to Close SPX Positions (Fixed 2026-02-03)
+**Wrong:** `DELETE /trade/v2/positions/{position_id}` - returns 404 for SPX options
+**Right:** Use `place_emergency_order()` with `to_open_close="ToClose"`
+
+**Impact:** Stop losses fail silently, positions remain open while bot thinks they're closed.
+
+**Root Cause:** The `DELETE /trade/v2/positions/{id}` endpoint returns 404 "File or directory not found" for StockIndexOption (SPX) positions. This endpoint may work for other asset types but does NOT work for SPX options.
+
+**Correct Pattern for Closing SPX Option Positions:**
+```python
+# To close a SHORT position (you sold it): BUY to close
+result = client.place_emergency_order(
+    uic=position_uic,
+    asset_type="StockIndexOption",
+    buy_sell=BuySell.BUY,  # Buy back the short
+    amount=position_amount,
+    order_type=OrderType.MARKET,
+    to_open_close="ToClose"
+)
+
+# To close a LONG position (you bought it): SELL to close
+result = client.place_emergency_order(
+    uic=position_uic,
+    asset_type="StockIndexOption",
+    buy_sell=BuySell.SELL,  # Sell the long
+    amount=position_amount,
+    order_type=OrderType.MARKET,
+    to_open_close="ToClose"
+)
+```
+
+**Affected Bots:**
+- MEIC: Fixed in commit d71a248 (2026-02-03)
+- Iron Fly: Already used place_emergency_order (not affected)
+- Delta Neutral: Uses SPY (StockOption), may need verification
+
 ---
 
 ## 9. Chart API for Historical OHLC Data
