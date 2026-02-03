@@ -3731,32 +3731,76 @@ class MEICStrategy:
     # =========================================================================
 
     def log_account_summary(self):
-        """Log account summary to Google Sheets dashboard."""
+        """Log MEIC-specific account summary to Google Sheets dashboard."""
         try:
-            account_info = self.client.get_account_info()
-            if account_info:
-                self.trade_logger.log_account_summary({
-                    "timestamp": get_us_market_time().isoformat(),
-                    "total_value": account_info.get("TotalValue"),
-                    "cash_balance": account_info.get("CashBalance"),
-                    "margin_used": account_info.get("MarginUsed"),
-                    "unrealized_pnl": sum(e.unrealized_pnl for e in self.daily_state.active_entries)
-                })
+            # Use MEIC-specific metrics that match the worksheet columns
+            metrics = self.get_dashboard_metrics()
+            self.trade_logger.log_account_summary({
+                # Market data
+                "spx_price": metrics["spx_price"],
+                "vix": metrics["vix"],
+                # Entry status
+                "entries_completed": metrics["entries_completed"],
+                "active_ics": metrics["active_entries"],
+                "entries_skipped": metrics["entries_skipped"],
+                # P&L
+                "total_credit": metrics["total_credit"],
+                "unrealized_pnl": metrics["unrealized_pnl"],
+                "realized_pnl": metrics["realized_pnl"],
+                # Stops
+                "call_stops": metrics["call_stops"],
+                "put_stops": metrics["put_stops"],
+                # Risk
+                "daily_loss_percent": metrics["pnl_percent"],
+                "circuit_breaker": metrics["circuit_breaker_open"],
+                # State
+                "state": metrics["state"]
+            })
         except Exception as e:
             logger.error(f"Failed to log account summary: {e}")
 
     def log_performance_metrics(self):
-        """Log performance metrics to Google Sheets."""
+        """Log MEIC-specific performance metrics to Google Sheets."""
         try:
-            summary = self.get_daily_summary()
+            metrics = self.get_dashboard_metrics()
+            cumulative = self.cumulative_metrics or {}
+
+            # Calculate win/breakeven/loss rates
+            completed = metrics["entries_completed"]
+            if completed > 0:
+                win_rate = (metrics["entries_with_no_stops"] / completed) * 100
+                breakeven_rate = (metrics["entries_with_one_stop"] / completed) * 100
+                loss_rate = (metrics["entries_with_both_stops"] / completed) * 100
+            else:
+                win_rate = breakeven_rate = loss_rate = 0
+
             self.trade_logger.log_performance_metrics(
                 period="Intraday",
                 metrics={
-                    "timestamp": get_us_market_time().isoformat(),
-                    "daily_pnl": summary["total_pnl"],
-                    "entries_completed": summary["entries_completed"],
-                    "total_stops": summary["call_stops"] + summary["put_stops"],
-                    "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + summary["total_pnl"]
+                    # P&L
+                    "total_pnl": metrics["total_pnl"],
+                    "realized_pnl": metrics["realized_pnl"],
+                    "unrealized_pnl": metrics["unrealized_pnl"],
+                    "pnl_percent": metrics["pnl_percent"],
+                    # Credit tracking
+                    "total_credit": metrics["total_credit"],
+                    "avg_credit_per_ic": metrics["total_credit"] / completed if completed > 0 else 0,
+                    # Entry stats
+                    "total_entries": metrics["entries_scheduled"],
+                    "entries_completed": metrics["entries_completed"],
+                    "entries_skipped": metrics["entries_skipped"],
+                    # Stop stats
+                    "call_stops": metrics["call_stops"],
+                    "put_stops": metrics["put_stops"],
+                    "double_stops": metrics["double_stops"],
+                    # Outcome rates
+                    "win_rate": win_rate,
+                    "breakeven_rate": breakeven_rate,
+                    "loss_rate": loss_rate,
+                    # Risk
+                    "max_drawdown": cumulative.get("max_drawdown", 0),
+                    "max_drawdown_pct": cumulative.get("max_drawdown_pct", 0),
+                    "avg_daily_pnl": cumulative.get("avg_daily_pnl", 0)
                 },
                 saxo_client=self.client
             )

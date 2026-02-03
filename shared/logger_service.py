@@ -2084,6 +2084,45 @@ class GoogleSheetsLogger:
                     metrics.get("avg_campaign_days", 0)
                 ]
                 col_range = "A2:T2"  # 20 columns
+            elif self.strategy_type == "meic":
+                # MEIC: Multiple entry iron condors - track entries, stops, breakeven rate
+                # Columns: Timestamp, Period, Total P&L ($), Total P&L (EUR), Total P&L (%),
+                #          Realized P&L ($), Unrealized P&L ($), Total Credit Collected ($), Avg Credit per IC ($),
+                #          Total Entries, Entries Completed, Entries Skipped,
+                #          Call Stops Triggered, Put Stops Triggered, Double Stops,
+                #          Win Rate (%), Breakeven Rate (%), Loss Rate (%),
+                #          Max Drawdown ($), Max Drawdown (%), Avg Daily P&L ($)
+                row = [
+                    # Meta
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    period,
+                    # P&L (Total)
+                    f"{total_pnl:.2f}",
+                    f"{total_pnl_eur:.2f}",
+                    f"{total_pnl_pct:.4f}",
+                    f"{metrics.get('realized_pnl', 0):.2f}",
+                    f"{metrics.get('unrealized_pnl', 0):.2f}",
+                    # Credit Tracking
+                    f"{metrics.get('total_credit', 0):.2f}",
+                    f"{metrics.get('avg_credit_per_ic', 0):.2f}",
+                    # Entry Stats
+                    metrics.get("total_entries", 0),
+                    metrics.get("entries_completed", 0),
+                    metrics.get("entries_skipped", 0),
+                    # Stop Stats
+                    metrics.get("call_stops", 0),
+                    metrics.get("put_stops", 0),
+                    metrics.get("double_stops", 0),
+                    # Outcome Rates
+                    f"{metrics.get('win_rate', 0):.2f}",
+                    f"{metrics.get('breakeven_rate', 0):.2f}",
+                    f"{metrics.get('loss_rate', 0):.2f}",
+                    # Risk
+                    f"{metrics.get('max_drawdown', 0):.2f}",
+                    f"{metrics.get('max_drawdown_pct', 0):.4f}",
+                    f"{metrics.get('avg_daily_pnl', 0):.2f}"
+                ]
+                col_range = "A2:V2"  # 22 columns
             else:
                 # Delta Neutral: Weekly theta strategy - track theta, rolls
                 row = [
