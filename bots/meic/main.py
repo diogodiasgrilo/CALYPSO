@@ -482,6 +482,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
 
                     # Visual divider after heartbeat for log readability
                     trade_logger.log_event("· · ·")
+                    trade_logger.log_event("· · ·")
+                    trade_logger.log_event("· · ·")
 
                     # Log to Google Sheets
                     strategy.log_account_summary()
