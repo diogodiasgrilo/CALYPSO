@@ -479,12 +479,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     for line in position_lines:
                         trade_logger.log_event(line)
 
-                    # Visual divider with P&L centered in middle bar
-                    pnl_text = f" {pnl_sign}${total_pnl:.2f} "
+                    # Visual divider with P&L centered in middle bar (transparent window effect)
+                    pnl_text = f"  {pnl_sign}${total_pnl:.2f}  "  # Extra padding around P&L
                     bar_width = 50
                     pnl_len = len(pnl_text)
                     side_len = (bar_width - pnl_len) // 2
-                    middle_bar = f"[{'░' * side_len}{pnl_text}{'░' * side_len}]"
+                    middle_bar = f"[{'▓' * side_len}{pnl_text}{'▓' * side_len}]"
                     trade_logger.log_event("[▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓]")
                     trade_logger.log_event(middle_bar)
                     trade_logger.log_event("[▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓]")
