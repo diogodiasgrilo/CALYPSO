@@ -3356,11 +3356,64 @@ class MEICStrategy:
             # Step 7: Update local state to match Saxo
             today = get_us_market_time().strftime("%Y-%m-%d")
 
+            # CRITICAL FIX (2026-02-03): Load existing state file to preserve realized P&L
+            # The state file contains historical data like realized P&L from closed positions
+            # that cannot be recovered from Saxo's current positions alone
+            preserved_realized_pnl = 0.0
+            preserved_put_stops = 0
+            preserved_call_stops = 0
+            preserved_double_stops = 0
+            preserved_entry_credits = {}  # entry_number -> (call_credit, put_credit, call_stop, put_stop)
+            try:
+                if os.path.exists(STATE_FILE):
+                    with open(STATE_FILE, "r") as f:
+                        saved_state = json.load(f)
+                        # Only use saved state if it's from today
+                        if saved_state.get("date") == today:
+                            preserved_realized_pnl = saved_state.get("total_realized_pnl", 0.0)
+                            preserved_put_stops = saved_state.get("put_stops_triggered", 0)
+                            preserved_call_stops = saved_state.get("call_stops_triggered", 0)
+                            preserved_double_stops = saved_state.get("double_stops", 0)
+                            # Preserve original credits from entries (not current spread values)
+                            for entry_data in saved_state.get("entries", []):
+                                entry_num = entry_data.get("entry_number")
+                                if entry_num:
+                                    preserved_entry_credits[entry_num] = {
+                                        "call_credit": entry_data.get("call_spread_credit", 0),
+                                        "put_credit": entry_data.get("put_spread_credit", 0),
+                                        "call_stop": entry_data.get("call_side_stop", 0),
+                                        "put_stop": entry_data.get("put_side_stop", 0),
+                                    }
+                            logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
+                                       f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}")
+            except Exception as e:
+                logger.warning(f"Could not load state file for preservation: {e}")
+
+            # Apply preserved credits and stop levels to recovered entries
+            for entry in recovered_entries:
+                if entry.entry_number in preserved_entry_credits:
+                    saved = preserved_entry_credits[entry.entry_number]
+                    # Restore original credits (not current spread values)
+                    entry.call_spread_credit = saved["call_credit"]
+                    entry.put_spread_credit = saved["put_credit"]
+                    # Restore stop levels
+                    entry.call_side_stop = saved["call_stop"]
+                    entry.put_side_stop = saved["put_stop"]
+                    logger.info(f"Entry #{entry.entry_number}: Restored credits from state file "
+                               f"(call=${saved['call_credit']:.2f}, put=${saved['put_credit']:.2f}, "
+                               f"stop=${saved['call_stop']:.2f})")
+
             # Reset daily state but preserve date
             self.daily_state = MEICDailyState()
             self.daily_state.date = today
             self.daily_state.entries = recovered_entries
             self.daily_state.entries_completed = len(recovered_entries)
+
+            # CRITICAL: Restore preserved P&L and stop counters
+            self.daily_state.total_realized_pnl = preserved_realized_pnl
+            self.daily_state.put_stops_triggered = preserved_put_stops
+            self.daily_state.call_stops_triggered = preserved_call_stops
+            self.daily_state.double_stops = preserved_double_stops
 
             # Determine next entry index (how many entries have we done?)
             max_entry_num = max(e.entry_number for e in recovered_entries)
@@ -3377,7 +3430,7 @@ class MEICStrategy:
                 else:
                     self.state = MEICState.DAILY_COMPLETE
 
-            # Calculate total credit from recovered entries
+            # Calculate total credit from entries (using preserved/restored values)
             total_credit = sum(e.total_credit for e in recovered_entries)
             self.daily_state.total_credit_received = total_credit
 
