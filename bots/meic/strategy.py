@@ -167,6 +167,49 @@ SLIPPAGE_CRITICAL_THRESHOLD_PERCENT = 15.0  # Critical at 15% slippage
 # EMERGENCY-001: Emergency close retry settings
 EMERGENCY_CLOSE_MAX_ATTEMPTS = 5
 EMERGENCY_CLOSE_RETRY_DELAY_SECONDS = 3
+
+# ORDER-008: SPX Option Tick Size Rules (CBOE Official)
+# Source: https://www.cboe.com/tradable_products/sp_500/spx_options/specifications/
+# - Options trading below $3.00: Minimum tick of $0.05
+# - Options $3.00 and above: Minimum tick of $0.10
+SPX_TICK_SIZE_BELOW_3 = 0.05  # $0.05 for prices < $3.00
+SPX_TICK_SIZE_ABOVE_3 = 0.10  # $0.10 for prices >= $3.00
+SPX_TICK_THRESHOLD = 3.00     # Price threshold for tick size change
+
+
+def round_to_spx_tick(price: float, round_up: bool = False) -> float:
+    """
+    Round a price to valid SPX option tick increments (CBOE rules).
+
+    SPX options have different tick sizes based on price:
+    - Below $3.00: $0.05 increments (e.g., $0.25, $0.30, $1.95, $2.90)
+    - $3.00 and above: $0.10 increments (e.g., $3.00, $3.10, $5.50)
+
+    Args:
+        price: The price to round
+        round_up: If True, always round up (for buys). If False, round to nearest.
+                  For sells, caller should pass round_up=False and we round down
+                  when the price is exactly between ticks.
+
+    Returns:
+        Price rounded to valid tick increment
+    """
+    if price <= 0:
+        return 0.0
+
+    # Determine tick size based on price level
+    tick_size = SPX_TICK_SIZE_BELOW_3 if price < SPX_TICK_THRESHOLD else SPX_TICK_SIZE_ABOVE_3
+
+    if round_up:
+        # Round up to next tick (for aggressive buys)
+        import math
+        return math.ceil(price / tick_size) * tick_size
+    else:
+        # Round to nearest tick
+        return round(price / tick_size) * tick_size
+
+
+# EMERGENCY-001: Spread validation for emergency closes
 EMERGENCY_SPREAD_MAX_PERCENT = 50.0  # Max acceptable spread for emergency close
 EMERGENCY_SPREAD_WAIT_SECONDS = 10  # Wait time for spread normalization
 EMERGENCY_SPREAD_MAX_WAIT_ATTEMPTS = 3
@@ -1897,9 +1940,13 @@ class MEICStrategy:
                     else:
                         # Accept LESS to sell (aggressive)
                         limit_price = mid_price * (1 - slippage_percent / 100)
-                    limit_price = round(limit_price, 2)
                 else:
-                    limit_price = round(mid_price, 2)
+                    limit_price = mid_price
+
+                # ORDER-008: Round to valid SPX tick size (CBOE rules)
+                # Buy orders round UP (pay more to get filled)
+                # Sell orders round DOWN (accept less to get filled)
+                limit_price = round_to_spx_tick(limit_price, round_up=(buy_sell == BuySell.BUY))
 
                 # For LIMIT orders, expected price is the limit price
                 expected_price = limit_price
