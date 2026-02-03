@@ -286,15 +286,51 @@ class SaxoClient:
         self._session_check_interval_seconds: int = 300  # Check every 5 minutes
         self._session_downgrade_detected: bool = False  # Flag to trigger immediate re-check
 
-        # Update coordinator cache with current tokens if we have them
-        if self.access_token and self.refresh_token:
-            self.token_coordinator.update_cache({
-                'access_token': self.access_token,
-                'refresh_token': self.refresh_token,
-                'token_expiry': self.token_expiry.isoformat() if self.token_expiry else None,
-                'app_key': self.app_key,
-                'app_secret': self.app_secret,
-            })
+        # IMPORTANT: Only update cache if our tokens are NEWER than cached ones
+        # This prevents stale config tokens from overwriting fresh tokens maintained by Token Keeper
+        # Bug fix 2026-02-03: Running diagnostic scripts with stale config corrupted the token cache
+        if self.access_token and self.refresh_token and self.token_expiry:
+            cached_tokens = self.token_coordinator.get_cached_tokens()
+            should_update_cache = False
+
+            if not cached_tokens:
+                # No cache exists, safe to write
+                should_update_cache = True
+                logger.debug("No cached tokens found, will update cache with config tokens")
+            else:
+                # Compare expiry times - only update if our tokens are newer
+                cached_expiry_str = cached_tokens.get('token_expiry')
+                if cached_expiry_str:
+                    try:
+                        cached_expiry = datetime.fromisoformat(cached_expiry_str.replace('Z', '+00:00'))
+                        # Make self.token_expiry timezone-aware if needed for comparison
+                        our_expiry = self.token_expiry
+                        if our_expiry.tzinfo is None and cached_expiry.tzinfo is not None:
+                            our_expiry = our_expiry.replace(tzinfo=cached_expiry.tzinfo)
+                        elif our_expiry.tzinfo is not None and cached_expiry.tzinfo is None:
+                            cached_expiry = cached_expiry.replace(tzinfo=our_expiry.tzinfo)
+
+                        if our_expiry > cached_expiry:
+                            should_update_cache = True
+                            logger.info(f"Config tokens newer than cache ({our_expiry} > {cached_expiry}), updating cache")
+                        else:
+                            logger.debug(f"Cache has newer tokens ({cached_expiry} >= {our_expiry}), keeping cache")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Could not parse cached token expiry: {e}")
+                        # If we can't parse cached expiry, don't overwrite - be conservative
+                else:
+                    # Cached tokens have no expiry, but we do - ours are more complete
+                    should_update_cache = True
+                    logger.debug("Cached tokens have no expiry, updating with config tokens")
+
+            if should_update_cache:
+                self.token_coordinator.update_cache({
+                    'access_token': self.access_token,
+                    'refresh_token': self.refresh_token,
+                    'token_expiry': self.token_expiry.isoformat() if self.token_expiry else None,
+                    'app_key': self.app_key,
+                    'app_secret': self.app_secret,
+                })
 
         logger.info(f"SaxoClient initialized in {self.environment} environment")
 
