@@ -3508,7 +3508,8 @@ class MEICStrategy:
 
             # Get option details
             options_data = pos_base.get("OptionsData", {})
-            strike = options_data.get("StrikePrice")  # NOTE: Saxo API uses "StrikePrice" not "Strike"
+            # FIX (2026-02-03): Saxo API uses "Strike", not "StrikePrice"
+            strike = options_data.get("Strike")
             expiry = options_data.get("ExpiryDate", "")
             put_call = options_data.get("PutCall")  # "Call" or "Put"
 
