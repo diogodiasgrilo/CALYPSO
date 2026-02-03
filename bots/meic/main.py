@@ -458,16 +458,23 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     status = strategy.get_status_summary()
                     mode_prefix = "[DRY RUN] " if dry_run else ""
 
+                    # Main heartbeat line
+                    total_pnl = status['realized_pnl'] + status['unrealized_pnl']
+                    pnl_sign = "+" if total_pnl >= 0 else ""
                     heartbeat_msg = (
                         f"{mode_prefix}HEARTBEAT | {status['state']} | "
                         f"SPX: {status['underlying_price']:.2f} | "
                         f"VIX: {status['vix']:.2f} | "
                         f"Entries: {status['entries_completed']}/{len(strategy.entry_times)} | "
                         f"Active ICs: {status['active_entries']} | "
-                        f"P&L: ${status['realized_pnl'] + status['unrealized_pnl']:.2f}"
+                        f"P&L: {pnl_sign}${total_pnl:.2f}"
                     )
-
                     trade_logger.log_event(heartbeat_msg)
+
+                    # Detailed position lines (like Delta Neutral)
+                    position_lines = strategy.get_detailed_position_status()
+                    for line in position_lines:
+                        trade_logger.log_event(line)
 
                     # Log to Google Sheets
                     strategy.log_account_summary()

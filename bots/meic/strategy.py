@@ -998,7 +998,7 @@ class MEICStrategy:
         try:
             # Get actual positions from Saxo
             actual_positions = self.client.get_positions()
-            actual_position_ids = {str(p.get("PositionBase", {}).get("PositionId")) for p in actual_positions}
+            actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
 
             # Get expected positions from our tracking
             expected_position_ids = set()
@@ -1071,6 +1071,10 @@ class MEICStrategy:
         Handle IDLE state - waiting for market to open.
 
         Transitions to WAITING_FIRST_ENTRY when market opens.
+
+        CRITICAL FIX (2026-02-03): Only call _reset_for_new_day() if there's an
+        actual previous day's date. If daily_state.date is empty (e.g., recovery
+        failed), just set today's date instead of treating it as "overnight".
         """
         if is_market_open():
             # Reconcile positions on startup
@@ -1079,7 +1083,14 @@ class MEICStrategy:
             # Reset daily state if new day
             today = get_us_market_time().strftime("%Y-%m-%d")
             if self.daily_state.date != today:
-                self._reset_for_new_day()
+                # CRITICAL FIX: Only reset if there's an actual previous date
+                # Empty string means recovery never set the date - don't treat as "overnight"
+                if self.daily_state.date and self.daily_state.date != "":
+                    self._reset_for_new_day()
+                else:
+                    # No previous date - just set today's date
+                    logger.info(f"Setting initial date to {today} (no previous date to compare)")
+                    self.daily_state.date = today
 
             self.state = MEICState.WAITING_FIRST_ENTRY
             logger.info("Market open - transitioning to WAITING_FIRST_ENTRY")
@@ -2382,13 +2393,19 @@ class MEICStrategy:
 
         Returns:
             Position ID or None
+
+        CRITICAL FIX (2026-02-03): Must check for None BEFORE converting to string,
+        otherwise str(None) returns the string "None" which corrupts the registry
+        and causes all positions to match on recovery.
         """
         # Check if directly in result (common path)
-        if "PositionId" in order_result:
+        # CRITICAL: Check is not None before str() to avoid "None" string bug
+        if "PositionId" in order_result and order_result["PositionId"] is not None:
             return str(order_result["PositionId"])
 
         # Check position_id (lowercase, from place_limit_order_with_timeout)
-        if "position_id" in order_result:
+        # CRITICAL: Check is not None before str() to avoid "None" string bug
+        if "position_id" in order_result and order_result["position_id"] is not None:
             return str(order_result["position_id"])
 
         # Fallback: Try to get from activities via order_id and uic
@@ -2400,7 +2417,8 @@ class MEICStrategy:
             filled, fill_details = self.client.check_order_filled_by_activity(str(order_id), uic)
             if filled and fill_details:
                 pos_id = fill_details.get("position_id") or fill_details.get("PositionId")
-                if pos_id:
+                # CRITICAL: Check is not None before str() to avoid "None" string bug
+                if pos_id is not None:
                     return str(pos_id)
 
         return None
@@ -2465,9 +2483,15 @@ class MEICStrategy:
         Args:
             entry: IronCondorEntry containing the position
             leg_name: Which leg ("short_call", "long_call", "short_put", "long_put")
+
+        CRITICAL FIX (2026-02-03): Explicitly reject "None" string to prevent
+        registry corruption that causes all positions to match on recovery.
         """
         position_id = getattr(entry, f"{leg_name}_position_id")
-        if not position_id:
+        # CRITICAL: Reject both None and the string "None"
+        if not position_id or position_id == "None":
+            if position_id == "None":
+                logger.error(f"BUG DETECTED: {leg_name} has string 'None' as position_id - not registering")
             return
 
         strike = getattr(entry, f"{leg_name}_strike")
@@ -3170,12 +3194,15 @@ class MEICStrategy:
             all_positions = self.client.get_positions()
             if not all_positions:
                 logger.info("No positions found in Saxo account - starting fresh")
+                # CRITICAL FIX (2026-02-03): Set date even when returning False
+                # to prevent _reset_for_new_day from treating this as "overnight"
+                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
                 return False
 
             logger.info(f"Found {len(all_positions)} total positions in account")
 
             # Step 2: Get valid position IDs and clean up registry orphans
-            valid_ids = {str(p.get("PositionBase", {}).get("PositionId")) for p in all_positions}
+            valid_ids = {str(p.get("PositionId")) for p in all_positions}
             orphans = self.registry.cleanup_orphans(valid_ids)
             if orphans:
                 logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
@@ -3185,6 +3212,8 @@ class MEICStrategy:
             my_position_ids = self.registry.get_positions("MEIC")
             if not my_position_ids:
                 logger.info("No MEIC positions in registry - starting fresh")
+                # CRITICAL FIX (2026-02-03): Set date even when returning False
+                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
                 return False
 
             logger.info(f"Found {len(my_position_ids)} MEIC positions in registry")
@@ -3192,7 +3221,7 @@ class MEICStrategy:
             # Step 4: Filter Saxo positions to just MEIC positions
             meic_positions = []
             for pos in all_positions:
-                pos_id = str(pos.get("PositionBase", {}).get("PositionId"))
+                pos_id = str(pos.get("PositionId"))
                 if pos_id in my_position_ids:
                     meic_positions.append(pos)
 
@@ -3202,6 +3231,8 @@ class MEICStrategy:
                 for pos_id in my_position_ids:
                     self.registry.unregister(pos_id)
                 self._log_safety_event("REGISTRY_CLEARED", "All MEIC positions removed - not found in Saxo")
+                # CRITICAL FIX (2026-02-03): Set date even when returning False
+                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
                 return False
 
             logger.info(f"Matched {len(meic_positions)} positions to MEIC in Saxo")
@@ -3210,9 +3241,17 @@ class MEICStrategy:
             entries_by_number = self._group_positions_by_entry(meic_positions, my_position_ids)
 
             if not entries_by_number:
-                logger.warning("Could not group positions into entries - manual review needed")
-                self._log_safety_event("RECOVERY_FAILED", "Could not reconstruct entries from positions")
-                return False
+                logger.warning("Could not group positions into entries via registry - trying UIC fallback...")
+                # CRITICAL FIX (2026-02-03): Try UIC-based recovery from state file
+                entries_by_number = self._recover_from_state_file_uics(all_positions)
+                if not entries_by_number:
+                    logger.warning("UIC-based recovery also failed - manual review needed")
+                    self._log_safety_event("RECOVERY_FAILED", "Could not reconstruct entries from positions or UICs")
+                    # CRITICAL FIX (2026-02-03): Set date even when returning False
+                    self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                    return False
+                else:
+                    logger.info(f"UIC-based recovery succeeded: found {len(entries_by_number)} entries")
 
             # Step 6: Reconstruct IronCondorEntry objects
             recovered_entries = []
@@ -3228,6 +3267,8 @@ class MEICStrategy:
 
             if not recovered_entries:
                 logger.warning("Failed to reconstruct any entries from Saxo positions")
+                # CRITICAL FIX (2026-02-03): Set date even when returning False
+                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
                 return False
 
             # Step 7: Update local state to match Saxo
@@ -3288,7 +3329,113 @@ class MEICStrategy:
             import traceback
             logger.error(traceback.format_exc())
             self._log_safety_event("RECOVERY_ERROR", str(e))
+            # CRITICAL FIX (2026-02-03): Set date even on exception
+            self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
             return False
+
+    def _recover_from_state_file_uics(self, all_positions: List[Dict]) -> Dict[int, List[Dict]]:
+        """
+        CRITICAL FIX (2026-02-03): Fallback recovery using UICs from state file.
+
+        When registry-based recovery fails (e.g., due to "None" string bug),
+        try to match positions using the UICs stored in the state file.
+
+        Args:
+            all_positions: All positions from Saxo API
+
+        Returns:
+            Dict mapping entry_number -> list of position data dicts, or empty dict
+        """
+        logger.info("Attempting UIC-based recovery from state file...")
+
+        # Load state file
+        try:
+            if not os.path.exists(STATE_FILE):
+                logger.warning(f"State file not found: {STATE_FILE}")
+                return {}
+
+            with open(STATE_FILE, 'r') as f:
+                state_data = json.load(f)
+
+            # Check if it's from today
+            saved_date = state_data.get("date", "")
+            today = get_us_market_time().strftime("%Y-%m-%d")
+            if saved_date != today:
+                logger.warning(f"State file is from {saved_date}, not today ({today}) - cannot use for recovery")
+                return {}
+
+            entries_data = state_data.get("entries", [])
+            if not entries_data:
+                logger.info("State file has no entries")
+                return {}
+
+            logger.info(f"Found {len(entries_data)} entries in state file")
+
+            # Build UIC to entry/leg mapping from state file
+            uic_to_entry_leg: Dict[int, Tuple[int, str]] = {}
+            for entry_data in entries_data:
+                entry_num = entry_data.get("entry_number")
+                if entry_num is None:
+                    continue
+
+                # Map each UIC to its entry and leg type
+                for leg in ["short_call", "long_call", "short_put", "long_put"]:
+                    uic = entry_data.get(f"{leg}_uic")
+                    if uic:
+                        uic_to_entry_leg[uic] = (entry_num, leg)
+
+            logger.info(f"Built UIC map with {len(uic_to_entry_leg)} UICs")
+
+            # Match Saxo positions by UIC
+            entries_by_number: Dict[int, List[Dict]] = {}
+            matched_count = 0
+
+            for pos in all_positions:
+                pos_base = pos.get("PositionBase", {})
+                uic = pos_base.get("Uic")
+
+                if uic and uic in uic_to_entry_leg:
+                    entry_num, leg_type = uic_to_entry_leg[uic]
+
+                    # Parse the position
+                    parsed = self._parse_spx_option_position(pos)
+                    if parsed:
+                        parsed["leg_type"] = leg_type
+                        parsed["entry_number"] = entry_num
+
+                        if entry_num not in entries_by_number:
+                            entries_by_number[entry_num] = []
+                        entries_by_number[entry_num].append(parsed)
+                        matched_count += 1
+
+                        # Re-register this position with correct ID
+                        pos_id = str(pos_base.get("PositionId"))
+                        if pos_id and pos_id != "None":
+                            # Find the entry data to get strategy_id
+                            for entry_data in entries_data:
+                                if entry_data.get("entry_number") == entry_num:
+                                    strategy_id = entry_data.get("strategy_id", f"meic_{today}_entry{entry_num}")
+                                    self.registry.register(
+                                        position_id=pos_id,
+                                        bot_name="MEIC",
+                                        strategy_id=strategy_id,
+                                        metadata={
+                                            "entry_number": entry_num,
+                                            "leg_type": leg_type,
+                                            "strike": parsed.get("strike")
+                                        }
+                                    )
+                                    logger.info(f"Re-registered position {pos_id} (UIC {uic}) as Entry #{entry_num} {leg_type}")
+                                    break
+
+            logger.info(f"UIC-based recovery matched {matched_count} positions to {len(entries_by_number)} entries")
+            return entries_by_number
+
+        except Exception as e:
+            logger.error(f"UIC-based recovery failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {}
 
     def _group_positions_by_entry(
         self,
@@ -3503,7 +3650,7 @@ class MEICStrategy:
 
         # Get all positions from Saxo
         all_positions = self.client.get_positions()
-        valid_ids = {str(p.get("PositionBase", {}).get("PositionId")) for p in all_positions}
+        valid_ids = {str(p.get("PositionId")) for p in all_positions}
 
         # Clean up orphans from registry
         orphans = self.registry.cleanup_orphans(valid_ids)
@@ -3737,6 +3884,114 @@ class MEICStrategy:
             "total_stops": self.daily_state.call_stops_triggered + self.daily_state.put_stops_triggered,
             "circuit_breaker_open": self._circuit_breaker_open
         }
+
+    def get_detailed_position_status(self) -> List[str]:
+        """
+        Get detailed status lines for each active position.
+
+        Returns a list of formatted strings, one per active entry, showing:
+        - Entry number
+        - Strikes (call spread / put spread)
+        - Credit received
+        - Live P&L
+        - Distance to stop levels
+        - Stop status
+
+        Similar to Delta Neutral's detailed position logging.
+        """
+        lines = []
+
+        if not self.daily_state.active_entries:
+            return lines
+
+        for entry in self.daily_state.active_entries:
+            # Get live prices and P&L
+            call_pnl = self._calculate_side_pnl(entry, "call")
+            put_pnl = self._calculate_side_pnl(entry, "put")
+            total_pnl = call_pnl + put_pnl
+
+            # Calculate distance to stop levels (as percentage of stop)
+            call_dist = entry.call_side_stop - abs(call_pnl) if not entry.call_side_stopped else 0
+            put_dist = entry.put_side_stop - abs(put_pnl) if not entry.put_side_stopped else 0
+            call_pct = (call_dist / entry.call_side_stop * 100) if entry.call_side_stop > 0 else 0
+            put_pct = (put_dist / entry.put_side_stop * 100) if entry.put_side_stop > 0 else 0
+
+            # Status indicators
+            call_status = "STOPPED" if entry.call_side_stopped else f"{call_pct:.0f}% cushion"
+            put_status = "STOPPED" if entry.put_side_stopped else f"{put_pct:.0f}% cushion"
+
+            # Warn if close to stop
+            call_warning = "⚠️" if not entry.call_side_stopped and call_pct < 30 else ""
+            put_warning = "⚠️" if not entry.put_side_stopped and put_pct < 30 else ""
+
+            line = (
+                f"  Entry #{entry.entry_number}: "
+                f"C:{entry.short_call_strike}/{entry.long_call_strike} "
+                f"P:{entry.short_put_strike}/{entry.long_put_strike} | "
+                f"Credit: ${entry.total_credit:.0f} | "
+                f"P&L: ${total_pnl:+.0f} | "
+                f"Call: {call_status}{call_warning} | "
+                f"Put: {put_status}{put_warning}"
+            )
+            lines.append(line)
+
+        return lines
+
+    def _calculate_side_pnl(self, entry: IronCondorEntry, side: str) -> float:
+        """
+        Calculate P&L for one side (call or put) of an iron condor.
+
+        Args:
+            entry: The IronCondorEntry
+            side: "call" or "put"
+
+        Returns:
+            P&L in dollars (positive = profit, negative = loss)
+        """
+        try:
+            if side == "call":
+                if entry.call_side_stopped:
+                    return -entry.call_side_stop  # Already realized loss
+                short_uic = entry.short_call_uic
+                long_uic = entry.long_call_uic
+                credit = entry.call_spread_credit
+            else:
+                if entry.put_side_stopped:
+                    return -entry.put_side_stop  # Already realized loss
+                short_uic = entry.short_put_uic
+                long_uic = entry.long_put_uic
+                credit = entry.put_spread_credit
+
+            # Get current prices
+            short_price = self._get_option_price(short_uic)
+            long_price = self._get_option_price(long_uic)
+
+            if short_price is None or long_price is None:
+                return 0.0
+
+            # Current cost to close = buy back short - sell long
+            current_cost = (short_price - long_price) * 100  # Convert to dollars
+
+            # P&L = credit - current cost to close
+            return credit - current_cost
+
+        except Exception as e:
+            logger.debug(f"Error calculating {side} P&L for Entry #{entry.entry_number}: {e}")
+            return 0.0
+
+    def _get_option_price(self, uic: int) -> Optional[float]:
+        """Get mid price for an option UIC."""
+        try:
+            quote = self.client.get_quote(uic)
+            if quote:
+                bid = quote.get("Bid", 0) or 0
+                ask = quote.get("Ask", 0) or 0
+                if bid > 0 and ask > 0:
+                    return (bid + ask) / 2
+                return ask or bid
+        except Exception:
+            pass
+        return None
 
     # =========================================================================
     # METRICS PERSISTENCE

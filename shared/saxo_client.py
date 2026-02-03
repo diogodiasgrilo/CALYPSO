@@ -2882,19 +2882,22 @@ class SaxoClient:
                                 # Also check "Price" as fallback for backwards compatibility
                                 fill_price = activity.get("FilledPrice") or activity.get("Price", 0)
                                 fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
+                                # FIX (2026-02-03): Extract PositionId from activity if available
+                                activity_position_id = activity.get("PositionId")
                                 fill_confirmed = True
                                 fill_amount_found = fill_amount
 
                                 if fill_price > 0:
                                     logger.info(
                                         f"Order {order_id} confirmed FILLED via activities (attempt {attempt}): "
-                                        f"FilledPrice={fill_price}, Amount={fill_amount}"
+                                        f"FilledPrice={fill_price}, Amount={fill_amount}, PositionId={activity_position_id}"
                                     )
                                     return True, {
                                         "status": "Filled",
                                         "fill_price": fill_price,
                                         "fill_amount": fill_amount,
                                         "order_id": order_id,
+                                        "position_id": activity_position_id,  # FIX (2026-02-03): Include position ID
                                         "source": "order_activities"
                                     }
                                 else:
@@ -2931,9 +2934,12 @@ class SaxoClient:
                         amount = pos.get("PositionBase", {}).get("Amount", 0)
                         # FIX (2026-02-02): PositionBase.OpenPrice works for BOTH long and short
                         open_price = pos.get("PositionBase", {}).get("OpenPrice", 0)
+                        # FIX (2026-02-03): Extract PositionId from TOP LEVEL (not PositionBase!)
+                        # Saxo API returns PositionId at the root of each position object
+                        position_id = pos.get("PositionId")
                         if open_price and open_price > 0:
                             logger.info(
-                                f"Position exists for UIC {uic}: Amount={amount}, OpenPrice={open_price:.2f} "
+                                f"Position exists for UIC {uic}: PositionId={position_id}, Amount={amount}, OpenPrice={open_price:.2f} "
                                 f"- order {order_id} confirmed filled"
                             )
                             return True, {
@@ -2941,6 +2947,7 @@ class SaxoClient:
                                 "fill_price": open_price,
                                 "fill_amount": abs(amount),
                                 "order_id": order_id,
+                                "position_id": position_id,  # FIX (2026-02-03): Include position ID
                                 "source": "position_check"
                             }
                         elif fill_confirmed:
@@ -2954,6 +2961,7 @@ class SaxoClient:
                                 "fill_price": 0,
                                 "fill_amount": fill_amount_found,
                                 "order_id": order_id,
+                                "position_id": position_id,  # FIX (2026-02-03): Include position ID
                                 "source": "position_check_no_price"
                             }
         except Exception as e:
@@ -2970,6 +2978,7 @@ class SaxoClient:
                 "fill_price": 0,
                 "fill_amount": fill_amount_found,
                 "order_id": order_id,
+                "position_id": None,  # FIX (2026-02-03): Explicitly set to None when unknown
                 "source": "activities_no_price"
             }
 
@@ -3080,11 +3089,14 @@ class SaxoClient:
                     actual_price = fill_details.get("fill_price") if fill_details else None
                     if not actual_price or actual_price <= 0:
                         actual_price = limit_price
-                    logger.info(f"✓ Limit order verified FILLED via activity check in {elapsed:.1f}s @ ${actual_price:.2f}")
+                    # FIX (2026-02-03): Pass through position_id from activity check
+                    position_id = fill_details.get("position_id") if fill_details else None
+                    logger.info(f"✓ Limit order verified FILLED via activity check in {elapsed:.1f}s @ ${actual_price:.2f}, PositionId={position_id}")
                     return {
                         "success": True,
                         "filled": True,
                         "order_id": order_id,
+                        "position_id": position_id,  # FIX (2026-02-03): Include position ID
                         "message": f"Order filled in {elapsed:.1f}s (verified via activity)",
                         "fill_price": actual_price,
                         "verified_via_activity": True
@@ -3092,11 +3104,13 @@ class SaxoClient:
                 else:
                     # Order disappeared but no fill activity found - likely filled anyway
                     # Return success with limit price as fallback
+                    # NOTE: position_id will be None here - MEIC will need to look it up
                     logger.info(f"✓ Limit order likely filled in {elapsed:.1f}s (no activity found, assuming filled)")
                     return {
                         "success": True,
                         "filled": True,
                         "order_id": order_id,
+                        "position_id": None,  # FIX (2026-02-03): Explicitly set to None
                         "message": f"Order filled in {elapsed:.1f}s",
                         "fill_price": limit_price
                     }
@@ -3146,11 +3160,14 @@ class SaxoClient:
                 actual_price = fill_details.get("fill_price") if fill_details else None
                 if not actual_price or actual_price <= 0:
                     actual_price = limit_price
-                logger.info(f"✓ Order {order_id} WAS FILLED (cancel failed because order completed) @ ${actual_price:.2f}")
+                # FIX (2026-02-03): Pass through position_id
+                position_id = fill_details.get("position_id") if fill_details else None
+                logger.info(f"✓ Order {order_id} WAS FILLED (cancel failed because order completed) @ ${actual_price:.2f}, PositionId={position_id}")
                 return {
                     "success": True,
                     "filled": True,
                     "order_id": order_id,
+                    "position_id": position_id,  # FIX (2026-02-03): Include position ID
                     "message": "Order filled just before timeout (verified via activity)",
                     "fill_price": actual_price,
                     "verified_via_activity": True
@@ -3161,6 +3178,7 @@ class SaxoClient:
             "success": False,
             "filled": False,
             "order_id": order_id,
+            "position_id": None,  # FIX (2026-02-03): Explicitly set to None
             "message": f"TIMEOUT: Order not filled within {timeout_seconds}s. Order cancelled.",
             "fill_price": None
         }
