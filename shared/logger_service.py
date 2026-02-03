@@ -342,6 +342,15 @@ class GoogleSheetsLogger:
                         "Delta", "Entry Price", "Current Price", "P&L ($)", "P&L (EUR)",
                         "Campaign #", "Premium Collected", "Status"
                     ]
+                elif self.strategy_type == "meic":
+                    # MEIC: Multiple iron condors with 4 legs each
+                    worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=16)
+                    headers = [
+                        "Last Updated", "Entry #", "Leg Type", "Strike", "Expiry",
+                        "Entry Credit", "Current Value", "P&L ($)", "P&L (EUR)",
+                        "Stop Level", "Distance to Stop ($)", "Stop Triggered",
+                        "Side", "Spread Width", "Position ID", "Status"
+                    ]
                 else:
                     # Delta Neutral: Theta tracking for weekly positions
                     worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=13)
@@ -382,6 +391,16 @@ class GoogleSheetsLogger:
                         "Roll Type", "Short Premium ($)", "Campaign #",
                         "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
                         "Long Put Delta", "Entry Conditions Met", "Notes"
+                    ]
+                elif self.strategy_type == "meic":
+                    # MEIC: Multiple entry iron condors - track entries and stops
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=16)
+                    headers = [
+                        "Date", "SPX Close", "VIX",
+                        "Entries Completed", "Entries Skipped", "Total ICs",
+                        "Total Credit ($)", "Call Stops", "Put Stops", "Double Stops",
+                        "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
+                        "Win Rate (%)", "Breakeven Days", "Notes"
                     ]
                 else:
                     # Delta Neutral: Theta tracking for weekly strategy
@@ -483,6 +502,26 @@ class GoogleSheetsLogger:
                         "Total Rolls", "Vertical Rolls", "Horizontal Rolls",
                         # Stats
                         "Win Rate (%)", "Max Drawdown ($)", "Avg Campaign Days"
+                    ]
+                elif self.strategy_type == "meic":
+                    # MEIC: Multiple entry iron condors - track entries, stops, breakeven rate
+                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=22)
+                    headers = [
+                        # Meta
+                        "Timestamp", "Period",
+                        # P&L (Total)
+                        "Total P&L ($)", "Total P&L (EUR)", "Total P&L (%)",
+                        "Realized P&L ($)", "Unrealized P&L ($)",
+                        # Credit Tracking (key KPI for MEIC)
+                        "Total Credit Collected ($)", "Avg Credit per IC ($)",
+                        # Entry Stats
+                        "Total Entries", "Entries Completed", "Entries Skipped",
+                        # Stop Stats (key MEIC metrics)
+                        "Call Stops Triggered", "Put Stops Triggered", "Double Stops",
+                        # Outcome Stats
+                        "Win Rate (%)", "Breakeven Rate (%)", "Loss Rate (%)",
+                        # Risk
+                        "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)"
                     ]
                 else:
                     # Delta Neutral: Weekly theta strategy - track theta, rolls
