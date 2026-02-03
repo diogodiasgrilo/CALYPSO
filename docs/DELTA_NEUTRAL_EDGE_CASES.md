@@ -2,7 +2,7 @@
 
 **Analysis Date:** 2026-01-22 (Updated 2026-02-03)
 **Analyst:** Claude (Devil's Advocate Review)
-**Bot Version:** 2.0.5
+**Bot Version:** 2.0.6
 **Status:** Living Document - Update as fixes are implemented
 
 ---
@@ -11,14 +11,14 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the Delta Neutral trading bot. Each scenario is evaluated for current handling and risk level.
 
-**Total Scenarios Analyzed:** 63
-**Well-Handled/Resolved:** 63 (100%)
+**Total Scenarios Analyzed:** 66
+**Well-Handled/Resolved:** 66 (100%)
 **Medium Risk:** 0 (0%)
 **High Risk:** 0 (0%) ✅
 
 🎉 **ALL EDGE CASES RESOLVED!**
 
-**Major Update (2026-02-03):** Added 2 new state machine edge cases (STATE-005, STATE-006) for SHORT_STRANGLE_ONLY recovery state and recenter/roll abort callbacks.
+**Major Update (2026-02-03):** Added ORDER-011 (margin settlement delay), ORDER-012 (retry delay for 409 conflicts), DATA-005 (quote fetch retry on invalid). Also added STATE-005, STATE-006 for SHORT_STRANGLE_ONLY recovery and abort callbacks.
 
 **Major Update (2026-02-01):** Added 4 new safety edge cases (ORDER-006 through ORDER-009) for order size validation, slippage monitoring, and emergency close retries.
 
@@ -346,6 +346,28 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Status** | RESOLVED |
 | **Resolution** | Modified `check_order_filled_by_activity()` in `saxo_client.py`. Retries up to 3 times with 1-second delay if no fill data found. Handles Saxo API sync delay of 1-3 seconds after fill. If still no data after retries, logs warning and falls back to quoted prices for P&L calculation. |
 | **Fixed In** | 2026-02-01 |
+
+### 2.12 Margin Not Available After Close (WouldExceedMargin)
+| | |
+|---|---|
+| **ID** | ORDER-011 |
+| **Trigger** | After closing positions, immediately attempt to open new positions but cash not yet available (Saxo returns "WouldExceedMargin") |
+| **Current Handling** | **Margin settlement delay** of 3 seconds between close and enter in recenter/roll operations. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added 3-second `margin_settle_delay` sleep in `strategy.py` after all close operations that are followed by enters: `execute_recenter()` (after close_long_straddle), `roll_weekly_shorts()` (after close_short_strangle), and all partial straddle recovery paths. Logs "⏳ Waiting 3.0s for margin to settle after close..." before delay and "Margin settlement delay complete" after. Gives Saxo time to process the close and make cash available before the enter attempt. |
+| **Fixed In** | 2026-02-03 |
+
+### 2.13 Rapid Retry Causes 409 Conflict
+| | |
+|---|---|
+| **ID** | ORDER-012 |
+| **Trigger** | After order cancellation or failure, immediate retry causes HTTP 409 Conflict (previous request still processing) |
+| **Current Handling** | **Retry delay** of 1.5 seconds between order attempts in protected multi-leg order placement. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added 1.5-second `retry_delay` sleep in `_place_protected_multi_leg_order()` after each failed attempt before starting next attempt. Logs "Waiting 1.5s before retry..." before delay. This prevents 409 Conflict errors caused by Saxo's API still processing the previous cancellation when the retry request arrives. Combined with margin settlement delay and quote fetch retry, this completes the timing fix for the 2026-02-03 recenter failure. |
+| **Fixed In** | 2026-02-03 |
 
 ---
 
@@ -689,20 +711,31 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Resolution** | Added explicit Bid > 0 and Ask > 0 checks in `strategy.py` before using quotes for order pricing. If quote invalid: logs warning "DATA-004: Invalid quote (Bid=0 or Ask=0)", falls back to original leg price if available, logs safety event for tracking. Prevents placing orders based on stale/invalid market open quotes. Works with TIME-005 market open delay for comprehensive protection. |
 | **Fixed In** | 2026-01-22 |
 
-### 7.5 Metrics File Corruption
+### 7.5 Quote Fetch Returns Invalid Data (Bid=0/Ask=0)
 | | |
 |---|---|
 | **ID** | DATA-005 |
+| **Trigger** | Quote fetch returns Bid=0 or Ask=0 during order pricing (common during market transitions) |
+| **Current Handling** | **Quote fetch retry** with up to 3 attempts and 1.5s delay between attempts before falling back to leg_price. |
+| **Risk Level** | ✅ RESOLVED |
+| **Status** | RESOLVED |
+| **Resolution** | Added quote fetch retry loop in `_place_protected_multi_leg_order()`. Before using a quote, validates Bid > 0 and Ask > 0. If invalid, waits 1.5 seconds and retries up to 3 times. Logs "Quote attempt {n}/3: Invalid (Bid={bid}, Ask={ask}), waiting 1.5s..." on each invalid attempt. Only falls back to `leg_price` after all 3 attempts fail, with warning "All 3 quote attempts failed, using leg_price fallback". Prevents using stale prices when fresh quotes are momentarily unavailable. |
+| **Fixed In** | 2026-02-03 |
+
+### 7.6 Metrics File Corruption
+| | |
+|---|---|
+| **ID** | DATA-006 |
 | **Trigger** | `delta_neutral_metrics.json` corrupted or invalid JSON |
 | **Current Handling** | `load_from_file` at `metrics.py:241` has try/except, returns None on error. Fresh metrics created. |
 | **Risk Level** | ✅ LOW |
 | **Status** | RESOLVED |
 | **Notes** | Graceful degradation - loses history but continues. |
 
-### 7.6 Position ID Mismatch
+### 7.7 Position ID Mismatch
 | | |
 |---|---|
-| **ID** | DATA-006 |
+| **ID** | DATA-007 |
 | **Trigger** | Position ID in bot memory doesn't match what Saxo reports |
 | **Current Handling** | `recover_positions` rebuilds from Saxo data. Bot objects would be updated. |
 | **Risk Level** | ✅ LOW |
@@ -754,13 +787,13 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Category | Total | ✅ Resolved | ⚠️ Medium | 🔴 High |
 |----------|-------|-------------|-----------|---------|
 | Connection/API | 17 | 17 | 0 | 0 |
-| Order Execution | 11 | 11 | 0 | 0 |
+| Order Execution | 13 | 13 | 0 | 0 |
 | Position State | 6 | 6 | 0 | 0 |
 | Market Conditions | 6 | 6 | 0 | 0 |
 | Timing/Race | 8 | 8 | 0 | 0 |
 | State Machine | 6 | 6 | 0 | 0 |
-| Data Integrity | 6 | 6 | 0 | 0 |
-| **TOTAL** | **63** | **63** | **0** | **0** |
+| Data Integrity | 7 | 7 | 0 | 0 |
+| **TOTAL** | **66** | **66** | **0** | **0** |
 
 🎉 **100% COVERAGE ACHIEVED!**
 
@@ -835,6 +868,10 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-02-03 | ADDED: Abort callbacks re-check recenter/roll conditions before each retry on leg 1 | Claude |
 | 2026-02-03 | ADDED: SHORT_STRANGLE_ONLY state handler enters longs normally on next strategy check | Claude |
 | 2026-02-03 | **63 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
+| 2026-02-03 | RESOLVED ORDER-011: Added margin settlement delay (3s) between close and enter in recenter/roll | Claude |
+| 2026-02-03 | RESOLVED ORDER-012: Added retry delay (1.5s) between order attempts to prevent 409 conflicts | Claude |
+| 2026-02-03 | RESOLVED DATA-005: Added quote fetch retry (3 attempts × 1.5s) when invalid (Bid=0/Ask=0) | Claude |
+| 2026-02-03 | **66 EDGE CASES - 100% COVERAGE MAINTAINED** | Claude |
 
 ---
 

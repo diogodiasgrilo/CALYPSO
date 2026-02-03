@@ -227,7 +227,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
 ### Delta Neutral Bot Details
-- **Version:** 2.0.5 (Updated 2026-02-03 with abort callbacks and SHORT_STRANGLE_ONLY recovery)
+- **Version:** 2.0.6 (Updated 2026-02-03 with margin settlement delay and improved retry logic)
 - **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
 - **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
 - **Long Entry:** 120 DTE target (configurable)
@@ -294,6 +294,27 @@ A recovery state for when the bot has only short strangle positions (no longs):
 - **Recovery:** Automatically transitions to `FULL_POSITION` once longs are entered
 - **Duration:** Typically resolved within 10-60 seconds (next strategy check)
 - **Note:** Previously, shorts-only incorrectly set `FULL_POSITION` which caused the bot to skip entering longs
+
+**Margin Settlement Delay (Fix #24, 2026-02-03):**
+After closing positions (longs or shorts), wait 3 seconds before entering new positions:
+- **Why:** Saxo rejects orders with `WouldExceedMargin` if cash from close isn't immediately available
+- **Where:** Recenter (after close longs), Roll (after close shorts), all partial straddle recovery paths
+- **Duration:** 3 seconds hardcoded delay
+- **Logs:** `"⏳ Waiting 3.0s for margin to settle after close..."`
+
+**Retry Delay Between Attempts (Fix #25, 2026-02-03):**
+Add 1.5 second delay between retry attempts in `_place_protected_multi_leg_order`:
+- **Why:** Rapid-fire retries caused 409 Conflict errors when Saxo hadn't fully processed previous cancellation
+- **When:** After each failed limit order attempt, before the next retry
+- **Duration:** 1.5 seconds between retries
+- **Logs:** `"Waiting 1.5s before retry..."`
+
+**Fresh Quote Retry on Invalid (Fix #26, 2026-02-03):**
+Retry fetching quotes up to 3 times if invalid (Bid=0/Ask=0):
+- **Why:** After closing positions, quotes may briefly be unavailable; using stale leg_price caused `PriceExceedsAggressiveTolerance`
+- **How:** Up to 3 attempts with 1.5s wait between each
+- **Fallback:** Only use original leg_price as last resort (with warning about staleness)
+- **Logs:** `"⚠️ Quote pending for UIC ... (attempt X/3)"`
 
 ### Bot Isolation
 Iron Fly (SPX/SPXW) and Delta Neutral (SPY) are mostly independent:
@@ -1042,3 +1063,9 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 27. **DELETE Endpoint Returns 404 for SPX Options (Fix #23, 2026-02-03)** - MEIC bot stop losses failed silently because `DELETE /trade/v2/positions/{position_id}` returns 404 "File or directory not found" for StockIndexOption (SPX) positions. The bot marked positions as "stopped" but they remained open, causing ~$1,000 unrealized loss. Solution: Use `place_emergency_order()` with `to_open_close="ToClose"` instead of the DELETE endpoint. This is the same pattern used by Iron Fly and Delta Neutral bots. (Cost: 2026-02-03 MEIC stop losses failed, positions remained open until fix deployed)
 
 28. **SaxoClient.__init__ Can Corrupt Token Cache with Stale Config Tokens (Fix #24, 2026-02-03)** - When `SaxoClient` is instantiated, it was calling `token_coordinator.update_cache()` with whatever tokens were loaded from the config file - even if those tokens were older than tokens already in the cache (maintained fresh by Token Keeper). This meant running a diagnostic script that loaded stale config data would overwrite the fresh tokens, causing authentication failures. Root cause: 2026-02-03 at 4:01 PM EST, a diagnostic script loaded Jan 13 expiry tokens from config and wrote them to cache, corrupting fresh tokens. Token Keeper then failed all refresh attempts with 401. Solution: Before updating cache in `__init__`, compare `token_expiry` timestamps - only update if config tokens are NEWER than cached tokens. (Cost: Complete auth failure requiring manual re-authentication, potential missed trades during market hours)
+
+29. **Margin Settlement Delay Needed Between Close and Enter (Fix #25, 2026-02-03)** - Delta Neutral recenter failed at 2:01 PM EST because after closing the long straddle ($10,180 received), the bot immediately tried to enter new longs (~$10,534). Saxo rejected with `WouldExceedMargin` because the cash from the close wasn't immediately available for margin. Solution: Add 3-second delay after closing positions before entering new positions. Applied to: execute_recenter, roll_weekly_shorts, all partial straddle recovery paths. (Cost: Recenter failed, left bot with shorts-only exposure for remainder of session)
+
+30. **Retry Attempts Need Delay to Avoid 409 Conflicts (Fix #26, 2026-02-03)** - Same recenter failure showed rapid 409 Conflict errors when the bot retried placing orders immediately after previous cancellation. Saxo API hadn't fully processed the cancellation. Solution: Add 1.5-second delay between retry attempts in `_place_protected_multi_leg_order`. (Cost: Multiple rapid rejections consuming all 7 retry attempts without meaningful progress)
+
+31. **Quote Fetch Must Retry on Invalid (Fix #27, 2026-02-03)** - During recenter, fresh quotes returned `Bid=0, Ask=0` immediately after closing positions. The code fell back to stale `leg_price` from original order creation, causing `PriceExceedsAggressiveTolerance` errors when the stale price was far from current market. Solution: Retry quote fetch up to 3 times with 1.5s delay if invalid (Bid=0/Ask=0). Only use leg_price as last resort with warning about staleness. (Cost: Orders placed at stale prices rejected by exchange)

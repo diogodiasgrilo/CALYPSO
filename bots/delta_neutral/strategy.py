@@ -3133,34 +3133,53 @@ class DeltaNeutralStrategy:
                             "aborted": True
                         }
 
-                # Get fresh quote for accurate limit price
-                quote = self.client.get_quote(leg_uic, leg_asset_type)
-                base_price = leg_price
+                # =============================================================
+                # GET FRESH QUOTE (Fix #26, 2026-02-03)
+                # Fetch fresh quote with retry if invalid. This ensures we always
+                # use current market prices, not stale leg_price from order creation.
+                # =============================================================
+                base_price = None
                 quote_valid = False
+                max_quote_attempts = 3
+                quote_wait_time = 1.5  # seconds between attempts
 
-                if quote and "Quote" in quote:
-                    bid = quote["Quote"].get("Bid", 0) or 0
-                    ask = quote["Quote"].get("Ask", 0) or 0
+                for quote_attempt in range(max_quote_attempts):
+                    quote = self.client.get_quote(leg_uic, leg_asset_type)
 
-                    # DATA-004: Validate quote has real prices (not Bid=0/Ask=0)
-                    if bid > 0 and ask > 0:
-                        quote_valid = True
-                        if leg_buy_sell == BuySell.BUY:
-                            base_price = ask
+                    if quote and "Quote" in quote:
+                        bid = quote["Quote"].get("Bid", 0) or 0
+                        ask = quote["Quote"].get("Ask", 0) or 0
+
+                        # DATA-004: Validate quote has real prices (not Bid=0/Ask=0)
+                        if bid > 0 and ask > 0:
+                            quote_valid = True
+                            if leg_buy_sell == BuySell.BUY:
+                                base_price = ask
+                            else:
+                                base_price = bid
+                            break  # Got valid quote, exit retry loop
                         else:
-                            base_price = bid
+                            logger.warning(f"  ⚠️ Quote pending for UIC {leg_uic} (attempt {quote_attempt + 1}/{max_quote_attempts}): Bid=${bid:.2f}, Ask=${ask:.2f}")
                     else:
-                        logger.warning(f"  ⚠️ DATA-004: Invalid quote for UIC {leg_uic}: Bid=${bid:.2f}, Ask=${ask:.2f}")
-                        # Fix #4: CRITICAL - Never use $0.00 as fallback price
-                        # This was the root cause of "OrderPrice must be set" errors on 2026-01-27
-                        if leg_price and leg_price > 0:
-                            logger.warning(f"     Using fallback price ${leg_price:.2f} from original leg data")
-                        else:
-                            # leg_price is $0 or None - cannot use as fallback
-                            logger.error(f"  ✗ DATA-004: No valid price available (quote invalid, leg_price=${leg_price})")
-                            logger.error(f"     Skipping to next retry attempt with fresh quote...")
-                            # Set base_price to None to signal invalid price
-                            base_price = None
+                        logger.warning(f"  ⚠️ No quote returned for UIC {leg_uic} (attempt {quote_attempt + 1}/{max_quote_attempts})")
+
+                    # Wait before retry if not last attempt
+                    if quote_attempt < max_quote_attempts - 1:
+                        logger.info(f"     Waiting {quote_wait_time}s for quotes to become available...")
+                        time.sleep(quote_wait_time)
+
+                # If still no valid quote after retries, use leg_price as last resort
+                if not quote_valid:
+                    logger.warning(f"  ⚠️ DATA-004: No valid quote after {max_quote_attempts} attempts for UIC {leg_uic}")
+                    # Fix #4: CRITICAL - Never use $0.00 as fallback price
+                    if leg_price and leg_price > 0:
+                        logger.warning(f"     Using fallback price ${leg_price:.2f} from original leg data (may be stale!)")
+                        base_price = leg_price
+                    else:
+                        # leg_price is $0 or None - cannot use as fallback
+                        logger.error(f"  ✗ DATA-004: No valid price available (quote invalid, leg_price=${leg_price})")
+                        logger.error(f"     Skipping to next retry attempt...")
+                        # base_price stays None to signal invalid price
 
                 # MARKET ORDER attempt (last resort in progressive sequence)
                 if is_market:
@@ -3313,6 +3332,17 @@ class DeltaNeutralStrategy:
                             logger.warning(f"  ⚠ Leg {i+1} failed at {current_slippage}% slippage - will try MARKET order next...")
                         else:
                             logger.warning(f"  ⚠ Leg {i+1} failed at {current_slippage}% slippage - retrying at {next_slippage}%...")
+
+                        # =============================================================
+                        # RETRY DELAY (Fix #25, 2026-02-03)
+                        # Add delay between retry attempts to:
+                        # 1. Allow Saxo API to fully process previous order cancellation
+                        # 2. Prevent 409 Conflict errors from rapid-fire requests
+                        # 3. Give the market time to settle for fresh quotes
+                        # =============================================================
+                        retry_delay = 1.5  # seconds
+                        logger.info(f"     Waiting {retry_delay}s before retry...")
+                        time.sleep(retry_delay)
                     else:
                         logger.error(f"  ✗ Leg {i+1} failed all {len(retry_sequence)} attempts: {result['message']}")
 
@@ -8462,6 +8492,11 @@ class DeltaNeutralStrategy:
                         "result": "SUCCESS"
                     })
 
+                # MARGIN SETTLEMENT DELAY (Fix #24, 2026-02-03)
+                margin_settle_delay = 3.0
+                logger.info(f"⏳ Waiting {margin_settle_delay}s for margin to settle...")
+                time.sleep(margin_settle_delay)
+
                 # Step 3: Do a fresh entry (straddle + strangle)
                 # VIX check for fresh entry
                 if not self.check_vix_entry_condition():
@@ -8527,6 +8562,11 @@ class DeltaNeutralStrategy:
                         "description": "Shorts safe, closed orphaned leg, recentering straddle",
                         "result": "SUCCESS"
                     })
+
+                # MARGIN SETTLEMENT DELAY (Fix #24, 2026-02-03)
+                margin_settle_delay = 3.0
+                logger.info(f"⏳ Waiting {margin_settle_delay}s for margin to settle...")
+                time.sleep(margin_settle_delay)
 
                 # Step 2: Enter new straddle at ATM (shorts are still there providing income)
                 logger.info("Step 2: Entering new long straddle at ATM...")
@@ -8594,6 +8634,11 @@ class DeltaNeutralStrategy:
                     "description": "Closed orphaned long leg (no shorts), entering new straddle",
                     "result": "SUCCESS"
                 })
+
+            # MARGIN SETTLEMENT DELAY (Fix #24, 2026-02-03)
+            margin_settle_delay = 3.0
+            logger.info(f"⏳ Waiting {margin_settle_delay}s for margin to settle...")
+            time.sleep(margin_settle_delay)
 
             # Step 2: Enter new straddle at ATM
             logger.info("Step 2: Entering new long straddle at ATM...")
@@ -8682,6 +8727,17 @@ class DeltaNeutralStrategy:
                 self.state = previous_state
                 self._increment_failure_count("recenter_close_failed")
                 return False
+
+        # =================================================================
+        # MARGIN SETTLEMENT DELAY (Fix #24, 2026-02-03)
+        # After closing longs, wait for margin to settle before entering new longs.
+        # Without this delay, Saxo may reject the new order with "WouldExceedMargin"
+        # because the cash from the close isn't immediately available.
+        # =================================================================
+        margin_settle_delay = 3.0  # seconds
+        logger.info(f"⏳ Waiting {margin_settle_delay}s for margin to settle after close...")
+        time.sleep(margin_settle_delay)
+        logger.info("   Margin settlement delay complete")
 
         # Step 2: Open new ATM long straddle at same expiration
         # We need to find ATM options at the new price but same expiry
@@ -9065,6 +9121,17 @@ class DeltaNeutralStrategy:
                 self.state = StrategyState.FULL_POSITION
                 self._increment_failure_count("roll_close_shorts_failed")
                 return False
+
+        # =================================================================
+        # MARGIN SETTLEMENT DELAY (Fix #24, 2026-02-03)
+        # After closing shorts, wait for margin to settle before entering new shorts.
+        # This prevents "WouldExceedMargin" errors when the cash from close
+        # isn't immediately available.
+        # =================================================================
+        margin_settle_delay = 3.0  # seconds
+        logger.info(f"⏳ Waiting {margin_settle_delay}s for margin to settle after close...")
+        time.sleep(margin_settle_delay)
+        logger.info("   Margin settlement delay complete")
 
         # Step 6: Enter new shorts for next week (for real this time)
         # CRITICAL: Pass for_roll=True to look for NEXT week's expiry (5-12 DTE)
