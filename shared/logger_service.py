@@ -548,6 +548,23 @@ class GoogleSheetsLogger:
                         # Meta
                         "State", "Exchange Rate"
                     ]
+                elif self.strategy_type == "meic":
+                    # MEIC: Multiple Entry Iron Condors snapshot
+                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=16)
+                    headers = [
+                        # Market Data
+                        "Timestamp", "SPX Price", "VIX",
+                        # Entry Status
+                        "Entries Completed", "Active ICs", "Entries Skipped",
+                        # P&L
+                        "Total Credit ($)", "Unrealized P&L ($)", "Realized P&L ($)",
+                        # Stops
+                        "Call Stops", "Put Stops",
+                        # Risk
+                        "Daily Loss Limit (%)", "Circuit Breaker",
+                        # Meta
+                        "State", "Environment"
+                    ]
                 else:
                     # Delta Neutral: Straddle + Strangle position snapshot
                     worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=17)
@@ -2184,6 +2201,49 @@ class GoogleSheetsLogger:
                     f"{exchange_rate:.6f}" if exchange_rate else "N/A"
                 ]
                 col_range = "A2:Q2"  # 17 columns
+            elif self.strategy_type == "meic":
+                # MEIC: Multiple Entry Iron Condors snapshot
+                # Columns: Timestamp, SPX Price, VIX, Entries Completed, Active ICs, Entries Skipped,
+                #          Total Credit ($), Unrealized P&L ($), Realized P&L ($),
+                #          Call Stops, Put Stops, Daily Loss Limit (%), Circuit Breaker, State, Environment
+                spx_price = strategy_data.get("spx_price", 0)
+                vix = strategy_data.get("vix", 0)
+                entries_completed = strategy_data.get("entries_completed", 0)
+                active_ics = strategy_data.get("active_ics", 0)
+                entries_skipped = strategy_data.get("entries_skipped", 0)
+                total_credit = strategy_data.get("total_credit", 0)
+                unrealized_pnl = strategy_data.get("unrealized_pnl", 0)
+                realized_pnl = strategy_data.get("realized_pnl", 0)
+                call_stops = strategy_data.get("call_stops", 0)
+                put_stops = strategy_data.get("put_stops", 0)
+                daily_loss_pct = strategy_data.get("daily_loss_percent", 0)
+                circuit_breaker = strategy_data.get("circuit_breaker", False)
+                state = strategy_data.get("state", "Unknown")
+
+                row = [
+                    # Market Data
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    f"{spx_price:.2f}",
+                    f"{vix:.2f}" if vix else "N/A",
+                    # Entry Status
+                    str(entries_completed),
+                    str(active_ics),
+                    str(entries_skipped),
+                    # P&L
+                    f"{total_credit:.2f}",
+                    f"{unrealized_pnl:.2f}",
+                    f"{realized_pnl:.2f}",
+                    # Stops
+                    str(call_stops),
+                    str(put_stops),
+                    # Risk
+                    f"{daily_loss_pct:.2f}",
+                    "YES" if circuit_breaker else "NO",
+                    # Meta
+                    state,
+                    environment
+                ]
+                col_range = "A2:O2"  # 15 columns
             else:
                 # Delta Neutral: Straddle + Strangle position snapshot
                 spy_price = strategy_data.get("spy_price", 0)
