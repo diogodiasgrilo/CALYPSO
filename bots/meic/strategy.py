@@ -3160,8 +3160,8 @@ class MEICStrategy:
         account_value = account_info.get("TotalValue", 50000)  # Default 50K
         max_loss = account_value * (self.max_daily_loss_percent / 100)
 
-        # Calculate current unrealized + realized loss
-        unrealized = sum(e.unrealized_pnl for e in self.daily_state.active_entries)
+        # FIX (2026-02-03): Use Saxo's authoritative P&L
+        unrealized = self._get_total_saxo_pnl()
         total_loss = -unrealized - self.daily_state.total_realized_pnl
 
         if total_loss >= max_loss:
@@ -3867,8 +3867,8 @@ class MEICStrategy:
 
     def get_daily_summary(self) -> Dict:
         """Get daily trading summary."""
-        # Calculate total P&L
-        unrealized = sum(e.unrealized_pnl for e in self.daily_state.active_entries)
+        # FIX (2026-02-03): Use Saxo's authoritative P&L instead of mid-price calc
+        unrealized = self._get_total_saxo_pnl()
         total_pnl = self.daily_state.total_realized_pnl + unrealized
 
         # PNL-001: Sanity check the P&L values
@@ -3892,7 +3892,8 @@ class MEICStrategy:
     def get_status_summary(self) -> Dict:
         """Get current status summary for heartbeat logging."""
         active_entries = len(self.daily_state.active_entries)
-        unrealized = sum(e.unrealized_pnl for e in self.daily_state.active_entries)
+        # FIX (2026-02-03): Use Saxo's authoritative P&L instead of mid-price calc
+        unrealized = self._get_total_saxo_pnl()
 
         return {
             "state": self.state.value,
@@ -3917,7 +3918,7 @@ class MEICStrategy:
         - Entry number
         - Strikes (call spread / put spread)
         - Credit received
-        - Live P&L
+        - Live P&L (from Saxo's ProfitLossOnTrade)
         - Distance to stop levels
         - Stop status
 
@@ -3929,10 +3930,13 @@ class MEICStrategy:
             return lines
 
         for entry in self.daily_state.active_entries:
-            # Get live prices and P&L
+            # FIX (2026-02-03): Use Saxo's authoritative P&L for display
+            total_pnl = self._get_saxo_pnl_for_entry(entry)
+
+            # For stop distance calculation, still use mid-price based calc
+            # (this is what the stop logic uses, so it should match)
             call_pnl = self._calculate_side_pnl(entry, "call")
             put_pnl = self._calculate_side_pnl(entry, "put")
-            total_pnl = call_pnl + put_pnl
 
             # Calculate distance to stop levels (as percentage of stop)
             call_dist = entry.call_side_stop - abs(call_pnl) if not entry.call_side_stopped else 0
@@ -4019,6 +4023,64 @@ class MEICStrategy:
         except Exception:
             pass
         return None
+
+    def _get_saxo_pnl_for_entry(self, entry: IronCondorEntry) -> float:
+        """
+        Get the actual P&L for an entry directly from Saxo positions.
+
+        This uses Saxo's ProfitLossOnTrade field which is the authoritative
+        P&L calculation (accounts for actual fill prices and current market).
+
+        FIX (2026-02-03): Previously used mid-price calculations which were
+        systematically optimistic. Saxo uses bid for sells and ask for buys.
+
+        Args:
+            entry: The IronCondorEntry to get P&L for
+
+        Returns:
+            Total P&L in dollars (positive = profit, negative = loss)
+        """
+        try:
+            # Get all positions from Saxo
+            positions = self.client.get_positions()
+            total_pnl = 0.0
+
+            # Map position IDs to their P&L
+            position_ids = [
+                entry.short_call_position_id,
+                entry.long_call_position_id,
+                entry.short_put_position_id,
+                entry.long_put_position_id,
+            ]
+
+            for pos in positions:
+                pos_id = str(pos.get("PositionId", ""))
+                if pos_id in position_ids:
+                    # Get Saxo's P&L calculation
+                    pos_view = pos.get("PositionView", {})
+                    pnl = pos_view.get("ProfitLossOnTrade", 0) or 0
+                    total_pnl += pnl
+
+            return total_pnl
+
+        except Exception as e:
+            logger.debug(f"Error getting Saxo P&L for Entry #{entry.entry_number}: {e}")
+            # Fall back to mid-price calculation
+            return entry.unrealized_pnl
+
+    def _get_total_saxo_pnl(self) -> float:
+        """
+        Get total unrealized P&L for all active entries from Saxo.
+
+        FIX (2026-02-03): Use Saxo's authoritative P&L instead of mid-price calc.
+
+        Returns:
+            Total unrealized P&L in dollars
+        """
+        total = 0.0
+        for entry in self.daily_state.active_entries:
+            total += self._get_saxo_pnl_for_entry(entry)
+        return total
 
     # =========================================================================
     # METRICS PERSISTENCE
@@ -4346,7 +4408,8 @@ class MEICStrategy:
         """
         # Basic status
         active_entries = len(self.daily_state.active_entries)
-        unrealized = sum(e.unrealized_pnl for e in self.daily_state.active_entries)
+        # FIX (2026-02-03): Use Saxo's authoritative P&L
+        unrealized = self._get_total_saxo_pnl()
         total_pnl = self.daily_state.total_realized_pnl + unrealized
 
         # Position counts
@@ -4367,9 +4430,11 @@ class MEICStrategy:
             avg_short_put = sum(e.short_put_strike for e in active if e.short_put_strike) / active_entries
             avg_spread_width = sum(e.spread_width for e in active if e.spread_width) / active_entries
 
-        # Per-entry details
+        # Per-entry details (use Saxo P&L for each entry)
         entry_details = []
         for entry in self.daily_state.entries:
+            # Get Saxo P&L if entry has positions
+            entry_pnl = self._get_saxo_pnl_for_entry(entry) if entry.is_complete else 0
             entry_details.append({
                 "entry_number": entry.entry_number,
                 "entry_time": entry.entry_time.strftime("%H:%M") if entry.entry_time else "",
@@ -4382,7 +4447,7 @@ class MEICStrategy:
                 "total_credit": entry.total_credit,
                 "call_stopped": entry.call_side_stopped,
                 "put_stopped": entry.put_side_stopped,
-                "unrealized_pnl": entry.unrealized_pnl,
+                "unrealized_pnl": entry_pnl,
                 "is_complete": entry.is_complete
             })
 
