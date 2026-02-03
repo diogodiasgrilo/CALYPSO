@@ -3986,7 +3986,8 @@ class MEICStrategy:
     def _get_option_price(self, uic: int) -> Optional[float]:
         """Get mid price for an option UIC."""
         try:
-            quote = self.client.get_quote(uic)
+            # FIX (2026-02-03): Must specify asset_type for SPX options
+            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
             if quote:
                 bid = quote.get("Bid", 0) or 0
                 ask = quote.get("Ask", 0) or 0
