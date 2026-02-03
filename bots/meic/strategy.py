@@ -571,15 +571,19 @@ class MEICStrategy:
         # Entry parameters
         self._parse_entry_times()
         self.spread_width = self.strategy_config.get("spread_width", 50)
-        self.min_credit_per_side = self.strategy_config.get("min_credit_per_side", 1.00)
-        self.max_credit_per_side = self.strategy_config.get("max_credit_per_side", 1.75)
+        # Config stores credit thresholds in per-contract dollars ($1.00 = $1.00 per contract)
+        # But entry credits are stored in total dollars (fill_price × 100 multiplier)
+        # So we multiply config values by 100 for consistent comparison
+        self.min_credit_per_side = self.strategy_config.get("min_credit_per_side", 1.00) * 100
+        self.max_credit_per_side = self.strategy_config.get("max_credit_per_side", 1.75) * 100
         self.target_delta = self.strategy_config.get("target_delta", 8)
         self.min_delta = self.strategy_config.get("min_delta", 5)
         self.max_delta = self.strategy_config.get("max_delta", 15)
 
         # MEIC+ modification
         self.meic_plus_enabled = self.strategy_config.get("meic_plus_enabled", True)
-        self.meic_plus_reduction = self.strategy_config.get("meic_plus_reduction", 0.10)
+        # Config stores reduction in per-contract dollars ($0.10), multiply by 100 for total dollars
+        self.meic_plus_reduction = self.strategy_config.get("meic_plus_reduction", 0.10) * 100
 
         # Risk parameters
         self.max_daily_loss_percent = self.strategy_config.get("max_daily_loss_percent", 2.0)
@@ -1551,7 +1555,8 @@ class MEICStrategy:
             # STOP-002: Don't apply if stop would be too tight (credit < $1.50)
             # Note: $1.50 is a safety threshold - with thin credits, reducing
             # the stop by $0.10 makes it proportionally too tight
-            min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50)
+            # Config is in per-contract dollars, multiply by 100 for total dollars comparison
+            min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
             if total_credit > min_credit_for_meic_plus:
                 stop_level = total_credit - self.meic_plus_reduction
             else:
@@ -3430,9 +3435,10 @@ class MEICStrategy:
         # Calculate stop levels based on recovered credit
         total_credit = entry.call_spread_credit + entry.put_spread_credit
         if self.meic_plus_enabled:
-            # MEIC+ stops at credit - $0.10 for potential small win
-            entry.call_side_stop = (total_credit / 2) - (self.meic_plus_reduction * 100)
-            entry.put_side_stop = (total_credit / 2) - (self.meic_plus_reduction * 100)
+            # MEIC+ stops at credit - reduction for potential small win
+            # Note: meic_plus_reduction is already in total dollars (was multiplied by 100 at load time)
+            entry.call_side_stop = (total_credit / 2) - self.meic_plus_reduction
+            entry.put_side_stop = (total_credit / 2) - self.meic_plus_reduction
         else:
             entry.call_side_stop = total_credit / 2
             entry.put_side_stop = total_credit / 2
