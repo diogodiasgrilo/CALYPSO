@@ -1,0 +1,67 @@
+# MEIC-TF (Trend Following Hybrid) Trading Bot Systemd Service
+#
+# This is a modified MEIC bot that adds EMA-based trend detection:
+# - BULLISH (20 EMA > 40 EMA): Place PUT spreads only
+# - BEARISH (20 EMA < 40 EMA): Place CALL spreads only
+# - NEUTRAL: Place full iron condor (standard MEIC)
+#
+# Installation:
+#   sudo cp /opt/calypso/bots/meic_tf/meic_tf.service /etc/systemd/system/meic_tf.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable meic_tf.service
+#   sudo systemctl start meic_tf.service
+#
+# Management:
+#   sudo systemctl status meic_tf
+#   sudo systemctl stop meic_tf
+#   sudo systemctl restart meic_tf
+#   sudo journalctl -u meic_tf -f
+#
+# IMPORTANT: Never use `kill` or `pkill` - always use systemctl to stop the service!
+# The service has Restart=always, so killing it will cause auto-restart in 30 seconds.
+
+[Unit]
+Description=MEIC-TF 0DTE Trading Bot (Trend Following Hybrid)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="PATH=/opt/calypso/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/opt/calypso"
+Environment="GOOGLE_APPLICATION_CREDENTIALS=/opt/calypso/credentials/service-account.json"
+
+# Run the MEIC-TF bot
+# Mode is controlled by config.json "dry_run" field:
+#   "dry_run": true  = simulation (no real orders)
+#   "dry_run": false = live trading
+# CLI flag --dry-run also works and takes priority over config
+ExecStart=/opt/calypso/.venv/bin/python -m bots.meic_tf.main
+
+# Graceful shutdown - send SIGTERM, wait 60s for cleanup
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Restart policy
+# Bot will automatically restart on crashes
+# Max 5 restarts in 10 minutes, then fail
+Restart=always
+RestartSec=30
+StartLimitInterval=600
+StartLimitBurst=5
+
+# Resource limits
+MemoryLimit=512M
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meic_tf
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,75 @@
+{
+    "bot_name": "MEIC-TF",
+    "saxo_api": {
+        "environment": "live",
+        "app_key": "FROM_SECRET_MANAGER",
+        "app_secret": "FROM_SECRET_MANAGER",
+        "redirect_uri": "http://localhost:8000/callback"
+    },
+    "strategy": {
+        "_comment_underlying": "US500.I is a CFD that tracks SPX - provides real-time prices",
+        "underlying_symbol": "US500.I",
+        "underlying_uic": 4913,
+
+        "_comment_options": "SPXW are SPX weekly options (0DTE)",
+        "option_root_uic": 128,
+
+        "_comment_vix": "VIX spot for volatility filtering",
+        "vix_spot_uic": 10606,
+
+        "_comment_entry_times": "Entry times in HH:MM format (US Eastern)",
+        "entry_times": ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30"],
+        "entry_window_minutes": 5,
+
+        "_comment_spread": "Spread configuration",
+        "spread_width": 50,
+        "min_spread_width": 25,
+        "max_spread_width": 100,
+
+        "_comment_credit": "Credit targets per side (call spread OR put spread)",
+        "min_credit_per_side": 1.00,
+        "max_credit_per_side": 1.75,
+        "credit_balance_tolerance": 0.25,
+
+        "_comment_delta": "Delta targeting for strike selection",
+        "target_delta": 8,
+        "min_delta": 5,
+        "max_delta": 15,
+
+        "_comment_meic_plus": "MEIC+ modification: stop = credit - $0.10 for better breakeven days",
+        "meic_plus_enabled": true,
+        "meic_plus_reduction": 0.10,
+
+        "_comment_risk": "Risk management settings",
+        "max_daily_loss_percent": 2.0,
+        "max_vix_entry": 25,
+        "contracts_per_entry": 1
+    },
+    "trend_filter": {
+        "_comment": "EMA-based trend direction detection for MEIC-TF",
+        "enabled": true,
+        "ema_short_period": 20,
+        "ema_long_period": 40,
+        "ema_neutral_threshold": 0.001,
+        "recheck_each_entry": true,
+        "chart_bars_count": 50,
+        "chart_horizon_minutes": 1
+    },
+    "filters": {
+        "_comment": "Skip trading on FOMC announcement days due to high volatility",
+        "fomc_blackout": true
+    },
+    "alerts": {
+        "_comment": "Alert settings - phone/email loaded from Secret Manager in cloud",
+        "enabled": true,
+        "phone_number": "+1XXXXXXXXXX",
+        "email": "your@email.com"
+    },
+    "logging": {
+        "log_level": "INFO",
+        "log_dir": "logs/meic_tf",
+        "google_sheets_enabled": true,
+        "spreadsheet_name": "Calypso_MEIC-TF_Live_Data",
+        "strategy_type": "meic_tf"
+    }
+}
