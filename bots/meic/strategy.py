@@ -130,7 +130,7 @@ FLASH_CRASH_THRESHOLD_PERCENT = 2.0  # 2% move in 5 minutes
 # When price is within this % of stop level, use faster monitoring
 VIGILANT_THRESHOLD_PERCENT = 50  # 50% of stop level used = vigilant mode
 VIGILANT_CHECK_INTERVAL_SECONDS = 2
-NORMAL_CHECK_INTERVAL_SECONDS = 5
+NORMAL_CHECK_INTERVAL_SECONDS = 3  # Reduced from 5s for faster 0DTE stop detection
 
 # ORDER-004: Pre-entry margin check
 MIN_BUYING_POWER_PER_IC = 5000  # Minimum BP required per iron condor ($5000)
