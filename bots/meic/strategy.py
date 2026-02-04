@@ -27,6 +27,7 @@ See docs/MEIC_STRATEGY_SPECIFICATION.md for full specification.
 
 import json
 import logging
+import math
 import os
 import time
 import threading
@@ -193,6 +194,11 @@ def round_to_spx_tick(price: float, round_up: bool = False) -> float:
 
     Returns:
         Price rounded to valid tick increment
+
+    Note:
+        FIX (2026-02-04): Added final round(result, 2) to fix floating point
+        precision issues. E.g., 2.55 / 0.05 * 0.05 = 2.5500000000000003
+        which Saxo rejects with PriceNotInTickSizeIncrements error.
     """
     if price <= 0:
         return 0.0
@@ -202,11 +208,13 @@ def round_to_spx_tick(price: float, round_up: bool = False) -> float:
 
     if round_up:
         # Round up to next tick (for aggressive buys)
-        import math
-        return math.ceil(price / tick_size) * tick_size
+        result = math.ceil(price / tick_size) * tick_size
     else:
         # Round to nearest tick
-        return round(price / tick_size) * tick_size
+        result = round(price / tick_size) * tick_size
+
+    # FIX: Round to 2 decimal places to fix floating point precision issues
+    return round(result, 2)
 
 
 # EMERGENCY-001: Spread validation for emergency closes
@@ -3374,11 +3382,15 @@ class MEICStrategy:
             logger.info(f"Found {len(all_positions)} total positions in account")
 
             # Step 2: Get valid position IDs and clean up registry orphans
+            # FIX (2026-02-04): Skip in dry-run mode - DRY_ positions don't exist in Saxo
             valid_ids = {str(p.get("PositionId")) for p in all_positions}
-            orphans = self.registry.cleanup_orphans(valid_ids)
-            if orphans:
-                logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
-                self._log_safety_event("ORPHAN_CLEANUP", f"Removed {len(orphans)} orphaned positions from registry")
+            if not self.dry_run:
+                orphans = self.registry.cleanup_orphans(valid_ids)
+                if orphans:
+                    logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
+                    self._log_safety_event("ORPHAN_CLEANUP", f"Removed {len(orphans)} orphaned positions from registry")
+            else:
+                logger.debug("Skipping orphan cleanup in dry-run mode")
 
             # Step 3: Get MEIC positions from registry
             my_position_ids = self.registry.get_positions("MEIC")
@@ -3890,11 +3902,16 @@ class MEICStrategy:
         all_positions = self.client.get_positions()
         valid_ids = {str(p.get("PositionId")) for p in all_positions}
 
-        # Clean up orphans from registry
-        orphans = self.registry.cleanup_orphans(valid_ids)
-        if orphans:
-            logger.warning(f"Cleaned up {len(orphans)} orphaned registrations")
-            self._log_safety_event("ORPHAN_CLEANUP", f"Cleaned {len(orphans)} orphans during reconciliation")
+        # FIX (2026-02-04): Skip orphan cleanup in dry-run mode
+        # Dry-run positions use synthetic IDs (DRY_xxx) that won't exist in Saxo,
+        # so cleanup_orphans would incorrectly remove all of them.
+        if not self.dry_run:
+            orphans = self.registry.cleanup_orphans(valid_ids)
+            if orphans:
+                logger.warning(f"Cleaned up {len(orphans)} orphaned registrations")
+                self._log_safety_event("ORPHAN_CLEANUP", f"Cleaned {len(orphans)} orphans during reconciliation")
+        else:
+            logger.debug("Skipping orphan cleanup in dry-run mode")
 
         # Check if any of our tracked positions are missing from Saxo
         for entry in self.daily_state.active_entries:
@@ -3907,6 +3924,8 @@ class MEICStrategy:
                     # Unregister the missing position
                     self.registry.unregister(pos_id)
                     setattr(entry, f"{leg_name}_position_id", None)
+                    # FIX (2026-02-04): Also clear UIC to prevent IllegalInstrumentId errors
+                    setattr(entry, f"{leg_name}_uic", None)
 
             if missing_legs:
                 logger.warning(f"Entry #{entry.entry_number}: Missing legs in Saxo: {missing_legs}")
@@ -4032,12 +4051,15 @@ class MEICStrategy:
                     logger.info(f"  Unregistered settled position: {pos_id}")
 
                 # Also clean up from daily state entries
+                # FIX (2026-02-04): Clear BOTH position_id AND uic when options settle
+                # to prevent IllegalInstrumentId errors from _update_entry_prices
                 for entry in self.daily_state.entries:
                     for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
                         pos_id = getattr(entry, f"{leg_name}_position_id")
                         if pos_id and pos_id in settled:
                             setattr(entry, f"{leg_name}_position_id", None)
-                            logger.debug(f"  Cleared {leg_name} from entry #{entry.entry_number}")
+                            setattr(entry, f"{leg_name}_uic", None)  # Also clear UIC
+                            logger.debug(f"  Cleared {leg_name} position_id and uic from entry #{entry.entry_number}")
 
                 # Mark sides as stopped if all legs are gone
                 for entry in self.daily_state.entries:

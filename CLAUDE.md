@@ -1004,7 +1004,7 @@ SCRIPT
 | `docs/VM_COMMANDS.md` | VM administration commands |
 | `.claude/settings.local.json` | Full command reference (also readable)
 
-### Key Lessons Learned (2026-01-31)
+### Key Lessons Learned (Updated 2026-02-04)
 
 These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
 
@@ -1069,3 +1069,9 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 30. **Retry Attempts Need Delay to Avoid 409 Conflicts (Fix #26, 2026-02-03)** - Same recenter failure showed rapid 409 Conflict errors when the bot retried placing orders immediately after previous cancellation. Saxo API hadn't fully processed the cancellation. Solution: Add 1.5-second delay between retry attempts in `_place_protected_multi_leg_order`. (Cost: Multiple rapid rejections consuming all 7 retry attempts without meaningful progress)
 
 31. **Quote Fetch Must Retry on Invalid (Fix #27, 2026-02-03)** - During recenter, fresh quotes returned `Bid=0, Ask=0` immediately after closing positions. The code fell back to stale `leg_price` from original order creation, causing `PriceExceedsAggressiveTolerance` errors when the stale price was far from current market. Solution: Retry quote fetch up to 3 times with 1.5s delay if invalid (Bid=0/Ask=0). Only use leg_price as last resort with warning about staleness. (Cost: Orders placed at stale prices rejected by exchange)
+
+32. **Floating Point Tick Size Rounding (Fix #28, 2026-02-04)** - MEIC orders rejected with `PriceNotInTickSizeIncrements` because `round(2.55 / 0.05) * 0.05 = 2.5500000000000003` due to floating point arithmetic. Saxo API is strict about tick sizes and won't accept prices with floating point artifacts. Solution: Add final `round(result, 2)` after tick size calculation in `round_to_spx_tick()`. (Cost: Multiple entry failures for MEIC Entry #2 on 2026-02-03)
+
+33. **Clear UICs When Positions Settle/Missing (Fix #29, 2026-02-04)** - After options settle or positions are marked as missing, the code only cleared `position_id` but not `uic`. This caused `_update_entry_prices()` to try fetching prices for expired options (UICs still set), generating 40+ `IllegalInstrumentId` (404) errors. Solution: Clear BOTH `position_id` AND `uic` when positions settle in `check_after_hours_settlement()` and when positions are marked missing in `_reconcile_positions()`. (Cost: 2026-02-03 MEIC got stuck in error loop trying to fetch prices for expired options)
+
+34. **Skip Orphan Cleanup in Dry-Run Mode (Fix #30, 2026-02-04)** - Dry-run positions use synthetic IDs like "DRY_xxx" that don't exist in Saxo. When `cleanup_orphans()` was called with real Saxo positions (empty set in dry-run), all DRY_ positions were incorrectly removed as "orphans", causing `STATE-002: Position count mismatch: expected 4, registry has 0` errors. Solution: Skip `cleanup_orphans()` calls when `self.dry_run` is True. (Cost: 2026-02-03 MEIC repeatedly failed recovery, generating 30+ STATE-002 errors)
