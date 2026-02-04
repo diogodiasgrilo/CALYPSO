@@ -3678,6 +3678,30 @@ class MEICStrategy:
             total_credit = sum(e.total_credit for e in recovered_entries)
             self.daily_state.total_credit_received = total_credit
 
+            # Retroactively calculate commission for entries without commission data
+            # This handles state files from before commission tracking was added (v1.2.2)
+            if self.daily_state.total_commission == 0 and recovered_entries:
+                retroactive_commission = 0.0
+                for entry in recovered_entries:
+                    # Open commission: 4 legs × $2.50 = $10 per IC
+                    if entry.open_commission == 0:
+                        entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
+                        retroactive_commission += entry.open_commission
+                    # Close commission: 2 legs per stopped side × $2.50 = $5 per side
+                    if entry.close_commission == 0:
+                        if entry.call_side_stopped:
+                            close_comm = 2 * self.commission_per_leg * self.contracts_per_entry
+                            entry.close_commission += close_comm
+                            retroactive_commission += close_comm
+                        if entry.put_side_stopped:
+                            close_comm = 2 * self.commission_per_leg * self.contracts_per_entry
+                            entry.close_commission += close_comm
+                            retroactive_commission += close_comm
+                self.daily_state.total_commission = retroactive_commission
+                if retroactive_commission > 0:
+                    logger.info(f"Retroactively calculated commission: ${retroactive_commission:.2f} "
+                               f"(from {len(recovered_entries)} entries)")
+
             logger.info("=" * 60)
             logger.info(f"RECOVERY COMPLETE: {len(recovered_entries)} entries recovered")
             logger.info(f"  State: {self.state.value}")
