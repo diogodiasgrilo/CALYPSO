@@ -129,8 +129,11 @@ FLASH_CRASH_THRESHOLD_PERCENT = 2.0  # 2% move in 5 minutes
 # MONITORING: Dynamic interval thresholds
 # When price is within this % of stop level, use faster monitoring
 VIGILANT_THRESHOLD_PERCENT = 50  # 50% of stop level used = vigilant mode
-VIGILANT_CHECK_INTERVAL_SECONDS = 2
-NORMAL_CHECK_INTERVAL_SECONDS = 3  # Reduced from 5s for faster 0DTE stop detection
+# RATE LIMIT FIX (2026-02-04): Increased intervals to stay under Saxo's 120 req/min limit
+# With 2 entries: 10 calls/cycle. At 6s interval = 600 cycles/hr = 6,000 calls/hr (under 7,200 limit)
+# With 6 entries: 26 calls/cycle. At 15s interval = 240 cycles/hr = 6,240 calls/hr (under 7,200 limit)
+VIGILANT_CHECK_INTERVAL_SECONDS = 5  # Was 2s - still faster when near stops
+NORMAL_CHECK_INTERVAL_SECONDS = 10   # Was 3s - safe for up to 4 entries
 
 # ORDER-004: Pre-entry margin check
 MIN_BUYING_POWER_PER_IC = 5000  # Minimum BP required per iron condor ($5000)

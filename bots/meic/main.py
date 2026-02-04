@@ -100,8 +100,8 @@ logger = logging.getLogger(__name__)
 #
 # REST-only mode (USE_WEBSOCKET_STREAMING = False):
 #   - All price fetching uses REST API directly
-#   - NORMAL mode: ~12 calls/min per bot (5s interval)
-#   - VIGILANT mode: ~30 calls/min per bot (2s interval)
+#   - NORMAL mode: ~6 calls/min per bot (10s interval) - stays under Saxo 120/min limit
+#   - VIGILANT mode: ~12 calls/min per bot (5s interval) - faster when near stops
 #   - Guaranteed fresh prices, no stale cache issues
 #
 # WebSocket mode (USE_WEBSOCKET_STREAMING = True):
@@ -355,7 +355,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     trade_logger.log_event("-" * 60)
 
     last_status_time = datetime.now()
-    status_interval = 3  # Log status every 3 seconds (matches check interval)
+    status_interval = 10  # Log status every 10 seconds (matches NORMAL_CHECK_INTERVAL)
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
     last_day = get_us_market_time().date()  # Use Eastern time, not UTC
