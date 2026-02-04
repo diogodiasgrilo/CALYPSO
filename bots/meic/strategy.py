@@ -353,18 +353,26 @@ class IronCondorEntry:
         Current unrealized P&L for this IC.
 
         Profit = Credit received - Cost to close
+
+        FIX (2026-02-04): Corrected loss calculation for stopped sides.
+        Previously used stop_level as loss, but actual loss = stop_level - credit.
+        Example: stop=$250, credit=$125 per side, net loss=$125 (not $250).
         """
         if self.call_side_stopped and self.put_side_stopped:
             # Both stopped - return realized loss
-            return -(self.call_side_stop + self.put_side_stop) + self.total_credit
+            # Net loss per side = stop_level - credit_for_that_side
+            call_loss = self.call_side_stop - self.call_spread_credit
+            put_loss = self.put_side_stop - self.put_spread_credit
+            return -(call_loss + put_loss)
         elif self.call_side_stopped:
             # Call stopped, put still open
-            loss_on_call = self.call_side_stop
-            return self.put_spread_credit - self.put_spread_value - loss_on_call
+            # Net loss on call = stop_level - credit_received
+            loss_on_call = self.call_side_stop - self.call_spread_credit
+            return (self.put_spread_credit - self.put_spread_value) - loss_on_call
         elif self.put_side_stopped:
             # Put stopped, call still open
-            loss_on_put = self.put_side_stop
-            return self.call_spread_credit - self.call_spread_value - loss_on_put
+            loss_on_put = self.put_side_stop - self.put_spread_credit
+            return (self.call_spread_credit - self.call_spread_value) - loss_on_put
         else:
             # Both sides still open
             return self.total_credit - self.call_spread_value - self.put_spread_value
@@ -2787,13 +2795,21 @@ class MEICStrategy:
                     self._close_position_with_retry(pos_id, leg_name, uic=uic)
 
         # Update realized P&L
-        self.daily_state.total_realized_pnl -= stop_level
+        # FIX (2026-02-04): Calculate NET loss, not gross cost to close
+        # Net loss = cost_to_close - credit_received_for_that_side
+        # Example: stop_level=$250 (total credit), call_credit=$125, net_loss=$125
+        # Previously was subtracting stop_level which double-counted the credit
+        if side == "call":
+            net_loss = stop_level - entry.call_spread_credit
+        else:
+            net_loss = stop_level - entry.put_spread_credit
+        self.daily_state.total_realized_pnl -= net_loss
 
-        # Log stop loss to Google Sheets
-        self._log_stop_loss(entry, side, stop_level, stop_level)
+        # Log stop loss to Google Sheets (pass net loss, not gross)
+        self._log_stop_loss(entry, side, stop_level, net_loss)
 
-        # ALERT-002: Use batched alerting for rapid stops
-        self._queue_stop_alert(entry, side, stop_level)
+        # ALERT-002: Use batched alerting for rapid stops (pass net loss for display)
+        self._queue_stop_alert(entry, side, stop_level, net_loss)
 
         # P1: Save state after stop loss
         self._save_state_to_disk()
@@ -4320,13 +4336,16 @@ class MEICStrategy:
         try:
             if side == "call":
                 if entry.call_side_stopped:
-                    return -entry.call_side_stop  # Already realized loss
+                    # FIX (2026-02-04): Return NET loss, not gross stop_level
+                    # Net loss = stop_level - credit_received
+                    return -(entry.call_side_stop - entry.call_spread_credit)
                 short_uic = entry.short_call_uic
                 long_uic = entry.long_call_uic
                 credit = entry.call_spread_credit
             else:
                 if entry.put_side_stopped:
-                    return -entry.put_side_stop  # Already realized loss
+                    # FIX (2026-02-04): Return NET loss, not gross stop_level
+                    return -(entry.put_side_stop - entry.put_spread_credit)
                 short_uic = entry.short_put_uic
                 long_uic = entry.long_put_uic
                 credit = entry.put_spread_credit
@@ -5440,16 +5459,18 @@ class MEICStrategy:
         """
         ALERT-002: Send a batched alert for multiple stop losses.
 
+        FIX (2026-02-04): Now receives net_loss instead of stop_level for accurate P&L.
+
         Args:
-            entries_stopped: List of (entry, side, stop_level) tuples
-            total_loss: Total loss across all stops
+            entries_stopped: List of (entry, side, net_loss) tuples
+            total_loss: Total NET loss across all stops
         """
         count = len(entries_stopped)
 
-        # Build summary
+        # Build summary (using net_loss for accurate display)
         details_lines = []
-        for entry, side, stop_level in entries_stopped:
-            details_lines.append(f"Entry #{entry.entry_number} {side}: -${stop_level:.2f}")
+        for entry, side, net_loss in entries_stopped:
+            details_lines.append(f"Entry #{entry.entry_number} {side}: -${net_loss:.2f}")
 
         details_text = "\n".join(details_lines)
 
@@ -5467,14 +5488,15 @@ class MEICStrategy:
 
         logger.info(f"ALERT-002: Sent batched alert for {count} stops")
 
-    def _queue_stop_alert(self, entry: IronCondorEntry, side: str, stop_level: float):
+    def _queue_stop_alert(self, entry: IronCondorEntry, side: str, stop_level: float, net_loss: float):
         """
         ALERT-002: Queue a stop alert for potential batching.
 
         Args:
             entry: Entry that was stopped
             side: "call" or "put"
-            stop_level: Stop loss amount
+            stop_level: Stop level that was triggered (cost to close)
+            net_loss: Actual NET loss (stop_level - credit_for_side)
         """
         if self._should_batch_alert("stop_loss"):
             # Add to batch
@@ -5482,6 +5504,7 @@ class MEICStrategy:
                 "entry": entry,
                 "side": side,
                 "stop_level": stop_level,
+                "net_loss": net_loss,  # FIX (2026-02-04): Track net loss for accurate alerts
                 "timestamp": get_us_market_time()
             })
             logger.info(f"ALERT-002: Queued stop alert for batching ({len(self._batched_alerts)} pending)")
@@ -5489,13 +5512,15 @@ class MEICStrategy:
             # Send immediately (also flush any pending)
             self._flush_batched_alerts()
             # Send this one
+            # FIX (2026-02-04): Use net_loss instead of stop_level for P&L display
             self.alert_service.stop_loss(
                 trigger_price=self.current_price,
-                pnl=-stop_level,
+                pnl=-net_loss,
                 details={
                     "description": f"MEIC Entry #{entry.entry_number} {side.upper()} side stopped",
-                    "reason": f"{side} spread value reached stop level",
-                    "entry_number": entry.entry_number
+                    "reason": f"{side} spread value reached stop level (${stop_level:.0f})",
+                    "entry_number": entry.entry_number,
+                    "net_loss": net_loss
                 }
             )
 
@@ -5508,12 +5533,12 @@ class MEICStrategy:
         if not self._batched_alerts:
             return
 
-        # Calculate total loss
-        total_loss = sum(a["stop_level"] for a in self._batched_alerts)
+        # FIX (2026-02-04): Calculate total using NET loss, not stop_level
+        total_loss = sum(a.get("net_loss", a["stop_level"]) for a in self._batched_alerts)
 
-        # Build entries list
+        # Build entries list with net_loss
         entries_stopped = [
-            (a["entry"], a["side"], a["stop_level"])
+            (a["entry"], a["side"], a.get("net_loss", a["stop_level"]))
             for a in self._batched_alerts
         ]
 
