@@ -1808,6 +1808,7 @@ class MEICStrategy:
                 raise Exception("Long Call order failed")
             entry.long_call_position_id = long_call_result.get("position_id")
             entry.long_call_uic = long_call_result.get("uic")
+            long_call_debit = long_call_result.get("debit", 0)  # Track debit for net credit calc
             filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
             self._register_position(entry, "long_call")
 
@@ -1824,6 +1825,7 @@ class MEICStrategy:
                 raise Exception("Long Put order failed")
             entry.long_put_position_id = long_put_result.get("position_id")
             entry.long_put_uic = long_put_result.get("uic")
+            long_put_debit = long_put_result.get("debit", 0)  # Track debit for net credit calc
             filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
             self._register_position(entry, "long_put")
 
@@ -1840,7 +1842,10 @@ class MEICStrategy:
                 raise Exception("Short Call order failed")
             entry.short_call_position_id = short_call_result.get("position_id")
             entry.short_call_uic = short_call_result.get("uic")
-            entry.call_spread_credit = short_call_result.get("credit", 0)
+            # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
+            short_call_credit = short_call_result.get("credit", 0)
+            entry.call_spread_credit = short_call_credit - long_call_debit
+            logger.debug(f"Call spread: short ${short_call_credit:.2f} - long ${long_call_debit:.2f} = net ${entry.call_spread_credit:.2f}")
             filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
             self._register_position(entry, "short_call")
 
@@ -1857,7 +1862,10 @@ class MEICStrategy:
                 raise Exception("Short Put order failed")
             entry.short_put_position_id = short_put_result.get("position_id")
             entry.short_put_uic = short_put_result.get("uic")
-            entry.put_spread_credit = short_put_result.get("credit", 0)
+            # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
+            short_put_credit = short_put_result.get("credit", 0)
+            entry.put_spread_credit = short_put_credit - long_put_debit
+            logger.debug(f"Put spread: short ${short_put_credit:.2f} - long ${long_put_debit:.2f} = net ${entry.put_spread_credit:.2f}")
             filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
             self._register_position(entry, "short_put")
 
