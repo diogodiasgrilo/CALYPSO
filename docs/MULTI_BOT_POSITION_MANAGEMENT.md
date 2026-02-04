@@ -834,19 +834,19 @@ class IronFlyStrategy:
 3. Add registry to `shared/__init__.py` exports
 4. Deploy to VM (no bot changes yet)
 
-### Phase 2: Integrate with Iron Fly (Optional for Single-Bot)
+### Phase 2: Integrate with Iron Fly ✅ COMPLETED (2026-02-04)
 
-1. Add registry integration to Iron Fly
-2. Iron Fly still works without registry (backward compatible)
-3. Test in dry-run mode
-4. Deploy (Iron Fly uses registry, but doesn't require it)
+1. ✅ Add registry integration to Iron Fly
+2. ✅ Iron Fly still works without registry (backward compatible - falls back to strike detection)
+3. ✅ Test in dry-run mode
+4. ✅ Deploy (Iron Fly uses registry for multi-bot safety)
 
-### Phase 3: Build MEIC with Registry (Required)
+### Phase 3: Build MEIC with Registry ✅ COMPLETED (2026-01-27)
 
-1. MEIC bot requires registry from day 1
-2. MEIC filters positions through registry
-3. Test Iron Fly + MEIC together in simulation
-4. Deploy both with registry active
+1. ✅ MEIC bot requires registry from day 1
+2. ✅ MEIC filters positions through registry
+3. ✅ Test Iron Fly + MEIC together in simulation
+4. ✅ Deploy both with registry active (2026-02-04)
 
 ### Phase 4: Retrofit Other Bots (Future)
 
@@ -881,3 +881,4 @@ class IronFlyStrategy:
 | Date | Author | Changes |
 |------|--------|---------|
 | 2026-01-27 | Claude | Initial design document |
+| 2026-02-04 | Claude | Phase 2+3 completed: Iron Fly + MEIC both use Position Registry for safe concurrent SPX trading |

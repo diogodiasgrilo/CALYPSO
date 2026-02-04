@@ -56,6 +56,12 @@ Code Audit: 2026-02-02 (Wing Width + P&L Fixes)
 - Added commission tracking for accurate net P&L
 - Added activities endpoint retry for sync delay (4 retries x 1.5s)
 
+Multi-Bot Isolation: 2026-02-04 (POS-005)
+- Added Position Registry integration for SPX multi-bot safety
+- Iron Fly and MEIC can now both trade SPX 0DTE without interference
+- Positions registered on fill, unregistered on close
+- Reconciliation filters by registry first (fallback to strike detection for legacy)
+
 See docs/IRON_FLY_EDGE_CASES.md for full edge case analysis.
 See docs/IRON_FLY_STRATEGY_SPECIFICATION.md for full strategy rules.
 """
@@ -74,6 +80,7 @@ from enum import Enum
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time
+from shared.position_registry import PositionRegistry
 
 # Path for persistent metrics storage
 METRICS_FILE = os.path.join(
@@ -780,6 +787,12 @@ class IronFlyStrategy:
         # Cumulative metrics tracking (persisted across days)
         self.cumulative_metrics = load_cumulative_metrics()
 
+        # Position Registry for multi-bot SPX isolation (2026-02-04)
+        # When running Iron Fly + MEIC simultaneously on SPX, this ensures
+        # each bot only sees its own positions
+        self.registry = PositionRegistry()
+        self.bot_name = "IRON_FLY_0DTE"
+
         logger.info(f"IronFlyStrategy initialized - State: {self.state.value}")
         logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
         logger.info(f"  Entry time: {self.entry_time} EST")
@@ -1307,6 +1320,7 @@ class IronFlyStrategy:
             )
             self.daily_pnl += pnl
             self.position = None
+            self._unregister_positions_from_registry()  # POS-005: Clear from registry
             self.state = IronFlyState.DAILY_COMPLETE
             return f"[DRY RUN] Emergency close complete - P&L: ${pnl / 100:.2f}"
 
@@ -1406,6 +1420,7 @@ class IronFlyStrategy:
         self.daily_pnl += pnl
         self.position = None
         self._clear_position_metadata()  # POS-001: Clear saved metadata
+        self._unregister_positions_from_registry()  # POS-005: Clear from registry
         self.state = IronFlyState.DAILY_COMPLETE
 
         # ALERT: Send emergency exit alert AFTER close is complete with actual results
@@ -1508,6 +1523,91 @@ class IronFlyStrategy:
                 logger.info("POS-001: Cleared position metadata file")
         except Exception as e:
             logger.error(f"POS-001: Failed to clear position metadata: {e}")
+
+    # =========================================================================
+    # POSITION REGISTRY METHODS (Multi-bot SPX isolation - 2026-02-04)
+    # =========================================================================
+
+    def _register_positions_with_registry(
+        self,
+        strategy_id: str,
+        fill_details: Dict[str, Dict],
+        iron_fly_options: Dict
+    ) -> None:
+        """
+        POS-005: Register all 4 Iron Fly legs with the Position Registry.
+
+        This is critical for multi-bot SPX isolation. When Iron Fly and MEIC
+        both trade SPX 0DTE options, the registry tracks which positions belong
+        to which bot, preventing interference.
+
+        Args:
+            strategy_id: Unique identifier for this trade (e.g., "iron_fly_20260204_100000")
+            fill_details: Dict with fill info for each leg (contains position_id)
+            iron_fly_options: Dict with strike info for metadata
+        """
+        leg_names = ["long_call", "long_put", "short_call", "short_put"]
+        strikes = {
+            "long_call": iron_fly_options.get("upper_wing"),
+            "long_put": iron_fly_options.get("lower_wing"),
+            "short_call": iron_fly_options.get("atm_strike"),
+            "short_put": iron_fly_options.get("atm_strike"),
+        }
+        registered_count = 0
+
+        for leg_name in leg_names:
+            fill_info = fill_details.get(leg_name, {})
+            position_id = fill_info.get("position_id")
+
+            if position_id and position_id != "None":
+                success = self.registry.register(
+                    position_id=str(position_id),
+                    bot_name=self.bot_name,
+                    strategy_id=strategy_id,
+                    metadata={
+                        "leg_type": leg_name,
+                        "strike": strikes.get(leg_name),
+                        "structure": "iron_fly"
+                    }
+                )
+                if success:
+                    registered_count += 1
+                    logger.debug(f"Registered {leg_name} position {position_id} with registry")
+                else:
+                    logger.warning(f"Failed to register {leg_name} position {position_id}")
+            else:
+                logger.warning(f"No position_id available for {leg_name} - cannot register with registry")
+
+        logger.info(f"POS-005: Registered {registered_count}/4 positions with registry (strategy: {strategy_id})")
+
+        if registered_count < 4:
+            self.trade_logger.log_safety_event({
+                "event_type": "REGISTRY_PARTIAL_REGISTRATION",
+                "spy_price": self.current_price,
+                "vix": self.current_vix,
+                "description": f"Only {registered_count}/4 positions registered - some legs missing position_id",
+                "strategy_id": strategy_id,
+                "result": "Position reconciliation may be affected"
+            })
+
+    def _unregister_positions_from_registry(self) -> None:
+        """
+        POS-005: Unregister all Iron Fly positions from the registry.
+
+        Called when position is closed (normal exit, stop loss, or emergency).
+        """
+        my_positions = self.registry.get_positions(self.bot_name)
+
+        if not my_positions:
+            logger.debug("No Iron Fly positions in registry to unregister")
+            return
+
+        unregistered = 0
+        for pos_id in my_positions:
+            if self.registry.unregister(pos_id):
+                unregistered += 1
+
+        logger.info(f"POS-005: Unregistered {unregistered} positions from registry")
 
     # =========================================================================
     # ORDER SAFETY METHODS (Safety feature from Delta Neutral bot)
@@ -2051,6 +2151,10 @@ class IronFlyStrategy:
 
         Enhanced to properly reconstruct IronFlyPosition for full monitoring.
         Also checks for and cancels any orphaned pending orders.
+
+        POS-005 (2026-02-04): Now uses Position Registry for multi-bot isolation.
+        First checks registry for Iron Fly positions, only falls back to strike-based
+        detection if registry has no entries (for backwards compatibility).
         """
         if self.dry_run:
             logger.info("Position reconciliation skipped (dry-run mode)")
@@ -2068,24 +2172,51 @@ class IronFlyStrategy:
                 logger.info("No positions found at broker - starting fresh")
                 return
 
-            # Look for SPX/SPXW options (StockIndexOption type)
-            # Note: Saxo API returns nested structure - PositionBase.AssetType and DisplayAndFormat.Description
-            spx_options = []
-            for p in broker_positions:
-                # Extract from nested Saxo structure
-                position_base = p.get('PositionBase', {})
-                display_format = p.get('DisplayAndFormat', {})
-                asset_type = position_base.get('AssetType', '')
-                description = str(display_format.get('Description', '')).upper()
-                # Match both StockOption and StockIndexOption for SPX
-                if asset_type in ['StockOption', 'StockIndexOption'] and ('SPX' in description or 'SPXW' in description):
-                    spx_options.append(p)
+            # POS-005: First try to filter by Position Registry
+            # This is the safe path when running with MEIC - each bot only sees its own positions
+            my_registry_positions = self.registry.get_positions(self.bot_name)
+            valid_position_ids = {str(p.get("PositionId")) for p in broker_positions}
+
+            # Clean up orphaned registry entries (positions that no longer exist)
+            orphans = self.registry.cleanup_orphans(valid_position_ids)
+            if orphans:
+                logger.warning(f"POS-005: Cleaned up {len(orphans)} orphaned registry entries")
+
+            if my_registry_positions:
+                # We have registry entries - use registry-based reconciliation
+                logger.info(f"POS-005: Found {len(my_registry_positions)} Iron Fly positions in registry")
+                spx_options = [
+                    p for p in broker_positions
+                    if str(p.get("PositionId")) in my_registry_positions
+                ]
+                if len(spx_options) != len(my_registry_positions):
+                    logger.warning(
+                        f"POS-005: Registry/broker mismatch - registry has {len(my_registry_positions)}, "
+                        f"broker has {len(spx_options)} matching positions"
+                    )
+            else:
+                # No registry entries - fall back to strike-based detection
+                # This is for backwards compatibility with positions opened before registry existed
+                logger.info("POS-005: No positions in registry - using strike-based detection (legacy mode)")
+
+                # Look for SPX/SPXW options (StockIndexOption type)
+                # Note: Saxo API returns nested structure - PositionBase.AssetType and DisplayAndFormat.Description
+                spx_options = []
+                for p in broker_positions:
+                    # Extract from nested Saxo structure
+                    position_base = p.get('PositionBase', {})
+                    display_format = p.get('DisplayAndFormat', {})
+                    asset_type = position_base.get('AssetType', '')
+                    description = str(display_format.get('Description', '')).upper()
+                    # Match both StockOption and StockIndexOption for SPX
+                    if asset_type in ['StockOption', 'StockIndexOption'] and ('SPX' in description or 'SPXW' in description):
+                        spx_options.append(p)
 
             if not spx_options:
                 logger.info("No SPX option positions found at broker - starting fresh")
                 return
 
-            logger.info(f"Found {len(spx_options)} SPX option positions at broker")
+            logger.info(f"Found {len(spx_options)} SPX option positions to reconcile")
 
             # Categorize by call/put and long/short
             short_calls = []
@@ -2837,6 +2968,7 @@ class IronFlyStrategy:
             self.closing_started_at = None
             self.position = None
             self._clear_position_metadata()  # POS-001: Clear saved metadata
+            self._unregister_positions_from_registry()  # POS-005: Clear from registry
             return "Position closed - all legs confirmed closed at broker"
 
         except Exception as e:
@@ -3352,6 +3484,11 @@ class IronFlyStrategy:
         # POS-001: Save position metadata for crash recovery
         self._save_position_metadata()
 
+        # POS-005: Register positions with Position Registry for multi-bot isolation (2026-02-04)
+        # This ensures Iron Fly and MEIC can both trade SPX without interference
+        strategy_id = f"iron_fly_{entry_time_eastern.strftime('%Y%m%d_%H%M%S')}"
+        self._register_positions_with_registry(strategy_id, fill_details, iron_fly_options)
+
         # Step 5: Subscribe to option price updates for position monitoring
         # LIVE-001: Use StockIndexOption for SPX/SPXW index options (not StockOption)
         try:
@@ -3452,6 +3589,7 @@ class IronFlyStrategy:
             )
 
             self.position = None
+            self._unregister_positions_from_registry()  # POS-005: Clear from registry
             self.state = IronFlyState.DAILY_COMPLETE
             return f"[DRY RUN] Closed position - {reason}: ${pnl / 100:.2f} P&L in {hold_time} min"
 
@@ -4957,6 +5095,7 @@ class IronFlyStrategy:
         self.opening_range = OpeningRange()
         self.position = None
         self._clear_position_metadata()  # POS-001: Clear any stale metadata
+        self._unregister_positions_from_registry()  # POS-005: Clear stale registry entries
         self.trades_today = 0
         self.daily_pnl = 0.0
         self.daily_premium_collected = 0.0

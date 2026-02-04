@@ -184,6 +184,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 - **Code audit:** Comprehensive review completed (see `docs/IRON_FLY_CODE_AUDIT.md`)
 
 #### Iron Fly Safety Features
+- **Position Registry:** Uses shared Position Registry for multi-bot SPX trading isolation (2026-02-04)
 - **Entry order:** Longs first (Long Call → Long Put → Short Call → Short Put) - safer on partial fills
 - **Entry retries:** 3 attempts with 15-second delays; auto-unwind filled legs on failure
 - **Stop losses:** Software-based via 2-second polling (NOT broker-side stops)
@@ -208,7 +209,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 - **MEIC+ modification:** Stop = credit - $0.10 for small wins (configurable threshold)
 - **Credit validation:** Warns if credit < $1.00 or > $1.75 per side
 - **Expected results:** 20.7% CAGR, 4.31% max drawdown, 4.8 Calmar ratio, ~70% win rate
-- **Edge cases:** 75 analyzed pre-implementation (see `docs/MEIC_EDGE_CASES.md`)
+- **Edge cases:** 76 analyzed, all resolved (see `docs/MEIC_EDGE_CASES.md`)
 - **Specification:** Full strategy spec (see `docs/MEIC_STRATEGY_SPECIFICATION.md`)
 
 #### MEIC Key Features
