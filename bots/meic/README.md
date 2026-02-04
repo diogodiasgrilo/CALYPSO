@@ -1,8 +1,8 @@
 # MEIC (Multiple Entry Iron Condors) Trading Bot
 
-**Last Updated:** 2026-02-02
+**Last Updated:** 2026-02-04
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.2.0)
+**Status:** IMPLEMENTED - Production Ready (v1.2.1)
 
 ---
 
@@ -86,6 +86,13 @@ Import from `bots.meic`:
 | **Config Validation** | CONFIG-001 | Validates config on startup |
 | **P&L Sanity Check** | PNL-001 | Alerts on unrealistic P&L values |
 | **Quote Freshness Warnings** | DATA-001 | Logs when quotes > 30s old |
+
+### Zero Credit Safety (v1.2.1)
+| Feature | Code | Description |
+|---------|------|-------------|
+| **Min Stop Level Floor** | STOP-007 | $50 minimum stop level prevents false triggers from zero/low credit |
+| **Stop Level Validation** | STOP-007 | Skip stop check if levels < $50 (corrupted data protection) |
+| **Recovery Protection** | STOP-007 | Same safety applied during state recovery from disk |
 
 ### REST-Only Mode (v1.1.0)
 MEIC uses **REST API only** for all price fetching (no WebSocket streaming). This provides:
@@ -178,7 +185,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 ## Documentation
 
 - Full Strategy Spec: [docs/MEIC_STRATEGY_SPECIFICATION.md](../../docs/MEIC_STRATEGY_SPECIFICATION.md)
-- Edge Cases (75): [docs/MEIC_EDGE_CASES.md](../../docs/MEIC_EDGE_CASES.md)
+- Edge Cases (76): [docs/MEIC_EDGE_CASES.md](../../docs/MEIC_EDGE_CASES.md)
 
 ---
 
@@ -186,6 +193,9 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-02-04 | 1.2.1 | STOP-007: Zero/low credit safety floor (MIN_STOP_LEVEL=$50) |
+| 2026-02-04 | 1.2.1 | Fixed P&L double-counting bug in stop loss tracking |
+| 2026-02-04 | 1.2.1 | Fixed daily summary logging to Google Sheets |
 | 2026-02-02 | 1.2.0 | VIX-adjusted strike selection for consistent delta targeting |
 | 2026-02-02 | 1.2.0 | Added credit validation (min/max credit per side now enforced) |
 | 2026-02-02 | 1.2.0 | Made MEIC+ threshold configurable (`meic_plus_min_credit`) |

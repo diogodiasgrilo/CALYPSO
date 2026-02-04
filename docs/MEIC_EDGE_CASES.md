@@ -2,9 +2,9 @@
 
 **Analysis Date:** 2026-01-27
 **Analyst:** Claude (Pre-Implementation Analysis)
-**Bot Version:** 1.2.0 (VIX-adjusted strikes)
+**Bot Version:** 1.2.1 (Zero credit safety fix)
 **Status:** Living Document - Updated after implementation audit
-**Last Updated:** 2026-02-02
+**Last Updated:** 2026-02-04
 
 ---
 
@@ -12,11 +12,11 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the MEIC (Multiple Entry Iron Condors) trading bot. Each scenario has been evaluated and implemented.
 
-**Total Scenarios Analyzed:** 75
-**Well-Handled/Resolved:** 75 (100%)
+**Total Scenarios Analyzed:** 76
+**Well-Handled/Resolved:** 76 (100%)
 **Needs Attention:** 0 (0%)
 
-**Note:** Post-implementation audit completed 2026-01-27. **ALL 75 edge cases now resolved** after second audit pass.
+**Note:** Post-implementation audit completed 2026-01-27. **ALL 76 edge cases now resolved** including STOP-007 (zero credit safety) added 2026-02-04.
 
 ---
 
@@ -464,6 +464,16 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Implementation** | Stop loss uses market order via `_close_position_with_retry()`. Wings limit max loss regardless of slippage. |
 | **Resolution** | Slippage accepted. Max loss is always spread width minus credit. Wings provide protection. |
 
+### 6.7 Zero/Low Credit Causes Immediate False Stop Trigger
+| | |
+|---|---|
+| **ID** | STOP-007 |
+| **Trigger** | `_get_fill_price()` returns 0 due to API sync delay, causing credit=0 and stop_level=0. With `spread_value >= 0` always true, stop triggers immediately on every monitoring cycle. |
+| **Expected Handling** | Detect dangerously low stop levels and apply minimum floor. Do not trigger stops on corrupted data. |
+| **Risk Level** | ✅ LOW |
+| **Implementation** | `_calculate_stop_levels()` enforces MIN_STOP_LEVEL=$50 floor with CRITICAL logging. `_check_stop_losses()` skips stop check if levels < $50. `_recover_entry_from_positions()` applies same protection. See strategy.py:1656-1673, 2684-2695, 3916-3927 |
+| **Resolution** | FIXED (2026-02-04) - Defense-in-depth: (1) minimum stop level floor in calculation, (2) skip stop check for invalid levels, (3) same protection during recovery. CRITICAL logging triggers investigation. |
+
 ---
 
 ## 7. MULTI-ENTRY SPECIFIC EDGE CASES
@@ -673,12 +683,12 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Position State | 7 | 7 | ✅ 100% |
 | Market Conditions | 9 | 9 | ✅ 100% |
 | Timing/Race Conditions | 5 | 5 | ✅ 100% |
-| Stop Loss | 6 | 6 | ✅ 100% |
+| Stop Loss | 7 | 7 | ✅ 100% |
 | Multi-Entry Specific | 6 | 6 | ✅ 100% |
 | Data Integrity | 5 | 5 | ✅ 100% |
 | State Machine | 4 | 4 | ✅ 100% |
 | Alert System | 3 | 3 | ✅ 100% |
-| **TOTAL** | **75** | **75** | **✅ 100% Resolved** |
+| **TOTAL** | **76** | **76** | **✅ 100% Resolved** |
 
 ### Items Resolved in Second Audit (2026-01-27)
 
@@ -702,6 +712,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-27 | 1.0.0 | Initial edge case analysis (pre-implementation) |
 | 2026-01-27 | 1.1.0 | Post-implementation audit - 68/75 resolved (91%) |
 | 2026-01-27 | 1.2.0 | Second audit pass - ALL 75/75 resolved (100%). Added: CONN-005 (429 handling via SaxoClient), ORDER-004 (margin check), MKT-005 (market halt), MKT-007 (strike liquidity), TIME-001 (clock validation), TIME-003 (via MKT-005), DATA-003 (P&L sanity), ALERT-002 (batching) |
+| 2026-02-04 | 1.2.1 | Added STOP-007: Zero/low credit stop level safety. Defense-in-depth with MIN_STOP_LEVEL=$50 floor. Total edge cases: 76 |
 
 ---
 
