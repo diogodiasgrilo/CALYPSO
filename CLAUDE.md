@@ -133,7 +133,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 | Iron Fly | `iron_fly_0dte.service` | Doc Severson's 0DTE Iron Butterfly | `bots/iron_fly_0dte/config/config.json` | PAUSED |
 | Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral/config/config.json` | LIVE |
 | Rolling Put Diagonal | `rolling_put_diagonal.service` | Bill Belt's Rolling Put Diagonal | `bots/rolling_put_diagonal/config/config.json` | DRY-RUN |
-| MEIC | `meic.service` | Tammy Chambless's MEIC (Multiple Entry Iron Condors) | `bots/meic/config/config.json` | DRY-RUN |
+| MEIC | `meic.service` | Tammy Chambless's MEIC (Multiple Entry Iron Condors) | `bots/meic/config/config.json` | LIVE |
 
 All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `StartLimitBurst=5`
 
@@ -168,7 +168,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 |-----|------------------|------|
 | Iron Fly | `false` | LIVE |
 | Delta Neutral | `false` | LIVE |
-| MEIC | `true` | DRY-RUN |
+| MEIC | `false` | LIVE |
 | Rolling Put Diagonal | `true` | DRY-RUN |
 
 ### Iron Fly Bot Details
@@ -955,7 +955,7 @@ SCRIPT
 7. **Iron Fly bot:** PAUSED (as of 2026-01-23)
 8. **Delta Neutral bot:** Running in LIVE mode
 9. **Rolling Put Diagonal bot:** Still in dry-run mode
-10. **MEIC bot:** Running in DRY-RUN mode (v1.2.0 with VIX-adjusted strikes)
+10. **MEIC bot:** Running in LIVE mode (v1.2.0 with VIX-adjusted strikes, switched to LIVE 2026-02-04)
 11. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 
 ---
