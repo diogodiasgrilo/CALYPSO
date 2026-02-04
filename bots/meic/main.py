@@ -25,6 +25,14 @@ Date: 2026-01-27
 
 Changelog:
 ----------
+1.2.1 (2026-02-04): After-hours settlement reconciliation fix
+    - BUGFIX: New day detection now uses Eastern time instead of UTC
+      (Prevents false "overnight position" alerts at 7 PM EST when UTC date changes)
+    - FEATURE: Added POS-004 after-hours settlement reconciliation
+      (Checks Saxo positions on every heartbeat after market close until all
+      0DTE positions are confirmed settled, then stops checking until next day)
+    - This fixes the false "6 positions survived overnight" critical alert
+
 1.2.0 (2026-02-02): VIX-adjusted strikes + Code audit fixes
     - Strike distance now scales with VIX for consistent delta targeting
     - Higher VIX = wider strikes (maintains ~8 delta probability)
@@ -350,15 +358,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     status_interval = 15  # Log status every 15 seconds
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
-    last_day = datetime.now().date()
+    last_day = get_us_market_time().date()  # Use Eastern time, not UTC
     consecutive_errors = 0
     daily_summary_sent_date = None
 
     try:
         while not shutdown_requested:
             try:
-                # Check for new trading day
-                today = datetime.now().date()
+                # Check for new trading day (use Eastern time, not UTC!)
+                # This prevents false "new day" triggers at midnight UTC (7 PM EST)
+                today = get_us_market_time().date()
                 if today != last_day:
                     trade_logger.log_event("New trading day detected - resetting strategy")
                     strategy._reset_for_new_day()
@@ -387,6 +396,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         strategy.log_daily_summary()
                         daily_summary_sent_date = today_date
                         trade_logger.log_event("Daily summary sent")
+
+                    # POS-004: After-hours settlement reconciliation
+                    # Check on every heartbeat until all 0DTE positions are confirmed settled
+                    # (Saxo settles 0DTE options sometime between 4:00 PM and 7:00 PM EST)
+                    if is_after_hours():
+                        settlement_complete = strategy.check_after_hours_settlement()
+                        if not settlement_complete:
+                            trade_logger.log_event("Settlement pending - positions still open on Saxo")
 
                     # Calculate sleep duration (max 15 min to keep token alive)
                     sleep_time = calculate_sleep_duration(max_sleep=900)

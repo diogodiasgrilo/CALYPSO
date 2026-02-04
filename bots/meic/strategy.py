@@ -701,6 +701,10 @@ class MEICStrategy:
         # POS-003: Hourly reconciliation tracking
         self._last_reconciliation_time: Optional[datetime] = None
 
+        # POS-004: After-hours settlement reconciliation tracking
+        # Once all positions are confirmed settled, stop checking until next trading day
+        self._settlement_reconciliation_complete: bool = False
+
         # P2: WebSocket price cache for stop monitoring
         self._ws_price_cache: Dict[int, Tuple[float, datetime]] = {}  # uic -> (price, timestamp)
 
@@ -3970,10 +3974,105 @@ class MEICStrategy:
         # Reset reconciliation timer
         self._last_reconciliation_time = None
 
+        # POS-004: Reset settlement reconciliation flag for new day
+        self._settlement_reconciliation_complete = False
+
         self.state = MEICState.IDLE
 
         # Save clean state to disk
         self._save_state_to_disk()
+
+    # =========================================================================
+    # AFTER-HOURS SETTLEMENT RECONCILIATION (POS-004)
+    # =========================================================================
+
+    def check_after_hours_settlement(self) -> bool:
+        """
+        POS-004: Check if 0DTE positions have been settled after market close.
+
+        Called on every heartbeat after market close until all MEIC positions
+        are confirmed settled. This handles the fact that Saxo settles 0DTE
+        options sometime between 4:00 PM and 7:00 PM EST.
+
+        Returns:
+            True if all positions are settled (or were already confirmed settled)
+            False if positions still exist on Saxo (settlement pending)
+        """
+        # Already confirmed settled for today - skip check
+        if self._settlement_reconciliation_complete:
+            return True
+
+        # Check how many MEIC positions we think we have in registry
+        my_position_ids = self.registry.get_positions("MEIC")
+
+        if not my_position_ids:
+            # Registry is already empty - mark as complete
+            logger.info("POS-004: No MEIC positions in registry - settlement reconciliation complete")
+            self._settlement_reconciliation_complete = True
+            return True
+
+        # We have positions in registry - check if they still exist on Saxo
+        logger.info(f"POS-004: Checking settlement status for {len(my_position_ids)} MEIC positions...")
+
+        try:
+            # Query Saxo for actual positions
+            actual_positions = self.client.get_positions()
+            actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
+
+            # Find which of our registered positions still exist
+            still_open = my_position_ids & actual_position_ids
+            settled = my_position_ids - actual_position_ids
+
+            if settled:
+                logger.info(f"POS-004: {len(settled)} positions settled/expired - cleaning up registry")
+
+                # Clean up settled positions from registry
+                for pos_id in settled:
+                    self.registry.unregister(pos_id)
+                    logger.info(f"  Unregistered settled position: {pos_id}")
+
+                # Also clean up from daily state entries
+                for entry in self.daily_state.entries:
+                    for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
+                        pos_id = getattr(entry, f"{leg_name}_position_id")
+                        if pos_id and pos_id in settled:
+                            setattr(entry, f"{leg_name}_position_id", None)
+                            logger.debug(f"  Cleared {leg_name} from entry #{entry.entry_number}")
+
+                # Mark sides as stopped if all legs are gone
+                for entry in self.daily_state.entries:
+                    if not entry.short_call_position_id and not entry.long_call_position_id:
+                        entry.call_side_stopped = True
+                    if not entry.short_put_position_id and not entry.long_put_position_id:
+                        entry.put_side_stopped = True
+                    # Mark complete if both sides done
+                    if entry.call_side_stopped and entry.put_side_stopped:
+                        entry.is_complete = True
+
+                # Save updated state
+                self._save_state_to_disk()
+
+            if still_open:
+                logger.info(f"POS-004: {len(still_open)} positions still open on Saxo - awaiting settlement")
+                return False
+            else:
+                # All positions settled
+                total_settled = len(settled) if settled else len(my_position_ids)
+                logger.info("POS-004: All MEIC positions confirmed settled - reconciliation complete")
+                self._settlement_reconciliation_complete = True
+
+                # Log safety event
+                self._log_safety_event(
+                    "SETTLEMENT_COMPLETE",
+                    f"All {total_settled} positions confirmed settled after market close"
+                )
+
+                return True
+
+        except Exception as e:
+            logger.error(f"POS-004: Error checking settlement status: {e}")
+            # Don't mark complete on error - try again next heartbeat
+            return False
 
     # =========================================================================
     # LOGGING AND ALERTS
