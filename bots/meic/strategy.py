@@ -1655,6 +1655,24 @@ class MEICStrategy:
         """
         total_credit = entry.total_credit
 
+        # CRITICAL SAFETY CHECK (2026-02-04): Prevent zero stop levels
+        # If total_credit is 0 or very small, stop would trigger immediately
+        # This can happen if fill_price wasn't captured correctly
+        MIN_STOP_LEVEL = 50.0  # $50 minimum stop level (safety floor)
+        if total_credit < MIN_STOP_LEVEL:
+            logger.critical(
+                f"CRITICAL: Entry #{entry.entry_number} has dangerously low credit "
+                f"(${total_credit:.2f} < ${MIN_STOP_LEVEL:.2f}). "
+                f"Call: ${entry.call_spread_credit:.2f}, Put: ${entry.put_spread_credit:.2f}. "
+                f"Using minimum stop level to prevent immediate false triggers."
+            )
+            self._log_safety_event(
+                "CRITICAL_LOW_CREDIT",
+                f"Entry #{entry.entry_number} credit ${total_credit:.2f} - using min stop ${MIN_STOP_LEVEL:.2f}"
+            )
+            # Use minimum stop level to prevent immediate false trigger
+            total_credit = MIN_STOP_LEVEL
+
         # Validate credit per side against configured bounds
         # This ensures we're getting adequate premium for the risk taken
         self._validate_entry_credit(entry)
@@ -2665,6 +2683,17 @@ class MEICStrategy:
             if not pnl_valid:
                 logger.error(f"DATA-003: Skipping stop check for Entry #{entry.entry_number} - {pnl_message}")
                 continue  # Skip this entry - data is suspect
+
+            # SAFETY CHECK (2026-02-04): Skip stop check if stop levels are invalid
+            # This prevents false triggers from zero/corrupted stop levels
+            MIN_VALID_STOP = 50.0  # Must match MIN_STOP_LEVEL in _calculate_stop_levels
+            if entry.call_side_stop < MIN_VALID_STOP or entry.put_side_stop < MIN_VALID_STOP:
+                logger.error(
+                    f"SAFETY: Entry #{entry.entry_number} has invalid stop levels "
+                    f"(call: ${entry.call_side_stop:.2f}, put: ${entry.put_side_stop:.2f}) - "
+                    f"skipping stop check to prevent false trigger"
+                )
+                continue
 
             # Check call side stop
             if not entry.call_side_stopped:
@@ -3887,6 +3916,17 @@ class MEICStrategy:
         # "Stop loss on each side = Total credit received for the FULL iron condor"
         # This ensures breakeven when one side stops and other expires worthless
         total_credit = entry.call_spread_credit + entry.put_spread_credit
+
+        # CRITICAL SAFETY CHECK (2026-02-04): Prevent zero stop levels
+        # Must match MIN_STOP_LEVEL in _calculate_stop_levels()
+        MIN_STOP_LEVEL = 50.0
+        if total_credit < MIN_STOP_LEVEL:
+            logger.critical(
+                f"Recovery CRITICAL: Entry #{entry.entry_number} has dangerously low credit "
+                f"(${total_credit:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+            )
+            total_credit = MIN_STOP_LEVEL
+
         if self.meic_plus_enabled:
             # MEIC+ stops at credit - reduction for potential small win
             # STOP-002: Don't apply if stop would be too tight (credit < $1.50)
