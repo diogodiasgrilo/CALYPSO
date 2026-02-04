@@ -12,11 +12,11 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the MEIC (Multiple Entry Iron Condors) trading bot. Each scenario has been evaluated and implemented.
 
-**Total Scenarios Analyzed:** 76
+**Total Scenarios Analyzed:** 77
 **Well-Handled/Resolved:** 76 (100%)
 **Needs Attention:** 0 (0%)
 
-**Note:** Post-implementation audit completed 2026-01-27. **ALL 76 edge cases now resolved** including STOP-007 (zero credit safety) added 2026-02-04.
+**Note:** Post-implementation audit completed 2026-01-27. **ALL 77 edge cases now resolved** including STOP-007 (zero credit safety) and ORDER-009 (retry delay) added 2026-02-04.
 
 ---
 
@@ -177,6 +177,16 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Risk Level** | ✅ LOW |
 | **Implementation** | Stop levels calculated from actual `entry.call_spread_credit` and `entry.put_spread_credit` which come from fill prices. See strategy.py:1330-1360 |
 | **Resolution** | Stop levels use actual fill prices stored in entry object, not quoted prices. |
+
+### 2.9 Rapid Order Retries Cause API Conflicts
+| | |
+|---|---|
+| **ID** | ORDER-009 |
+| **Trigger** | Order fails (409 Conflict), bot immediately retries, gets 429 Rate Limit, then "opposite directions" error |
+| **Expected Handling** | Add delay between retry attempts to let Saxo clear stale order state. |
+| **Risk Level** | ✅ LOW |
+| **Implementation** | `_place_leg_with_retries()` adds `ORDER_RETRY_DELAY_SECONDS` (2.0s) delay between failed attempts. See strategy.py:2131-2134 |
+| **Resolution** | FIXED (2026-02-04) - 2 second delay between leg order retries prevents 409/429 cascades that caused Entry #6 failures. |
 
 ---
 
@@ -679,7 +689,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Category | Count | Resolved | Status |
 |----------|-------|----------|--------|
 | Connection/API | 6 | 6 | ✅ 100% |
-| Order Execution | 8 | 8 | ✅ 100% |
+| Order Execution | 9 | 9 | ✅ 100% |
 | Position State | 7 | 7 | ✅ 100% |
 | Market Conditions | 9 | 9 | ✅ 100% |
 | Timing/Race Conditions | 5 | 5 | ✅ 100% |
@@ -688,7 +698,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Data Integrity | 5 | 5 | ✅ 100% |
 | State Machine | 4 | 4 | ✅ 100% |
 | Alert System | 3 | 3 | ✅ 100% |
-| **TOTAL** | **76** | **76** | **✅ 100% Resolved** |
+| **TOTAL** | **77** | **77** | **✅ 100% Resolved** |
 
 ### Items Resolved in Second Audit (2026-01-27)
 
@@ -712,7 +722,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 | 2026-01-27 | 1.0.0 | Initial edge case analysis (pre-implementation) |
 | 2026-01-27 | 1.1.0 | Post-implementation audit - 68/75 resolved (91%) |
 | 2026-01-27 | 1.2.0 | Second audit pass - ALL 75/75 resolved (100%). Added: CONN-005 (429 handling via SaxoClient), ORDER-004 (margin check), MKT-005 (market halt), MKT-007 (strike liquidity), TIME-001 (clock validation), TIME-003 (via MKT-005), DATA-003 (P&L sanity), ALERT-002 (batching) |
-| 2026-02-04 | 1.2.1 | Added STOP-007: Zero/low credit stop level safety. Defense-in-depth with MIN_STOP_LEVEL=$50 floor. Total edge cases: 76 |
+| 2026-02-04 | 1.2.1 | Added STOP-007: Zero/low credit stop level safety. Defense-in-depth with MIN_STOP_LEVEL=$50 floor |
+| 2026-02-04 | 1.2.2 | Added ORDER-009: 2s delay between leg order retries to prevent 409/429 API conflicts. Total edge cases: 77 |
 
 ---
 

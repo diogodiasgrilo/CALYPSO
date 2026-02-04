@@ -101,6 +101,10 @@ PROGRESSIVE_RETRY_SEQUENCE = [
 ORDER_TIMEOUT_SECONDS = 30  # Shorter for 0DTE (vs 60s for Delta Neutral)
 ORDER_TIMEOUT_EMERGENCY_SECONDS = 15  # Even shorter for emergency closes
 
+# ORDER-009: Retry delay to prevent API conflicts
+# Without this, rapid retries cause 409 Conflict (stale order state) and 429 Rate Limit
+ORDER_RETRY_DELAY_SECONDS = 2.0
+
 # CONN-005: Position verification
 POSITION_VERIFY_DELAY_SECONDS = 0.5  # Wait before verifying position exists
 
@@ -2120,13 +2124,18 @@ class MEICStrategy:
                     # Cannot continue with orphaned order
                     return None
 
-            # Log retry info
+            # Log retry info and add delay before next attempt
             if attempt < len(PROGRESSIVE_RETRY_SEQUENCE) - 1:
                 next_slippage, next_is_market = PROGRESSIVE_RETRY_SEQUENCE[attempt + 1]
                 if next_is_market:
                     logger.warning(f"  ⚠ {leg_description} not filled - trying MARKET next...")
                 else:
                     logger.warning(f"  ⚠ {leg_description} not filled - retrying at {next_slippage}% slippage...")
+
+                # ORDER-009: Add delay between retries to let Saxo clear order state
+                # Without this delay, rapid retries cause 409 Conflict and 429 Rate Limit errors
+                logger.info(f"  Waiting {ORDER_RETRY_DELAY_SECONDS}s before retry (ORDER-009: prevent API conflicts)...")
+                time.sleep(ORDER_RETRY_DELAY_SECONDS)
 
         # All attempts failed
         logger.error(f"  ✗ {leg_description} failed all {len(PROGRESSIVE_RETRY_SEQUENCE)} attempts")
