@@ -3545,7 +3545,8 @@ class MEICStrategy:
                             preserved_put_stops = saved_state.get("put_stops_triggered", 0)
                             preserved_call_stops = saved_state.get("call_stops_triggered", 0)
                             preserved_double_stops = saved_state.get("double_stops", 0)
-                            # Preserve original credits from entries (not current spread values)
+                            # Preserve original credits, stops, and strikes from entries
+                            # Strikes are needed for stopped sides (no longer in Saxo)
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
                                 if entry_num:
@@ -3554,13 +3555,21 @@ class MEICStrategy:
                                         "put_credit": entry_data.get("put_spread_credit", 0),
                                         "call_stop": entry_data.get("call_side_stop", 0),
                                         "put_stop": entry_data.get("put_side_stop", 0),
+                                        # Preserve strikes for stopped sides (display purposes)
+                                        "short_call_strike": entry_data.get("short_call_strike", 0),
+                                        "long_call_strike": entry_data.get("long_call_strike", 0),
+                                        "short_put_strike": entry_data.get("short_put_strike", 0),
+                                        "long_put_strike": entry_data.get("long_put_strike", 0),
+                                        # Preserve stopped flags
+                                        "call_side_stopped": entry_data.get("call_side_stopped", False),
+                                        "put_side_stopped": entry_data.get("put_side_stopped", False),
                                     }
                             logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
                                        f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}")
             except Exception as e:
                 logger.warning(f"Could not load state file for preservation: {e}")
 
-            # Apply preserved credits and stop levels to recovered entries
+            # Apply preserved credits, stop levels, and strikes to recovered entries
             for entry in recovered_entries:
                 if entry.entry_number in preserved_entry_credits:
                     saved = preserved_entry_credits[entry.entry_number]
@@ -3570,6 +3579,27 @@ class MEICStrategy:
                     # Restore stop levels
                     entry.call_side_stop = saved["call_stop"]
                     entry.put_side_stop = saved["put_stop"]
+
+                    # Restore stopped flags from state file
+                    # (may be more accurate than reconstruction from positions)
+                    if saved.get("call_side_stopped"):
+                        entry.call_side_stopped = True
+                    if saved.get("put_side_stopped"):
+                        entry.put_side_stopped = True
+
+                    # Restore strikes for stopped sides (positions no longer exist in Saxo)
+                    # Only restore if the strike is 0 (not recovered from Saxo)
+                    if entry.call_side_stopped and entry.short_call_strike == 0:
+                        entry.short_call_strike = saved.get("short_call_strike", 0)
+                        entry.long_call_strike = saved.get("long_call_strike", 0)
+                        logger.info(f"Entry #{entry.entry_number}: Restored stopped call strikes "
+                                   f"(short={entry.short_call_strike}, long={entry.long_call_strike})")
+                    if entry.put_side_stopped and entry.short_put_strike == 0:
+                        entry.short_put_strike = saved.get("short_put_strike", 0)
+                        entry.long_put_strike = saved.get("long_put_strike", 0)
+                        logger.info(f"Entry #{entry.entry_number}: Restored stopped put strikes "
+                                   f"(short={entry.short_put_strike}, long={entry.long_put_strike})")
+
                     logger.info(f"Entry #{entry.entry_number}: Restored credits from state file "
                                f"(call=${saved['call_credit']:.2f}, put=${saved['put_credit']:.2f}, "
                                f"stop=${saved['call_stop']:.2f})")
