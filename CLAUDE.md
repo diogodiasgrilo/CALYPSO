@@ -163,13 +163,15 @@ SCRIPT
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart BOT_SERVICE_NAME"
 ```
 
-**Current Mode Status:**
-| Bot | Config `dry_run` | Mode |
-|-----|------------------|------|
-| Iron Fly | `false` | LIVE |
-| Delta Neutral | `false` | LIVE |
-| MEIC | `false` | LIVE |
-| Rolling Put Diagonal | `true` | DRY-RUN |
+**Current Mode Status (Updated 2026-02-04):**
+| Bot | Config `dry_run` | Mode | Service Status |
+|-----|------------------|------|----------------|
+| Iron Fly | `false` | LIVE | **RUNNING** |
+| Delta Neutral | `false` | LIVE | **STOPPED** |
+| MEIC | `false` | LIVE | **RUNNING** |
+| Rolling Put Diagonal | `true` | DRY-RUN | **STOPPED** |
+
+**Active Services:** `token_keeper`, `iron_fly_0dte`, `meic`
 
 ### Iron Fly Bot Details
 - **Entry:** 10:00 AM EST (after 30-min opening range)
@@ -952,11 +954,12 @@ SCRIPT
 4. **Position data:** `/opt/calypso/data/iron_fly_position.json`
 5. **Config files are gitignored:** Real credentials come from Secret Manager
 6. **All API calls are direct:** No caching for order status or positions (always fresh from Saxo)
-7. **Iron Fly bot:** PAUSED (as of 2026-01-23)
-8. **Delta Neutral bot:** Running in LIVE mode
-9. **Rolling Put Diagonal bot:** Still in dry-run mode
-10. **MEIC bot:** Running in LIVE mode (v1.2.0 with VIX-adjusted strikes, switched to LIVE 2026-02-04)
+7. **Iron Fly bot:** Running in LIVE mode (as of 2026-02-04)
+8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
+9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
+10. **MEIC bot:** Running in LIVE mode (v1.2.1, switched to LIVE 2026-02-04)
 11. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
+12. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 
 ---
 
