@@ -788,11 +788,18 @@ class AlertService:
         if entries_skipped > 0:
             message += f" ({entries_skipped} skipped)"
 
+        # Commission tracking (display only)
+        total_commission = summary.get("total_commission", 0)
+        net_pnl = summary.get("net_pnl", total_pnl)
+        net_sign = "+" if net_pnl >= 0 else ""
+
         message += (
             f"\nTotal Credit: ${total_credit:.2f}\n"
             f"Call Stops: {call_stops} | Put Stops: {put_stops}\n"
             f"Double Stops: {double_stops}\n\n"
-            f"Daily P&L: {pnl_sign}${total_pnl:.2f}\n"
+            f"Daily P&L (gross): {pnl_sign}${total_pnl:.2f}\n"
+            f"Commission: ${total_commission:.2f}\n"
+            f"Daily P&L (net): {net_sign}${net_pnl:.2f}\n\n"
             f"Cumulative P&L: {cum_sign}${cumulative_pnl:.2f}\n"
             f"Win Rate: {win_rate:.0f}%"
         )

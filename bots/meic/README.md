@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-02-04
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.2.1)
+**Status:** IMPLEMENTED - Production Ready (v1.2.2)
 
 ---
 
@@ -193,6 +193,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-02-04 | 1.2.2 | Added commission tracking - shows gross/net P&L in logs, alerts, daily summary |
 | 2026-02-04 | 1.2.1 | STOP-007: Zero/low credit safety floor (MIN_STOP_LEVEL=$50) |
 | 2026-02-04 | 1.2.1 | Fixed P&L double-counting bug in stop loss tracking |
 | 2026-02-04 | 1.2.1 | Fixed daily summary logging to Google Sheets |

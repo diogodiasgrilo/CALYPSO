@@ -327,6 +327,12 @@ class IronCondorEntry:
     put_side_stopped: bool = False   # Put spread was stopped out
     strategy_id: str = ""  # For Position Registry tracking
 
+    # Commission tracking (display only - does not affect P&L calculations)
+    # Open commission: $2.50 per leg × 4 legs = $10 per IC (charged on entry)
+    # Close commission: $2.50 per leg × 2 legs per side (only charged when closed, not expired)
+    open_commission: float = 0.0   # Commission paid to open this IC
+    close_commission: float = 0.0  # Commission paid to close legs (accumulated on stops)
+
     @property
     def total_credit(self) -> float:
         """Total credit received from both spreads."""
@@ -411,6 +417,9 @@ class MEICDailyState:
     # Aggregate P&L
     total_credit_received: float = 0.0
     total_realized_pnl: float = 0.0
+
+    # Commission tracking (display only - does not affect strategy logic)
+    total_commission: float = 0.0  # Running total of all commissions paid today
 
     # Stop tracking
     call_stops_triggered: int = 0
@@ -676,6 +685,10 @@ class MEICStrategy:
         self.max_daily_loss_percent = self.strategy_config.get("max_daily_loss_percent", 2.0)
         self.max_vix_entry = self.strategy_config.get("max_vix_entry", DEFAULT_MAX_VIX_ENTRY)
         self.contracts_per_entry = self.strategy_config.get("contracts_per_entry", 1)
+
+        # Commission tracking (display only - does not affect strategy logic)
+        # Saxo Bank charges $2.50 per leg per contract, round-trip = $5.00 per leg
+        self.commission_per_leg = self.strategy_config.get("commission_per_leg", 2.50)
 
         # State
         self.state = MEICState.IDLE
@@ -1486,6 +1499,10 @@ class MEICStrategy:
                     self.daily_state.entries.append(entry)
                     self.daily_state.entries_completed += 1
                     self.daily_state.total_credit_received += entry.total_credit
+
+                    # Track commission (display only - 4 legs × $2.50 open = $10 per IC)
+                    entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
+                    self.daily_state.total_commission += entry.open_commission
 
                     # Calculate stop losses
                     self._calculate_stop_levels(entry)
@@ -2860,6 +2877,11 @@ class MEICStrategy:
             net_loss = stop_level - entry.put_spread_credit
         self.daily_state.total_realized_pnl -= net_loss
 
+        # Track close commission (display only - 2 legs per side × $2.50 close = $5 per side)
+        close_commission = 2 * self.commission_per_leg * self.contracts_per_entry
+        entry.close_commission += close_commission
+        self.daily_state.total_commission += close_commission
+
         # Log stop loss to Google Sheets (pass net loss, not gross)
         self._log_stop_loss(entry, side, stop_level, net_loss)
 
@@ -3545,6 +3567,7 @@ class MEICStrategy:
             preserved_put_stops = 0
             preserved_call_stops = 0
             preserved_double_stops = 0
+            preserved_total_commission = 0.0  # Commission tracking
             preserved_entry_credits = {}  # entry_number -> (call_credit, put_credit, call_stop, put_stop)
             try:
                 if os.path.exists(STATE_FILE):
@@ -3556,6 +3579,7 @@ class MEICStrategy:
                             preserved_put_stops = saved_state.get("put_stops_triggered", 0)
                             preserved_call_stops = saved_state.get("call_stops_triggered", 0)
                             preserved_double_stops = saved_state.get("double_stops", 0)
+                            preserved_total_commission = saved_state.get("total_commission", 0.0)
                             # Preserve original credits, stops, and strikes from entries
                             # Strikes are needed for stopped sides (no longer in Saxo)
                             for entry_data in saved_state.get("entries", []):
@@ -3574,6 +3598,9 @@ class MEICStrategy:
                                         # Preserve stopped flags
                                         "call_side_stopped": entry_data.get("call_side_stopped", False),
                                         "put_side_stopped": entry_data.get("put_side_stopped", False),
+                                        # Commission tracking
+                                        "open_commission": entry_data.get("open_commission", 0),
+                                        "close_commission": entry_data.get("close_commission", 0),
                                     }
                             logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
                                        f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}")
@@ -3597,6 +3624,10 @@ class MEICStrategy:
                         entry.call_side_stopped = True
                     if saved.get("put_side_stopped"):
                         entry.put_side_stopped = True
+
+                    # Restore commission tracking
+                    entry.open_commission = saved.get("open_commission", 0)
+                    entry.close_commission = saved.get("close_commission", 0)
 
                     # Restore strikes for stopped sides (positions no longer exist in Saxo)
                     # Only restore if the strike is 0 (not recovered from Saxo)
@@ -3626,6 +3657,7 @@ class MEICStrategy:
             self.daily_state.put_stops_triggered = preserved_put_stops
             self.daily_state.call_stops_triggered = preserved_call_stops
             self.daily_state.double_stops = preserved_double_stops
+            self.daily_state.total_commission = preserved_total_commission
 
             # Determine next entry index (how many entries have we done?)
             max_entry_num = max(e.entry_number for e in recovered_entries)
@@ -4354,7 +4386,9 @@ class MEICStrategy:
             "call_stops": self.daily_state.call_stops_triggered,
             "put_stops": self.daily_state.put_stops_triggered,
             "double_stops": self.daily_state.double_stops,
-            "circuit_breaker_opens": self.daily_state.circuit_breaker_opens
+            "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
+            "total_commission": self.daily_state.total_commission,
+            "net_pnl": total_pnl - self.daily_state.total_commission  # P&L after commission
         }
 
     def get_status_summary(self) -> Dict:
@@ -4375,7 +4409,8 @@ class MEICStrategy:
             "realized_pnl": self.daily_state.total_realized_pnl,
             "unrealized_pnl": unrealized,
             "total_stops": self.daily_state.call_stops_triggered + self.daily_state.put_stops_triggered,
-            "circuit_breaker_open": self._circuit_breaker_open
+            "circuit_breaker_open": self._circuit_breaker_open,
+            "total_commission": self.daily_state.total_commission  # For net P&L display
         }
 
     def get_detailed_position_status(self) -> List[str]:
@@ -4716,6 +4751,8 @@ class MEICStrategy:
             "spx_close": self.current_price,
             "vix_close": self.current_vix,
             "daily_pnl": summary["total_pnl"],
+            "daily_pnl_net": summary.get("net_pnl", summary["total_pnl"]),  # P&L after commission
+            "total_commission": summary.get("total_commission", 0),
             "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + summary["total_pnl"],
             "notes": "Post-settlement" if self._settlement_reconciliation_complete else ""
         }
@@ -4771,6 +4808,7 @@ class MEICStrategy:
                 "entries_skipped": self.daily_state.entries_skipped,
                 "total_credit_received": self.daily_state.total_credit_received,
                 "total_realized_pnl": self.daily_state.total_realized_pnl,
+                "total_commission": self.daily_state.total_commission,  # Commission tracking
                 "call_stops_triggered": self.daily_state.call_stops_triggered,
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
                 "double_stops": self.daily_state.double_stops,
@@ -4809,6 +4847,9 @@ class MEICStrategy:
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,
                     "put_side_stopped": entry.put_side_stopped,
+                    # Commission tracking
+                    "open_commission": entry.open_commission,
+                    "close_commission": entry.close_commission,
                 }
                 state_data["entries"].append(entry_data)
 

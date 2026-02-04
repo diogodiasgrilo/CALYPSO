@@ -501,10 +501,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     for line in position_lines:
                         trade_logger.log_event(line)
 
-                    # Visual divider with P&L centered in middle grey bar
-                    # All bars must be exactly the same width (50 chars inside brackets)
+                    # Visual divider with gross/net P&L centered in middle grey bar
+                    # Shows both gross P&L (strategy performance) and net P&L (after commission)
                     bar_width = 50
-                    pnl_text = f"  {pnl_sign}${total_pnl:.2f}  "  # Padding around P&L
+                    commission = status.get('total_commission', 0)
+                    net_pnl = total_pnl - commission
+                    net_sign = "+" if net_pnl >= 0 else ""
+                    # Show net P&L with commission breakdown
+                    pnl_text = f"  {net_sign}${net_pnl:.2f} net (${commission:.0f} comm)  "
                     pnl_len = len(pnl_text)
                     left_len = (bar_width - pnl_len) // 2
                     right_len = bar_width - pnl_len - left_len  # Handle odd lengths
