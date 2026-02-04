@@ -1545,6 +1545,10 @@ class IronFlyStrategy:
             strategy_id: Unique identifier for this trade (e.g., "iron_fly_20260204_100000")
             fill_details: Dict with fill info for each leg (contains position_id)
             iron_fly_options: Dict with strike info for metadata
+
+        Note:
+            Registry errors are logged but don't crash the bot - position monitoring
+            continues even if registry fails. The position is already open at this point.
         """
         leg_names = ["long_call", "long_put", "short_call", "short_put"]
         strikes = {
@@ -1559,7 +1563,16 @@ class IronFlyStrategy:
             fill_info = fill_details.get(leg_name, {})
             position_id = fill_info.get("position_id")
 
-            if position_id and position_id != "None":
+            # CRITICAL: Reject both None and the string "None" to prevent registry corruption
+            # The string "None" can occur if str(None) is called somewhere in the fill chain
+            if not position_id or position_id == "None":
+                if position_id == "None":
+                    logger.error(f"BUG DETECTED: {leg_name} has string 'None' as position_id - not registering")
+                else:
+                    logger.warning(f"No position_id available for {leg_name} - cannot register with registry")
+                continue
+
+            try:
                 success = self.registry.register(
                     position_id=str(position_id),
                     bot_name=self.bot_name,
@@ -1575,8 +1588,8 @@ class IronFlyStrategy:
                     logger.debug(f"Registered {leg_name} position {position_id} with registry")
                 else:
                     logger.warning(f"Failed to register {leg_name} position {position_id}")
-            else:
-                logger.warning(f"No position_id available for {leg_name} - cannot register with registry")
+            except Exception as e:
+                logger.error(f"POS-005: Registry error for {leg_name} position {position_id}: {e}")
 
         logger.info(f"POS-005: Registered {registered_count}/4 positions with registry (strategy: {strategy_id})")
 
@@ -1595,19 +1608,26 @@ class IronFlyStrategy:
         POS-005: Unregister all Iron Fly positions from the registry.
 
         Called when position is closed (normal exit, stop loss, or emergency).
+        Registry errors are logged but don't crash - position is already closed.
         """
-        my_positions = self.registry.get_positions(self.bot_name)
+        try:
+            my_positions = self.registry.get_positions(self.bot_name)
 
-        if not my_positions:
-            logger.debug("No Iron Fly positions in registry to unregister")
-            return
+            if not my_positions:
+                logger.debug("No Iron Fly positions in registry to unregister")
+                return
 
-        unregistered = 0
-        for pos_id in my_positions:
-            if self.registry.unregister(pos_id):
-                unregistered += 1
+            unregistered = 0
+            for pos_id in my_positions:
+                try:
+                    if self.registry.unregister(pos_id):
+                        unregistered += 1
+                except Exception as e:
+                    logger.error(f"POS-005: Failed to unregister position {pos_id}: {e}")
 
-        logger.info(f"POS-005: Unregistered {unregistered} positions from registry")
+            logger.info(f"POS-005: Unregistered {unregistered} positions from registry")
+        except Exception as e:
+            logger.error(f"POS-005: Registry error during unregister: {e}")
 
     # =========================================================================
     # ORDER SAFETY METHODS (Safety feature from Delta Neutral bot)
@@ -2174,13 +2194,20 @@ class IronFlyStrategy:
 
             # POS-005: First try to filter by Position Registry
             # This is the safe path when running with MEIC - each bot only sees its own positions
-            my_registry_positions = self.registry.get_positions(self.bot_name)
+            try:
+                my_registry_positions = self.registry.get_positions(self.bot_name)
+            except Exception as e:
+                logger.error(f"POS-005: Registry error getting positions: {e}")
+                my_registry_positions = set()
             valid_position_ids = {str(p.get("PositionId")) for p in broker_positions}
 
             # Clean up orphaned registry entries (positions that no longer exist)
-            orphans = self.registry.cleanup_orphans(valid_position_ids)
-            if orphans:
-                logger.warning(f"POS-005: Cleaned up {len(orphans)} orphaned registry entries")
+            try:
+                orphans = self.registry.cleanup_orphans(valid_position_ids)
+                if orphans:
+                    logger.warning(f"POS-005: Cleaned up {len(orphans)} orphaned registry entries")
+            except Exception as e:
+                logger.error(f"POS-005: Registry error during orphan cleanup: {e}")
 
             if my_registry_positions:
                 # We have registry entries - use registry-based reconciliation

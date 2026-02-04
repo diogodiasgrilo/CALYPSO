@@ -1105,7 +1105,10 @@ class MEICStrategy:
                         entry.long_put_position_id = None
 
                     # Unregister from registry
-                    self.registry.unregister(position_id)
+                    try:
+                        self.registry.unregister(position_id)
+                    except Exception as e:
+                        logger.error(f"Registry error unregistering position {position_id}: {e}")
 
     # =========================================================================
     # STATE HANDLERS
@@ -2558,6 +2561,9 @@ class MEICStrategy:
 
         CRITICAL FIX (2026-02-03): Explicitly reject "None" string to prevent
         registry corruption that causes all positions to match on recovery.
+
+        Note: Registry errors are logged but don't crash - position monitoring
+        continues even if registry fails.
         """
         position_id = getattr(entry, f"{leg_name}_position_id")
         # CRITICAL: Reject both None and the string "None"
@@ -2568,16 +2574,19 @@ class MEICStrategy:
 
         strike = getattr(entry, f"{leg_name}_strike")
 
-        self.registry.register(
-            position_id=position_id,
-            bot_name="MEIC",
-            strategy_id=entry.strategy_id,
-            metadata={
-                "entry_number": entry.entry_number,
-                "leg_type": leg_name,
-                "strike": strike
-            }
-        )
+        try:
+            self.registry.register(
+                position_id=position_id,
+                bot_name="MEIC",
+                strategy_id=entry.strategy_id,
+                metadata={
+                    "entry_number": entry.entry_number,
+                    "leg_type": leg_name,
+                    "strike": strike
+                }
+            )
+        except Exception as e:
+            logger.error(f"Registry error registering {leg_name} position {position_id}: {e}")
 
     def _handle_naked_short(self, naked_info: Tuple[str, str, int]):
         """
@@ -2616,7 +2625,10 @@ class MEICStrategy:
             )
             if result:
                 logger.info(f"Closed naked short {pos_id} via order {result.get('OrderId')}")
-                self.registry.unregister(pos_id)
+                try:
+                    self.registry.unregister(pos_id)
+                except Exception as reg_e:
+                    logger.error(f"Registry error unregistering {pos_id}: {reg_e}")
                 self._log_safety_event("NAKED_SHORT_CLOSED", f"{leg_name} position {pos_id} closed successfully")
             else:
                 logger.critical(f"FAILED to close naked short {pos_id}!")
@@ -2652,7 +2664,10 @@ class MEICStrategy:
                         to_open_close="ToClose"
                     )
                     if result:
-                        self.registry.unregister(pos_id)
+                        try:
+                            self.registry.unregister(pos_id)
+                        except Exception as reg_e:
+                            logger.error(f"Registry error unregistering {pos_id}: {reg_e}")
                         logger.info(f"Unwound {leg_name}: {pos_id} via order {result.get('OrderId')}")
                     else:
                         logger.error(f"Failed to unwind {leg_name}: no result from close order")
@@ -2917,7 +2932,10 @@ class MEICStrategy:
                     # SAFETY-024: Verify position is actually closed after order placement
                     time.sleep(1.5)  # Wait for order to fill
                     if self._verify_position_closed(position_id, leg_name, uic):
-                        self.registry.unregister(position_id)
+                        try:
+                            self.registry.unregister(position_id)
+                        except Exception as reg_e:
+                            logger.error(f"Registry error unregistering {position_id}: {reg_e}")
                         logger.info(f"EMERGENCY-001: Verified {leg_name} closed on attempt {attempt_num}")
                         return True
                     else:
@@ -3430,10 +3448,13 @@ class MEICStrategy:
             # FIX (2026-02-04): Skip in dry-run mode - DRY_ positions don't exist in Saxo
             valid_ids = {str(p.get("PositionId")) for p in all_positions}
             if not self.dry_run:
-                orphans = self.registry.cleanup_orphans(valid_ids)
-                if orphans:
-                    logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
-                    self._log_safety_event("ORPHAN_CLEANUP", f"Removed {len(orphans)} orphaned positions from registry")
+                try:
+                    orphans = self.registry.cleanup_orphans(valid_ids)
+                    if orphans:
+                        logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
+                        self._log_safety_event("ORPHAN_CLEANUP", f"Removed {len(orphans)} orphaned positions from registry")
+                except Exception as e:
+                    logger.error(f"Registry error during orphan cleanup: {e}")
             else:
                 logger.debug("Skipping orphan cleanup in dry-run mode")
 
@@ -3458,7 +3479,10 @@ class MEICStrategy:
                 logger.warning("Registry says we have MEIC positions but none found in Saxo! Cleaning registry...")
                 # Clear MEIC positions from registry since they don't exist
                 for pos_id in my_position_ids:
-                    self.registry.unregister(pos_id)
+                    try:
+                        self.registry.unregister(pos_id)
+                    except Exception as e:
+                        logger.error(f"Registry error unregistering {pos_id}: {e}")
                 self._log_safety_event("REGISTRY_CLEARED", "All MEIC positions removed - not found in Saxo")
                 # CRITICAL FIX (2026-02-03): Set date even when returning False
                 self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
@@ -3698,17 +3722,20 @@ class MEICStrategy:
                             for entry_data in entries_data:
                                 if entry_data.get("entry_number") == entry_num:
                                     strategy_id = entry_data.get("strategy_id", f"meic_{today}_entry{entry_num}")
-                                    self.registry.register(
-                                        position_id=pos_id,
-                                        bot_name="MEIC",
-                                        strategy_id=strategy_id,
-                                        metadata={
-                                            "entry_number": entry_num,
-                                            "leg_type": leg_type,
-                                            "strike": parsed.get("strike")
-                                        }
-                                    )
-                                    logger.info(f"Re-registered position {pos_id} (UIC {uic}) as Entry #{entry_num} {leg_type}")
+                                    try:
+                                        self.registry.register(
+                                            position_id=pos_id,
+                                            bot_name="MEIC",
+                                            strategy_id=strategy_id,
+                                            metadata={
+                                                "entry_number": entry_num,
+                                                "leg_type": leg_type,
+                                                "strike": parsed.get("strike")
+                                            }
+                                        )
+                                        logger.info(f"Re-registered position {pos_id} (UIC {uic}) as Entry #{entry_num} {leg_type}")
+                                    except Exception as e:
+                                        logger.error(f"Registry error re-registering {pos_id}: {e}")
                                     break
 
             logger.info(f"UIC-based recovery matched {matched_count} positions to {len(entries_by_number)} entries")
@@ -3962,10 +3989,13 @@ class MEICStrategy:
         # Dry-run positions use synthetic IDs (DRY_xxx) that won't exist in Saxo,
         # so cleanup_orphans would incorrectly remove all of them.
         if not self.dry_run:
-            orphans = self.registry.cleanup_orphans(valid_ids)
-            if orphans:
-                logger.warning(f"Cleaned up {len(orphans)} orphaned registrations")
-                self._log_safety_event("ORPHAN_CLEANUP", f"Cleaned {len(orphans)} orphans during reconciliation")
+            try:
+                orphans = self.registry.cleanup_orphans(valid_ids)
+                if orphans:
+                    logger.warning(f"Cleaned up {len(orphans)} orphaned registrations")
+                    self._log_safety_event("ORPHAN_CLEANUP", f"Cleaned {len(orphans)} orphans during reconciliation")
+            except Exception as e:
+                logger.error(f"Registry error during orphan cleanup: {e}")
         else:
             logger.debug("Skipping orphan cleanup in dry-run mode")
 
@@ -3978,7 +4008,10 @@ class MEICStrategy:
                 if pos_id and pos_id not in valid_ids:
                     missing_legs.append(leg_name)
                     # Unregister the missing position
-                    self.registry.unregister(pos_id)
+                    try:
+                        self.registry.unregister(pos_id)
+                    except Exception as e:
+                        logger.error(f"Registry error unregistering {pos_id}: {e}")
                     setattr(entry, f"{leg_name}_position_id", None)
                     # FIX (2026-02-04): Also clear UIC to prevent IllegalInstrumentId errors
                     setattr(entry, f"{leg_name}_uic", None)
@@ -4014,7 +4047,11 @@ class MEICStrategy:
         logger.info("Resetting for new trading day")
 
         # STATE-004: Check for overnight 0DTE positions (should NEVER happen)
-        my_position_ids = self.registry.get_positions("MEIC")
+        try:
+            my_position_ids = self.registry.get_positions("MEIC")
+        except Exception as e:
+            logger.error(f"Registry error checking for overnight positions: {e}")
+            my_position_ids = set()
         if my_position_ids:
             # This is a critical error - 0DTE positions should never survive to next day
             error_msg = f"CRITICAL: {len(my_position_ids)} MEIC positions survived overnight! 0DTE should expire same day."
@@ -4103,8 +4140,11 @@ class MEICStrategy:
 
                 # Clean up settled positions from registry
                 for pos_id in settled:
-                    self.registry.unregister(pos_id)
-                    logger.info(f"  Unregistered settled position: {pos_id}")
+                    try:
+                        self.registry.unregister(pos_id)
+                        logger.info(f"  Unregistered settled position: {pos_id}")
+                    except Exception as e:
+                        logger.error(f"Registry error unregistering {pos_id}: {e}")
 
                 # Also clean up from daily state entries
                 # FIX (2026-02-04): Clear BOTH position_id AND uic when options settle
