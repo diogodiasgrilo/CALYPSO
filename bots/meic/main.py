@@ -389,21 +389,26 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     else:
                         close_reason = ""
 
-                    # Send daily summary once at market close
-                    today_date = now_et.date()
-                    if is_after_hours() and daily_summary_sent_date != today_date:
-                        trade_logger.log_event("Market closed - sending daily summary...")
-                        strategy.log_daily_summary()
-                        daily_summary_sent_date = today_date
-                        trade_logger.log_event("Daily summary sent")
-
                     # POS-004: After-hours settlement reconciliation
                     # Check on every heartbeat until all 0DTE positions are confirmed settled
                     # (Saxo settles 0DTE options sometime between 4:00 PM and 7:00 PM EST)
+                    #
+                    # IMPORTANT: Daily summary is sent AFTER settlement is confirmed,
+                    # not at market close. This ensures accurate final P&L because:
+                    # 1. Options expiring worthless show as "open" until settled
+                    # 2. Saxo settles 0DTE between 4:00 PM and 7:00 PM EST
+                    # 3. Final P&L isn't accurate until positions are removed
+                    today_date = now_et.date()
                     if is_after_hours():
                         settlement_complete = strategy.check_after_hours_settlement()
                         if not settlement_complete:
                             trade_logger.log_event("Settlement pending - positions still open on Saxo")
+                        elif daily_summary_sent_date != today_date:
+                            # Settlement complete - NOW send daily summary with accurate P&L
+                            trade_logger.log_event("Settlement complete - sending daily summary...")
+                            strategy.log_daily_summary()
+                            daily_summary_sent_date = today_date
+                            trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
 
                     # Calculate sleep duration (max 15 min to keep token alive)
                     sleep_time = calculate_sleep_duration(max_sleep=900)

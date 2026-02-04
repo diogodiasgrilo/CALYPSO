@@ -4270,14 +4270,18 @@ class MEICStrategy:
             # FIX (2026-02-03): Use Saxo's authoritative P&L for display
             total_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions)
 
-            # For stop distance calculation, still use mid-price based calc
-            # (this is what the stop logic uses, so it should match)
-            call_pnl = self._calculate_side_pnl(entry, "call")
-            put_pnl = self._calculate_side_pnl(entry, "put")
+            # FIX (2026-02-04): Use spread_value (cost to close) for cushion calculation
+            # This matches the stop logic which triggers when spread_value >= stop_level
+            # Previously used P&L with abs() which gave wrong cushion when profitable
+            call_value = entry.call_spread_value if not entry.call_side_stopped else 0
+            put_value = entry.put_spread_value if not entry.put_side_stopped else 0
 
             # Calculate distance to stop levels (as percentage of stop)
-            call_dist = entry.call_side_stop - abs(call_pnl) if not entry.call_side_stopped else 0
-            put_dist = entry.put_side_stop - abs(put_pnl) if not entry.put_side_stopped else 0
+            # Cushion = (stop_level - current_value) / stop_level * 100
+            # When value=0 (options worthless): cushion = 100%
+            # When value=stop_level: cushion = 0% (stop triggered)
+            call_dist = entry.call_side_stop - call_value if not entry.call_side_stopped else 0
+            put_dist = entry.put_side_stop - put_value if not entry.put_side_stopped else 0
             call_pct = (call_dist / entry.call_side_stop * 100) if entry.call_side_stop > 0 else 0
             put_pct = (put_dist / entry.put_side_stop * 100) if entry.put_side_stop > 0 else 0
 
@@ -4546,11 +4550,49 @@ class MEICStrategy:
             logger.error(f"Failed to log performance metrics: {e}")
 
     def log_daily_summary(self):
-        """Log and send daily summary at end of day."""
+        """
+        Log and send daily summary after settlement is confirmed.
+
+        Called from main.py AFTER check_after_hours_settlement() returns True,
+        ensuring that all 0DTE positions have been settled by Saxo and we have
+        accurate final P&L figures.
+
+        This method:
+        1. Sends WhatsApp/Email alert via alert_service
+        2. Logs to Google Sheets Daily Summary tab
+        3. Updates cumulative metrics (winning/losing days, total P&L)
+        4. Saves cumulative metrics to disk
+        """
+        # Get summary data
+        summary = self.get_daily_summary()
+
+        # Send alert (WhatsApp/Email)
         self._send_daily_summary()
 
+        # Log to Google Sheets Daily Summary tab
+        # Add extra fields needed by the logger
+        sheets_summary = {
+            **summary,
+            "spx_close": self.current_price,
+            "vix_close": self.current_vix,
+            "daily_pnl": summary["total_pnl"],
+            "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + summary["total_pnl"],
+            "notes": "Post-settlement" if self._settlement_reconciliation_complete else ""
+        }
+
+        # Convert daily P&L to EUR if exchange rate available
+        try:
+            rate = self.client.get_fx_rate("USD", "EUR")
+            if rate:
+                sheets_summary["daily_pnl_eur"] = summary["total_pnl"] * rate
+        except Exception:
+            sheets_summary["daily_pnl_eur"] = 0
+
+        if self.trade_logger:
+            self.trade_logger.log_daily_summary(sheets_summary)
+            logger.info(f"Daily summary logged to Google Sheets (P&L: ${summary['total_pnl']:.2f})")
+
         # Update cumulative metrics
-        summary = self.get_daily_summary()
         self.cumulative_metrics["cumulative_pnl"] += summary["total_pnl"]
         self.cumulative_metrics["total_entries"] += summary["entries_completed"]
         self.cumulative_metrics["total_credit_collected"] += summary["total_credit"]

@@ -504,8 +504,8 @@ class GoogleSheetsLogger:
                         "Win Rate (%)", "Max Drawdown ($)", "Avg Campaign Days"
                     ]
                 elif self.strategy_type == "meic":
-                    # MEIC: Multiple entry iron condors - track entries, stops, breakeven rate
-                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=22)
+                    # MEIC: Multiple entry iron condors - track entries, stops, breakeven rate (21 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=21)
                     headers = [
                         # Meta
                         "Timestamp", "Period",
@@ -588,8 +588,8 @@ class GoogleSheetsLogger:
                         "State", "Exchange Rate"
                     ]
                 elif self.strategy_type == "meic":
-                    # MEIC: Multiple Entry Iron Condors snapshot
-                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=16)
+                    # MEIC: Multiple Entry Iron Condors snapshot (15 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=15)
                     headers = [
                         # Market Data
                         "Timestamp", "SPX Price", "VIX",
@@ -1683,6 +1683,50 @@ class GoogleSheetsLogger:
                     summary.get("notes", "")
                 ]
                 logger.debug(f"Daily summary logged to Google Sheets (Campaign: #{summary.get('campaign_number', 0)})")
+            elif self.strategy_type == "meic":
+                # MEIC: Multiple entry iron condors - track entries and stops
+                # Columns: Date, SPX Close, VIX, Entries Completed, Entries Skipped, Total ICs,
+                #          Total Credit ($), Call Stops, Put Stops, Double Stops,
+                #          Daily P&L ($), Daily P&L (EUR), Cumulative P&L ($),
+                #          Win Rate (%), Breakeven Days, Notes
+                entries_completed = summary.get('entries_completed', 0)
+                call_stops = summary.get('call_stops', 0)
+                put_stops = summary.get('put_stops', 0)
+                double_stops = summary.get('double_stops', 0)
+
+                # Calculate win rate: entries that didn't get stopped out on both sides
+                # A "win" is an entry where at least one side expired worthless
+                total_entries = entries_completed
+                if total_entries > 0:
+                    # Double stops are full losses, single-side stops are breakeven, no stops are wins
+                    wins = total_entries - double_stops - (call_stops + put_stops - 2 * double_stops)
+                    win_rate = (wins / total_entries) * 100 if total_entries > 0 else 0
+                else:
+                    win_rate = 0
+
+                # Breakeven days: days where P&L is within ±$50 of zero
+                daily_pnl = summary.get('daily_pnl', summary.get('total_pnl', 0))
+                is_breakeven = 1 if abs(daily_pnl) <= 50 else 0
+
+                row = [
+                    summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    f"{summary.get('spx_close', summary.get('underlying_close', 0)):.2f}",
+                    f"{summary.get('vix_close', summary.get('vix', 0)):.2f}",
+                    str(entries_completed),
+                    str(summary.get('entries_skipped', 0)),
+                    str(total_entries),  # Total ICs = entries completed
+                    f"{summary.get('total_credit', 0):.2f}",
+                    str(call_stops),
+                    str(put_stops),
+                    str(double_stops),
+                    f"{daily_pnl:.2f}",
+                    f"{summary.get('daily_pnl_eur', 0):.2f}",
+                    f"{summary.get('cumulative_pnl', 0):.2f}",
+                    f"{win_rate:.1f}",
+                    str(is_breakeven),
+                    summary.get("notes", "")
+                ]
+                logger.debug(f"MEIC daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
             else:
                 # Delta Neutral: Theta-based tracking
                 net_theta = summary.get('total_theta', summary.get('net_theta', 0))
@@ -2122,7 +2166,7 @@ class GoogleSheetsLogger:
                     f"{metrics.get('max_drawdown_pct', 0):.4f}",
                     f"{metrics.get('avg_daily_pnl', 0):.2f}"
                 ]
-                col_range = "A2:V2"  # 22 columns
+                col_range = "A2:U2"  # 21 columns
             else:
                 # Delta Neutral: Weekly theta strategy - track theta, rolls
                 row = [
