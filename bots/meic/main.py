@@ -355,7 +355,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     trade_logger.log_event("-" * 60)
 
     last_status_time = datetime.now()
-    status_interval = 15  # Log status every 15 seconds
+    status_interval = 3  # Log status every 3 seconds (matches check interval)
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600  # Log to Google Sheets Bot Logs every hour
     last_day = get_us_market_time().date()  # Use Eastern time, not UTC
