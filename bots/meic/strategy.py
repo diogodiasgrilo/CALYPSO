@@ -2870,23 +2870,68 @@ class MEICStrategy:
             self.daily_state.double_stops += 1
             logger.warning(f"DOUBLE STOP on Entry #{entry.entry_number}")
 
+        # FIX #42 (2026-02-05): Track actual fill prices for accurate P&L calculation
+        # Previous bug: Used theoretical stop_level instead of actual close cost
+        # This caused P&L to show wrong values (even profits instead of losses!)
+        actual_close_cost = 0.0  # Total cost to close the spread (in dollars)
+        fill_prices_captured = True  # Track if we got actual prices
+
         if self.dry_run:
             logger.info(f"[DRY RUN] Would close {side} side of Entry #{entry.entry_number}")
+            # In dry-run, use theoretical stop level for P&L
+            actual_close_cost = stop_level
         else:
             # EMERGENCY-001: Close positions with enhanced retry logic and spread validation
+            # FIX #42: Collect fill prices from each leg
             for pos_id, leg_name, uic in positions_to_close:
                 if pos_id:
-                    self._close_position_with_retry(pos_id, leg_name, uic=uic)
+                    _, fill_price = self._close_position_with_retry(pos_id, leg_name, uic=uic)
+                    if fill_price is not None:
+                        # Short leg: we BUY to close (cost us money)
+                        # Long leg: we SELL to close (gives us money back)
+                        if leg_name.startswith("short"):
+                            # Buying back short at fill_price costs us money
+                            actual_close_cost += fill_price * 100  # Convert to dollars
+                            logger.info(f"FIX-42: {leg_name} close cost: +${fill_price * 100:.2f}")
+                        else:
+                            # Selling long at fill_price gives us money back
+                            actual_close_cost -= fill_price * 100  # Subtract (reduces cost)
+                            logger.info(f"FIX-42: {leg_name} close proceeds: -${fill_price * 100:.2f}")
+                    else:
+                        fill_prices_captured = False
+                        logger.warning(f"FIX-42: No fill price for {leg_name}, will fall back to theoretical")
 
-        # Update realized P&L
-        # FIX (2026-02-04): Calculate NET loss, not gross cost to close
-        # Net loss = cost_to_close - credit_received_for_that_side
-        # Example: stop_level=$250 (total credit), call_credit=$125, net_loss=$125
-        # Previously was subtracting stop_level which double-counted the credit
+        # Calculate actual net loss
+        # FIX #42 (2026-02-05): Use actual close cost when available
+        # Net loss = (cost to buy back short - proceeds from selling long) - credit received
+        # Example: Bought back short @ $8.90 ($890), sold long @ $1.55 ($155)
+        #          actual_close_cost = $890 - $155 = $735
+        #          credit_received = $560
+        #          net_loss = $735 - $560 = $175 (loss)
         if side == "call":
-            net_loss = stop_level - entry.call_spread_credit
+            credit_received = entry.call_spread_credit
         else:
-            net_loss = stop_level - entry.put_spread_credit
+            credit_received = entry.put_spread_credit
+
+        if fill_prices_captured and not self.dry_run:
+            # Use actual close cost
+            net_loss = actual_close_cost - credit_received
+            logger.info(
+                f"FIX-42: Actual P&L for Entry #{entry.entry_number} {side}: "
+                f"close_cost=${actual_close_cost:.2f} - credit=${credit_received:.2f} = "
+                f"net_loss=${net_loss:.2f}"
+            )
+        else:
+            # Fallback to theoretical (stop_level = credit, so net_loss = 0 for MEIC)
+            # This is a known limitation - log warning
+            net_loss = stop_level - credit_received
+            if not self.dry_run:
+                logger.warning(
+                    f"FIX-42: Using theoretical P&L (fill prices unavailable): "
+                    f"stop_level=${stop_level:.2f} - credit=${credit_received:.2f} = "
+                    f"net_loss=${net_loss:.2f} (may be inaccurate!)"
+                )
+
         self.daily_state.total_realized_pnl -= net_loss
 
         # Track close commission (display only - 2 legs per side × $2.50 close = $5 per side)
@@ -2910,7 +2955,7 @@ class MEICStrategy:
 
         return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${stop_level:.2f})"
 
-    def _close_position_with_retry(self, position_id: str, leg_name: str, uic: int = None) -> bool:
+    def _close_position_with_retry(self, position_id: str, leg_name: str, uic: int = None) -> Tuple[bool, Optional[float]]:
         """
         EMERGENCY-001: Close a position with enhanced retry logic and spread validation.
 
@@ -2919,6 +2964,7 @@ class MEICStrategy:
         2. Waits for spread normalization if too wide
         3. Uses progressive retry with escalating alerts
         4. Tracks slippage for monitoring
+        5. FIX #42 (2026-02-05): Captures actual fill price for accurate P&L
 
         CRITICAL FIX (2026-02-03): Saxo's DELETE /trade/v2/positions/{id} endpoint
         returns 404 for SPX options. Must use place_emergency_order with ToClose instead.
@@ -2929,12 +2975,14 @@ class MEICStrategy:
             uic: Option UIC for spread checking (required for placing close order)
 
         Returns:
-            True if closed successfully
+            Tuple of (success: bool, fill_price: Optional[float])
+            - fill_price is the actual price at which the position was closed
+            - If fill_price is None, P&L calculation should fall back to theoretical
         """
         # UIC is REQUIRED now - we need it to place the close order
         if not uic:
             logger.error(f"EMERGENCY-001: Cannot close {leg_name} without UIC!")
-            return False
+            return False, None
 
         # Determine direction: short positions need BUY to close, long positions need SELL to close
         if leg_name.startswith("short"):
@@ -2981,8 +3029,11 @@ class MEICStrategy:
                             self.registry.unregister(position_id)
                         except Exception as reg_e:
                             logger.error(f"Registry error unregistering {position_id}: {reg_e}")
-                        logger.info(f"EMERGENCY-001: Verified {leg_name} closed on attempt {attempt_num}")
-                        return True
+
+                        # FIX #42 (2026-02-05): Get actual fill price from activities
+                        fill_price = self._get_close_fill_price(order_id, uic, leg_name)
+                        logger.info(f"EMERGENCY-001: Verified {leg_name} closed on attempt {attempt_num}, fill_price=${fill_price:.2f}" if fill_price else f"EMERGENCY-001: Verified {leg_name} closed on attempt {attempt_num}, fill_price=unknown")
+                        return True, fill_price
                     else:
                         logger.warning(
                             f"EMERGENCY-001: Order {order_id} placed but position still exists, retrying..."
@@ -3044,7 +3095,7 @@ class MEICStrategy:
             priority=AlertPriority.CRITICAL
         )
         self._log_safety_event("EMERGENCY_CLOSE_FAILED", error_msg)
-        return False
+        return False, None
 
     def _check_spread_for_emergency_close(self, uic: int) -> Tuple[bool, float]:
         """
@@ -3184,6 +3235,62 @@ class MEICStrategy:
             f"{EMERGENCY_SPREAD_MAX_WAIT_ATTEMPTS} waits, proceeding with close anyway"
         )
         return False
+
+    def _get_close_fill_price(self, order_id: str, uic: int, leg_name: str) -> Optional[float]:
+        """
+        FIX #42 (2026-02-05): Get actual fill price for a close order.
+
+        Queries the activities endpoint to find the fill price for accurate P&L.
+        This fixes the bug where theoretical stop levels were used instead of
+        actual close prices, causing massive P&L discrepancies.
+
+        Args:
+            order_id: The emergency close order ID
+            uic: The instrument UIC
+            leg_name: Name for logging (e.g., "short_call")
+
+        Returns:
+            Fill price in dollars (e.g., 8.90), or None if not found
+        """
+        try:
+            # Use client's activity check which has retry logic built-in
+            filled, fill_details = self.client.check_order_filled_by_activity(
+                order_id=order_id,
+                uic=uic,
+                max_retries=3,
+                retry_delay=1.0
+            )
+
+            if filled and fill_details:
+                fill_price = fill_details.get("fill_price")
+                if fill_price and fill_price > 0:
+                    logger.info(f"FIX-42: Got actual fill price for {leg_name}: ${fill_price:.2f}")
+                    return fill_price
+                else:
+                    logger.warning(f"FIX-42: Activity found but fill_price=0 for {leg_name}")
+
+            # Fallback: Try to get from current quote (less accurate but better than nothing)
+            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+            if quote:
+                # For buys (closing shorts), we paid the ask
+                # For sells (closing longs), we received the bid
+                is_short = leg_name.startswith("short")
+                if is_short:
+                    # We bought to close at ask price
+                    price = quote.get("Quote", {}).get("Ask") or quote.get("Quote", {}).get("Mid")
+                else:
+                    # We sold to close at bid price
+                    price = quote.get("Quote", {}).get("Bid") or quote.get("Quote", {}).get("Mid")
+                if price:
+                    logger.warning(f"FIX-42: Using current quote as fallback for {leg_name}: ${price:.2f}")
+                    return price
+
+            logger.error(f"FIX-42: Could not determine fill price for {leg_name}")
+            return None
+
+        except Exception as e:
+            logger.error(f"FIX-42: Error getting fill price for {leg_name}: {e}")
+            return None
 
     # =========================================================================
     # MARKET DATA
