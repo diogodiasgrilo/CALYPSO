@@ -25,7 +25,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -46,6 +46,10 @@ from bots.meic.strategy import (
     ENTRY_MAX_RETRIES,
     ENTRY_RETRY_DELAY_SECONDS,
     is_fomc_meeting_day,
+    # P&L sanity check constants (Fix #39 - one-sided entry validation)
+    PNL_SANITY_CHECK_ENABLED,
+    MAX_PNL_PER_IC,
+    MIN_PNL_PER_IC,
 )
 
 # =============================================================================
@@ -689,6 +693,109 @@ class MEICTFStrategy(MEICStrategy):
         else:
             # Full IC - use parent's logic
             self._calculate_stop_levels(entry)
+
+    # =========================================================================
+    # OVERRIDE: P&L sanity validation for one-sided entries (Fix #39)
+    # =========================================================================
+
+    def _validate_pnl_sanity(self, entry: IronCondorEntry) -> Tuple[bool, str]:
+        """
+        DATA-003/DATA-004: Validate P&L values for one-sided entries.
+
+        OVERRIDE (Fix #39, 2026-02-05): The parent class checks both call and put
+        sides unconditionally. For one-sided entries (call_only or put_only),
+        the non-placed side has zero prices, which triggers DATA-004 warnings
+        every ~8 seconds. This override only validates the side that was actually
+        placed.
+
+        Args:
+            entry: IronCondorEntry (or TFIronCondorEntry) to validate
+
+        Returns:
+            Tuple of (is_valid, message)
+        """
+        if not PNL_SANITY_CHECK_ENABLED:
+            return True, "P&L sanity check disabled"
+
+        is_tf_entry = isinstance(entry, TFIronCondorEntry)
+
+        # =====================================================================
+        # CALL-ONLY ENTRY: Only validate call side prices
+        # =====================================================================
+        if is_tf_entry and entry.call_only:
+            # Only check call side - put side was never placed
+            if not entry.call_side_stopped:
+                if entry.short_call_price == 0 and entry.long_call_price == 0:
+                    logger.warning(
+                        f"DATA-004: Entry #{entry.entry_number} call side has zero prices "
+                        f"(SC=${entry.short_call_price:.2f}, LC=${entry.long_call_price:.2f}) - skipping stop check"
+                    )
+                    return False, "Call side prices are zero"
+                if entry.short_call_price == 0 or entry.long_call_price == 0:
+                    logger.warning(
+                        f"DATA-004: Entry #{entry.entry_number} call side has partial zero prices "
+                        f"(SC=${entry.short_call_price:.2f}, LC=${entry.long_call_price:.2f}) - skipping stop check"
+                    )
+                    return False, "Call side has partial zero price"
+
+            # Check P&L bounds for call-only entry
+            pnl = entry.unrealized_pnl
+            if pnl > MAX_PNL_PER_IC:
+                logger.error(
+                    f"DATA-003: Impossible P&L for call-only Entry #{entry.entry_number}: "
+                    f"${pnl:.2f} > max ${MAX_PNL_PER_IC}"
+                )
+                return False, f"P&L too high: ${pnl:.2f}"
+            if pnl < MIN_PNL_PER_IC:
+                logger.error(
+                    f"DATA-003: Impossible P&L for call-only Entry #{entry.entry_number}: "
+                    f"${pnl:.2f} < min ${MIN_PNL_PER_IC}"
+                )
+                return False, f"P&L too low: ${pnl:.2f}"
+
+            return True, "OK"
+
+        # =====================================================================
+        # PUT-ONLY ENTRY: Only validate put side prices
+        # =====================================================================
+        elif is_tf_entry and entry.put_only:
+            # Only check put side - call side was never placed
+            if not entry.put_side_stopped:
+                if entry.short_put_price == 0 and entry.long_put_price == 0:
+                    logger.warning(
+                        f"DATA-004: Entry #{entry.entry_number} put side has zero prices "
+                        f"(SP=${entry.short_put_price:.2f}, LP=${entry.long_put_price:.2f}) - skipping stop check"
+                    )
+                    return False, "Put side prices are zero"
+                if entry.short_put_price == 0 or entry.long_put_price == 0:
+                    logger.warning(
+                        f"DATA-004: Entry #{entry.entry_number} put side has partial zero prices "
+                        f"(SP=${entry.short_put_price:.2f}, LP=${entry.long_put_price:.2f}) - skipping stop check"
+                    )
+                    return False, "Put side has partial zero price"
+
+            # Check P&L bounds for put-only entry
+            pnl = entry.unrealized_pnl
+            if pnl > MAX_PNL_PER_IC:
+                logger.error(
+                    f"DATA-003: Impossible P&L for put-only Entry #{entry.entry_number}: "
+                    f"${pnl:.2f} > max ${MAX_PNL_PER_IC}"
+                )
+                return False, f"P&L too high: ${pnl:.2f}"
+            if pnl < MIN_PNL_PER_IC:
+                logger.error(
+                    f"DATA-003: Impossible P&L for put-only Entry #{entry.entry_number}: "
+                    f"${pnl:.2f} < min ${MIN_PNL_PER_IC}"
+                )
+                return False, f"P&L too low: ${pnl:.2f}"
+
+            return True, "OK"
+
+        # =====================================================================
+        # FULL IC: Use parent's validation for both sides
+        # =====================================================================
+        else:
+            return super()._validate_pnl_sanity(entry)
 
     # =========================================================================
     # OVERRIDE: Stop loss checking for one-sided entries
