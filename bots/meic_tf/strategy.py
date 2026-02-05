@@ -200,9 +200,12 @@ class MEICTFStrategy(MEICStrategy):
                 logger.warning(f"Insufficient bars for EMA: {len(bars)} < {self.ema_long_period}")
                 return TrendSignal.NEUTRAL
 
-            # Extract close prices
-            closes = [bar.get("Close", 0) for bar in bars]
-            closes = [c for c in closes if c > 0]  # Filter out invalid
+            # Extract close prices (Saxo CFD data uses CloseBid, not Close)
+            closes = []
+            for bar in bars:
+                close = bar.get("CloseBid") or bar.get("Close") or 0
+                if close > 0:
+                    closes.append(close)
 
             if len(closes) < self.ema_long_period:
                 logger.warning(f"Insufficient valid closes: {len(closes)}")
