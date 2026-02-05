@@ -1403,6 +1403,180 @@ class MEICTFStrategy(MEICStrategy):
             # Don't let logging failure affect trading
             logger.error(f"Failed to log safety event: {e}")
 
+    def _reconstruct_entry_from_positions(
+        self,
+        entry_number: int,
+        positions: List[Dict]
+    ) -> Optional[TFIronCondorEntry]:
+        """
+        Reconstruct a TFIronCondorEntry from Saxo position data.
+
+        OVERRIDE (Fix #40, 2026-02-05): Parent class creates IronCondorEntry objects
+        which don't have call_only/put_only fields. For MEIC-TF, we must create
+        TFIronCondorEntry objects and set the one-sided flags based on which legs
+        exist. Without this, recovery of one-sided entries triggers false stops.
+
+        Args:
+            entry_number: The entry number (1-6)
+            positions: List of parsed position dicts for this entry
+
+        Returns:
+            Reconstructed TFIronCondorEntry or None if invalid
+        """
+        # Create TFIronCondorEntry instead of IronCondorEntry
+        entry = TFIronCondorEntry(entry_number=entry_number)
+        entry.strategy_id = f"meic_tf_{get_us_market_time().strftime('%Y%m%d')}_{entry_number:03d}"
+
+        # Use dictionary approach to handle positions in any order
+        entry_prices = {
+            "short_call": 0.0,
+            "long_call": 0.0,
+            "short_put": 0.0,
+            "long_put": 0.0,
+        }
+
+        # First pass: collect all positions and entry prices
+        for pos in positions:
+            leg_type = pos.get("leg_type")
+            strike = pos.get("strike")
+            is_long = pos.get("is_long")
+
+            # Validate leg type matches expected
+            expected_long = leg_type in ["long_call", "long_put"]
+            if expected_long != is_long:
+                logger.warning(f"Entry #{entry_number}: Leg {leg_type} direction mismatch!")
+
+            # Store entry price for later NET calculation
+            entry_prices[leg_type] = pos.get("entry_price", 0) * 100
+
+            if leg_type == "short_call":
+                entry.short_call_position_id = pos["position_id"]
+                entry.short_call_uic = pos["uic"]
+                entry.short_call_strike = strike
+                entry.short_call_price = pos.get("current_price", 0)
+
+            elif leg_type == "long_call":
+                entry.long_call_position_id = pos["position_id"]
+                entry.long_call_uic = pos["uic"]
+                entry.long_call_strike = strike
+                entry.long_call_price = pos.get("current_price", 0)
+
+            elif leg_type == "short_put":
+                entry.short_put_position_id = pos["position_id"]
+                entry.short_put_uic = pos["uic"]
+                entry.short_put_strike = strike
+                entry.short_put_price = pos.get("current_price", 0)
+
+            elif leg_type == "long_put":
+                entry.long_put_position_id = pos["position_id"]
+                entry.long_put_uic = pos["uic"]
+                entry.long_put_strike = strike
+                entry.long_put_price = pos.get("current_price", 0)
+
+        # Second pass: calculate NET credits (short - long)
+        entry.call_spread_credit = entry_prices["short_call"] - entry_prices["long_call"]
+        entry.put_spread_credit = entry_prices["short_put"] - entry_prices["long_put"]
+
+        logger.debug(
+            f"Entry #{entry_number} recovered credits: "
+            f"Call=${entry.call_spread_credit:.2f} (short ${entry_prices['short_call']:.2f} - long ${entry_prices['long_call']:.2f}), "
+            f"Put=${entry.put_spread_credit:.2f} (short ${entry_prices['short_put']:.2f} - long ${entry_prices['long_put']:.2f})"
+        )
+
+        # Check which legs exist
+        has_call_side = entry.short_call_position_id and entry.long_call_position_id
+        has_put_side = entry.short_put_position_id and entry.long_put_position_id
+        has_all_legs = has_call_side and has_put_side
+
+        if not has_all_legs:
+            # Partial entry - determine if it's a one-sided TF entry or a stopped entry
+            legs_found = []
+            if entry.short_call_position_id:
+                legs_found.append("SC")
+            if entry.long_call_position_id:
+                legs_found.append("LC")
+            if entry.short_put_position_id:
+                legs_found.append("SP")
+            if entry.long_put_position_id:
+                legs_found.append("LP")
+
+            logger.warning(f"Entry #{entry_number} is PARTIAL: only {legs_found}")
+
+            # MEIC-TF SPECIFIC: Determine if this is a one-sided entry (by design)
+            # or if a side was stopped out
+            # If we have exactly call side OR put side, it's likely a one-sided TF entry
+            if has_call_side and not has_put_side:
+                # Has call spread only - could be BEARISH (call_only) entry
+                # Mark as call_only - stop checking will only monitor call side
+                entry.call_only = True
+                entry.put_only = False
+                entry.call_side_stopped = False
+                entry.put_side_stopped = True  # Mark put as "stopped" so it's not monitored
+                logger.info(f"Entry #{entry_number}: Detected as CALL-ONLY entry (bearish trend)")
+            elif has_put_side and not has_call_side:
+                # Has put spread only - could be BULLISH (put_only) entry
+                entry.call_only = False
+                entry.put_only = True
+                entry.call_side_stopped = True  # Mark call as "stopped" so it's not monitored
+                entry.put_side_stopped = False
+                logger.info(f"Entry #{entry_number}: Detected as PUT-ONLY entry (bullish trend)")
+            else:
+                # Mixed partial - probably a stopped entry
+                entry.call_side_stopped = not has_call_side
+                entry.put_side_stopped = not has_put_side
+
+        entry.is_complete = has_all_legs
+
+        # Calculate stop levels based on recovered credit
+        total_credit = entry.call_spread_credit + entry.put_spread_credit
+
+        # CRITICAL SAFETY CHECK: Prevent zero stop levels
+        MIN_STOP_LEVEL = 50.0
+
+        # For one-sided entries, use the single side's credit for stop
+        if entry.call_only:
+            credit_for_stop = entry.call_spread_credit
+            if credit_for_stop < MIN_STOP_LEVEL:
+                logger.critical(
+                    f"Recovery CRITICAL: Entry #{entry.entry_number} (call-only) has low credit "
+                    f"(${credit_for_stop:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+                )
+                credit_for_stop = MIN_STOP_LEVEL
+            entry.call_side_stop = credit_for_stop
+            entry.put_side_stop = 0  # No put side to monitor
+        elif entry.put_only:
+            credit_for_stop = entry.put_spread_credit
+            if credit_for_stop < MIN_STOP_LEVEL:
+                logger.critical(
+                    f"Recovery CRITICAL: Entry #{entry.entry_number} (put-only) has low credit "
+                    f"(${credit_for_stop:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+                )
+                credit_for_stop = MIN_STOP_LEVEL
+            entry.put_side_stop = credit_for_stop
+            entry.call_side_stop = 0  # No call side to monitor
+        else:
+            # Full IC or stopped entry - use total credit per side
+            if total_credit < MIN_STOP_LEVEL:
+                logger.critical(
+                    f"Recovery CRITICAL: Entry #{entry.entry_number} has low credit "
+                    f"(${total_credit:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+                )
+                total_credit = MIN_STOP_LEVEL
+
+            if self.meic_plus_enabled:
+                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
+                if total_credit > min_credit_for_meic_plus:
+                    stop_level = total_credit - self.meic_plus_reduction
+                else:
+                    stop_level = total_credit
+                entry.call_side_stop = stop_level
+                entry.put_side_stop = stop_level
+            else:
+                entry.call_side_stop = total_credit
+                entry.put_side_stop = total_credit
+
+        return entry
+
     def _recover_from_state_file_uics(self, all_positions: List[Dict]) -> Dict[int, List[Dict]]:
         """
         Override to use MEIC-TF bot name in registry during UIC-based recovery.
@@ -1417,7 +1591,6 @@ class MEICTFStrategy(MEICStrategy):
         Returns:
             Dict mapping entry_number -> list of position data dicts, or empty dict
         """
-        from typing import Tuple
 
         logger.info("Attempting UIC-based recovery from state file...")
 
@@ -1645,6 +1818,10 @@ class MEICTFStrategy(MEICStrategy):
                                         "put_side_stopped": entry_data.get("put_side_stopped", False),
                                         "open_commission": entry_data.get("open_commission", 0),
                                         "close_commission": entry_data.get("close_commission", 0),
+                                        # MEIC-TF specific fields (Fix #40)
+                                        "call_only": entry_data.get("call_only", False),
+                                        "put_only": entry_data.get("put_only", False),
+                                        "trend_signal": entry_data.get("trend_signal"),
                                     }
                             logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
                                        f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}")
@@ -1667,6 +1844,25 @@ class MEICTFStrategy(MEICStrategy):
 
                     entry.open_commission = saved.get("open_commission", 0)
                     entry.close_commission = saved.get("close_commission", 0)
+
+                    # MEIC-TF specific: Restore one-sided entry flags (Fix #40)
+                    # This is critical - without these flags, one-sided entries get
+                    # incorrect stop monitoring (checking non-existent sides)
+                    if saved.get("call_only"):
+                        entry.call_only = True
+                        entry.put_only = False
+                        logger.info(f"Entry #{entry.entry_number}: Restored as CALL-ONLY entry from state file")
+                    elif saved.get("put_only"):
+                        entry.call_only = False
+                        entry.put_only = True
+                        logger.info(f"Entry #{entry.entry_number}: Restored as PUT-ONLY entry from state file")
+
+                    # Restore trend signal if saved
+                    if saved.get("trend_signal"):
+                        try:
+                            entry.trend_signal = TrendSignal(saved["trend_signal"])
+                        except ValueError:
+                            pass  # Invalid trend signal value, ignore
 
                     if entry.call_side_stopped and entry.short_call_strike == 0:
                         entry.short_call_strike = saved.get("short_call_strike", 0)
