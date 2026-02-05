@@ -533,6 +533,12 @@ class MEICTFStrategy(MEICStrategy):
             self._register_position(entry, "short_call")
 
             logger.info(f"Call spread complete: Credit ${entry.call_spread_credit:.2f}")
+
+            # FIX #44: Mark put side as "stopped" so stop check doesn't monitor non-existent spread
+            # For BEARISH (call-only) entries, there's no put spread to monitor
+            entry.put_side_stopped = True
+            logger.info(f"Entry #{entry.entry_number}: Marked put side as stopped (call-only entry)")
+
             return True
 
         except Exception as e:
@@ -600,6 +606,12 @@ class MEICTFStrategy(MEICStrategy):
             self._register_position(entry, "short_put")
 
             logger.info(f"Put spread complete: Credit ${entry.put_spread_credit:.2f}")
+
+            # FIX #44: Mark call side as "stopped" so stop check doesn't monitor non-existent spread
+            # For BULLISH (put-only) entries, there's no call spread to monitor
+            entry.call_side_stopped = True
+            logger.info(f"Entry #{entry.entry_number}: Marked call side as stopped (put-only entry)")
+
             return True
 
         except Exception as e:
@@ -627,11 +639,15 @@ class MEICTFStrategy(MEICStrategy):
             entry.call_spread_credit = self.spread_width * credit_ratio * 100
             entry.short_call_position_id = f"DRY_{base_id}_SC"
             entry.long_call_position_id = f"DRY_{base_id}_LC"
+            # FIX #44: Mark put side as stopped (no put spread in call-only entry)
+            entry.put_side_stopped = True
             logger.info(f"[DRY RUN] Simulated Call Spread: Credit ${entry.call_spread_credit:.2f}")
         else:
             entry.put_spread_credit = self.spread_width * credit_ratio * 100
             entry.short_put_position_id = f"DRY_{base_id}_SP"
             entry.long_put_position_id = f"DRY_{base_id}_LP"
+            # FIX #44: Mark call side as stopped (no call spread in put-only entry)
+            entry.call_side_stopped = True
             logger.info(f"[DRY RUN] Simulated Put Spread: Credit ${entry.put_spread_credit:.2f}")
 
         return True
