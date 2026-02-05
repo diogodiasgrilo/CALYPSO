@@ -338,10 +338,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                 if (now - last_bot_log_time).total_seconds() >= bot_log_interval:
                     try:
                         status = strategy.get_status_summary()
+                        ema_info = ""
+                        if status.get('ema_short', 0) > 0:
+                            diff_sign = "+" if status.get('ema_diff_pct', 0) >= 0 else ""
+                            ema_info = f", EMA20={status['ema_short']:.0f}/EMA40={status['ema_long']:.0f} ({diff_sign}{status['ema_diff_pct']*100:.2f}%)"
                         trade_logger.log_bot_activity(
                             level="INFO",
                             component="MEICTFStrategy",
-                            message=f"Hourly: State={status['state']}, Entries={status['entries_completed']}, Trend={status.get('current_trend', 'N/A')}, P&L=${status['realized_pnl'] + status['unrealized_pnl']:.2f}",
+                            message=f"Hourly: State={status['state']}, Entries={status['entries_completed']}, Trend={status.get('current_trend', 'N/A')}{ema_info}, P&L=${status['realized_pnl'] + status['unrealized_pnl']:.2f}",
                             spy_price=status['underlying_price'],
                             vix=status['vix'],
                             flush=True
@@ -436,7 +440,20 @@ def show_status(config: dict):
     print(f"  State: {status['state']}")
     print(f"  SPX Price: {status['underlying_price']:.2f}")
     print(f"  VIX: {status['vix']:.2f}")
-    print(f"  Current Trend: {status.get('current_trend', 'N/A')}")
+
+    # Show trend info with EMA values
+    trend = status.get('current_trend', 'N/A').upper()
+    ema_short = status.get('ema_short', 0)
+    ema_long = status.get('ema_long', 0)
+    ema_diff = status.get('ema_diff_pct', 0)
+    if ema_short > 0 and ema_long > 0:
+        diff_sign = "+" if ema_diff >= 0 else ""
+        print(f"  Current Trend: {trend}")
+        print(f"    EMA 20: {ema_short:.2f}")
+        print(f"    EMA 40: {ema_long:.2f}")
+        print(f"    Difference: {diff_sign}{ema_diff*100:.3f}% (threshold: ±{strategy.ema_neutral_threshold*100:.1f}%)")
+    else:
+        print(f"  Current Trend: {trend} (EMA not yet calculated)")
 
     print("\n  Entry Schedule:")
     for i, entry_time in enumerate(strategy.entry_times):

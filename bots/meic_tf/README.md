@@ -110,6 +110,17 @@ sudo journalctl -u meic_tf -f
 2. **Trend reversal risk**: If trend flips after entry, the "safe" side becomes risky
 3. **EMA lag**: EMAs are lagging indicators; sudden reversals may not be detected immediately
 
+## State Files
+
+MEIC-TF uses **separate state files** from MEIC to allow both bots to run simultaneously:
+
+| File | Description |
+|------|-------------|
+| `data/meic_tf_state.json` | MEIC-TF daily state (entries, P&L, stops) |
+| `data/position_registry.json` | Shared with all SPX bots for position isolation |
+
+**Important**: The Position Registry is shared across all SPX bots (MEIC, MEIC-TF, Iron Fly) to prevent position conflicts when multiple bots trade the same underlying.
+
 ## Files
 
 ```

@@ -49,6 +49,7 @@ bots/
   delta_neutral/      # Brian's Delta Neutral strategy
   rolling_put_diagonal/  # Bill Belt's Rolling Put Diagonal strategy
   meic/               # Tammy Chambless's MEIC strategy (Multiple Entry Iron Condors)
+  meic_tf/            # MEIC + Trend Following (EMA 20/40 direction filter)
 
 shared/               # Shared modules used by all bots
   saxo_client.py      # Saxo Bank API client (orders, positions, streaming)
@@ -126,14 +127,15 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 ---
 
-## Trading Bots (4 Total)
+## Trading Bots (5 Total)
 
 | Bot | Service Name | Strategy | Config Path | Status |
 |-----|--------------|----------|-------------|--------|
 | Iron Fly | `iron_fly_0dte.service` | Doc Severson's 0DTE Iron Butterfly | `bots/iron_fly_0dte/config/config.json` | PAUSED |
-| Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral/config/config.json` | LIVE |
-| Rolling Put Diagonal | `rolling_put_diagonal.service` | Bill Belt's Rolling Put Diagonal | `bots/rolling_put_diagonal/config/config.json` | DRY-RUN |
-| MEIC | `meic.service` | Tammy Chambless's MEIC (Multiple Entry Iron Condors) | `bots/meic/config/config.json` | LIVE |
+| Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral/config/config.json` | STOPPED |
+| Rolling Put Diagonal | `rolling_put_diagonal.service` | Bill Belt's Rolling Put Diagonal | `bots/rolling_put_diagonal/config/config.json` | STOPPED |
+| MEIC | `meic.service` | Tammy Chambless's MEIC (Multiple Entry Iron Condors) | `bots/meic/config/config.json` | STOPPED |
+| MEIC-TF | `meic_tf.service` | MEIC + Trend Following (EMA 20/40 filter) | `bots/meic_tf/config/config.json` | **LIVE** |
 
 All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `StartLimitBurst=5`
 
@@ -163,15 +165,16 @@ SCRIPT
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart BOT_SERVICE_NAME"
 ```
 
-**Current Mode Status (Updated 2026-02-04):**
+**Current Mode Status (Updated 2026-02-05):**
 | Bot | Config `dry_run` | Mode | Service Status |
 |-----|------------------|------|----------------|
 | Iron Fly | `false` | LIVE | **STOPPED** |
 | Delta Neutral | `false` | LIVE | **STOPPED** |
-| MEIC | `false` | LIVE | **RUNNING** |
+| MEIC | `false` | LIVE | **STOPPED** |
+| MEIC-TF | `false` | LIVE | **RUNNING** |
 | Rolling Put Diagonal | `true` | DRY-RUN | **STOPPED** |
 
-**Active Services:** `token_keeper`, `meic`
+**Active Services:** `token_keeper`, `meic_tf`
 
 ### Iron Fly Bot Details
 - **Entry:** 10:00 AM EST (after 30-min opening range)
@@ -228,6 +231,18 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 | Both sides stopped | ~6% | -$250 to -$750 |
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
+
+### MEIC-TF Bot Details (v1.0.0 - NEW 2026-02-05)
+- **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
+- **Structure:** Same as MEIC but with EMA-based entry filtering
+- **Key Difference:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
+- **BULLISH (20 > 40):** Place PUT spread only (calls are risky in uptrend)
+- **BEARISH (20 < 40):** Place CALL spread only (puts are risky in downtrend)
+- **NEUTRAL:** Place full iron condor (standard MEIC behavior)
+- **State file:** `data/meic_tf_state.json` (separate from MEIC's `meic_state.json`)
+- **Why it exists:** On Feb 4, 2026, pure MEIC had all 6 put sides stopped in a sustained downtrend. MEIC-TF would have detected bearish trend and avoided ~$1,500 in losses.
+
+**Note:** MEIC-TF and MEIC can run simultaneously - they use separate state files but share the Position Registry for multi-bot SPX position isolation.
 
 ### Delta Neutral Bot Details
 - **Version:** 2.0.6 (Updated 2026-02-03 with margin settlement delay and improved retry logic)
@@ -493,10 +508,10 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-tradin
 ### Emergency Stop (All Bots + Token Keeper)
 ```bash
 # Stop all trading bots (token keeper keeps running to preserve auth)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
 
 # Stop EVERYTHING including token keeper (token will expire in ~20 min!)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic token_keeper"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf token_keeper"
 ```
 
 ### Stop Individual Services
@@ -513,6 +528,9 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop 
 # MEIC
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop meic"
 
+# MEIC-TF (Trend Following)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop meic_tf"
+
 # Token Keeper (WARNING: token will expire in ~20 min without this!)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop token_keeper"
 ```
@@ -523,25 +541,27 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop 
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start token_keeper"
 
 # Start all trading bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte delta_neutral rolling_put_diagonal meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
 
 # Individual bots
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start delta_neutral"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start rolling_put_diagonal"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start meic_tf"
 ```
 
 ### Restart Services
 ```bash
 # Restart all trading bots (token keeper usually doesn't need restart)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
 
 # Individual bots
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart delta_neutral"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart rolling_put_diagonal"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart meic_tf"
 
 # Token Keeper (rarely needed)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart token_keeper"
@@ -550,7 +570,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 ### Check Status
 ```bash
 # All services (bots + token keeper)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper iron_fly_0dte delta_neutral rolling_put_diagonal meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
 
 # List running Calypso services
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling|meic|token_keeper)'"
@@ -566,16 +586,19 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u i
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u delta_neutral -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u rolling_put_diagonal -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -n 50 --no-pager"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf -n 50 --no-pager"
 
 # Follow logs (live)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -f"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte -f"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -f"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf -f"
 
 # Today's logs
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper --since today --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte --since today --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic --since today --no-pager"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf --since today --no-pager"
 ```
 
 ---
@@ -614,12 +637,12 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 3. **Restart bots to apply changes:**
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
 ```
 
 4. **Verify status:**
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
 ```
 
 5. **Post-Deployment Documentation Update (MANDATORY):**
@@ -950,17 +973,18 @@ SCRIPT
 ## Important Notes
 
 1. **Git on VM:** Must run as `calypso` user: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
-2. **Service names use underscores:** `iron_fly_0dte`, `delta_neutral`, `rolling_put_diagonal`, `meic`
-3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral,rolling_put_diagonal,meic}/bot.log`
+2. **Service names use underscores:** `iron_fly_0dte`, `delta_neutral`, `rolling_put_diagonal`, `meic`, `meic_tf`
+3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral,rolling_put_diagonal,meic,meic_tf}/bot.log`
 4. **Position data:** `/opt/calypso/data/iron_fly_position.json`
 5. **Config files are gitignored:** Real credentials come from Secret Manager
 6. **All API calls are direct:** No caching for order status or positions (always fresh from Saxo)
 7. **Iron Fly bot:** STOPPED (as of 2026-02-04) - Position Registry integration complete, paused to focus on MEIC
 8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
 9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
-10. **MEIC bot:** Running in LIVE mode (v1.2.1, switched to LIVE 2026-02-04) - ONLY active trading bot
-11. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
-12. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
+10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by MEIC-TF for trend filtering
+11. **MEIC-TF bot:** Running in LIVE mode (v1.0.0, deployed 2026-02-05) - ONLY active trading bot - adds EMA 20/40 trend filter
+12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
+13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 
 ---
 
@@ -1085,3 +1109,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 36. **P&L Double-Counting in Stop Loss Tracking (Fix #32, 2026-02-04)** - MEIC stop losses were recording gross cost-to-close instead of net loss, overstating losses by the credit amount. Example: Entry collects $250 credit, stop_level = $250. Old code: `realized_pnl -= $250`. Actual loss = `stop_level - credit_for_side = $250 - $125 = $125`. The bug affected `total_realized_pnl`, `entry.unrealized_pnl`, `_calculate_side_pnl()`, and alert messages. Solution: All P&L tracking now uses `net_loss = stop_level - credit_for_that_side`. (Cost: P&L displays were overstated by ~50% on stop days)
 
 37. **Spread Credit Recorded as Gross Short Fill Instead of Net (Fix #33, 2026-02-04)** - MEIC was recording spread credits as only the short leg fill price, not subtracting the long leg cost. Example: Short Call fills @ $3.20 ($320), Long Call fills @ $0.25 ($25). Code recorded `call_spread_credit = $320` instead of correct net `$320 - $25 = $295`. This caused: (1) inflated total credits (Entry #1 showed $1090 instead of $845), (2) incorrect stop levels (set at inflated credit), (3) DATA-003 sanity check triggering (P&L > max possible profit), (4) stop monitoring skipped for affected entries. Solution: Track long leg debits separately, subtract from short credits: `entry.call_spread_credit = short_call_credit - long_call_debit`. (Cost: Entry #1 stop monitoring was disabled for ~1 hour due to DATA-003 sanity check)
+
+38. **Recovery Logic Position Order Bug (Fix #38, 2026-02-05)** - When MEIC recovered entries from positions after restart, the code processed positions in iteration order and assumed short legs came before long legs. If positions arrived in order `[long_call, short_call]`, then: (1) `long_call` subtracted from 0 → credit = -20, (2) `short_call` OVERWROTE → credit = 210 (wrong, should be 190). This caused $410 P&L discrepancy on Feb 4. Solution: Use dictionary approach - collect ALL entry prices in first pass, then calculate NET credit in second pass: `call_spread_credit = entry_prices["short_call"] - entry_prices["long_call"]`. (Cost: Feb 4 bot reported -$1285 P&L instead of actual -$875 from Saxo)

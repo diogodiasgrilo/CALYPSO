@@ -20,14 +20,16 @@ Based on: bots/meic/strategy.py (MEIC v1.2.0)
 See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
 """
 
+import json
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
-from shared.saxo_client import SaxoClient, BuySell, OrderType
+from shared.saxo_client import SaxoClient, BuySell
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time
 from shared.technical_indicators import get_current_ema
@@ -45,6 +47,23 @@ from bots.meic.strategy import (
     ENTRY_RETRY_DELAY_SECONDS,
     is_fomc_meeting_day,
 )
+
+# =============================================================================
+# MEIC-TF SPECIFIC FILE PATHS (separate from MEIC)
+# =============================================================================
+
+# CRITICAL: MEIC-TF must use separate state files from MEIC to prevent conflicts
+# when both bots run simultaneously. Each bot maintains its own:
+# - State file: Tracks entries, P&L, stops for the day
+# - Metrics file: Historical performance tracking
+# The Position Registry is SHARED (for multi-bot position isolation on same underlying)
+
+DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "data"
+)
+MEIC_TF_STATE_FILE = os.path.join(DATA_DIR, "meic_tf_state.json")
+MEIC_TF_METRICS_FILE = os.path.join(DATA_DIR, "meic_tf_metrics.json")
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -149,12 +168,20 @@ class MEICTFStrategy(MEICStrategy):
         self.chart_bars_count = self.trend_config.get("chart_bars_count", 50)
         self.chart_horizon_minutes = self.trend_config.get("chart_horizon_minutes", 1)
 
-        # Track current trend signal
+        # Track current trend signal and EMA values for logging
         self._current_trend: Optional[TrendSignal] = None
         self._last_trend_check: Optional[datetime] = None
+        self._last_ema_short: float = 0.0
+        self._last_ema_long: float = 0.0
+        self._last_ema_diff_pct: float = 0.0
 
         # Call parent init (this sets up everything else)
         super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
+
+        # CRITICAL: Override state file path to use MEIC-TF specific file
+        # This prevents conflicts when both MEIC and MEIC-TF run simultaneously
+        self.state_file = MEIC_TF_STATE_FILE
+        logger.info(f"MEIC-TF using state file: {self.state_file}")
 
         # Update alert service name
         if not alert_service:
@@ -221,6 +248,11 @@ class MEICTFStrategy(MEICStrategy):
 
             # Calculate percentage difference
             diff_pct = (ema_short - ema_long) / ema_long
+
+            # Store EMA values for heartbeat logging
+            self._last_ema_short = ema_short
+            self._last_ema_long = ema_long
+            self._last_ema_diff_pct = diff_pct
 
             logger.info(
                 f"Trend detection: EMA{self.ema_short_period}={ema_short:.2f}, "
@@ -747,13 +779,18 @@ class MEICTFStrategy(MEICStrategy):
         Get current strategy status summary with trend info.
 
         Returns:
-            Dict with status information including current trend
+            Dict with status information including current trend and EMA values
         """
         status = super().get_status_summary()
 
         # Add trend info
         status['current_trend'] = self._current_trend.value if self._current_trend else "unknown"
         status['trend_enabled'] = self.trend_enabled
+
+        # Add EMA values for detailed logging
+        status['ema_short'] = self._last_ema_short
+        status['ema_long'] = self._last_ema_long
+        status['ema_diff_pct'] = self._last_ema_diff_pct
 
         return status
 
@@ -762,13 +799,22 @@ class MEICTFStrategy(MEICStrategy):
         Get detailed position status lines with trend info.
 
         Returns:
-            List of status lines for logging
+            List of status lines for logging with EMA values
         """
         lines = super().get_detailed_position_status()
 
-        # Add trend line at the start
+        # Add trend line at the start with actual EMA values
         if self._current_trend:
-            trend_line = f"  Trend: {self._current_trend.value.upper()} (EMA {self.ema_short_period}/{self.ema_long_period})"
+            if self._last_ema_short > 0 and self._last_ema_long > 0:
+                diff_sign = "+" if self._last_ema_diff_pct >= 0 else ""
+                trend_line = (
+                    f"  Trend: {self._current_trend.value.upper()} | "
+                    f"EMA{self.ema_short_period}: {self._last_ema_short:.2f} | "
+                    f"EMA{self.ema_long_period}: {self._last_ema_long:.2f} | "
+                    f"Diff: {diff_sign}{self._last_ema_diff_pct*100:.3f}%"
+                )
+            else:
+                trend_line = f"  Trend: {self._current_trend.value.upper()} (EMA {self.ema_short_period}/{self.ema_long_period})"
             lines.insert(0, trend_line)
 
         return lines
@@ -829,3 +875,93 @@ class MEICTFStrategy(MEICStrategy):
             )
         except Exception as e:
             logger.error(f"Failed to log entry: {e}")
+
+    # =========================================================================
+    # STATE FILE OVERRIDES (MEIC-TF uses separate state file from MEIC)
+    # =========================================================================
+    # CRITICAL: These overrides ensure MEIC-TF uses its own state file
+    # (meic_tf_state.json) instead of sharing with MEIC (meic_state.json).
+    # This is necessary when both bots may run simultaneously.
+
+    def _save_state_to_disk(self):
+        """
+        Save current daily state to disk for crash recovery.
+
+        OVERRIDE: Uses MEIC_TF_STATE_FILE instead of MEIC's STATE_FILE.
+        Also saves trend-following specific fields (call_only, put_only, trend_signal).
+        """
+        try:
+            state_data = {
+                "bot_type": "meic_tf",  # Identify this as MEIC-TF state
+                "date": self.daily_state.date,
+                "state": self.state.value,
+                "next_entry_index": self._next_entry_index,
+                "entries_completed": self.daily_state.entries_completed,
+                "entries_failed": self.daily_state.entries_failed,
+                "entries_skipped": self.daily_state.entries_skipped,
+                "total_credit_received": self.daily_state.total_credit_received,
+                "total_realized_pnl": self.daily_state.total_realized_pnl,
+                "total_commission": self.daily_state.total_commission,
+                "call_stops_triggered": self.daily_state.call_stops_triggered,
+                "put_stops_triggered": self.daily_state.put_stops_triggered,
+                "double_stops": self.daily_state.double_stops,
+                "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
+                "entries": []
+            }
+
+            # Serialize each entry with TF-specific fields
+            for entry in self.daily_state.entries:
+                is_tf_entry = isinstance(entry, TFIronCondorEntry)
+                entry_data = {
+                    "entry_number": entry.entry_number,
+                    "entry_time": entry.entry_time.isoformat() if entry.entry_time else None,
+                    "strategy_id": entry.strategy_id,
+                    # Strikes
+                    "short_call_strike": entry.short_call_strike,
+                    "long_call_strike": entry.long_call_strike,
+                    "short_put_strike": entry.short_put_strike,
+                    "long_put_strike": entry.long_put_strike,
+                    # Position IDs
+                    "short_call_position_id": entry.short_call_position_id,
+                    "long_call_position_id": entry.long_call_position_id,
+                    "short_put_position_id": entry.short_put_position_id,
+                    "long_put_position_id": entry.long_put_position_id,
+                    # UICs
+                    "short_call_uic": entry.short_call_uic,
+                    "long_call_uic": entry.long_call_uic,
+                    "short_put_uic": entry.short_put_uic,
+                    "long_put_uic": entry.long_put_uic,
+                    # Credits
+                    "call_spread_credit": entry.call_spread_credit,
+                    "put_spread_credit": entry.put_spread_credit,
+                    # Stops
+                    "call_side_stop": entry.call_side_stop,
+                    "put_side_stop": entry.put_side_stop,
+                    # Status
+                    "is_complete": entry.is_complete,
+                    "call_side_stopped": entry.call_side_stopped,
+                    "put_side_stopped": entry.put_side_stopped,
+                    # Commission tracking
+                    "open_commission": entry.open_commission,
+                    "close_commission": entry.close_commission,
+                    # MEIC-TF specific: trend-following fields
+                    "call_only": entry.call_only if is_tf_entry else False,
+                    "put_only": entry.put_only if is_tf_entry else False,
+                    "trend_signal": entry.trend_signal.value if is_tf_entry and entry.trend_signal else None,
+                }
+                state_data["entries"].append(entry_data)
+
+            state_data["last_saved"] = get_us_market_time().isoformat()
+
+            # Write atomically using temp file (uses self.state_file set in __init__)
+            temp_file = self.state_file + ".tmp"
+            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+
+            with open(temp_file, 'w') as f:
+                json.dump(state_data, f, indent=2)
+
+            os.replace(temp_file, self.state_file)
+            logger.debug(f"MEIC-TF state saved to {self.state_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to save MEIC-TF state: {e}")

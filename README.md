@@ -40,6 +40,15 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - Per-side stop = total credit received (breakeven design)
 - Expected: ~20.7% CAGR, 4.31% max drawdown, ~70% win rate
 
+### 5. MEIC-TF - Trend Following MEIC (S&P 500)
+**MEIC + EMA 20/40 Trend Filter** - directional filtering to avoid losses on strong trend days:
+- Same entry schedule as MEIC (10:00-12:30 PM ET)
+- Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
+- **BULLISH** (20 > 40): Place PUT spread only (calls are risky in uptrend)
+- **BEARISH** (20 < 40): Place CALL spread only (puts are risky in downtrend)
+- **NEUTRAL**: Place full iron condor (standard MEIC behavior)
+- Designed to avoid full stop-outs on strong trend days
+
 ---
 
 ## Project Structure
@@ -65,7 +74,11 @@ calypso/
 │   │   ├── main.py
 │   │   ├── strategy.py
 │   │   └── config/config.json
-│   └── meic/                    # MEIC (Multiple Entry Iron Condors)
+│   ├── meic/                    # MEIC (Multiple Entry Iron Condors)
+│   │   ├── main.py
+│   │   ├── strategy.py
+│   │   └── config/config.json
+│   └── meic_tf/                 # MEIC-TF (Trend Following MEIC)
 │       ├── main.py
 │       ├── strategy.py
 │       └── config/config.json
@@ -120,7 +133,7 @@ python -m bots.delta_neutral.main --status
 
 ## GCP VM Deployment
 
-All 4 bots run as systemd services on a single GCP VM (`calypso-bot`, zone `us-east1-b`), along with a dedicated Token Keeper service that keeps OAuth tokens fresh 24/7.
+All 5 bots run as systemd services on a single GCP VM (`calypso-bot`, zone `us-east1-b`), along with a dedicated Token Keeper service that keeps OAuth tokens fresh 24/7.
 
 ### SSH Access
 ```bash
@@ -145,10 +158,11 @@ sudo systemctl start delta_neutral
 sudo systemctl stop iron_fly_0dte
 sudo systemctl restart rolling_put_diagonal
 sudo systemctl restart meic
+sudo systemctl restart meic_tf
 
 # Start/stop ALL bots (token keeper keeps running)
-sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal meic
-sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal meic
+sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal meic meic_tf
+sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal meic meic_tf
 
 # Emergency kill (immediate)
 sudo systemctl kill -s SIGKILL delta_neutral
@@ -174,7 +188,7 @@ cd /opt/calypso
 sudo -u calypso git pull
 # Clear Python cache to ensure new code runs
 find bots shared services -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
-sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic
+sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic meic_tf
 ```
 
 ---
@@ -190,6 +204,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 | Iron Fly 0DTE | `logs/iron_fly_0dte/bot.log` | Full logs for IF bot |
 | Rolling Put Diagonal | `logs/rolling_put_diagonal/bot.log` | Full logs for RPD bot |
 | MEIC | `logs/meic/bot.log` | Full logs for MEIC bot |
+| MEIC-TF | `logs/meic_tf/bot.log` | Full logs for MEIC-TF bot |
 
 ---
 
@@ -204,6 +219,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - **[Iron Fly Code Audit](docs/IRON_FLY_CODE_AUDIT.md)** - Pre-LIVE comprehensive code review
 - **[MEIC Strategy Spec](docs/MEIC_STRATEGY_SPECIFICATION.md)** - Full MEIC implementation details
 - **[MEIC Edge Cases](docs/MEIC_EDGE_CASES.md)** - Risk analysis (75 edge cases)
+- **[MEIC-TF README](bots/meic_tf/README.md)** - Trend Following MEIC bot details
 - **[Configuration Reference](config/README.md)** - Config file reference
 - **[Token Keeper Service](services/token_keeper/README.md)** - OAuth token refresh service
 
@@ -293,5 +309,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 3.5.0
-**Last Updated:** 2026-01-27
+**Version:** 3.6.0
+**Last Updated:** 2026-02-05
