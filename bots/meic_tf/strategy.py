@@ -183,12 +183,14 @@ class MEICTFStrategy(MEICStrategy):
         self._last_ema_long: float = 0.0
         self._last_ema_diff_pct: float = 0.0
 
-        # Call parent init (this sets up everything else)
-        super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
-
-        # CRITICAL: Override state file path to use MEIC-TF specific file
+        # CRITICAL: Set state file path BEFORE calling parent init
+        # Parent's __init__ calls _recover_positions_from_saxo() which needs the correct state file
         # This prevents conflicts when both MEIC and MEIC-TF run simultaneously
         self.state_file = MEIC_TF_STATE_FILE
+
+        # Call parent init (this sets up everything else including recovery)
+        super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
+
         logger.info(f"MEIC-TF using state file: {self.state_file}")
 
         # Update alert service name
