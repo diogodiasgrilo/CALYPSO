@@ -1050,6 +1050,252 @@ class MEICTFStrategy(MEICStrategy):
 
         return None
 
+    def _check_hourly_reconciliation(self):
+        """
+        POS-003: Perform hourly position reconciliation during market hours.
+
+        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+
+        Compares expected positions vs actual Saxo positions to detect:
+        - Early assignment
+        - Manual intervention
+        - Orphaned positions
+        """
+        from bots.meic.strategy import is_market_open, RECONCILIATION_INTERVAL_MINUTES
+
+        if not is_market_open():
+            return
+
+        now = get_us_market_time()
+
+        # Check if it's time for reconciliation
+        if self._last_reconciliation_time:
+            elapsed_minutes = (now - self._last_reconciliation_time).total_seconds() / 60
+            if elapsed_minutes < RECONCILIATION_INTERVAL_MINUTES:
+                return
+
+        logger.info("POS-003: Performing hourly position reconciliation")
+        self._last_reconciliation_time = now
+
+        try:
+            # Get actual positions from Saxo
+            actual_positions = self.client.get_positions()
+            actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
+
+            # Get expected positions from our tracking
+            expected_position_ids = set()
+            for entry in self.daily_state.active_entries:
+                expected_position_ids.update(entry.all_position_ids)
+
+            # Check for missing positions (closed manually or assigned)
+            missing = expected_position_ids - actual_position_ids
+            if missing:
+                logger.warning(f"POS-003: {len(missing)} expected positions NOT FOUND in Saxo!")
+                logger.warning(f"  Missing IDs: {missing}")
+
+                # This is serious - positions may have been manually closed
+                self.alert_service.send_alert(
+                    alert_type=AlertType.CRITICAL_INTERVENTION,
+                    title="Position Mismatch Detected",
+                    message=f"{len(missing)} {self.BOT_NAME} positions missing from Saxo. Manual intervention suspected.",
+                    priority=AlertPriority.HIGH,
+                    details={"missing_ids": list(missing)}
+                )
+
+                # Clean up registry and daily state
+                self._handle_missing_positions(missing)
+
+            # Check for unexpected positions (assigned, etc.)
+            my_registry_positions = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
+            unexpected = (actual_position_ids & my_registry_positions) - expected_position_ids
+            if unexpected:
+                logger.warning(f"POS-003: {len(unexpected)} unexpected {self.BOT_NAME} positions found")
+
+            # Persist state after reconciliation
+            self._save_state_to_disk()
+
+            logger.info(f"POS-003: Reconciliation complete - {len(expected_position_ids)} expected, {len(actual_position_ids & my_registry_positions)} found")
+
+        except Exception as e:
+            logger.error(f"POS-003: Reconciliation failed: {e}")
+
+    def _reset_for_new_day(self):
+        """
+        Reset state for a new trading day.
+
+        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+        """
+        from bots.meic.strategy import MEICDailyState
+
+        logger.info("Resetting for new trading day")
+
+        # STATE-004: Check for overnight 0DTE positions (should NEVER happen)
+        try:
+            my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
+        except Exception as e:
+            logger.error(f"Registry error checking for overnight positions: {e}")
+            my_position_ids = set()
+        if my_position_ids:
+            # This is a critical error - 0DTE positions should never survive to next day
+            error_msg = f"CRITICAL: {len(my_position_ids)} {self.BOT_NAME} positions survived overnight! 0DTE should expire same day."
+            logger.critical(error_msg)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title=f"{self.BOT_NAME} Overnight Position Detected!",
+                message=error_msg,
+                priority=AlertPriority.CRITICAL,
+                details={"position_ids": list(my_position_ids)}
+            )
+            # Halt trading - manual intervention required
+            self._critical_intervention_required = True
+            self._critical_intervention_reason = "Overnight 0DTE positions detected - investigate immediately"
+            return  # Don't reset state, need to handle existing positions
+
+        self.daily_state = MEICDailyState()
+        self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+
+        self._next_entry_index = 0
+        self._daily_summary_sent = False
+        self._circuit_breaker_open = False
+        self._consecutive_failures = 0
+        self._api_results_window.clear()
+
+        # P3: Reset intraday market data tracking
+        self.market_data.reset_daily_tracking()
+
+        # P2: Clear WebSocket price cache
+        self._ws_price_cache.clear()
+
+        # Reset reconciliation timer
+        self._last_reconciliation_time = None
+
+        # POS-004: Reset settlement reconciliation flag for new day
+        self._settlement_reconciliation_complete = False
+
+        self.state = MEICState.IDLE
+
+        # Save clean state to disk
+        self._save_state_to_disk()
+
+    def check_after_hours_settlement(self) -> bool:
+        """
+        POS-004: Check if 0DTE positions have been settled after market close.
+
+        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+
+        Called on every heartbeat after market close until all positions
+        are confirmed settled. This handles the fact that Saxo settles 0DTE
+        options sometime between 4:00 PM and 7:00 PM EST.
+
+        Returns:
+            True if all positions are settled (or were already confirmed settled)
+            False if positions still exist on Saxo (settlement pending)
+        """
+        # Already confirmed settled for today - skip check
+        if self._settlement_reconciliation_complete:
+            return True
+
+        # Check how many positions we think we have in registry
+        my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
+
+        if not my_position_ids:
+            # Registry is already empty - mark as complete
+            logger.info(f"POS-004: No {self.BOT_NAME} positions in registry - settlement reconciliation complete")
+            self._settlement_reconciliation_complete = True
+            return True
+
+        # We have positions in registry - check if they still exist on Saxo
+        logger.info(f"POS-004: Checking settlement status for {len(my_position_ids)} {self.BOT_NAME} positions...")
+
+        try:
+            # Query Saxo for actual positions
+            actual_positions = self.client.get_positions()
+            actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
+
+            # Find which of our registered positions still exist
+            still_open = my_position_ids & actual_position_ids
+            settled = my_position_ids - actual_position_ids
+
+            if settled:
+                logger.info(f"POS-004: {len(settled)} positions settled/expired - cleaning up registry")
+
+                # Clean up settled positions from registry
+                for pos_id in settled:
+                    try:
+                        self.registry.unregister(pos_id)
+                        logger.info(f"  Unregistered settled position: {pos_id}")
+                    except Exception as e:
+                        logger.error(f"Registry error unregistering {pos_id}: {e}")
+
+                # Also clean up from daily state entries
+                # Clear BOTH position_id AND uic when options settle
+                for entry in self.daily_state.entries:
+                    for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
+                        pos_id = getattr(entry, f"{leg_name}_position_id")
+                        if pos_id and pos_id in settled:
+                            setattr(entry, f"{leg_name}_position_id", None)
+                            setattr(entry, f"{leg_name}_uic", None)  # Also clear UIC
+                            logger.debug(f"  Cleared {leg_name} position_id and uic from entry #{entry.entry_number}")
+
+                # Mark sides as stopped if all legs are gone
+                for entry in self.daily_state.entries:
+                    if not entry.short_call_position_id and not entry.long_call_position_id:
+                        entry.call_side_stopped = True
+                    if not entry.short_put_position_id and not entry.long_put_position_id:
+                        entry.put_side_stopped = True
+                    # Mark complete if both sides done
+                    if entry.call_side_stopped and entry.put_side_stopped:
+                        entry.is_complete = True
+
+                # Save updated state
+                self._save_state_to_disk()
+
+            if still_open:
+                logger.info(f"POS-004: {len(still_open)} positions still open on Saxo - awaiting settlement")
+                return False
+            else:
+                # All positions settled
+                logger.info(f"POS-004: All {self.BOT_NAME} positions confirmed settled - reconciliation complete")
+                self._settlement_reconciliation_complete = True
+
+                # Log safety event
+                self._log_safety_event(
+                    "SETTLEMENT_COMPLETE",
+                    f"All {len(settled) if settled else len(my_position_ids)} positions settled after market close"
+                )
+
+                return True
+
+        except Exception as e:
+            logger.error(f"POS-004: Settlement check failed: {e}")
+            return False
+
+    def _log_safety_event(self, event_type: str, details: str):
+        """
+        Log safety events to Google Sheets for audit trail.
+
+        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+
+        Args:
+            event_type: Type of safety event (e.g., "CIRCUIT_BREAKER_OPEN", "NAKED_SHORT_DETECTED")
+            details: Human-readable description of the event
+        """
+        try:
+            self.trade_logger.log_safety_event({
+                "timestamp": get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_type": event_type,
+                "bot": self.BOT_NAME,  # Use MEIC-TF, not MEIC
+                "state": self.state.value,
+                "spx_price": self.current_price,
+                "vix": self.current_vix,
+                "active_entries": len(self.daily_state.active_entries),
+                "details": details
+            })
+            logger.info(f"Safety event logged: {event_type} - {details}")
+        except Exception as e:
+            # Don't let logging failure affect trading
+            logger.error(f"Failed to log safety event: {e}")
+
     def _recover_from_state_file_uics(self, all_positions: List[Dict]) -> Dict[int, List[Dict]]:
         """
         Override to use MEIC-TF bot name in registry during UIC-based recovery.
