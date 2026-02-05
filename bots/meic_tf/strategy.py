@@ -1143,7 +1143,7 @@ class MEICTFStrategy(MEICStrategy):
                 is_tf_entry = isinstance(entry, TFIronCondorEntry)
                 entry_data = {
                     "entry_number": entry.entry_number,
-                    "entry_time": entry.entry_time.isoformat() if entry.entry_time else None,
+                    "entry_time": entry.entry_time.isoformat() if hasattr(entry.entry_time, 'isoformat') else entry.entry_time,
                     "strategy_id": entry.strategy_id,
                     # Strikes
                     "short_call_strike": entry.short_call_strike,
