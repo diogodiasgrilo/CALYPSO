@@ -1638,6 +1638,7 @@ class MEICTFStrategy(MEICStrategy):
         MIN_STOP_LEVEL = 50.0
 
         # For one-sided entries, use the single side's credit for stop
+        # BUG FIX: Apply MEIC+ reduction consistently (was missing for one-sided entries)
         if entry.call_only:
             credit_for_stop = entry.call_spread_credit
             if credit_for_stop < MIN_STOP_LEVEL:
@@ -1646,8 +1647,16 @@ class MEICTFStrategy(MEICStrategy):
                     f"(${credit_for_stop:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
                 )
                 credit_for_stop = MIN_STOP_LEVEL
+
+            # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_tf behavior)
+            if self.meic_plus_enabled:
+                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
+                if credit_for_stop > min_credit_for_meic_plus:
+                    credit_for_stop = credit_for_stop - self.meic_plus_reduction
+
             entry.call_side_stop = credit_for_stop
             entry.put_side_stop = 0  # No put side to monitor
+
         elif entry.put_only:
             credit_for_stop = entry.put_spread_credit
             if credit_for_stop < MIN_STOP_LEVEL:
@@ -1656,6 +1665,13 @@ class MEICTFStrategy(MEICStrategy):
                     f"(${credit_for_stop:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
                 )
                 credit_for_stop = MIN_STOP_LEVEL
+
+            # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_tf behavior)
+            if self.meic_plus_enabled:
+                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
+                if credit_for_stop > min_credit_for_meic_plus:
+                    credit_for_stop = credit_for_stop - self.meic_plus_reduction
+
             entry.put_side_stop = credit_for_stop
             entry.call_side_stop = 0  # No call side to monitor
         else:
@@ -2015,11 +2031,15 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.total_credit_received = total_credit
 
             # Retroactively calculate commission for entries without commission data
+            # BUG FIX: Use 2 legs for one-sided entries, 4 for full ICs
             if self.daily_state.total_commission == 0 and recovered_entries:
                 retroactive_commission = 0.0
                 for entry in recovered_entries:
                     if entry.open_commission == 0:
-                        entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
+                        # One-sided entries have 2 legs, full ICs have 4
+                        is_one_sided = getattr(entry, 'call_only', False) or getattr(entry, 'put_only', False)
+                        open_legs = 2 if is_one_sided else 4
+                        entry.open_commission = open_legs * self.commission_per_leg * self.contracts_per_entry
                         retroactive_commission += entry.open_commission
                     if entry.close_commission == 0:
                         if entry.call_side_stopped:
