@@ -778,9 +778,21 @@ class MEICTFStrategy(MEICStrategy):
         """
         Get current strategy status summary with trend info.
 
+        Automatically refreshes trend detection if not checked in last 60 seconds
+        to ensure heartbeat displays accurate trend data.
+
         Returns:
             Dict with status information including current trend and EMA values
         """
+        # Refresh trend if not checked recently (every 60 seconds)
+        # This ensures heartbeat shows current trend without excessive API calls
+        now = get_us_market_time()
+        if self._last_trend_check is None or (now - self._last_trend_check).total_seconds() >= 60:
+            try:
+                self._get_trend_signal()
+            except Exception as e:
+                logger.warning(f"Failed to refresh trend for status: {e}")
+
         status = super().get_status_summary()
 
         # Add trend info
