@@ -707,8 +707,10 @@ class MEICStrategy:
         # Saxo Bank charges $2.50 per leg per contract, round-trip = $5.00 per leg
         self.commission_per_leg = self.strategy_config.get("commission_per_leg", 2.50)
 
-        # State file path - can be overridden by subclasses (e.g., MEIC-TF)
-        self.state_file = STATE_FILE
+        # State file path - can be overridden by subclasses BEFORE calling super().__init__()
+        # Check if subclass already set it to avoid overwriting (e.g., MEIC-TF uses different file)
+        if not hasattr(self, 'state_file') or self.state_file is None:
+            self.state_file = STATE_FILE
 
         # State
         self.state = MEICState.IDLE
