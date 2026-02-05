@@ -16,7 +16,7 @@ from datetime import datetime
 import pytz
 
 from shared.saxo_client import SaxoClient
-from shared.config_loader import get_config_loader
+from shared.config_loader import ConfigLoader
 from shared.technical_indicators import calculate_ema
 
 
@@ -59,13 +59,15 @@ def main():
 
     # Load config (use MEIC-TF config if available, otherwise MEIC)
     try:
-        config_loader = get_config_loader("bots/meic_tf/config")
+        config_path = "bots/meic_tf/config/config.json"
+        config_loader = ConfigLoader(config_path)
         config = config_loader.load_config()
-        print("Loaded config: bots/meic_tf/config")
+        print(f"Loaded config: {config_path}")
     except Exception:
-        config_loader = get_config_loader("bots/meic/config")
+        config_path = "bots/meic/config/config.json"
+        config_loader = ConfigLoader(config_path)
         config = config_loader.load_config()
-        print("Loaded config: bots/meic/config (fallback)")
+        print(f"Loaded config: {config_path} (fallback)")
 
     # Get trend filter settings
     trend_config = config.get("trend_filter", {})
