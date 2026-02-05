@@ -30,9 +30,6 @@ Type=simple
 User=calypso
 Group=calypso
 WorkingDirectory=/opt/calypso
-Environment="PATH=/opt/calypso/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="PYTHONPATH=/opt/calypso"
-Environment="GOOGLE_APPLICATION_CREDENTIALS=/opt/calypso/credentials/service-account.json"
 
 # Run the MEIC-TF bot
 # Mode is controlled by config.json "dry_run" field:
@@ -53,10 +50,6 @@ Restart=always
 RestartSec=30
 StartLimitInterval=600
 StartLimitBurst=5
-
-# Resource limits
-MemoryLimit=512M
-CPUQuota=50%
 
 # Logging
 StandardOutput=journal
