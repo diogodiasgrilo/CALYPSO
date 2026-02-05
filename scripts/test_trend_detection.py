@@ -17,7 +17,7 @@ import pytz
 
 from shared.saxo_client import SaxoClient
 from shared.config_loader import ConfigLoader
-from shared.technical_indicators import calculate_ema
+from shared.technical_indicators import get_current_ema
 
 
 def get_trend_signal(ema_short: float, ema_long: float, threshold: float = 0.001):
@@ -150,8 +150,8 @@ def main():
 
         # Calculate EMAs
         print(f"Calculating EMAs...")
-        ema_short = calculate_ema(closes, ema_short_period)
-        ema_long = calculate_ema(closes, ema_long_period)
+        ema_short = get_current_ema(closes, ema_short_period)
+        ema_long = get_current_ema(closes, ema_long_period)
 
         print(f"  {ema_short_period} EMA: ${ema_short:.4f}")
         print(f"  {ema_long_period} EMA: ${ema_long:.4f}")
