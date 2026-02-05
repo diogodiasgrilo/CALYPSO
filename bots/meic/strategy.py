@@ -5307,7 +5307,7 @@ class MEICStrategy:
             entry_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions) if has_any_positions else 0
             entry_details.append({
                 "entry_number": entry.entry_number,
-                "entry_time": entry.entry_time.strftime("%H:%M") if entry.entry_time else "",
+                "entry_time": entry.entry_time.strftime("%H:%M") if hasattr(entry.entry_time, 'strftime') else (entry.entry_time or ""),
                 "short_call": entry.short_call_strike,
                 "long_call": entry.long_call_strike,
                 "short_put": entry.short_put_strike,
@@ -5782,10 +5782,16 @@ class MEICStrategy:
         pnl = entry.unrealized_pnl
 
         # DATA-003: Check for impossible P&L values
-        if pnl > MAX_PNL_PER_IC:
+        # Max profit = 100% of credit received (all options expire worthless)
+        # Use entry's actual credit, not fixed constant, because credits vary
+        max_profit = entry.total_credit if entry.total_credit > 0 else MAX_PNL_PER_IC
+        # Add 20% buffer for floating point and timing differences
+        max_profit_with_buffer = max_profit * 1.2
+
+        if pnl > max_profit_with_buffer:
             logger.error(
                 f"DATA-003: Impossible P&L detected for Entry #{entry.entry_number}: "
-                f"${pnl:.2f} > max ${MAX_PNL_PER_IC}"
+                f"${pnl:.2f} > max ${max_profit_with_buffer:.2f} (credit=${entry.total_credit:.2f})"
             )
             return False, f"P&L too high: ${pnl:.2f}"
 
