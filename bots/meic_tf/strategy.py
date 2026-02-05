@@ -1172,9 +1172,11 @@ class MEICTFStrategy(MEICStrategy):
                     "open_commission": entry.open_commission,
                     "close_commission": entry.close_commission,
                     # MEIC-TF specific: trend-following fields
-                    "call_only": entry.call_only if is_tf_entry else False,
-                    "put_only": entry.put_only if is_tf_entry else False,
-                    "trend_signal": entry.trend_signal.value if is_tf_entry and entry.trend_signal else None,
+                    # FIX #43: Use getattr to handle both TFIronCondorEntry and
+                    # dynamically-added attributes on IronCondorEntry (from recovery)
+                    "call_only": getattr(entry, 'call_only', False),
+                    "put_only": getattr(entry, 'put_only', False),
+                    "trend_signal": getattr(entry, 'trend_signal', None).value if getattr(entry, 'trend_signal', None) else None,
                 }
                 state_data["entries"].append(entry_data)
 
