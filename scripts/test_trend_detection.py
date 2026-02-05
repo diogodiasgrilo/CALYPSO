@@ -99,24 +99,32 @@ def main():
 
     # Fetch chart data
     try:
-        bars = client.get_chart_data(
+        result = client.get_chart_data(
             uic=underlying_uic,
             asset_type="CfdOnIndex",
             horizon=horizon,
             count=bars_count
         )
 
-        if not bars:
+        if not result:
             print("ERROR: No chart data returned from Saxo API")
+            return 1
+
+        # Extract bars from the Data key
+        bars = result.get("Data", []) if isinstance(result, dict) else result
+
+        if not bars:
+            print("ERROR: No bars in chart data response")
             return 1
 
         print(f"✓ Received {len(bars)} bars")
         print()
 
-        # Extract close prices
+        # Extract close prices (use CloseBid as the close price, falling back to Close)
         closes = []
         for bar in bars:
-            close = bar.get("Close") or bar.get("C")
+            # Saxo CFD chart data uses CloseBid/CloseAsk, not Close
+            close = bar.get("CloseBid") or bar.get("Close") or bar.get("C")
             if close:
                 closes.append(float(close))
 
@@ -134,9 +142,9 @@ def main():
         print("Last 10 bars:")
         for i, bar in enumerate(bars[-10:]):
             bar_time = bar.get("Time", "N/A")
-            close = bar.get("Close") or bar.get("C")
-            high = bar.get("High") or bar.get("H")
-            low = bar.get("Low") or bar.get("L")
+            close = bar.get("CloseBid") or bar.get("Close") or bar.get("C") or 0
+            high = bar.get("HighBid") or bar.get("High") or bar.get("H") or 0
+            low = bar.get("LowBid") or bar.get("Low") or bar.get("L") or 0
             print(f"  {i+1:2}. {bar_time} | Close: ${close:.2f} | High: ${high:.2f} | Low: ${low:.2f}")
         print()
 
