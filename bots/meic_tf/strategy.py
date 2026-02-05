@@ -1914,6 +1914,7 @@ class MEICTFStrategy(MEICStrategy):
             preserved_double_stops = 0
             preserved_total_commission = 0.0
             preserved_entry_credits = {}
+            preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
             try:
                 if os.path.exists(self.state_file):
                     with open(self.state_file, "r") as f:
@@ -1945,8 +1946,26 @@ class MEICTFStrategy(MEICStrategy):
                                         "put_only": entry_data.get("put_only", False),
                                         "trend_signal": entry_data.get("trend_signal"),
                                     }
+                                    # FIX #43: Check if this entry is fully stopped (no live positions)
+                                    call_stopped = entry_data.get("call_side_stopped", False)
+                                    put_stopped = entry_data.get("put_side_stopped", False)
+                                    call_only = entry_data.get("call_only", False)
+                                    put_only = entry_data.get("put_only", False)
+
+                                    is_fully_stopped = False
+                                    if call_only and call_stopped:
+                                        is_fully_stopped = True
+                                    elif put_only and put_stopped:
+                                        is_fully_stopped = True
+                                    elif not call_only and not put_only and call_stopped and put_stopped:
+                                        is_fully_stopped = True
+
+                                    if is_fully_stopped:
+                                        preserved_stopped_entries.append(entry_data)
+
                             logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
-                                       f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}")
+                                       f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}, "
+                                       f"stopped_entries={len(preserved_stopped_entries)}")
             except Exception as e:
                 logger.warning(f"Could not load state file for preservation: {e}")
 
@@ -2001,6 +2020,65 @@ class MEICTFStrategy(MEICStrategy):
                                f"(call=${saved['call_credit']:.2f}, put=${saved['put_credit']:.2f}, "
                                f"stop=${saved['call_stop']:.2f})")
 
+            # FIX #43 (2026-02-05): Reconstruct fully stopped entries that have no live positions
+            recovered_entry_nums = {e.entry_number for e in recovered_entries}
+            for stopped_entry_data in preserved_stopped_entries:
+                entry_num = stopped_entry_data.get("entry_number")
+                if entry_num and entry_num not in recovered_entry_nums:
+                    # Reconstruct TFIronCondorEntry from saved state data
+                    stopped_entry = TFIronCondorEntry(entry_number=entry_num)
+                    stopped_entry.entry_time = stopped_entry_data.get("entry_time")
+                    stopped_entry.strategy_id = stopped_entry_data.get("strategy_id", f"meic_tf_{today.replace('-', '')}_{entry_num:03d}")
+
+                    # Strikes
+                    stopped_entry.short_call_strike = stopped_entry_data.get("short_call_strike", 0)
+                    stopped_entry.long_call_strike = stopped_entry_data.get("long_call_strike", 0)
+                    stopped_entry.short_put_strike = stopped_entry_data.get("short_put_strike", 0)
+                    stopped_entry.long_put_strike = stopped_entry_data.get("long_put_strike", 0)
+
+                    # Credits and stops
+                    stopped_entry.call_spread_credit = stopped_entry_data.get("call_spread_credit", 0)
+                    stopped_entry.put_spread_credit = stopped_entry_data.get("put_spread_credit", 0)
+                    stopped_entry.call_side_stop = stopped_entry_data.get("call_side_stop", 0)
+                    stopped_entry.put_side_stop = stopped_entry_data.get("put_side_stop", 0)
+
+                    # Stopped flags
+                    stopped_entry.call_side_stopped = stopped_entry_data.get("call_side_stopped", False)
+                    stopped_entry.put_side_stopped = stopped_entry_data.get("put_side_stopped", False)
+                    stopped_entry.is_complete = True
+
+                    # Commission
+                    stopped_entry.open_commission = stopped_entry_data.get("open_commission", 0)
+                    stopped_entry.close_commission = stopped_entry_data.get("close_commission", 0)
+
+                    # MEIC-TF specific: One-sided entry flags
+                    stopped_entry.call_only = stopped_entry_data.get("call_only", False)
+                    stopped_entry.put_only = stopped_entry_data.get("put_only", False)
+                    if stopped_entry_data.get("trend_signal"):
+                        try:
+                            stopped_entry.trend_signal = TrendSignal(stopped_entry_data["trend_signal"])
+                        except ValueError:
+                            pass
+
+                    # Position IDs are None (positions closed)
+                    stopped_entry.short_call_position_id = None
+                    stopped_entry.long_call_position_id = None
+                    stopped_entry.short_put_position_id = None
+                    stopped_entry.long_put_position_id = None
+
+                    recovered_entries.append(stopped_entry)
+
+                    one_sided_info = ""
+                    if stopped_entry.call_only:
+                        one_sided_info = ", call_only=True"
+                    elif stopped_entry.put_only:
+                        one_sided_info = ", put_only=True"
+                    logger.info(f"FIX #43: Restored fully stopped Entry #{entry_num} from state file "
+                               f"(credit=${stopped_entry.total_credit:.2f}{one_sided_info})")
+
+            # Sort recovered entries by entry number
+            recovered_entries.sort(key=lambda e: e.entry_number)
+
             # Reset daily state but preserve date
             self.daily_state = MEICDailyState()
             self.daily_state.date = today
@@ -2015,12 +2093,24 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.total_commission = preserved_total_commission
 
             # Determine next entry index
-            max_entry_num = max(e.entry_number for e in recovered_entries)
-            self._next_entry_index = max_entry_num
+            if recovered_entries:
+                max_entry_num = max(e.entry_number for e in recovered_entries)
+                self._next_entry_index = max_entry_num
+            else:
+                self._next_entry_index = 0
 
             # Set state based on recovered positions
+            # FIX #43: For one-sided entries, check only the placed side
             if recovered_entries:
-                active_entries = [e for e in recovered_entries if not (e.call_side_stopped and e.put_side_stopped)]
+                def is_entry_active(entry):
+                    if getattr(entry, 'call_only', False):
+                        return not entry.call_side_stopped
+                    elif getattr(entry, 'put_only', False):
+                        return not entry.put_side_stopped
+                    else:
+                        return not (entry.call_side_stopped and entry.put_side_stopped)
+
+                active_entries = [e for e in recovered_entries if is_entry_active(e)]
                 if active_entries:
                     self.state = MEICState.MONITORING
                 elif self._next_entry_index < len(self.entry_times):
