@@ -798,6 +798,110 @@ class MEICTFStrategy(MEICStrategy):
             return super()._validate_pnl_sanity(entry)
 
     # =========================================================================
+    # OVERRIDE: Price updates for one-sided entries (Fix #41, 2026-02-05)
+    # =========================================================================
+
+    def _update_entry_prices(self, entry: IronCondorEntry):
+        """
+        Update option prices for an entry.
+
+        OVERRIDE (Fix #41, 2026-02-05): Parent class fetches prices for ALL 4 legs
+        unconditionally. For MEIC-TF one-sided entries, this causes DATA-004 warnings
+        because it tries to fetch prices for legs that don't exist (UIC=0).
+
+        This override only fetches prices for the legs that were actually placed:
+        - call_only entries: Only fetch call side prices
+        - put_only entries: Only fetch put side prices
+        - Full IC entries: Fetch all 4 legs (via parent method)
+
+        Args:
+            entry: The entry to update prices for
+        """
+        # Check if this is a TFIronCondorEntry with one-sided flags
+        is_tf_entry = isinstance(entry, TFIronCondorEntry)
+
+        if is_tf_entry and entry.call_only:
+            # CALL-ONLY ENTRY: Only fetch call side prices
+            if self.dry_run:
+                self._simulate_tf_entry_prices(entry)
+                return
+
+            # Short Call
+            if entry.short_call_uic:
+                quote = self.client.get_quote(entry.short_call_uic, asset_type="StockIndexOption")
+                entry.short_call_price = self._extract_mid_price(quote) or 0
+
+            # Long Call
+            if entry.long_call_uic:
+                quote = self.client.get_quote(entry.long_call_uic, asset_type="StockIndexOption")
+                entry.long_call_price = self._extract_mid_price(quote) or 0
+
+            # Put side prices stay at 0 - they were never placed
+            # No DATA-004 warnings because we don't try to fetch non-existent legs
+
+        elif is_tf_entry and entry.put_only:
+            # PUT-ONLY ENTRY: Only fetch put side prices
+            if self.dry_run:
+                self._simulate_tf_entry_prices(entry)
+                return
+
+            # Short Put
+            if entry.short_put_uic:
+                quote = self.client.get_quote(entry.short_put_uic, asset_type="StockIndexOption")
+                entry.short_put_price = self._extract_mid_price(quote) or 0
+
+            # Long Put
+            if entry.long_put_uic:
+                quote = self.client.get_quote(entry.long_put_uic, asset_type="StockIndexOption")
+                entry.long_put_price = self._extract_mid_price(quote) or 0
+
+            # Call side prices stay at 0 - they were never placed
+
+        else:
+            # FULL IC: Use parent's method to fetch all 4 legs
+            super()._update_entry_prices(entry)
+
+    def _simulate_tf_entry_prices(self, entry: IronCondorEntry):
+        """
+        Simulate option prices for TF entries in dry-run mode.
+
+        Similar to parent's _simulate_entry_prices but handles one-sided entries.
+
+        Args:
+            entry: The entry to simulate prices for
+        """
+        if not entry.entry_time:
+            return
+
+        # Calculate time decay factor (theta)
+        hold_minutes = (get_us_market_time() - entry.entry_time).total_seconds() / 60
+        decay_factor = 1 - (hold_minutes / 360)  # Assume ~6 hours to expiry
+        decay_factor = max(0.1, decay_factor)  # Floor at 10%
+
+        is_tf_entry = isinstance(entry, TFIronCondorEntry)
+
+        if is_tf_entry and entry.call_only:
+            # Only simulate call side
+            initial_short_price = entry.call_spread_credit / 100  # Per contract
+            entry.short_call_price = initial_short_price * decay_factor
+            entry.long_call_price = initial_short_price * decay_factor * 0.3
+
+        elif is_tf_entry and entry.put_only:
+            # Only simulate put side
+            initial_short_price = entry.put_spread_credit / 100  # Per contract
+            entry.short_put_price = initial_short_price * decay_factor
+            entry.long_put_price = initial_short_price * decay_factor * 0.3
+
+        else:
+            # Full IC - use parent's simulation
+            # But call our parent's method for consistency
+            initial_short_price = entry.total_credit / 200  # Per contract
+            entry.short_call_price = initial_short_price * decay_factor
+            entry.short_put_price = initial_short_price * decay_factor
+            entry.long_call_price = initial_short_price * decay_factor * 0.3
+            entry.long_put_price = initial_short_price * decay_factor * 0.3
+
+    # =========================================================================
     # OVERRIDE: Stop loss checking for one-sided entries
     # =========================================================================
 
