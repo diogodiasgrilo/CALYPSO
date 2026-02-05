@@ -139,6 +139,10 @@ class MEICTFStrategy(MEICStrategy):
     is inherited from MEICStrategy.
     """
 
+    # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
+    # This ensures MEIC-TF positions are isolated in the registry
+    BOT_NAME = "MEIC-TF"
+
     def __init__(
         self,
         saxo_client: SaxoClient,
@@ -977,3 +981,402 @@ class MEICTFStrategy(MEICStrategy):
 
         except Exception as e:
             logger.error(f"Failed to save MEIC-TF state: {e}")
+
+    def _register_position(self, entry: IronCondorEntry, leg_name: str):
+        """
+        Register a position leg with the Position Registry using MEIC-TF bot name.
+
+        Override from MEIC to use "MEIC-TF" instead of "MEIC" for proper isolation
+        when both bots run simultaneously.
+
+        Args:
+            entry: IronCondorEntry containing the position
+            leg_name: Which leg ("short_call", "long_call", "short_put", "long_put")
+        """
+        position_id = getattr(entry, f"{leg_name}_position_id")
+        # CRITICAL: Reject both None and the string "None"
+        if not position_id or position_id == "None":
+            if position_id == "None":
+                logger.error(f"BUG DETECTED: {leg_name} has string 'None' as position_id - not registering")
+            return
+
+        strike = getattr(entry, f"{leg_name}_strike")
+
+        try:
+            self.registry.register(
+                position_id=position_id,
+                bot_name="MEIC-TF",  # Use MEIC-TF instead of MEIC for isolation
+                strategy_id=entry.strategy_id,
+                metadata={
+                    "entry_number": entry.entry_number,
+                    "leg_type": leg_name,
+                    "strike": strike
+                }
+            )
+        except Exception as e:
+            logger.error(f"Registry error registering {leg_name} position {position_id}: {e}")
+
+    def _recover_from_state_file_uics(self, all_positions: List[Dict]) -> Dict[int, List[Dict]]:
+        """
+        Override to use MEIC-TF bot name in registry during UIC-based recovery.
+
+        This is a fallback recovery method when registry-based recovery fails.
+        Uses UICs stored in the state file to match positions and re-registers
+        them with the correct bot name (MEIC-TF instead of MEIC).
+
+        Args:
+            all_positions: All positions from Saxo API
+
+        Returns:
+            Dict mapping entry_number -> list of position data dicts, or empty dict
+        """
+        from typing import Tuple
+
+        logger.info("Attempting UIC-based recovery from state file...")
+
+        try:
+            if not os.path.exists(self.state_file):
+                logger.warning(f"State file not found: {self.state_file}")
+                return {}
+
+            with open(self.state_file, 'r') as f:
+                state_data = json.load(f)
+
+            # Check if it's from today
+            saved_date = state_data.get("date", "")
+            today = get_us_market_time().strftime("%Y-%m-%d")
+            if saved_date != today:
+                logger.warning(f"State file is from {saved_date}, not today ({today}) - cannot use for recovery")
+                return {}
+
+            entries_data = state_data.get("entries", [])
+            if not entries_data:
+                logger.info("State file has no entries")
+                return {}
+
+            logger.info(f"Found {len(entries_data)} entries in state file")
+
+            # Build UIC to entry/leg mapping from state file
+            uic_to_entry_leg: Dict[int, Tuple[int, str]] = {}
+            for entry_data in entries_data:
+                entry_num = entry_data.get("entry_number")
+                if entry_num is None:
+                    continue
+
+                # Map each UIC to its entry and leg type
+                for leg in ["short_call", "long_call", "short_put", "long_put"]:
+                    uic = entry_data.get(f"{leg}_uic")
+                    if uic:
+                        uic_to_entry_leg[uic] = (entry_num, leg)
+
+            logger.info(f"Built UIC map with {len(uic_to_entry_leg)} UICs")
+
+            # Match Saxo positions by UIC
+            entries_by_number: Dict[int, List[Dict]] = {}
+            matched_count = 0
+
+            for pos in all_positions:
+                pos_base = pos.get("PositionBase", {})
+                uic = pos_base.get("Uic")
+
+                if uic and uic in uic_to_entry_leg:
+                    entry_num, leg_type = uic_to_entry_leg[uic]
+
+                    # Parse the position
+                    parsed = self._parse_spx_option_position(pos)
+                    if parsed:
+                        parsed["leg_type"] = leg_type
+                        parsed["entry_number"] = entry_num
+
+                        if entry_num not in entries_by_number:
+                            entries_by_number[entry_num] = []
+                        entries_by_number[entry_num].append(parsed)
+                        matched_count += 1
+
+                        # Re-register this position with correct ID
+                        pos_id = str(pos.get("PositionId"))
+                        if pos_id and pos_id != "None":
+                            # Find the entry data to get strategy_id
+                            for entry_data in entries_data:
+                                if entry_data.get("entry_number") == entry_num:
+                                    strategy_id = entry_data.get("strategy_id", f"meic_tf_{today}_entry{entry_num}")
+                                    try:
+                                        self.registry.register(
+                                            position_id=pos_id,
+                                            bot_name=self.BOT_NAME,  # Use MEIC-TF
+                                            strategy_id=strategy_id,
+                                            metadata={
+                                                "entry_number": entry_num,
+                                                "leg_type": leg_type,
+                                                "strike": parsed.get("strike")
+                                            }
+                                        )
+                                        logger.info(f"Re-registered position {pos_id} (UIC {uic}) as Entry #{entry_num} {leg_type}")
+                                    except Exception as e:
+                                        logger.error(f"Registry error re-registering {pos_id}: {e}")
+                                    break
+
+            logger.info(f"UIC-based recovery matched {matched_count} positions to {len(entries_by_number)} entries")
+            return entries_by_number
+
+        except Exception as e:
+            logger.error(f"UIC-based recovery failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {}
+
+    def _recover_positions_from_saxo(self) -> bool:
+        """
+        Override to use MEIC-TF bot name in registry queries and logging.
+
+        This is the main recovery method that queries Saxo API for positions
+        and uses the Position Registry to identify which belong to MEIC-TF.
+
+        Returns:
+            bool: True if positions were recovered, False if starting fresh
+        """
+        logger.info("=" * 60)
+        logger.info("POSITION RECOVERY: Querying Saxo API for source of truth...")
+        logger.info("=" * 60)
+
+        try:
+            # Step 1: Get ALL positions from Saxo
+            all_positions = self.client.get_positions()
+            if not all_positions:
+                logger.info("No positions found in Saxo account - starting fresh")
+                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                return False
+
+            logger.info(f"Found {len(all_positions)} total positions in account")
+
+            # Step 2: Get valid position IDs and clean up registry orphans
+            valid_ids = {str(p.get("PositionId")) for p in all_positions}
+            if not self.dry_run:
+                try:
+                    orphans = self.registry.cleanup_orphans(valid_ids)
+                    if orphans:
+                        logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
+                        self._log_safety_event("ORPHAN_CLEANUP", f"Removed {len(orphans)} orphaned positions from registry")
+                except Exception as e:
+                    logger.error(f"Registry error during orphan cleanup: {e}")
+            else:
+                logger.debug("Skipping orphan cleanup in dry-run mode")
+
+            # Step 3: Get MEIC-TF positions from registry (using class constant)
+            my_position_ids = self.registry.get_positions(self.BOT_NAME)
+            if not my_position_ids:
+                logger.info(f"No {self.BOT_NAME} positions in registry - starting fresh")
+                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                return False
+
+            logger.info(f"Found {len(my_position_ids)} {self.BOT_NAME} positions in registry")
+
+            # Step 4: Filter Saxo positions to just MEIC-TF positions
+            meic_tf_positions = []
+            for pos in all_positions:
+                pos_id = str(pos.get("PositionId"))
+                if pos_id in my_position_ids:
+                    meic_tf_positions.append(pos)
+
+            if not meic_tf_positions:
+                logger.warning(f"Registry says we have {self.BOT_NAME} positions but none found in Saxo! Cleaning registry...")
+                for pos_id in my_position_ids:
+                    try:
+                        self.registry.unregister(pos_id)
+                    except Exception as e:
+                        logger.error(f"Registry error unregistering {pos_id}: {e}")
+                self._log_safety_event("REGISTRY_CLEARED", f"All {self.BOT_NAME} positions removed - not found in Saxo")
+                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                return False
+
+            logger.info(f"Matched {len(meic_tf_positions)} positions to {self.BOT_NAME} in Saxo")
+
+            # Step 5: Group positions by entry number using registry metadata
+            entries_by_number = self._group_positions_by_entry(meic_tf_positions, my_position_ids)
+
+            if not entries_by_number:
+                logger.warning("Could not group positions into entries via registry - trying UIC fallback...")
+                entries_by_number = self._recover_from_state_file_uics(all_positions)
+                if not entries_by_number:
+                    logger.warning("UIC-based recovery also failed - manual review needed")
+                    self._log_safety_event("RECOVERY_FAILED", "Could not reconstruct entries from positions or UICs")
+                    self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                    return False
+                else:
+                    logger.info(f"UIC-based recovery succeeded: found {len(entries_by_number)} entries")
+
+            # Step 6: Reconstruct IronCondorEntry objects
+            recovered_entries = []
+            for entry_num, positions in entries_by_number.items():
+                entry = self._reconstruct_entry_from_positions(entry_num, positions)
+                if entry:
+                    recovered_entries.append(entry)
+                    logger.info(
+                        f"  Entry #{entry_num}: "
+                        f"SC={entry.short_call_strike} LC={entry.long_call_strike} "
+                        f"SP={entry.short_put_strike} LP={entry.long_put_strike}"
+                    )
+
+            if not recovered_entries:
+                logger.warning("Failed to reconstruct any entries from Saxo positions")
+                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                return False
+
+            # Step 7: Update local state to match Saxo
+            today = get_us_market_time().strftime("%Y-%m-%d")
+
+            # Load existing state file to preserve realized P&L
+            preserved_realized_pnl = 0.0
+            preserved_put_stops = 0
+            preserved_call_stops = 0
+            preserved_double_stops = 0
+            preserved_total_commission = 0.0
+            preserved_entry_credits = {}
+            try:
+                if os.path.exists(self.state_file):
+                    with open(self.state_file, "r") as f:
+                        saved_state = json.load(f)
+                        if saved_state.get("date") == today:
+                            preserved_realized_pnl = saved_state.get("total_realized_pnl", 0.0)
+                            preserved_put_stops = saved_state.get("put_stops_triggered", 0)
+                            preserved_call_stops = saved_state.get("call_stops_triggered", 0)
+                            preserved_double_stops = saved_state.get("double_stops", 0)
+                            preserved_total_commission = saved_state.get("total_commission", 0.0)
+                            for entry_data in saved_state.get("entries", []):
+                                entry_num = entry_data.get("entry_number")
+                                if entry_num:
+                                    preserved_entry_credits[entry_num] = {
+                                        "call_credit": entry_data.get("call_spread_credit", 0),
+                                        "put_credit": entry_data.get("put_spread_credit", 0),
+                                        "call_stop": entry_data.get("call_side_stop", 0),
+                                        "put_stop": entry_data.get("put_side_stop", 0),
+                                        "short_call_strike": entry_data.get("short_call_strike", 0),
+                                        "long_call_strike": entry_data.get("long_call_strike", 0),
+                                        "short_put_strike": entry_data.get("short_put_strike", 0),
+                                        "long_put_strike": entry_data.get("long_put_strike", 0),
+                                        "call_side_stopped": entry_data.get("call_side_stopped", False),
+                                        "put_side_stopped": entry_data.get("put_side_stopped", False),
+                                        "open_commission": entry_data.get("open_commission", 0),
+                                        "close_commission": entry_data.get("close_commission", 0),
+                                    }
+                            logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
+                                       f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}")
+            except Exception as e:
+                logger.warning(f"Could not load state file for preservation: {e}")
+
+            # Apply preserved credits, stop levels, and strikes to recovered entries
+            for entry in recovered_entries:
+                if entry.entry_number in preserved_entry_credits:
+                    saved = preserved_entry_credits[entry.entry_number]
+                    entry.call_spread_credit = saved["call_credit"]
+                    entry.put_spread_credit = saved["put_credit"]
+                    entry.call_side_stop = saved["call_stop"]
+                    entry.put_side_stop = saved["put_stop"]
+
+                    if saved.get("call_side_stopped"):
+                        entry.call_side_stopped = True
+                    if saved.get("put_side_stopped"):
+                        entry.put_side_stopped = True
+
+                    entry.open_commission = saved.get("open_commission", 0)
+                    entry.close_commission = saved.get("close_commission", 0)
+
+                    if entry.call_side_stopped and entry.short_call_strike == 0:
+                        entry.short_call_strike = saved.get("short_call_strike", 0)
+                        entry.long_call_strike = saved.get("long_call_strike", 0)
+                        logger.info(f"Entry #{entry.entry_number}: Restored stopped call strikes "
+                                   f"(short={entry.short_call_strike}, long={entry.long_call_strike})")
+                    if entry.put_side_stopped and entry.short_put_strike == 0:
+                        entry.short_put_strike = saved.get("short_put_strike", 0)
+                        entry.long_put_strike = saved.get("long_put_strike", 0)
+                        logger.info(f"Entry #{entry.entry_number}: Restored stopped put strikes "
+                                   f"(short={entry.short_put_strike}, long={entry.long_put_strike})")
+
+                    logger.info(f"Entry #{entry.entry_number}: Restored credits from state file "
+                               f"(call=${saved['call_credit']:.2f}, put=${saved['put_credit']:.2f}, "
+                               f"stop=${saved['call_stop']:.2f})")
+
+            # Reset daily state but preserve date
+            self.daily_state = MEICDailyState()
+            self.daily_state.date = today
+            self.daily_state.entries = recovered_entries
+            self.daily_state.entries_completed = len(recovered_entries)
+
+            # Restore preserved P&L and stop counters
+            self.daily_state.total_realized_pnl = preserved_realized_pnl
+            self.daily_state.put_stops_triggered = preserved_put_stops
+            self.daily_state.call_stops_triggered = preserved_call_stops
+            self.daily_state.double_stops = preserved_double_stops
+            self.daily_state.total_commission = preserved_total_commission
+
+            # Determine next entry index
+            max_entry_num = max(e.entry_number for e in recovered_entries)
+            self._next_entry_index = max_entry_num
+
+            # Set state based on recovered positions
+            if recovered_entries:
+                active_entries = [e for e in recovered_entries if not (e.call_side_stopped and e.put_side_stopped)]
+                if active_entries:
+                    self.state = MEICState.MONITORING
+                elif self._next_entry_index < len(self.entry_times):
+                    self.state = MEICState.WAITING_FIRST_ENTRY
+                else:
+                    self.state = MEICState.DAILY_COMPLETE
+
+            # Calculate total credit from entries
+            total_credit = sum(e.total_credit for e in recovered_entries)
+            self.daily_state.total_credit_received = total_credit
+
+            # Retroactively calculate commission for entries without commission data
+            if self.daily_state.total_commission == 0 and recovered_entries:
+                retroactive_commission = 0.0
+                for entry in recovered_entries:
+                    if entry.open_commission == 0:
+                        entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
+                        retroactive_commission += entry.open_commission
+                    if entry.close_commission == 0:
+                        if entry.call_side_stopped:
+                            close_comm = 2 * self.commission_per_leg * self.contracts_per_entry
+                            entry.close_commission += close_comm
+                            retroactive_commission += close_comm
+                        if entry.put_side_stopped:
+                            close_comm = 2 * self.commission_per_leg * self.contracts_per_entry
+                            entry.close_commission += close_comm
+                            retroactive_commission += close_comm
+                self.daily_state.total_commission = retroactive_commission
+                if retroactive_commission > 0:
+                    logger.info(f"Retroactively calculated commission: ${retroactive_commission:.2f} "
+                               f"(from {len(recovered_entries)} entries)")
+
+            logger.info("=" * 60)
+            logger.info(f"RECOVERY COMPLETE: {len(recovered_entries)} entries recovered")
+            logger.info(f"  State: {self.state.value}")
+            logger.info(f"  Next entry index: {self._next_entry_index}")
+            logger.info(f"  Total credit: ${total_credit:.2f}")
+            logger.info("=" * 60)
+
+            # Send recovery alert
+            self.alert_service.send_alert(
+                alert_type=AlertType.POSITION_OPENED,
+                title=f"{self.BOT_NAME} Position Recovery",
+                message=f"Recovered {len(recovered_entries)} iron condor(s) from Saxo API",
+                priority=AlertPriority.MEDIUM,
+                details={
+                    "entries_recovered": len(recovered_entries),
+                    "state": self.state.value,
+                    "total_credit": total_credit
+                }
+            )
+
+            # Save recovered state to disk
+            self._save_state_to_disk()
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Position recovery failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self._log_safety_event("RECOVERY_ERROR", str(e))
+            self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+            return False
