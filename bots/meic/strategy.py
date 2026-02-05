@@ -694,6 +694,9 @@ class MEICStrategy:
         # Saxo Bank charges $2.50 per leg per contract, round-trip = $5.00 per leg
         self.commission_per_leg = self.strategy_config.get("commission_per_leg", 2.50)
 
+        # State file path - can be overridden by subclasses (e.g., MEIC-TF)
+        self.state_file = STATE_FILE
+
         # State
         self.state = MEICState.IDLE
         self.daily_state = MEICDailyState()
@@ -3579,8 +3582,8 @@ class MEICStrategy:
             preserved_total_commission = 0.0  # Commission tracking
             preserved_entry_credits = {}  # entry_number -> (call_credit, put_credit, call_stop, put_stop)
             try:
-                if os.path.exists(STATE_FILE):
-                    with open(STATE_FILE, "r") as f:
+                if os.path.exists(self.state_file):
+                    with open(self.state_file, "r") as f:
                         saved_state = json.load(f)
                         # Only use saved state if it's from today
                         if saved_state.get("date") == today:
@@ -3762,11 +3765,11 @@ class MEICStrategy:
 
         # Load state file
         try:
-            if not os.path.exists(STATE_FILE):
-                logger.warning(f"State file not found: {STATE_FILE}")
+            if not os.path.exists(self.state_file):
+                logger.warning(f"State file not found: {self.state_file}")
                 return {}
 
-            with open(STATE_FILE, 'r') as f:
+            with open(self.state_file, 'r') as f:
                 state_data = json.load(f)
 
             # Check if it's from today
@@ -3971,47 +3974,65 @@ class MEICStrategy:
         entry = IronCondorEntry(entry_number=entry_number)
         entry.strategy_id = f"meic_{get_us_market_time().strftime('%Y%m%d')}_{entry_number:03d}"
 
-        # Categorize positions by leg type
+        # FIX (2026-02-05): Use dictionary approach to handle positions in any order
+        # Previous code assumed positions arrived in a specific order (short before long).
+        # If long arrived first, the subtraction happened from 0, then short OVERWROTE it.
+        # Now we collect ALL entry prices first, then calculate NET credit correctly.
+        entry_prices = {
+            "short_call": 0.0,
+            "long_call": 0.0,
+            "short_put": 0.0,
+            "long_put": 0.0,
+        }
+
+        # First pass: collect all positions and entry prices
         for pos in positions:
             leg_type = pos.get("leg_type")
             strike = pos.get("strike")
             is_long = pos.get("is_long")
-            # Note: put_call available in pos but leg_type is sufficient
 
             # Validate leg type matches expected
             expected_long = leg_type in ["long_call", "long_put"]
             if expected_long != is_long:
                 logger.warning(f"Entry #{entry_number}: Leg {leg_type} direction mismatch!")
 
+            # Store entry price for later NET calculation
+            entry_prices[leg_type] = pos.get("entry_price", 0) * 100
+
             if leg_type == "short_call":
                 entry.short_call_position_id = pos["position_id"]
                 entry.short_call_uic = pos["uic"]
                 entry.short_call_strike = strike
                 entry.short_call_price = pos.get("current_price", 0)
-                # Estimate credit from entry price
-                entry.call_spread_credit = pos.get("entry_price", 0) * 100
 
             elif leg_type == "long_call":
                 entry.long_call_position_id = pos["position_id"]
                 entry.long_call_uic = pos["uic"]
                 entry.long_call_strike = strike
                 entry.long_call_price = pos.get("current_price", 0)
-                # Subtract long cost from credit
-                entry.call_spread_credit -= pos.get("entry_price", 0) * 100
 
             elif leg_type == "short_put":
                 entry.short_put_position_id = pos["position_id"]
                 entry.short_put_uic = pos["uic"]
                 entry.short_put_strike = strike
                 entry.short_put_price = pos.get("current_price", 0)
-                entry.put_spread_credit = pos.get("entry_price", 0) * 100
 
             elif leg_type == "long_put":
                 entry.long_put_position_id = pos["position_id"]
                 entry.long_put_uic = pos["uic"]
                 entry.long_put_strike = strike
                 entry.long_put_price = pos.get("current_price", 0)
-                entry.put_spread_credit -= pos.get("entry_price", 0) * 100
+
+        # Second pass: calculate NET credits (short - long)
+        # This ensures correct calculation regardless of position processing order
+        entry.call_spread_credit = entry_prices["short_call"] - entry_prices["long_call"]
+        entry.put_spread_credit = entry_prices["short_put"] - entry_prices["long_put"]
+
+        logger.debug(
+            f"Entry #{entry_number} recovered credits: "
+            f"Call=${entry.call_spread_credit:.2f} (short ${entry_prices['short_call']:.2f} - long ${entry_prices['long_call']:.2f}), "
+            f"Put=${entry.put_spread_credit:.2f} (short ${entry_prices['short_put']:.2f} - long ${entry_prices['long_put']:.2f})"
+        )
 
         # Check if entry is complete (all 4 legs)
         has_all_legs = all([
@@ -4889,14 +4910,14 @@ class MEICStrategy:
             state_data["last_saved"] = get_us_market_time().isoformat()
 
             # Write atomically using temp file
-            temp_file = STATE_FILE + ".tmp"
-            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+            temp_file = self.state_file + ".tmp"
+            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
 
             with open(temp_file, 'w') as f:
                 json.dump(state_data, f, indent=2)
 
-            os.replace(temp_file, STATE_FILE)
-            logger.debug(f"State saved to {STATE_FILE}")
+            os.replace(temp_file, self.state_file)
+            logger.debug(f"State saved to {self.state_file}")
 
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
