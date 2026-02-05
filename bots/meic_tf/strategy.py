@@ -1016,6 +1016,40 @@ class MEICTFStrategy(MEICStrategy):
         except Exception as e:
             logger.error(f"Registry error registering {leg_name} position {position_id}: {e}")
 
+    def _check_state_consistency(self) -> Optional[str]:
+        """
+        STATE-002: Validate that strategy state matches actual positions.
+
+        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+
+        Returns:
+            Error message if inconsistent, None if OK
+        """
+        from bots.meic.strategy import MEICState
+
+        active_entries = len(self.daily_state.active_entries)
+        my_positions = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
+
+        # Check state vs position count
+        if self.state == MEICState.MONITORING and active_entries == 0:
+            return "State is MONITORING but no active entries"
+
+        if self.state == MEICState.IDLE and active_entries > 0:
+            return f"State is IDLE but have {active_entries} active entries"
+
+        if self.state == MEICState.WAITING_FIRST_ENTRY and active_entries > 0:
+            # This is OK - waiting for next entry while monitoring existing
+            pass
+
+        # Cross-check with Position Registry
+        expected_positions = sum(len(e.all_position_ids) for e in self.daily_state.active_entries)
+        registry_count = len(my_positions)
+
+        if abs(expected_positions - registry_count) > 2:  # Allow small discrepancy
+            return f"Position count mismatch: expected {expected_positions}, registry has {registry_count}"
+
+        return None
+
     def _recover_from_state_file_uics(self, all_positions: List[Dict]) -> Dict[int, List[Dict]]:
         """
         Override to use MEIC-TF bot name in registry during UIC-based recovery.
