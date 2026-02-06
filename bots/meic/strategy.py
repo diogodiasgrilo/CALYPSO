@@ -1599,10 +1599,11 @@ class MEICStrategy:
         Lower VIX = less volatility = far OTM wings become worthless = need tighter spreads
 
         Scaling:
-            VIX >= 20: 50 pts (normal/elevated vol, good liquidity)
-            VIX 15-20: 40 pts (low-medium vol)
-            VIX 10-15: 30 pts (low vol, wings getting illiquid)
-            VIX < 10:  25 pts (very low vol, minimum spread)
+            VIX > 30:  80 pts (high vol, excellent liquidity)
+            VIX 25-30: 70 pts (elevated vol, more liquidity)
+            VIX 20-25: 60 pts (normal conditions)
+            VIX 15-20: 50 pts (low-medium vol)
+            VIX < 15:  40 pts (very low vol, wings illiquid)
 
         Args:
             vix: Current VIX level
@@ -1612,14 +1613,16 @@ class MEICStrategy:
         """
         min_spread = self.strategy_config.get("min_spread_width", 25)
 
-        if vix >= 20:
-            spread_width = 50
+        if vix > 30:
+            spread_width = 80
+        elif vix >= 25:
+            spread_width = 70
+        elif vix >= 20:
+            spread_width = 60
         elif vix >= 15:
-            spread_width = 40
-        elif vix >= 10:
-            spread_width = 30
+            spread_width = 50
         else:
-            spread_width = 25
+            spread_width = 40
 
         # Ensure we don't go below min_spread_width
         spread_width = max(min_spread, spread_width)
