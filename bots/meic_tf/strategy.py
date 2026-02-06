@@ -369,8 +369,52 @@ class MEICTFStrategy(MEICStrategy):
                     last_error = "Failed to calculate strikes"
                     continue
 
-                # Execute based on trend signal
-                if trend == TrendSignal.BULLISH:
+                # MKT-010: Override to one-sided entry if a wing is illiquid
+                # Illiquid wing = far OTM = SAFE side to trade
+                # This prevents asymmetric ICs where one side has almost no cushion
+                illiquidity_override = None
+                if entry.call_wing_illiquid and not entry.put_wing_illiquid:
+                    # Call wing illiquid = calls far OTM = call side is SAFE
+                    # Place CALL-only to avoid risky put side
+                    illiquidity_override = "call"
+                    logger.info(
+                        f"MKT-010: Call wing illiquid → overriding to CALL-only "
+                        f"(safe side, was {trend.value})"
+                    )
+                elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
+                    # Put wing illiquid = puts far OTM = put side is SAFE
+                    # Place PUT-only to avoid risky call side
+                    illiquidity_override = "put"
+                    logger.info(
+                        f"MKT-010: Put wing illiquid → overriding to PUT-only "
+                        f"(safe side, was {trend.value})"
+                    )
+                elif entry.call_wing_illiquid and entry.put_wing_illiquid:
+                    # Both wings illiquid = very unusual, skip entry
+                    logger.warning(
+                        f"MKT-010: Both wings illiquid, skipping entry #{entry.entry_number}"
+                    )
+                    last_error = "Both wings illiquid"
+                    continue
+
+                # Execute based on trend signal OR illiquidity override
+                if illiquidity_override == "call":
+                    logger.info(f"MKT-010 → placing CALL spread only (illiquidity override)")
+                    entry.call_only = True
+                    if self.dry_run:
+                        success = self._simulate_one_sided_entry(entry, "call")
+                    else:
+                        success = self._execute_call_spread_only(entry)
+
+                elif illiquidity_override == "put":
+                    logger.info(f"MKT-010 → placing PUT spread only (illiquidity override)")
+                    entry.put_only = True
+                    if self.dry_run:
+                        success = self._simulate_one_sided_entry(entry, "put")
+                    else:
+                        success = self._execute_put_spread_only(entry)
+
+                elif trend == TrendSignal.BULLISH:
                     logger.info(f"BULLISH trend → placing PUT spread only")
                     entry.put_only = True
                     if self.dry_run:
@@ -411,11 +455,19 @@ class MEICTFStrategy(MEICStrategy):
                     # Log to Google Sheets
                     self._log_entry(entry)
 
-                    # Send alert with trend info
+                    # Send alert with trend/illiquidity info
                     if entry.call_only:
-                        position_summary = f"MEIC-TF Entry #{entry_num} [BEARISH]: Call {entry.short_call_strike}/{entry.long_call_strike}"
+                        if entry.call_wing_illiquid:
+                            # MKT-010: Call-only due to illiquidity override
+                            position_summary = f"MEIC-TF Entry #{entry_num} [MKT-010]: Call {entry.short_call_strike}/{entry.long_call_strike} (illiq override)"
+                        else:
+                            position_summary = f"MEIC-TF Entry #{entry_num} [BEARISH]: Call {entry.short_call_strike}/{entry.long_call_strike}"
                     elif entry.put_only:
-                        position_summary = f"MEIC-TF Entry #{entry_num} [BULLISH]: Put {entry.short_put_strike}/{entry.long_put_strike}"
+                        if entry.put_wing_illiquid:
+                            # MKT-010: Put-only due to illiquidity override
+                            position_summary = f"MEIC-TF Entry #{entry_num} [MKT-010]: Put {entry.short_put_strike}/{entry.long_put_strike} (illiq override)"
+                        else:
+                            position_summary = f"MEIC-TF Entry #{entry_num} [BULLISH]: Put {entry.short_put_strike}/{entry.long_put_strike}"
                     else:
                         position_summary = f"MEIC-TF Entry #{entry_num} [NEUTRAL]: Full IC"
 
@@ -1104,15 +1156,17 @@ class MEICTFStrategy(MEICStrategy):
             is_tf_entry = isinstance(entry, TFIronCondorEntry)
 
             if is_tf_entry and entry.call_only:
-                # Call spread only (bearish)
+                # Call spread only
                 strike_str = f"C:{entry.short_call_strike}/{entry.long_call_strike}"
                 entry_type = "Call Spread"
-                trend_tag = "[BEARISH]"
+                # MKT-010: Distinguish between trend and illiquidity override
+                trend_tag = "[MKT-010]" if entry.call_wing_illiquid else "[BEARISH]"
             elif is_tf_entry and entry.put_only:
-                # Put spread only (bullish)
+                # Put spread only
                 strike_str = f"P:{entry.short_put_strike}/{entry.long_put_strike}"
                 entry_type = "Put Spread"
-                trend_tag = "[BULLISH]"
+                # MKT-010: Distinguish between trend and illiquidity override
+                trend_tag = "[MKT-010]" if entry.put_wing_illiquid else "[BULLISH]"
             else:
                 # Full IC (neutral)
                 strike_str = (

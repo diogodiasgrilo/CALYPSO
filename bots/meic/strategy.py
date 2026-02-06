@@ -331,6 +331,12 @@ class IronCondorEntry:
     put_side_stopped: bool = False   # Put spread was stopped out
     strategy_id: str = ""  # For Position Registry tracking
 
+    # MKT-010: Wing illiquidity tracking (set by MKT-008 adjustment)
+    # If a wing was illiquid and adjusted, that side is far OTM = SAFE
+    # Used by MEIC-TF to place one-sided entries on the safe side
+    call_wing_illiquid: bool = False  # Call wing was adjusted (calls far OTM = safe)
+    put_wing_illiquid: bool = False   # Put wing was adjusted (puts far OTM = safe)
+
     # Commission tracking (display only - does not affect P&L calculations)
     # Open commission: $2.50 per leg × 4 legs = $10 per IC (charged on entry)
     # Close commission: $2.50 per leg × 2 legs per side (only charged when closed, not expired)
@@ -1729,6 +1735,8 @@ class MEICStrategy:
             )
             if call_adjusted:
                 entry.long_call_strike = adjusted_long_call
+                # MKT-010: Mark call wing as illiquid (far OTM = safe side)
+                entry.call_wing_illiquid = True
 
             adjusted_long_put, put_adjusted = self._adjust_long_wing_for_liquidity(
                 entry.long_put_strike, entry.short_put_strike,
@@ -1736,6 +1744,8 @@ class MEICStrategy:
             )
             if put_adjusted:
                 entry.long_put_strike = adjusted_long_put
+                # MKT-010: Mark put wing as illiquid (far OTM = safe side)
+                entry.put_wing_illiquid = True
 
         logger.info(
             f"Strikes calculated for SPX {spx:.2f}: "
