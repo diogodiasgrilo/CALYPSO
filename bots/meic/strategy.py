@@ -4186,6 +4186,8 @@ class MEICStrategy:
             metadata = reg_info.get("metadata", {})
             entry_number = metadata.get("entry_number")
             leg_type = metadata.get("leg_type")
+            # Fix #44: Support merged positions (multiple entries at same strike)
+            shared_entries = metadata.get("shared_entries", [])
             # Note: strike from metadata not used - actual strike comes from parsed position
 
             if entry_number is None:
@@ -4201,6 +4203,16 @@ class MEICStrategy:
                 if entry_number not in entries_by_number:
                     entries_by_number[entry_number] = []
                 entries_by_number[entry_number].append(parsed)
+
+                # Fix #44: If position is shared across entries (merged), add to all entries
+                for shared_entry_num in shared_entries:
+                    if shared_entry_num != entry_number:  # Avoid duplicate
+                        shared_parsed = parsed.copy()
+                        shared_parsed["entry_number"] = shared_entry_num
+                        if shared_entry_num not in entries_by_number:
+                            entries_by_number[shared_entry_num] = []
+                        entries_by_number[shared_entry_num].append(shared_parsed)
+                        logger.info(f"Fix #44: Position {pos_id} is shared - added to Entry #{shared_entry_num}")
 
         return entries_by_number
 
