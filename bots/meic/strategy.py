@@ -2,7 +2,7 @@
 strategy.py - MEIC (Multiple Entry Iron Condors) Strategy Implementation
 
 This module implements Tammy Chambless's MEIC 0DTE strategy:
-- 6 scheduled iron condor entries per day (10:00, 10:30, 11:00, 11:30, 12:00, 12:30 AM ET)
+- 6 scheduled iron condor entries per day (10:05, 10:35, 11:05, 11:35, 12:05, 12:35 AM ET)
 - OTM call spread + OTM put spread per entry (4 legs = 1 IC)
 - Per-side stop losses equal to total credit received
 - MEIC+ modification: stop = credit - $0.10 for small wins on stop days
@@ -239,12 +239,12 @@ ACTIVITIES_RETRY_DELAY_SECONDS = 1.0
 # =============================================================================
 
 DEFAULT_ENTRY_TIMES = [
-    dt_time(10, 0),   # Entry 1: 10:00 AM ET
-    dt_time(10, 30),  # Entry 2: 10:30 AM ET
-    dt_time(11, 0),   # Entry 3: 11:00 AM ET
-    dt_time(11, 30),  # Entry 4: 11:30 AM ET
-    dt_time(12, 0),   # Entry 5: 12:00 PM ET
-    dt_time(12, 30),  # Entry 6: 12:30 PM ET
+    dt_time(10, 5),   # Entry 1: 10:05 AM ET
+    dt_time(10, 35),  # Entry 2: 10:35 AM ET
+    dt_time(11, 5),   # Entry 3: 11:05 AM ET
+    dt_time(11, 35),  # Entry 4: 11:35 AM ET
+    dt_time(12, 5),   # Entry 5: 12:05 PM ET
+    dt_time(12, 35),  # Entry 6: 12:35 PM ET
 ]
 
 # Note: Early close day handling is done dynamically in _parse_entry_times()
@@ -5737,11 +5737,13 @@ class MEICStrategy:
                 long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
 
         # Could not find liquid long wing - return original
+        # MKT-010: Still mark as illiquid so MEIC-TF can use one-sided entry
+        # The wing IS illiquid even though we're using the original strike
         logger.warning(
             f"MKT-008: Could not find liquid long {put_call} near {original_long_strike}, "
             f"using original (may fail during order placement)"
         )
-        return original_long_strike, False
+        return original_long_strike, True  # True = wing is illiquid (for MKT-010)
 
     # =========================================================================
     # TIME-001: CLOCK SYNC VALIDATION

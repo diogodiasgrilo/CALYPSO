@@ -19,12 +19,12 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 
 | Entry | Time (ET) |
 |-------|-----------|
-| 1 | 10:00 AM |
-| 2 | 10:30 AM |
-| 3 | 11:00 AM |
-| 4 | 11:30 AM |
-| 5 | 12:00 PM |
-| 6 | 12:30 PM |
+| 1 | 10:05 AM |
+| 2 | 10:35 AM |
+| 3 | 11:05 AM |
+| 4 | 11:35 AM |
+| 5 | 12:05 PM |
+| 6 | 12:35 PM |
 
 ### Trend-Based Entry Logic
 

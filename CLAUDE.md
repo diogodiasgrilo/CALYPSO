@@ -206,7 +206,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 ### MEIC Bot Details (v1.2.0 - Updated 2026-02-02)
 - **Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors) - "Queen of 0DTE"
 - **Structure:** 6 scheduled iron condor entries per day
-- **Entry times:** 10:00, 10:30, 11:00, 11:30, 12:00, 12:30 AM ET
+- **Entry times:** 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 AM ET
 - **Strikes:** VIX-adjusted for ~8 delta, 50-point spreads (25-120pt range based on VIX)
 - **Stop loss:** Per-side stop = total credit received (breakeven design)
 - **MEIC+ modification:** Stop = credit - $0.10 for small wins (configurable threshold)

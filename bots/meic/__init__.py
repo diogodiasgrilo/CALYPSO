@@ -13,7 +13,7 @@ Key Performance Metrics (Tammy Chambless, Jan 2023 - present):
 - ~70% win rate
 
 Strategy Details:
-- Entry times: 10:00, 10:30, 11:00, 11:30, 12:00, 12:30 AM ET
+- Entry times: 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 AM ET
 - Strike selection: VIX-adjusted for ~8 delta, 50-point spreads
 - Credit target: $1.00 - $1.75 per side (validated at runtime)
 - Stop loss: Total credit per side (MEIC+ subtracts configurable amount)

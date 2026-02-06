@@ -7,7 +7,7 @@ Tammy Chambless's strategy (Queen of 0DTE).
 
 Strategy Summary:
 -----------------
-1. Enter 6 iron condors throughout the day (10:00, 10:30, 11:00, 11:30, 12:00, 12:30 AM ET)
+1. Enter 6 iron condors throughout the day (10:05, 10:35, 11:05, 11:35, 12:05, 12:35 AM ET)
 2. Each IC: OTM call spread + OTM put spread at 5-15 delta
 3. Stop loss per side = total credit received
 4. MEIC+ modification: stop = credit - $0.10 for small wins on stop days
@@ -229,7 +229,7 @@ def print_banner():
     ║         Strategy: Tammy Chambless's MEIC                      ║
     ║         (Multiple Entry Iron Condors - Queen of 0DTE)         ║
     ║                                                               ║
-    ║         Entries: 10:00, 10:30, 11:00, 11:30, 12:00, 12:30     ║
+    ║         Entries: 10:05, 10:35, 11:05, 11:35, 12:05, 12:35     ║
     ║         Expected: 20.7% CAGR, 4.31% max drawdown              ║
     ║                                                               ║
     ║         Version: 1.1.0                                        ║

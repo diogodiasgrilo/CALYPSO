@@ -125,7 +125,7 @@ Legs are placed in safe order (longs before shorts):
         "underlying_uic": 4913,
         "option_root_uic": 128,
         "vix_spot_uic": 10606,
-        "entry_times": ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30"],
+        "entry_times": ["10:05", "10:35", "11:05", "11:35", "12:05", "12:35"],
         "spread_width": 50,
         "target_delta": 8,
         "min_delta": 5,
