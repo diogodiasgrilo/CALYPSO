@@ -1864,6 +1864,125 @@ class MEICTFStrategy(MEICStrategy):
             logger.error(traceback.format_exc())
             return {}
 
+    def _load_state_file_history(self) -> bool:
+        """
+        FIX #41 (2026-02-06): Load historical data from state file when no active positions.
+
+        When all positions have been stopped out, we still need to preserve:
+        - Completed entries (for tracking which entries are done)
+        - Realized P&L from stopped entries
+        - Stop counters (put_stops, call_stops, double_stops)
+        - Commission totals
+        - Next entry index
+
+        This method loads the state file and restores this historical data
+        to daily_state, even when there are no active positions to monitor.
+
+        Returns:
+            bool: True if historical data was loaded, False if no valid state file
+        """
+        today = get_us_market_time().strftime("%Y-%m-%d")
+
+        try:
+            if not os.path.exists(self.state_file):
+                logger.info("No state file found - truly starting fresh")
+                return False
+
+            with open(self.state_file, 'r') as f:
+                saved_state = json.load(f)
+
+            # Only use saved state if it's from today
+            if saved_state.get("date") != today:
+                logger.info(f"State file is from {saved_state.get('date')}, not today ({today}) - starting fresh")
+                return False
+
+            # Restore historical data
+            self.daily_state.date = today
+            self.daily_state.total_realized_pnl = saved_state.get("total_realized_pnl", 0.0)
+            self.daily_state.put_stops_triggered = saved_state.get("put_stops_triggered", 0)
+            self.daily_state.call_stops_triggered = saved_state.get("call_stops_triggered", 0)
+            self.daily_state.double_stops = saved_state.get("double_stops", 0)
+            self.daily_state.total_commission = saved_state.get("total_commission", 0.0)
+            self.daily_state.entries_completed = saved_state.get("entries_completed", 0)
+            self.daily_state.entries_failed = saved_state.get("entries_failed", 0)
+            self.daily_state.entries_skipped = saved_state.get("entries_skipped", 0)
+            self.daily_state.total_credit_received = saved_state.get("total_credit_received", 0.0)
+
+            # Restore stopped entries (entries that have no live positions)
+            stopped_entries_restored = 0
+            for entry_data in saved_state.get("entries", []):
+                call_stopped = entry_data.get("call_side_stopped", False)
+                put_stopped = entry_data.get("put_side_stopped", False)
+                call_only = entry_data.get("call_only", False)
+                put_only = entry_data.get("put_only", False)
+
+                # Check if this entry is fully stopped (no live positions)
+                is_fully_stopped = False
+                if call_only and call_stopped:
+                    is_fully_stopped = True
+                elif put_only and put_stopped:
+                    is_fully_stopped = True
+                elif not call_only and not put_only and call_stopped and put_stopped:
+                    is_fully_stopped = True
+
+                if is_fully_stopped:
+                    # Reconstruct the entry from saved state
+                    entry_num = entry_data.get("entry_number")
+                    stopped_entry = TFIronCondorEntry(entry_number=entry_num)
+
+                    # Parse entry_time if it's a string
+                    entry_time_str = entry_data.get("entry_time")
+                    if entry_time_str:
+                        if isinstance(entry_time_str, str):
+                            try:
+                                stopped_entry.entry_time = datetime.fromisoformat(entry_time_str)
+                            except ValueError:
+                                stopped_entry.entry_time = None
+                        else:
+                            stopped_entry.entry_time = entry_time_str
+
+                    stopped_entry.strategy_id = entry_data.get("strategy_id", f"meic_tf_{today.replace('-', '')}_{entry_num:03d}")
+                    stopped_entry.short_call_strike = entry_data.get("short_call_strike", 0)
+                    stopped_entry.long_call_strike = entry_data.get("long_call_strike", 0)
+                    stopped_entry.short_put_strike = entry_data.get("short_put_strike", 0)
+                    stopped_entry.long_put_strike = entry_data.get("long_put_strike", 0)
+                    stopped_entry.call_spread_credit = entry_data.get("call_spread_credit", 0)
+                    stopped_entry.put_spread_credit = entry_data.get("put_spread_credit", 0)
+                    stopped_entry.call_side_stop = entry_data.get("call_side_stop", 0)
+                    stopped_entry.put_side_stop = entry_data.get("put_side_stop", 0)
+                    stopped_entry.call_side_stopped = call_stopped
+                    stopped_entry.put_side_stopped = put_stopped
+                    stopped_entry.is_complete = True
+                    stopped_entry.open_commission = entry_data.get("open_commission", 0)
+                    stopped_entry.close_commission = entry_data.get("close_commission", 0)
+                    stopped_entry.call_only = call_only
+                    stopped_entry.put_only = put_only
+
+                    if entry_data.get("trend_signal"):
+                        try:
+                            stopped_entry.trend_signal = TrendSignal(entry_data["trend_signal"])
+                        except ValueError:
+                            pass
+
+                    self.daily_state.entries.append(stopped_entry)
+                    stopped_entries_restored += 1
+
+            # Update next_entry_index based on restored entries
+            if self.daily_state.entries:
+                max_entry_num = max(e.entry_number for e in self.daily_state.entries)
+                self._next_entry_index = max_entry_num  # Next entry is the one after max
+
+            logger.info(f"FIX #41: Loaded state file history - P&L: ${self.daily_state.total_realized_pnl:.2f}, "
+                       f"entries_completed: {self.daily_state.entries_completed}, "
+                       f"stopped_entries_restored: {stopped_entries_restored}, "
+                       f"next_entry_index: {self._next_entry_index}")
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"Could not load state file history: {e}")
+            return False
+
     def _recover_positions_from_saxo(self) -> bool:
         """
         Override to use MEIC-TF bot name in registry queries and logging.
@@ -1878,12 +1997,16 @@ class MEICTFStrategy(MEICStrategy):
         logger.info("POSITION RECOVERY: Querying Saxo API for source of truth...")
         logger.info("=" * 60)
 
+        today = get_us_market_time().strftime("%Y-%m-%d")
+
         try:
             # Step 1: Get ALL positions from Saxo
             all_positions = self.client.get_positions()
             if not all_positions:
-                logger.info("No positions found in Saxo account - starting fresh")
-                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                logger.info("No positions found in Saxo account")
+                # FIX #41: Still load historical data from state file
+                self._load_state_file_history()
+                self.daily_state.date = today
                 return False
 
             logger.info(f"Found {len(all_positions)} total positions in account")
@@ -1904,8 +2027,10 @@ class MEICTFStrategy(MEICStrategy):
             # Step 3: Get MEIC-TF positions from registry (using class constant)
             my_position_ids = self.registry.get_positions(self.BOT_NAME)
             if not my_position_ids:
-                logger.info(f"No {self.BOT_NAME} positions in registry - starting fresh")
-                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                logger.info(f"No {self.BOT_NAME} positions in registry")
+                # FIX #41: Still load historical data from state file
+                self._load_state_file_history()
+                self.daily_state.date = today
                 return False
 
             logger.info(f"Found {len(my_position_ids)} {self.BOT_NAME} positions in registry")
@@ -1925,7 +2050,9 @@ class MEICTFStrategy(MEICStrategy):
                     except Exception as e:
                         logger.error(f"Registry error unregistering {pos_id}: {e}")
                 self._log_safety_event("REGISTRY_CLEARED", f"All {self.BOT_NAME} positions removed - not found in Saxo")
-                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
+                # FIX #41: Still load historical data from state file
+                self._load_state_file_history()
+                self.daily_state.date = today
                 return False
 
             logger.info(f"Matched {len(meic_tf_positions)} positions to {self.BOT_NAME} in Saxo")
