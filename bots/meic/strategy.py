@@ -1705,7 +1705,7 @@ class MEICStrategy:
             )
             if adjusted_call and adjusted_call != entry.short_call_strike:
                 entry.short_call_strike = adjusted_call
-                entry.long_call_strike = adjusted_call + self.spread_width
+                entry.long_call_strike = adjusted_call + dynamic_spread_width
                 logger.info(f"MKT-007: {call_msg}")
 
             # Check short put liquidity (move closer to ATM if illiquid)
@@ -1715,7 +1715,7 @@ class MEICStrategy:
             )
             if adjusted_put and adjusted_put != entry.short_put_strike:
                 entry.short_put_strike = adjusted_put
-                entry.long_put_strike = adjusted_put - self.spread_width
+                entry.long_put_strike = adjusted_put - dynamic_spread_width
                 logger.info(f"MKT-007: {put_msg}")
 
             # MKT-008: Check long wing liquidity and reduce spread width if needed
@@ -5704,10 +5704,11 @@ class MEICStrategy:
                 if spread_percent < MAX_BID_ASK_SPREAD_PERCENT_SKIP:
                     # Found liquid strike
                     if long_strike != original_long_strike:
+                        original_spread = abs(original_long_strike - short_strike)
                         new_spread = abs(long_strike - short_strike)
                         logger.info(
                             f"MKT-008: Adjusted long {put_call} {original_long_strike} -> {long_strike} "
-                            f"(spread width {current_spread:.0f} -> {new_spread:.0f} pts, "
+                            f"(spread width {original_spread:.0f} -> {new_spread:.0f} pts, "
                             f"bid=${bid:.2f}, ask=${ask:.2f}, {spread_percent:.1f}%)"
                         )
                         return long_strike, True
