@@ -2009,10 +2009,10 @@ class MEICStrategy:
             if bid > 0:
                 spread_percent = (spread / bid) * 100
                 if spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_SKIP:
-                    logger.warning(f"  ORDER-006: Spread {spread_percent:.1f}% too wide, skipping attempt")
+                    logger.warning(f"  ORDER-006: Spread {spread_percent:.1f}% too wide (bid=${bid:.2f}, ask=${ask:.2f}), skipping attempt")
                     continue
                 elif spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_WARNING:
-                    logger.warning(f"  ORDER-006: Wide spread warning: {spread_percent:.1f}%")
+                    logger.warning(f"  ORDER-006: Wide spread warning: {spread_percent:.1f}% (bid=${bid:.2f}, ask=${ask:.2f})")
 
             # ORDER-007: Track expected price for slippage monitoring
             expected_price = 0.0
