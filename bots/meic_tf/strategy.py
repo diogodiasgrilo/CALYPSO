@@ -660,8 +660,22 @@ class MEICTFStrategy(MEICStrategy):
         """
         Calculate stop loss levels for trend-following entries.
 
-        For one-sided entries, stop = credit received for that side.
-        For full ICs, uses parent's logic (stop = total credit).
+        FIX #40 (2026-02-06): For one-sided entries, stop = 2× credit received.
+
+        PROBLEM: Previously used stop = credit, but spread_value (cost-to-close)
+        approximately equals credit at entry time (due to bid-ask spread, mid prices
+        are slightly higher than fill prices). This caused immediate stop triggers
+        ~10 seconds after entry when spread_value >= stop_level became true.
+
+        SOLUTION: Use 2× credit as stop level for one-sided entries to match the
+        effective behavior of full ICs:
+        - Full IC: stop_level = total_credit, each side's value ≈ total_credit/2
+          → Each side has ~2× headroom before stop
+        - One-sided: stop_level = 2 × single_side_credit
+          → Same ~2× headroom as full ICs
+
+        This means: Stop triggers when cost-to-close = 2× credit received,
+        which equals P&L = -credit (you've lost what you collected).
 
         Args:
             entry: TFIronCondorEntry to calculate stops for
@@ -675,18 +689,22 @@ class MEICTFStrategy(MEICStrategy):
                 logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
                 credit = MIN_STOP_LEVEL
 
+            # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
+            # This prevents immediate false stop triggers from bid-ask spread
+            base_stop = credit * 2
+
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
                 if credit > min_credit_for_meic_plus:
-                    stop_level = credit - self.meic_plus_reduction
+                    stop_level = base_stop - self.meic_plus_reduction
                 else:
-                    stop_level = credit
+                    stop_level = base_stop
             else:
-                stop_level = credit
+                stop_level = base_stop
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = 0  # No put side
-            logger.info(f"Stop level for call spread: ${stop_level:.2f}")
+            logger.info(f"Stop level for call spread: ${stop_level:.2f} (2× credit ${credit:.2f})")
 
         elif entry.put_only:
             # Only put spread placed
@@ -695,18 +713,22 @@ class MEICTFStrategy(MEICStrategy):
                 logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
                 credit = MIN_STOP_LEVEL
 
+            # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
+            # This prevents immediate false stop triggers from bid-ask spread
+            base_stop = credit * 2
+
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
                 if credit > min_credit_for_meic_plus:
-                    stop_level = credit - self.meic_plus_reduction
+                    stop_level = base_stop - self.meic_plus_reduction
                 else:
-                    stop_level = credit
+                    stop_level = base_stop
             else:
-                stop_level = credit
+                stop_level = base_stop
 
             entry.put_side_stop = stop_level
             entry.call_side_stop = 0  # No call side
-            logger.info(f"Stop level for put spread: ${stop_level:.2f}")
+            logger.info(f"Stop level for put spread: ${stop_level:.2f} (2× credit ${credit:.2f})")
 
         else:
             # Full IC - use parent's logic
@@ -1657,43 +1679,60 @@ class MEICTFStrategy(MEICStrategy):
         # CRITICAL SAFETY CHECK: Prevent zero stop levels
         MIN_STOP_LEVEL = 50.0
 
-        # For one-sided entries, use the single side's credit for stop
-        # BUG FIX: Apply MEIC+ reduction consistently (was missing for one-sided entries)
+        # FIX #40 (2026-02-06): For one-sided entries, use 2× credit for stop
+        # This matches _calculate_stop_levels_tf behavior and prevents immediate false triggers
+        # due to bid-ask spread making spread_value slightly higher than credit at entry
         if entry.call_only:
-            credit_for_stop = entry.call_spread_credit
-            if credit_for_stop < MIN_STOP_LEVEL:
+            credit = entry.call_spread_credit
+            if credit < MIN_STOP_LEVEL:
                 logger.critical(
                     f"Recovery CRITICAL: Entry #{entry.entry_number} (call-only) has low credit "
-                    f"(${credit_for_stop:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+                    f"(${credit:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
                 )
-                credit_for_stop = MIN_STOP_LEVEL
+                credit = MIN_STOP_LEVEL
+
+            # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
+            base_stop = credit * 2
 
             # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_tf behavior)
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if credit_for_stop > min_credit_for_meic_plus:
-                    credit_for_stop = credit_for_stop - self.meic_plus_reduction
+                if credit > min_credit_for_meic_plus:
+                    stop_level = base_stop - self.meic_plus_reduction
+                else:
+                    stop_level = base_stop
+            else:
+                stop_level = base_stop
 
-            entry.call_side_stop = credit_for_stop
+            entry.call_side_stop = stop_level
             entry.put_side_stop = 0  # No put side to monitor
+            logger.info(f"Recovery: Call-only stop = ${stop_level:.2f} (2× credit ${credit:.2f})")
 
         elif entry.put_only:
-            credit_for_stop = entry.put_spread_credit
-            if credit_for_stop < MIN_STOP_LEVEL:
+            credit = entry.put_spread_credit
+            if credit < MIN_STOP_LEVEL:
                 logger.critical(
                     f"Recovery CRITICAL: Entry #{entry.entry_number} (put-only) has low credit "
-                    f"(${credit_for_stop:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+                    f"(${credit:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
                 )
-                credit_for_stop = MIN_STOP_LEVEL
+                credit = MIN_STOP_LEVEL
+
+            # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
+            base_stop = credit * 2
 
             # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_tf behavior)
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if credit_for_stop > min_credit_for_meic_plus:
-                    credit_for_stop = credit_for_stop - self.meic_plus_reduction
+                if credit > min_credit_for_meic_plus:
+                    stop_level = base_stop - self.meic_plus_reduction
+                else:
+                    stop_level = base_stop
+            else:
+                stop_level = base_stop
 
-            entry.put_side_stop = credit_for_stop
+            entry.put_side_stop = stop_level
             entry.call_side_stop = 0  # No call side to monitor
+            logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (2× credit ${credit:.2f})")
         else:
             # Full IC or stopped entry - use total credit per side
             if total_credit < MIN_STOP_LEVEL:
