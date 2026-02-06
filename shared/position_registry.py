@@ -324,6 +324,26 @@ class PositionRegistry:
             return registry["positions"][position_id]["bot_name"]
         return None
 
+    def get_position_info(self, position_id: str) -> Optional[Dict]:
+        """
+        Get full registration info for a specific position.
+
+        Fix #45: Added to support merged position handling during stop losses.
+        Returns the complete registration data including metadata (which may
+        contain shared_entries list for merged positions).
+
+        Args:
+            position_id: Saxo PositionId
+
+        Returns:
+            Dict with bot_name, strategy_id, registered_at, metadata,
+            or None if not registered.
+        """
+        registry = self._read_registry()
+        if position_id in registry["positions"]:
+            return registry["positions"][position_id]
+        return None
+
     def get_position_details(self, position_id: str) -> Optional[Dict]:
         """
         Get full registration details for a position.

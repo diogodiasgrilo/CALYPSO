@@ -2967,9 +2967,12 @@ class MEICStrategy:
         else:
             # EMERGENCY-001: Close positions with enhanced retry logic and spread validation
             # FIX #42: Collect fill prices from each leg
+            # Fix #45: Pass entry_number for merged position handling
             for pos_id, leg_name, uic in positions_to_close:
                 if pos_id:
-                    _, fill_price = self._close_position_with_retry(pos_id, leg_name, uic=uic)
+                    _, fill_price = self._close_position_with_retry(
+                        pos_id, leg_name, uic=uic, entry_number=entry.entry_number
+                    )
                     if fill_price is not None:
                         # Short leg: we BUY to close (cost us money)
                         # Long leg: we SELL to close (gives us money back)
@@ -3039,7 +3042,9 @@ class MEICStrategy:
 
         return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${stop_level:.2f})"
 
-    def _close_position_with_retry(self, position_id: str, leg_name: str, uic: int = None) -> Tuple[bool, Optional[float]]:
+    def _close_position_with_retry(
+        self, position_id: str, leg_name: str, uic: int = None, entry_number: int = None
+    ) -> Tuple[bool, Optional[float]]:
         """
         EMERGENCY-001: Close a position with enhanced retry logic and spread validation.
 
@@ -3049,6 +3054,7 @@ class MEICStrategy:
         3. Uses progressive retry with escalating alerts
         4. Tracks slippage for monitoring
         5. FIX #42 (2026-02-05): Captures actual fill price for accurate P&L
+        6. Fix #45 (2026-02-06): Handles merged positions (multiple entries at same strike)
 
         CRITICAL FIX (2026-02-03): Saxo's DELETE /trade/v2/positions/{id} endpoint
         returns 404 for SPX options. Must use place_emergency_order with ToClose instead.
@@ -3057,6 +3063,7 @@ class MEICStrategy:
             position_id: Saxo position ID
             leg_name: Name for logging (e.g., "short_call", "long_put")
             uic: Option UIC for spread checking (required for placing close order)
+            entry_number: Fix #45 - Entry number being closed (for merged position handling)
 
         Returns:
             Tuple of (success: bool, fill_price: Optional[float])
@@ -3067,6 +3074,22 @@ class MEICStrategy:
         if not uic:
             logger.error(f"EMERGENCY-001: Cannot close {leg_name} without UIC!")
             return False, None
+
+        # Fix #45: Check if this is a merged position (shared across multiple entries)
+        is_shared, shared_entries = self._is_position_shared(position_id)
+        amount_before = None
+        is_partial_close = False
+
+        if is_shared:
+            # Get current position amount before closing
+            amount_before = self._get_position_amount(position_id)
+            if amount_before is not None:
+                # This will be a partial close - only close 1 contract of the merged position
+                is_partial_close = True
+                logger.info(
+                    f"Fix #45: Position {position_id} is shared across entries {shared_entries}, "
+                    f"Amount={amount_before}. Performing partial close for Entry #{entry_number}"
+                )
 
         # Determine direction: short positions need BUY to close, long positions need SELL to close
         if leg_name.startswith("short"):
@@ -3107,12 +3130,23 @@ class MEICStrategy:
                     logger.info(f"EMERGENCY-001: Close order placed for {leg_name}: order {order_id}")
 
                     # SAFETY-024: Verify position is actually closed after order placement
+                    # Fix #45: Pass partial close info for merged position verification
                     time.sleep(1.5)  # Wait for order to fill
-                    if self._verify_position_closed(position_id, leg_name, uic):
-                        try:
-                            self.registry.unregister(position_id)
-                        except Exception as reg_e:
-                            logger.error(f"Registry error unregistering {position_id}: {reg_e}")
+                    if self._verify_position_closed(
+                        position_id, leg_name, uic,
+                        expected_amount_before=amount_before,
+                        is_partial_close=is_partial_close
+                    ):
+                        # Fix #45: Handle registry update based on whether position is shared
+                        if is_partial_close and entry_number is not None:
+                            # Update registry to remove this entry from shared_entries
+                            self._update_registry_for_partial_close(position_id, entry_number)
+                        else:
+                            # Full close - unregister the entire position
+                            try:
+                                self.registry.unregister(position_id)
+                            except Exception as reg_e:
+                                logger.error(f"Registry error unregistering {position_id}: {reg_e}")
 
                         # FIX #42 (2026-02-05): Get actual fill price from activities
                         fill_price = self._get_close_fill_price(order_id, uic, leg_name)
@@ -3226,7 +3260,132 @@ class MEICStrategy:
             logger.error(f"EMERGENCY-001: Error checking spread for UIC {uic}: {e}")
             return (True, 0.0)  # Proceed on error
 
-    def _verify_position_closed(self, position_id: str, leg_name: str, uic: int) -> bool:
+    def _is_position_shared(self, position_id: str) -> Tuple[bool, List[int]]:
+        """
+        Fix #45: Check if a position is shared across multiple entries.
+
+        When two entries have options at the same strike, Saxo merges them into
+        a single position with Amount=-2. This function checks the registry
+        metadata to determine if a position is shared.
+
+        Args:
+            position_id: Saxo position ID to check
+
+        Returns:
+            Tuple of (is_shared: bool, shared_entries: List[int])
+            - is_shared: True if position has multiple entries sharing it
+            - shared_entries: List of entry numbers sharing this position
+        """
+        try:
+            reg_info = self.registry.get_position_info(position_id)
+            if not reg_info:
+                return False, []
+
+            metadata = reg_info.get("metadata", {})
+            shared_entries = metadata.get("shared_entries", [])
+
+            if shared_entries and len(shared_entries) > 1:
+                return True, shared_entries
+            return False, []
+
+        except Exception as e:
+            logger.error(f"Fix #45: Error checking shared position {position_id}: {e}")
+            return False, []
+
+    def _get_position_amount(self, position_id: str) -> Optional[int]:
+        """
+        Fix #45: Get the current Amount for a position from Saxo.
+
+        Args:
+            position_id: Saxo position ID
+
+        Returns:
+            Position amount (negative for shorts), or None if not found
+        """
+        try:
+            positions = self.client.get_positions()
+            for pos in positions:
+                pos_id = str(pos.get("PositionId", ""))
+                if pos_id == str(position_id):
+                    return pos.get("PositionBase", {}).get("Amount")
+            return None
+        except Exception as e:
+            logger.error(f"Fix #45: Error getting position amount for {position_id}: {e}")
+            return None
+
+    def _update_registry_for_partial_close(self, position_id: str, closed_entry_number: int) -> bool:
+        """
+        Fix #45: Update registry when one entry of a shared position is closed.
+
+        When Entry #4 stops out but Entry #5 still has contracts in the same
+        merged position, we need to:
+        1. Remove Entry #4 from the shared_entries list
+        2. Keep the position registered for Entry #5
+        3. If only one entry remains, remove shared_entries metadata
+
+        Args:
+            position_id: Saxo position ID
+            closed_entry_number: Entry number that was stopped out
+
+        Returns:
+            True if registry updated successfully
+        """
+        try:
+            reg_info = self.registry.get_position_info(position_id)
+            if not reg_info:
+                logger.warning(f"Fix #45: Position {position_id} not in registry for partial close update")
+                return False
+
+            metadata = reg_info.get("metadata", {})
+            shared_entries = metadata.get("shared_entries", [])
+
+            if not shared_entries:
+                logger.warning(f"Fix #45: Position {position_id} has no shared_entries metadata")
+                return False
+
+            # Remove the closed entry from shared_entries
+            if closed_entry_number in shared_entries:
+                shared_entries.remove(closed_entry_number)
+                logger.info(f"Fix #45: Removed Entry #{closed_entry_number} from shared_entries, remaining: {shared_entries}")
+
+            # Update registry with new metadata
+            if len(shared_entries) == 1:
+                # Only one entry left - remove shared_entries, update primary entry_number
+                remaining_entry = shared_entries[0]
+                new_metadata = metadata.copy()
+                del new_metadata["shared_entries"]
+                new_metadata["entry_number"] = remaining_entry
+                logger.info(f"Fix #45: Position {position_id} now solely owned by Entry #{remaining_entry}")
+            elif len(shared_entries) > 1:
+                # Still multiple entries - update shared_entries list
+                new_metadata = metadata.copy()
+                new_metadata["shared_entries"] = shared_entries
+                # Update primary entry_number to first remaining entry
+                new_metadata["entry_number"] = shared_entries[0]
+            else:
+                # No entries left - should not happen, but handle gracefully
+                logger.warning(f"Fix #45: No entries left for position {position_id} after removing Entry #{closed_entry_number}")
+                self.registry.unregister(position_id)
+                return True
+
+            # Update the registry entry with new metadata
+            # Note: PositionRegistry doesn't have an update method, so we unregister and re-register
+            bot_name = reg_info.get("bot_name", self.bot_name)
+            strategy_id = reg_info.get("strategy_id", self.strategy_id)
+            self.registry.unregister(position_id)
+            self.registry.register(position_id, bot_name, strategy_id, new_metadata)
+
+            logger.info(f"Fix #45: Updated registry for position {position_id}: {new_metadata}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Fix #45: Error updating registry for partial close: {e}")
+            return False
+
+    def _verify_position_closed(
+        self, position_id: str, leg_name: str, uic: int,
+        expected_amount_before: Optional[int] = None, is_partial_close: bool = False
+    ) -> bool:
         """
         SAFETY-024: Verify that a position was actually closed after placing a close order.
 
@@ -3234,13 +3393,19 @@ class MEICStrategy:
         but the order might get rejected, leaving the position open. We need to verify
         the position is actually gone before marking it as closed.
 
+        Fix #45: Now supports partial closes for merged positions. When two entries
+        share a position (e.g., Amount=-2), closing one entry's contract should reduce
+        Amount to -1, not fully close the position.
+
         Args:
             position_id: Saxo position ID that should be closed
             leg_name: Name for logging
             uic: UIC of the option (for additional verification)
+            expected_amount_before: Fix #45 - Amount before close (e.g., -2 for merged short)
+            is_partial_close: Fix #45 - True if this is a partial close (merged position)
 
         Returns:
-            True if position is confirmed closed, False if still exists
+            True if position is confirmed closed (or partially closed for merged), False otherwise
         """
         try:
             # Check if position still exists in Saxo
@@ -3250,12 +3415,51 @@ class MEICStrategy:
             for pos in positions:
                 pos_id = str(pos.get("PositionId", ""))
                 if pos_id == str(position_id):
-                    # Position still exists
+                    current_amount = pos.get("PositionBase", {}).get("Amount", 0)
+
+                    # Fix #45: For partial closes on merged positions, verify Amount decreased
+                    if is_partial_close and expected_amount_before is not None:
+                        # For shorts: expected_amount_before = -2, after partial close = -1
+                        # Amount should have increased (less negative)
+                        if expected_amount_before < 0:
+                            # Short position: Amount should be closer to 0
+                            expected_amount_after = expected_amount_before + self.contracts_per_entry
+                            if current_amount == expected_amount_after:
+                                logger.info(
+                                    f"Fix #45: Verified partial close on {leg_name}: "
+                                    f"Amount changed from {expected_amount_before} to {current_amount}"
+                                )
+                                return True
+                            else:
+                                logger.warning(
+                                    f"Fix #45: Partial close verification failed for {leg_name}: "
+                                    f"Expected Amount={expected_amount_after}, got {current_amount}"
+                                )
+                                return False
+                        else:
+                            # Long position: Amount should be closer to 0
+                            expected_amount_after = expected_amount_before - self.contracts_per_entry
+                            if current_amount == expected_amount_after:
+                                logger.info(
+                                    f"Fix #45: Verified partial close on {leg_name}: "
+                                    f"Amount changed from {expected_amount_before} to {current_amount}"
+                                )
+                                return True
+                            else:
+                                logger.warning(
+                                    f"Fix #45: Partial close verification failed for {leg_name}: "
+                                    f"Expected Amount={expected_amount_after}, got {current_amount}"
+                                )
+                                return False
+
+                    # Position still exists and not a partial close
                     logger.warning(
-                        f"SAFETY-024: Position {position_id} ({leg_name}) still exists after close order!"
+                        f"SAFETY-024: Position {position_id} ({leg_name}) still exists after close order! "
+                        f"Amount={current_amount}"
                     )
                     return False
 
+            # Position not found - it was fully closed
             # Also check by UIC in case position ID changed
             for pos in positions:
                 pos_uic = pos.get("PositionBase", {}).get("Uic")
