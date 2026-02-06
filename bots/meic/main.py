@@ -390,20 +390,21 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         close_reason = ""
 
                     # POS-004: After-hours settlement reconciliation
-                    # Check on every heartbeat until all 0DTE positions are confirmed settled
-                    # (Saxo settles 0DTE options sometime between 4:00 PM and 7:00 PM EST)
+                    # FIX #39: Check settlement until complete, not just during 4-5 PM window
+                    # Saxo settles 0DTE options anytime between 5 PM - 2 AM ET, so we need to
+                    # keep checking until settlement_complete returns True (all positions cleared)
                     #
                     # IMPORTANT: Daily summary is sent AFTER settlement is confirmed,
                     # not at market close. This ensures accurate final P&L because:
                     # 1. Options expiring worthless show as "open" until settled
-                    # 2. Saxo settles 0DTE between 4:00 PM and 7:00 PM EST
+                    # 2. Saxo settles 0DTE between 4:00 PM and 2:00 AM EST
                     # 3. Final P&L isn't accurate until positions are removed
                     today_date = now_et.date()
-                    if is_after_hours():
+                    if not is_weekend() and daily_summary_sent_date != today_date:
                         settlement_complete = strategy.check_after_hours_settlement()
                         if not settlement_complete:
                             trade_logger.log_event("Settlement pending - positions still open on Saxo")
-                        elif daily_summary_sent_date != today_date:
+                        else:
                             # Settlement complete - NOW send daily summary with accurate P&L
                             trade_logger.log_event("Settlement complete - sending daily summary...")
                             strategy.log_daily_summary()
