@@ -1678,6 +1678,22 @@ class MEICStrategy:
                 entry.long_put_strike = adjusted_put - self.spread_width
                 logger.info(f"MKT-007: {put_msg}")
 
+            # MKT-008: Check long wing liquidity and reduce spread width if needed
+            # Long wings (hedges) can become illiquid as they move far OTM
+            adjusted_long_call, call_adjusted = self._adjust_long_wing_for_liquidity(
+                entry.long_call_strike, entry.short_call_strike,
+                "Call", expiry, is_call=True
+            )
+            if call_adjusted:
+                entry.long_call_strike = adjusted_long_call
+
+            adjusted_long_put, put_adjusted = self._adjust_long_wing_for_liquidity(
+                entry.long_put_strike, entry.short_put_strike,
+                "Put", expiry, is_call=False
+            )
+            if put_adjusted:
+                entry.long_put_strike = adjusted_long_put
+
         logger.info(
             f"Strikes calculated for SPX {spx:.2f}: "
             f"Call {entry.short_call_strike}/{entry.long_call_strike}, "
@@ -5578,6 +5594,100 @@ class MEICStrategy:
         # Could not find liquid strike
         logger.warning(f"MKT-007: Could not find liquid strike for {put_call} near {original_strike}")
         return None, "No liquid strike found"
+
+    def _adjust_long_wing_for_liquidity(
+        self,
+        long_strike: float,
+        short_strike: float,
+        put_call: str,
+        expiry: str,
+        is_call: bool
+    ) -> Tuple[float, bool]:
+        """
+        MKT-008: Adjust long wing strike if illiquid by reducing spread width.
+
+        When the long wing (hedge) is illiquid (100%+ spread), try strikes
+        closer to the short strike until we find liquidity or hit min_spread_width.
+
+        Args:
+            long_strike: Original long wing strike
+            short_strike: Short strike (anchor)
+            put_call: "Call" or "Put"
+            expiry: Expiry date string
+            is_call: True for call side, False for put side
+
+        Returns:
+            Tuple of (adjusted_long_strike, was_adjusted)
+        """
+        original_long_strike = long_strike
+        min_spread_width = self.strategy_config.get("min_spread_width", 25)
+
+        # Calculate adjustment direction (toward short strike)
+        # For calls: long is above short, so decrease to get closer
+        # For puts: long is below short, so increase to get closer
+        adjustment_direction = -1 if is_call else 1
+
+        # Max attempts = (current_spread_width - min_spread_width) / 5
+        current_spread = abs(long_strike - short_strike)
+        max_attempts = int((current_spread - min_spread_width) / ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS)
+        max_attempts = max(0, min(6, max_attempts))  # Cap at 6 attempts
+
+        for attempt in range(max_attempts + 1):
+            # Calculate current spread width
+            current_spread = abs(long_strike - short_strike)
+            if current_spread < min_spread_width:
+                logger.warning(
+                    f"MKT-008: Cannot reduce spread further - "
+                    f"at min_spread_width {min_spread_width}"
+                )
+                break
+
+            # Get option UIC
+            uic = self._get_option_uic(long_strike, put_call, expiry)
+            if not uic:
+                # Strike doesn't exist - try closer
+                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+                continue
+
+            # Check quote for liquidity
+            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+            if not quote or "Quote" not in quote:
+                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+                continue
+
+            bid = quote["Quote"].get("Bid") or 0
+            ask = quote["Quote"].get("Ask") or 0
+
+            # Check if liquid
+            if bid > 0 and ask > 0:
+                spread_percent = ((ask - bid) / bid) * 100 if bid > 0 else float('inf')
+                if spread_percent < MAX_BID_ASK_SPREAD_PERCENT_SKIP:
+                    # Found liquid strike
+                    if long_strike != original_long_strike:
+                        new_spread = abs(long_strike - short_strike)
+                        logger.info(
+                            f"MKT-008: Adjusted long {put_call} {original_long_strike} -> {long_strike} "
+                            f"(spread width {current_spread:.0f} -> {new_spread:.0f} pts, "
+                            f"bid=${bid:.2f}, ask=${ask:.2f}, {spread_percent:.1f}%)"
+                        )
+                        return long_strike, True
+                    return long_strike, False
+                else:
+                    logger.info(
+                        f"MKT-008: Long {put_call} {long_strike} illiquid "
+                        f"(bid=${bid:.2f}, ask=${ask:.2f}, {spread_percent:.1f}%), trying closer"
+                    )
+
+            # Illiquid - try closer to short strike
+            if attempt < max_attempts:
+                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+
+        # Could not find liquid long wing - return original
+        logger.warning(
+            f"MKT-008: Could not find liquid long {put_call} near {original_long_strike}, "
+            f"using original (may fail during order placement)"
+        )
+        return original_long_strike, False
 
     # =========================================================================
     # TIME-001: CLOCK SYNC VALIDATION
