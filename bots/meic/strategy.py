@@ -1591,6 +1591,41 @@ class MEICStrategy:
 
         return f"Entry #{entry_num} failed after {ENTRY_MAX_RETRIES} attempts: {last_error}"
 
+    def _get_vix_adjusted_spread_width(self, vix: float) -> int:
+        """
+        MKT-009: Calculate spread width dynamically based on VIX.
+
+        Higher VIX = more volatility = wings have more value/liquidity = wider spreads OK
+        Lower VIX = less volatility = far OTM wings become worthless = need tighter spreads
+
+        Scaling:
+            VIX >= 20: 50 pts (normal/elevated vol, good liquidity)
+            VIX 15-20: 40 pts (low-medium vol)
+            VIX 10-15: 30 pts (low vol, wings getting illiquid)
+            VIX < 10:  25 pts (very low vol, minimum spread)
+
+        Args:
+            vix: Current VIX level
+
+        Returns:
+            Spread width in points (rounded to 5)
+        """
+        min_spread = self.strategy_config.get("min_spread_width", 25)
+
+        if vix >= 20:
+            spread_width = 50
+        elif vix >= 15:
+            spread_width = 40
+        elif vix >= 10:
+            spread_width = 30
+        else:
+            spread_width = 25
+
+        # Ensure we don't go below min_spread_width
+        spread_width = max(min_spread, spread_width)
+
+        return spread_width
+
     def _calculate_strikes(self, entry: IronCondorEntry) -> bool:
         """
         Calculate iron condor strikes based on current SPX price and VIX.
@@ -1640,19 +1675,24 @@ class MEICStrategy:
         otm_distance = round(otm_distance / 5) * 5  # Round to 5-point strikes
         otm_distance = max(25, min(120, otm_distance))  # Clamp to 25-120 points
 
+        # MKT-009: VIX-adjusted spread width
+        # Higher VIX = more liquidity on wings = can use wider spreads
+        # Lower VIX = wings become worthless/illiquid = need tighter spreads
+        dynamic_spread_width = self._get_vix_adjusted_spread_width(vix)
+
         logger.info(
             f"Strike calculation: VIX={vix:.1f}, target_delta={self.target_delta}, "
             f"vix_factor={vix_factor:.2f}, delta_adj={delta_adjustment:.2f}, "
-            f"otm_distance={otm_distance} pts"
+            f"otm_distance={otm_distance} pts, spread_width={dynamic_spread_width} pts"
         )
 
         # Call side (above current price)
         entry.short_call_strike = rounded_spx + otm_distance
-        entry.long_call_strike = entry.short_call_strike + self.spread_width
+        entry.long_call_strike = entry.short_call_strike + dynamic_spread_width
 
         # Put side (below current price)
         entry.short_put_strike = rounded_spx - otm_distance
-        entry.long_put_strike = entry.short_put_strike - self.spread_width
+        entry.long_put_strike = entry.short_put_strike - dynamic_spread_width
 
         # MKT-007: Check liquidity and adjust strikes if needed
         # Get today's expiry for liquidity check
