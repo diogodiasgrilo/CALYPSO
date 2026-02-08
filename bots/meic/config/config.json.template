@@ -31,6 +31,9 @@
         "max_credit_per_side": 1.75,
         "credit_balance_tolerance": 0.25,
 
+        "_comment_credit_gate": "MKT-011: Skip entry if ESTIMATED credit below this (prevents illiquid trades)",
+        "min_viable_credit_per_side": 0.50,
+
         "_comment_delta": "Delta targeting for strike selection",
         "target_delta": 8,
         "min_delta": 5,

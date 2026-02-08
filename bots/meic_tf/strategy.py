@@ -133,14 +133,21 @@ class MEICTFStrategy(MEICStrategy):
     """
     MEIC-TF (Trend Following Hybrid) Strategy Implementation.
 
-    Extends MEICStrategy with EMA-based trend detection:
+    Extends MEICStrategy with EMA-based trend detection and credit validation:
     - Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars
     - BULLISH: Place PUT spread only (calls are risky in uptrend)
     - BEARISH: Place CALL spread only (puts are risky in downtrend)
     - NEUTRAL: Place full iron condor (standard MEIC behavior)
 
+    Credit Gate (MKT-011):
+    - Estimates credit from quotes BEFORE placing orders
+    - Skips or converts entry if credit < min_viable_credit_per_side
+    - MKT-010 illiquidity check is fallback when quotes unavailable
+
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
+
+    Version: 1.1.0 (2026-02-08)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -289,6 +296,83 @@ class MEICTFStrategy(MEICStrategy):
             return TrendSignal.NEUTRAL
 
     # =========================================================================
+    # MKT-011: Credit Gate for MEIC-TF (one-sided entry support)
+    # =========================================================================
+
+    def _check_credit_gate_tf(self, entry: TFIronCondorEntry) -> Tuple[str, bool]:
+        """
+        MKT-011: Check if estimated credit is above minimum viable threshold.
+
+        Unlike base MEIC which skips entire entry if either side is non-viable,
+        MEIC-TF can convert to one-sided entry when only one side is non-viable.
+
+        Args:
+            entry: TFIronCondorEntry with strikes calculated
+
+        Returns:
+            Tuple of (result, estimation_worked):
+            - result: "proceed", "call_only", "put_only", or "skip"
+            - estimation_worked: True if we got valid quotes, False if estimation failed
+        """
+        estimated_call, estimated_put = self._estimate_entry_credit(entry)
+
+        # If we couldn't estimate credit, signal that estimation failed
+        # MKT-010 will run as fallback
+        if estimated_call == 0.0 and estimated_put == 0.0:
+            logger.warning(
+                f"MKT-011: Could not estimate credit for Entry #{entry.entry_number} - "
+                f"falling back to MKT-010 illiquidity check"
+            )
+            return ("proceed", False)  # estimation_worked = False
+
+        call_viable = estimated_call >= self.min_viable_credit_per_side
+        put_viable = estimated_put >= self.min_viable_credit_per_side
+
+        if call_viable and put_viable:
+            logger.info(
+                f"MKT-011: Credit gate PASSED for Entry #{entry.entry_number}: "
+                f"Call ${estimated_call:.2f}, Put ${estimated_put:.2f} "
+                f"(min: ${self.min_viable_credit_per_side:.2f})"
+            )
+            return ("proceed", True)  # estimation_worked = True
+
+        if not call_viable and not put_viable:
+            logger.warning(
+                f"MKT-011: SKIPPING Entry #{entry.entry_number} - both sides non-viable. "
+                f"Call ${estimated_call:.2f}, Put ${estimated_put:.2f} "
+                f"(min: ${self.min_viable_credit_per_side:.2f})"
+            )
+            self._log_safety_event(
+                "MKT-011_ENTRY_SKIPPED",
+                f"Entry #{entry.entry_number} - call ${estimated_call:.2f}, put ${estimated_put:.2f}"
+            )
+            return ("skip", True)  # estimation_worked = True
+
+        # One side viable, other not - convert to one-sided entry
+        if not call_viable:
+            logger.warning(
+                f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
+                f"(${estimated_call:.2f} < ${self.min_viable_credit_per_side:.2f}) - "
+                f"converting to PUT-only (put ${estimated_put:.2f} is viable)"
+            )
+            self._log_safety_event(
+                "MKT-011_CREDIT_OVERRIDE",
+                f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable → put-only"
+            )
+            return ("put_only", True)  # estimation_worked = True
+        else:
+            logger.warning(
+                f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
+                f"(${estimated_put:.2f} < ${self.min_viable_credit_per_side:.2f}) - "
+                f"converting to CALL-only (call ${estimated_call:.2f} is viable)"
+            )
+            self._log_safety_event(
+                "MKT-011_CREDIT_OVERRIDE",
+                f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable → call-only"
+            )
+            return ("call_only", True)  # estimation_worked = True
+
+    # =========================================================================
     # OVERRIDE: Entry initiation with trend detection
     # =========================================================================
 
@@ -369,52 +453,64 @@ class MEICTFStrategy(MEICStrategy):
                     last_error = "Failed to calculate strikes"
                     continue
 
-                # MKT-010: Override to one-sided entry if a wing is illiquid
-                # Illiquid wing = far OTM = SAFE side to trade
-                # This prevents asymmetric ICs where one side has almost no cushion
-                illiquidity_override = None
-                if entry.call_wing_illiquid and not entry.put_wing_illiquid:
-                    # Call wing illiquid = calls far OTM = call side is SAFE
-                    # Place CALL-only to avoid risky put side
-                    illiquidity_override = "call"
-                    logger.info(
-                        f"MKT-010: Call wing illiquid → overriding to CALL-only "
-                        f"(safe side, was {trend.value})"
-                    )
-                elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
-                    # Put wing illiquid = puts far OTM = put side is SAFE
-                    # Place PUT-only to avoid risky call side
-                    illiquidity_override = "put"
-                    logger.info(
-                        f"MKT-010: Put wing illiquid → overriding to PUT-only "
-                        f"(safe side, was {trend.value})"
-                    )
-                elif entry.call_wing_illiquid and entry.put_wing_illiquid:
-                    # Both wings illiquid = very unusual, skip entry
-                    logger.warning(
-                        f"MKT-010: Both wings illiquid, skipping entry #{entry.entry_number}"
-                    )
-                    last_error = "Both wings illiquid"
-                    continue
+                # MKT-011: Check minimum credit gate before placing orders (primary check)
+                credit_gate_handled = False
+                if not self.dry_run:
+                    gate_result, estimation_worked = self._check_credit_gate_tf(entry)
 
-                # Execute based on trend signal OR illiquidity override
-                if illiquidity_override == "call":
-                    logger.info(f"MKT-010 → placing CALL spread only (illiquidity override)")
-                    entry.call_only = True
-                    if self.dry_run:
-                        success = self._simulate_one_sided_entry(entry, "call")
-                    else:
-                        success = self._execute_call_spread_only(entry)
+                    if gate_result == "skip":
+                        # Both sides non-viable, skip this entry
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        self._next_entry_index += 1
+                        return f"Entry #{entry_num} skipped - both sides below minimum viable credit"
+                    elif gate_result == "call_only":
+                        # Put credit too low, override to call-only
+                        logger.info(f"MKT-011: Put credit non-viable → forcing CALL-only entry")
+                        trend = TrendSignal.BEARISH  # Force bearish to get call-only
+                        credit_gate_handled = True
+                    elif gate_result == "put_only":
+                        # Call credit too low, override to put-only
+                        logger.info(f"MKT-011: Call credit non-viable → forcing PUT-only entry")
+                        trend = TrendSignal.BULLISH  # Force bullish to get put-only
+                        credit_gate_handled = True
+                    elif estimation_worked:
+                        # MKT-011 worked and said proceed - skip MKT-010
+                        credit_gate_handled = True
+                    # else: estimation failed, fall through to MKT-010
 
-                elif illiquidity_override == "put":
-                    logger.info(f"MKT-010 → placing PUT spread only (illiquidity override)")
-                    entry.put_only = True
-                    if self.dry_run:
-                        success = self._simulate_one_sided_entry(entry, "put")
-                    else:
-                        success = self._execute_put_spread_only(entry)
+                # MKT-010: Fallback ONLY when MKT-011 couldn't estimate credit
+                # When one wing is illiquid, that spread has REDUCED width and POOR credit
+                # Trade the OTHER side which has full width and viable credit
+                if not credit_gate_handled and not self.dry_run:
+                    logger.info("MKT-010: Running as fallback (credit estimation failed)")
+                    if entry.call_wing_illiquid and not entry.put_wing_illiquid:
+                        # Call wing illiquid = call spread has reduced width/credit
+                        # Put spread is unaffected = has viable credit
+                        logger.info(
+                            f"MKT-010: Call wing illiquid → "
+                            f"forcing PUT-only (viable credit side, was {trend.value})"
+                        )
+                        trend = TrendSignal.BULLISH  # Force to get put-only
+                    elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
+                        # Put wing illiquid = put spread has reduced width/credit
+                        # Call spread is unaffected = has viable credit
+                        logger.info(
+                            f"MKT-010: Put wing illiquid → "
+                            f"forcing CALL-only (viable credit side, was {trend.value})"
+                        )
+                        trend = TrendSignal.BEARISH  # Force to get call-only
+                    elif entry.call_wing_illiquid and entry.put_wing_illiquid:
+                        # Both wings illiquid = very unusual, skip entry
+                        logger.warning(
+                            f"MKT-010: Both wings illiquid, skipping entry #{entry.entry_number}"
+                        )
+                        last_error = "Both wings illiquid"
+                        continue
 
-                elif trend == TrendSignal.BULLISH:
+                # Execute based on trend signal (may have been overridden by MKT-011 or MKT-010)
+                if trend == TrendSignal.BULLISH:
                     logger.info(f"BULLISH trend → placing PUT spread only")
                     entry.put_only = True
                     if self.dry_run:
@@ -457,15 +553,15 @@ class MEICTFStrategy(MEICStrategy):
 
                     # Send alert with trend/illiquidity info
                     if entry.call_only:
-                        if entry.call_wing_illiquid:
-                            # MKT-010: Call-only due to illiquidity override
-                            position_summary = f"MEIC-TF Entry #{entry_num} [MKT-010]: Call {entry.short_call_strike}/{entry.long_call_strike} (illiq override)"
+                        if entry.put_wing_illiquid:
+                            # MKT-010: Call-only because PUT wing was illiquid (reduced credit)
+                            position_summary = f"MEIC-TF Entry #{entry_num} [MKT-010]: Call {entry.short_call_strike}/{entry.long_call_strike} (put illiq→call)"
                         else:
                             position_summary = f"MEIC-TF Entry #{entry_num} [BEARISH]: Call {entry.short_call_strike}/{entry.long_call_strike}"
                     elif entry.put_only:
-                        if entry.put_wing_illiquid:
-                            # MKT-010: Put-only due to illiquidity override
-                            position_summary = f"MEIC-TF Entry #{entry_num} [MKT-010]: Put {entry.short_put_strike}/{entry.long_put_strike} (illiq override)"
+                        if entry.call_wing_illiquid:
+                            # MKT-010: Put-only because CALL wing was illiquid (reduced credit)
+                            position_summary = f"MEIC-TF Entry #{entry_num} [MKT-010]: Put {entry.short_put_strike}/{entry.long_put_strike} (call illiq→put)"
                         else:
                             position_summary = f"MEIC-TF Entry #{entry_num} [BULLISH]: Put {entry.short_put_strike}/{entry.long_put_strike}"
                     else:
@@ -1159,14 +1255,14 @@ class MEICTFStrategy(MEICStrategy):
                 # Call spread only
                 strike_str = f"C:{entry.short_call_strike}/{entry.long_call_strike}"
                 entry_type = "Call Spread"
-                # MKT-010: Distinguish between trend and illiquidity override
-                trend_tag = "[MKT-010]" if entry.call_wing_illiquid else "[BEARISH]"
+                # MKT-010: Call-only because PUT wing was illiquid (traded viable credit side)
+                trend_tag = "[MKT-010]" if entry.put_wing_illiquid else "[BEARISH]"
             elif is_tf_entry and entry.put_only:
                 # Put spread only
                 strike_str = f"P:{entry.short_put_strike}/{entry.long_put_strike}"
                 entry_type = "Put Spread"
-                # MKT-010: Distinguish between trend and illiquidity override
-                trend_tag = "[MKT-010]" if entry.put_wing_illiquid else "[BULLISH]"
+                # MKT-010: Put-only because CALL wing was illiquid (traded viable credit side)
+                trend_tag = "[MKT-010]" if entry.call_wing_illiquid else "[BULLISH]"
             else:
                 # Full IC (neutral)
                 strike_str = (

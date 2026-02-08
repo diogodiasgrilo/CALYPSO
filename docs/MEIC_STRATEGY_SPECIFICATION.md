@@ -1,9 +1,9 @@
 # MEIC (Multiple Entry Iron Condors) Strategy Specification
 
-**Last Updated:** 2026-02-04
+**Last Updated:** 2026-02-08
 **Purpose:** Complete implementation specification for the MEIC 0DTE trading bot
 **Strategy Creator:** Tammy Chambless (the "Queen of 0DTE")
-**Status:** IMPLEMENTED - v1.2.1 (Zero credit safety + P&L fixes)
+**Status:** IMPLEMENTED - v1.2.3 (Credit gate + Zero credit safety + P&L fixes)
 
 ---
 
@@ -438,6 +438,40 @@ When one side gets stopped and the other expires worthless:
 MEIC_PLUS_ENABLED = True  # Set to True for MEIC+ modification
 MEIC_PLUS_REDUCTION = 0.10  # $0.10 reduction from standard stop
 ```
+
+---
+
+## Pre-Entry Credit Validation (MKT-011)
+
+### What is the Credit Gate?
+
+Before placing any orders, MEIC estimates the expected credit by fetching option quotes. This prevents placing trades in illiquid market conditions where the actual credit would be too low to be viable.
+
+### Credit Gate Logic
+
+| Condition | MEIC Base | MEIC-TF |
+|-----------|-----------|---------|
+| Both sides ≥ $0.50 | Proceed normally | Proceed (trend signal decides) |
+| Call ≥ $0.50, Put < $0.50 | Skip entry | Force CALL-only |
+| Put ≥ $0.50, Call < $0.50 | Skip entry | Force PUT-only |
+| Both < $0.50 | Skip entry | Skip entry |
+
+### Implementation
+
+```python
+# Config option (default $0.50/side = $50 total, matching MIN_STOP_LEVEL)
+min_viable_credit_per_side = 0.50  # In per-contract dollars
+
+# Before placing orders
+estimated_call, estimated_put = self._estimate_entry_credit(entry)
+if estimated_call < min_viable_credit_per_side and estimated_put < min_viable_credit_per_side:
+    logger.warning(f"MKT-011: Skipping entry - both sides non-viable")
+    return
+```
+
+### Why Credit Gate is Important
+
+On Feb 7, 2026, Entry #4's wings were illiquid, resulting in $1.55 credit instead of expected ~$2.50. The credit gate now detects this BEFORE placing orders.
 
 ---
 

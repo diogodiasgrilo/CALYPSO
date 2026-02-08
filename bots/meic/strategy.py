@@ -626,9 +626,9 @@ class MEICStrategy:
     - Independent stop monitoring per IC
     - VIX filtering (skip entries if VIX > max_vix_entry)
     - FOMC blackout (skip all entries on Fed announcement days)
-    - Comprehensive edge case handling (75 cases analyzed)
+    - Comprehensive edge case handling (79 cases analyzed)
 
-    Version: 1.2.0 (2026-02-02)
+    Version: 1.2.3 (2026-02-08)
     """
 
     def __init__(
@@ -695,6 +695,9 @@ class MEICStrategy:
         # So we multiply config values by 100 for consistent comparison
         self.min_credit_per_side = self.strategy_config.get("min_credit_per_side", 1.00) * 100
         self.max_credit_per_side = self.strategy_config.get("max_credit_per_side", 1.75) * 100
+        # MKT-011: Minimum viable credit gate - entries with credit below this are SKIPPED (not just warned)
+        # Default $0.50 per side = $50 total, matching MIN_STOP_LEVEL safety floor
+        self.min_viable_credit_per_side = self.strategy_config.get("min_viable_credit_per_side", 0.50) * 100
         self.target_delta = self.strategy_config.get("target_delta", 8)
         self.min_delta = self.strategy_config.get("min_delta", 5)
         self.max_delta = self.strategy_config.get("max_delta", 15)
@@ -1514,6 +1517,16 @@ class MEICStrategy:
                     last_error = "Failed to calculate strikes"
                     continue
 
+                # MKT-011: Check minimum credit gate before placing orders (live mode only)
+                if not self.dry_run:
+                    gate_passed, gate_reason = self._check_minimum_credit_gate(entry)
+                    if not gate_passed:
+                        # Don't retry if gate fails - it's a deliberate skip
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        return gate_reason
+
                 if self.dry_run:
                     # Simulate entry
                     success = self._simulate_entry(entry)
@@ -1844,6 +1857,155 @@ class MEICStrategy:
                     f"HIGH CREDIT: {side} credit ${credit:.2f} > target ${self.max_credit_per_side:.2f} - "
                     f"Entry #{entry.entry_number} (higher IV environment)"
                 )
+
+    def _estimate_entry_credit(self, entry: IronCondorEntry) -> Tuple[float, float]:
+        """
+        Estimate expected credit per side by fetching quotes BEFORE entry.
+
+        MKT-011: This allows us to check if credit is viable before placing orders.
+
+        Uses mid prices to estimate:
+        - Call spread credit = short_call_mid - long_call_mid
+        - Put spread credit = short_put_mid - long_put_mid
+
+        Args:
+            entry: IronCondorEntry with strikes already calculated
+
+        Returns:
+            Tuple of (estimated_call_credit, estimated_put_credit) in total dollars
+            Returns (0.0, 0.0) if quotes unavailable
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            logger.warning("Could not get expiry for credit estimation")
+            return (0.0, 0.0)
+
+        try:
+            # Get UICs for all options
+            short_call_uic = self._get_option_uic(entry.short_call_strike, "Call", expiry)
+            long_call_uic = self._get_option_uic(entry.long_call_strike, "Call", expiry)
+            short_put_uic = self._get_option_uic(entry.short_put_strike, "Put", expiry)
+            long_put_uic = self._get_option_uic(entry.long_put_strike, "Put", expiry)
+
+            if not all([short_call_uic, long_call_uic, short_put_uic, long_put_uic]):
+                logger.warning("Could not get UICs for all legs - skipping credit estimation")
+                return (0.0, 0.0)
+
+            # Get quotes for all options
+            short_call_quote = self.client.get_quote(short_call_uic, asset_type="StockIndexOption")
+            long_call_quote = self.client.get_quote(long_call_uic, asset_type="StockIndexOption")
+            short_put_quote = self.client.get_quote(short_put_uic, asset_type="StockIndexOption")
+            long_put_quote = self.client.get_quote(long_put_uic, asset_type="StockIndexOption")
+
+            def get_mid(quote) -> float:
+                """Extract mid price from quote."""
+                if not quote or "Quote" not in quote:
+                    return 0.0
+                q = quote["Quote"]
+                bid = q.get("Bid", 0) or 0
+                ask = q.get("Ask", 0) or 0
+                if bid > 0 and ask > 0:
+                    return (bid + ask) / 2
+                return 0.0
+
+            short_call_mid = get_mid(short_call_quote)
+            long_call_mid = get_mid(long_call_quote)
+            short_put_mid = get_mid(short_put_quote)
+            long_put_mid = get_mid(long_put_quote)
+
+            # Estimated net credit per side (in total dollars, × 100 multiplier)
+            # Credit = short - long (we collect on short, pay on long)
+            estimated_call_credit = (short_call_mid - long_call_mid) * 100
+            estimated_put_credit = (short_put_mid - long_put_mid) * 100
+
+            logger.debug(
+                f"Credit estimation for Entry #{entry.entry_number}: "
+                f"Call spread ${estimated_call_credit:.2f} "
+                f"(short ${short_call_mid:.2f} - long ${long_call_mid:.2f}), "
+                f"Put spread ${estimated_put_credit:.2f} "
+                f"(short ${short_put_mid:.2f} - long ${long_put_mid:.2f})"
+            )
+
+            return (estimated_call_credit, estimated_put_credit)
+
+        except Exception as e:
+            logger.warning(f"Credit estimation failed: {e}")
+            return (0.0, 0.0)
+
+    def _check_minimum_credit_gate(self, entry: IronCondorEntry) -> Tuple[bool, str]:
+        """
+        MKT-011: Check if estimated credit is above minimum viable threshold.
+
+        This gate prevents placing entries that would have insufficient premium
+        to make the trade worthwhile. Called BEFORE placing orders.
+
+        Args:
+            entry: IronCondorEntry with strikes calculated
+
+        Returns:
+            Tuple of (should_proceed, reason_if_skipping)
+            - (True, "") if entry should proceed
+            - (False, "reason") if entry should be skipped
+        """
+        estimated_call, estimated_put = self._estimate_entry_credit(entry)
+
+        # If we couldn't estimate credit, proceed with caution (don't block)
+        if estimated_call == 0.0 and estimated_put == 0.0:
+            logger.warning(
+                f"MKT-011: Could not estimate credit for Entry #{entry.entry_number} - "
+                f"proceeding without gate check"
+            )
+            return (True, "")
+
+        # Check each side against minimum viable threshold
+        call_viable = estimated_call >= self.min_viable_credit_per_side
+        put_viable = estimated_put >= self.min_viable_credit_per_side
+
+        if call_viable and put_viable:
+            # Both sides have viable credit - proceed with full IC
+            logger.info(
+                f"MKT-011: Credit gate PASSED for Entry #{entry.entry_number}: "
+                f"Call ${estimated_call:.2f}, Put ${estimated_put:.2f} "
+                f"(min: ${self.min_viable_credit_per_side:.2f})"
+            )
+            return (True, "")
+
+        # At least one side is non-viable
+        if not call_viable and not put_viable:
+            # Both sides below minimum - skip entry entirely
+            reason = (
+                f"MKT-011: SKIPPING Entry #{entry.entry_number} - both sides below minimum viable credit. "
+                f"Call ${estimated_call:.2f}, Put ${estimated_put:.2f} "
+                f"(min: ${self.min_viable_credit_per_side:.2f})"
+            )
+            logger.warning(reason)
+            self._log_safety_event(
+                "MKT-011_ENTRY_SKIPPED",
+                f"Entry #{entry.entry_number} - call ${estimated_call:.2f}, put ${estimated_put:.2f}"
+            )
+            return (False, reason)
+
+        # One side is viable, other is not
+        # In base MEIC, we skip the entry entirely (one-sided entries are MEIC-TF only)
+        if not call_viable:
+            reason = (
+                f"MKT-011: SKIPPING Entry #{entry.entry_number} - call side below minimum viable credit. "
+                f"Call ${estimated_call:.2f} < ${self.min_viable_credit_per_side:.2f} "
+                f"(Put ${estimated_put:.2f} is viable)"
+            )
+        else:
+            reason = (
+                f"MKT-011: SKIPPING Entry #{entry.entry_number} - put side below minimum viable credit. "
+                f"Put ${estimated_put:.2f} < ${self.min_viable_credit_per_side:.2f} "
+                f"(Call ${estimated_call:.2f} is viable)"
+            )
+
+        logger.warning(reason)
+        self._log_safety_event(
+            "MKT-011_ENTRY_SKIPPED",
+            f"Entry #{entry.entry_number} - call ${estimated_call:.2f}, put ${estimated_put:.2f}"
+        )
+        return (False, reason)
 
     def _simulate_entry(self, entry: IronCondorEntry) -> bool:
         """
@@ -3097,10 +3259,36 @@ class MEICStrategy:
         else:
             buy_sell = BuySell.SELL  # Sell the long position
 
+        # Fix #46: Check if we're in "limit orders only" period (after 3:45 PM ET)
+        # Saxo requires limit orders for the final 15 minutes before market close
+        now = get_us_market_time()
+        is_limit_only_period = now.hour == 15 and now.minute >= 45
+
         for attempt in range(EMERGENCY_CLOSE_MAX_ATTEMPTS):
             attempt_num = attempt + 1
 
             try:
+                # Fix #46: Check if position still exists before retrying
+                # This prevents 409 Conflict errors when position is already closed
+                if attempt > 0:
+                    positions = self.client.get_positions()
+                    position_exists = any(
+                        str(p.get("PositionId", "")) == str(position_id)
+                        for p in positions
+                    )
+                    if not position_exists:
+                        logger.info(
+                            f"Fix #46: Position {position_id} ({leg_name}) already closed, "
+                            f"skipping retry"
+                        )
+                        # Position is gone - consider it successfully closed
+                        # We don't have fill price but that's better than infinite retries
+                        try:
+                            self.registry.unregister(position_id)
+                        except Exception:
+                            pass
+                        return True, None
+
                 # EMERGENCY-001: Check spread before closing (if UIC available)
                 if attempt > 0:  # Skip spread check on first attempt
                     spread_ok, spread_pct = self._check_spread_for_emergency_close(uic)
@@ -3111,19 +3299,41 @@ class MEICStrategy:
                         )
                         self._wait_for_spread_normalization(uic, leg_name)
 
+                # Fix #46: Use limit orders near market close
+                order_type = OrderType.MARKET
+                limit_price = None
+
+                if is_limit_only_period:
+                    logger.info(f"Fix #46: In limit-only period, using LIMIT order for {leg_name}")
+                    quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+                    if quote:
+                        quote_data = quote.get("Quote", quote)
+                        if buy_sell == BuySell.BUY:
+                            # Buying to close - use ask price (aggressive)
+                            limit_price = quote_data.get("Ask") or quote_data.get("Mid")
+                        else:
+                            # Selling to close - use bid price (aggressive)
+                            limit_price = quote_data.get("Bid") or quote_data.get("Mid")
+
+                        if limit_price:
+                            order_type = OrderType.LIMIT
+                            logger.info(f"Fix #46: Using LIMIT @ ${limit_price:.2f}")
+
                 # CRITICAL FIX: Use place_emergency_order with ToClose instead of DELETE endpoint
                 # This is how Iron Fly and Delta Neutral successfully close positions
                 logger.info(
-                    f"EMERGENCY-001: Closing {leg_name} via market order "
+                    f"EMERGENCY-001: Closing {leg_name} via {order_type.value} order "
                     f"(UIC={uic}, {buy_sell.value}, amount={self.contracts_per_entry})"
+                    + (f" @ ${limit_price:.2f}" if limit_price else "")
                 )
                 result = self.client.place_emergency_order(
                     uic=uic,
                     asset_type="StockIndexOption",  # SPX options
                     buy_sell=buy_sell,
                     amount=self.contracts_per_entry,
-                    order_type=OrderType.MARKET,
-                    to_open_close="ToClose"
+                    order_type=order_type,
+                    to_open_close="ToClose",
+                    limit_price=limit_price
                 )
                 if result:
                     order_id = result.get('OrderId', 'unknown')

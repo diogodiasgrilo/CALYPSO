@@ -2655,7 +2655,8 @@ class SaxoClient:
         amount: int,
         order_type: OrderType = OrderType.MARKET,
         to_open_close: str = "ToClose",
-        max_retries: int = 3
+        max_retries: int = 3,
+        limit_price: Optional[float] = None
     ) -> Optional[Dict]:
         """
         Place an emergency stop-loss order, BYPASSING the circuit breaker.
@@ -2667,6 +2668,10 @@ class SaxoClient:
         order is more important than preventing additional API load during
         an outage. We'd rather risk API errors than leave a position unprotected.
 
+        Fix #46 (2026-02-08): Near market close (~3:45 PM ET), Saxo only allows
+        limit orders. If we get "only limit orders are allowed" error, we
+        automatically retry with a limit order at aggressive pricing.
+
         Args:
             uic: Instrument UIC
             asset_type: Type of asset
@@ -2675,11 +2680,17 @@ class SaxoClient:
             order_type: Type of order (default Market for stop-loss)
             to_open_close: ToOpen or ToClose (default ToClose for exits)
             max_retries: Number of retry attempts
+            limit_price: Price for LIMIT orders (required if order_type is LIMIT)
 
         Returns:
             dict: Order response with OrderId if successful, None otherwise.
         """
+        import time as time_module
         endpoint = "/trade/v2/orders"
+
+        # Track if we need to switch to limit orders
+        use_limit_order = order_type == OrderType.LIMIT
+        current_limit_price = limit_price
 
         order_data = {
             "AccountKey": self.account_key,
@@ -2694,19 +2705,58 @@ class SaxoClient:
             "ToOpenClose": to_open_close
         }
 
+        # Add limit price if using limit order
+        if use_limit_order and current_limit_price is not None:
+            order_data["OrderPrice"] = current_limit_price
+
         logger.warning(
             f"EMERGENCY ORDER (bypassing circuit breaker): "
             f"{buy_sell.value} {amount} x UIC {uic}"
+            + (f" @ ${current_limit_price:.2f}" if use_limit_order and current_limit_price else "")
         )
 
         # Retry loop with exponential backoff
         for attempt in range(max_retries):
             try:
                 # BYPASS circuit breaker - call API directly
-                response = self._make_emergency_request("POST", endpoint, data=order_data)
+                response, error_info = self._make_emergency_request_with_error(
+                    "POST", endpoint, data=order_data
+                )
+
                 if response:
                     logger.info(f"EMERGENCY order placed successfully: {response.get('OrderId')}")
                     return response
+
+                # Fix #46: Check if we need to switch to limit orders
+                if error_info and "only limit orders are allowed" in error_info.lower():
+                    if not use_limit_order:
+                        logger.warning(
+                            f"Fix #46: Saxo requires limit orders only. "
+                            f"Switching to LIMIT order..."
+                        )
+                        # Fetch current quote for aggressive limit pricing
+                        quote = self.get_quote(uic, asset_type=asset_type)
+                        if quote:
+                            quote_data = quote.get("Quote", quote)
+                            if buy_sell == BuySell.BUY:
+                                # Buying to close - use ask price (aggressive)
+                                current_limit_price = quote_data.get("Ask") or quote_data.get("Mid")
+                            else:
+                                # Selling to close - use bid price (aggressive)
+                                current_limit_price = quote_data.get("Bid") or quote_data.get("Mid")
+
+                            if current_limit_price:
+                                use_limit_order = True
+                                order_data["OrderType"] = OrderType.LIMIT.value
+                                order_data["OrderPrice"] = current_limit_price
+                                logger.info(
+                                    f"Fix #46: Using LIMIT order @ ${current_limit_price:.2f}"
+                                )
+                            else:
+                                logger.error(f"Fix #46: Could not get quote for limit price")
+                        else:
+                            logger.error(f"Fix #46: Could not fetch quote for UIC {uic}")
+                    # Continue to next retry with limit order
 
                 logger.warning(f"Emergency order attempt {attempt + 1}/{max_retries} failed")
 
@@ -2715,10 +2765,9 @@ class SaxoClient:
 
             # Exponential backoff: 1s, 2s, 4s
             if attempt < max_retries - 1:
-                import time
                 backoff = 2 ** attempt
                 logger.info(f"Retrying emergency order in {backoff}s...")
-                time.sleep(backoff)
+                time_module.sleep(backoff)
 
         logger.critical(f"EMERGENCY ORDER FAILED after {max_retries} attempts!")
         return None
@@ -2768,6 +2817,61 @@ class SaxoClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Emergency request error for {endpoint}: {e}")
             return None
+
+    def _make_emergency_request_with_error(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict] = None,
+        data: Optional[Dict] = None
+    ) -> Tuple[Optional[Dict], Optional[str]]:
+        """
+        Make an API request WITHOUT circuit breaker protection.
+        Returns both the response and error info for better error handling.
+
+        Fix #46 (2026-02-08): This version returns error message text so caller
+        can detect specific errors like "only limit orders are allowed".
+
+        Returns:
+            Tuple of (response_dict, error_message)
+            - On success: (response_dict, None)
+            - On failure: (None, error_message_string)
+        """
+        import requests
+
+        # Ensure token is valid (but don't fail if auth fails)
+        if not self._is_token_valid():
+            self.authenticate()
+
+        url = f"{self.base_url}{endpoint}"
+
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=self._get_auth_headers(),
+                params=params,
+                json=data,
+                timeout=30
+            )
+
+            if response.status_code in [200, 201, 202]:
+                return response.json() if response.text else {}, None
+            elif response.status_code == 204:
+                return {}, None
+            else:
+                error_text = response.text or ""
+                logger.error(f"Emergency request failed: {response.status_code} - {error_text}")
+                return None, error_text
+
+        except requests.exceptions.Timeout:
+            error_msg = f"Timeout for {endpoint}"
+            logger.error(f"Emergency request timeout for {endpoint}")
+            return None, error_msg
+        except requests.exceptions.RequestException as e:
+            error_msg = str(e)
+            logger.error(f"Emergency request error for {endpoint}: {e}")
+            return None, error_msg
 
     def place_order_with_retry(
         self,

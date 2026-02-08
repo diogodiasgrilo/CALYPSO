@@ -9,7 +9,7 @@ For detailed edge case analysis, see: docs/DELTA_NEUTRAL_EDGE_CASES.md
 
 =============================================================================
 SAFETY ARCHITECTURE OVERVIEW (60 Edge Cases - 100% Coverage)
-Bot Version: 2.0.4 (Updated 2026-02-01 - Enhanced safety features)
+Bot Version: 2.0.6 (Updated 2026-02-03 - Margin settlement delay, retry logic fixes)
 =============================================================================
 
 1. CIRCUIT BREAKER (strategy.py ~1053-1127)
@@ -333,7 +333,7 @@ SAFETY CHECK ORDER IN run_strategy_check() (~8350+)
 
 =============================================================================
 Last Updated: 2026-02-01
-Bot Version: 2.0.4 (60 edge cases documented, enhanced safety features)
+Bot Version: 2.0.6 (61 edge cases documented, margin settlement delay, retry logic fixes)
 =============================================================================
 
 NEW SAFETY FEATURES (2026-02-01)

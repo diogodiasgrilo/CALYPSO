@@ -1,6 +1,8 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days.
+**Version:** 1.1.0 | **Last Updated:** 2026-02-08
+
+A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
 ## Strategy Overview
 
@@ -34,6 +36,31 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 | BEARISH | CALL spread only | Downtrend → puts risky, calls safe |
 | NEUTRAL | Full iron condor | Range-bound → both sides safe |
 
+### Credit Gate (MKT-011) - NEW in v1.1.0
+
+Before placing any orders, MEIC-TF estimates the expected credit by fetching option quotes:
+
+| Estimated Credit | Action |
+|------------------|--------|
+| Both sides ≥ $0.50 | Proceed as normal (trend signal decides) |
+| Call ≥ $0.50, Put < $0.50 | Force CALL-only entry (ignore trend) |
+| Put ≥ $0.50, Call < $0.50 | Force PUT-only entry (ignore trend) |
+| Both < $0.50 | Skip entry entirely |
+
+**Why?** On Friday Feb 7, Entry #4's wings were illiquid, resulting in $1.55 credit instead of the expected ~$2.50. The credit gate now detects this BEFORE placing orders and either:
+- Converts to one-sided entry (trade the viable side only), or
+- Skips the entry if both sides are non-viable
+
+### Illiquidity Fallback (MKT-010)
+
+If the credit gate can't get valid quotes (rare), it falls back to wing illiquidity flags set during strike calculation:
+
+| Wing Status | Action |
+|-------------|--------|
+| Call wing illiquid | Force PUT-only (put spread has viable credit) |
+| Put wing illiquid | Force CALL-only (call spread has viable credit) |
+| Both illiquid | Skip entry |
+
 ## Configuration
 
 ```json
@@ -59,6 +86,12 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 | `recheck_each_entry` | `true` | Re-check EMAs before each entry |
 | `chart_bars_count` | `50` | Number of 1-min bars to fetch |
 | `chart_horizon_minutes` | `1` | Bar interval (1 = 1 minute) |
+
+### Credit Gate Config (strategy section)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `min_viable_credit_per_side` | `0.50` | MKT-011: Skip/convert if estimated credit below this |
 
 ## Usage
 
@@ -140,6 +173,12 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.1.0** (2026-02-08): Credit gate and illiquidity handling
+  - MKT-011: Pre-entry credit estimation - skips/converts non-viable entries
+  - MKT-010: Illiquidity override - fallback when quotes unavailable
+  - Fixed: Illiquidity logic now trades the VIABLE side (not the illiquid side)
+  - Simplified: MKT-010 is now fallback-only (MKT-011 is primary check)
 
 - **1.0.0** (2026-02-04): Initial implementation
   - EMA 20/40 trend detection

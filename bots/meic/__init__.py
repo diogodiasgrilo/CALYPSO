@@ -19,6 +19,7 @@ Strategy Details:
 - Stop loss: Total credit per side (MEIC+ subtracts configurable amount)
 
 Version History:
+- 1.2.3 (2026-02-08): MKT-011 credit gate - estimates credit before entry, skips non-viable entries
 - 1.2.2 (2026-02-04): Commission tracking - shows gross/net P&L in logs, alerts, daily summary
 - 1.2.1 (2026-02-04): Zero credit safety (STOP-007), P&L double-counting fix, daily summary logging fix
 - 1.2.0 (2026-02-02): VIX-adjusted strike selection, credit validation, code audit fixes

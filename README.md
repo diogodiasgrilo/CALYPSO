@@ -47,7 +47,8 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - **BULLISH** (20 > 40): Place PUT spread only (calls are risky in uptrend)
 - **BEARISH** (20 < 40): Place CALL spread only (puts are risky in downtrend)
 - **NEUTRAL**: Place full iron condor (standard MEIC behavior)
-- Designed to avoid full stop-outs on strong trend days
+- **Credit Gate (MKT-011)**: Estimates credit BEFORE placing orders, skips/converts non-viable entries
+- Designed to avoid full stop-outs on strong trend days and illiquid entries
 
 ---
 
@@ -218,7 +219,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - **[Iron Fly Edge Cases](docs/IRON_FLY_EDGE_CASES.md)** - Risk analysis (63 edge cases)
 - **[Iron Fly Code Audit](docs/IRON_FLY_CODE_AUDIT.md)** - Pre-LIVE comprehensive code review
 - **[MEIC Strategy Spec](docs/MEIC_STRATEGY_SPECIFICATION.md)** - Full MEIC implementation details
-- **[MEIC Edge Cases](docs/MEIC_EDGE_CASES.md)** - Risk analysis (75 edge cases)
+- **[MEIC Edge Cases](docs/MEIC_EDGE_CASES.md)** - Risk analysis (79 edge cases)
 - **[MEIC-TF README](bots/meic_tf/README.md)** - Trend Following MEIC bot details
 - **[Configuration Reference](config/README.md)** - Config file reference
 - **[Token Keeper Service](services/token_keeper/README.md)** - OAuth token refresh service
@@ -309,5 +310,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 3.6.0
-**Last Updated:** 2026-02-05
+**Version:** 3.7.0
+**Last Updated:** 2026-02-08

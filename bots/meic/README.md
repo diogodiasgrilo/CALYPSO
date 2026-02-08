@@ -1,8 +1,8 @@
 # MEIC (Multiple Entry Iron Condors) Trading Bot
 
-**Last Updated:** 2026-02-04
+**Last Updated:** 2026-02-08
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.2.2)
+**Status:** IMPLEMENTED - Production Ready (v1.2.3)
 
 ---
 
@@ -94,6 +94,13 @@ Import from `bots.meic`:
 | **Stop Level Validation** | STOP-007 | Skip stop check if levels < $50 (corrupted data protection) |
 | **Recovery Protection** | STOP-007 | Same safety applied during state recovery from disk |
 
+### Credit Gate (v1.2.3)
+| Feature | Code | Description |
+|---------|------|-------------|
+| **Pre-Entry Credit Check** | MKT-011 | Estimates credit from quotes BEFORE placing orders |
+| **Non-Viable Entry Skip** | MKT-011 | Skips entries where estimated credit < $0.50/side |
+| **Illiquidity Prevention** | MKT-011 | Prevents trades during illiquid market conditions |
+
 ### REST-Only Mode (v1.1.0)
 MEIC uses **REST API only** for all price fetching (no WebSocket streaming). This provides:
 - Guaranteed fresh quotes for every check
@@ -132,6 +139,7 @@ Legs are placed in safe order (longs before shorts):
         "max_delta": 15,
         "min_credit_per_side": 1.00,
         "max_credit_per_side": 1.75,
+        "min_viable_credit_per_side": 0.50,
         "contracts_per_entry": 1,
         "max_vix_entry": 25,
         "max_daily_loss_percent": 2.0,
@@ -146,6 +154,11 @@ Legs are placed in safe order (longs before shorts):
     }
 }
 ```
+
+### New in v1.2.3
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `min_viable_credit_per_side` | 0.50 | MKT-011: Skip entry if ESTIMATED credit below this |
 
 ### New in v1.2.0
 | Parameter | Default | Description |
@@ -185,7 +198,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 ## Documentation
 
 - Full Strategy Spec: [docs/MEIC_STRATEGY_SPECIFICATION.md](../../docs/MEIC_STRATEGY_SPECIFICATION.md)
-- Edge Cases (76): [docs/MEIC_EDGE_CASES.md](../../docs/MEIC_EDGE_CASES.md)
+- Edge Cases (79): [docs/MEIC_EDGE_CASES.md](../../docs/MEIC_EDGE_CASES.md)
 
 ---
 
@@ -193,6 +206,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-02-08 | 1.2.3 | MKT-011: Pre-entry credit gate - estimates credit, skips non-viable entries |
 | 2026-02-04 | 1.2.2 | Added commission tracking - shows gross/net P&L in logs, alerts, daily summary |
 | 2026-02-04 | 1.2.1 | STOP-007: Zero/low credit safety floor (MIN_STOP_LEVEL=$50) |
 | 2026-02-04 | 1.2.1 | Fixed P&L double-counting bug in stop loss tracking |

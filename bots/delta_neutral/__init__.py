@@ -1,8 +1,8 @@
 """
 Delta Neutral Strategy Bot (Brian Terry's Strategy from Theta Profits)
 
-Version: 2.0.4
-Last Updated: 2026-02-01
+Version: 2.0.6
+Last Updated: 2026-02-03
 
 SPY Long Straddle + Weekly Short Strangles with 5-Point Recentering
 
@@ -46,6 +46,15 @@ Safety Features (see config/config.json for limits):
 - emergency_close: Max retries (5), spread normalization wait, max spread % - ORDER-008
 
 Version History:
+- 2.0.6 (2026-02-03): Margin settlement delay and improved retry logic
+  - Fix #24: 3-second delay between close and enter for margin settlement
+  - Fix #25: 1.5-second delay between order retries (prevents 409 conflicts)
+  - Fix #26: Fresh quote retry on invalid (Bid=0/Ask=0) quotes
+  - SHORT_STRANGLE_ONLY recovery state for failed recenter
+  - Abort callbacks for recenter/roll (re-check conditions before retry)
+- 2.0.5 (2026-02-02): Fill price extraction fixes
+  - Use PositionBase.OpenPrice (not PositionView.AverageOpenPrice) for fill prices
+  - Works correctly for both long and short positions
 - 2.0.4 (2026-02-01): Enhanced safety features
   - ORDER-006: Order size validation (max 10 contracts/order, 20 per underlying)
   - ORDER-007: Fill price slippage monitoring (warning at 5%, critical at 15%)
@@ -78,7 +87,7 @@ Version History:
   - Config key standardization
 """
 
-__version__ = "2.0.4"
+__version__ = "2.0.6"
 
 from bots.delta_neutral.strategy import DeltaNeutralStrategy, StrategyState
 

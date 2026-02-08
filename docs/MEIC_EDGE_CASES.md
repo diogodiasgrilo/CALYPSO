@@ -2,9 +2,9 @@
 
 **Analysis Date:** 2026-01-27
 **Analyst:** Claude (Pre-Implementation Analysis)
-**Bot Version:** 1.2.1 (Zero credit safety fix)
+**Bot Version:** 1.2.3 (MKT-011 credit gate)
 **Status:** Living Document - Updated after implementation audit
-**Last Updated:** 2026-02-04
+**Last Updated:** 2026-02-08
 
 ---
 
@@ -12,11 +12,11 @@
 
 This document catalogs all identified edge cases and potential failure scenarios for the MEIC (Multiple Entry Iron Condors) trading bot. Each scenario has been evaluated and implemented.
 
-**Total Scenarios Analyzed:** 77
-**Well-Handled/Resolved:** 76 (100%)
+**Total Scenarios Analyzed:** 79
+**Well-Handled/Resolved:** 79 (100%)
 **Needs Attention:** 0 (0%)
 
-**Note:** Post-implementation audit completed 2026-01-27. **ALL 77 edge cases now resolved** including STOP-007 (zero credit safety) and ORDER-009 (retry delay) added 2026-02-04.
+**Note:** Post-implementation audit completed 2026-01-27. **ALL 79 edge cases now resolved** including MKT-010 (illiquidity fallback) and MKT-011 (credit gate) added 2026-02-08.
 
 ---
 
@@ -356,6 +356,26 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Implementation** | `_parse_entry_times()` checks `is_early_close_day()` and filters to entries before 11:00 AM. See strategy.py:614-623 |
 | **Resolution** | Early close days use EARLY_CLOSE_ENTRY_TIMES (only 10:00 and 10:30 AM entries). |
 
+### 4.10 Wing Illiquidity Fallback (MEIC-TF Only)
+| | |
+|---|---|
+| **ID** | MKT-010 |
+| **Trigger** | Long wing strike has wide bid-ask spread (illiquid) |
+| **Expected Handling** | When credit estimation fails, check illiquidity flags. Trade the side with viable credit (opposite of illiquid wing). |
+| **Risk Level** | ✅ LOW |
+| **Implementation** | In MEIC-TF `_initiate_entry()`, if `credit_gate_handled=False` and `call_wing_illiquid=True`, force PUT-only (viable side). See meic_tf/strategy.py:479-503 |
+| **Resolution** | FIXED - MKT-010 is fallback when MKT-011 can't estimate credit. Trades the viable side, not the illiquid side (bug fixed 2026-02-08). |
+
+### 4.11 Pre-Entry Credit Gate
+| | |
+|---|---|
+| **ID** | MKT-011 |
+| **Trigger** | Entry about to be placed, but market is illiquid or spread widths are unusual |
+| **Expected Handling** | Estimate credit from option quotes BEFORE placing orders. Skip or convert entry if credit non-viable. |
+| **Risk Level** | ✅ LOW |
+| **Implementation** | MEIC: `_check_minimum_credit_gate()` skips entry if either side < $0.50. MEIC-TF: `_check_credit_gate_tf()` can convert to one-sided entry if one side viable. See meic/strategy.py:1935-2008 and meic_tf/strategy.py:295-366 |
+| **Resolution** | FIXED - Pre-entry credit estimation prevents placing orders with non-viable premium. Prevents Friday Entry #4 scenario where $1.55 credit resulted instead of expected ~$2.50. |
+
 ---
 
 ## 5. TIMING/RACE CONDITION ISSUES
@@ -691,14 +711,14 @@ This document catalogs all identified edge cases and potential failure scenarios
 | Connection/API | 6 | 6 | ✅ 100% |
 | Order Execution | 9 | 9 | ✅ 100% |
 | Position State | 7 | 7 | ✅ 100% |
-| Market Conditions | 9 | 9 | ✅ 100% |
+| Market Conditions | 11 | 11 | ✅ 100% |
 | Timing/Race Conditions | 5 | 5 | ✅ 100% |
 | Stop Loss | 7 | 7 | ✅ 100% |
 | Multi-Entry Specific | 6 | 6 | ✅ 100% |
 | Data Integrity | 5 | 5 | ✅ 100% |
 | State Machine | 4 | 4 | ✅ 100% |
 | Alert System | 3 | 3 | ✅ 100% |
-| **TOTAL** | **77** | **77** | **✅ 100% Resolved** |
+| **TOTAL** | **79** | **79** | **✅ 100% Resolved** |
 
 ### Items Resolved in Second Audit (2026-01-27)
 
@@ -770,6 +790,7 @@ This document should be updated:
 
 | Date | Author | Changes |
 |------|--------|---------|
+| 2026-02-08 | Claude | Added MKT-010 (illiquidity fallback) and MKT-011 (credit gate) edge cases - now 77 total |
 | 2026-01-27 | Claude | Initial pre-implementation edge case analysis |
 | 2026-01-27 | Claude | Post-implementation audit - updated all 75 edge cases with resolution status |
 | 2026-01-27 | Claude | **Second audit pass - 100% resolution achieved!** Implemented 7 remaining fixes: pre-entry margin check, market halt detection, strike liquidity adjustment, clock validation, P&L sanity check, alert batching |
