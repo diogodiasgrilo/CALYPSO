@@ -17,6 +17,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
 
 Version History:
+- 1.1.1 (2026-02-09): Hybrid credit gate - respects trend filter in non-NEUTRAL markets
 - 1.1.0 (2026-02-08): MKT-011 credit gate, MKT-010 illiquidity fallback
 - 1.0.0 (2026-02-04): Initial implementation with EMA trend detection
 """

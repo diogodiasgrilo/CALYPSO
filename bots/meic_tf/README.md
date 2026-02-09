@@ -36,30 +36,35 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 | BEARISH | CALL spread only | Downtrend → puts risky, calls safe |
 | NEUTRAL | Full iron condor | Range-bound → both sides safe |
 
-### Credit Gate (MKT-011) - NEW in v1.1.0
+### Credit Gate (MKT-011) - Updated v1.1.1
 
-Before placing any orders, MEIC-TF estimates the expected credit by fetching option quotes:
+Before placing any orders, MEIC-TF estimates the expected credit by fetching option quotes.
 
-| Estimated Credit | Action |
-|------------------|--------|
-| Both sides ≥ $0.50 | Proceed as normal (trend signal decides) |
-| Call ≥ $0.50, Put < $0.50 | Force CALL-only entry (ignore trend) |
-| Put ≥ $0.50, Call < $0.50 | Force PUT-only entry (ignore trend) |
-| Both < $0.50 | Skip entry entirely |
+**Key Design: Trend Filter Takes Priority**
 
-**Why?** On Friday Feb 7, Entry #4's wings were illiquid, resulting in $1.55 credit instead of the expected ~$2.50. The credit gate now detects this BEFORE placing orders and either:
-- Converts to one-sided entry (trade the viable side only), or
-- Skips the entry if both sides are non-viable
+MKT-011 respects the trend filter - it won't force you into a trade that contradicts the trend direction:
+
+| Trend | Preferred Side | If Non-Viable | Action |
+|-------|----------------|---------------|--------|
+| NEUTRAL | Full IC | Call non-viable | Convert to PUT-only ✅ |
+| NEUTRAL | Full IC | Put non-viable | Convert to CALL-only ✅ |
+| NEUTRAL | Full IC | Both non-viable | Skip entry |
+| BULLISH | PUT spread | Put non-viable | **Skip entry** (won't place calls in uptrend) |
+| BEARISH | CALL spread | Call non-viable | **Skip entry** (won't place puts in downtrend) |
+
+**Why this design?** The trend filter exists to protect against directional risk. If the market is trending up (BULLISH), we don't want to sell call spreads - even if they're the only "viable" option. Better to skip the entry than contradict the safety mechanism.
 
 ### Illiquidity Fallback (MKT-010)
 
-If the credit gate can't get valid quotes (rare), it falls back to wing illiquidity flags set during strike calculation:
+If the credit gate can't get valid quotes (rare), it falls back to wing illiquidity flags set during strike calculation. Same trend-respecting logic applies:
 
-| Wing Status | Action |
-|-------------|--------|
-| Call wing illiquid | Force PUT-only (put spread has viable credit) |
-| Put wing illiquid | Force CALL-only (call spread has viable credit) |
-| Both illiquid | Skip entry |
+| Trend | Illiquid Wing | Action |
+|-------|---------------|--------|
+| NEUTRAL | Call wing | Convert to PUT-only |
+| NEUTRAL | Put wing | Convert to CALL-only |
+| BULLISH | Put wing | **Skip entry** (won't place calls) |
+| BEARISH | Call wing | **Skip entry** (won't place puts) |
+| Any | Both wings | Skip entry |
 
 ## Configuration
 
@@ -173,6 +178,12 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.1.1** (2026-02-09): Hybrid credit gate - respects trend filter
+  - MKT-011/MKT-010 now respect trend direction
+  - In trending markets: skip entry if preferred side is non-viable (won't contradict trend)
+  - In NEUTRAL markets: convert to one-sided entry (same as before)
+  - New safety event: MKT-011_TREND_CONFLICT logged when skipping due to trend conflict
 
 - **1.1.0** (2026-02-08): Credit gate and illiquidity handling
   - MKT-011: Pre-entry credit estimation - skips/converts non-viable entries
