@@ -1786,12 +1786,12 @@ class MEICStrategy:
         occupied = set()
         for e in self.daily_state.entries:
             # Only consider entries that are active (not fully stopped)
-            if e.call_stopped and e.put_stopped:
+            if e.call_side_stopped and e.put_side_stopped:
                 continue
             # Add short strikes that are still active
-            if not e.call_stopped and e.short_call_strike:
+            if not e.call_side_stopped and e.short_call_strike:
                 occupied.add(e.short_call_strike)
-            if not e.put_stopped and e.short_put_strike:
+            if not e.put_side_stopped and e.short_put_strike:
                 occupied.add(e.short_put_strike)
         return occupied
 
