@@ -1,8 +1,8 @@
 # MEIC (Multiple Entry Iron Condors) Trading Bot
 
-**Last Updated:** 2026-02-08
+**Last Updated:** 2026-02-09
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.2.3)
+**Status:** IMPLEMENTED - Production Ready (v1.2.4)
 
 ---
 
@@ -100,6 +100,13 @@ Import from `bots.meic`:
 | **Pre-Entry Credit Check** | MKT-011 | Estimates credit from quotes BEFORE placing orders |
 | **Non-Viable Entry Skip** | MKT-011 | Skips entries where estimated credit < $0.50/side |
 | **Illiquidity Prevention** | MKT-011 | Prevents trades during illiquid market conditions |
+
+### Strike Conflict Prevention (v1.2.4)
+| Feature | Code | Description |
+|---------|------|-------------|
+| **Conflict Detection** | MKT-012 | Detects if new long strikes conflict with existing short strikes |
+| **Auto-Adjustment** | MKT-012 | Moves conflicting long strike 5 pts further OTM |
+| **Multi-Entry Safety** | MKT-012 | Prevents "opposite direction" errors in range-bound markets |
 
 ### REST-Only Mode (v1.1.0)
 MEIC uses **REST API only** for all price fetching (no WebSocket streaming). This provides:
@@ -206,6 +213,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-02-09 | 1.2.4 | MKT-012: Strike conflict prevention - adjusts long strikes conflicting with existing shorts |
 | 2026-02-08 | 1.2.3 | MKT-011: Pre-entry credit gate - estimates credit, skips non-viable entries |
 | 2026-02-04 | 1.2.2 | Added commission tracking - shows gross/net P&L in logs, alerts, daily summary |
 | 2026-02-04 | 1.2.1 | STOP-007: Zero/low credit safety floor (MIN_STOP_LEVEL=$50) |

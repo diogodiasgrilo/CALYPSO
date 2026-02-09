@@ -1760,6 +1760,10 @@ class MEICStrategy:
                 # MKT-010: Mark put wing as illiquid (far OTM = safe side)
                 entry.put_wing_illiquid = True
 
+        # Fix #44: Check for strike conflicts with existing entries
+        # Long strikes cannot equal short strikes from other entries
+        self._adjust_for_strike_conflicts(entry)
+
         logger.info(
             f"Strikes calculated for SPX {spx:.2f}: "
             f"Call {entry.short_call_strike}/{entry.long_call_strike}, "
@@ -1767,6 +1771,69 @@ class MEICStrategy:
         )
 
         return True
+
+    def _get_occupied_short_strikes(self) -> set:
+        """
+        Get all short strikes currently in use by active entries.
+
+        Fix #44: Used to prevent new entries from placing long positions
+        at strikes where we already have short positions (Saxo doesn't allow
+        long and short at same strike).
+
+        Returns:
+            Set of strikes currently occupied by short positions
+        """
+        occupied = set()
+        for e in self.daily_state.entries:
+            # Only consider entries that are active (not fully stopped)
+            if e.call_stopped and e.put_stopped:
+                continue
+            # Add short strikes that are still active
+            if not e.call_stopped and e.short_call_strike:
+                occupied.add(e.short_call_strike)
+            if not e.put_stopped and e.short_put_strike:
+                occupied.add(e.short_put_strike)
+        return occupied
+
+    def _adjust_for_strike_conflicts(self, entry: IronCondorEntry):
+        """
+        Adjust long strikes if they conflict with existing short strikes.
+
+        Fix #44: If a new entry's long strike equals an existing entry's short
+        strike, Saxo will reject with "cannot open positions in opposite directions".
+
+        Solution: Move the conflicting long strike further OTM by 5 points.
+        - Long put conflicts: move DOWN (further OTM for puts)
+        - Long call conflicts: move UP (further OTM for calls)
+
+        This slightly increases spread width but maintains protection.
+
+        Args:
+            entry: IronCondorEntry to check and adjust
+        """
+        occupied = self._get_occupied_short_strikes()
+        if not occupied:
+            return  # No existing entries, no conflicts possible
+
+        # Check long call strike
+        original_long_call = entry.long_call_strike
+        while entry.long_call_strike in occupied:
+            entry.long_call_strike += 5  # Move further OTM (up for calls)
+        if entry.long_call_strike != original_long_call:
+            logger.warning(
+                f"MKT-012: Long call {original_long_call} conflicts with existing short strike, "
+                f"adjusted to {entry.long_call_strike}"
+            )
+
+        # Check long put strike
+        original_long_put = entry.long_put_strike
+        while entry.long_put_strike in occupied:
+            entry.long_put_strike -= 5  # Move further OTM (down for puts)
+        if entry.long_put_strike != original_long_put:
+            logger.warning(
+                f"MKT-012: Long put {original_long_put} conflicts with existing short strike, "
+                f"adjusted to {entry.long_put_strike}"
+            )
 
     def _calculate_stop_levels(self, entry: IronCondorEntry):
         """
