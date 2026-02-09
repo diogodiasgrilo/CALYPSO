@@ -232,15 +232,15 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
-### MEIC-TF Bot Details (v1.1.0 - Updated 2026-02-08)
+### MEIC-TF Bot Details (v1.1.1 - Updated 2026-02-09)
 - **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
 - **Structure:** Same as MEIC but with EMA-based entry filtering + credit gate
 - **Key Difference:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
 - **BULLISH (20 > 40):** Place PUT spread only (calls are risky in uptrend)
 - **BEARISH (20 < 40):** Place CALL spread only (puts are risky in downtrend)
 - **NEUTRAL:** Place full iron condor (standard MEIC behavior)
-- **Credit Gate (MKT-011):** Estimates credit from quotes BEFORE placing orders. Skips or converts entry if credit < $0.50/side.
-- **Illiquidity Fallback (MKT-010):** When credit estimation fails, checks wing illiquidity flags and trades the viable side.
+- **Credit Gate (MKT-011):** Estimates credit from quotes BEFORE placing orders. In NEUTRAL markets, converts to one-sided if one side non-viable. In trending markets, skips entry if preferred side non-viable (respects trend filter).
+- **Illiquidity Fallback (MKT-010):** When credit estimation fails, checks wing illiquidity flags. Same trend-respecting logic applies.
 - **State file:** `data/meic_tf_state.json` (separate from MEIC's `meic_state.json`)
 - **Why it exists:** On Feb 4, 2026, pure MEIC had all 6 put sides stopped in a sustained downtrend. MEIC-TF would have detected bearish trend and avoided ~$1,500 in losses.
 
@@ -984,7 +984,7 @@ SCRIPT
 8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
 9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
 10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by MEIC-TF for trend filtering
-11. **MEIC-TF bot:** Running in LIVE mode (v1.1.0, deployed 2026-02-08) - ONLY active trading bot - adds EMA 20/40 trend filter + credit gate (MKT-011)
+11. **MEIC-TF bot:** Running in LIVE mode (v1.1.1, deployed 2026-02-09) - ONLY active trading bot - adds EMA 20/40 trend filter + credit gate (MKT-011) + hybrid trend-respecting logic
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 
@@ -1121,3 +1121,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 41. **Merged Position Stop Loss Closes Wrong Amount and Breaks Registry (Fix #45, 2026-02-06)** - When two entries share the same strike (e.g., Entry #4 and Entry #5 both have short calls at 6950), Saxo merges them into a single position with Amount=-2. When one entry's stop is triggered, the bot was: (1) Closing only 1 contract with `amount=contracts_per_entry`, (2) `_verify_position_closed()` returning False because position still exists with Amount=-1, (3) Retrying 5 times then giving up, (4) `registry.unregister()` removing the position for ALL shared entries, breaking the remaining entry's tracking. Solution: Added `_is_position_shared()` to check registry metadata for `shared_entries`, `_get_position_amount()` to get current Amount before closing, updated `_verify_position_closed()` to verify Amount decreased (not position gone) for partial closes, added `_update_registry_for_partial_close()` to update `shared_entries` metadata, and added `get_position_info()` to PositionRegistry. (Cost: Stop losses on merged positions would fail verification, potentially leaving positions open or breaking registry for remaining entries)
 
 42. **Pre-Entry Credit Estimation Prevents Illiquid Trades (MKT-011, 2026-02-08)** - On Friday Feb 7, Entry #4 placed with illiquid wings resulted in $1.55 credit instead of expected ~$2.50. The entry was placed blindly without checking if credit was viable. Solution: Added `_estimate_entry_credit()` that fetches option quotes BEFORE placing orders and calculates expected credit. Added `_check_minimum_credit_gate()` (MEIC base) and `_check_credit_gate_tf()` (MEIC-TF) to validate credit against `min_viable_credit_per_side` (default $0.50). MEIC skips entry entirely if non-viable; MEIC-TF can convert to one-sided entry if one side is viable. MKT-010 (illiquidity check) becomes fallback-only when MKT-011 can't get quotes. (Cost: Would have prevented ~$100 loss from Friday Entry #4's poor credit)
+
+43. **MKT-011 Must Respect Trend Filter (Fix #43, 2026-02-09)** - Original MKT-011 implementation could override trend direction inappropriately. Example: BULLISH trend + put credit non-viable → old code forced CALL-only, placing calls in an uptrend. This contradicts the trend filter's safety purpose. Solution: Added `original_trend` tracking and hybrid logic: In NEUTRAL markets, convert to one-sided entry (same as before). In BULLISH markets with put non-viable, skip entry entirely (don't place calls that contradict trend). In BEARISH markets with call non-viable, skip entry entirely (don't place puts). New safety event `MKT-011_TREND_CONFLICT` logs when skipping due to trend conflict. Same logic applied to MKT-010 fallback. (Cost: Prevented potential losses from trading against detected trend direction)

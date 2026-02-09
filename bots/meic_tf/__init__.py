@@ -11,7 +11,8 @@ Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars:
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both sides viable: Proceed with trend signal
-- One side non-viable: Force one-sided entry on viable side
+- One side non-viable in NEUTRAL market: Convert to one-sided entry on viable side
+- One side non-viable in trending market: Skip if preferred side is non-viable
 - Both non-viable: Skip entry entirely
 
 Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
