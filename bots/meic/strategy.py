@@ -289,6 +289,15 @@ class IronCondorEntry:
     Structure:
     - Short Call + Long Call = Call Spread (credit)
     - Short Put + Long Put = Put Spread (credit)
+
+    Side Status Tracking (Fix #46, #47):
+    Each side (call/put) can be in one of these states:
+    - **Active**: Position is open and being monitored (default)
+    - **Stopped**: Side was opened but hit stop loss (LOSS)
+    - **Expired**: Side was opened and expired worthless (PROFIT - kept credit)
+    - **Skipped**: Side was never opened (MEIC-TF one-sided entry, NO P&L IMPACT)
+
+    The flags are mutually exclusive - a side can only be in one state at a time.
     """
     entry_number: int  # 1-6
     entry_time: Optional[datetime] = None
@@ -327,8 +336,12 @@ class IronCondorEntry:
 
     # Status tracking
     is_complete: bool = False  # All 4 legs filled
-    call_side_stopped: bool = False  # Call spread was stopped out
-    put_side_stopped: bool = False   # Put spread was stopped out
+    call_side_stopped: bool = False  # Call spread was stopped out (LOSS)
+    put_side_stopped: bool = False   # Put spread was stopped out (LOSS)
+    call_side_expired: bool = False  # Call spread expired worthless (PROFIT - kept credit)
+    put_side_expired: bool = False   # Put spread expired worthless (PROFIT - kept credit)
+    call_side_skipped: bool = False  # Call side was never opened (MEIC-TF one-sided entry)
+    put_side_skipped: bool = False   # Put side was never opened (MEIC-TF one-sided entry)
     strategy_id: str = ""  # For Position Registry tracking
 
     # MKT-010: Wing illiquidity tracking (set by MKT-008 adjustment)
@@ -2982,14 +2995,14 @@ class MEICStrategy:
                     self.registry.unregister(pos_id)
                 except Exception as reg_e:
                     logger.error(f"Registry error unregistering {pos_id}: {reg_e}")
-                self._log_safety_event("NAKED_SHORT_CLOSED", f"{leg_name} position {pos_id} closed successfully")
+                self._log_safety_event("NAKED_SHORT_CLOSED", f"{leg_name} position {pos_id} closed successfully", "Closed")
             else:
                 logger.critical(f"FAILED to close naked short {pos_id}!")
-                self._log_safety_event("NAKED_SHORT_CLOSE_FAILED", f"{leg_name} position {pos_id} - close returned false")
+                self._log_safety_event("NAKED_SHORT_CLOSE_FAILED", f"{leg_name} position {pos_id} - close returned false", "Failed")
                 self._trigger_critical_intervention(f"Cannot close naked short {pos_id}")
         except Exception as e:
             logger.critical(f"Exception closing naked short: {e}")
-            self._log_safety_event("NAKED_SHORT_EXCEPTION", f"{leg_name} position {pos_id} - {str(e)}")
+            self._log_safety_event("NAKED_SHORT_EXCEPTION", f"{leg_name} position {pos_id} - {str(e)}", "Exception")
             self._trigger_critical_intervention(f"Exception closing naked short: {e}")
 
     def _unwind_partial_entry(self, filled_legs: List[Tuple], entry: IronCondorEntry):
@@ -3489,7 +3502,7 @@ class MEICStrategy:
             message=error_msg,
             priority=AlertPriority.CRITICAL
         )
-        self._log_safety_event("EMERGENCY_CLOSE_FAILED", error_msg)
+        self._log_safety_event("EMERGENCY_CLOSE_FAILED", error_msg, "Failed")
         return False, None
 
     def _check_spread_for_emergency_close(self, uic: int) -> Tuple[bool, float]:
@@ -4041,7 +4054,7 @@ class MEICStrategy:
         logger.critical(f"CIRCUIT BREAKER OPEN: {reason}")
 
         # Log safety event for audit trail
-        self._log_safety_event("CIRCUIT_BREAKER_OPEN", reason)
+        self._log_safety_event("CIRCUIT_BREAKER_OPEN", reason, "Bot Halted")
 
         self.alert_service.circuit_breaker(reason, self._consecutive_failures)
 
@@ -4086,7 +4099,7 @@ class MEICStrategy:
         logger.critical(f"CRITICAL INTERVENTION REQUIRED: {reason}")
 
         # Log safety event for audit trail
-        self._log_safety_event("CRITICAL_INTERVENTION", reason)
+        self._log_safety_event("CRITICAL_INTERVENTION", reason, "Manual Action Required")
 
         self.alert_service.send_alert(
             alert_type=AlertType.CRITICAL_INTERVENTION,
@@ -4216,7 +4229,7 @@ class MEICStrategy:
                 entries_by_number = self._recover_from_state_file_uics(all_positions)
                 if not entries_by_number:
                     logger.warning("UIC-based recovery also failed - manual review needed")
-                    self._log_safety_event("RECOVERY_FAILED", "Could not reconstruct entries from positions or UICs")
+                    self._log_safety_event("RECOVERY_FAILED", "Could not reconstruct entries from positions or UICs", "Manual Review Needed")
                     # CRITICAL FIX (2026-02-03): Set date even when returning False
                     self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
                     return False
@@ -4280,9 +4293,13 @@ class MEICStrategy:
                                         "long_call_strike": entry_data.get("long_call_strike", 0),
                                         "short_put_strike": entry_data.get("short_put_strike", 0),
                                         "long_put_strike": entry_data.get("long_put_strike", 0),
-                                        # Preserve stopped flags
+                                        # Preserve stopped/expired/skipped flags
                                         "call_side_stopped": entry_data.get("call_side_stopped", False),
                                         "put_side_stopped": entry_data.get("put_side_stopped", False),
+                                        "call_side_expired": entry_data.get("call_side_expired", False),
+                                        "put_side_expired": entry_data.get("put_side_expired", False),
+                                        "call_side_skipped": entry_data.get("call_side_skipped", False),
+                                        "put_side_skipped": entry_data.get("put_side_skipped", False),
                                         # Commission tracking
                                         "open_commission": entry_data.get("open_commission", 0),
                                         "close_commission": entry_data.get("close_commission", 0),
@@ -4291,23 +4308,32 @@ class MEICStrategy:
                                         "put_only": entry_data.get("put_only", False),
                                         "trend_signal": entry_data.get("trend_signal"),
                                     }
-                                    # FIX #43: Check if this entry is fully stopped (no live positions)
-                                    # For one-sided entries: stopped if placed side is stopped
-                                    # For full IC: stopped if both sides are stopped
+                                    # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
+                                    # A side is "done" if it was stopped OR expired OR skipped
+                                    # Skipped = never opened (MEIC-TF one-sided entry)
+                                    # For one-sided entries: done if placed side is done
+                                    # For full IC: done if both sides are done
                                     call_stopped = entry_data.get("call_side_stopped", False)
                                     put_stopped = entry_data.get("put_side_stopped", False)
+                                    call_expired = entry_data.get("call_side_expired", False)
+                                    put_expired = entry_data.get("put_side_expired", False)
+                                    call_skipped = entry_data.get("call_side_skipped", False)
+                                    put_skipped = entry_data.get("put_side_skipped", False)
                                     call_only = entry_data.get("call_only", False)
                                     put_only = entry_data.get("put_only", False)
 
-                                    is_fully_stopped = False
-                                    if call_only and call_stopped:
-                                        is_fully_stopped = True  # One-sided call entry, call stopped
-                                    elif put_only and put_stopped:
-                                        is_fully_stopped = True  # One-sided put entry, put stopped
-                                    elif not call_only and not put_only and call_stopped and put_stopped:
-                                        is_fully_stopped = True  # Full IC, both sides stopped
+                                    call_done = call_stopped or call_expired or call_skipped
+                                    put_done = put_stopped or put_expired or put_skipped
 
-                                    if is_fully_stopped:
+                                    is_fully_done = False
+                                    if call_only and call_done:
+                                        is_fully_done = True  # One-sided call entry, call done
+                                    elif put_only and put_done:
+                                        is_fully_done = True  # One-sided put entry, put done
+                                    elif not call_only and not put_only and call_done and put_done:
+                                        is_fully_done = True  # Full IC, both sides done
+
+                                    if is_fully_done:
                                         preserved_stopped_entries.append(entry_data)
 
                             logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
@@ -4327,28 +4353,41 @@ class MEICStrategy:
                     entry.call_side_stop = saved["call_stop"]
                     entry.put_side_stop = saved["put_stop"]
 
-                    # Restore stopped flags from state file
+                    # Restore stopped/expired flags from state file
                     # (may be more accurate than reconstruction from positions)
                     if saved.get("call_side_stopped"):
                         entry.call_side_stopped = True
                     if saved.get("put_side_stopped"):
                         entry.put_side_stopped = True
+                    if saved.get("call_side_expired"):
+                        entry.call_side_expired = True
+                    if saved.get("put_side_expired"):
+                        entry.put_side_expired = True
+                    # FIX #47: Also restore skipped flags (for MEIC-TF one-sided entries)
+                    if saved.get("call_side_skipped"):
+                        entry.call_side_skipped = True
+                    if saved.get("put_side_skipped"):
+                        entry.put_side_skipped = True
 
                     # Restore commission tracking
                     entry.open_commission = saved.get("open_commission", 0)
                     entry.close_commission = saved.get("close_commission", 0)
 
-                    # Restore strikes for stopped sides (positions no longer exist in Saxo)
+                    # Restore strikes for stopped/expired/skipped sides (positions no longer exist in Saxo)
                     # Only restore if the strike is 0 (not recovered from Saxo)
-                    if entry.call_side_stopped and entry.short_call_strike == 0:
+                    call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped
+                    put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped
+                    if call_done and entry.short_call_strike == 0:
                         entry.short_call_strike = saved.get("short_call_strike", 0)
                         entry.long_call_strike = saved.get("long_call_strike", 0)
-                        logger.info(f"Entry #{entry.entry_number}: Restored stopped call strikes "
+                        status = "stopped" if entry.call_side_stopped else "expired"
+                        logger.info(f"Entry #{entry.entry_number}: Restored {status} call strikes "
                                    f"(short={entry.short_call_strike}, long={entry.long_call_strike})")
-                    if entry.put_side_stopped and entry.short_put_strike == 0:
+                    if put_done and entry.short_put_strike == 0:
                         entry.short_put_strike = saved.get("short_put_strike", 0)
                         entry.long_put_strike = saved.get("long_put_strike", 0)
-                        logger.info(f"Entry #{entry.entry_number}: Restored stopped put strikes "
+                        status = "stopped" if entry.put_side_stopped else "expired"
+                        logger.info(f"Entry #{entry.entry_number}: Restored {status} put strikes "
                                    f"(short={entry.short_put_strike}, long={entry.long_put_strike})")
 
                     logger.info(f"Entry #{entry.entry_number}: Restored credits from state file "
@@ -4379,9 +4418,13 @@ class MEICStrategy:
                     stopped_entry.call_side_stop = stopped_entry_data.get("call_side_stop", 0)
                     stopped_entry.put_side_stop = stopped_entry_data.get("put_side_stop", 0)
 
-                    # Stopped flags - entry is fully stopped
+                    # Stopped/expired/skipped flags - entry is fully done
                     stopped_entry.call_side_stopped = stopped_entry_data.get("call_side_stopped", False)
                     stopped_entry.put_side_stopped = stopped_entry_data.get("put_side_stopped", False)
+                    stopped_entry.call_side_expired = stopped_entry_data.get("call_side_expired", False)
+                    stopped_entry.put_side_expired = stopped_entry_data.get("put_side_expired", False)
+                    stopped_entry.call_side_skipped = stopped_entry_data.get("call_side_skipped", False)
+                    stopped_entry.put_side_skipped = stopped_entry_data.get("put_side_skipped", False)
                     stopped_entry.is_complete = True
 
                     # Commission
@@ -4443,17 +4486,20 @@ class MEICStrategy:
             # Set state based on recovered positions
             if recovered_entries:
                 # Check if any entries still have active positions
-                # FIX #43: For one-sided entries (MEIC-TF), check the placed side only
+                # FIX #43 + FIX #47: For one-sided entries, check the placed side only
+                # A side is "done" if stopped, expired, or skipped
                 def is_entry_active(entry):
+                    call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped
+                    put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped
                     call_only = getattr(entry, 'call_only', False)
                     put_only = getattr(entry, 'put_only', False)
                     if call_only:
-                        return not entry.call_side_stopped
+                        return not call_done
                     elif put_only:
-                        return not entry.put_side_stopped
+                        return not put_done
                     else:
-                        # Full IC - active if either side is not stopped
-                        return not (entry.call_side_stopped and entry.put_side_stopped)
+                        # Full IC - active if either side is not done
+                        return not (call_done and put_done)
 
                 active_entries = [e for e in recovered_entries if is_entry_active(e)]
                 if active_entries:
@@ -4524,7 +4570,7 @@ class MEICStrategy:
             logger.error(f"Position recovery failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            self._log_safety_event("RECOVERY_ERROR", str(e))
+            self._log_safety_event("RECOVERY_ERROR", str(e), "Error")
             # CRITICAL FIX (2026-02-03): Set date even on exception
             self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
             return False
@@ -5077,15 +5123,83 @@ class MEICStrategy:
                             setattr(entry, f"{leg_name}_uic", None)  # Also clear UIC
                             logger.debug(f"  Cleared {leg_name} position_id and uic from entry #{entry.entry_number}")
 
-                # Mark sides as stopped if all legs are gone
+                # FIX #43 (2026-02-10): Track expired positions and add their credit to realized P&L
+                # BUG: Previously, when positions expired worthless at settlement, the code just
+                # marked them as "stopped" without adding the credit (which is now profit) to
+                # total_realized_pnl. This caused Feb 9 to show -$360 when actual P&L was +$170.
+                #
+                # The fix distinguishes between:
+                # - STOPPED: Side was closed during the day due to stop loss (LOSS - already tracked)
+                # - EXPIRED: Side expired worthless at settlement (PROFIT - credit is kept)
+                expired_call_credit = 0.0
+                expired_put_credit = 0.0
+
                 for entry in self.daily_state.entries:
-                    if not entry.short_call_position_id and not entry.long_call_position_id:
-                        entry.call_side_stopped = True
-                    if not entry.short_put_position_id and not entry.long_put_position_id:
-                        entry.put_side_stopped = True
-                    # Mark complete if both sides done
-                    if entry.call_side_stopped and entry.put_side_stopped:
-                        entry.is_complete = True
+                    # Check call side - only process if it had positions (not a put-only entry)
+                    call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
+                    call_positions_gone = not entry.short_call_position_id and not entry.long_call_position_id
+
+                    if call_had_positions and call_positions_gone:
+                        # Only mark as expired if it wasn't already stopped, expired, OR skipped
+                        if not entry.call_side_stopped and not entry.call_side_expired and not entry.call_side_skipped:
+                            # Call side EXPIRED (not stopped) - credit is profit!
+                            entry.call_side_expired = True
+                            credit = entry.call_spread_credit
+                            if credit > 0:
+                                expired_call_credit += credit
+                                logger.info(
+                                    f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
+                                    f"+${credit:.2f} profit (credit kept)"
+                                )
+
+                    # Check put side - only process if it had positions (not a call-only entry)
+                    put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
+                    put_positions_gone = not entry.short_put_position_id and not entry.long_put_position_id
+
+                    if put_had_positions and put_positions_gone:
+                        # Only mark as expired if it wasn't already stopped, expired, OR skipped
+                        if not entry.put_side_stopped and not entry.put_side_expired and not entry.put_side_skipped:
+                            # Put side EXPIRED (not stopped) - credit is profit!
+                            entry.put_side_expired = True
+                            credit = entry.put_spread_credit
+                            if credit > 0:
+                                expired_put_credit += credit
+                                logger.info(
+                                    f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
+                                    f"+${credit:.2f} profit (credit kept)"
+                                )
+
+                    # Mark complete if both sides done (stopped OR expired)
+                    # For one-sided entries (MEIC-TF), check the appropriate side
+                    call_only = getattr(entry, 'call_only', False)
+                    put_only = getattr(entry, 'put_only', False)
+
+                    if call_only:
+                        # Call-only entry - done when call side is stopped or expired
+                        if entry.call_side_stopped or entry.call_side_expired:
+                            entry.is_complete = True
+                    elif put_only:
+                        # Put-only entry - done when put side is stopped or expired
+                        if entry.put_side_stopped or entry.put_side_expired:
+                            entry.is_complete = True
+                    else:
+                        # Full IC - done when both sides are done (stopped/expired/skipped)
+                        call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped or not call_had_positions
+                        put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped or not put_had_positions
+                        if call_done and put_done:
+                            entry.is_complete = True
+
+                # Add expired credits to realized P&L
+                total_expired_credit = expired_call_credit + expired_put_credit
+                if total_expired_credit > 0:
+                    self.daily_state.total_realized_pnl += total_expired_credit
+                    logger.info(
+                        f"POS-004: Added ${total_expired_credit:.2f} from expired positions to realized P&L "
+                        f"(Calls: ${expired_call_credit:.2f}, Puts: ${expired_put_credit:.2f})"
+                    )
+                    logger.info(
+                        f"POS-004: Updated total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f}"
+                    )
 
                 # Save updated state
                 self._save_state_to_disk()
@@ -5102,7 +5216,8 @@ class MEICStrategy:
                 # Log safety event
                 self._log_safety_event(
                     "SETTLEMENT_COMPLETE",
-                    f"All {total_settled} positions confirmed settled after market close"
+                    f"All {total_settled} positions confirmed settled after market close",
+                    "Complete"
                 )
 
                 return True
@@ -5173,7 +5288,7 @@ class MEICStrategy:
         except Exception as e:
             logger.error(f"Failed to log stop loss: {e}")
 
-    def _log_safety_event(self, event_type: str, details: str):
+    def _log_safety_event(self, event_type: str, details: str, result: str = "Acknowledged"):
         """
         Log safety events to Google Sheets for audit trail.
 
@@ -5183,6 +5298,7 @@ class MEICStrategy:
         Args:
             event_type: Type of safety event (e.g., "CIRCUIT_BREAKER_OPEN", "NAKED_SHORT_DETECTED")
             details: Human-readable description of the event
+            result: Outcome of the event (default: "Acknowledged")
         """
         try:
             self.trade_logger.log_safety_event({
@@ -5190,10 +5306,11 @@ class MEICStrategy:
                 "event_type": event_type,
                 "bot": "MEIC",
                 "state": self.state.value,
-                "spx_price": self.current_price,
+                "spy_price": self.current_price,  # Logger expects 'spy_price' not 'spx_price'
                 "vix": self.current_vix,
                 "active_entries": len(self.daily_state.active_entries),
-                "details": details
+                "description": details,  # Logger expects 'description' not 'details'
+                "result": result
             })
             logger.info(f"Safety event logged: {event_type} - {details}")
         except Exception as e:
@@ -5694,6 +5811,10 @@ class MEICStrategy:
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,
                     "put_side_stopped": entry.put_side_stopped,
+                    "call_side_expired": entry.call_side_expired,
+                    "put_side_expired": entry.put_side_expired,
+                    "call_side_skipped": entry.call_side_skipped,
+                    "put_side_skipped": entry.put_side_skipped,
                     # Commission tracking
                     "open_commission": entry.open_commission,
                     "close_commission": entry.close_commission,

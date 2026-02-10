@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.1.1 | **Last Updated:** 2026-02-09
+**Version:** 1.1.2 | **Last Updated:** 2026-02-10
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -178,6 +178,12 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.1.2** (2026-02-10): P&L tracking fixes
+  - Fix #46: Expired positions now correctly add credit to realized P&L
+  - Fix #47: Non-opened sides now marked as "skipped" instead of "stopped"
+  - Proper distinction between stopped (loss), expired (profit), and skipped (never opened)
+  - Fixes Feb 9 P&L discrepancy (-$360 reported vs +$170 actual)
 
 - **1.1.1** (2026-02-09): Hybrid credit gate - respects trend filter
   - MKT-011/MKT-010 now respect trend direction

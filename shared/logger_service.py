@@ -193,6 +193,8 @@ class GoogleSheetsLogger:
         # Strategy type determines column structure
         # "iron_fly" = Iron Fly 0DTE strategy (no theta tracking, different metrics)
         # "delta_neutral" = Delta Neutral strategy (straddle + strangle, theta tracking)
+        # "meic" = Multiple Entry Iron Condors (Tammy Chambless strategy)
+        # "meic_tf" = MEIC + Trend Following (EMA-based direction filter)
         self.strategy_type = self.config.get("strategy_type", "delta_neutral")
 
         # Optional worksheets - only created for specific strategies
@@ -342,14 +344,14 @@ class GoogleSheetsLogger:
                         "Delta", "Entry Price", "Current Price", "P&L ($)", "P&L (EUR)",
                         "Campaign #", "Premium Collected", "Status"
                     ]
-                elif self.strategy_type == "meic":
-                    # MEIC: Multiple iron condors with 4 legs each
-                    worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=16)
+                elif self.strategy_type in ("meic", "meic_tf"):
+                    # MEIC/MEIC-TF: Multiple iron condors with 4 legs each
+                    worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=17)
                     headers = [
                         "Last Updated", "Entry #", "Leg Type", "Strike", "Expiry",
                         "Entry Credit", "Current Value", "P&L ($)", "P&L (EUR)",
                         "Stop Level", "Distance to Stop ($)", "Stop Triggered",
-                        "Side", "Spread Width", "Position ID", "Status"
+                        "Side", "Spread Width", "Position ID", "Trend Signal", "Status"
                     ]
                 else:
                     # Delta Neutral: Theta tracking for weekly positions
@@ -401,6 +403,19 @@ class GoogleSheetsLogger:
                         "Total Credit ($)", "Call Stops", "Put Stops", "Double Stops",
                         "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
                         "Win Rate (%)", "Breakeven Days", "Notes"
+                    ]
+                elif self.strategy_type == "meic_tf":
+                    # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=19)
+                    headers = [
+                        "Date", "SPX Close", "VIX",
+                        "Entries Completed", "Entries Skipped",
+                        "Full ICs", "One-Sided Entries",
+                        "Total Credit ($)", "Call Stops", "Put Stops", "Double Stops",
+                        "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
+                        "Win Rate (%)",
+                        "Bullish Signals", "Bearish Signals", "Neutral Signals",
+                        "Notes"
                     ]
                 else:
                     # Delta Neutral: Theta tracking for weekly strategy
@@ -523,6 +538,29 @@ class GoogleSheetsLogger:
                         # Risk
                         "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)"
                     ]
+                elif self.strategy_type == "meic_tf":
+                    # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries (25 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=25)
+                    headers = [
+                        # Meta
+                        "Timestamp", "Period",
+                        # P&L (Total)
+                        "Total P&L ($)", "Total P&L (EUR)", "Total P&L (%)",
+                        "Realized P&L ($)", "Unrealized P&L ($)",
+                        # Credit Tracking
+                        "Total Credit Collected ($)", "Avg Credit per IC ($)",
+                        # Entry Stats
+                        "Total Entries", "Entries Completed", "Entries Skipped",
+                        "Full ICs", "One-Sided Entries",
+                        # Stop Stats
+                        "Call Stops Triggered", "Put Stops Triggered", "Double Stops",
+                        # Outcome Stats
+                        "Win Rate (%)", "Breakeven Rate (%)", "Loss Rate (%)",
+                        # Trend Stats (MEIC-TF specific)
+                        "Trend Overrides", "Credit Gate Skips",
+                        # Risk
+                        "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)"
+                    ]
                 else:
                     # Delta Neutral: Weekly theta strategy - track theta, rolls
                     worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=22)
@@ -601,6 +639,25 @@ class GoogleSheetsLogger:
                         "Call Stops", "Put Stops",
                         # Risk
                         "Daily Loss Limit (%)", "Circuit Breaker",
+                        # Meta
+                        "State", "Environment"
+                    ]
+                elif self.strategy_type == "meic_tf":
+                    # MEIC-TF: MEIC with trend following snapshot (17 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=17)
+                    headers = [
+                        # Market Data
+                        "Timestamp", "SPX Price", "VIX",
+                        # Entry Status
+                        "Entries Completed", "Active ICs", "Entries Skipped",
+                        # P&L
+                        "Total Credit ($)", "Unrealized P&L ($)", "Realized P&L ($)",
+                        # Stops
+                        "Call Stops", "Put Stops",
+                        # Trend (MEIC-TF specific)
+                        "Current Trend", "EMA 20", "EMA 40",
+                        # Risk
+                        "Circuit Breaker",
                         # Meta
                         "State", "Environment"
                     ]
@@ -1727,6 +1784,60 @@ class GoogleSheetsLogger:
                     summary.get("notes", "")
                 ]
                 logger.debug(f"MEIC daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
+            elif self.strategy_type == "meic_tf":
+                # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries
+                # Columns: Date, SPX Close, VIX, Entries Completed, Entries Skipped,
+                #          Full ICs, One-Sided Entries, Total Credit ($),
+                #          Call Stops, Put Stops, Double Stops,
+                #          Daily P&L ($), Daily P&L (EUR), Cumulative P&L ($),
+                #          Win Rate (%),
+                #          Bullish Signals, Bearish Signals, Neutral Signals, Notes
+                entries_completed = summary.get('entries_completed', 0)
+                call_stops = summary.get('call_stops', 0)
+                put_stops = summary.get('put_stops', 0)
+                double_stops = summary.get('double_stops', 0)
+
+                # MEIC-TF specific: track full ICs vs one-sided entries
+                full_ics = summary.get('full_ics', 0)
+                one_sided = summary.get('one_sided_entries', 0)
+
+                # Trend signal counts
+                bullish_count = summary.get('bullish_signals', 0)
+                bearish_count = summary.get('bearish_signals', 0)
+                neutral_count = summary.get('neutral_signals', 0)
+
+                # Calculate win rate
+                total_entries = entries_completed
+                if total_entries > 0:
+                    wins = total_entries - double_stops - (call_stops + put_stops - 2 * double_stops)
+                    win_rate = (wins / total_entries) * 100 if total_entries > 0 else 0
+                else:
+                    win_rate = 0
+
+                daily_pnl = summary.get('daily_pnl', summary.get('total_pnl', 0))
+
+                row = [
+                    summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    f"{summary.get('spx_close', summary.get('underlying_close', 0)):.2f}",
+                    f"{summary.get('vix_close', summary.get('vix', 0)):.2f}",
+                    str(entries_completed),
+                    str(summary.get('entries_skipped', 0)),
+                    str(full_ics),
+                    str(one_sided),
+                    f"{summary.get('total_credit', 0):.2f}",
+                    str(call_stops),
+                    str(put_stops),
+                    str(double_stops),
+                    f"{daily_pnl:.2f}",
+                    f"{summary.get('daily_pnl_eur', 0):.2f}",
+                    f"{summary.get('cumulative_pnl', 0):.2f}",
+                    f"{win_rate:.1f}",
+                    str(bullish_count),
+                    str(bearish_count),
+                    str(neutral_count),
+                    summary.get("notes", "")
+                ]
+                logger.debug(f"MEIC-TF daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
             else:
                 # Delta Neutral: Theta-based tracking
                 net_theta = summary.get('total_theta', summary.get('net_theta', 0))
@@ -2167,6 +2278,52 @@ class GoogleSheetsLogger:
                     f"{metrics.get('avg_daily_pnl', 0):.2f}"
                 ]
                 col_range = "A2:U2"  # 21 columns
+            elif self.strategy_type == "meic_tf":
+                # MEIC-TF: MEIC with trend following - track entries, stops, trend overrides
+                # Columns: Timestamp, Period, Total P&L ($), Total P&L (EUR), Total P&L (%),
+                #          Realized P&L ($), Unrealized P&L ($), Total Credit ($), Avg Credit per IC ($),
+                #          Total Entries, Entries Completed, Entries Skipped,
+                #          Full ICs, One-Sided Entries,
+                #          Call Stops, Put Stops, Double Stops,
+                #          Win Rate (%), Breakeven Rate (%), Loss Rate (%),
+                #          Trend Overrides, Credit Gate Skips,
+                #          Max Drawdown ($), Max Drawdown (%), Avg Daily P&L ($)
+                row = [
+                    # Meta
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    period,
+                    # P&L (Total)
+                    f"{total_pnl:.2f}",
+                    f"{total_pnl_eur:.2f}",
+                    f"{total_pnl_pct:.4f}",
+                    f"{metrics.get('realized_pnl', 0):.2f}",
+                    f"{metrics.get('unrealized_pnl', 0):.2f}",
+                    # Credit Tracking
+                    f"{metrics.get('total_credit', 0):.2f}",
+                    f"{metrics.get('avg_credit_per_ic', 0):.2f}",
+                    # Entry Stats
+                    metrics.get("total_entries", 0),
+                    metrics.get("entries_completed", 0),
+                    metrics.get("entries_skipped", 0),
+                    metrics.get("full_ics", 0),
+                    metrics.get("one_sided_entries", 0),
+                    # Stop Stats
+                    metrics.get("call_stops", 0),
+                    metrics.get("put_stops", 0),
+                    metrics.get("double_stops", 0),
+                    # Outcome Rates
+                    f"{metrics.get('win_rate', 0):.2f}",
+                    f"{metrics.get('breakeven_rate', 0):.2f}",
+                    f"{metrics.get('loss_rate', 0):.2f}",
+                    # Trend Stats (MEIC-TF specific)
+                    metrics.get("trend_overrides", 0),
+                    metrics.get("credit_gate_skips", 0),
+                    # Risk
+                    f"{metrics.get('max_drawdown', 0):.2f}",
+                    f"{metrics.get('max_drawdown_pct', 0):.4f}",
+                    f"{metrics.get('avg_daily_pnl', 0):.2f}"
+                ]
+                col_range = "A2:Y2"  # 25 columns
             else:
                 # Delta Neutral: Weekly theta strategy - track theta, rolls
                 row = [
@@ -2366,6 +2523,57 @@ class GoogleSheetsLogger:
                     environment
                 ]
                 col_range = "A2:O2"  # 15 columns
+            elif self.strategy_type == "meic_tf":
+                # MEIC-TF: MEIC with trend following snapshot
+                # Columns: Timestamp, SPX Price, VIX, Entries Completed, Active ICs, Entries Skipped,
+                #          Total Credit ($), Unrealized P&L ($), Realized P&L ($),
+                #          Call Stops, Put Stops,
+                #          Current Trend, EMA 20, EMA 40,
+                #          Circuit Breaker, State, Environment
+                spx_price = strategy_data.get("spx_price", 0)
+                vix = strategy_data.get("vix", 0)
+                entries_completed = strategy_data.get("entries_completed", 0)
+                active_ics = strategy_data.get("active_ics", 0)
+                entries_skipped = strategy_data.get("entries_skipped", 0)
+                total_credit = strategy_data.get("total_credit", 0)
+                unrealized_pnl = strategy_data.get("unrealized_pnl", 0)
+                realized_pnl = strategy_data.get("realized_pnl", 0)
+                call_stops = strategy_data.get("call_stops", 0)
+                put_stops = strategy_data.get("put_stops", 0)
+                # MEIC-TF specific: trend data
+                current_trend = strategy_data.get("current_trend", "NEUTRAL")
+                ema_20 = strategy_data.get("ema_20", 0)
+                ema_40 = strategy_data.get("ema_40", 0)
+                circuit_breaker = strategy_data.get("circuit_breaker", False)
+                state = strategy_data.get("state", "Unknown")
+
+                row = [
+                    # Market Data
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    f"{spx_price:.2f}",
+                    f"{vix:.2f}" if vix else "N/A",
+                    # Entry Status
+                    str(entries_completed),
+                    str(active_ics),
+                    str(entries_skipped),
+                    # P&L
+                    f"{total_credit:.2f}",
+                    f"{unrealized_pnl:.2f}",
+                    f"{realized_pnl:.2f}",
+                    # Stops
+                    str(call_stops),
+                    str(put_stops),
+                    # Trend (MEIC-TF specific)
+                    current_trend,
+                    f"{ema_20:.2f}" if ema_20 else "N/A",
+                    f"{ema_40:.2f}" if ema_40 else "N/A",
+                    # Risk
+                    "YES" if circuit_breaker else "NO",
+                    # Meta
+                    state,
+                    environment
+                ]
+                col_range = "A2:Q2"  # 17 columns
             else:
                 # Delta Neutral: Straddle + Strangle position snapshot
                 spy_price = strategy_data.get("spy_price", 0)
