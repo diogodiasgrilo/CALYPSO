@@ -232,7 +232,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
-### MEIC-TF Bot Details (v1.1.3 - Updated 2026-02-10)
+### MEIC-TF Bot Details (v1.1.4 - Updated 2026-02-10)
 - **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
 - **Structure:** Same as MEIC but with EMA-based entry filtering + credit gate
 - **Key Difference:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
@@ -984,7 +984,7 @@ SCRIPT
 8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
 9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
 10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by MEIC-TF for trend filtering
-11. **MEIC-TF bot:** Running in LIVE mode (v1.1.3, deployed 2026-02-10) - ONLY active trading bot - adds EMA 20/40 trend filter + credit gate (MKT-011) + hybrid trend-respecting logic + proper P&L tracking (Fix #46/#47) + accurate log labels (Fix #49)
+11. **MEIC-TF bot:** Running in LIVE mode (v1.1.4, deployed 2026-02-10) - ONLY active trading bot - adds EMA 20/40 trend filter + credit gate (MKT-011) + hybrid trend-respecting logic + proper P&L tracking (Fix #46/#47) + accurate log labels (Fix #49) + same-strike overlap prevention (Fix #50/MKT-013)
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 
@@ -1131,3 +1131,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 46. **One-Sided Entry Non-Opened Side Marked as "Stopped" Instead of "Skipped" (Fix #47, 2026-02-10)** - MEIC-TF one-sided entries (e.g., BULLISH → put-only) were incorrectly marking the non-opened side as "stopped" (`call_side_stopped = True`). This is semantically incorrect - "stopped" implies a loss was incurred, but the side was never opened. This caused: (1) Incorrect P&L interpretation (skipped sides counted as losses), (2) Confusing logs showing sides as "stopped" that never existed, (3) Potential recovery issues when determining entry status. Solution: Added `call_side_skipped`/`put_side_skipped` flags to `IronCondorEntry` to properly distinguish three states: **Stopped** (side was opened but hit stop loss = LOSS), **Expired** (side was opened and expired worthless = PROFIT), **Skipped** (side was never opened = NO P&L IMPACT). Updated all entry creation, recovery, and "is_done" checks to use the appropriate flag. (Cost: Incorrect status tracking for MEIC-TF one-sided entries)
 
 47. **Log Messages Showed Wrong Trend Label for MKT-011 Overrides (Fix #49, 2026-02-10)** - When MKT-011 credit gate triggered a conversion (e.g., NEUTRAL → put-only because call credit was non-viable), logs showed "BULLISH trend → placing PUT spread only" and "Entry #1 [BULLISH] complete" even though the actual trend was NEUTRAL. The heartbeat also showed "Call: 0% cushion⚠️" for sides that were never opened (SKIPPED). Solution: (1) Added `override_reason` field to `TFIronCondorEntry` to track "mkt-011", "mkt-010", or "trend". (2) Log messages now show actual reason: "MKT-011 override → placing PUT spread only (actual trend: neutral)". (3) Completion messages show correct label: "[MKT-011]" not "[BULLISH]". (4) Heartbeat cushion display shows "SKIPPED" for never-opened sides. (5) Google Sheets entries tagged with correct reason. (Cost: Confusing logs made it hard to diagnose entry decisions)
+
+48. **Same-Strike Entries Cause Position Merging and Tracking Loss (Fix #50, 2026-02-10)** - Feb 10: Entry #1 and Entry #2 both landed on same strikes (Put 6935/6885) because SPX only moved 0.72 points in 30 minutes. Saxo merged the positions into a single position with Amount=2, but DELETED Entry #1's position IDs. Result: Entry #1's P&L showed $0 constantly, its position IDs were "missing", and it was incorrectly marked as "stopped (external close)". If Entry #2's stop triggered, it would only close 1 contract, leaving 1 orphaned. Root cause: VIX-adjusted delta calculation produces identical strikes when SPX barely moves. Saxo merges positions at same strike by keeping the NEWER position ID and deleting the older one. Solution: Added `_adjust_for_same_strike_overlap()` (MKT-013) that detects when new entry's short strikes match existing entries and offsets them by 5 points further OTM. Applied after Fix #44's long strike conflict check. (Cost: Feb 10 Entry #1 P&L tracking broken, potential orphaned contract if stop triggered)

@@ -1777,6 +1777,11 @@ class MEICStrategy:
         # Long strikes cannot equal short strikes from other entries
         self._adjust_for_strike_conflicts(entry)
 
+        # Fix #50: Check for same-strike overlap with existing entries
+        # If multiple entries land on same short strikes, Saxo merges positions
+        # causing tracking issues. Offset overlapping strikes further OTM.
+        self._adjust_for_same_strike_overlap(entry)
+
         logger.info(
             f"Strikes calculated for SPX {spx:.2f}: "
             f"Call {entry.short_call_strike}/{entry.long_call_strike}, "
@@ -1846,6 +1851,82 @@ class MEICStrategy:
             logger.warning(
                 f"MKT-012: Long put {original_long_put} conflicts with existing short strike, "
                 f"adjusted to {entry.long_put_strike}"
+            )
+
+    def _adjust_for_same_strike_overlap(self, entry: IronCondorEntry):
+        """
+        Adjust short strikes if they overlap with existing entries' short strikes.
+
+        Fix #50: When multiple entries land on the same short strikes (due to
+        minimal SPX movement), Saxo merges them into a single position with
+        increased Amount. This causes tracking issues because:
+        1. The earlier entry's position_id becomes stale (Saxo uses the newer ID)
+        2. P&L calculation for earlier entries returns 0 (position not found)
+        3. Stop loss on one entry would partially close the shared position
+
+        Solution: Offset overlapping short strikes by 5 points further OTM.
+        - Short call overlaps: move UP by 5 (further OTM for calls)
+        - Short put overlaps: move DOWN by 5 (further OTM for puts)
+        - Corresponding long strikes also adjusted to maintain spread width
+
+        Args:
+            entry: IronCondorEntry to check and adjust
+        """
+        # Get existing short strikes from active entries
+        existing_short_calls = set()
+        existing_short_puts = set()
+
+        for e in self.daily_state.entries:
+            # Only consider entries that are still active
+            call_active = not e.call_side_stopped and not getattr(e, 'call_side_skipped', False)
+            put_active = not e.put_side_stopped and not getattr(e, 'put_side_skipped', False)
+
+            if call_active and e.short_call_strike:
+                existing_short_calls.add(e.short_call_strike)
+            if put_active and e.short_put_strike:
+                existing_short_puts.add(e.short_put_strike)
+
+        if not existing_short_calls and not existing_short_puts:
+            return  # No existing entries, no overlaps possible
+
+        # Check and adjust short call strike
+        original_short_call = entry.short_call_strike
+        original_long_call = entry.long_call_strike
+        while entry.short_call_strike and entry.short_call_strike in existing_short_calls:
+            # Move both short and long call UP by 5 (further OTM)
+            entry.short_call_strike += 5
+            entry.long_call_strike += 5
+        if entry.short_call_strike != original_short_call:
+            logger.warning(
+                f"MKT-013: Short call {original_short_call} overlaps existing entry, "
+                f"adjusted to {entry.short_call_strike}/{entry.long_call_strike} "
+                f"(was {original_short_call}/{original_long_call})"
+            )
+            self._log_safety_event(
+                "MKT-013_STRIKE_OVERLAP",
+                f"Entry #{entry.entry_number} call spread shifted: "
+                f"{original_short_call}/{original_long_call} → "
+                f"{entry.short_call_strike}/{entry.long_call_strike}"
+            )
+
+        # Check and adjust short put strike
+        original_short_put = entry.short_put_strike
+        original_long_put = entry.long_put_strike
+        while entry.short_put_strike and entry.short_put_strike in existing_short_puts:
+            # Move both short and long put DOWN by 5 (further OTM)
+            entry.short_put_strike -= 5
+            entry.long_put_strike -= 5
+        if entry.short_put_strike != original_short_put:
+            logger.warning(
+                f"MKT-013: Short put {original_short_put} overlaps existing entry, "
+                f"adjusted to {entry.short_put_strike}/{entry.long_put_strike} "
+                f"(was {original_short_put}/{original_long_put})"
+            )
+            self._log_safety_event(
+                "MKT-013_STRIKE_OVERLAP",
+                f"Entry #{entry.entry_number} put spread shifted: "
+                f"{original_short_put}/{original_long_put} → "
+                f"{entry.short_put_strike}/{entry.long_put_strike}"
             )
 
     def _calculate_stop_levels(self, entry: IronCondorEntry):
