@@ -256,10 +256,25 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         if not settlement_complete:
                             trade_logger.log_event("Settlement pending - positions still open on Saxo")
                         else:
-                            trade_logger.log_event("Settlement complete - sending daily summary...")
-                            strategy.log_daily_summary()
-                            daily_summary_sent_date = today_date
-                            trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
+                            # FIX #48: Don't send empty daily summary on pre-market startup
+                            # If settlement is "complete" because there's nothing to settle AND
+                            # we're before market open with no trading activity, skip the summary
+                            market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                            had_trading_activity = (
+                                strategy.daily_state.entries_completed > 0 or
+                                strategy.daily_state.total_realized_pnl != 0 or
+                                len(strategy.daily_state.entries) > 0
+                            )
+                            is_after_market_close = now_et.hour >= 16  # 4 PM or later
+
+                            if had_trading_activity or is_after_market_close:
+                                trade_logger.log_event("Settlement complete - sending daily summary...")
+                                strategy.log_daily_summary()
+                                daily_summary_sent_date = today_date
+                                trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
+                            else:
+                                trade_logger.log_event("Settlement complete - no trading activity today, skipping empty summary")
+                                daily_summary_sent_date = today_date  # Mark as sent to avoid repeated checks
 
                     sleep_time = calculate_sleep_duration(max_sleep=900)
                     market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
