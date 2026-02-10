@@ -3903,6 +3903,12 @@ class MEICStrategy:
         This fixes the bug where theoretical stop levels were used instead of
         actual close prices, causing massive P&L discrepancies.
 
+        FIX #51 (2026-02-10): Reduced retries from 3 to 1 since this function is
+        called AFTER _verify_position_closed() confirms the position is closed.
+        We KNOW the order filled - if FilledPrice isn't populated yet due to
+        Saxo's sync delay, use quote fallback immediately. Saves ~2-3 seconds
+        per leg during stop loss execution.
+
         Args:
             order_id: The emergency close order ID
             uic: The instrument UIC
@@ -3912,12 +3918,13 @@ class MEICStrategy:
             Fill price in dollars (e.g., 8.90), or None if not found
         """
         try:
-            # Use client's activity check which has retry logic built-in
+            # FIX #51: Only 1 retry since we already verified position is closed
+            # If FilledPrice=0, use quote fallback immediately (saves 2-3 seconds)
             filled, fill_details = self.client.check_order_filled_by_activity(
                 order_id=order_id,
                 uic=uic,
-                max_retries=3,
-                retry_delay=1.0
+                max_retries=1,
+                retry_delay=0.5
             )
 
             if filled and fill_details:
