@@ -104,11 +104,20 @@ class TFIronCondorEntry(IronCondorEntry):
     - BULLISH trend: put_only = True (only put spread placed)
     - BEARISH trend: call_only = True (only call spread placed)
     - NEUTRAL: full IC (both sides placed, call_only=False, put_only=False)
+
+    Override reasons (Fix #49):
+    - "trend": One-sided due to EMA trend filter (BULLISH/BEARISH)
+    - "mkt-011": One-sided due to credit gate (non-viable credit)
+    - "mkt-010": One-sided due to illiquidity fallback
+    - None: Full IC (no override)
     """
     # Track what was actually placed
     call_only: bool = False   # Only call spread was placed (bearish signal)
     put_only: bool = False    # Only put spread was placed (bullish signal)
     trend_signal: Optional[TrendSignal] = None  # The trend signal at entry time
+
+    # Fix #49: Track why entry became one-sided (for correct logging)
+    override_reason: Optional[str] = None  # "trend", "mkt-011", "mkt-010", or None
 
     @property
     def is_one_sided(self) -> bool:
@@ -492,6 +501,7 @@ class MEICTFStrategy(MEICStrategy):
                             # NEUTRAL or BEARISH - OK to convert to call-only
                             logger.info(f"MKT-011: Put credit non-viable → converting to CALL-only (trend: {original_trend.value})")
                             trend = TrendSignal.BEARISH  # Force bearish to get call-only
+                            entry.override_reason = "mkt-011"  # Fix #49: Track override reason
                             credit_gate_handled = True
                     elif gate_result == "put_only":
                         # Call credit too low - but respect trend filter!
@@ -516,6 +526,7 @@ class MEICTFStrategy(MEICStrategy):
                             # NEUTRAL or BULLISH - OK to convert to put-only
                             logger.info(f"MKT-011: Call credit non-viable → converting to PUT-only (trend: {original_trend.value})")
                             trend = TrendSignal.BULLISH  # Force bullish to get put-only
+                            entry.override_reason = "mkt-011"  # Fix #49: Track override reason
                             credit_gate_handled = True
                     elif estimation_worked:
                         # MKT-011 worked and said proceed - skip MKT-010
@@ -547,6 +558,7 @@ class MEICTFStrategy(MEICStrategy):
                             f"converting to PUT-only (trend: {original_trend.value})"
                         )
                         trend = TrendSignal.BULLISH  # Force to get put-only
+                        entry.override_reason = "mkt-010"  # Fix #49: Track override reason
                     elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
                         # Put wing illiquid = put spread has reduced width/credit
                         # Call spread is unaffected = has viable credit
@@ -566,6 +578,7 @@ class MEICTFStrategy(MEICStrategy):
                             f"converting to CALL-only (trend: {original_trend.value})"
                         )
                         trend = TrendSignal.BEARISH  # Force to get call-only
+                        entry.override_reason = "mkt-010"  # Fix #49: Track override reason
                     elif entry.call_wing_illiquid and entry.put_wing_illiquid:
                         # Both wings illiquid = very unusual, skip entry
                         logger.warning(
@@ -575,8 +588,15 @@ class MEICTFStrategy(MEICStrategy):
                         continue
 
                 # Execute based on trend signal (may have been overridden by MKT-011 or MKT-010)
+                # Fix #49: Log the actual reason for one-sided entries
                 if trend == TrendSignal.BULLISH:
-                    logger.info(f"BULLISH trend → placing PUT spread only")
+                    if entry.override_reason == "mkt-011":
+                        logger.info(f"MKT-011 override → placing PUT spread only (actual trend: {original_trend.value})")
+                    elif entry.override_reason == "mkt-010":
+                        logger.info(f"MKT-010 fallback → placing PUT spread only (actual trend: {original_trend.value})")
+                    else:
+                        logger.info(f"BULLISH trend → placing PUT spread only")
+                        entry.override_reason = "trend"  # Track that trend was the reason
                     entry.put_only = True
                     if self.dry_run:
                         success = self._simulate_one_sided_entry(entry, "put")
@@ -584,7 +604,13 @@ class MEICTFStrategy(MEICStrategy):
                         success = self._execute_put_spread_only(entry)
 
                 elif trend == TrendSignal.BEARISH:
-                    logger.info(f"BEARISH trend → placing CALL spread only")
+                    if entry.override_reason == "mkt-011":
+                        logger.info(f"MKT-011 override → placing CALL spread only (actual trend: {original_trend.value})")
+                    elif entry.override_reason == "mkt-010":
+                        logger.info(f"MKT-010 fallback → placing CALL spread only (actual trend: {original_trend.value})")
+                    else:
+                        logger.info(f"BEARISH trend → placing CALL spread only")
+                        entry.override_reason = "trend"  # Track that trend was the reason
                     entry.call_only = True
                     if self.dry_run:
                         success = self._simulate_one_sided_entry(entry, "call")
@@ -656,7 +682,15 @@ class MEICTFStrategy(MEICStrategy):
 
                     self._save_state_to_disk()
 
-                    result_msg = f"Entry #{entry_num} [{trend.value.upper()}] complete - Credit: ${entry.total_credit:.2f}"
+                    # Fix #49: Show correct label in completion message
+                    if entry.override_reason == "mkt-011":
+                        label = "MKT-011"
+                    elif entry.override_reason == "mkt-010":
+                        label = "MKT-010"
+                    else:
+                        label = original_trend.value.upper()
+
+                    result_msg = f"Entry #{entry_num} [{label}] complete - Credit: ${entry.total_credit:.2f}"
                     if attempt > 0:
                         result_msg += f" (after {attempt + 1} attempts)"
                     return result_msg
@@ -1417,6 +1451,11 @@ class MEICTFStrategy(MEICStrategy):
         - Use "MEIC-TF" instead of "MEIC"
         - Include trend signal in the action
         - Handle one-sided entries (show only placed side's strikes)
+
+        Fix #49: Use override_reason to determine correct tag:
+        - MKT-011: Credit gate triggered override
+        - MKT-010: Illiquidity fallback triggered override
+        - Trend: EMA trend filter determined one-sided
         """
         try:
             # Determine entry type and format strikes accordingly
@@ -1426,14 +1465,26 @@ class MEICTFStrategy(MEICStrategy):
                 # Call spread only
                 strike_str = f"C:{entry.short_call_strike}/{entry.long_call_strike}"
                 entry_type = "Call Spread"
-                # MKT-010: Call-only because PUT wing was illiquid (traded viable credit side)
-                trend_tag = "[MKT-010]" if entry.put_wing_illiquid else "[BEARISH]"
+                # Fix #49: Use override_reason for correct tag
+                override_reason = getattr(entry, 'override_reason', None)
+                if override_reason == "mkt-011":
+                    trend_tag = "[MKT-011]"
+                elif override_reason == "mkt-010":
+                    trend_tag = "[MKT-010]"
+                else:
+                    trend_tag = "[BEARISH]"
             elif is_tf_entry and entry.put_only:
                 # Put spread only
                 strike_str = f"P:{entry.short_put_strike}/{entry.long_put_strike}"
                 entry_type = "Put Spread"
-                # MKT-010: Put-only because CALL wing was illiquid (traded viable credit side)
-                trend_tag = "[MKT-010]" if entry.call_wing_illiquid else "[BULLISH]"
+                # Fix #49: Use override_reason for correct tag
+                override_reason = getattr(entry, 'override_reason', None)
+                if override_reason == "mkt-011":
+                    trend_tag = "[MKT-011]"
+                elif override_reason == "mkt-010":
+                    trend_tag = "[MKT-010]"
+                else:
+                    trend_tag = "[BULLISH]"
             else:
                 # Full IC (neutral)
                 strike_str = (
@@ -1542,6 +1593,8 @@ class MEICTFStrategy(MEICStrategy):
                     "call_only": getattr(entry, 'call_only', False),
                     "put_only": getattr(entry, 'put_only', False),
                     "trend_signal": getattr(entry, 'trend_signal', None).value if getattr(entry, 'trend_signal', None) else None,
+                    # Fix #49: Track override reason for correct logging after recovery
+                    "override_reason": getattr(entry, 'override_reason', None),
                 }
                 state_data["entries"].append(entry_data)
 
@@ -2369,6 +2422,9 @@ class MEICTFStrategy(MEICStrategy):
                         except ValueError:
                             pass
 
+                    # Fix #49: Restore override_reason for correct logging
+                    stopped_entry.override_reason = entry_data.get("override_reason", None)
+
                     self.daily_state.entries.append(stopped_entry)
                     stopped_entries_restored += 1
 
@@ -2538,6 +2594,8 @@ class MEICTFStrategy(MEICStrategy):
                                         "call_only": entry_data.get("call_only", False),
                                         "put_only": entry_data.get("put_only", False),
                                         "trend_signal": entry_data.get("trend_signal"),
+                                        # Fix #49: Preserve override_reason for correct logging
+                                        "override_reason": entry_data.get("override_reason"),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -2673,6 +2731,9 @@ class MEICTFStrategy(MEICStrategy):
                             stopped_entry.trend_signal = TrendSignal(stopped_entry_data["trend_signal"])
                         except ValueError:
                             pass
+
+                    # Fix #49: Restore override_reason for correct logging
+                    stopped_entry.override_reason = stopped_entry_data.get("override_reason", None)
 
                     # Position IDs are None (positions closed)
                     stopped_entry.short_call_position_id = None

@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.1.2 | **Last Updated:** 2026-02-10
+**Version:** 1.1.3 | **Last Updated:** 2026-02-10
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -178,6 +178,12 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.1.3** (2026-02-10): Logging accuracy improvements
+  - Fix #49: Correct log labels for MKT-011 vs MKT-010 vs trend-based entries
+  - Log messages now show actual reason for one-sided entries (not just "BULLISH"/"BEARISH")
+  - Heartbeat cushion display shows "SKIPPED" for never-opened sides (not "0%⚠️")
+  - Google Sheets entries now tagged with correct override reason ([MKT-011], [MKT-010], or [BULLISH]/[BEARISH])
 
 - **1.1.2** (2026-02-10): P&L tracking fixes
   - Fix #46: Expired positions now correctly add credit to realized P&L

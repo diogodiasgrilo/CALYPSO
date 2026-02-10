@@ -232,7 +232,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
-### MEIC-TF Bot Details (v1.1.2 - Updated 2026-02-10)
+### MEIC-TF Bot Details (v1.1.3 - Updated 2026-02-10)
 - **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
 - **Structure:** Same as MEIC but with EMA-based entry filtering + credit gate
 - **Key Difference:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
@@ -984,7 +984,7 @@ SCRIPT
 8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
 9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
 10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by MEIC-TF for trend filtering
-11. **MEIC-TF bot:** Running in LIVE mode (v1.1.2, deployed 2026-02-10) - ONLY active trading bot - adds EMA 20/40 trend filter + credit gate (MKT-011) + hybrid trend-respecting logic + proper P&L tracking (Fix #46/#47)
+11. **MEIC-TF bot:** Running in LIVE mode (v1.1.3, deployed 2026-02-10) - ONLY active trading bot - adds EMA 20/40 trend filter + credit gate (MKT-011) + hybrid trend-respecting logic + proper P&L tracking (Fix #46/#47) + accurate log labels (Fix #49)
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 
@@ -1129,3 +1129,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 45. **Expired Position P&L Not Added to Realized P&L (Fix #46, 2026-02-10)** - Feb 9 daily summary showed **-$360** when actual Saxo P&L was **+$170** - a $530 error! Root cause: When 0DTE positions expire worthless at settlement, `check_after_hours_settlement()` only unregistered them from the registry without adding their credit (now profit) to `total_realized_pnl`. The daily summary calculated `total_pnl = realized_pnl + unrealized`, but `_get_total_saxo_pnl()` returns 0 after settlement (positions are gone from Saxo). The code also incorrectly marked expired positions as "stopped" when they should be "expired". Solution: (1) Added `call_side_expired`/`put_side_expired` flags to `IronCondorEntry` to distinguish from stopped. (2) In settlement, before marking a side as done, check if it was already stopped - if not, it expired and we add its credit to `total_realized_pnl`. (3) Updated state serialization/deserialization to persist the new flags. (4) Applied same fix to MEIC-TF's override of `check_after_hours_settlement()`. (Cost: Feb 9 reported -$360 instead of +$170 - would have shown first winning day as massive loss)
 
 46. **One-Sided Entry Non-Opened Side Marked as "Stopped" Instead of "Skipped" (Fix #47, 2026-02-10)** - MEIC-TF one-sided entries (e.g., BULLISH → put-only) were incorrectly marking the non-opened side as "stopped" (`call_side_stopped = True`). This is semantically incorrect - "stopped" implies a loss was incurred, but the side was never opened. This caused: (1) Incorrect P&L interpretation (skipped sides counted as losses), (2) Confusing logs showing sides as "stopped" that never existed, (3) Potential recovery issues when determining entry status. Solution: Added `call_side_skipped`/`put_side_skipped` flags to `IronCondorEntry` to properly distinguish three states: **Stopped** (side was opened but hit stop loss = LOSS), **Expired** (side was opened and expired worthless = PROFIT), **Skipped** (side was never opened = NO P&L IMPACT). Updated all entry creation, recovery, and "is_done" checks to use the appropriate flag. (Cost: Incorrect status tracking for MEIC-TF one-sided entries)
+
+47. **Log Messages Showed Wrong Trend Label for MKT-011 Overrides (Fix #49, 2026-02-10)** - When MKT-011 credit gate triggered a conversion (e.g., NEUTRAL → put-only because call credit was non-viable), logs showed "BULLISH trend → placing PUT spread only" and "Entry #1 [BULLISH] complete" even though the actual trend was NEUTRAL. The heartbeat also showed "Call: 0% cushion⚠️" for sides that were never opened (SKIPPED). Solution: (1) Added `override_reason` field to `TFIronCondorEntry` to track "mkt-011", "mkt-010", or "trend". (2) Log messages now show actual reason: "MKT-011 override → placing PUT spread only (actual trend: neutral)". (3) Completion messages show correct label: "[MKT-011]" not "[BULLISH]". (4) Heartbeat cushion display shows "SKIPPED" for never-opened sides. (5) Google Sheets entries tagged with correct reason. (Cost: Confusing logs made it hard to diagnose entry decisions)

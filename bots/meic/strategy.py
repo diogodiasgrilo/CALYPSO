@@ -5422,12 +5422,24 @@ class MEICStrategy:
             put_pct = (put_dist / entry.put_side_stop * 100) if entry.put_side_stop > 0 else 0
 
             # Status indicators
-            call_status = "STOPPED" if entry.call_side_stopped else f"{call_pct:.0f}% cushion"
-            put_status = "STOPPED" if entry.put_side_stopped else f"{put_pct:.0f}% cushion"
+            # Fix #49: Show SKIPPED for one-sided entries that never opened a side
+            if getattr(entry, 'call_side_skipped', False):
+                call_status = "SKIPPED"
+            elif entry.call_side_stopped:
+                call_status = "STOPPED"
+            else:
+                call_status = f"{call_pct:.0f}% cushion"
 
-            # Warn if close to stop
-            call_warning = "⚠️" if not entry.call_side_stopped and call_pct < 30 else ""
-            put_warning = "⚠️" if not entry.put_side_stopped and put_pct < 30 else ""
+            if getattr(entry, 'put_side_skipped', False):
+                put_status = "SKIPPED"
+            elif entry.put_side_stopped:
+                put_status = "STOPPED"
+            else:
+                put_status = f"{put_pct:.0f}% cushion"
+
+            # Warn if close to stop (only for active sides, not skipped/stopped)
+            call_warning = "⚠️" if call_status.endswith("cushion") and call_pct < 30 else ""
+            put_warning = "⚠️" if put_status.endswith("cushion") and put_pct < 30 else ""
 
             line = (
                 f"  Entry #{entry.entry_number}: "
