@@ -1405,7 +1405,7 @@ class MEICTFStrategy(MEICStrategy):
         # On startup, _last_ema_short/long are initialized to 0.0, not None
         if self._last_ema_short <= 0 or self._last_ema_long <= 0:
             try:
-                self._detect_trend()
+                self._get_trend_signal()
             except Exception as e:
                 logger.warning(f"Could not detect trend for dashboard: {e}")
 
