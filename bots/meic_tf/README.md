@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.1.7 | **Last Updated:** 2026-02-11
+**Version:** 1.1.8 | **Last Updated:** 2026-02-11
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -178,6 +178,12 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.1.8** (2026-02-11): Fix #64 - Google Sheets API timeout protection
+  - Bot froze for 3+ minutes when Google Sheets API returned 503 and hung
+  - Added `_sheets_call_with_timeout()` wrapper with 10-second timeout
+  - All 30+ gspread calls now protected: append_row, get_all_values, update, delete_rows, format
+  - Trading operations continue even if logging fails (logging is non-critical)
 
 - **1.1.7** (2026-02-11): Fix #63 - EUR conversion in Trades tab
   - Passes `saxo_client` to `log_trade()` calls to enable FX rate fetching
