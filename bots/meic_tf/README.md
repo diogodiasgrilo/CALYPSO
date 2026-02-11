@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.1.4 | **Last Updated:** 2026-02-10
+**Version:** 1.1.5 | **Last Updated:** 2026-02-11
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -178,6 +178,14 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.1.5** (2026-02-11): Liquidity re-check, counter tracking, position merge detection
+  - MKT-014: After MKT-013 moves strikes to avoid overlap, re-check liquidity
+  - Warns if the overlap adjustment landed on an illiquid strike
+  - Fix #52-#57: Multi-contract support, accurate counter tracking (skips, one-sided, trend overrides)
+  - Fix #58: Win rate calculation now handles merged entries correctly
+  - Fix #59: EMA values logged in Trades tab trade_reason (instead of Account Summary)
+  - Fix #61: Position merge detection - merged entries counted as wins, not stopped
 
 - **1.1.4** (2026-02-10): Same-strike overlap prevention
   - Fix #50: Detect when new entry would land on same strikes as existing entry

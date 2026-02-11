@@ -119,6 +119,10 @@ class TFIronCondorEntry(IronCondorEntry):
     # Fix #49: Track why entry became one-sided (for correct logging)
     override_reason: Optional[str] = None  # "trend", "mkt-011", "mkt-010", or None
 
+    # Fix #59: Track EMA values at entry time for Trades tab logging
+    ema_20_at_entry: Optional[float] = None
+    ema_40_at_entry: Optional[float] = None
+
     @property
     def is_one_sided(self) -> bool:
         """True if only one side was placed (not a full IC)."""
@@ -458,6 +462,8 @@ class MEICTFStrategy(MEICStrategy):
                 entry = TFIronCondorEntry(entry_number=entry_num)
                 entry.strategy_id = f"meic_tf_{get_us_market_time().strftime('%Y%m%d')}_entry{entry_num}"
                 entry.trend_signal = trend
+                # Fix #52: Set contract count for multi-contract support
+                entry.contracts = self.contracts_per_entry
                 self._current_entry = entry
 
                 # Calculate strikes
@@ -492,6 +498,9 @@ class MEICTFStrategy(MEICStrategy):
                                 f"Entry #{entry_num} - put non-viable + BULLISH trend → skip",
                                 "Skipped - Trend Conflict"
                             )
+                            # Fix #53/#57: Track skipped entries and credit gate skips
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
                             self._entry_in_progress = False
                             self._current_entry = None
                             self.state = MEICState.MONITORING
@@ -517,6 +526,9 @@ class MEICTFStrategy(MEICStrategy):
                                 f"Entry #{entry_num} - call non-viable + BEARISH trend → skip",
                                 "Skipped - Trend Conflict"
                             )
+                            # Fix #53/#57: Track skipped entries and credit gate skips
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
                             self._entry_in_progress = False
                             self._current_entry = None
                             self.state = MEICState.MONITORING
@@ -548,6 +560,14 @@ class MEICTFStrategy(MEICStrategy):
                                 f"MKT-010: Entry #{entry_num} call wing illiquid, "
                                 f"but trend is BEARISH (can't place puts) - SKIPPING"
                             )
+                            self._log_safety_event(
+                                "MKT-010_TREND_CONFLICT",
+                                f"Entry #{entry_num} - call illiquid + BEARISH trend → skip",
+                                "Skipped - Trend Conflict"
+                            )
+                            # Fix #53/#57: Track skipped entries and credit gate skips
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
                             self._entry_in_progress = False
                             self._current_entry = None
                             self.state = MEICState.MONITORING
@@ -568,6 +588,14 @@ class MEICTFStrategy(MEICStrategy):
                                 f"MKT-010: Entry #{entry_num} put wing illiquid, "
                                 f"but trend is BULLISH (can't place calls) - SKIPPING"
                             )
+                            self._log_safety_event(
+                                "MKT-010_TREND_CONFLICT",
+                                f"Entry #{entry_num} - put illiquid + BULLISH trend → skip",
+                                "Skipped - Trend Conflict"
+                            )
+                            # Fix #53/#57: Track skipped entries and credit gate skips
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
                             self._entry_in_progress = False
                             self._current_entry = None
                             self.state = MEICState.MONITORING
@@ -581,11 +609,23 @@ class MEICTFStrategy(MEICStrategy):
                         entry.override_reason = "mkt-010"  # Fix #49: Track override reason
                     elif entry.call_wing_illiquid and entry.put_wing_illiquid:
                         # Both wings illiquid = very unusual, skip entry
+                        # Fix #53: Skip immediately, don't retry (this isn't a transient failure)
+                        # Fix #57: Track credit gate skip
                         logger.warning(
                             f"MKT-010: Both wings illiquid, skipping entry #{entry.entry_number}"
                         )
-                        last_error = "Both wings illiquid"
-                        continue
+                        self._log_safety_event(
+                            "MKT-010_BOTH_ILLIQUID",
+                            f"Entry #{entry.entry_number} - both wings illiquid → skip",
+                            "Skipped - Both Illiquid"
+                        )
+                        self.daily_state.entries_skipped += 1
+                        self.daily_state.credit_gate_skips += 1
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        self._next_entry_index += 1
+                        return f"Entry #{entry_num} skipped - both wings illiquid"
 
                 # Execute based on trend signal (may have been overridden by MKT-011 or MKT-010)
                 # Fix #49: Log the actual reason for one-sided entries
@@ -627,9 +667,19 @@ class MEICTFStrategy(MEICStrategy):
                 if success:
                     entry.entry_time = get_us_market_time()
                     entry.is_complete = True
+                    # Fix #59: Capture EMA values at entry time for Trades tab logging
+                    entry.ema_20_at_entry = self._last_ema_short
+                    entry.ema_40_at_entry = self._last_ema_long
                     self.daily_state.entries.append(entry)
                     self.daily_state.entries_completed += 1
                     self.daily_state.total_credit_received += entry.total_credit
+
+                    # Fix #55/#56: Track one-sided entries and trend overrides
+                    if entry.is_one_sided:
+                        self.daily_state.one_sided_entries += 1
+                        if entry.override_reason == "trend":
+                            # Trend filter (not MKT-011/MKT-010) caused one-sided entry
+                            self.daily_state.trend_overrides += 1
 
                     # Track commission (2 or 4 legs)
                     legs = 2 if entry.is_one_sided else 4
@@ -1389,9 +1439,9 @@ class MEICTFStrategy(MEICStrategy):
         metrics['neutral_signals'] = neutral_count
 
         # Track MKT-010/MKT-011 overrides (trend overrides and credit gate skips)
-        # These counters track when trend filter or credit gate modified the entry
-        metrics['trend_overrides'] = getattr(self.daily_state, 'trend_overrides', 0)
-        metrics['credit_gate_skips'] = getattr(self.daily_state, 'credit_gate_skips', 0)
+        # Fix #55/#56/#57: Now tracked directly on daily_state
+        metrics['trend_overrides'] = self.daily_state.trend_overrides
+        metrics['credit_gate_skips'] = self.daily_state.credit_gate_skips
 
         return metrics
 
@@ -1494,6 +1544,15 @@ class MEICTFStrategy(MEICStrategy):
                 entry_type = "Iron Condor"
                 trend_tag = "[NEUTRAL]"
 
+            # Fix #54: Add expiry_date and dte for 0DTE options
+            # Fix #59: Add EMA values to trade_reason instead of Account Summary
+            today_str = get_us_market_time().strftime("%Y-%m-%d")
+            ema_20 = getattr(entry, 'ema_20_at_entry', None)
+            ema_40 = getattr(entry, 'ema_40_at_entry', None)
+            ema_info = ""
+            if ema_20 is not None and ema_40 is not None:
+                ema_info = f" | EMA20: {ema_20:.2f}, EMA40: {ema_40:.2f}"
+
             self.trade_logger.log_trade(
                 action=f"MEIC-TF Entry #{entry.entry_number} {trend_tag}",
                 strike=strike_str,
@@ -1503,8 +1562,10 @@ class MEICTFStrategy(MEICStrategy):
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type=entry_type,
+                expiry_date=today_str,  # Fix #54: 0DTE expiry is today
+                dte=0,  # Fix #54: 0DTE
                 premium_received=entry.total_credit,
-                trade_reason=f"Entry | Trend: {trend_tag} | Credit: ${entry.total_credit:.2f}"
+                trade_reason=f"Entry | Trend: {trend_tag} | Credit: ${entry.total_credit:.2f}{ema_info}"
             )
 
             logger.info(
@@ -1545,6 +1606,10 @@ class MEICTFStrategy(MEICStrategy):
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
                 "double_stops": self.daily_state.double_stops,
                 "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
+                # Fix #55/#56/#57: MEIC-TF specific counters
+                "one_sided_entries": self.daily_state.one_sided_entries,
+                "trend_overrides": self.daily_state.trend_overrides,
+                "credit_gate_skips": self.daily_state.credit_gate_skips,
                 "entries": []
             }
 
@@ -1584,6 +1649,9 @@ class MEICTFStrategy(MEICStrategy):
                     "put_side_expired": entry.put_side_expired,
                     "call_side_skipped": entry.call_side_skipped,
                     "put_side_skipped": entry.put_side_skipped,
+                    # Fix #61: Position merge tracking
+                    "call_side_merged": entry.call_side_merged,
+                    "put_side_merged": entry.put_side_merged,
                     # Commission tracking
                     "open_commission": entry.open_commission,
                     "close_commission": entry.close_commission,
@@ -1595,6 +1663,11 @@ class MEICTFStrategy(MEICStrategy):
                     "trend_signal": getattr(entry, 'trend_signal', None).value if getattr(entry, 'trend_signal', None) else None,
                     # Fix #49: Track override reason for correct logging after recovery
                     "override_reason": getattr(entry, 'override_reason', None),
+                    # Fix #52: Contract count for multi-contract support
+                    "contracts": entry.contracts,
+                    # Fix #59: EMA values at entry time for Trades tab logging
+                    "ema_20_at_entry": getattr(entry, 'ema_20_at_entry', None),
+                    "ema_40_at_entry": getattr(entry, 'ema_40_at_entry', None),
                 }
                 state_data["entries"].append(entry_data)
 
@@ -2015,6 +2088,8 @@ class MEICTFStrategy(MEICStrategy):
         # Create TFIronCondorEntry instead of IronCondorEntry
         entry = TFIronCondorEntry(entry_number=entry_number)
         entry.strategy_id = f"meic_tf_{get_us_market_time().strftime('%Y%m%d')}_{entry_number:03d}"
+        # Fix #52: Set contract count for multi-contract support
+        entry.contracts = self.contracts_per_entry
 
         # Use dictionary approach to handle positions in any order
         entry_prices = {
@@ -2036,7 +2111,8 @@ class MEICTFStrategy(MEICStrategy):
                 logger.warning(f"Entry #{entry_number}: Leg {leg_type} direction mismatch!")
 
             # Store entry price for later NET calculation
-            entry_prices[leg_type] = pos.get("entry_price", 0) * 100
+            # Fix #52: Multiply by entry.contracts for multi-contract support
+            entry_prices[leg_type] = pos.get("entry_price", 0) * 100 * entry.contracts
 
             if leg_type == "short_call":
                 entry.short_call_position_id = pos["position_id"]
@@ -2351,6 +2427,10 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.entries_failed = saved_state.get("entries_failed", 0)
             self.daily_state.entries_skipped = saved_state.get("entries_skipped", 0)
             self.daily_state.total_credit_received = saved_state.get("total_credit_received", 0.0)
+            # Fix #55/#56/#57: Restore MEIC-TF specific counters
+            self.daily_state.one_sided_entries = saved_state.get("one_sided_entries", 0)
+            self.daily_state.trend_overrides = saved_state.get("trend_overrides", 0)
+            self.daily_state.credit_gate_skips = saved_state.get("credit_gate_skips", 0)
 
             # Restore stopped entries (entries that have no live positions)
             # FIX #47: Also consider expired and skipped flags
@@ -2410,11 +2490,16 @@ class MEICTFStrategy(MEICStrategy):
                     stopped_entry.put_side_expired = put_expired
                     stopped_entry.call_side_skipped = call_skipped
                     stopped_entry.put_side_skipped = put_skipped
+                    # Fix #61: Restore merge flags
+                    stopped_entry.call_side_merged = entry_data.get("call_side_merged", False)
+                    stopped_entry.put_side_merged = entry_data.get("put_side_merged", False)
                     stopped_entry.is_complete = True
                     stopped_entry.open_commission = entry_data.get("open_commission", 0)
                     stopped_entry.close_commission = entry_data.get("close_commission", 0)
                     stopped_entry.call_only = call_only
                     stopped_entry.put_only = put_only
+                    # Fix #52: Restore contract count (default to current config if not saved)
+                    stopped_entry.contracts = entry_data.get("contracts", self.contracts_per_entry)
 
                     if entry_data.get("trend_signal"):
                         try:
@@ -2424,6 +2509,9 @@ class MEICTFStrategy(MEICStrategy):
 
                     # Fix #49: Restore override_reason for correct logging
                     stopped_entry.override_reason = entry_data.get("override_reason", None)
+                    # Fix #59: Restore EMA values for Trades tab logging
+                    stopped_entry.ema_20_at_entry = entry_data.get("ema_20_at_entry", None)
+                    stopped_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)
 
                     self.daily_state.entries.append(stopped_entry)
                     stopped_entries_restored += 1
@@ -2717,6 +2805,9 @@ class MEICTFStrategy(MEICStrategy):
                     stopped_entry.put_side_expired = stopped_entry_data.get("put_side_expired", False)
                     stopped_entry.call_side_skipped = stopped_entry_data.get("call_side_skipped", False)
                     stopped_entry.put_side_skipped = stopped_entry_data.get("put_side_skipped", False)
+                    # Fix #61: Restore merge flags
+                    stopped_entry.call_side_merged = stopped_entry_data.get("call_side_merged", False)
+                    stopped_entry.put_side_merged = stopped_entry_data.get("put_side_merged", False)
                     stopped_entry.is_complete = True
 
                     # Commission
@@ -2726,6 +2817,8 @@ class MEICTFStrategy(MEICStrategy):
                     # MEIC-TF specific: One-sided entry flags
                     stopped_entry.call_only = stopped_entry_data.get("call_only", False)
                     stopped_entry.put_only = stopped_entry_data.get("put_only", False)
+                    # Fix #52: Restore contract count (default to current config if not saved)
+                    stopped_entry.contracts = stopped_entry_data.get("contracts", self.contracts_per_entry)
                     if stopped_entry_data.get("trend_signal"):
                         try:
                             stopped_entry.trend_signal = TrendSignal(stopped_entry_data["trend_signal"])
@@ -2734,6 +2827,9 @@ class MEICTFStrategy(MEICStrategy):
 
                     # Fix #49: Restore override_reason for correct logging
                     stopped_entry.override_reason = stopped_entry_data.get("override_reason", None)
+                    # Fix #59: Restore EMA values for Trades tab logging
+                    stopped_entry.ema_20_at_entry = stopped_entry_data.get("ema_20_at_entry", None)
+                    stopped_entry.ema_40_at_entry = stopped_entry_data.get("ema_40_at_entry", None)
 
                     # Position IDs are None (positions closed)
                     stopped_entry.short_call_position_id = None

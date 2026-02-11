@@ -350,11 +350,22 @@ class IronCondorEntry:
     call_wing_illiquid: bool = False  # Call wing was adjusted (calls far OTM = safe)
     put_wing_illiquid: bool = False   # Put wing was adjusted (puts far OTM = safe)
 
+    # Fix #61: Position merge tracking
+    # When two entries land on same strikes, Saxo merges them into one position
+    # The older entry's position IDs become invalid, but credit is preserved
+    call_side_merged: bool = False  # Call positions merged with another entry
+    put_side_merged: bool = False   # Put positions merged with another entry
+
     # Commission tracking (display only - does not affect P&L calculations)
     # Open commission: $2.50 per leg × 4 legs = $10 per IC (charged on entry)
     # Close commission: $2.50 per leg × 2 legs per side (only charged when closed, not expired)
     open_commission: float = 0.0   # Commission paid to open this IC
     close_commission: float = 0.0  # Commission paid to close legs (accumulated on stops)
+
+    # Fix #52: Contract size for multi-contract support
+    # Stores the number of contracts for this entry (set at entry creation)
+    # Used by spread_value properties and P&L calculations
+    contracts: int = 1
 
     @property
     def total_credit(self) -> float:
@@ -370,14 +381,21 @@ class IronCondorEntry:
 
     @property
     def call_spread_value(self) -> float:
-        """Current value (cost to close) of call spread."""
+        """Current value (cost to close) of call spread.
+
+        Fix #52: Multiplies by contracts for multi-contract support.
+        """
         # Buy back short, sell long
-        return (self.short_call_price - self.long_call_price) * 100
+        # Multiply by 100 (option multiplier) and contracts
+        return (self.short_call_price - self.long_call_price) * 100 * self.contracts
 
     @property
     def put_spread_value(self) -> float:
-        """Current value (cost to close) of put spread."""
-        return (self.short_put_price - self.long_put_price) * 100
+        """Current value (cost to close) of put spread.
+
+        Fix #52: Multiplies by contracts for multi-contract support.
+        """
+        return (self.short_put_price - self.long_put_price) * 100 * self.contracts
 
     @property
     def unrealized_pnl(self) -> float:
@@ -389,22 +407,48 @@ class IronCondorEntry:
         FIX (2026-02-04): Corrected loss calculation for stopped sides.
         Previously used stop_level as loss, but actual loss = stop_level - credit.
         Example: stop=$250, credit=$125 per side, net loss=$125 (not $250).
+
+        Fix #61/#62: Merged entries preserve their credit (transferred to surviving entry).
+        For merged sides, treat as if the credit was kept (no loss, no cost to close).
         """
-        if self.call_side_stopped and self.put_side_stopped:
+        # Fix #61: Handle merged entries
+        # Merged sides have their credit preserved - count as profit, not loss
+        call_merged = getattr(self, 'call_side_merged', False)
+        put_merged = getattr(self, 'put_side_merged', False)
+
+        # Check stopped status (note: merged overrides stopped)
+        call_stopped = self.call_side_stopped and not call_merged
+        put_stopped = self.put_side_stopped and not put_merged
+
+        if call_stopped and put_stopped:
             # Both stopped - return realized loss
             # Net loss per side = stop_level - credit_for_that_side
             call_loss = self.call_side_stop - self.call_spread_credit
             put_loss = self.put_side_stop - self.put_spread_credit
             return -(call_loss + put_loss)
-        elif self.call_side_stopped:
-            # Call stopped, put still open
-            # Net loss on call = stop_level - credit_received
+        elif call_stopped:
+            # Call stopped (loss), put still open or merged
             loss_on_call = self.call_side_stop - self.call_spread_credit
-            return (self.put_spread_credit - self.put_spread_value) - loss_on_call
-        elif self.put_side_stopped:
-            # Put stopped, call still open
+            if put_merged:
+                # Put merged - credit preserved (profit = credit)
+                return self.put_spread_credit - loss_on_call
+            else:
+                # Put still open
+                return (self.put_spread_credit - self.put_spread_value) - loss_on_call
+        elif put_stopped:
+            # Put stopped (loss), call still open or merged
             loss_on_put = self.put_side_stop - self.put_spread_credit
-            return (self.call_spread_credit - self.call_spread_value) - loss_on_put
+            if call_merged:
+                # Call merged - credit preserved (profit = credit)
+                return self.call_spread_credit - loss_on_put
+            else:
+                # Call still open
+                return (self.call_spread_credit - self.call_spread_value) - loss_on_put
+        elif call_merged or put_merged:
+            # One or both sides merged, neither stopped
+            call_pnl = self.call_spread_credit if call_merged else (self.call_spread_credit - self.call_spread_value)
+            put_pnl = self.put_spread_credit if put_merged else (self.put_spread_credit - self.put_spread_value)
+            return call_pnl + put_pnl
         else:
             # Both sides still open
             return self.total_credit - self.call_spread_value - self.put_spread_value
@@ -451,6 +495,12 @@ class MEICDailyState:
 
     # Circuit breaker
     circuit_breaker_opens: int = 0
+
+    # MEIC-TF specific counters (used by trend-following variant)
+    # These remain 0 for base MEIC, but are tracked in MEIC-TF
+    one_sided_entries: int = 0  # Fix #55: Count of one-sided (put-only or call-only) entries
+    trend_overrides: int = 0    # Fix #56: Times trend filter caused one-sided entry
+    credit_gate_skips: int = 0  # Fix #57: Times credit gate skipped/modified entry
 
     @property
     def total_stops(self) -> int:
@@ -1143,25 +1193,50 @@ class MEICStrategy:
             logger.error(f"POS-003: Reconciliation failed: {e}")
 
     def _handle_missing_positions(self, missing_ids: set):
-        """Handle positions that are missing from Saxo (manually closed or assigned)."""
+        """
+        Handle positions that are missing from Saxo (manually closed, assigned, or merged).
+
+        Fix #61: Detect when positions were merged (same strikes as another entry)
+        instead of incorrectly marking them as stopped. Merged positions preserve
+        their credit and should count as wins in the win rate calculation.
+        """
         for entry in self.daily_state.entries:
             for position_id in list(missing_ids):
                 # Check if this entry had the missing position
                 if position_id in entry.all_position_ids:
+                    # Fix #61: Check if this might be a merge (another entry has same strikes)
+                    is_merge = self._check_if_position_merged(entry, position_id)
+
                     # Determine which leg
                     if position_id == entry.short_call_position_id:
-                        logger.warning(f"  Entry #{entry.entry_number}: Short Call missing - marking call side stopped")
-                        entry.call_side_stopped = True
+                        if is_merge:
+                            logger.warning(f"  Entry #{entry.entry_number}: Short Call merged with another entry (same strikes)")
+                            entry.call_side_merged = True
+                        else:
+                            logger.warning(f"  Entry #{entry.entry_number}: Short Call missing - marking call side stopped")
+                            entry.call_side_stopped = True
                         entry.short_call_position_id = None
                     elif position_id == entry.long_call_position_id:
-                        logger.warning(f"  Entry #{entry.entry_number}: Long Call missing")
+                        if is_merge:
+                            logger.warning(f"  Entry #{entry.entry_number}: Long Call merged with another entry (same strikes)")
+                            # Long call merged is tracked with short call merge flag
+                        else:
+                            logger.warning(f"  Entry #{entry.entry_number}: Long Call missing")
                         entry.long_call_position_id = None
                     elif position_id == entry.short_put_position_id:
-                        logger.warning(f"  Entry #{entry.entry_number}: Short Put missing - marking put side stopped")
-                        entry.put_side_stopped = True
+                        if is_merge:
+                            logger.warning(f"  Entry #{entry.entry_number}: Short Put merged with another entry (same strikes)")
+                            entry.put_side_merged = True
+                        else:
+                            logger.warning(f"  Entry #{entry.entry_number}: Short Put missing - marking put side stopped")
+                            entry.put_side_stopped = True
                         entry.short_put_position_id = None
                     elif position_id == entry.long_put_position_id:
-                        logger.warning(f"  Entry #{entry.entry_number}: Long Put missing")
+                        if is_merge:
+                            logger.warning(f"  Entry #{entry.entry_number}: Long Put merged with another entry (same strikes)")
+                            # Long put merged is tracked with short put merge flag
+                        else:
+                            logger.warning(f"  Entry #{entry.entry_number}: Long Put missing")
                         entry.long_put_position_id = None
 
                     # Unregister from registry
@@ -1169,6 +1244,57 @@ class MEICStrategy:
                         self.registry.unregister(position_id)
                     except Exception as e:
                         logger.error(f"Registry error unregistering position {position_id}: {e}")
+
+    def _check_if_position_merged(self, entry: IronCondorEntry, position_id: str) -> bool:
+        """
+        Fix #61: Check if a missing position was merged with another entry.
+
+        When two entries have the same strikes, Saxo merges them into one position.
+        The older entry's position IDs become invalid, but the positions still exist
+        under the newer entry.
+
+        Args:
+            entry: The entry whose position is missing
+            position_id: The missing position ID
+
+        Returns:
+            True if another entry has the same strikes and valid position IDs
+        """
+        # Determine which side/strike to check based on position_id
+        if position_id == entry.short_call_position_id or position_id == entry.long_call_position_id:
+            # Call side - check if another entry has same call strikes
+            target_short = entry.short_call_strike
+            target_long = entry.long_call_strike
+            is_call = True
+        elif position_id == entry.short_put_position_id or position_id == entry.long_put_position_id:
+            # Put side - check if another entry has same put strikes
+            target_short = entry.short_put_strike
+            target_long = entry.long_put_strike
+            is_call = False
+        else:
+            return False
+
+        # Check other entries for same strikes with valid position IDs
+        for other_entry in self.daily_state.entries:
+            if other_entry.entry_number == entry.entry_number:
+                continue  # Skip self
+
+            if is_call:
+                if (other_entry.short_call_strike == target_short and
+                    other_entry.long_call_strike == target_long and
+                    other_entry.short_call_position_id is not None):
+                    logger.info(f"  Fix #61: Entry #{entry.entry_number} call strikes ({target_short}/{target_long}) "
+                               f"match Entry #{other_entry.entry_number} - likely merged")
+                    return True
+            else:
+                if (other_entry.short_put_strike == target_short and
+                    other_entry.long_put_strike == target_long and
+                    other_entry.short_put_position_id is not None):
+                    logger.info(f"  Fix #61: Entry #{entry.entry_number} put strikes ({target_short}/{target_long}) "
+                               f"match Entry #{other_entry.entry_number} - likely merged")
+                    return True
+
+        return False
 
     # =========================================================================
     # STATE HANDLERS
@@ -1523,6 +1649,8 @@ class MEICStrategy:
                 # Create entry object (fresh each attempt)
                 entry = IronCondorEntry(entry_number=entry_num)
                 entry.strategy_id = f"meic_{get_us_market_time().strftime('%Y%m%d')}_entry{entry_num}"
+                # Fix #52: Set contract count for multi-contract support
+                entry.contracts = self.contracts_per_entry
                 self._current_entry = entry
 
                 # Calculate strikes (may change between retries due to price movement)
@@ -1908,6 +2036,13 @@ class MEICStrategy:
                 f"{original_short_call}/{original_long_call} → "
                 f"{entry.short_call_strike}/{entry.long_call_strike}"
             )
+            # MKT-014: Re-check liquidity after MKT-013 adjustment
+            # MKT-007 may have optimized away from an illiquid strike, but MKT-013
+            # moved us back further OTM. Warn if we landed on an illiquid strike.
+            self._warn_if_strike_illiquid(
+                entry.short_call_strike, "Call", entry.entry_number,
+                reason="MKT-013 overlap adjustment"
+            )
 
         # Check and adjust short put strike
         original_short_put = entry.short_put_strike
@@ -1927,6 +2062,87 @@ class MEICStrategy:
                 f"Entry #{entry.entry_number} put spread shifted: "
                 f"{original_short_put}/{original_long_put} → "
                 f"{entry.short_put_strike}/{entry.long_put_strike}"
+            )
+            # MKT-014: Re-check liquidity after MKT-013 adjustment
+            self._warn_if_strike_illiquid(
+                entry.short_put_strike, "Put", entry.entry_number,
+                reason="MKT-013 overlap adjustment"
+            )
+
+    def _warn_if_strike_illiquid(
+        self,
+        strike: float,
+        put_call: str,
+        entry_number: int,
+        reason: str = ""
+    ):
+        """
+        MKT-014: Check and warn if a strike is illiquid after adjustment.
+
+        This is called after MKT-013 moves a strike further OTM to avoid overlap.
+        If MKT-007 previously moved away from an illiquid strike, MKT-013's
+        adjustment might land us back on an illiquid strike.
+
+        We warn but don't prevent the entry - MKT-011 credit gate will catch
+        this if the credit is too low.
+
+        Args:
+            strike: Strike price to check
+            put_call: "Call" or "Put"
+            entry_number: Entry number for logging
+            reason: Why we're checking (for log message)
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            return
+
+        uic = self._get_option_uic(strike, put_call, expiry)
+        if not uic:
+            logger.warning(
+                f"MKT-014: Entry #{entry_number} {put_call} {strike} - "
+                f"strike not found in chain after {reason}"
+            )
+            return
+
+        quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+        if not quote or "Quote" not in quote:
+            logger.warning(
+                f"MKT-014: Entry #{entry_number} {put_call} {strike} - "
+                f"no quote available after {reason}"
+            )
+            return
+
+        bid = quote["Quote"].get("Bid") or 0
+        ask = quote["Quote"].get("Ask") or 0
+
+        if bid <= 0 or ask <= 0:
+            logger.warning(
+                f"MKT-014: Entry #{entry_number} {put_call} {strike} is ILLIQUID "
+                f"(no bid/ask) after {reason}. MKT-011 credit gate will validate."
+            )
+            self._log_safety_event(
+                "MKT-014_ILLIQUID_AFTER_ADJUSTMENT",
+                f"Entry #{entry_number} {put_call} {strike} illiquid after {reason}",
+                "Warning"
+            )
+            return
+
+        spread_percent = ((ask - bid) / bid) * 100 if bid > 0 else float('inf')
+        if spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_SKIP:
+            logger.warning(
+                f"MKT-014: Entry #{entry_number} {put_call} {strike} has wide spread "
+                f"({spread_percent:.1f}%) after {reason}. "
+                f"Bid=${bid:.2f}, Ask=${ask:.2f}. MKT-011 credit gate will validate."
+            )
+            self._log_safety_event(
+                "MKT-014_WIDE_SPREAD_AFTER_ADJUSTMENT",
+                f"Entry #{entry_number} {put_call} {strike} spread {spread_percent:.1f}% after {reason}",
+                "Warning"
+            )
+        elif spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_WARNING:
+            logger.info(
+                f"MKT-014: Entry #{entry_number} {put_call} {strike} has moderate spread "
+                f"({spread_percent:.1f}%) after {reason}. Bid=${bid:.2f}, Ask=${ask:.2f}."
             )
 
     def _calculate_stop_levels(self, entry: IronCondorEntry):
@@ -2180,9 +2396,10 @@ class MEICStrategy:
         """
         # Simulate realistic credits based on spread width
         # Typically collect 2-3% of spread width as credit
+        # Fix #52: Multiply by contracts_per_entry for multi-contract support
         credit_ratio = 0.025  # 2.5% of spread width per side
-        entry.call_spread_credit = self.spread_width * credit_ratio * 100
-        entry.put_spread_credit = self.spread_width * credit_ratio * 100
+        entry.call_spread_credit = self.spread_width * credit_ratio * 100 * self.contracts_per_entry
+        entry.put_spread_credit = self.spread_width * credit_ratio * 100 * self.contracts_per_entry
 
         # Generate fake position IDs
         base_id = int(datetime.now().timestamp() * 1000)
@@ -2517,11 +2734,12 @@ class MEICStrategy:
 
                 logger.info(f"  ✓ Filled {leg_description} @ ${fill_price:.2f}")
 
+                # Fix #52: Multiply by contracts_per_entry for multi-contract support
                 return {
                     "position_id": position_id,
                     "uic": uic,
-                    "credit": fill_price * 100 if buy_sell == BuySell.SELL else 0,
-                    "debit": fill_price * 100 if buy_sell == BuySell.BUY else 0,
+                    "credit": fill_price * 100 * self.contracts_per_entry if buy_sell == BuySell.SELL else 0,
+                    "debit": fill_price * 100 * self.contracts_per_entry if buy_sell == BuySell.BUY else 0,
                     "fill_price": fill_price
                 }
 
@@ -3299,14 +3517,15 @@ class MEICStrategy:
                     if fill_price is not None:
                         # Short leg: we BUY to close (cost us money)
                         # Long leg: we SELL to close (gives us money back)
+                        # Fix #52: Multiply by entry.contracts for multi-contract support
                         if leg_name.startswith("short"):
                             # Buying back short at fill_price costs us money
-                            actual_close_cost += fill_price * 100  # Convert to dollars
-                            logger.info(f"FIX-42: {leg_name} close cost: +${fill_price * 100:.2f}")
+                            actual_close_cost += fill_price * 100 * entry.contracts  # Convert to dollars
+                            logger.info(f"FIX-42: {leg_name} close cost: +${fill_price * 100 * entry.contracts:.2f}")
                         else:
                             # Selling long at fill_price gives us money back
-                            actual_close_cost -= fill_price * 100  # Subtract (reduces cost)
-                            logger.info(f"FIX-42: {leg_name} close proceeds: -${fill_price * 100:.2f}")
+                            actual_close_cost -= fill_price * 100 * entry.contracts  # Subtract (reduces cost)
+                            logger.info(f"FIX-42: {leg_name} close proceeds: -${fill_price * 100 * entry.contracts:.2f}")
                     else:
                         fill_prices_captured = False
                         logger.warning(f"FIX-42: No fill price for {leg_name}, will fall back to theoretical")
@@ -4493,6 +4712,8 @@ class MEICStrategy:
                     stopped_entry = IronCondorEntry(entry_number=entry_num)
                     stopped_entry.entry_time = stopped_entry_data.get("entry_time")
                     stopped_entry.strategy_id = stopped_entry_data.get("strategy_id", f"meic_{today.replace('-', '')}_{entry_num:03d}")
+                    # Fix #52: Restore contract count (default to current config if not saved)
+                    stopped_entry.contracts = stopped_entry_data.get("contracts", self.contracts_per_entry)
 
                     # Strikes
                     stopped_entry.short_call_strike = stopped_entry_data.get("short_call_strike", 0)
@@ -4513,6 +4734,9 @@ class MEICStrategy:
                     stopped_entry.put_side_expired = stopped_entry_data.get("put_side_expired", False)
                     stopped_entry.call_side_skipped = stopped_entry_data.get("call_side_skipped", False)
                     stopped_entry.put_side_skipped = stopped_entry_data.get("put_side_skipped", False)
+                    # Fix #61: Restore merge flags
+                    stopped_entry.call_side_merged = stopped_entry_data.get("call_side_merged", False)
+                    stopped_entry.put_side_merged = stopped_entry_data.get("put_side_merged", False)
                     stopped_entry.is_complete = True
 
                     # Commission
@@ -4900,6 +5124,8 @@ class MEICStrategy:
         """
         entry = IronCondorEntry(entry_number=entry_number)
         entry.strategy_id = f"meic_{get_us_market_time().strftime('%Y%m%d')}_{entry_number:03d}"
+        # Fix #52: Set contract count for multi-contract support
+        entry.contracts = self.contracts_per_entry
 
         # FIX (2026-02-05): Use dictionary approach to handle positions in any order
         # Previous code assumed positions arrived in a specific order (short before long).
@@ -4924,7 +5150,8 @@ class MEICStrategy:
                 logger.warning(f"Entry #{entry_number}: Leg {leg_type} direction mismatch!")
 
             # Store entry price for later NET calculation
-            entry_prices[leg_type] = pos.get("entry_price", 0) * 100
+            # Fix #52: Multiply by entry.contracts for multi-contract support
+            entry_prices[leg_type] = pos.get("entry_price", 0) * 100 * entry.contracts
 
             if leg_type == "short_call":
                 entry.short_call_position_id = pos["position_id"]
@@ -5915,9 +6142,14 @@ class MEICStrategy:
                     "put_side_expired": entry.put_side_expired,
                     "call_side_skipped": entry.call_side_skipped,
                     "put_side_skipped": entry.put_side_skipped,
+                    # Fix #61: Position merge tracking
+                    "call_side_merged": entry.call_side_merged,
+                    "put_side_merged": entry.put_side_merged,
                     # Commission tracking
                     "open_commission": entry.open_commission,
                     "close_commission": entry.close_commission,
+                    # Fix #52: Contract count for multi-contract support
+                    "contracts": entry.contracts,
                 }
                 state_data["entries"].append(entry_data)
 
@@ -6031,6 +6263,79 @@ class MEICStrategy:
     # Note: Intraday stats (SPX high/low, VIX average) are tracked in MarketData
     # and can be accessed via market_data.get_spx_range(), market_data.get_vix_average()
     # when needed for future dashboard features.
+
+    def _entry_is_win(self, entry: IronCondorEntry) -> bool:
+        """
+        Fix #58/#61: Determine if entry is a WIN (no stops, or merged with credit preserved).
+
+        A win means:
+        - Neither side was stopped (both expired worthless = kept credit), OR
+        - Side(s) were merged with another entry (credit preserved)
+        - Skipped sides don't count against win (MEIC-TF one-sided entries)
+
+        Args:
+            entry: IronCondorEntry to evaluate
+
+        Returns:
+            True if this entry is a win
+        """
+        # For one-sided entries (MEIC-TF), only check the side that was opened
+        call_only = getattr(entry, 'call_only', False)
+        put_only = getattr(entry, 'put_only', False)
+
+        if call_only:
+            # Call-only entry - win if call wasn't stopped (merged = win)
+            return not entry.call_side_stopped
+        elif put_only:
+            # Put-only entry - win if put wasn't stopped (merged = win)
+            return not entry.put_side_stopped
+        else:
+            # Full IC - win if neither side was stopped (merged = win)
+            # Merged sides count as wins since credit is preserved
+            return not entry.call_side_stopped and not entry.put_side_stopped
+
+    def _entry_is_breakeven(self, entry: IronCondorEntry) -> bool:
+        """
+        Fix #58/#61: Determine if entry is BREAKEVEN (exactly one side stopped).
+
+        Args:
+            entry: IronCondorEntry to evaluate
+
+        Returns:
+            True if this entry is breakeven
+        """
+        # For one-sided entries (MEIC-TF), can't be breakeven (either win or loss)
+        call_only = getattr(entry, 'call_only', False)
+        put_only = getattr(entry, 'put_only', False)
+
+        if call_only or put_only:
+            return False  # One-sided entries are either win or loss, not breakeven
+
+        # Full IC - breakeven if exactly one side stopped
+        # Merged sides don't count as stopped
+        return entry.call_side_stopped != entry.put_side_stopped
+
+    def _entry_is_loss(self, entry: IronCondorEntry) -> bool:
+        """
+        Fix #58/#61: Determine if entry is a LOSS (both sides stopped for full IC).
+
+        Args:
+            entry: IronCondorEntry to evaluate
+
+        Returns:
+            True if this entry is a loss
+        """
+        # For one-sided entries (MEIC-TF), loss if the placed side was stopped
+        call_only = getattr(entry, 'call_only', False)
+        put_only = getattr(entry, 'put_only', False)
+
+        if call_only:
+            return entry.call_side_stopped
+        elif put_only:
+            return entry.put_side_stopped
+        else:
+            # Full IC - loss if BOTH sides stopped
+            return entry.call_side_stopped and entry.put_side_stopped
 
     def get_dashboard_metrics(self) -> Dict[str, Any]:
         """
@@ -6157,9 +6462,10 @@ class MEICStrategy:
 
             # Win/loss metrics - count entries by stop status
             # FIX (2026-02-03): Include partial entries (is_complete was excluding stopped entries)
-            "entries_with_no_stops": sum(1 for e in self.daily_state.entries if not e.call_side_stopped and not e.put_side_stopped),
-            "entries_with_one_stop": sum(1 for e in self.daily_state.entries if e.call_side_stopped != e.put_side_stopped),
-            "entries_with_both_stops": sum(1 for e in self.daily_state.entries if e.call_side_stopped and e.put_side_stopped),
+            # Fix #58/#61: Merged entries count as wins (credit preserved), not stops
+            "entries_with_no_stops": sum(1 for e in self.daily_state.entries if self._entry_is_win(e)),
+            "entries_with_one_stop": sum(1 for e in self.daily_state.entries if self._entry_is_breakeven(e)),
+            "entries_with_both_stops": sum(1 for e in self.daily_state.entries if self._entry_is_loss(e)),
 
             # Cumulative metrics
             "cumulative_pnl": cumulative.get("cumulative_pnl", 0) + total_pnl,
@@ -6708,9 +7014,10 @@ class MEICStrategy:
 
         # Calculate max possible P&L based on entries completed
         # Each IC can make at most MAX_PNL_PER_IC and lose at most MIN_PNL_PER_IC
+        # Fix #52: Multiply by contracts_per_entry for multi-contract support
         num_entries = max(1, self.daily_state.entries_completed)
-        max_possible = MAX_PNL_PER_IC * num_entries
-        min_possible = MIN_PNL_PER_IC * num_entries
+        max_possible = MAX_PNL_PER_IC * num_entries * self.contracts_per_entry
+        min_possible = MIN_PNL_PER_IC * num_entries * self.contracts_per_entry
 
         # Check for NaN or infinity
         import math
