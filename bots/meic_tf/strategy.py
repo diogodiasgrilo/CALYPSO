@@ -1605,6 +1605,7 @@ class MEICTFStrategy(MEICStrategy):
                 price=entry.total_credit,
                 delta=0.0,
                 pnl=0.0,
+                saxo_client=self.client,  # Fix #63: Enable EUR conversion
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type=entry_type,

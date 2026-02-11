@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.1.5 | **Last Updated:** 2026-02-11
+**Version:** 1.1.7 | **Last Updated:** 2026-02-11
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -178,6 +178,10 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.1.7** (2026-02-11): Fix #63 - EUR conversion in Trades tab
+  - Passes `saxo_client` to `log_trade()` calls to enable FX rate fetching
+  - P&L EUR column now shows actual converted values instead of "N/A"
 
 - **1.1.6** (2026-02-11): Fix #62 - EMA values now appear in Account Summary
   - MEIC-TF now overrides `log_account_summary()` to include EMA 20/40 values

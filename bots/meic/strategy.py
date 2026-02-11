@@ -5561,6 +5561,7 @@ class MEICStrategy:
                 price=entry.total_credit,
                 delta=0.0,  # Iron condors are delta neutral
                 pnl=0.0,  # At entry, no P&L yet
+                saxo_client=self.client,  # Fix #63: Enable EUR conversion
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type="Iron Condor",
@@ -5590,6 +5591,7 @@ class MEICStrategy:
                 price=stop_level,
                 delta=0.0,
                 pnl=-realized_loss,  # Negative because it's a loss
+                saxo_client=self.client,  # Fix #63: Enable EUR conversion
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type=f"IC {side.title()} Spread",

@@ -19,6 +19,7 @@ Strategy Details:
 - Stop loss: Total credit per side (MEIC+ subtracts configurable amount)
 
 Version History:
+- 1.2.6 (2026-02-11): Fix #63 - EUR conversion in Trades tab (pass saxo_client to log_trade)
 - 1.2.5 (2026-02-11): MKT-014 liquidity re-check + Fix #52-#61 (multi-contract, position merge detection, win rate helpers)
 - 1.2.4 (2026-02-09): MKT-012 strike conflict prevention - adjusts long strikes that conflict with existing shorts
 - 1.2.3 (2026-02-08): MKT-011 credit gate - estimates credit before entry, skips non-viable entries
