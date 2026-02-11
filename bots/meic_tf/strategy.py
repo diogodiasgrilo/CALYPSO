@@ -1401,6 +1401,14 @@ class MEICTFStrategy(MEICStrategy):
         Returns:
             Dict with all dashboard metrics including trend data
         """
+        # Fix #62: Ensure trend detection runs to populate EMA values
+        # On startup, _last_ema_short/long may be None if _detect_trend() hasn't run
+        if self._last_ema_short is None or self._last_ema_long is None:
+            try:
+                self._detect_trend()
+            except Exception as e:
+                logger.warning(f"Could not detect trend for dashboard: {e}")
+
         # Get base MEIC metrics
         metrics = super().get_dashboard_metrics()
 
