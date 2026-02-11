@@ -18,6 +18,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
 
 Version History:
+- 1.1.6 (2026-02-11): Fix #62 - EMA values now logged to Account Summary tab
 - 1.1.5 (2026-02-11): MKT-014 liquidity re-check, counter tracking, position merge detection
 - 1.1.4 (2026-02-10): MKT-013 same-strike overlap prevention
 - 1.1.3 (2026-02-10): Logging accuracy (Fix #49), correct MKT-011/MKT-010/trend labels

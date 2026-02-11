@@ -179,6 +179,10 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.1.6** (2026-02-11): Fix #62 - EMA values now appear in Account Summary
+  - MEIC-TF now overrides `log_account_summary()` to include EMA 20/40 values
+  - Previously showed "N/A" because parent class didn't pass EMA data to logger
+
 - **1.1.5** (2026-02-11): Liquidity re-check, counter tracking, position merge detection
   - MKT-014: After MKT-013 moves strikes to avoid overlap, re-check liquidity
   - Warns if the overlap adjustment landed on an illiquid strike

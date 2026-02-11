@@ -1493,6 +1493,44 @@ class MEICTFStrategy(MEICStrategy):
     # OVERRIDE: Logging for trend-following entries
     # =========================================================================
 
+    def log_account_summary(self):
+        """
+        Log MEIC-TF account summary to Google Sheets dashboard.
+
+        Overrides parent to include EMA values in the Account Summary tab.
+        Fix #62: EMA 20/40 values were showing as N/A because parent's
+        log_account_summary() didn't pass them to the logger.
+        """
+        try:
+            metrics = self.get_dashboard_metrics()
+            self.trade_logger.log_account_summary({
+                # Market data
+                "spx_price": metrics["spx_price"],
+                "vix": metrics["vix"],
+                # Entry status
+                "entries_completed": metrics["entries_completed"],
+                "active_ics": metrics["active_entries"],
+                "entries_skipped": metrics["entries_skipped"],
+                # P&L
+                "total_credit": metrics["total_credit"],
+                "unrealized_pnl": metrics["unrealized_pnl"],
+                "realized_pnl": metrics["realized_pnl"],
+                # Stops
+                "call_stops": metrics["call_stops"],
+                "put_stops": metrics["put_stops"],
+                # MEIC-TF specific: Trend data (Fix #62)
+                "current_trend": metrics.get("current_trend", "NEUTRAL"),
+                "ema_20": metrics.get("ema_20"),
+                "ema_40": metrics.get("ema_40"),
+                # Risk
+                "daily_loss_percent": metrics["pnl_percent"],
+                "circuit_breaker": metrics["circuit_breaker_open"],
+                # State
+                "state": metrics["state"]
+            })
+        except Exception as e:
+            logger.error(f"Failed to log MEIC-TF account summary: {e}")
+
     def _log_entry(self, entry):
         """
         Log entry to Google Sheets with trend info.
