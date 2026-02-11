@@ -300,6 +300,58 @@ class GoogleSheetsLogger:
             self.enabled = False
             return False
 
+    # Timeout for Google Sheets API calls (seconds)
+    # Fix #64: Prevent bot freeze when Google Sheets API hangs
+    SHEETS_API_TIMEOUT = 10
+
+    def _sheets_call_with_timeout(self, func, *args, timeout: float = None, **kwargs):
+        """
+        Execute a Google Sheets API call with timeout protection.
+
+        Fix #64: The bot froze for 3+ minutes on Feb 11, 2026 because a Google Sheets
+        API call hung indefinitely (503 Service Unavailable). During this time,
+        Entry #6's stop loss couldn't trigger, causing delayed execution.
+
+        This wrapper runs the API call in a thread and enforces a timeout.
+        If the call takes too long, we log a warning and return None instead
+        of blocking the main trading loop.
+
+        Args:
+            func: The function to call (e.g., worksheet.append_row)
+            *args: Positional arguments to pass to func
+            timeout: Timeout in seconds (default: SHEETS_API_TIMEOUT)
+            **kwargs: Keyword arguments to pass to func
+
+        Returns:
+            The result of func(*args, **kwargs), or None if timeout/error
+        """
+        if timeout is None:
+            timeout = self.SHEETS_API_TIMEOUT
+
+        result = [None]
+        exception = [None]
+
+        def target():
+            try:
+                result[0] = func(*args, **kwargs)
+            except Exception as e:
+                exception[0] = e
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            # Thread is still running - timeout occurred
+            logger.warning(f"SHEETS-TIMEOUT: Google Sheets API call timed out after {timeout}s: {func.__name__ if hasattr(func, '__name__') else str(func)}")
+            return None
+
+        if exception[0] is not None:
+            logger.warning(f"SHEETS-ERROR: Google Sheets API call failed: {exception[0]}")
+            return None
+
+        return result[0]
+
     def _setup_trades_worksheet(self):
         """Setup the Trades worksheet with essential columns only."""
         try:
@@ -784,7 +836,14 @@ class GoogleSheetsLogger:
                 data.get("close_reason", ""),
                 data.get("notes", "")
             ]
-            self.worksheets["Campaigns"].append_row(row)
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            result = self._sheets_call_with_timeout(
+                self.worksheets["Campaigns"].append_row,
+                row
+            )
+            if result is None:
+                logger.warning(f"Campaign log skipped due to timeout: {data.get('campaign_number')}")
+                return False
             logger.debug(f"Logged campaign {data.get('campaign_number')} to Google Sheets")
             return True
         except Exception as e:
@@ -852,7 +911,14 @@ class GoogleSheetsLogger:
                 f"{data.get('wing_width', 0):.0f}" if data.get('wing_width') else ""
             ]
 
-            self.worksheets["Opening Range"].append_row(row)
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            result = self._sheets_call_with_timeout(
+                self.worksheets["Opening Range"].append_row,
+                row
+            )
+            if result is None:
+                logger.warning(f"Opening range log skipped due to timeout")
+                return False
             logger.debug(f"Opening range logged to Google Sheets: {data.get('entry_decision', 'N/A')}")
             return True
         except Exception as e:
@@ -907,7 +973,12 @@ class GoogleSheetsLogger:
             ]
 
             # Find existing row for today's date (column A)
-            all_values = worksheet.get_all_values()
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            all_values = self._sheets_call_with_timeout(worksheet.get_all_values)
+            if all_values is None:
+                logger.warning("update_opening_range skipped due to timeout reading existing data")
+                return False
+
             row_num = None
             for i, existing_row in enumerate(all_values):
                 if i == 0:  # Skip header
@@ -919,11 +990,17 @@ class GoogleSheetsLogger:
             if row_num:
                 # Update existing row
                 col_range = f"A{row_num}:S{row_num}"  # 19 columns (A-S) - added price_position_pct
-                worksheet.update(col_range, [row])
+                result = self._sheets_call_with_timeout(worksheet.update, col_range, [row])
+                if result is None:
+                    logger.warning(f"Opening range update skipped due to timeout")
+                    return False
                 logger.debug(f"Opening range updated (row {row_num}): {data.get('entry_decision', 'N/A')}")
             else:
                 # Append new row for today
-                worksheet.append_row(row)
+                result = self._sheets_call_with_timeout(worksheet.append_row, row)
+                if result is None:
+                    logger.warning(f"Opening range append skipped due to timeout")
+                    return False
                 logger.debug(f"Opening range created: {data.get('entry_decision', 'N/A')}")
 
             return True
@@ -945,7 +1022,14 @@ class GoogleSheetsLogger:
             return False
 
         try:
-            self.worksheets["Trades"].append_row(trade.to_list())
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            result = self._sheets_call_with_timeout(
+                self.worksheets["Trades"].append_row,
+                trade.to_list()
+            )
+            if result is None:
+                logger.warning(f"Trade log skipped due to timeout: {trade.action}")
+                return False
             logger.debug(f"Trade logged to Google Sheets: {trade.action}")
             return True
         except Exception as e:
@@ -1001,7 +1085,11 @@ class GoogleSheetsLogger:
         try:
             # Get all records from Trades worksheet
             worksheet = self.worksheets["Trades"]
-            records = worksheet.get_all_records()
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            records = self._sheets_call_with_timeout(worksheet.get_all_records)
+            if records is None:
+                logger.warning("is_position_already_logged skipped due to timeout")
+                return False  # Assume not logged if we can't read
 
             # Normalize the expiry we're searching for
             normalized_expiry = self._normalize_expiry(expiry)
@@ -1054,7 +1142,11 @@ class GoogleSheetsLogger:
 
         try:
             worksheet = self.worksheets["Safety Events"]
-            records = worksheet.get_all_records()
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            records = self._sheets_call_with_timeout(worksheet.get_all_records)
+            if records is None:
+                logger.warning("check_recovery_logged_today skipped due to timeout")
+                return False  # Assume not logged if we can't read
 
             today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -1181,10 +1273,9 @@ class GoogleSheetsLogger:
             worksheet = self.worksheets["Positions"]
             # Only delete if there are rows beyond the header
             if worksheet.row_count > 1:
-                try:
-                    worksheet.delete_rows(2, worksheet.row_count)
-                except Exception:
-                    pass  # Ignore if no rows to delete
+                # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+                self._sheets_call_with_timeout(worksheet.delete_rows, 2, worksheet.row_count)
+                # Ignore failures - we'll overwrite anyway
 
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1208,13 +1299,14 @@ class GoogleSheetsLogger:
                         f"{pos.get('distance_to_wing', 0):.2f}",
                         pos.get("status", "Active")
                     ]
-                    worksheet.append_row(row)
+                    # Fix #64: Use timeout wrapper to prevent freeze
+                    self._sheets_call_with_timeout(worksheet.append_row, row)
 
                 # Clear any bold formatting from data rows (row 2 onwards)
                 if len(positions) > 0:
                     last_row = worksheet.row_count
                     if last_row > 1:
-                        worksheet.format(f"A2:L{last_row}", {"textFormat": {"bold": False}})
+                        self._sheets_call_with_timeout(worksheet.format, f"A2:L{last_row}", {"textFormat": {"bold": False}})
 
             elif self.strategy_type == "rolling_put_diagonal":
                 # Rolling Put Diagonal: Campaign-based tracking with premium collection
@@ -1237,13 +1329,14 @@ class GoogleSheetsLogger:
                         f"{pos.get('premium_collected', 0):.2f}",
                         pos.get("status", "Active")
                     ]
-                    worksheet.append_row(row)
+                    # Fix #64: Use timeout wrapper to prevent freeze
+                    self._sheets_call_with_timeout(worksheet.append_row, row)
 
                 # Clear any bold formatting from data rows (row 2 onwards)
                 if len(positions) > 0:
                     last_row = worksheet.row_count
                     if last_row > 1:
-                        worksheet.format(f"A2:M{last_row}", {"textFormat": {"bold": False}})
+                        self._sheets_call_with_timeout(worksheet.format, f"A2:M{last_row}", {"textFormat": {"bold": False}})
 
             else:
                 # Delta Neutral: Theta tracking for weekly positions
@@ -1279,13 +1372,14 @@ class GoogleSheetsLogger:
                         f"{weekly_theta:.2f}",
                         pos.get("status", "Active")
                     ]
-                    worksheet.append_row(row)
+                    # Fix #64: Use timeout wrapper to prevent freeze
+                    self._sheets_call_with_timeout(worksheet.append_row, row)
 
                 # Clear any bold formatting from data rows (row 2 onwards)
                 if len(positions) > 0:
                     last_row = worksheet.row_count
                     if last_row > 1:
-                        worksheet.format(f"A2:L{last_row}", {"textFormat": {"bold": False}})
+                        self._sheets_call_with_timeout(worksheet.format, f"A2:L{last_row}", {"textFormat": {"bold": False}})
 
             logger.debug(f"Updated position snapshot: {len(positions)} positions")
             return True
@@ -1373,7 +1467,11 @@ class GoogleSheetsLogger:
 
         try:
             worksheet = self.worksheets["Positions"]
-            records = worksheet.get_all_records()
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            records = self._sheets_call_with_timeout(worksheet.get_all_records)
+            if records is None:
+                logger.warning("remove_position skipped due to timeout")
+                return False
 
             # Find rows to delete (search from bottom to preserve indices)
             rows_to_delete = []
@@ -1390,8 +1488,12 @@ class GoogleSheetsLogger:
                         pass
 
             # Delete rows from bottom to top to preserve indices
+            # Fix #64: Use timeout wrapper for delete operations too
             for row_num in sorted(rows_to_delete, reverse=True):
-                worksheet.delete_rows(row_num)
+                result = self._sheets_call_with_timeout(worksheet.delete_rows, row_num)
+                if result is None:
+                    logger.warning(f"delete_rows skipped for row {row_num} due to timeout")
+                    continue
                 logger.debug(f"Removed position row {row_num}: {position_type} @ {strike}")
 
             if rows_to_delete:
@@ -1419,8 +1521,12 @@ class GoogleSheetsLogger:
         try:
             worksheet = self.worksheets["Positions"]
             # Delete all rows except header
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
             if worksheet.row_count > 1:
-                worksheet.delete_rows(2, worksheet.row_count)
+                result = self._sheets_call_with_timeout(worksheet.delete_rows, 2, worksheet.row_count)
+                if result is None:
+                    logger.warning("clear_all_positions skipped due to timeout")
+                    return False
                 logger.info("Cleared all positions from Positions sheet")
             return True
         except Exception as e:
@@ -1860,7 +1966,14 @@ class GoogleSheetsLogger:
                 ]
                 logger.debug(f"Daily summary logged to Google Sheets (Net Theta: ${net_theta:.2f})")
 
-            self.worksheets["Daily Summary"].append_row(row)
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            result = self._sheets_call_with_timeout(
+                self.worksheets["Daily Summary"].append_row,
+                row
+            )
+            if result is None:
+                logger.warning(f"Daily summary log skipped due to timeout")
+                return False
             return True
         except Exception as e:
             logger.error(f"Failed to log daily summary: {e}")
@@ -1885,7 +1998,11 @@ class GoogleSheetsLogger:
         try:
             worksheet = self.worksheets["Daily Summary"]
             # Get all data (Date is column A, Net Theta is column D)
-            all_data = worksheet.get_all_values()
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            all_data = self._sheets_call_with_timeout(worksheet.get_all_values)
+            if all_data is None:
+                logger.warning("get_accumulated_theta_from_daily_summary skipped due to timeout")
+                return None
 
             if len(all_data) <= 1:  # Only headers or empty
                 return None
@@ -1942,7 +2059,11 @@ class GoogleSheetsLogger:
 
         try:
             worksheet = self.worksheets["Daily Summary"]
-            all_data = worksheet.get_all_values()
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            all_data = self._sheets_call_with_timeout(worksheet.get_all_values)
+            if all_data is None:
+                logger.warning("get_daily_summary_count skipped due to timeout")
+                return None
 
             if len(all_data) <= 1:  # Only headers or empty
                 return None
@@ -1985,7 +2106,11 @@ class GoogleSheetsLogger:
 
         try:
             worksheet = self.worksheets["Daily Summary"]
-            all_data = worksheet.get_all_values()
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            all_data = self._sheets_call_with_timeout(worksheet.get_all_values)
+            if all_data is None:
+                logger.warning("get_last_daily_summary skipped due to timeout")
+                return None
 
             if len(all_data) <= 1:  # Only headers or empty
                 return None
@@ -2055,7 +2180,14 @@ class GoogleSheetsLogger:
                 event.get("description", ""),
                 event.get("result", "Pending")
             ]
-            self.worksheets["Safety Events"].append_row(row)
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            result = self._sheets_call_with_timeout(
+                self.worksheets["Safety Events"].append_row,
+                row
+            )
+            if result is None:
+                logger.warning(f"Safety event log skipped due to timeout: {event.get('event_type')}")
+                return False
             logger.info(f"Safety event logged: {event.get('event_type')}")
             return True
         except Exception as e:
@@ -2126,9 +2258,15 @@ class GoogleSheetsLogger:
         try:
             worksheet = self.worksheets.get("Bot Logs")
             if worksheet:
-                # Batch append all buffered rows
+                # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+                # Batch append all buffered rows with timeout protection
+                rows_written = 0
                 for row in self._log_buffer:
-                    worksheet.append_row(row)
+                    result = self._sheets_call_with_timeout(worksheet.append_row, row)
+                    if result is None:
+                        logger.warning(f"Bot log flush skipped remaining {len(self._log_buffer) - rows_written} rows due to timeout")
+                        break
+                    rows_written += 1
                 self._log_buffer.clear()
                 self._last_log_flush = datetime.now()
         except Exception as e:
@@ -2358,10 +2496,16 @@ class GoogleSheetsLogger:
                 col_range = "A2:U2"  # 21 columns
 
             # Update row 2 (single row for current snapshot) instead of appending
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
             if worksheet.row_count < 2:
-                worksheet.append_row(row)
+                result = self._sheets_call_with_timeout(worksheet.append_row, row)
             else:
-                worksheet.update(col_range, [row])
+                result = self._sheets_call_with_timeout(worksheet.update, col_range, [row])
+
+            if result is None:
+                logger.warning(f"Performance metrics update skipped due to timeout/error")
+                return False
+
             logger.debug(f"Strategy performance metrics updated for period: {period}")
             return True
         except Exception as e:
@@ -2626,10 +2770,16 @@ class GoogleSheetsLogger:
                 col_range = "A2:S2"  # 19 columns (was 15, added 4 cushion columns)
 
             # Update row 2 (single row for current snapshot) instead of appending
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
             if worksheet.row_count < 2:
-                worksheet.append_row(row)
+                result = self._sheets_call_with_timeout(worksheet.append_row, row)
             else:
-                worksheet.update(col_range, [row])
+                result = self._sheets_call_with_timeout(worksheet.update, col_range, [row])
+
+            if result is None:
+                logger.warning(f"Account summary update skipped due to timeout/error")
+                return False
+
             logger.debug("Strategy account summary updated")
             return True
         except Exception as e:
@@ -2655,7 +2805,10 @@ class GoogleSheetsLogger:
 
         try:
             worksheet = self.worksheets["Account Summary"]
-            all_values = worksheet.get_all_values()
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            all_values = self._sheets_call_with_timeout(worksheet.get_all_values)
+            if all_values is None:
+                return True  # Assume stale if we can't read, safer to log fresh data
 
             # If only header row exists (or empty), we need to log
             if len(all_values) <= 1:
