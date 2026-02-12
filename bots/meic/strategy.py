@@ -1910,6 +1910,13 @@ class MEICStrategy:
         # causing tracking issues. Offset overlapping strikes further OTM.
         self._adjust_for_same_strike_overlap(entry)
 
+        # Fix #66: Re-run Fix #44 after MKT-013, because MKT-013 shifts BOTH
+        # short AND long strikes further OTM. The new long strike may now
+        # conflict with an existing short strike that wasn't a problem before.
+        # Example: Long call 6980 (OK) → MKT-013 shifts to 6985 → conflicts
+        # with Entry #2's short call at 6985.
+        self._adjust_for_strike_conflicts(entry)
+
         logger.info(
             f"Strikes calculated for SPX {spx:.2f}: "
             f"Call {entry.short_call_strike}/{entry.long_call_strike}, "
