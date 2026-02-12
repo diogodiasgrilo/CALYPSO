@@ -1547,6 +1547,181 @@ class MEICTFStrategy(MEICStrategy):
         except Exception as e:
             logger.error(f"Failed to log MEIC-TF account summary: {e}")
 
+    def log_performance_metrics(self):
+        """
+        Log MEIC-TF performance metrics to Google Sheets.
+
+        Overrides parent to include TF-specific fields:
+        - full_ics / one_sided_entries counts
+        - trend_overrides / credit_gate_skips counts
+
+        Fix #69: Parent's log_performance_metrics() builds a NEW dict that
+        doesn't include TF-specific keys from get_dashboard_metrics().
+        The logger reads metrics.get("full_ics", 0) which defaults to 0.
+        """
+        try:
+            metrics = self.get_dashboard_metrics()
+            cumulative = self.cumulative_metrics or {}
+
+            # Calculate win/breakeven/loss rates
+            completed = metrics["entries_completed"]
+            if completed > 0:
+                win_rate = (metrics["entries_with_no_stops"] / completed) * 100
+                breakeven_rate = (metrics["entries_with_one_stop"] / completed) * 100
+                loss_rate = (metrics["entries_with_both_stops"] / completed) * 100
+            else:
+                win_rate = breakeven_rate = loss_rate = 0
+
+            self.trade_logger.log_performance_metrics(
+                period="Intraday",
+                metrics={
+                    # P&L
+                    "total_pnl": metrics["total_pnl"],
+                    "realized_pnl": metrics["realized_pnl"],
+                    "unrealized_pnl": metrics["unrealized_pnl"],
+                    "pnl_percent": metrics["pnl_percent"],
+                    # Credit tracking
+                    "total_credit": metrics["total_credit"],
+                    "avg_credit_per_ic": metrics["total_credit"] / completed if completed > 0 else 0,
+                    # Entry stats
+                    "total_entries": metrics["entries_scheduled"],
+                    "entries_completed": metrics["entries_completed"],
+                    "entries_skipped": metrics["entries_skipped"],
+                    # MEIC-TF specific: entry type counts
+                    "full_ics": metrics.get("full_ics", 0),
+                    "one_sided_entries": metrics.get("one_sided_entries", 0),
+                    # Stop stats
+                    "call_stops": metrics["call_stops"],
+                    "put_stops": metrics["put_stops"],
+                    "double_stops": metrics["double_stops"],
+                    # Outcome rates
+                    "win_rate": win_rate,
+                    "breakeven_rate": breakeven_rate,
+                    "loss_rate": loss_rate,
+                    # MEIC-TF specific: trend stats
+                    "trend_overrides": metrics.get("trend_overrides", 0),
+                    "credit_gate_skips": metrics.get("credit_gate_skips", 0),
+                    # Risk
+                    "max_drawdown": cumulative.get("max_drawdown", 0),
+                    "max_drawdown_pct": cumulative.get("max_drawdown_pct", 0),
+                    "avg_daily_pnl": cumulative.get("avg_daily_pnl", 0)
+                },
+                saxo_client=self.client
+            )
+        except Exception as e:
+            logger.error(f"Failed to log MEIC-TF performance metrics: {e}")
+
+    def log_position_snapshot(self):
+        """
+        Log current position snapshot to the Positions tab in Google Sheets.
+
+        Fix #69: Positions tab was created with correct headers but never populated.
+        Writes one row per SIDE (call/put) for each entry, showing:
+        - Entry credit, current spread value, P&L
+        - Stop level, distance to stop, whether triggered
+        - Trend signal and status (ACTIVE/STOPPED/EXPIRED/SKIPPED)
+        """
+        try:
+            today = get_us_market_time().strftime("%Y-%m-%d")
+            positions = []
+
+            # Get EUR exchange rate (once per snapshot, not per position)
+            eur_rate = 0
+            if self.trade_logger.currency_enabled:
+                try:
+                    eur_rate = self.client.get_fx_rate(
+                        self.trade_logger.base_currency,
+                        self.trade_logger.account_currency
+                    ) or 0
+                except Exception:
+                    eur_rate = 0
+
+            for entry in self.daily_state.entries:
+                is_tf = isinstance(entry, TFIronCondorEntry)
+                trend_signal = entry.trend_signal.value.upper() if is_tf and entry.trend_signal else "NEUTRAL"
+
+                # Call side
+                call_skipped = getattr(entry, 'call_side_skipped', False)
+                if not call_skipped:
+                    if entry.call_side_stopped:
+                        status = "STOPPED"
+                        current_value = entry.call_side_stop
+                        pnl = -(entry.call_side_stop - entry.call_spread_credit)
+                    elif getattr(entry, 'call_side_expired', False):
+                        status = "EXPIRED"
+                        current_value = 0
+                        pnl = entry.call_spread_credit
+                    else:
+                        status = "ACTIVE"
+                        current_value = entry.call_spread_value if entry.call_spread_value else 0
+                        pnl = entry.call_spread_credit - current_value
+
+                    stop_level = entry.call_side_stop if entry.call_side_stop else 0
+                    distance = stop_level - current_value if status == "ACTIVE" and stop_level > 0 else 0
+                    spread_width = abs(entry.long_call_strike - entry.short_call_strike) if entry.long_call_strike else 0
+
+                    positions.append({
+                        "entry_number": entry.entry_number,
+                        "leg_type": "Call Spread",
+                        "strike": entry.short_call_strike,
+                        "expiry": today,
+                        "entry_credit": entry.call_spread_credit,
+                        "current_value": current_value,
+                        "pnl": pnl,
+                        "pnl_eur": pnl * eur_rate,
+                        "stop_level": stop_level,
+                        "distance_to_stop": distance,
+                        "stop_triggered": "Yes" if entry.call_side_stopped else "No",
+                        "side": "Call",
+                        "spread_width": spread_width,
+                        "position_id": entry.short_call_position_id or "",
+                        "trend_signal": trend_signal,
+                        "status": status
+                    })
+
+                # Put side
+                put_skipped = getattr(entry, 'put_side_skipped', False)
+                if not put_skipped:
+                    if entry.put_side_stopped:
+                        status = "STOPPED"
+                        current_value = entry.put_side_stop
+                        pnl = -(entry.put_side_stop - entry.put_spread_credit)
+                    elif getattr(entry, 'put_side_expired', False):
+                        status = "EXPIRED"
+                        current_value = 0
+                        pnl = entry.put_spread_credit
+                    else:
+                        status = "ACTIVE"
+                        current_value = entry.put_spread_value if entry.put_spread_value else 0
+                        pnl = entry.put_spread_credit - current_value
+
+                    stop_level = entry.put_side_stop if entry.put_side_stop else 0
+                    distance = stop_level - current_value if status == "ACTIVE" and stop_level > 0 else 0
+                    spread_width = abs(entry.short_put_strike - entry.long_put_strike) if entry.long_put_strike else 0
+
+                    positions.append({
+                        "entry_number": entry.entry_number,
+                        "leg_type": "Put Spread",
+                        "strike": entry.short_put_strike,
+                        "expiry": today,
+                        "entry_credit": entry.put_spread_credit,
+                        "current_value": current_value,
+                        "pnl": pnl,
+                        "pnl_eur": pnl * eur_rate,
+                        "stop_level": stop_level,
+                        "distance_to_stop": distance,
+                        "stop_triggered": "Yes" if entry.put_side_stopped else "No",
+                        "side": "Put",
+                        "spread_width": spread_width,
+                        "position_id": entry.short_put_position_id or "",
+                        "trend_signal": trend_signal,
+                        "status": status
+                    })
+
+            self.trade_logger.log_position_snapshot(positions)
+        except Exception as e:
+            logger.error(f"Failed to log MEIC-TF position snapshot: {e}")
+
     def _log_entry(self, entry):
         """
         Log entry to Google Sheets with trend info.

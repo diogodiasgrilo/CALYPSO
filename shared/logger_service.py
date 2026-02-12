@@ -1360,6 +1360,57 @@ class GoogleSheetsLogger:
                     if last_row > 1:
                         self._sheets_call_with_timeout(worksheet.format, f"A2:M{last_row}", {"textFormat": {"bold": False}})
 
+            elif self.strategy_type in ("meic", "meic_tf"):
+                # MEIC/MEIC-TF: Multiple iron condors - one row per side (call/put) per entry
+                # Columns: Last Updated, Entry #, Leg Type, Strike, Expiry,
+                #          Entry Credit, Current Value, P&L ($), P&L (EUR),
+                #          Stop Level, Distance to Stop ($), Stop Triggered,
+                #          Side, Spread Width, Position ID, Trend Signal, Status
+                all_rows = []
+                for pos in positions:
+                    row = [
+                        timestamp,
+                        pos.get("entry_number", ""),
+                        pos.get("leg_type", ""),
+                        pos.get("strike", ""),
+                        pos.get("expiry", ""),
+                        f"{pos.get('entry_credit', 0):.2f}",
+                        f"{pos.get('current_value', 0):.2f}",
+                        f"{pos.get('pnl', 0):.2f}",
+                        f"{pos.get('pnl_eur', 0):.2f}",
+                        f"{pos.get('stop_level', 0):.2f}",
+                        f"{pos.get('distance_to_stop', 0):.2f}",
+                        pos.get("stop_triggered", "No"),
+                        pos.get("side", ""),
+                        pos.get("spread_width", ""),
+                        pos.get("position_id", ""),
+                        pos.get("trend_signal", ""),
+                        pos.get("status", "ACTIVE")
+                    ]
+                    all_rows.append(row)
+
+                # Batch write all rows at once (single API call)
+                if all_rows:
+                    end_row = 1 + len(all_rows)
+                    self._sheets_call_with_timeout(
+                        worksheet.update, f"A2:Q{end_row}", all_rows
+                    )
+
+                # Clear any leftover rows from previous snapshot with more entries
+                current_rows = worksheet.row_count
+                expected_rows = 1 + len(all_rows)  # 1 header + data rows
+                if current_rows > expected_rows:
+                    self._sheets_call_with_timeout(
+                        worksheet.delete_rows, expected_rows + 1, current_rows
+                    )
+
+                # Clear any bold formatting from data rows
+                if all_rows:
+                    last_row = 1 + len(all_rows)
+                    self._sheets_call_with_timeout(
+                        worksheet.format, f"A2:Q{last_row}", {"textFormat": {"bold": False}}
+                    )
+
             else:
                 # Delta Neutral: Theta tracking for weekly positions
                 # Columns: Last Updated, Type, Strike, Expiry, Days to Expiry, Entry Price, Current Price,

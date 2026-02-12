@@ -189,6 +189,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
         strategy.update_market_data()
         strategy.log_account_summary()
         strategy.log_performance_metrics()
+        strategy.log_position_snapshot()
 
         status = strategy.get_status_summary()
         trade_logger.log_bot_activity(
@@ -275,6 +276,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                                 # meaning the final values with settled P&L were never recorded
                                 strategy.log_account_summary()
                                 strategy.log_performance_metrics()
+                                strategy.log_position_snapshot()
                                 daily_summary_sent_date = today_date
                                 trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
                             else:
@@ -355,6 +357,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
 
                     strategy.log_account_summary()
                     strategy.log_performance_metrics()
+                    strategy.log_position_snapshot()
                     last_status_time = now
 
                 # Hourly Bot Logs
