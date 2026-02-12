@@ -2841,6 +2841,33 @@ class MEICTFStrategy(MEICStrategy):
                         logger.info(f"Entry #{entry.entry_number}: Restored stopped put strikes "
                                    f"(short={entry.short_put_strike}, long={entry.long_put_strike})")
 
+                    # Fix #67: Restore missing strikes/UICs for active sides.
+                    # When Saxo merges long positions at the same strike (MKT-015 scenario),
+                    # recovery can't find the older entry's long leg. The state file has
+                    # the correct values from before the merge.
+                    if not entry.call_side_stopped and entry.long_call_strike == 0:
+                        saved_lc_strike = saved.get("long_call_strike", 0)
+                        saved_lc_uic = saved.get("long_call_uic")
+                        if saved_lc_strike:
+                            entry.long_call_strike = saved_lc_strike
+                            if saved_lc_uic:
+                                entry.long_call_uic = saved_lc_uic
+                            logger.warning(
+                                f"Entry #{entry.entry_number}: Restored missing long call from state file "
+                                f"(strike={saved_lc_strike}, uic={saved_lc_uic}) - likely merged position"
+                            )
+                    if not entry.put_side_stopped and entry.long_put_strike == 0:
+                        saved_lp_strike = saved.get("long_put_strike", 0)
+                        saved_lp_uic = saved.get("long_put_uic")
+                        if saved_lp_strike:
+                            entry.long_put_strike = saved_lp_strike
+                            if saved_lp_uic:
+                                entry.long_put_uic = saved_lp_uic
+                            logger.warning(
+                                f"Entry #{entry.entry_number}: Restored missing long put from state file "
+                                f"(strike={saved_lp_strike}, uic={saved_lp_uic}) - likely merged position"
+                            )
+
                     logger.info(f"Entry #{entry.entry_number}: Restored credits from state file "
                                f"(call=${saved['call_credit']:.2f}, put=${saved['put_credit']:.2f}, "
                                f"stop=${saved['call_stop']:.2f})")
