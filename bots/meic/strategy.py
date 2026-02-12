@@ -2601,6 +2601,10 @@ class MEICStrategy:
             filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
             self._register_position(entry, "short_put")
 
+            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
+            # Activities endpoint may return limit price instead of actual execution price
+            self._verify_entry_fill_prices(entry)
+
             logger.info(
                 f"Entry #{entry.entry_number} complete: "
                 f"Call credit ${entry.call_spread_credit:.2f}, "
@@ -3296,6 +3300,98 @@ class MEICStrategy:
         )
         return 0
 
+    def _verify_entry_fill_prices(self, entry: IronCondorEntry) -> None:
+        """
+        FIX #70 Part A: Verify entry fill prices against PositionBase.OpenPrice.
+
+        After all legs are placed, the activities endpoint may have returned the
+        submitted limit price rather than the actual execution price (when Saxo
+        gives price improvement). PositionBase.OpenPrice always has the real
+        execution price.
+
+        This method calls get_positions() once, compares OpenPrice against
+        recorded credits, and updates credits if price improvement is detected.
+
+        Non-critical: if verification fails, original prices are kept.
+
+        Args:
+            entry: IronCondorEntry with all legs filled and position IDs set
+        """
+        try:
+            positions = self.client.get_positions(include_greeks=False)
+            if not positions:
+                logger.warning("FIX-70: Could not fetch positions for entry price verification")
+                return
+
+            # Build lookup: position_id -> OpenPrice
+            price_lookup = {}
+            for pos in positions:
+                pos_id = str(pos.get("PositionId", ""))
+                open_price = pos.get("PositionBase", {}).get("OpenPrice", 0)
+                if pos_id and open_price > 0:
+                    price_lookup[pos_id] = open_price
+
+            # Define legs to verify: (position_id_attr, price_role, leg_name)
+            # price_role: "short_call", "long_call", "short_put", "long_put"
+            legs = [
+                ("short_call_position_id", "short_call"),
+                ("long_call_position_id", "long_call"),
+                ("short_put_position_id", "short_put"),
+                ("long_put_position_id", "long_put"),
+            ]
+
+            corrections = {}  # leg_name -> (old_price, new_price)
+
+            for pos_attr, leg_name in legs:
+                pos_id = getattr(entry, pos_attr, None)
+                if not pos_id:
+                    continue
+
+                actual_price = price_lookup.get(str(pos_id))
+                if actual_price is None:
+                    continue
+
+                corrections[leg_name] = actual_price
+
+            # Recalculate call spread credit if we have corrections for call legs
+            if "short_call" in corrections or "long_call" in corrections:
+                short_call_price = corrections.get("short_call")
+                long_call_price = corrections.get("long_call")
+
+                if short_call_price is not None and long_call_price is not None:
+                    new_call_credit = (short_call_price - long_call_price) * 100 * entry.contracts
+                    old_call_credit = entry.call_spread_credit
+
+                    if abs(new_call_credit - old_call_credit) > 0.01:
+                        logger.info(
+                            f"FIX-70: Price improvement detected on Entry #{entry.entry_number} CALL side: "
+                            f"credit ${old_call_credit:.2f} -> ${new_call_credit:.2f} "
+                            f"(short={short_call_price:.2f}, long={long_call_price:.2f})"
+                        )
+                        entry.call_spread_credit = new_call_credit
+
+            # Recalculate put spread credit if we have corrections for put legs
+            if "short_put" in corrections or "long_put" in corrections:
+                short_put_price = corrections.get("short_put")
+                long_put_price = corrections.get("long_put")
+
+                if short_put_price is not None and long_put_price is not None:
+                    new_put_credit = (short_put_price - long_put_price) * 100 * entry.contracts
+                    old_put_credit = entry.put_spread_credit
+
+                    if abs(new_put_credit - old_put_credit) > 0.01:
+                        logger.info(
+                            f"FIX-70: Price improvement detected on Entry #{entry.entry_number} PUT side: "
+                            f"credit ${old_put_credit:.2f} -> ${new_put_credit:.2f} "
+                            f"(short={short_put_price:.2f}, long={long_put_price:.2f})"
+                        )
+                        entry.put_spread_credit = new_put_credit
+
+            logger.info(f"FIX-70: Entry #{entry.entry_number} price verification complete")
+
+        except Exception as e:
+            logger.warning(f"FIX-70: Entry price verification failed (non-critical): {e}")
+
     def _get_todays_expiry(self) -> Optional[str]:
         """Get today's expiry date string for 0DTE options."""
         return get_us_market_time().strftime("%Y-%m-%d")
@@ -3593,9 +3689,12 @@ class MEICStrategy:
             # EMERGENCY-001: Close positions with enhanced retry logic and spread validation
             # FIX #42: Collect fill prices from each leg
             # Fix #45: Pass entry_number for merged position handling
+            # FIX #70: Track deferred legs for batch price lookup after both legs close
+            deferred_legs = []  # Legs needing deferred price lookup
+
             for pos_id, leg_name, uic in positions_to_close:
                 if pos_id:
-                    _, fill_price = self._close_position_with_retry(
+                    _, fill_price, order_id = self._close_position_with_retry(
                         pos_id, leg_name, uic=uic, entry_number=entry.entry_number
                     )
                     if fill_price is not None:
@@ -3613,6 +3712,19 @@ class MEICStrategy:
                     else:
                         fill_prices_captured = False
                         logger.warning(f"FIX-42: No fill price for {leg_name}, will fall back to theoretical")
+                        # FIX #70: Track for deferred lookup if we have an order_id
+                        if order_id:
+                            deferred_legs.append((order_id, uic, leg_name))
+
+            # FIX #70 Part B: Deferred price lookup after BOTH legs are closed
+            # Activities endpoint needs time to sync FilledPrice for market orders
+            if deferred_legs:
+                updated_cost, all_found = self._deferred_stop_fill_lookup(
+                    deferred_legs, actual_close_cost, entry
+                )
+                actual_close_cost = updated_cost
+                if all_found:
+                    fill_prices_captured = True
 
         # Calculate actual net loss
         # FIX #42 (2026-02-05): Use actual close cost when available
@@ -3670,7 +3782,7 @@ class MEICStrategy:
 
     def _close_position_with_retry(
         self, position_id: str, leg_name: str, uic: int = None, entry_number: int = None
-    ) -> Tuple[bool, Optional[float]]:
+    ) -> Tuple[bool, Optional[float], Optional[str]]:
         """
         EMERGENCY-001: Close a position with enhanced retry logic and spread validation.
 
@@ -3681,6 +3793,7 @@ class MEICStrategy:
         4. Tracks slippage for monitoring
         5. FIX #42 (2026-02-05): Captures actual fill price for accurate P&L
         6. Fix #45 (2026-02-06): Handles merged positions (multiple entries at same strike)
+        7. FIX #70 (2026-02-12): Returns order_id for deferred price lookup
 
         CRITICAL FIX (2026-02-03): Saxo's DELETE /trade/v2/positions/{id} endpoint
         returns 404 for SPX options. Must use place_emergency_order with ToClose instead.
@@ -3692,14 +3805,15 @@ class MEICStrategy:
             entry_number: Fix #45 - Entry number being closed (for merged position handling)
 
         Returns:
-            Tuple of (success: bool, fill_price: Optional[float])
+            Tuple of (success: bool, fill_price: Optional[float], order_id: Optional[str])
             - fill_price is the actual price at which the position was closed
             - If fill_price is None, P&L calculation should fall back to theoretical
+            - order_id is the close order ID for deferred price lookup (FIX #70)
         """
         # UIC is REQUIRED now - we need it to place the close order
         if not uic:
             logger.error(f"EMERGENCY-001: Cannot close {leg_name} without UIC!")
-            return False, None
+            return False, None, None
 
         # Fix #45: Check if this is a merged position (shared across multiple entries)
         is_shared, shared_entries = self._is_position_shared(position_id)
@@ -3751,7 +3865,7 @@ class MEICStrategy:
                             self.registry.unregister(position_id)
                         except Exception:
                             pass
-                        return True, None
+                        return True, None, None
 
                 # EMERGENCY-001: Check spread before closing (if UIC available)
                 if attempt > 0:  # Skip spread check on first attempt
@@ -3825,7 +3939,8 @@ class MEICStrategy:
                         # FIX #42 (2026-02-05): Get actual fill price from activities
                         fill_price = self._get_close_fill_price(order_id, uic, leg_name)
                         logger.info(f"EMERGENCY-001: Verified {leg_name} closed on attempt {attempt_num}, fill_price=${fill_price:.2f}" if fill_price else f"EMERGENCY-001: Verified {leg_name} closed on attempt {attempt_num}, fill_price=unknown")
-                        return True, fill_price
+                        # FIX #70: Return order_id for deferred price lookup
+                        return True, fill_price, str(order_id)
                     else:
                         logger.warning(
                             f"EMERGENCY-001: Order {order_id} placed but position still exists, retrying..."
@@ -3887,7 +4002,7 @@ class MEICStrategy:
             priority=AlertPriority.CRITICAL
         )
         self._log_safety_event("EMERGENCY_CLOSE_FAILED", error_msg, "Failed")
-        return False, None
+        return False, None, None
 
     def _check_spread_for_emergency_close(self, uic: int) -> Tuple[bool, float]:
         """
@@ -4260,6 +4375,75 @@ class MEICStrategy:
         except Exception as e:
             logger.error(f"FIX-42: Error getting fill price for {leg_name}: {e}")
             return None
+
+    def _deferred_stop_fill_lookup(
+        self,
+        deferred_legs: list,
+        current_close_cost: float,
+        entry: IronCondorEntry
+    ) -> Tuple[float, bool]:
+        """
+        FIX #70 Part B: Deferred price lookup for stop loss legs with missing fill prices.
+
+        After both legs of a stop are closed, waits 3 seconds for Saxo's activities
+        endpoint to sync, then re-checks for actual fill prices. This replaces the
+        inaccurate quote-based fallback from _get_close_fill_price().
+
+        Args:
+            deferred_legs: List of (order_id, uic, leg_name) tuples needing price lookup
+            current_close_cost: Running close cost total (may already include some legs)
+            entry: The entry being stopped (for contracts count)
+
+        Returns:
+            Tuple of (updated_close_cost, all_prices_found)
+        """
+        logger.info(
+            f"FIX-70: Deferred price lookup for {len(deferred_legs)} legs, "
+            f"waiting 3s for Saxo sync..."
+        )
+        time.sleep(3)
+
+        all_found = True
+        updated_cost = current_close_cost
+
+        for order_id, uic, leg_name in deferred_legs:
+            try:
+                filled, fill_details = self.client.check_order_filled_by_activity(
+                    order_id=order_id,
+                    uic=uic,
+                    max_retries=3,
+                    retry_delay=1.5
+                )
+
+                if filled and fill_details:
+                    fill_price = fill_details.get("fill_price", 0)
+                    if fill_price and fill_price > 0:
+                        if leg_name.startswith("short"):
+                            updated_cost += fill_price * 100 * entry.contracts
+                            logger.info(
+                                f"FIX-70: Deferred fill price for {leg_name}: "
+                                f"${fill_price:.2f} (close cost +${fill_price * 100 * entry.contracts:.2f})"
+                            )
+                        else:
+                            updated_cost -= fill_price * 100 * entry.contracts
+                            logger.info(
+                                f"FIX-70: Deferred fill price for {leg_name}: "
+                                f"${fill_price:.2f} (close proceeds -${fill_price * 100 * entry.contracts:.2f})"
+                            )
+                        continue
+
+                # Still no price after deferred lookup
+                logger.warning(
+                    f"FIX-70: Deferred lookup still has no fill price for {leg_name} "
+                    f"(order {order_id}). P&L may be inaccurate."
+                )
+                all_found = False
+
+            except Exception as e:
+                logger.warning(f"FIX-70: Deferred lookup error for {leg_name}: {e}")
+                all_found = False
+
+        return updated_cost, all_found
 
     # =========================================================================
     # MARKET DATA

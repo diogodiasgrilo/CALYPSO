@@ -829,6 +829,9 @@ class MEICTFStrategy(MEICStrategy):
             filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
             self._register_position(entry, "short_call")
 
+            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
+            self._verify_entry_fill_prices(entry)
+
             logger.info(f"Call spread complete: Credit ${entry.call_spread_credit:.2f}")
 
             # FIX #47: Mark put side as "skipped" (not stopped) since it was never opened
@@ -902,6 +905,9 @@ class MEICTFStrategy(MEICStrategy):
             entry.put_spread_credit = short_put_credit - long_put_debit
             filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
             self._register_position(entry, "short_put")
+
+            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
+            self._verify_entry_fill_prices(entry)
 
             logger.info(f"Put spread complete: Credit ${entry.put_spread_credit:.2f}")
 
