@@ -121,7 +121,7 @@ def get_secret(secret_name: str, version: str = "latest") -> Optional[str]:
         client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{project_id}/secrets/{secret_name}/versions/{version}"
 
-        response = client.access_secret_version(request={"name": name})
+        response = client.access_secret_version(request={"name": name}, timeout=10)
         secret_value = response.payload.data.decode("UTF-8")
 
         logger.info(f"Successfully fetched secret: {secret_name}")

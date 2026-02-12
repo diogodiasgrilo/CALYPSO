@@ -535,7 +535,8 @@ class SaxoClient:
             response = requests.post(
                 self.token_url,
                 data=token_data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30
             )
 
             if response.status_code in [200, 201]:
@@ -597,7 +598,8 @@ class SaxoClient:
             response = requests.post(
                 self.token_url,
                 data=refresh_data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30
             )
 
             if response.status_code in [200, 201]:

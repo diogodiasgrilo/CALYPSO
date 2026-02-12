@@ -255,36 +255,58 @@ class GoogleSheetsLogger:
             # Authorize and create client
             self.client = gspread.authorize(credentials)
 
-            # Open or create spreadsheet
-            try:
-                self.spreadsheet = self.client.open(self.spreadsheet_name)
-                logger.info(f"Opened existing Google spreadsheet: {self.spreadsheet_name}")
-            except gspread.SpreadsheetNotFound:
-                # Create new spreadsheet if it doesn't exist
-                self.spreadsheet = self.client.create(self.spreadsheet_name)
-                logger.info(f"Created new Google spreadsheet: {self.spreadsheet_name}")
+            # Run all Google Sheets setup in a thread with timeout protection.
+            # If Google Sheets API is degraded during bot restart (mid-day with open
+            # positions), startup could hang for minutes before stop monitoring begins.
+            STARTUP_TIMEOUT = 30  # seconds - generous but bounded
 
-            # Initialize all worksheets (7 tabs for comprehensive Looker dashboard)
-            self._setup_trades_worksheet()
-            self._setup_positions_worksheet()
-            self._setup_daily_summary_worksheet()
-            self._setup_safety_events_worksheet()
-            self._setup_bot_logs_worksheet()
-            self._setup_performance_metrics_worksheet()
-            self._setup_account_summary_worksheet()
+            setup_error = [None]
 
-            # Optional: Strategy-specific worksheets
-            tab_count = 7
-            if self.include_opening_range:
-                # Opening Range worksheet (only for Iron Fly 0DTE strategy)
-                self._setup_opening_range_worksheet()
-                tab_count = 8
-            elif self.strategy_type == "rolling_put_diagonal":
-                # Campaigns worksheet (only for Rolling Put Diagonal strategy)
-                self._setup_campaigns_worksheet()
-                tab_count = 8
+            def _run_sheets_setup():
+                try:
+                    import gspread as _gspread
+                    # Open or create spreadsheet
+                    try:
+                        self.spreadsheet = self.client.open(self.spreadsheet_name)
+                        logger.info(f"Opened existing Google spreadsheet: {self.spreadsheet_name}")
+                    except _gspread.SpreadsheetNotFound:
+                        self.spreadsheet = self.client.create(self.spreadsheet_name)
+                        logger.info(f"Created new Google spreadsheet: {self.spreadsheet_name}")
 
-            logger.info(f"All Google Sheets worksheets initialized successfully ({tab_count} tabs)")
+                    # Initialize all worksheets (7 tabs for comprehensive Looker dashboard)
+                    self._setup_trades_worksheet()
+                    self._setup_positions_worksheet()
+                    self._setup_daily_summary_worksheet()
+                    self._setup_safety_events_worksheet()
+                    self._setup_bot_logs_worksheet()
+                    self._setup_performance_metrics_worksheet()
+                    self._setup_account_summary_worksheet()
+
+                    # Optional: Strategy-specific worksheets
+                    tab_count = 7
+                    if self.include_opening_range:
+                        self._setup_opening_range_worksheet()
+                        tab_count = 8
+                    elif self.strategy_type == "rolling_put_diagonal":
+                        self._setup_campaigns_worksheet()
+                        tab_count = 8
+
+                    logger.info(f"All Google Sheets worksheets initialized successfully ({tab_count} tabs)")
+                except Exception as e:
+                    setup_error[0] = e
+
+            setup_thread = threading.Thread(target=_run_sheets_setup, daemon=True)
+            setup_thread.start()
+            setup_thread.join(timeout=STARTUP_TIMEOUT)
+
+            if setup_thread.is_alive():
+                logger.error(f"Google Sheets initialization timed out after {STARTUP_TIMEOUT}s - continuing without Sheets")
+                self.enabled = False
+                return False
+
+            if setup_error[0] is not None:
+                raise setup_error[0]
+
             return True
 
         except ImportError:

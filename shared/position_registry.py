@@ -134,6 +134,35 @@ class PositionRegistry:
             })
             logger.info(f"Created new position registry: {self.registry_path}")
 
+    # Maximum time to wait for file lock (seconds)
+    LOCK_TIMEOUT = 10
+
+    def _acquire_flock(self, fd, lock_type: int, timeout: float = None) -> bool:
+        """
+        Acquire a file lock with timeout to prevent indefinite blocking.
+
+        Args:
+            fd: File descriptor to lock
+            lock_type: fcntl.LOCK_SH or fcntl.LOCK_EX
+            timeout: Maximum seconds to wait (default: LOCK_TIMEOUT)
+
+        Returns:
+            bool: True if lock acquired, False if timeout
+        """
+        if timeout is None:
+            timeout = self.LOCK_TIMEOUT
+        import time
+        start = time.monotonic()
+        while True:
+            try:
+                fcntl.flock(fd, lock_type | fcntl.LOCK_NB)
+                return True
+            except (IOError, OSError):
+                if time.monotonic() - start >= timeout:
+                    logger.warning(f"Registry file lock timeout after {timeout}s")
+                    return False
+                time.sleep(0.1)
+
     def _read_registry(self) -> Dict:
         """
         Read registry with shared (read) lock.
@@ -146,7 +175,9 @@ class PositionRegistry:
         """
         try:
             with open(self.registry_path, 'r') as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+                if not self._acquire_flock(f.fileno(), fcntl.LOCK_SH):
+                    logger.error("Could not acquire read lock on registry - returning empty")
+                    return {"version": self.REGISTRY_VERSION, "positions": {}}
                 try:
                     data = json.load(f)
                     return data
@@ -174,7 +205,8 @@ class PositionRegistry:
             # Open with 'r+' for atomic update, but create if doesn't exist
             mode = 'r+' if os.path.exists(self.registry_path) else 'w'
             with open(self.registry_path, mode) as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock for writing
+                if not self._acquire_flock(f.fileno(), fcntl.LOCK_EX):
+                    raise RuntimeError(f"Could not acquire write lock on registry after {self.LOCK_TIMEOUT}s")
                 try:
                     f.seek(0)
                     json.dump(data, f, indent=2)
