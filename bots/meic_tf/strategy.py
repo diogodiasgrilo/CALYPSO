@@ -2755,6 +2755,11 @@ class MEICTFStrategy(MEICStrategy):
                                         "trend_signal": entry_data.get("trend_signal"),
                                         # Fix #49: Preserve override_reason for correct logging
                                         "override_reason": entry_data.get("override_reason"),
+                                        # Fix #67: Preserve UICs for merged position recovery
+                                        "long_call_uic": entry_data.get("long_call_uic"),
+                                        "long_put_uic": entry_data.get("long_put_uic"),
+                                        "short_call_uic": entry_data.get("short_call_uic"),
+                                        "short_put_uic": entry_data.get("short_put_uic"),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
