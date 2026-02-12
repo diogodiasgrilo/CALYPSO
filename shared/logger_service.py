@@ -1392,21 +1392,23 @@ class GoogleSheetsLogger:
                 # Batch write all rows at once (single API call)
                 if all_rows:
                     end_row = 1 + len(all_rows)
+                    # Ensure sheet has enough rows for data (delete_rows above may have shrunk it)
+                    if worksheet.row_count < end_row:
+                        self._sheets_call_with_timeout(
+                            worksheet.resize, end_row, 17
+                        )
                     self._sheets_call_with_timeout(
                         worksheet.update, f"A2:Q{end_row}", all_rows
                     )
 
-                # Clear any leftover rows from previous snapshot with more entries
-                current_rows = worksheet.row_count
-                expected_rows = 1 + len(all_rows)  # 1 header + data rows
-                if current_rows > expected_rows:
-                    self._sheets_call_with_timeout(
-                        worksheet.delete_rows, expected_rows + 1, current_rows
-                    )
+                    # Clear any leftover rows from previous snapshot with more entries
+                    if worksheet.row_count > end_row:
+                        self._sheets_call_with_timeout(
+                            worksheet.delete_rows, end_row + 1, worksheet.row_count
+                        )
 
-                # Clear any bold formatting from data rows
-                if all_rows:
-                    last_row = 1 + len(all_rows)
+                    # Clear any bold formatting from data rows
+                    last_row = end_row
                     self._sheets_call_with_timeout(
                         worksheet.format, f"A2:Q{last_row}", {"textFormat": {"bold": False}}
                     )
