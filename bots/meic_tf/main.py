@@ -270,6 +270,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                             if had_trading_activity or is_after_market_close:
                                 trade_logger.log_event("Settlement complete - sending daily summary...")
                                 strategy.log_daily_summary()
+                                # Fix #65: Also log post-settlement account summary and performance metrics
+                                # These were previously only logged during market hours heartbeat (pre-settlement),
+                                # meaning the final values with settled P&L were never recorded
+                                strategy.log_account_summary()
+                                strategy.log_performance_metrics()
                                 daily_summary_sent_date = today_date
                                 trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
                             else:

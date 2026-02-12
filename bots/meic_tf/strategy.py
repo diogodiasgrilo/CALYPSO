@@ -1418,7 +1418,9 @@ class MEICTFStrategy(MEICStrategy):
         metrics['ema_40'] = self._last_ema_long
         metrics['ema_diff_pct'] = self._last_ema_diff_pct
 
-        # Count one-sided vs full IC entries
+        # Fix #65: Count signals using actual trend_signal, not entry type
+        # Entry type (call_only/put_only) can differ from trend signal when MKT-011
+        # credit gate converts a NEUTRAL entry to one-sided
         full_ics = 0
         one_sided = 0
         bullish_count = 0
@@ -1426,18 +1428,21 @@ class MEICTFStrategy(MEICStrategy):
         neutral_count = 0
 
         for entry in self.daily_state.entries:
-            if isinstance(entry, TFIronCondorEntry):
-                if entry.call_only:
-                    one_sided += 1
-                    bearish_count += 1  # Call-only = bearish signal
-                elif entry.put_only:
-                    one_sided += 1
-                    bullish_count += 1  # Put-only = bullish signal
-                else:
-                    full_ics += 1
-                    neutral_count += 1  # Full IC = neutral signal
+            # Count entry type (full IC vs one-sided)
+            if isinstance(entry, TFIronCondorEntry) and entry.is_one_sided:
+                one_sided += 1
             else:
                 full_ics += 1
+
+            # Count trend signals from actual trend_signal field
+            if isinstance(entry, TFIronCondorEntry) and entry.trend_signal:
+                if entry.trend_signal == TrendSignal.BULLISH:
+                    bullish_count += 1
+                elif entry.trend_signal == TrendSignal.BEARISH:
+                    bearish_count += 1
+                else:
+                    neutral_count += 1
+            else:
                 neutral_count += 1
 
         metrics['full_ics'] = full_ics
@@ -1467,7 +1472,7 @@ class MEICTFStrategy(MEICStrategy):
         # Get base MEIC summary
         summary = super().get_daily_summary()
 
-        # Count one-sided vs full IC entries
+        # Fix #65: Count signals using actual trend_signal, not entry type
         full_ics = 0
         one_sided = 0
         bullish_count = 0
@@ -1475,18 +1480,21 @@ class MEICTFStrategy(MEICStrategy):
         neutral_count = 0
 
         for entry in self.daily_state.entries:
-            if isinstance(entry, TFIronCondorEntry):
-                if entry.call_only:
-                    one_sided += 1
-                    bearish_count += 1
-                elif entry.put_only:
-                    one_sided += 1
-                    bullish_count += 1
-                else:
-                    full_ics += 1
-                    neutral_count += 1
+            # Count entry type (full IC vs one-sided)
+            if isinstance(entry, TFIronCondorEntry) and entry.is_one_sided:
+                one_sided += 1
             else:
                 full_ics += 1
+
+            # Count trend signals from actual trend_signal field
+            if isinstance(entry, TFIronCondorEntry) and entry.trend_signal:
+                if entry.trend_signal == TrendSignal.BULLISH:
+                    bullish_count += 1
+                elif entry.trend_signal == TrendSignal.BEARISH:
+                    bearish_count += 1
+                else:
+                    neutral_count += 1
+            else:
                 neutral_count += 1
 
         summary['full_ics'] = full_ics
@@ -2693,6 +2701,14 @@ class MEICTFStrategy(MEICStrategy):
             preserved_call_stops = 0
             preserved_double_stops = 0
             preserved_total_commission = 0.0
+            # Fix #65: Preserve additional counters from state file
+            preserved_total_credit_received = 0.0
+            preserved_entries_completed = 0
+            preserved_entries_failed = 0
+            preserved_entries_skipped = 0
+            preserved_one_sided_entries = 0
+            preserved_trend_overrides = 0
+            preserved_credit_gate_skips = 0
             preserved_entry_credits = {}
             preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
             try:
@@ -2705,6 +2721,14 @@ class MEICTFStrategy(MEICStrategy):
                             preserved_call_stops = saved_state.get("call_stops_triggered", 0)
                             preserved_double_stops = saved_state.get("double_stops", 0)
                             preserved_total_commission = saved_state.get("total_commission", 0.0)
+                            # Fix #65: Also preserve total_credit_received and other counters
+                            preserved_total_credit_received = saved_state.get("total_credit_received", 0.0)
+                            preserved_entries_completed = saved_state.get("entries_completed", 0)
+                            preserved_entries_failed = saved_state.get("entries_failed", 0)
+                            preserved_entries_skipped = saved_state.get("entries_skipped", 0)
+                            preserved_one_sided_entries = saved_state.get("one_sided_entries", 0)
+                            preserved_trend_overrides = saved_state.get("trend_overrides", 0)
+                            preserved_credit_gate_skips = saved_state.get("credit_gate_skips", 0)
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
                                 if entry_num:
@@ -2772,41 +2796,39 @@ class MEICTFStrategy(MEICStrategy):
                     entry.call_side_stop = saved["call_stop"]
                     entry.put_side_stop = saved["put_stop"]
 
-                    # FIX #47: Restore all status flags (stopped/expired/skipped)
-                    if saved.get("call_side_stopped"):
-                        entry.call_side_stopped = True
-                    if saved.get("put_side_stopped"):
-                        entry.put_side_stopped = True
-                    if saved.get("call_side_expired"):
-                        entry.call_side_expired = True
-                    if saved.get("put_side_expired"):
-                        entry.put_side_expired = True
-                    if saved.get("call_side_skipped"):
-                        entry.call_side_skipped = True
-                    if saved.get("put_side_skipped"):
-                        entry.put_side_skipped = True
+                    # Fix #65: Restore ALL status flags from state file (authoritative source)
+                    # The reconstruction code guesses entry types from positions, but the state
+                    # file knows the actual history (e.g., full IC with stopped put vs call-only entry)
+                    entry.call_side_stopped = saved.get("call_side_stopped", False)
+                    entry.put_side_stopped = saved.get("put_side_stopped", False)
+                    entry.call_side_expired = saved.get("call_side_expired", False)
+                    entry.put_side_expired = saved.get("put_side_expired", False)
+                    entry.call_side_skipped = saved.get("call_side_skipped", False)
+                    entry.put_side_skipped = saved.get("put_side_skipped", False)
 
                     entry.open_commission = saved.get("open_commission", 0)
                     entry.close_commission = saved.get("close_commission", 0)
 
-                    # MEIC-TF specific: Restore one-sided entry flags (Fix #40)
-                    # This is critical - without these flags, one-sided entries get
-                    # incorrect stop monitoring (checking non-existent sides)
-                    if saved.get("call_only"):
-                        entry.call_only = True
-                        entry.put_only = False
-                        logger.info(f"Entry #{entry.entry_number}: Restored as CALL-ONLY entry from state file")
-                    elif saved.get("put_only"):
-                        entry.call_only = False
-                        entry.put_only = True
-                        logger.info(f"Entry #{entry.entry_number}: Restored as PUT-ONLY entry from state file")
+                    # Fix #65: Always restore entry type from state file (authoritative source)
+                    # Without this, a full IC with a stopped put side gets misclassified as
+                    # call_only by _reconstruct_entry_from_positions() (it only sees call positions)
+                    entry.call_only = saved.get("call_only", False)
+                    entry.put_only = saved.get("put_only", False)
+                    if entry.call_only:
+                        logger.info(f"Entry #{entry.entry_number}: Restored as CALL-ONLY from state file")
+                    elif entry.put_only:
+                        logger.info(f"Entry #{entry.entry_number}: Restored as PUT-ONLY from state file")
+                    else:
+                        logger.info(f"Entry #{entry.entry_number}: Restored as FULL IC from state file")
 
-                    # Restore trend signal if saved
+                    # Restore trend signal and override reason if saved
                     if saved.get("trend_signal"):
                         try:
                             entry.trend_signal = TrendSignal(saved["trend_signal"])
                         except ValueError:
                             pass  # Invalid trend signal value, ignore
+                    # Fix #65: Restore override_reason for correct logging (was missing)
+                    entry.override_reason = saved.get("override_reason", None)
 
                     if entry.call_side_stopped and entry.short_call_strike == 0:
                         entry.short_call_strike = saved.get("short_call_strike", 0)
@@ -2903,12 +2925,18 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.entries = recovered_entries
             self.daily_state.entries_completed = len(recovered_entries)
 
-            # Restore preserved P&L and stop counters
+            # Restore preserved P&L, stop counters, and other state from state file
             self.daily_state.total_realized_pnl = preserved_realized_pnl
             self.daily_state.put_stops_triggered = preserved_put_stops
             self.daily_state.call_stops_triggered = preserved_call_stops
             self.daily_state.double_stops = preserved_double_stops
             self.daily_state.total_commission = preserved_total_commission
+            # Fix #65: Restore additional counters that were previously lost on recovery
+            self.daily_state.entries_failed = preserved_entries_failed
+            self.daily_state.entries_skipped = preserved_entries_skipped
+            self.daily_state.one_sided_entries = preserved_one_sided_entries
+            self.daily_state.trend_overrides = preserved_trend_overrides
+            self.daily_state.credit_gate_skips = preserved_credit_gate_skips
 
             # Determine next entry index
             if recovered_entries:
@@ -2939,9 +2967,15 @@ class MEICTFStrategy(MEICStrategy):
                 else:
                     self.state = MEICState.DAILY_COMPLETE
 
-            # Calculate total credit from entries
-            total_credit = sum(e.total_credit for e in recovered_entries)
-            self.daily_state.total_credit_received = total_credit
+            # Fix #65: Use preserved total_credit from state file if available,
+            # rather than recalculating (recalculation depends on correct call_only/put_only flags
+            # which may have been wrong before state file restoration in earlier versions)
+            if preserved_total_credit_received > 0:
+                total_credit = preserved_total_credit_received
+                self.daily_state.total_credit_received = preserved_total_credit_received
+            else:
+                total_credit = sum(e.total_credit for e in recovered_entries)
+                self.daily_state.total_credit_received = total_credit
 
             # Retroactively calculate commission for entries without commission data
             # BUG FIX: Use 2 legs for one-sided entries, 4 for full ICs
