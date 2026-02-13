@@ -355,6 +355,18 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     trade_logger.log_event(f"[{'░' * left_len}{pnl_text}{'░' * right_len}]")
                     trade_logger.log_event(f"[{'▓' * bar_width}]")
 
+                    # Risk & return metrics line
+                    capital = status.get('capital_deployed', 0)
+                    max_loss_s = status.get('max_loss_stops', 0)
+                    max_loss_c = status.get('max_loss_catastrophic', 0)
+                    return_pct = (net_pnl / capital * 100) if capital > 0 else 0
+                    return_sign = "+" if return_pct >= 0 else ""
+                    trade_logger.log_event(
+                        f"  Capital: ${capital:,.0f} | "
+                        f"Max Loss: ${max_loss_s:,.0f} (stops) / ${max_loss_c:,.0f} (no stops) | "
+                        f"Return: {return_sign}{return_pct:.1f}%"
+                    )
+
                     strategy.log_account_summary()
                     strategy.log_performance_metrics()
                     strategy.log_position_snapshot()

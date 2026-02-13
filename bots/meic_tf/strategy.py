@@ -1578,6 +1578,10 @@ class MEICTFStrategy(MEICStrategy):
             else:
                 win_rate = breakeven_rate = loss_rate = 0
 
+            # Risk & return metrics
+            capital_deployed = self._calculate_capital_deployed()
+            net_pnl = metrics["total_pnl"] - self.daily_state.total_commission
+
             self.trade_logger.log_performance_metrics(
                 period="Intraday",
                 metrics={
@@ -1610,7 +1614,12 @@ class MEICTFStrategy(MEICStrategy):
                     # Risk
                     "max_drawdown": cumulative.get("max_drawdown", 0),
                     "max_drawdown_pct": cumulative.get("max_drawdown_pct", 0),
-                    "avg_daily_pnl": cumulative.get("avg_daily_pnl", 0)
+                    "avg_daily_pnl": cumulative.get("avg_daily_pnl", 0),
+                    # Risk & return metrics
+                    "max_loss_stops": self._calculate_max_loss_with_stops(),
+                    "max_loss_catastrophic": self._calculate_max_loss_catastrophic(),
+                    "capital_deployed": capital_deployed,
+                    "return_on_capital": (net_pnl / capital_deployed * 100) if capital_deployed > 0 else 0,
                 },
                 saxo_client=self.client
             )

@@ -5969,7 +5969,11 @@ class MEICStrategy:
             "unrealized_pnl": unrealized,
             "total_stops": self.daily_state.call_stops_triggered + self.daily_state.put_stops_triggered,
             "circuit_breaker_open": self._circuit_breaker_open,
-            "total_commission": self.daily_state.total_commission  # For net P&L display
+            "total_commission": self.daily_state.total_commission,  # For net P&L display
+            # Risk & return metrics
+            "max_loss_stops": self._calculate_max_loss_with_stops(),
+            "max_loss_catastrophic": self._calculate_max_loss_catastrophic(),
+            "capital_deployed": self._calculate_capital_deployed(),
         }
 
     def get_detailed_position_status(self) -> List[str]:
@@ -6215,6 +6219,128 @@ class MEICStrategy:
             logger.error(f"Failed to save cumulative metrics: {e}")
 
     # =========================================================================
+    # RISK & RETURN METRICS
+    # =========================================================================
+
+    def _calculate_max_loss_with_stops(self) -> float:
+        """
+        Calculate worst-case loss assuming all stop losses trigger correctly.
+
+        For MEIC breakeven design, stop_level ≈ credit, so net loss per stop ≈ $0.
+        For one-sided entries (Fix #40), stop = 2×credit, net loss = credit.
+        """
+        total = 0.0
+        for entry in self.daily_state.entries:
+            call_skipped = getattr(entry, 'call_side_skipped', False)
+            call_expired = getattr(entry, 'call_side_expired', False)
+            put_skipped = getattr(entry, 'put_side_skipped', False)
+            put_expired = getattr(entry, 'put_side_expired', False)
+
+            # Call side contribution
+            if call_skipped or call_expired:
+                call_loss = 0.0
+            elif entry.call_side_stopped:
+                call_loss = entry.call_side_stop - entry.call_spread_credit
+            else:
+                # Active side: worst case = stop triggers
+                call_loss = entry.call_side_stop - entry.call_spread_credit
+
+            # Put side contribution
+            if put_skipped or put_expired:
+                put_loss = 0.0
+            elif entry.put_side_stopped:
+                put_loss = entry.put_side_stop - entry.put_spread_credit
+            else:
+                put_loss = entry.put_side_stop - entry.put_spread_credit
+
+            total += max(0.0, call_loss) + max(0.0, put_loss)
+        return total
+
+    def _calculate_max_loss_catastrophic(self) -> float:
+        """
+        Calculate worst-case loss if all stops fail (catastrophic scenario).
+
+        For a full IC, only one side can go to full spread width at expiry.
+        For one-sided entries, only the placed side is at risk.
+        """
+        total = 0.0
+        for entry in self.daily_state.entries:
+            sw = entry.spread_width * 100 * entry.contracts
+
+            call_skipped = getattr(entry, 'call_side_skipped', False)
+            call_expired = getattr(entry, 'call_side_expired', False)
+            put_skipped = getattr(entry, 'put_side_skipped', False)
+            put_expired = getattr(entry, 'put_side_expired', False)
+
+            call_active = not entry.call_side_stopped and not call_skipped and not call_expired
+            put_active = not entry.put_side_stopped and not put_skipped and not put_expired
+
+            if call_active and put_active:
+                # Full IC: only one side can go to full loss at expiry
+                entry_loss = sw - entry.total_credit
+            elif call_active:
+                entry_loss = sw - entry.call_spread_credit
+                if entry.put_side_stopped:
+                    entry_loss += max(0.0, entry.put_side_stop - entry.put_spread_credit)
+            elif put_active:
+                entry_loss = sw - entry.put_spread_credit
+                if entry.call_side_stopped:
+                    entry_loss += max(0.0, entry.call_side_stop - entry.call_spread_credit)
+            else:
+                # Both sides done - only realized losses
+                entry_loss = 0.0
+                if entry.call_side_stopped:
+                    entry_loss += max(0.0, entry.call_side_stop - entry.call_spread_credit)
+                if entry.put_side_stopped:
+                    entry_loss += max(0.0, entry.put_side_stop - entry.put_spread_credit)
+
+            total += max(0.0, entry_loss)
+        return total
+
+    def _calculate_capital_deployed(self) -> float:
+        """
+        Calculate total margin/capital tied up in today's entries.
+
+        Capital deployed = spread_width x $100 x contracts per entry.
+        This is the maximum risk per entry (margin requirement).
+        """
+        total = 0.0
+        for entry in self.daily_state.entries:
+            if entry.spread_width > 0:
+                total += entry.spread_width * 100 * entry.contracts
+        return total
+
+    def _calculate_sortino_ratio(self, today_net_pnl: float, today_capital: float) -> float:
+        """
+        Calculate annualized Sortino ratio from historical daily returns.
+
+        Sortino = (mean_return - 0) / downside_deviation * sqrt(252)
+        Uses % returns (net_pnl / capital_deployed) for each day.
+        Returns 0.0 if < 2 days of data, 99.99 if no losing days.
+        """
+        daily_returns = self.cumulative_metrics.get("daily_returns", [])
+
+        all_returns = [d["return_pct"] for d in daily_returns]
+        if today_capital > 0:
+            all_returns.append(today_net_pnl / today_capital)
+
+        if len(all_returns) < 2:
+            return 0.0
+
+        mean_return = sum(all_returns) / len(all_returns)
+        downside_sq = [r ** 2 for r in all_returns if r < 0]
+
+        if not downside_sq:
+            return 99.99  # No losing days - cap display
+
+        downside_dev = math.sqrt(sum(downside_sq) / len(all_returns))
+        if downside_dev == 0:
+            return 99.99
+
+        sortino = (mean_return / downside_dev) * math.sqrt(252)
+        return round(min(99.99, max(-99.99, sortino)), 2)
+
+    # =========================================================================
     # ACCOUNT & DASHBOARD LOGGING (matching Iron Fly interface)
     # =========================================================================
 
@@ -6262,6 +6388,10 @@ class MEICStrategy:
             else:
                 win_rate = breakeven_rate = loss_rate = 0
 
+            # Risk & return metrics
+            capital_deployed = self._calculate_capital_deployed()
+            net_pnl = metrics["total_pnl"] - self.daily_state.total_commission
+
             self.trade_logger.log_performance_metrics(
                 period="Intraday",
                 metrics={
@@ -6288,7 +6418,12 @@ class MEICStrategy:
                     # Risk
                     "max_drawdown": cumulative.get("max_drawdown", 0),
                     "max_drawdown_pct": cumulative.get("max_drawdown_pct", 0),
-                    "avg_daily_pnl": cumulative.get("avg_daily_pnl", 0)
+                    "avg_daily_pnl": cumulative.get("avg_daily_pnl", 0),
+                    # Risk & return metrics
+                    "max_loss_stops": self._calculate_max_loss_with_stops(),
+                    "max_loss_catastrophic": self._calculate_max_loss_catastrophic(),
+                    "capital_deployed": capital_deployed,
+                    "return_on_capital": (net_pnl / capital_deployed * 100) if capital_deployed > 0 else 0,
                 },
                 saxo_client=self.client
             )
@@ -6340,6 +6475,7 @@ class MEICStrategy:
 
         # Log to Google Sheets Daily Summary tab
         # Add extra fields needed by the logger
+        capital_deployed = self._calculate_capital_deployed()
         sheets_summary = {
             **summary,
             "spx_close": self.current_price,
@@ -6347,6 +6483,12 @@ class MEICStrategy:
             "daily_pnl": net_pnl,
             "total_commission": commission,
             "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + net_pnl,
+            # Risk & return metrics
+            "max_loss_stops": self._calculate_max_loss_with_stops(),
+            "max_loss_catastrophic": self._calculate_max_loss_catastrophic(),
+            "capital_deployed": capital_deployed,
+            "return_on_capital": (net_pnl / capital_deployed * 100) if capital_deployed > 0 else 0,
+            "sortino_ratio": self._calculate_sortino_ratio(net_pnl, capital_deployed),
             "notes": "Post-settlement" if self._settlement_reconciliation_complete else ""
         }
 
@@ -6373,6 +6515,17 @@ class MEICStrategy:
             self.cumulative_metrics["winning_days"] += 1
         else:
             self.cumulative_metrics["losing_days"] += 1
+
+        # Store daily return for Sortino ratio calculation
+        if "daily_returns" not in self.cumulative_metrics:
+            self.cumulative_metrics["daily_returns"] = []
+        if capital_deployed > 0:
+            self.cumulative_metrics["daily_returns"].append({
+                "date": summary["date"],
+                "net_pnl": net_pnl,
+                "capital_deployed": capital_deployed,
+                "return_pct": net_pnl / capital_deployed
+            })
 
         self._save_cumulative_metrics()
 

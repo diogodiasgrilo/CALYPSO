@@ -480,7 +480,7 @@ class GoogleSheetsLogger:
                     ]
                 elif self.strategy_type == "meic_tf":
                     # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries
-                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=19)
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=24)
                     headers = [
                         "Date", "SPX Close", "VIX",
                         "Entries Completed", "Entries Skipped",
@@ -489,6 +489,8 @@ class GoogleSheetsLogger:
                         "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
                         "Win Rate (%)",
                         "Bullish Signals", "Bearish Signals", "Neutral Signals",
+                        "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
+                        "Capital Deployed ($)", "Return on Capital (%)", "Sortino Ratio",
                         "Notes"
                     ]
                 else:
@@ -501,8 +503,8 @@ class GoogleSheetsLogger:
                         "Rolled Today", "Recentered Today", "Notes"
                     ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:N1", {"textFormat": {"bold": True}})
-                logger.info(f"Created Daily Summary worksheet ({self.strategy_type} format)")
+                worksheet.format("A1:Z1", {"textFormat": {"bold": True}})
+                logger.info(f"Created Daily Summary worksheet ({self.strategy_type} format, {len(headers)} cols)")
 
             self.worksheets["Daily Summary"] = worksheet
         except Exception as e:
@@ -613,8 +615,8 @@ class GoogleSheetsLogger:
                         "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)"
                     ]
                 elif self.strategy_type == "meic_tf":
-                    # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries (25 columns)
-                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=25)
+                    # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries (29 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=29)
                     headers = [
                         # Meta
                         "Timestamp", "Period",
@@ -633,7 +635,10 @@ class GoogleSheetsLogger:
                         # Trend Stats (MEIC-TF specific)
                         "Trend Overrides", "Credit Gate Skips",
                         # Risk
-                        "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)"
+                        "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)",
+                        # Risk & Return Metrics
+                        "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
+                        "Capital Deployed ($)", "Return on Capital (%)"
                     ]
                 else:
                     # Delta Neutral: Weekly theta strategy - track theta, rolls
@@ -655,8 +660,8 @@ class GoogleSheetsLogger:
                         "Days Held", "Days to Expiry"
                     ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:V1", {"textFormat": {"bold": True}})
-                logger.info(f"Created Performance Metrics worksheet ({self.strategy_type} format)")
+                worksheet.format("A1:AE1", {"textFormat": {"bold": True}})
+                logger.info(f"Created Performance Metrics worksheet ({self.strategy_type} format, {len(headers)} cols)")
 
             self.worksheets["Performance Metrics"] = worksheet
         except Exception as e:
@@ -2016,6 +2021,12 @@ class GoogleSheetsLogger:
                     str(bullish_count),
                     str(bearish_count),
                     str(neutral_count),
+                    # Risk & Return Metrics
+                    f"{summary.get('max_loss_stops', 0):.2f}",
+                    f"{summary.get('max_loss_catastrophic', 0):.2f}",
+                    f"{summary.get('capital_deployed', 0):.2f}",
+                    f"{summary.get('return_on_capital', 0):.2f}",
+                    f"{summary.get('sortino_ratio', 0):.2f}",
                     summary.get("notes", "")
                 ]
                 logger.debug(f"MEIC-TF daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
@@ -2500,7 +2511,9 @@ class GoogleSheetsLogger:
                 #          Call Stops, Put Stops, Double Stops,
                 #          Win Rate (%), Breakeven Rate (%), Loss Rate (%),
                 #          Trend Overrides, Credit Gate Skips,
-                #          Max Drawdown ($), Max Drawdown (%), Avg Daily P&L ($)
+                #          Max Drawdown ($), Max Drawdown (%), Avg Daily P&L ($),
+                #          Max Loss Stops ($), Max Loss Catastrophic ($),
+                #          Capital Deployed ($), Return on Capital (%)
                 row = [
                     # Meta
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2534,9 +2547,14 @@ class GoogleSheetsLogger:
                     # Risk
                     f"{metrics.get('max_drawdown', 0):.2f}",
                     f"{metrics.get('max_drawdown_pct', 0):.4f}",
-                    f"{metrics.get('avg_daily_pnl', 0):.2f}"
+                    f"{metrics.get('avg_daily_pnl', 0):.2f}",
+                    # Risk & Return Metrics
+                    f"{metrics.get('max_loss_stops', 0):.2f}",
+                    f"{metrics.get('max_loss_catastrophic', 0):.2f}",
+                    f"{metrics.get('capital_deployed', 0):.2f}",
+                    f"{metrics.get('return_on_capital', 0):.2f}"
                 ]
-                col_range = "A2:Y2"  # 25 columns
+                col_range = "A2:AC2"  # 29 columns
             else:
                 # Delta Neutral: Weekly theta strategy - track theta, rolls
                 row = [
