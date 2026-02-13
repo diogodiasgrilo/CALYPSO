@@ -851,6 +851,9 @@ class MEICStrategy:
         # Once all positions are confirmed settled, stop checking until next trading day
         self._settlement_reconciliation_complete: bool = False
 
+        # FIX #75: Track background fill correction threads
+        self._pending_fill_corrections: list = []
+
         # P2: WebSocket price cache for stop monitoring
         self._ws_price_cache: Dict[int, Tuple[float, datetime]] = {}  # uic -> (price, timestamp)
 
@@ -3700,6 +3703,7 @@ class MEICStrategy:
         # This caused P&L to show wrong values (even profits instead of losses!)
         actual_close_cost = 0.0  # Total cost to close the spread (in dollars)
         fill_prices_captured = True  # Track if we got actual prices
+        deferred_legs = []  # FIX #75: Moved before dry_run check for async access
 
         if self.dry_run:
             logger.info(f"[DRY RUN] Would close {side} side of Entry #{entry.entry_number}")
@@ -3710,7 +3714,6 @@ class MEICStrategy:
             # FIX #42: Collect fill prices from each leg
             # Fix #45: Pass entry_number for merged position handling
             # FIX #70: Track deferred legs for batch price lookup after both legs close
-            deferred_legs = []  # Legs needing deferred price lookup
 
             for pos_id, leg_name, uic in positions_to_close:
                 if pos_id:
@@ -3736,15 +3739,10 @@ class MEICStrategy:
                         if order_id:
                             deferred_legs.append((order_id, uic, leg_name))
 
-            # FIX #70 Part B: Deferred price lookup after BOTH legs are closed
-            # Activities endpoint needs time to sync FilledPrice for market orders
-            if deferred_legs:
-                updated_cost, all_found = self._deferred_stop_fill_lookup(
-                    deferred_legs, actual_close_cost, entry
-                )
-                actual_close_cost = updated_cost
-                if all_found:
-                    fill_prices_captured = True
+            # FIX #75: Don't block main loop waiting for fill prices.
+            # Positions are already closed - deferred lookup is just for P&L accuracy.
+            # Fall through to theoretical P&L path below, then spawn background
+            # thread to correct P&L with actual fill prices (~10s later).
 
         # Calculate actual net loss
         # FIX #42 (2026-02-05): Use actual close cost when available
@@ -3792,6 +3790,15 @@ class MEICStrategy:
 
         # P1: Save state after stop loss
         self._save_state_to_disk()
+
+        # FIX #75: Spawn background thread for deferred fill price lookup
+        # Positions are already closed - this is just P&L accounting correction
+        # Pass actual_close_cost so the worker can add deferred legs' costs on top
+        # of any legs that already had immediate fill prices
+        if not self.dry_run and deferred_legs:
+            self._spawn_async_fill_correction(
+                deferred_legs, actual_close_cost, entry, side, credit_received, net_loss
+            )
 
         # ALERT-002: Flush any batched alerts after a short delay
         # This allows multiple rapid stops to be batched together
@@ -4460,6 +4467,100 @@ class MEICStrategy:
                 all_found = False
 
         return updated_cost, all_found
+
+    def _spawn_async_fill_correction(
+        self,
+        deferred_legs: list,
+        partial_close_cost: float,
+        entry: IronCondorEntry,
+        side: str,
+        credit_received: float,
+        theoretical_net_loss: float
+    ):
+        """
+        FIX #75: Run deferred fill lookup in background thread.
+
+        After a stop loss closes positions, actual fill prices may not be available
+        immediately (Saxo sync delay). Instead of blocking the main loop for ~10s,
+        this spawns a daemon thread that:
+        1. Waits 3s for Saxo to sync
+        2. Retries up to 3 times to get actual fill prices
+        3. Applies P&L correction to daily_state if prices differ from theoretical
+        4. Re-saves state to disk
+
+        Args:
+            deferred_legs: List of (order_id, uic, leg_name) tuples needing price lookup
+            partial_close_cost: Close cost already captured from legs with immediate fills
+            entry: The entry being stopped
+            side: "call" or "put"
+            credit_received: Credit collected for this side
+            theoretical_net_loss: Initial P&L estimate (stop_level - credit)
+
+        Thread safety: CPython GIL ensures atomic float assignment and list append.
+        Entry objects are already marked as stopped before this runs.
+        """
+        def worker():
+            try:
+                updated_cost, all_found = self._deferred_stop_fill_lookup(
+                    deferred_legs, partial_close_cost, entry
+                )
+                if all_found:
+                    actual_net_loss = updated_cost - credit_received
+                    correction = actual_net_loss - theoretical_net_loss
+                    if abs(correction) > 0.01:
+                        self.daily_state.total_realized_pnl -= correction
+                        self._save_state_to_disk()
+                        logger.info(
+                            f"FIX-75: Async P&L correction for Entry #{entry.entry_number} {side}: "
+                            f"theoretical=${theoretical_net_loss:.2f} → actual=${actual_net_loss:.2f} "
+                            f"(correction: ${correction:+.2f})"
+                        )
+                    else:
+                        logger.info(
+                            f"FIX-75: Async lookup confirmed theoretical P&L for "
+                            f"Entry #{entry.entry_number} {side} (no correction needed)"
+                        )
+                else:
+                    logger.warning(
+                        f"FIX-75: Async lookup incomplete for Entry #{entry.entry_number} {side}, "
+                        f"keeping theoretical P&L (${theoretical_net_loss:.2f})"
+                    )
+            except Exception as e:
+                logger.warning(f"FIX-75: Async fill correction failed for Entry #{entry.entry_number}: {e}")
+
+        thread = threading.Thread(
+            target=worker, daemon=True,
+            name=f"fill_correction_e{entry.entry_number}_{side}"
+        )
+        thread.start()
+        self._pending_fill_corrections.append(thread)
+        logger.info(
+            f"FIX-75: Spawned async fill correction thread for Entry #{entry.entry_number} {side}"
+        )
+
+    def _wait_for_pending_fill_corrections(self, timeout: float = 15.0):
+        """
+        FIX #75: Wait for any pending async fill corrections to complete.
+
+        Called before daily summary and on graceful shutdown to ensure all
+        P&L corrections are applied before final accounting.
+
+        Args:
+            timeout: Maximum seconds to wait per thread (default 15s)
+        """
+        active = [t for t in self._pending_fill_corrections if t.is_alive()]
+        if not active:
+            self._pending_fill_corrections.clear()
+            return
+        logger.info(f"FIX-75: Waiting for {len(active)} pending fill correction(s)...")
+        for t in active:
+            t.join(timeout=timeout)
+        still_alive = [t for t in active if t.is_alive()]
+        if still_alive:
+            logger.warning(
+                f"FIX-75: {len(still_alive)} correction(s) still running after {timeout}s timeout"
+            )
+        self._pending_fill_corrections.clear()
 
     # =========================================================================
     # MARKET DATA
@@ -6467,6 +6568,9 @@ class MEICStrategy:
                     return
             except (ValueError, TypeError):
                 pass  # If parsing fails, proceed normally
+
+        # FIX #75: Ensure all async fill corrections are applied before calculating summary
+        self._wait_for_pending_fill_corrections(timeout=15.0)
 
         # Get summary data
         summary = self.get_daily_summary()

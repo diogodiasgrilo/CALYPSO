@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.2.5 | **Last Updated:** 2026-02-13
+**Version:** 1.2.6 | **Last Updated:** 2026-02-13
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -177,6 +177,15 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.2.6** (2026-02-13): Fix #75 - Async deferred stop fill lookup
+  - `_deferred_stop_fill_lookup()` blocked main loop for 10-15s per stop (3s sleep + retries)
+  - In fast markets, multiple simultaneous stops would stack delays (10s × N stops)
+  - Fix: Use theoretical P&L immediately, spawn daemon thread for actual price correction
+  - Theoretical P&L is within ~$15 of actual (based on Feb 13 data)
+  - Background thread corrects P&L within ~10s, re-saves state to disk
+  - Cleanup gate ensures daily summary always uses corrected values
+  - Main loop stays responsive for monitoring other entries' stop levels
 
 - **1.2.5** (2026-02-13): Fix #74 - Stop loss fill price accuracy
   - `_get_close_fill_price()` quote fallback was bypassing Fix #70's deferred lookup

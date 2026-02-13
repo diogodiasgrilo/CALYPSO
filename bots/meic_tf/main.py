@@ -149,7 +149,7 @@ def print_banner():
     ║                                                               ║
     ║         Entries: 10:05, 10:35, 11:05, 11:35, 12:05            ║
     ║                                                               ║
-    ║         Version: 1.2.5                                        ║
+    ║         Version: 1.2.6                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
@@ -449,6 +449,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
         trade_logger.log_event("=" * 60)
         trade_logger.log_event("INITIATING GRACEFUL SHUTDOWN")
         trade_logger.log_event("=" * 60)
+
+        # FIX #75: Wait for async fill corrections before shutdown
+        if strategy is not None:
+            strategy._wait_for_pending_fill_corrections(timeout=15.0)
 
         try:
             if strategy is not None:
