@@ -18,6 +18,11 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
 
 Version History:
+- 1.2.4 (2026-02-13): Code audit hardening - error handling, timeout protection, documentation
+- 1.2.3 (2026-02-12): Fix #70 - Accurate fill price tracking (verify vs PositionBase.OpenPrice)
+- 1.2.2 (2026-02-12): Fix #65-#68 - Recovery classification, long overlap, timeout protection
+- 1.2.1 (2026-02-12): Fix #71-#73 - Duplicate summary prevention, net P&L, active entries fix
+- 1.2.0 (2026-02-12): Accurate P&L tracking and daily summary fixes
 - 1.1.8 (2026-02-11): Fix #64 - Google Sheets API timeout protection (prevents bot freeze)
 - 1.1.7 (2026-02-11): Fix #63 - EUR conversion in Trades tab (pass saxo_client to log_trade)
 - 1.1.6 (2026-02-11): Fix #62 - EMA values now logged to Account Summary tab

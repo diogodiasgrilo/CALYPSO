@@ -1272,7 +1272,7 @@ class GoogleSheetsLogger:
                 premium_received=entry_price * quantity * 100 if position_type == "SHORT_STRANGLE" else None
             )
 
-            self.worksheets["Trades"].append_row(trade.to_list())
+            self._sheets_call_with_timeout(self.worksheets["Trades"].append_row, trade.to_list())
             logger.info(f"Logged recovered position to Google Sheets: {position_type} @ {strike_display}")
             return True
 
@@ -1522,7 +1522,7 @@ class GoogleSheetsLogger:
                 f"{weekly_theta:.2f}",
                 position.get("status", "Active")
             ]
-            worksheet.append_row(row)
+            self._sheets_call_with_timeout(worksheet.append_row, row)
             logger.debug(f"Added position to Positions sheet: {position.get('type')} @ {position.get('strike')}")
             return True
         except Exception as e:
@@ -1768,7 +1768,7 @@ class GoogleSheetsLogger:
                 )
 
                 if "Trades" in self.worksheets:
-                    self.worksheets["Trades"].append_row(trade.to_list())
+                    self._sheets_call_with_timeout(self.worksheets["Trades"].append_row, trade.to_list())
                     logger.info(f"Logged individual position to Trades: {position_type} {option_type} @ ${pos.get('strike')}")
 
             # 2. Update Positions tab with current snapshot
@@ -1851,7 +1851,7 @@ class GoogleSheetsLogger:
                         f"Recovered {len(individual_positions)} option positions from Saxo",
                         "SUCCESS"
                     ]
-                    self.worksheets["Safety Events"].append_row(safety_row)
+                    self._sheets_call_with_timeout(self.worksheets["Safety Events"].append_row, safety_row)
                     logger.info("Logged recovery event to Safety Events")
                 else:
                     logger.info("Recovery event already logged today - skipping Safety Events entry")

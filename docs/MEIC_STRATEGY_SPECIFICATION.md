@@ -1,9 +1,9 @@
 # MEIC (Multiple Entry Iron Condors) Strategy Specification
 
-**Last Updated:** 2026-02-08
+**Last Updated:** 2026-02-13
 **Purpose:** Complete implementation specification for the MEIC 0DTE trading bot
 **Strategy Creator:** Tammy Chambless (the "Queen of 0DTE")
-**Status:** IMPLEMENTED - v1.2.3 (Credit gate + Zero credit safety + P&L fixes)
+**Status:** IMPLEMENTED - v1.2.4 (Credit gate + Zero credit safety + P&L fixes + timeout protection + fill price accuracy)
 
 ---
 

@@ -51,7 +51,7 @@ from shared.saxo_client import SaxoClient
 from shared.logger_service import setup_logging
 from shared.market_hours import (
     is_market_open, get_market_status_message, calculate_sleep_duration,
-    get_holiday_name, get_us_market_time, is_after_hours, is_weekend
+    get_holiday_name, get_us_market_time, is_weekend
 )
 from shared.config_loader import ConfigLoader
 from shared.secret_manager import is_running_on_gcp
@@ -149,7 +149,7 @@ def print_banner():
     ║                                                               ║
     ║         Entries: 10:05, 10:35, 11:05, 11:35, 12:05, 12:35     ║
     ║                                                               ║
-    ║         Version: 1.1.0                                        ║
+    ║         Version: 1.2.4                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
@@ -176,12 +176,20 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     trade_logger.log_event("Authenticating with Saxo Bank API...")
     if not client.authenticate():
         trade_logger.log_error("Failed to authenticate. Please check your credentials.")
+        trade_logger.shutdown()
         return
 
     trade_logger.log_event("Authentication successful!")
 
     # Initialize strategy
-    strategy = MEICTFStrategy(client, config, trade_logger, dry_run=dry_run)
+    strategy = None
+    try:
+        strategy = MEICTFStrategy(client, config, trade_logger, dry_run=dry_run)
+    except Exception as e:
+        trade_logger.log_error(f"Failed to initialize strategy: {e}")
+        logger.exception("Strategy initialization failed")
+        trade_logger.shutdown()
+        return
 
     # Log dashboard metrics on startup
     try:
@@ -253,7 +261,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     # keep checking until settlement_complete returns True (all positions cleared)
                     today_date = now_et.date()
                     if not is_weekend() and daily_summary_sent_date != today_date:
-                        settlement_complete = strategy.check_after_hours_settlement()
+                        try:
+                            settlement_complete = strategy.check_after_hours_settlement()
+                        except Exception as e:
+                            trade_logger.log_error(f"Settlement check failed: {e}")
+                            settlement_complete = False
+
                         if not settlement_complete:
                             trade_logger.log_event("Settlement pending - positions still open on Saxo")
                         else:
@@ -270,13 +283,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
 
                             if had_trading_activity or is_after_market_close:
                                 trade_logger.log_event("Settlement complete - sending daily summary...")
-                                strategy.log_daily_summary()
-                                # Fix #65: Also log post-settlement account summary and performance metrics
-                                # These were previously only logged during market hours heartbeat (pre-settlement),
-                                # meaning the final values with settled P&L were never recorded
-                                strategy.log_account_summary()
-                                strategy.log_performance_metrics()
-                                strategy.log_position_snapshot()
+                                try:
+                                    strategy.log_daily_summary()
+                                    # Fix #65: Also log post-settlement account summary and performance metrics
+                                    # These were previously only logged during market hours heartbeat (pre-settlement),
+                                    # meaning the final values with settled P&L were never recorded
+                                    strategy.log_account_summary()
+                                    strategy.log_performance_metrics()
+                                    strategy.log_position_snapshot()
+                                except Exception as e:
+                                    trade_logger.log_error(f"Failed to log daily summary: {e}")
                                 daily_summary_sent_date = today_date
                                 trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
                             else:
@@ -338,9 +354,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                     )
                     trade_logger.log_event(heartbeat_msg)
 
-                    position_lines = strategy.get_detailed_position_status()
-                    for line in position_lines:
-                        trade_logger.log_event(line)
+                    try:
+                        position_lines = strategy.get_detailed_position_status()
+                        for line in position_lines:
+                            trade_logger.log_event(line)
+                    except Exception as e:
+                        trade_logger.log_error(f"Failed to get position status: {e}")
 
                     # Visual P&L bar
                     bar_width = 50
@@ -431,32 +450,46 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
         trade_logger.log_event("INITIATING GRACEFUL SHUTDOWN")
         trade_logger.log_event("=" * 60)
 
-        status = strategy.get_status_summary()
-        trade_logger.log_event(
-            f"Final Status: State={status['state']}, "
-            f"Entries={status['entries_completed']}, "
-            f"P&L=${status['realized_pnl'] + status['unrealized_pnl']:.2f}"
-        )
+        try:
+            if strategy is not None:
+                status = strategy.get_status_summary()
+                state = status.get('state', 'Unknown')
+                entries = status.get('entries_completed', 0)
+                realized = status.get('realized_pnl', 0)
+                unrealized = status.get('unrealized_pnl', 0)
+                active = status.get('active_entries', 0)
 
-        if status['active_entries'] > 0:
-            logger.critical(
-                f"CRITICAL: Bot shutting down with {status['active_entries']} ACTIVE positions! "
-                f"P&L: ${status['realized_pnl'] + status['unrealized_pnl']:.2f}"
-            )
-            trade_logger.log_event(
-                f"WARNING: Bot shutting down with {status['active_entries']} ACTIVE positions! "
-                "Manual intervention may be required."
-            )
-            trade_logger.log_safety_event({
-                "event_type": "MEIC_TF_SHUTDOWN_WITH_POSITION",
-                "spy_price": status['underlying_price'],
-                "vix": status['vix'],
-                "description": f"Bot shutdown with {status['active_entries']} active positions",
-                "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
-            })
+                trade_logger.log_event(
+                    f"Final Status: State={state}, "
+                    f"Entries={entries}, "
+                    f"P&L=${realized + unrealized:.2f}"
+                )
 
-        trade_logger.shutdown()
+                if active > 0:
+                    spy_price = status.get('underlying_price', 0)
+                    vix = status.get('vix', 0)
+                    logger.critical(
+                        f"CRITICAL: Bot shutting down with {active} ACTIVE positions! "
+                        f"P&L: ${realized + unrealized:.2f}"
+                    )
+                    trade_logger.log_event(
+                        f"WARNING: Bot shutting down with {active} ACTIVE positions! "
+                        "Manual intervention may be required."
+                    )
+                    trade_logger.log_safety_event({
+                        "event_type": "MEIC_TF_SHUTDOWN_WITH_POSITION",
+                        "spy_price": spy_price,
+                        "vix": vix,
+                        "description": f"Bot shutdown with {active} active positions",
+                        "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
+                    })
+            else:
+                trade_logger.log_event("Strategy was not initialized - no final status available")
+        except Exception as e:
+            trade_logger.log_error(f"Error during shutdown status reporting: {e}")
+
         trade_logger.log_event("Shutdown complete.")
+        trade_logger.shutdown()
 
 
 def show_status(config: dict):
@@ -466,50 +499,56 @@ def show_status(config: dict):
 
     if not client.authenticate():
         print("Failed to authenticate. Please check your credentials.")
+        trade_logger.shutdown()
         return
 
-    strategy = MEICTFStrategy(client, config, trade_logger)
-    strategy.update_market_data()
-    status = strategy.get_status_summary()
+    try:
+        strategy = MEICTFStrategy(client, config, trade_logger)
+        strategy.update_market_data()
+        status = strategy.get_status_summary()
 
-    print("\n" + "=" * 60)
-    print("MEIC-TF CURRENT STATUS")
-    print("=" * 60)
-    print(f"  State: {status['state']}")
-    print(f"  SPX Price: {status['underlying_price']:.2f}")
-    print(f"  VIX: {status['vix']:.2f}")
+        print("\n" + "=" * 60)
+        print("MEIC-TF CURRENT STATUS")
+        print("=" * 60)
+        print(f"  State: {status['state']}")
+        print(f"  SPX Price: {status['underlying_price']:.2f}")
+        print(f"  VIX: {status['vix']:.2f}")
 
-    # Show trend info with EMA values
-    trend = status.get('current_trend', 'N/A').upper()
-    ema_short = status.get('ema_short', 0)
-    ema_long = status.get('ema_long', 0)
-    ema_diff = status.get('ema_diff_pct', 0)
-    if ema_short > 0 and ema_long > 0:
-        diff_sign = "+" if ema_diff >= 0 else ""
-        print(f"  Current Trend: {trend}")
-        print(f"    EMA 20: {ema_short:.2f}")
-        print(f"    EMA 40: {ema_long:.2f}")
-        print(f"    Difference: {diff_sign}{ema_diff*100:.3f}% (threshold: ±{strategy.ema_neutral_threshold*100:.1f}%)")
-    else:
-        print(f"  Current Trend: {trend} (EMA not yet calculated)")
+        # Show trend info with EMA values
+        trend = status.get('current_trend', 'N/A').upper()
+        ema_short = status.get('ema_short', 0)
+        ema_long = status.get('ema_long', 0)
+        ema_diff = status.get('ema_diff_pct', 0)
+        if ema_short > 0 and ema_long > 0:
+            diff_sign = "+" if ema_diff >= 0 else ""
+            print(f"  Current Trend: {trend}")
+            print(f"    EMA 20: {ema_short:.2f}")
+            print(f"    EMA 40: {ema_long:.2f}")
+            print(f"    Difference: {diff_sign}{ema_diff*100:.3f}% (threshold: ±{strategy.ema_neutral_threshold*100:.1f}%)")
+        else:
+            print(f"  Current Trend: {trend} (EMA not yet calculated)")
 
-    print("\n  Entry Schedule:")
-    for i, entry_time in enumerate(strategy.entry_times):
-        completed = i < status['entries_completed']
-        marker = "✓" if completed else "○"
-        print(f"    {marker} Entry #{i+1}: {entry_time.strftime('%H:%M')} ET")
+        print("\n  Entry Schedule:")
+        for i, entry_time in enumerate(strategy.entry_times):
+            completed = i < status['entries_completed']
+            marker = "✓" if completed else "○"
+            print(f"    {marker} Entry #{i+1}: {entry_time.strftime('%H:%M')} ET")
 
-    print("\n  Today's Stats:")
-    print(f"    Entries Completed: {status['entries_completed']}")
-    print(f"    Entries Failed: {status['entries_failed']}")
-    print(f"    Active Positions: {status['active_entries']}")
-    print(f"    Total Credit: ${status['total_credit']:.2f}")
-    print(f"    Realized P&L: ${status['realized_pnl']:.2f}")
-    print(f"    Unrealized P&L: ${status['unrealized_pnl']:.2f}")
-    print(f"    Total P&L: ${status['realized_pnl'] + status['unrealized_pnl']:.2f}")
-    print(f"    Stops Triggered: {status['total_stops']}")
+        print("\n  Today's Stats:")
+        print(f"    Entries Completed: {status['entries_completed']}")
+        print(f"    Entries Failed: {status['entries_failed']}")
+        print(f"    Active Positions: {status['active_entries']}")
+        print(f"    Total Credit: ${status['total_credit']:.2f}")
+        print(f"    Realized P&L: ${status['realized_pnl']:.2f}")
+        print(f"    Unrealized P&L: ${status['unrealized_pnl']:.2f}")
+        print(f"    Total P&L: ${status['realized_pnl'] + status['unrealized_pnl']:.2f}")
+        print(f"    Stops Triggered: {status['total_stops']}")
 
-    print("=" * 60 + "\n")
+        print("=" * 60 + "\n")
+    except Exception as e:
+        print(f"Error getting status: {e}")
+    finally:
+        trade_logger.shutdown()
 
 
 def main():

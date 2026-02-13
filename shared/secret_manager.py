@@ -237,7 +237,8 @@ def update_secret(secret_name: str, secret_value: str) -> bool:
             request={
                 "parent": parent,
                 "payload": {"data": secret_value.encode("UTF-8")}
-            }
+            },
+            timeout=10
         )
 
         logger.info(f"Secret {secret_name} updated successfully: {response.name}")

@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.2.0 | **Last Updated:** 2026-02-12
+**Version:** 1.2.4 | **Last Updated:** 2026-02-13
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -178,6 +178,27 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.2.4** (2026-02-13): Code audit hardening
+  - Error handling: try/except wrappers for settlement, shutdown, position status, strategy init
+  - Timeout protection: remaining Google Sheets `append_row` calls wrapped with 10s timeout
+  - Documentation: version consistency, edge case counts aligned
+  - Shared modules: `add_secret_version` timeout, account key validation warning
+
+- **1.2.3** (2026-02-12): Fix #70 - Accurate fill price tracking
+  - Verify entry fill prices against `PositionBase.OpenPrice` after all legs fill
+  - Deferred stop fill lookup - waits 3s after stop close, re-checks activities for actual price
+
+- **1.2.2** (2026-02-12): Recovery and overlap fixes
+  - Fix #65: State file is authoritative source for entry classification (not position reconstruction)
+  - Fix #66: Re-run strike conflict check after MKT-013 overlap adjustment
+  - Fix #67/MKT-015: Prevent long-long strike overlap (Saxo merges same-strike longs)
+  - Fix #68: Comprehensive timeout protection for all blocking calls
+
+- **1.2.1** (2026-02-12): Daily summary and metrics fixes
+  - Fix #71: Prevent duplicate daily summary rows after bot restart (idempotency guard)
+  - Fix #72: Daily summary now uses net P&L (after commission) for all tracking
+  - Fix #73: `active_entries` property now checks expired and skipped flags
 
 - **1.2.0** (2026-02-12): Accurate P&L tracking and daily summary fixes
   - Fix #70: Verify entry fill prices against `PositionBase.OpenPrice` after all legs fill

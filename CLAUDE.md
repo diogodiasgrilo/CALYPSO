@@ -212,7 +212,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 - **MEIC+ modification:** Stop = credit - $0.10 for small wins (configurable threshold)
 - **Credit validation:** Warns if credit < $1.00 or > $1.75 per side
 - **Expected results:** 20.7% CAGR, 4.31% max drawdown, 4.8 Calmar ratio, ~70% win rate
-- **Edge cases:** 76 analyzed, all resolved (see `docs/MEIC_EDGE_CASES.md`)
+- **Edge cases:** 79 analyzed, all resolved (see `docs/MEIC_EDGE_CASES.md`)
 - **Specification:** Full strategy spec (see `docs/MEIC_STRATEGY_SPECIFICATION.md`)
 
 #### MEIC Key Features
@@ -1006,7 +1006,7 @@ SCRIPT
 | **Iron Fly strategy** | [IRON_FLY_STRATEGY_SPECIFICATION.md](docs/IRON_FLY_STRATEGY_SPECIFICATION.md) | Wing width rules, profit targets, Doc Severson + Jim Olson |
 | **Delta Neutral strategy** | [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md) | Roll mechanics, credit/debit logic, full spec |
 | **MEIC strategy spec** | [MEIC_STRATEGY_SPECIFICATION.md](docs/MEIC_STRATEGY_SPECIFICATION.md) | Full MEIC implementation details |
-| **MEIC edge cases** | [MEIC_EDGE_CASES.md](docs/MEIC_EDGE_CASES.md) | 75 edge cases for MEIC bot |
+| **MEIC edge cases** | [MEIC_EDGE_CASES.md](docs/MEIC_EDGE_CASES.md) | 79 edge cases for MEIC bot |
 | SMS/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
 | **Next bots to build** | [THETA_PROFITS_STRATEGY_ANALYSIS.md](docs/THETA_PROFITS_STRATEGY_ANALYSIS.md) | Top 3: MEIC, METF, SPX Put Credit |
 | **Capital allocation** | [PORTFOLIO_ALLOCATION_ANALYSIS.md](docs/PORTFOLIO_ALLOCATION_ANALYSIS.md) | $50K optimal split: MEIC + Delta Neutral |
@@ -1025,7 +1025,7 @@ SCRIPT
 | `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
 | `docs/IRON_FLY_EDGE_CASES.md` | 64 edge cases analyzed for Iron Fly bot |
 | `docs/MEIC_STRATEGY_SPECIFICATION.md` | **MEIC strategy** - Full Tammy Chambless MEIC implementation spec |
-| `docs/MEIC_EDGE_CASES.md` | 75 edge cases analyzed for MEIC bot |
+| `docs/MEIC_EDGE_CASES.md` | 79 edge cases analyzed for MEIC bot |
 | `docs/DELTA_NEUTRAL_EDGE_CASES.md` | **55 edge cases** for Delta Neutral bot (updated 2026-01-28) |
 | `docs/ROLLING_PUT_DIAGONAL_EDGE_CASES.md` | Edge cases for Rolling Put Diagonal bot |
 | `docs/ALERTING_SETUP.md` | SMS/Email alert system deployment guide |

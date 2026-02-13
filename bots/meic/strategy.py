@@ -701,7 +701,7 @@ class MEICStrategy:
     - FOMC blackout (skip all entries on Fed announcement days)
     - Comprehensive edge case handling (79 cases analyzed)
 
-    Version: 1.2.3 (2026-02-08)
+    Version: 1.2.4 (2026-02-13)
     """
 
     def __init__(

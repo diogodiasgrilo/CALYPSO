@@ -262,6 +262,12 @@ class SaxoClient:
             self.account_key = account_config.get("account_key")
             self.client_key = account_config.get("client_key")
 
+        if not self.account_key or not self.client_key:
+            logger.warning(
+                f"Account key or client key not found in config for environment '{self.environment}'. "
+                "API calls requiring account context will fail."
+            )
+
         # Currency configuration (for FX rate lookups)
         self.currency_config = config.get("currency", {})
 

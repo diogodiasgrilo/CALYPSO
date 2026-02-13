@@ -15,7 +15,7 @@ This package contains common utilities used by all trading strategies:
 - alert_service: SMS/Email alerting via Google Cloud Pub/Sub
 - position_registry: Multi-bot position ownership tracking (for same underlying)
 
-Last Updated: 2026-02-01 (Added activities sync delay retry, commission tracking support)
+Last Updated: 2026-02-13 (Timeout protection for all Sheets/API calls, account key validation, fill price accuracy)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
