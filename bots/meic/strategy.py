@@ -3350,7 +3350,7 @@ class MEICStrategy:
                 ("long_put_position_id", "long_put"),
             ]
 
-            corrections = {}  # leg_name -> (old_price, new_price)
+            corrections = {}  # leg_name -> actual_price from PositionBase.OpenPrice
 
             for pos_attr, leg_name in legs:
                 pos_id = getattr(entry, pos_attr, None)
@@ -6345,7 +6345,6 @@ class MEICStrategy:
             "spx_close": self.current_price,
             "vix_close": self.current_vix,
             "daily_pnl": net_pnl,
-            "daily_pnl_gross": summary["total_pnl"],
             "total_commission": commission,
             "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + net_pnl,
             "notes": "Post-settlement" if self._settlement_reconciliation_complete else ""

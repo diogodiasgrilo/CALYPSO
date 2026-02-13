@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.1.8 | **Last Updated:** 2026-02-11
+**Version:** 1.2.0 | **Last Updated:** 2026-02-12
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -178,6 +178,13 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.2.0** (2026-02-12): Accurate P&L tracking and daily summary fixes
+  - Fix #70: Verify entry fill prices against `PositionBase.OpenPrice` after all legs fill
+  - Fix #70: Deferred stop fill lookup - waits 3s after stop close, re-checks activities for actual price
+  - Fix #71: Prevent duplicate daily summary rows after bot restart (idempotency guard)
+  - Fix #72: Daily summary now uses net P&L (after commission) for all tracking and cumulative metrics
+  - Fix #73: `active_entries` property now checks expired and skipped flags, not just stopped
 
 - **1.1.8** (2026-02-11): Fix #64 - Google Sheets API timeout protection
   - Bot froze for 3+ minutes when Google Sheets API returned 503 and hung

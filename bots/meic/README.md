@@ -1,8 +1,8 @@
 # MEIC (Multiple Entry Iron Condors) Trading Bot
 
-**Last Updated:** 2026-02-09
+**Last Updated:** 2026-02-12
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.2.4)
+**Status:** IMPLEMENTED - Production Ready (v1.2.5)
 
 ---
 
@@ -213,6 +213,10 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-02-12 | 1.2.5 | Fix #70: Verify entry fill prices against PositionBase.OpenPrice; deferred stop fill lookup |
+| 2026-02-12 | 1.2.5 | Fix #71: Duplicate daily summary prevention (idempotency guard on restart) |
+| 2026-02-12 | 1.2.5 | Fix #72: Daily summary uses net P&L (after commission) instead of gross |
+| 2026-02-12 | 1.2.5 | Fix #73: Active entries property checks expired/skipped flags, not just stopped |
 | 2026-02-09 | 1.2.4 | MKT-012: Strike conflict prevention - adjusts long strikes conflicting with existing shorts |
 | 2026-02-08 | 1.2.3 | MKT-011: Pre-entry credit gate - estimates credit, skips non-viable entries |
 | 2026-02-04 | 1.2.2 | Added commission tracking - shows gross/net P&L in logs, alerts, daily summary |
