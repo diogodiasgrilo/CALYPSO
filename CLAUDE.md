@@ -203,7 +203,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 | Stop loss (wing touch) | -$300 to -$350 | Typical stop-out |
 | Max loss (circuit breaker) | -$400 | Safety cap |
 
-### MEIC Bot Details (v1.2.0 - Updated 2026-02-02)
+### MEIC Bot Details (v1.2.8 - Updated 2026-02-13)
 - **Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors) - "Queen of 0DTE"
 - **Structure:** 6 scheduled iron condor entries per day
 - **Entry times:** 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 AM ET

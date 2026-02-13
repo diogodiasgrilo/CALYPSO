@@ -599,6 +599,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
         trade_logger.log_event("INITIATING GRACEFUL SHUTDOWN")
         trade_logger.log_event("=" * 60)
 
+        # FIX #75: Wait for async fill corrections before shutdown
+        if strategy is not None:
+            strategy._wait_for_pending_fill_corrections(timeout=15.0)
+
         # Stop price streaming (only if WebSocket mode was enabled)
         if USE_WEBSOCKET_STREAMING:
             trade_logger.log_event("Stopping price streaming...")

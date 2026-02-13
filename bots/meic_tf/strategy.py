@@ -16,7 +16,7 @@ For capital-constrained accounts, this hybrid combines both concepts in one bot.
 Author: Trading Bot Developer
 Date: 2026-02-04
 
-Based on: bots/meic/strategy.py (MEIC v1.2.4)
+Based on: bots/meic/strategy.py (MEIC v1.2.8)
 See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
 """
 
@@ -160,7 +160,7 @@ class MEICTFStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.2.4 (2026-02-13)
+    Version: 1.2.6 (2026-02-13)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"

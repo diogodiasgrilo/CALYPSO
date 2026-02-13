@@ -1,8 +1,8 @@
 # MEIC (Multiple Entry Iron Condors) Trading Bot
 
-**Last Updated:** 2026-02-12
+**Last Updated:** 2026-02-13
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.2.5)
+**Status:** IMPLEMENTED - Production Ready (v1.2.8)
 
 ---
 
@@ -213,6 +213,9 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-02-13 | 1.2.8 | Fix #75: Async deferred stop fill lookup (non-blocking P&L correction) |
+| 2026-02-13 | 1.2.7 | Fix #74: Stop loss fill price accuracy (deferred lookup was bypassed by quote fallback) |
+| 2026-02-11 | 1.2.6 | Fix #63: EUR conversion in Trades tab (pass saxo_client to log_trade) |
 | 2026-02-12 | 1.2.5 | Fix #70: Verify entry fill prices against PositionBase.OpenPrice; deferred stop fill lookup |
 | 2026-02-12 | 1.2.5 | Fix #71: Duplicate daily summary prevention (idempotency guard on restart) |
 | 2026-02-12 | 1.2.5 | Fix #72: Daily summary uses net P&L (after commission) instead of gross |
