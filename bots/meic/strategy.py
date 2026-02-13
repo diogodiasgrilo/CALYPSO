@@ -3731,7 +3731,7 @@ class MEICStrategy:
                             logger.info(f"FIX-42: {leg_name} close proceeds: -${fill_price * 100 * entry.contracts:.2f}")
                     else:
                         fill_prices_captured = False
-                        logger.warning(f"FIX-42: No fill price for {leg_name}, will fall back to theoretical")
+                        logger.info(f"FIX-74: No immediate fill price for {leg_name}, will use deferred batch lookup")
                         # FIX #70: Track for deferred lookup if we have an order_id
                         if order_id:
                             deferred_legs.append((order_id, uic, leg_name))
@@ -4344,8 +4344,14 @@ class MEICStrategy:
         FIX #51 (2026-02-10): Reduced retries from 3 to 1 since this function is
         called AFTER _verify_position_closed() confirms the position is closed.
         We KNOW the order filled - if FilledPrice isn't populated yet due to
-        Saxo's sync delay, use quote fallback immediately. Saves ~2-3 seconds
-        per leg during stop loss execution.
+        Saxo's sync delay, return None so deferred lookup can handle it.
+
+        FIX #74 (2026-02-13): REMOVED quote fallback. When activities returns
+        FilledPrice=0 (normal for emergency market orders due to Saxo sync delay),
+        the old code fell back to current bid/ask quotes and returned them as fill
+        prices. This prevented _deferred_stop_fill_lookup() from ever running,
+        causing $75/day P&L discrepancy (quotes overstate losses vs actual fills).
+        Now returns None so the deferred lookup path in _execute_stop_loss() runs.
 
         Args:
             order_id: The emergency close order ID
@@ -4357,7 +4363,6 @@ class MEICStrategy:
         """
         try:
             # FIX #51: Only 1 retry since we already verified position is closed
-            # If FilledPrice=0, use quote fallback immediately (saves 2-3 seconds)
             filled, fill_details = self.client.check_order_filled_by_activity(
                 order_id=order_id,
                 uic=uic,
@@ -4371,25 +4376,16 @@ class MEICStrategy:
                     logger.info(f"FIX-42: Got actual fill price for {leg_name}: ${fill_price:.2f}")
                     return fill_price
                 else:
-                    logger.warning(f"FIX-42: Activity found but fill_price=0 for {leg_name}")
+                    # FIX #74: FilledPrice=0 is normal for emergency market orders
+                    # Return None so deferred lookup runs (waits 3s, retries 3x)
+                    logger.info(
+                        f"FIX-74: Activity found but FilledPrice=0 for {leg_name} "
+                        f"(normal for market orders) - deferring to batch lookup"
+                    )
+                    return None
 
-            # Fallback: Try to get from current quote (less accurate but better than nothing)
-            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
-            if quote:
-                # For buys (closing shorts), we paid the ask
-                # For sells (closing longs), we received the bid
-                is_short = leg_name.startswith("short")
-                if is_short:
-                    # We bought to close at ask price
-                    price = quote.get("Quote", {}).get("Ask") or quote.get("Quote", {}).get("Mid")
-                else:
-                    # We sold to close at bid price
-                    price = quote.get("Quote", {}).get("Bid") or quote.get("Quote", {}).get("Mid")
-                if price:
-                    logger.warning(f"FIX-42: Using current quote as fallback for {leg_name}: ${price:.2f}")
-                    return price
-
-            logger.error(f"FIX-42: Could not determine fill price for {leg_name}")
+            # No activity found at all - return None for deferred lookup
+            logger.warning(f"FIX-74: No activity found for {leg_name} order_id={order_id} - deferring to batch lookup")
             return None
 
         except Exception as e:

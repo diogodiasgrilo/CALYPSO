@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.2.4 | **Last Updated:** 2026-02-13
+**Version:** 1.2.5 | **Last Updated:** 2026-02-13
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -177,6 +177,15 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.2.5** (2026-02-13): Fix #74 - Stop loss fill price accuracy
+  - `_get_close_fill_price()` quote fallback was bypassing Fix #70's deferred lookup
+  - Emergency market orders return `FilledPrice=0` from activities (Saxo sync delay)
+  - Old code fell back to current bid/ask quotes and returned them as fill prices
+  - This prevented `_deferred_stop_fill_lookup()` from ever running
+  - Fix: Return `None` instead of quote price, triggering the deferred lookup path
+  - Deferred lookup waits 3s then retries 3×1.5s - enough for Saxo to sync actual prices
+  - Impact: Feb 13 had $75 P&L understatement across 3 stops ($25 + $35 + $15)
 
 - **1.2.4** (2026-02-13): Code audit hardening
   - Error handling: try/except wrappers for settlement, shutdown, position status, strategy init
