@@ -6320,6 +6320,11 @@ class MEICStrategy:
         # Get summary data
         summary = self.get_daily_summary()
 
+        # Fix #72: Use NET P&L (after commission) for all tracking
+        # Previously used gross P&L which overstated actual returns
+        net_pnl = summary.get("net_pnl", summary["total_pnl"])
+        commission = summary.get("total_commission", 0)
+
         # Send alert (WhatsApp/Email)
         self._send_daily_summary()
 
@@ -6329,10 +6334,10 @@ class MEICStrategy:
             **summary,
             "spx_close": self.current_price,
             "vix_close": self.current_vix,
-            "daily_pnl": summary["total_pnl"],
-            "daily_pnl_net": summary.get("net_pnl", summary["total_pnl"]),  # P&L after commission
-            "total_commission": summary.get("total_commission", 0),
-            "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + summary["total_pnl"],
+            "daily_pnl": net_pnl,
+            "daily_pnl_gross": summary["total_pnl"],
+            "total_commission": commission,
+            "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + net_pnl,
             "notes": "Post-settlement" if self._settlement_reconciliation_complete else ""
         }
 
@@ -6340,22 +6345,22 @@ class MEICStrategy:
         try:
             rate = self.client.get_fx_rate("USD", "EUR")
             if rate:
-                sheets_summary["daily_pnl_eur"] = summary["total_pnl"] * rate
+                sheets_summary["daily_pnl_eur"] = net_pnl * rate
         except Exception:
             sheets_summary["daily_pnl_eur"] = 0
 
         if self.trade_logger:
             self.trade_logger.log_daily_summary(sheets_summary)
-            logger.info(f"Daily summary logged to Google Sheets (P&L: ${summary['total_pnl']:.2f})")
+            logger.info(f"Daily summary logged to Google Sheets (Net P&L: ${net_pnl:.2f}, Commission: ${commission:.2f})")
 
-        # Update cumulative metrics
-        self.cumulative_metrics["cumulative_pnl"] += summary["total_pnl"]
+        # Update cumulative metrics (using net P&L)
+        self.cumulative_metrics["cumulative_pnl"] += net_pnl
         self.cumulative_metrics["total_entries"] += summary["entries_completed"]
         self.cumulative_metrics["total_credit_collected"] += summary["total_credit"]
         self.cumulative_metrics["total_stops"] += summary["call_stops"] + summary["put_stops"]
         self.cumulative_metrics["double_stops"] += summary["double_stops"]
 
-        if summary["total_pnl"] >= 0:
+        if net_pnl >= 0:
             self.cumulative_metrics["winning_days"] += 1
         else:
             self.cumulative_metrics["losing_days"] += 1
