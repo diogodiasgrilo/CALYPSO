@@ -6299,6 +6299,24 @@ class MEICStrategy:
         3. Updates cumulative metrics (winning/losing days, total P&L)
         4. Saves cumulative metrics to disk
         """
+        # Fix #71: Guard against duplicate daily summary after restart
+        # On restart, main.py's local daily_summary_sent_date resets to None,
+        # which allows this method to be called again for the same day.
+        # Check last_updated date in cumulative_metrics to detect duplicates.
+        last_updated_str = self.cumulative_metrics.get("last_updated", "")
+        if last_updated_str:
+            try:
+                metrics_date = datetime.strptime(last_updated_str[:10], "%Y-%m-%d").date()
+                today_et = get_us_market_time().date()
+                if metrics_date == today_et:
+                    logger.warning(
+                        "FIX-71: Daily summary already sent today (metrics last_updated=%s) - skipping duplicate",
+                        last_updated_str
+                    )
+                    return
+            except (ValueError, TypeError):
+                pass  # If parsing fails, proceed normally
+
         # Get summary data
         summary = self.get_daily_summary()
 
