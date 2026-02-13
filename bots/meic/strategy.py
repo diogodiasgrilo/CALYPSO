@@ -374,10 +374,20 @@ class IronCondorEntry:
 
     @property
     def spread_width(self) -> float:
-        """Width of spreads (both should be equal)."""
+        """Width of spreads - max of call/put for accurate capital calculation.
+
+        Fix #74: Previously only checked call strikes, which understated capital
+        when MKT-008 narrowed call spread but not put spread, and returned 0
+        for put-only entries after restart (call strikes not reconstructed).
+        Now returns max(call_width, put_width) for correct risk/margin.
+        """
+        call_width = 0.0
+        put_width = 0.0
         if self.long_call_strike and self.short_call_strike:
-            return self.long_call_strike - self.short_call_strike
-        return 0.0
+            call_width = self.long_call_strike - self.short_call_strike
+        if self.short_put_strike and self.long_put_strike:
+            put_width = self.short_put_strike - self.long_put_strike
+        return max(call_width, put_width)
 
     @property
     def call_spread_value(self) -> float:
