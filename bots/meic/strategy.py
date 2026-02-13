@@ -6483,9 +6483,13 @@ class MEICStrategy:
             "daily_pnl": net_pnl,
             "total_commission": commission,
             "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + net_pnl,
-            # Risk & return metrics
-            "max_loss_stops": self._calculate_max_loss_with_stops(),
-            "max_loss_catastrophic": self._calculate_max_loss_catastrophic(),
+            # Risk & return metrics (use PEAK intraday values, not end-of-day snapshot)
+            # At settlement all entries are settled, so snapshot methods would just show
+            # realized stop losses. Investors need peak risk exposure during the day:
+            #   Peak Max Loss (Stops) = total credit (MEIC breakeven: stop ≈ credit)
+            #   Peak Max Loss (Catastrophic) = capital - credit (one side goes full width)
+            "max_loss_stops": summary["total_credit"],
+            "max_loss_catastrophic": max(0, capital_deployed - summary["total_credit"]),
             "capital_deployed": capital_deployed,
             "return_on_capital": (net_pnl / capital_deployed * 100) if capital_deployed > 0 else 0,
             "sortino_ratio": self._calculate_sortino_ratio(net_pnl, capital_deployed),
