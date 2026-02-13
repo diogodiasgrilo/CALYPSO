@@ -511,11 +511,11 @@ class MEICDailyState:
     def active_entries(self) -> List[IronCondorEntry]:
         """Get entries that have open positions.
 
-        An entry is active if:
-        - It's complete (all 4 legs) and not fully stopped, OR
-        - It's partial (only call or put side remains) after the other side was stopped
+        An entry is active if it has at least one side that is still open
+        (not stopped, not expired, not skipped).
 
         CRITICAL FIX (2026-02-03): Partial entries should still be monitored until expiry.
+        Fix #73: Also check expired and skipped flags, not just stopped.
         """
         active = []
         for e in self.entries:
@@ -523,20 +523,30 @@ class MEICDailyState:
             call_only = getattr(e, 'call_only', False)
             put_only = getattr(e, 'put_only', False)
 
+            # Fix #73: A side is "done" if stopped, expired, or skipped (never opened)
+            call_done = (
+                e.call_side_stopped or
+                getattr(e, 'call_side_expired', False) or
+                getattr(e, 'call_side_skipped', False)
+            )
+            put_done = (
+                e.put_side_stopped or
+                getattr(e, 'put_side_expired', False) or
+                getattr(e, 'put_side_skipped', False)
+            )
+
             if call_only:
-                # Call-only entry - stopped if call side is stopped
-                if e.call_side_stopped:
+                if call_done:
                     continue
             elif put_only:
-                # Put-only entry - stopped if put side is stopped
-                if e.put_side_stopped:
+                if put_done:
                     continue
-            elif e.call_side_stopped and e.put_side_stopped:
-                # Full IC - stopped if both sides are stopped
+            elif call_done and put_done:
+                # Full IC - both sides resolved
                 continue
 
             if e.is_complete:
-                # Full IC with at least one side still open
+                # Entry with at least one side still open
                 active.append(e)
             else:
                 # Partial entry - check if ANY position ID exists
