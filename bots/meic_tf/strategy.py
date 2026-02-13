@@ -2324,7 +2324,7 @@ class MEICTFStrategy(MEICStrategy):
         exist. Without this, recovery of one-sided entries triggers false stops.
 
         Args:
-            entry_number: The entry number (1-6)
+            entry_number: The entry number (1-N, based on configured entry_times)
             positions: List of parsed position dicts for this entry
 
         Returns:

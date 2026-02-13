@@ -232,9 +232,9 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
-### MEIC-TF Bot Details (v1.2.0 - Updated 2026-02-12)
+### MEIC-TF Bot Details (v1.2.4 - Updated 2026-02-13)
 - **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
-- **Structure:** Same as MEIC but with EMA-based entry filtering + credit gate
+- **Structure:** 5 entries per day (10:05, 10:35, 11:05, 11:35, 12:05) with EMA-based entry filtering + credit gate
 - **Key Difference:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
 - **BULLISH (20 > 40):** Place PUT spread only (calls are risky in uptrend)
 - **BEARISH (20 < 40):** Place CALL spread only (puts are risky in downtrend)

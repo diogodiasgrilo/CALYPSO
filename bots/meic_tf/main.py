@@ -147,7 +147,7 @@ def print_banner():
     ║         BEARISH → CALL spreads only                           ║
     ║         NEUTRAL → Full iron condor                            ║
     ║                                                               ║
-    ║         Entries: 10:05, 10:35, 11:05, 11:35, 12:05, 12:35     ║
+    ║         Entries: 10:05, 10:35, 11:05, 11:35, 12:05            ║
     ║                                                               ║
     ║         Version: 1.2.4                                        ║
     ║         API: Saxo Bank OpenAPI                                ║

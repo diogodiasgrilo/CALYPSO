@@ -17,7 +17,7 @@ MEIC-TF combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. MEIC-TF would have detected the bearish trend and only placed call spreads, avoiding ~$1,500 in losses.
 
-### Entry Schedule (Same as MEIC)
+### Entry Schedule (5 entries, reduced from MEIC's 6)
 
 | Entry | Time (ET) |
 |-------|-----------|
@@ -26,7 +26,6 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 | 3 | 11:05 AM |
 | 4 | 11:35 AM |
 | 5 | 12:05 PM |
-| 6 | 12:35 PM |
 
 ### Trend-Based Entry Logic
 
