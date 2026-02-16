@@ -6056,14 +6056,16 @@ class MEICStrategy:
         # PNL-001: Sanity check the P&L values
         self._check_pnl_sanity(total_pnl, "daily_total")
 
-        # P&L breakdown: compute stop loss debits and expired credits from entries
+        # P&L breakdown: compute net stop loss debits and expired credits from entries
+        # Net stop debit = cost-to-close (stop level) minus credit collected for that side
+        # Identity: Expired Credits - Stop Loss Debits - Commission = Daily P&L (net)
         stop_loss_debits = 0.0
         expired_credits = 0.0
         for entry in self.daily_state.entries:
             if entry.call_side_stopped:
-                stop_loss_debits += entry.call_side_stop
+                stop_loss_debits += entry.call_side_stop - entry.call_spread_credit
             if entry.put_side_stopped:
-                stop_loss_debits += entry.put_side_stop
+                stop_loss_debits += entry.put_side_stop - entry.put_spread_credit
             if entry.call_side_expired:
                 expired_credits += entry.call_spread_credit
             if entry.put_side_expired:

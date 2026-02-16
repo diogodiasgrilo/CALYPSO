@@ -234,7 +234,11 @@ class TestMarketDataOHLC:
 # ============================================================
 
 class TestGetDailySummaryPnLBreakdown:
-    """Test P&L breakdown computation in get_daily_summary()."""
+    """Test P&L breakdown computation in get_daily_summary().
+
+    Identity: Expired Credits - Stop Loss Debits (net) - Commission = Daily P&L
+    Stop Loss Debits = net loss per stop = stop_level - credit_for_that_side
+    """
 
     def _make_mock_entry(self, call_stopped=False, put_stopped=False,
                           call_expired=False, put_expired=False,
@@ -252,22 +256,26 @@ class TestGetDailySummaryPnLBreakdown:
         entry.put_spread_credit = put_spread_credit
         return entry
 
-    def test_no_entries_returns_zero(self):
-        """No entries means zero debits and zero expired credits."""
-        entries = []
+    def _compute_breakdown(self, entries):
+        """Replicate the P&L breakdown logic from get_daily_summary()."""
         stop_loss_debits = 0.0
         expired_credits = 0.0
         for entry in entries:
             if entry.call_side_stopped:
-                stop_loss_debits += entry.call_side_stop
+                stop_loss_debits += entry.call_side_stop - entry.call_spread_credit
             if entry.put_side_stopped:
-                stop_loss_debits += entry.put_side_stop
+                stop_loss_debits += entry.put_side_stop - entry.put_spread_credit
             if entry.call_side_expired:
                 expired_credits += entry.call_spread_credit
             if entry.put_side_expired:
                 expired_credits += entry.put_spread_credit
-        assert stop_loss_debits == 0.0
-        assert expired_credits == 0.0
+        return stop_loss_debits, expired_credits
+
+    def test_no_entries_returns_zero(self):
+        """No entries means zero debits and zero expired credits."""
+        debits, credits = self._compute_breakdown([])
+        assert debits == 0.0
+        assert credits == 0.0
 
     def test_all_expired_no_stops(self):
         """All entries expired = credits earned, no stop debits."""
@@ -281,136 +289,149 @@ class TestGetDailySummaryPnLBreakdown:
                 call_spread_credit=1.10, put_spread_credit=1.15
             ),
         ]
-        stop_loss_debits = 0.0
-        expired_credits = 0.0
-        for entry in entries:
-            if entry.call_side_stopped:
-                stop_loss_debits += entry.call_side_stop
-            if entry.put_side_stopped:
-                stop_loss_debits += entry.put_side_stop
-            if entry.call_side_expired:
-                expired_credits += entry.call_spread_credit
-            if entry.put_side_expired:
-                expired_credits += entry.put_spread_credit
+        debits, credits = self._compute_breakdown(entries)
+        assert debits == 0.0
+        assert abs(credits - 4.80) < 0.01
 
-        assert stop_loss_debits == 0.0
-        expected_credits = 1.25 + 1.30 + 1.10 + 1.15  # 4.80
-        assert abs(expired_credits - expected_credits) < 0.01
-
-    def test_one_side_stopped_other_expired(self):
-        """Put stopped, call expired - typical MEIC outcome."""
+    def test_one_side_stopped_other_expired_full_ic(self):
+        """Full IC: put stopped, call expired. Net debit = stop - put_credit."""
+        # Full IC: $2.50 total credit ($1.25/$1.30), stop level = $2.50
         entries = [
             self._make_mock_entry(
                 call_expired=True, put_stopped=True,
                 call_spread_credit=1.25, put_spread_credit=1.30,
-                put_side_stop=2.50  # Stop level
+                put_side_stop=2.50
             ),
         ]
-        stop_loss_debits = 0.0
-        expired_credits = 0.0
-        for entry in entries:
-            if entry.call_side_stopped:
-                stop_loss_debits += entry.call_side_stop
-            if entry.put_side_stopped:
-                stop_loss_debits += entry.put_side_stop
-            if entry.call_side_expired:
-                expired_credits += entry.call_spread_credit
-            if entry.put_side_expired:
-                expired_credits += entry.put_spread_credit
+        debits, credits = self._compute_breakdown(entries)
+        # Net debit = 2.50 - 1.30 = 1.20
+        assert abs(debits - 1.20) < 0.01
+        assert abs(credits - 1.25) < 0.01
+        # Identity: credits - debits = gross P&L = 1.25 - 1.20 = 0.05
+        gross_pnl = credits - debits
+        assert abs(gross_pnl - 0.05) < 0.01
 
-        assert stop_loss_debits == 2.50
-        assert expired_credits == 1.25
-
-    def test_double_stop(self):
-        """Both sides stopped - worst case."""
+    def test_double_stop_full_ic(self):
+        """Both sides stopped - net debit = total credit."""
+        # Full IC: $2.50 total ($1.20/$1.30), both stopped at $2.50
         entries = [
             self._make_mock_entry(
                 call_stopped=True, put_stopped=True,
+                call_spread_credit=1.20, put_spread_credit=1.30,
                 call_side_stop=2.50, put_side_stop=2.50
             ),
         ]
-        stop_loss_debits = 0.0
-        expired_credits = 0.0
-        for entry in entries:
-            if entry.call_side_stopped:
-                stop_loss_debits += entry.call_side_stop
-            if entry.put_side_stopped:
-                stop_loss_debits += entry.put_side_stop
-            if entry.call_side_expired:
-                expired_credits += entry.call_spread_credit
-            if entry.put_side_expired:
-                expired_credits += entry.put_spread_credit
+        debits, credits = self._compute_breakdown(entries)
+        # Net debit = (2.50 - 1.20) + (2.50 - 1.30) = 1.30 + 1.20 = 2.50 = total_credit
+        assert abs(debits - 2.50) < 0.01
+        assert credits == 0.0
+        # Identity: 0 - 2.50 = -2.50 gross P&L (lost total credit)
+        assert abs(credits - debits - (-2.50)) < 0.01
 
-        assert stop_loss_debits == 5.00
-        assert expired_credits == 0.0
-
-    def test_mixed_entries_real_scenario(self):
-        """Feb 13 scenario: 5 entries, 3 with put stops, all calls expired."""
+    def test_one_sided_entry_stopped(self):
+        """One-sided (put-only): stop = 2x credit, net debit = credit."""
         entries = [
-            # Entry 1: Call expired, Put stopped
             self._make_mock_entry(
-                call_expired=True, put_stopped=True,
-                call_spread_credit=1.85, put_side_stop=4.70
-            ),
-            # Entry 2: Call expired, Put stopped
-            self._make_mock_entry(
-                call_expired=True, put_stopped=True,
-                call_spread_credit=2.00, put_side_stop=4.50
-            ),
-            # Entry 3: Call expired, Put expired
-            self._make_mock_entry(
-                call_expired=True, put_expired=True,
-                call_spread_credit=1.90, put_spread_credit=2.10
-            ),
-            # Entry 4: Call expired, Put stopped
-            self._make_mock_entry(
-                call_expired=True, put_stopped=True,
-                call_spread_credit=1.80, put_side_stop=4.40
-            ),
-            # Entry 5: Both expired
-            self._make_mock_entry(
-                call_expired=True, put_expired=True,
-                call_spread_credit=1.75, put_spread_credit=1.95
+                put_stopped=True,
+                put_spread_credit=1.28,
+                put_side_stop=2.56  # 2x credit (Fix #40)
             ),
         ]
-        stop_loss_debits = 0.0
-        expired_credits = 0.0
-        for entry in entries:
-            if entry.call_side_stopped:
-                stop_loss_debits += entry.call_side_stop
-            if entry.put_side_stopped:
-                stop_loss_debits += entry.put_side_stop
-            if entry.call_side_expired:
-                expired_credits += entry.call_spread_credit
-            if entry.put_side_expired:
-                expired_credits += entry.put_spread_credit
+        debits, credits = self._compute_breakdown(entries)
+        # Net debit = 2.56 - 1.28 = 1.28 (lost exactly one credit)
+        assert abs(debits - 1.28) < 0.01
+        assert credits == 0.0
 
-        # 3 put stops: 4.70 + 4.50 + 4.40 = 13.60
-        assert abs(stop_loss_debits - 13.60) < 0.01
-        # 5 call expired + 2 put expired: 1.85+2.00+1.90+1.80+1.75 + 2.10+1.95 = 13.35
-        assert abs(expired_credits - 13.35) < 0.01
+    def test_one_sided_entry_expired(self):
+        """One-sided (put-only): expired = credit kept, no debit."""
+        entries = [
+            self._make_mock_entry(
+                put_expired=True,
+                put_spread_credit=1.28
+            ),
+        ]
+        debits, credits = self._compute_breakdown(entries)
+        assert debits == 0.0
+        assert abs(credits - 1.28) < 0.01
+
+    def test_identity_feb10(self):
+        """Feb 10: Expired Credits - Debits = Gross P&L ($380)."""
+        # 5 one-sided entries (put-only), 1 put stop, 4 expired
+        # Total credit = $640, Commission = $30, Net P&L = $350
+        # Using representative per-entry credits that sum to $640
+        entries = [
+            self._make_mock_entry(put_expired=True, put_spread_credit=128.0),
+            self._make_mock_entry(put_expired=True, put_spread_credit=130.0),
+            self._make_mock_entry(put_expired=True, put_spread_credit=126.0),
+            self._make_mock_entry(put_expired=True, put_spread_credit=128.0),
+            self._make_mock_entry(
+                put_stopped=True, put_spread_credit=128.0,
+                put_side_stop=256.0  # 2x credit for one-sided
+            ),
+        ]
+        debits, credits = self._compute_breakdown(entries)
+        gross_pnl = credits - debits
+        commission = 30.0
+        net_pnl = gross_pnl - commission
+        # Expired = 128+130+126+128 = 512
+        # Net debit = 256 - 128 = 128
+        # Gross = 512 - 128 = 384, Net = 384 - 30 = 354
+        # (Not exactly $350 because we're using representative credits, not actuals)
+        assert debits == 128.0
+        assert credits == 512.0
+        assert debits < credits  # Identity: debits always < credits on profitable day
+
+    def test_identity_always_holds(self):
+        """Verify: Expired Credits - Net Debits - Commission = Net P&L for any mix."""
+        # 3 full ICs: 2 with one side stopped, 1 both expired
+        # Full IC credit = $2.60 ($1.30/$1.30), stop = $2.60
+        entries = [
+            # Entry 1: call expired, put stopped
+            self._make_mock_entry(
+                call_expired=True, put_stopped=True,
+                call_spread_credit=1.30, put_spread_credit=1.30,
+                put_side_stop=2.60
+            ),
+            # Entry 2: both expired
+            self._make_mock_entry(
+                call_expired=True, put_expired=True,
+                call_spread_credit=1.30, put_spread_credit=1.30,
+            ),
+            # Entry 3: call stopped, put expired
+            self._make_mock_entry(
+                call_stopped=True, put_expired=True,
+                call_spread_credit=1.30, put_spread_credit=1.30,
+                call_side_stop=2.60
+            ),
+        ]
+        debits, credits = self._compute_breakdown(entries)
+        commission = 45.0  # 3 entries × $15
+
+        # Expired: 1.30 + 1.30 + 1.30 + 1.30 = 5.20 (4 expired sides)
+        # Net debits: (2.60-1.30) + (2.60-1.30) = 1.30 + 1.30 = 2.60 (2 stopped sides)
+        assert abs(credits - 5.20) < 0.01
+        assert abs(debits - 2.60) < 0.01
+
+        # Total credit = 3 × 2.60 = 7.80
+        # Gross P&L = Total Credit - Gross Stop Debits = 7.80 - (2.60 + 2.60) = 2.60
+        # Also: Expired Credits - Net Debits = 5.20 - 2.60 = 2.60 ✓
+        gross_pnl = credits - debits
+        assert abs(gross_pnl - 2.60) < 0.01
+
+        net_pnl = gross_pnl - commission
+        assert abs(net_pnl - (2.60 - 45.0)) < 0.01  # -42.40
 
     def test_skipped_sides_not_counted(self):
         """Skipped sides (one-sided entries) should not appear in debits or credits."""
         entry = self._make_mock_entry(
-            call_expired=True,  # Call side expired
-            put_stopped=False, put_expired=False,  # Put side was skipped
+            call_expired=True,
+            put_stopped=False, put_expired=False,
             call_spread_credit=1.50,
-            put_spread_credit=0.0,  # No put credit (skipped)
+            put_spread_credit=0.0,
         )
-        stop_loss_debits = 0.0
-        expired_credits = 0.0
-        if entry.call_side_stopped:
-            stop_loss_debits += entry.call_side_stop
-        if entry.put_side_stopped:
-            stop_loss_debits += entry.put_side_stop
-        if entry.call_side_expired:
-            expired_credits += entry.call_spread_credit
-        if entry.put_side_expired:
-            expired_credits += entry.put_spread_credit
-
-        assert stop_loss_debits == 0.0
-        assert expired_credits == 1.50
+        debits, credits = self._compute_breakdown([entry])
+        assert debits == 0.0
+        assert credits == 1.50
 
 
 # ============================================================
