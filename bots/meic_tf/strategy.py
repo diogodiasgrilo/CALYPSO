@@ -160,7 +160,7 @@ class MEICTFStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.2.6 (2026-02-13)
+    Version: 1.2.7 (2026-02-16)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -2677,6 +2677,20 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.trend_overrides = saved_state.get("trend_overrides", 0)
             self.daily_state.credit_gate_skips = saved_state.get("credit_gate_skips", 0)
 
+            # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
+            ohlc = saved_state.get("market_data_ohlc", {})
+            if ohlc:
+                self.market_data.spx_open = ohlc.get("spx_open", 0.0)
+                self.market_data.spx_high = ohlc.get("spx_high", 0.0)
+                spx_low = ohlc.get("spx_low", 0.0)
+                if spx_low > 0:
+                    self.market_data.spx_low = spx_low
+                self.market_data.vix_open = ohlc.get("vix_open", 0.0)
+                self.market_data.vix_high = ohlc.get("vix_high", 0.0)
+                vix_low = ohlc.get("vix_low", 0.0)
+                if vix_low > 0:
+                    self.market_data.vix_low = vix_low
+
             # Restore stopped entries (entries that have no live positions)
             # FIX #47: Also consider expired and skipped flags
             stopped_entries_restored = 0
@@ -2901,6 +2915,7 @@ class MEICTFStrategy(MEICStrategy):
             preserved_credit_gate_skips = 0
             preserved_entry_credits = {}
             preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
+            preserved_market_ohlc = {}
             try:
                 if os.path.exists(self.state_file):
                     with open(self.state_file, "r") as f:
@@ -2919,6 +2934,7 @@ class MEICTFStrategy(MEICStrategy):
                             preserved_one_sided_entries = saved_state.get("one_sided_entries", 0)
                             preserved_trend_overrides = saved_state.get("trend_overrides", 0)
                             preserved_credit_gate_skips = saved_state.get("credit_gate_skips", 0)
+                            preserved_market_ohlc = saved_state.get("market_data_ohlc", {})
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
                                 if entry_num:
@@ -3159,6 +3175,19 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.one_sided_entries = preserved_one_sided_entries
             self.daily_state.trend_overrides = preserved_trend_overrides
             self.daily_state.credit_gate_skips = preserved_credit_gate_skips
+
+            # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
+            if preserved_market_ohlc:
+                self.market_data.spx_open = preserved_market_ohlc.get("spx_open", 0.0)
+                self.market_data.spx_high = preserved_market_ohlc.get("spx_high", 0.0)
+                spx_low = preserved_market_ohlc.get("spx_low", 0.0)
+                if spx_low > 0:
+                    self.market_data.spx_low = spx_low
+                self.market_data.vix_open = preserved_market_ohlc.get("vix_open", 0.0)
+                self.market_data.vix_high = preserved_market_ohlc.get("vix_high", 0.0)
+                vix_low = preserved_market_ohlc.get("vix_low", 0.0)
+                if vix_low > 0:
+                    self.market_data.vix_low = vix_low
 
             # Determine next entry index
             if recovered_entries:

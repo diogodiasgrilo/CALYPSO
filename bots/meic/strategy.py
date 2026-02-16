@@ -583,20 +583,27 @@ class MarketData:
     last_spx_update: Optional[datetime] = None
     last_vix_update: Optional[datetime] = None
 
-    # P3: Intraday high/low tracking
+    # Intraday OHLC tracking
+    spx_open: float = 0.0
     spx_high: float = 0.0
     spx_low: float = float('inf')
+    vix_open: float = 0.0
     vix_high: float = 0.0
+    vix_low: float = float('inf')
     vix_samples: List[float] = field(default_factory=list)
 
     # P3: Flash crash velocity tracking
     price_history: Deque[Tuple[datetime, float]] = field(default_factory=lambda: deque(maxlen=100))
 
     def update_spx(self, price: float):
-        """Update SPX price with timestamp and track high/low."""
+        """Update SPX price with timestamp and track open/high/low."""
         if price > 0:
             self.spx_price = price
             self.last_spx_update = get_us_market_time()
+
+            # Track opening price (first valid update of the day)
+            if self.spx_open == 0.0:
+                self.spx_open = price
 
             # Track intraday high/low
             if price > self.spx_high:
@@ -608,14 +615,20 @@ class MarketData:
             self.price_history.append((self.last_spx_update, price))
 
     def update_vix(self, vix: float):
-        """Update VIX with timestamp and track high/average."""
+        """Update VIX with timestamp and track open/high/low/average."""
         if vix > 0:
             self.vix = vix
             self.last_vix_update = get_us_market_time()
 
-            # Track VIX high and samples for average
+            # Track opening VIX (first valid update of the day)
+            if self.vix_open == 0.0:
+                self.vix_open = vix
+
+            # Track VIX high/low and samples for average
             if vix > self.vix_high:
                 self.vix_high = vix
+            if vix < self.vix_low:
+                self.vix_low = vix
             self.vix_samples.append(vix)
 
     def is_spx_stale(self, max_age: int = MAX_DATA_STALENESS_SECONDS) -> bool:
@@ -680,9 +693,12 @@ class MarketData:
 
     def reset_daily_tracking(self):
         """Reset intraday tracking for new day."""
+        self.spx_open = 0.0
         self.spx_high = 0.0
         self.spx_low = float('inf')
+        self.vix_open = 0.0
         self.vix_high = 0.0
+        self.vix_low = float('inf')
         self.vix_samples.clear()
         self.price_history.clear()
 
@@ -6040,6 +6056,19 @@ class MEICStrategy:
         # PNL-001: Sanity check the P&L values
         self._check_pnl_sanity(total_pnl, "daily_total")
 
+        # P&L breakdown: compute stop loss debits and expired credits from entries
+        stop_loss_debits = 0.0
+        expired_credits = 0.0
+        for entry in self.daily_state.entries:
+            if entry.call_side_stopped:
+                stop_loss_debits += entry.call_side_stop
+            if entry.put_side_stopped:
+                stop_loss_debits += entry.put_side_stop
+            if entry.call_side_expired:
+                expired_credits += entry.call_spread_credit
+            if entry.put_side_expired:
+                expired_credits += entry.put_spread_credit
+
         return {
             "date": self.daily_state.date,
             "entries_completed": self.daily_state.entries_completed,
@@ -6054,7 +6083,9 @@ class MEICStrategy:
             "double_stops": self.daily_state.double_stops,
             "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
             "total_commission": self.daily_state.total_commission,
-            "net_pnl": total_pnl - self.daily_state.total_commission  # P&L after commission
+            "net_pnl": total_pnl - self.daily_state.total_commission,  # P&L after commission
+            "stop_loss_debits": stop_loss_debits,
+            "expired_credits": expired_credits,
         }
 
     def get_status_summary(self) -> Dict:
@@ -6586,13 +6617,22 @@ class MEICStrategy:
         # Log to Google Sheets Daily Summary tab
         # Add extra fields needed by the logger
         capital_deployed = self._calculate_capital_deployed()
+        cumulative_pnl = self.cumulative_metrics.get("cumulative_pnl", 0) + net_pnl
         sheets_summary = {
             **summary,
+            # Market data OHLC
+            "spx_open": self.market_data.spx_open,
             "spx_close": self.current_price,
+            "spx_high": self.market_data.spx_high,
+            "spx_low": self.market_data.spx_low if self.market_data.spx_low != float('inf') else 0.0,
+            "vix_open": self.market_data.vix_open,
             "vix_close": self.current_vix,
+            "vix_high": self.market_data.vix_high,
+            "vix_low": self.market_data.vix_low if self.market_data.vix_low != float('inf') else 0.0,
+            # P&L
             "daily_pnl": net_pnl,
             "total_commission": commission,
-            "cumulative_pnl": self.cumulative_metrics.get("cumulative_pnl", 0) + net_pnl,
+            "cumulative_pnl": cumulative_pnl,
             # Risk & return metrics (use PEAK intraday values, not end-of-day snapshot)
             # At settlement all entries are settled, so snapshot methods would just show
             # realized stop losses. Investors need peak risk exposure during the day:
@@ -6606,13 +6646,15 @@ class MEICStrategy:
             "notes": "Post-settlement" if self._settlement_reconciliation_complete else ""
         }
 
-        # Convert daily P&L to EUR if exchange rate available
+        # Convert P&L to EUR if exchange rate available
         try:
             rate = self.client.get_fx_rate("USD", "EUR")
             if rate:
                 sheets_summary["daily_pnl_eur"] = net_pnl * rate
+                sheets_summary["cumulative_pnl_eur"] = cumulative_pnl * rate
         except Exception:
             sheets_summary["daily_pnl_eur"] = 0
+            sheets_summary["cumulative_pnl_eur"] = 0
 
         if self.trade_logger:
             self.trade_logger.log_daily_summary(sheets_summary)
@@ -6721,6 +6763,16 @@ class MEICStrategy:
                     "contracts": entry.contracts,
                 }
                 state_data["entries"].append(entry_data)
+
+            # Persist intraday OHLC so it survives mid-day restarts
+            state_data["market_data_ohlc"] = {
+                "spx_open": self.market_data.spx_open,
+                "spx_high": self.market_data.spx_high,
+                "spx_low": self.market_data.spx_low if self.market_data.spx_low != float('inf') else 0.0,
+                "vix_open": self.market_data.vix_open,
+                "vix_high": self.market_data.vix_high,
+                "vix_low": self.market_data.vix_low if self.market_data.vix_low != float('inf') else 0.0,
+            }
 
             state_data["last_saved"] = get_us_market_time().isoformat()
 

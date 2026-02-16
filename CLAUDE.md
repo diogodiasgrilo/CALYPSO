@@ -232,7 +232,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
-### MEIC-TF Bot Details (v1.2.6 - Updated 2026-02-13)
+### MEIC-TF Bot Details (v1.2.7 - Updated 2026-02-16)
 - **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
 - **Structure:** 5 entries per day (10:05, 10:35, 11:05, 11:35, 12:05) with EMA-based entry filtering + credit gate
 - **Key Difference:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
@@ -984,7 +984,7 @@ SCRIPT
 8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
 9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
 10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by MEIC-TF for trend filtering
-11. **MEIC-TF bot:** Running in LIVE mode (v1.2.6, deployed 2026-02-13) - ONLY active trading bot - adds EMA 20/40 trend filter + credit gate (MKT-011) + hybrid trend-respecting logic + proper P&L tracking (Fix #46/#47) + accurate log labels (Fix #49) + same-strike overlap prevention (Fix #50/MKT-013) + liquidity re-check after overlap adjustment (MKT-014) + Google Sheets timeout protection (Fix #64) + recovery entry classification fix (Fix #65) + post-MKT-013 strike conflict re-check (Fix #66) + long-long overlap prevention (Fix #67/MKT-015) + comprehensive timeout protection for all blocking calls (Fix #68) + accurate fill price tracking (Fix #70) + duplicate daily summary prevention (Fix #71) + net P&L in daily summary (Fix #72) + active entries property fix (Fix #73) + stop loss fill price deferred lookup fix (Fix #74) + async deferred stop fill lookup (Fix #75)
+11. **MEIC-TF bot:** Running in LIVE mode (v1.2.7, deployed 2026-02-16) - ONLY active trading bot - adds EMA 20/40 trend filter + credit gate (MKT-011) + hybrid trend-respecting logic + proper P&L tracking (Fix #46/#47) + accurate log labels (Fix #49) + same-strike overlap prevention (Fix #50/MKT-013) + liquidity re-check after overlap adjustment (MKT-014) + Google Sheets timeout protection (Fix #64) + recovery entry classification fix (Fix #65) + post-MKT-013 strike conflict re-check (Fix #66) + long-long overlap prevention (Fix #67/MKT-015) + comprehensive timeout protection for all blocking calls (Fix #68) + accurate fill price tracking (Fix #70) + duplicate daily summary prevention (Fix #71) + net P&L in daily summary (Fix #72) + active entries property fix (Fix #73) + stop loss fill price deferred lookup fix (Fix #74) + async deferred stop fill lookup (Fix #75) + Daily Summary column redesign with OHLC and P&L breakdown (v1.2.7)
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 

@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.2.6 | **Last Updated:** 2026-02-13
+**Version:** 1.2.7 | **Last Updated:** 2026-02-16
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -177,6 +177,15 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.2.7** (2026-02-16): Daily Summary column redesign (24 → 34 columns)
+  - SPX OHLC: Added SPX Open, High, Low columns (Close already existed)
+  - VIX OHLC: Replaced single VIX column with VIX Open, Close, High, Low
+  - P&L breakdown: Added Stop Loss Debits, Commission, Expired Credits columns
+  - Added Cumulative P&L (EUR) column
+  - Full logical column rearrangement: Market Context → Bot Activity → Position Outcomes → P&L Breakdown → Performance & Risk → Notes
+  - MarketData: Added `spx_open`, `vix_open`, `vix_low` tracking fields
+  - OHLC persisted to state file and restored on mid-day restart (prevents data loss)
 
 - **1.2.6** (2026-02-13): Fix #75 - Async deferred stop fill lookup
   - `_deferred_stop_fill_lookup()` blocked main loop for 10-15s per stop (3s sleep + retries)

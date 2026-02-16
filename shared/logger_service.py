@@ -479,18 +479,27 @@ class GoogleSheetsLogger:
                         "Win Rate (%)", "Breakeven Days", "Notes"
                     ]
                 elif self.strategy_type == "meic_tf":
-                    # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries
-                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=24)
+                    # MEIC-TF: MEIC with trend following - full OHLC, P&L breakdown, trend signals
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=34)
                     headers = [
-                        "Date", "SPX Close", "VIX",
+                        # Market Context (9 cols)
+                        "Date", "SPX Open", "SPX Close", "SPX High", "SPX Low",
+                        "VIX Open", "VIX Close", "VIX High", "VIX Low",
+                        # Bot Activity (7 cols)
                         "Entries Completed", "Entries Skipped",
                         "Full ICs", "One-Sided Entries",
-                        "Total Credit ($)", "Call Stops", "Put Stops", "Double Stops",
-                        "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
-                        "Win Rate (%)",
                         "Bullish Signals", "Bearish Signals", "Neutral Signals",
-                        "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
+                        # Position Outcomes (4 cols)
+                        "Total Credit ($)", "Call Stops", "Put Stops", "Double Stops",
+                        # P&L Breakdown (7 cols)
+                        "Stop Loss Debits ($)", "Commission ($)", "Expired Credits ($)",
+                        "Daily P&L ($)", "Daily P&L (EUR)",
+                        "Cumulative P&L ($)", "Cumulative P&L (EUR)",
+                        # Performance & Risk (6 cols)
+                        "Win Rate (%)",
                         "Capital Deployed ($)", "Return on Capital (%)", "Sortino Ratio",
+                        "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
+                        # Other
                         "Notes"
                     ]
                 else:
@@ -503,7 +512,7 @@ class GoogleSheetsLogger:
                         "Rolled Today", "Recentered Today", "Notes"
                     ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:Z1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:AH1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Daily Summary worksheet ({self.strategy_type} format, {len(headers)} cols)")
 
             self.worksheets["Daily Summary"] = worksheet
@@ -2003,30 +2012,45 @@ class GoogleSheetsLogger:
                 daily_pnl = summary.get('daily_pnl', summary.get('total_pnl', 0))
 
                 row = [
+                    # Market Context (9 cols)
                     summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    f"{summary.get('spx_open', 0):.2f}",
                     f"{summary.get('spx_close', summary.get('underlying_close', 0)):.2f}",
+                    f"{summary.get('spx_high', 0):.2f}",
+                    f"{summary.get('spx_low', 0):.2f}",
+                    f"{summary.get('vix_open', 0):.2f}",
                     f"{summary.get('vix_close', summary.get('vix', 0)):.2f}",
+                    f"{summary.get('vix_high', 0):.2f}",
+                    f"{summary.get('vix_low', 0):.2f}",
+                    # Bot Activity (7 cols)
                     str(entries_completed),
                     str(summary.get('entries_skipped', 0)),
                     str(full_ics),
                     str(one_sided),
+                    str(bullish_count),
+                    str(bearish_count),
+                    str(neutral_count),
+                    # Position Outcomes (4 cols)
                     f"{summary.get('total_credit', 0):.2f}",
                     str(call_stops),
                     str(put_stops),
                     str(double_stops),
+                    # P&L Breakdown (7 cols)
+                    f"{summary.get('stop_loss_debits', 0):.2f}",
+                    f"{summary.get('total_commission', 0):.2f}",
+                    f"{summary.get('expired_credits', 0):.2f}",
                     f"{daily_pnl:.2f}",
                     f"{summary.get('daily_pnl_eur', 0):.2f}",
                     f"{summary.get('cumulative_pnl', 0):.2f}",
+                    f"{summary.get('cumulative_pnl_eur', 0):.2f}",
+                    # Performance & Risk (6 cols)
                     f"{win_rate:.1f}",
-                    str(bullish_count),
-                    str(bearish_count),
-                    str(neutral_count),
-                    # Risk & Return Metrics
-                    f"{summary.get('max_loss_stops', 0):.2f}",
-                    f"{summary.get('max_loss_catastrophic', 0):.2f}",
                     f"{summary.get('capital_deployed', 0):.2f}",
                     f"{summary.get('return_on_capital', 0):.2f}",
                     f"{summary.get('sortino_ratio', 0):.2f}",
+                    f"{summary.get('max_loss_stops', 0):.2f}",
+                    f"{summary.get('max_loss_catastrophic', 0):.2f}",
+                    # Other
                     summary.get("notes", "")
                 ]
                 logger.debug(f"MEIC-TF daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
