@@ -237,7 +237,10 @@ class ConfigLoader:
             "dry_run": bot_config.get("dry_run", False),
 
             # ALERTS config from bot config
-            "alerts": bot_config.get("alerts", {})
+            "alerts": bot_config.get("alerts", {}),
+
+            # TREND FILTER config from bot config (MEIC-TF specific)
+            "trend_filter": bot_config.get("trend_filter", {})
         }
 
         # Store sheets credentials for later use by GoogleSheetsLogger
