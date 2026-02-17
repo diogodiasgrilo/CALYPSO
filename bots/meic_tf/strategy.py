@@ -1896,6 +1896,8 @@ class MEICTFStrategy(MEICStrategy):
                 "one_sided_entries": self.daily_state.one_sided_entries,
                 "trend_overrides": self.daily_state.trend_overrides,
                 "credit_gate_skips": self.daily_state.credit_gate_skips,
+                # MKT-016: Stop cascade breaker state
+                "stop_cascade_triggered": self._stop_cascade_triggered,
                 "entries": []
             }
 
@@ -2729,6 +2731,9 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.trend_overrides = saved_state.get("trend_overrides", 0)
             self.daily_state.credit_gate_skips = saved_state.get("credit_gate_skips", 0)
 
+            # MKT-016: Restore cascade breaker state (prevents double-trigger on restart)
+            self._stop_cascade_triggered = saved_state.get("stop_cascade_triggered", False)
+
             # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
             ohlc = saved_state.get("market_data_ohlc", {})
             if ohlc:
@@ -2827,10 +2832,14 @@ class MEICTFStrategy(MEICStrategy):
                     self.daily_state.entries.append(stopped_entry)
                     stopped_entries_restored += 1
 
-            # Update next_entry_index based on restored entries
+            # Update next_entry_index: use saved value if higher than entry-based calc
+            # (MKT-016 cascade breaker sets next_entry_index beyond completed entries)
+            saved_next_idx = saved_state.get("next_entry_index", 0)
+            entry_based_idx = 0
             if self.daily_state.entries:
                 max_entry_num = max(e.entry_number for e in self.daily_state.entries)
-                self._next_entry_index = max_entry_num  # Next entry is the one after max
+                entry_based_idx = max_entry_num  # Next entry is the one after max
+            self._next_entry_index = max(entry_based_idx, saved_next_idx)
 
             logger.info(f"FIX #41: Loaded state file history - P&L: ${self.daily_state.total_realized_pnl:.2f}, "
                        f"entries_completed: {self.daily_state.entries_completed}, "
@@ -2968,6 +2977,8 @@ class MEICTFStrategy(MEICStrategy):
             preserved_entry_credits = {}
             preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
             preserved_market_ohlc = {}
+            preserved_stop_cascade_triggered = False  # MKT-016
+            preserved_next_entry_index = 0  # MKT-016: cascade may advance beyond entry count
             try:
                 if os.path.exists(self.state_file):
                     with open(self.state_file, "r") as f:
@@ -2987,6 +2998,9 @@ class MEICTFStrategy(MEICStrategy):
                             preserved_trend_overrides = saved_state.get("trend_overrides", 0)
                             preserved_credit_gate_skips = saved_state.get("credit_gate_skips", 0)
                             preserved_market_ohlc = saved_state.get("market_data_ohlc", {})
+                            # MKT-016: Preserve cascade breaker state
+                            preserved_stop_cascade_triggered = saved_state.get("stop_cascade_triggered", False)
+                            preserved_next_entry_index = saved_state.get("next_entry_index", 0)
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
                                 if entry_num:
@@ -3242,11 +3256,15 @@ class MEICTFStrategy(MEICStrategy):
                     self.market_data.vix_low = vix_low
 
             # Determine next entry index
+            # Use saved next_entry_index if higher (MKT-016 cascade may have advanced it)
             if recovered_entries:
                 max_entry_num = max(e.entry_number for e in recovered_entries)
-                self._next_entry_index = max_entry_num
+                self._next_entry_index = max(max_entry_num, preserved_next_entry_index)
             else:
-                self._next_entry_index = 0
+                self._next_entry_index = preserved_next_entry_index
+
+            # MKT-016: Restore cascade breaker state
+            self._stop_cascade_triggered = preserved_stop_cascade_triggered
 
             # Set state based on recovered positions
             # FIX #43 + FIX #47: For one-sided entries, check only the placed side
