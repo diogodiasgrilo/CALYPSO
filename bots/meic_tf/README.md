@@ -187,6 +187,9 @@ bots/meic_tf/
   - MarketData: Added `spx_open`, `vix_open`, `vix_low` tracking fields
   - OHLC persisted to state file and restored on mid-day restart (prevents data loss)
   - Fix: MEIC-TF `_save_state_to_disk()` was missing `market_data_ohlc` persistence (save/restore asymmetry)
+  - Fix #76: Saxo activities `FilledPrice` field does NOT exist - correct field is `AveragePrice`/`ExecutionPrice`
+  - Fix #76: Added `/port/v1/closedpositions` (`ClosingPrice`) as authoritative fallback for close fill prices
+  - Fix #76: Two-tier fill price lookup: activities AveragePrice → closedpositions ClosingPrice
 
 - **1.2.6** (2026-02-13): Fix #75 - Async deferred stop fill lookup
   - `_deferred_stop_fill_lookup()` blocked main loop for 10-15s per stop (3s sleep + retries)

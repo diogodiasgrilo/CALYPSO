@@ -3298,12 +3298,13 @@ class MEICStrategy:
         check_order_filled_by_activity() which has built-in retry logic
         (3 attempts with 1s delay) to handle activities endpoint sync delays.
 
-        Fill price priority:
+        Fill price priority (FIX #76: AveragePrice is the correct Saxo field):
         1. fill_price - from place_limit_order_with_timeout() via activity check
-        2. FilledPrice - direct from Saxo order response
-        3. Price - legacy field name
-        4. ExecutionPrice - alternative field name
-        5. Fallback to order details API call
+        2. AveragePrice - Saxo's actual execution price field
+        3. ExecutionPrice - same value, alternative field name
+        4. FilledPrice - legacy (does not exist in Saxo API, kept for safety)
+        5. Price - limit order submitted price (not execution price)
+        6. Fallback to order details API call
 
         Args:
             order_result: Order result dict from place_order or place_limit_order_with_timeout
@@ -3318,7 +3319,8 @@ class MEICStrategy:
                 return float(price)
 
         # Priority 2-4: Try various direct field names
-        for field in ["FilledPrice", "Price", "ExecutionPrice"]:
+        # FIX #76: AveragePrice/ExecutionPrice are the correct Saxo field names
+        for field in ["AveragePrice", "ExecutionPrice", "FilledPrice", "Price"]:
             if field in order_result:
                 price = order_result[field]
                 if price and price > 0:
@@ -3329,7 +3331,7 @@ class MEICStrategy:
         if order_id:
             order_status = self.client.get_order_status(order_id)
             if order_status:
-                fill_price = order_status.get("FilledPrice", 0)
+                fill_price = order_status.get("AveragePrice") or order_status.get("FilledPrice", 0)
                 if fill_price and fill_price > 0:
                     return float(fill_price)
 
@@ -4360,21 +4362,13 @@ class MEICStrategy:
         """
         FIX #42 (2026-02-05): Get actual fill price for a close order.
 
-        Queries the activities endpoint to find the fill price for accurate P&L.
-        This fixes the bug where theoretical stop levels were used instead of
-        actual close prices, causing massive P&L discrepancies.
+        FIX #76 (2026-02-17): Two-tier lookup:
+          1. Activities endpoint (AveragePrice field) - works immediately now
+          2. Closed positions endpoint (ClosingPrice field) - authoritative fallback
 
-        FIX #51 (2026-02-10): Reduced retries from 3 to 1 since this function is
-        called AFTER _verify_position_closed() confirms the position is closed.
-        We KNOW the order filled - if FilledPrice isn't populated yet due to
-        Saxo's sync delay, return None so deferred lookup can handle it.
-
-        FIX #74 (2026-02-13): REMOVED quote fallback. When activities returns
-        FilledPrice=0 (normal for emergency market orders due to Saxo sync delay),
-        the old code fell back to current bid/ask quotes and returned them as fill
-        prices. This prevented _deferred_stop_fill_lookup() from ever running,
-        causing $75/day P&L discrepancy (quotes overstate losses vs actual fills).
-        Now returns None so the deferred lookup path in _execute_stop_loss() runs.
+        The root cause of 17 days of FilledPrice=0 was that the field "FilledPrice"
+        does NOT exist in Saxo's API. The correct field is "AveragePrice" (also
+        "ExecutionPrice"). This was verified via live diagnostic on 2026-02-17.
 
         Args:
             order_id: The emergency close order ID
@@ -4385,7 +4379,7 @@ class MEICStrategy:
             Fill price in dollars (e.g., 8.90), or None if not found
         """
         try:
-            # FIX #51: Only 1 retry since we already verified position is closed
+            # Tier 1: Activities endpoint (AveragePrice - Fix #76 field name fix)
             filled, fill_details = self.client.check_order_filled_by_activity(
                 order_id=order_id,
                 uic=uic,
@@ -4396,23 +4390,28 @@ class MEICStrategy:
             if filled and fill_details:
                 fill_price = fill_details.get("fill_price")
                 if fill_price and fill_price > 0:
-                    logger.info(f"FIX-42: Got actual fill price for {leg_name}: ${fill_price:.2f}")
+                    logger.info(f"FIX-76: Got fill price for {leg_name} via activities: ${fill_price:.2f}")
                     return fill_price
-                else:
-                    # FIX #74: FilledPrice=0 is normal for emergency market orders
-                    # Return None so deferred lookup runs (waits 3s, retries 3x)
-                    logger.info(
-                        f"FIX-74: Activity found but FilledPrice=0 for {leg_name} "
-                        f"(normal for market orders) - deferring to batch lookup"
-                    )
-                    return None
 
-            # No activity found at all - return None for deferred lookup
-            logger.warning(f"FIX-74: No activity found for {leg_name} order_id={order_id} - deferring to batch lookup")
+            # Tier 2: Closed positions endpoint (ClosingPrice - Fix #76 new fallback)
+            # Determine direction: short legs are bought to close, long legs are sold
+            buy_or_sell = "Sell" if leg_name.startswith("short") else "Buy"
+            closed_info = self.client.get_closed_position_price(uic, buy_or_sell=buy_or_sell)
+            if closed_info:
+                closing_price = closed_info.get("closing_price")
+                if closing_price and closing_price > 0:
+                    logger.info(
+                        f"FIX-76: Got fill price for {leg_name} via closedpositions: "
+                        f"${closing_price:.2f} (Saxo P&L: ${closed_info.get('closed_pnl', 0):.2f})"
+                    )
+                    return closing_price
+
+            # Neither source has a price yet - return None for deferred lookup
+            logger.info(f"FIX-76: No fill price yet for {leg_name} - deferring to batch lookup")
             return None
 
         except Exception as e:
-            logger.error(f"FIX-42: Error getting fill price for {leg_name}: {e}")
+            logger.error(f"FIX-76: Error getting fill price for {leg_name}: {e}")
             return None
 
     def _deferred_stop_fill_lookup(
@@ -4422,11 +4421,11 @@ class MEICStrategy:
         entry: IronCondorEntry
     ) -> Tuple[float, bool]:
         """
-        FIX #70 Part B: Deferred price lookup for stop loss legs with missing fill prices.
+        FIX #70 Part B / FIX #76: Deferred price lookup for stop loss legs.
 
-        After both legs of a stop are closed, waits 3 seconds for Saxo's activities
-        endpoint to sync, then re-checks for actual fill prices. This replaces the
-        inaccurate quote-based fallback from _get_close_fill_price().
+        FIX #76 (2026-02-17): With the AveragePrice field name fix, activities should
+        now return prices immediately. This deferred lookup is kept as a safety net
+        with closed positions endpoint as the authoritative fallback.
 
         Args:
             deferred_legs: List of (order_id, uic, leg_name) tuples needing price lookup
@@ -4437,7 +4436,7 @@ class MEICStrategy:
             Tuple of (updated_close_cost, all_prices_found)
         """
         logger.info(
-            f"FIX-70: Deferred price lookup for {len(deferred_legs)} legs, "
+            f"FIX-76: Deferred price lookup for {len(deferred_legs)} legs, "
             f"waiting 3s for Saxo sync..."
         )
         time.sleep(3)
@@ -4446,40 +4445,57 @@ class MEICStrategy:
         updated_cost = current_close_cost
 
         for order_id, uic, leg_name in deferred_legs:
+            fill_price = None
+            source = None
+
             try:
+                # Tier 1: Activities endpoint (AveragePrice - should work now with Fix #76)
                 filled, fill_details = self.client.check_order_filled_by_activity(
                     order_id=order_id,
                     uic=uic,
                     max_retries=3,
                     retry_delay=1.5
                 )
-
                 if filled and fill_details:
-                    fill_price = fill_details.get("fill_price", 0)
-                    if fill_price and fill_price > 0:
-                        if leg_name.startswith("short"):
-                            updated_cost += fill_price * 100 * entry.contracts
-                            logger.info(
-                                f"FIX-70: Deferred fill price for {leg_name}: "
-                                f"${fill_price:.2f} (close cost +${fill_price * 100 * entry.contracts:.2f})"
-                            )
-                        else:
-                            updated_cost -= fill_price * 100 * entry.contracts
-                            logger.info(
-                                f"FIX-70: Deferred fill price for {leg_name}: "
-                                f"${fill_price:.2f} (close proceeds -${fill_price * 100 * entry.contracts:.2f})"
-                            )
-                        continue
+                    fp = fill_details.get("fill_price", 0)
+                    if fp and fp > 0:
+                        fill_price = fp
+                        source = "activities"
 
-                # Still no price after deferred lookup
+                # Tier 2: Closed positions endpoint (authoritative fallback)
+                if fill_price is None:
+                    buy_or_sell = "Sell" if leg_name.startswith("short") else "Buy"
+                    closed_info = self.client.get_closed_position_price(uic, buy_or_sell=buy_or_sell)
+                    if closed_info:
+                        cp = closed_info.get("closing_price")
+                        if cp and cp > 0:
+                            fill_price = cp
+                            source = "closedpositions"
+
+                if fill_price is not None:
+                    if leg_name.startswith("short"):
+                        updated_cost += fill_price * 100 * entry.contracts
+                        logger.info(
+                            f"FIX-76: Deferred fill price for {leg_name} via {source}: "
+                            f"${fill_price:.2f} (close cost +${fill_price * 100 * entry.contracts:.2f})"
+                        )
+                    else:
+                        updated_cost -= fill_price * 100 * entry.contracts
+                        logger.info(
+                            f"FIX-76: Deferred fill price for {leg_name} via {source}: "
+                            f"${fill_price:.2f} (close proceeds -${fill_price * 100 * entry.contracts:.2f})"
+                        )
+                    continue
+
+                # Still no price after both lookups
                 logger.warning(
-                    f"FIX-70: Deferred lookup still has no fill price for {leg_name} "
+                    f"FIX-76: Deferred lookup still has no fill price for {leg_name} "
                     f"(order {order_id}). P&L may be inaccurate."
                 )
                 all_found = False
 
             except Exception as e:
-                logger.warning(f"FIX-70: Deferred lookup error for {leg_name}: {e}")
+                logger.warning(f"FIX-76: Deferred lookup error for {leg_name}: {e}")
                 all_found = False
 
         return updated_cost, all_found

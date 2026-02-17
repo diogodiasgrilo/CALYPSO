@@ -2981,11 +2981,13 @@ class SaxoClient:
         sync delay. Saxo activities endpoint may have 1-3 second lag after order fill.
 
         FIX (2026-02-02): Increased retries to 4 × 1.5s = 6s total (was 3 × 1s = 3s).
-        Friday 2026-01-30 showed FilledPrice=0 after 3s, causing fallback to quoted
-        prices and P&L errors of $1.30 per trade. Also added explicit position lookup
-        for PositionBase.OpenPrice as secondary source (NOT PositionView.AverageOpenPrice,
-        which is always 0 for all positions). Note: Iron Fly has its own retry loop on
-        top of this, so keeping client retries moderate (6s not 10s).
+
+        FIX #76 (2026-02-17): The field "FilledPrice" does NOT exist in Saxo's API.
+        The correct field for execution price is "AveragePrice" (also "ExecutionPrice").
+        "Price" only exists on limit orders (the submitted limit price, not execution price).
+        This was verified via live diagnostic showing all FinalFill activities have
+        AveragePrice but never FilledPrice. The wrong field name caused 17 days of
+        fill_price=0 on every market order close.
 
         Args:
             order_id: The order ID to check
@@ -3026,9 +3028,10 @@ class SaxoClient:
                         # Check if this activity matches our order
                         if activity_order_id == str(order_id):
                             if activity_status in ["FinalFill", "Fill"]:
-                                # FIX (2026-01-31): Saxo activities endpoint uses "FilledPrice", not "Price"
-                                # Also check "Price" as fallback for backwards compatibility
-                                fill_price = activity.get("FilledPrice") or activity.get("Price", 0)
+                                # FIX #76 (2026-02-17): Saxo activities FinalFill uses "AveragePrice"/"ExecutionPrice"
+                                # "FilledPrice" does NOT exist in Saxo's API (was wrong in Fix #14)
+                                # "Price" only exists on limit orders (submitted price, not execution price)
+                                fill_price = activity.get("AveragePrice") or activity.get("ExecutionPrice") or activity.get("Price", 0)
                                 fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
                                 # FIX (2026-02-03): Extract PositionId from activity if available
                                 activity_position_id = activity.get("PositionId")
@@ -3038,7 +3041,7 @@ class SaxoClient:
                                 if fill_price > 0:
                                     logger.info(
                                         f"Order {order_id} confirmed FILLED via activities (attempt {attempt}): "
-                                        f"FilledPrice={fill_price}, Amount={fill_amount}, PositionId={activity_position_id}"
+                                        f"AveragePrice={fill_price}, Amount={fill_amount}, PositionId={activity_position_id}"
                                     )
                                     return True, {
                                         "status": "Filled",
@@ -3051,7 +3054,7 @@ class SaxoClient:
                                 else:
                                     # Activity found but no price yet - keep retrying
                                     logger.info(
-                                        f"Activity found for {order_id} but FilledPrice=0 (attempt {attempt}/{max_retries})"
+                                        f"Activity found for {order_id} but AveragePrice=0 (attempt {attempt}/{max_retries})"
                                     )
 
             except Exception as e:
@@ -3101,7 +3104,7 @@ class SaxoClient:
                         elif fill_confirmed:
                             # We know it filled but have no price - log warning
                             logger.warning(
-                                f"Order {order_id} FILLED but no price available (activities FilledPrice=0, "
+                                f"Order {order_id} FILLED but no price available (activities AveragePrice=0, "
                                 f"position OpenPrice=0). Using fill_amount={fill_amount_found}."
                             )
                             return True, {
@@ -4280,6 +4283,53 @@ class SaxoClient:
             "ClientKey": self.client_key
         }
         return self._make_request("GET", endpoint, params=params)
+
+    def get_closed_position_price(self, uic: int, buy_or_sell: str = None) -> Optional[Dict]:
+        """Get closing price for a recently closed position from /port/v1/closedpositions.
+
+        FIX #76 (2026-02-17): This endpoint is the AUTHORITATIVE source for close fill prices.
+        Unlike the activities endpoint (which has sync delays for market orders),
+        closedpositions is available immediately when netting mode is Intraday.
+
+        Args:
+            uic: The instrument UIC to look up
+            buy_or_sell: Optional "Buy" or "Sell" filter to match specific direction
+
+        Returns:
+            Dict with {closing_price, open_price, closed_pnl, amount, buy_or_sell, execution_time}
+            or None if not found
+        """
+        try:
+            response = self._make_request("GET", "/port/v1/closedpositions", params={
+                "AccountKey": self.account_key,
+                "ClientKey": self.client_key,
+            })
+            if not response or "Data" not in response:
+                return None
+
+            # Search for the most recent closed position matching this UIC
+            # Data is returned newest-first
+            for cp in response["Data"]:
+                closed = cp.get("ClosedPosition", {})
+                if closed.get("Uic") == uic:
+                    # Optional direction filter
+                    if buy_or_sell and closed.get("BuyOrSell") != buy_or_sell:
+                        continue
+                    closing_price = closed.get("ClosingPrice")
+                    if closing_price is not None and closing_price > 0:
+                        return {
+                            "closing_price": closing_price,
+                            "open_price": closed.get("OpenPrice"),
+                            "closed_pnl": closed.get("ClosedProfitLoss"),
+                            "amount": closed.get("Amount"),
+                            "buy_or_sell": closed.get("BuyOrSell"),
+                            "execution_time": closed.get("ExecutionTimeClose"),
+                            "closing_position_id": closed.get("ClosingPositionId"),
+                        }
+            return None
+        except Exception as e:
+            logger.warning(f"Error fetching closed position price for UIC {uic}: {e}")
+            return None
 
     def get_closed_spy_positions(
         self,
