@@ -1916,6 +1916,16 @@ class MEICTFStrategy(MEICStrategy):
                 }
                 state_data["entries"].append(entry_data)
 
+            # Persist intraday OHLC so it survives mid-day restarts
+            state_data["market_data_ohlc"] = {
+                "spx_open": self.market_data.spx_open,
+                "spx_high": self.market_data.spx_high,
+                "spx_low": self.market_data.spx_low if self.market_data.spx_low != float('inf') else 0.0,
+                "vix_open": self.market_data.vix_open,
+                "vix_high": self.market_data.vix_high,
+                "vix_low": self.market_data.vix_low if self.market_data.vix_low != float('inf') else 0.0,
+            }
+
             state_data["last_saved"] = get_us_market_time().isoformat()
 
             # Write atomically using temp file (uses self.state_file set in __init__)

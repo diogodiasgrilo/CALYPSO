@@ -186,6 +186,7 @@ bots/meic_tf/
   - Full logical column rearrangement: Market Context → Bot Activity → Position Outcomes → P&L Breakdown → Performance & Risk → Notes
   - MarketData: Added `spx_open`, `vix_open`, `vix_low` tracking fields
   - OHLC persisted to state file and restored on mid-day restart (prevents data loss)
+  - Fix: MEIC-TF `_save_state_to_disk()` was missing `market_data_ohlc` persistence (save/restore asymmetry)
 
 - **1.2.6** (2026-02-13): Fix #75 - Async deferred stop fill lookup
   - `_deferred_stop_fill_lookup()` blocked main loop for 10-15s per stop (3s sleep + retries)
