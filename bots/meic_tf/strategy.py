@@ -223,6 +223,47 @@ class MEICTFStrategy(MEICStrategy):
         logger.info(f"  Neutral threshold: {self.ema_neutral_threshold * 100:.2f}%")
         logger.info(f"  Recheck each entry: {self.recheck_each_entry}")
 
+        # MKT-016: Stop cascade breaker - pause entries after N stops in a day
+        strategy_config = config.get("strategy", {})
+        self.max_daily_stops_before_pause = strategy_config.get("max_daily_stops_before_pause", 3)
+        self._stop_cascade_triggered = False
+        logger.info(f"  Stop cascade breaker: pause after {self.max_daily_stops_before_pause} stops")
+
+    # =========================================================================
+    # ENTRY GATING (MKT-016)
+    # =========================================================================
+
+    def _should_attempt_entry(self, now) -> bool:
+        """
+        Override parent to add stop cascade breaker (MKT-016).
+
+        After max_daily_stops_before_pause stops in a single day, skip all
+        remaining entries. This prevents placing new entries into a market
+        that has already stopped multiple existing positions.
+
+        Existing positions continue to be monitored for stops normally.
+        """
+        # MKT-016: Check if stop cascade breaker has been triggered
+        total_stops = self.daily_state.call_stops_triggered + self.daily_state.put_stops_triggered
+        if total_stops >= self.max_daily_stops_before_pause and not self._stop_cascade_triggered:
+            # First time detecting cascade - log and skip remaining entries
+            self._stop_cascade_triggered = True
+            remaining = len(self.entry_times) - self._next_entry_index
+            logger.warning(
+                f"MKT-016 STOP CASCADE BREAKER: {total_stops} stops today "
+                f"(threshold: {self.max_daily_stops_before_pause}) - "
+                f"pausing {remaining} remaining entries"
+            )
+            self.daily_state.entries_skipped += remaining
+            self._next_entry_index = len(self.entry_times)
+            return False
+
+        if self._stop_cascade_triggered:
+            return False
+
+        # Delegate to parent for normal time-window checks
+        return super()._should_attempt_entry(now)
+
     # =========================================================================
     # TREND DETECTION
     # =========================================================================
@@ -2118,6 +2159,7 @@ class MEICTFStrategy(MEICStrategy):
         self._circuit_breaker_open = False
         self._consecutive_failures = 0
         self._api_results_window.clear()
+        self._stop_cascade_triggered = False  # MKT-016: Reset cascade breaker
 
         # P3: Reset intraday market data tracking
         self.market_data.reset_daily_tracking()

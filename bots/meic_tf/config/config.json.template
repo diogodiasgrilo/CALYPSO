@@ -46,14 +46,17 @@
         "_comment_risk": "Risk management settings",
         "max_daily_loss_percent": 2.0,
         "max_vix_entry": 25,
-        "contracts_per_entry": 1
+        "contracts_per_entry": 1,
+
+        "_comment_cascade": "MKT-016: Pause entries after N total stops in a day (call + put)",
+        "max_daily_stops_before_pause": 3
     },
     "trend_filter": {
         "_comment": "EMA-based trend direction detection for MEIC-TF",
         "enabled": true,
         "ema_short_period": 20,
         "ema_long_period": 40,
-        "ema_neutral_threshold": 0.001,
+        "ema_neutral_threshold": 0.002,
         "recheck_each_entry": true,
         "chart_bars_count": 50,
         "chart_horizon_minutes": 1

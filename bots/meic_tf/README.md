@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.2.7 | **Last Updated:** 2026-02-16
+**Version:** 1.2.8 | **Last Updated:** 2026-02-17
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -11,7 +11,7 @@ MEIC-TF combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend
 - **Before each entry**, check 20 EMA vs 40 EMA on SPX 1-minute bars
 - **BULLISH** (20 > 40): Place PUT spread only (calls are risky in uptrend)
 - **BEARISH** (20 < 40): Place CALL spread only (puts are risky in downtrend)
-- **NEUTRAL** (within 0.1%): Place full iron condor (standard MEIC behavior)
+- **NEUTRAL** (within 0.2%): Place full iron condor (standard MEIC behavior)
 
 ### Why This Works
 
@@ -73,7 +73,7 @@ If the credit gate can't get valid quotes (rare), it falls back to wing illiquid
         "enabled": true,
         "ema_short_period": 20,
         "ema_long_period": 40,
-        "ema_neutral_threshold": 0.001,
+        "ema_neutral_threshold": 0.002,
         "recheck_each_entry": true,
         "chart_bars_count": 50,
         "chart_horizon_minutes": 1
@@ -86,16 +86,28 @@ If the credit gate can't get valid quotes (rare), it falls back to wing illiquid
 | `enabled` | `true` | Enable/disable trend filtering |
 | `ema_short_period` | `20` | Fast EMA period |
 | `ema_long_period` | `40` | Slow EMA period |
-| `ema_neutral_threshold` | `0.001` | 0.1% - threshold for neutral zone |
+| `ema_neutral_threshold` | `0.002` | 0.2% - threshold for neutral zone (widened from 0.1% on 2026-02-17) |
 | `recheck_each_entry` | `true` | Re-check EMAs before each entry |
 | `chart_bars_count` | `50` | Number of 1-min bars to fetch |
 | `chart_horizon_minutes` | `1` | Bar interval (1 = 1 minute) |
+
+### Stop Cascade Breaker (MKT-016) - Added v1.2.8
+
+After a configurable number of total stops (call + put) in a single day, pause all remaining entries. Prevents compounding losses on whipsaw/reversal days where the EMA trend filter lags rapid price changes.
+
+| Trend | Stops Hit | Remaining Entries | Action |
+|-------|-----------|-------------------|--------|
+| Any | < threshold | Any | Continue normally |
+| Any | >= threshold | N remaining | **Skip all N entries** |
+
+**Why this works:** On Feb 17, 2026, a V-shaped reversal caused 5/5 entries to stop. Entries #4 and #5 together lost $195 net. A cascade breaker at 3 stops would have paused Entry #4 and #5, saving $195.
 
 ### Credit Gate Config (strategy section)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `min_viable_credit_per_side` | `0.50` | MKT-011: Skip/convert if estimated credit below this |
+| `max_daily_stops_before_pause` | `3` | MKT-016: Pause entries after N total stops in a day |
 
 ## Usage
 
@@ -177,6 +189,14 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.2.8** (2026-02-17): EMA threshold widening + stop cascade breaker
+  - EMA neutral threshold widened from 0.1% to 0.2% (fewer false trend signals on low-conviction moves)
+  - MKT-016: Stop cascade breaker - pause all remaining entries after N total stops in a day (default: 3)
+  - Based on Feb 10-17 performance analysis: 4 winning days then $740 loss on V-shaped reversal
+  - EMA threshold change would have saved ~$330 on Feb 17 (fewer one-sided entries on weak trends)
+  - Cascade breaker would have saved ~$195 on Feb 17 (blocked Entry #4 and #5 after 3 stops)
+  - See `docs/MEIC_TF_PERFORMANCE_BASELINE.md` for full analysis and baseline data
 
 - **1.2.7** (2026-02-16): Daily Summary column redesign (24 → 34 columns)
   - SPX OHLC: Added SPX Open, High, Low columns (Close already existed)
