@@ -355,7 +355,7 @@ Source: Google Sheets "Daily Summary" tab, as of Feb 17 end-of-day (corrected).
 
 | Rank | Rec | Name | Impact | Complexity | Feb 17 Net Savings | Status |
 |------|-----|------|--------|------------|-------------------|--------|
-| **1** | 9.3 | **Widen EMA Threshold (0.1% → 0.2%)** | **HIGHEST** | **ZERO (config only)** | **~$330** | **IMPLEMENTED (v1.2.8)** |
+| **1** | 9.3 | **Widen EMA Threshold (0.1% → 0.2%)** | **HIGHEST** | **ZERO (config only)** | **~$290** | **IMPLEMENTED (v1.2.8)** |
 | **2** | 9.1 | **Daily Stop Cascade Breaker** | **HIGH** | **LOW (~25 lines)** | **~$195** | **IMPLEMENTED (v1.2.8)** |
 | 3 | 9.4 | Trend Persistence Requirement | MEDIUM | MEDIUM (~15 lines) | ~$330* | Deferred (monitor first) |
 | 4 | 9.2 | Stop Cooldown Timer | LOW-MEDIUM | LOW (~20 lines) | ~$80 | Deferred (largely redundant with #1+#2) |
@@ -376,7 +376,7 @@ Source: Google Sheets "Daily Summary" tab, as of Feb 17 end-of-day (corrected).
 **Why it's #1**:
 - Addresses the **root cause** of Feb 17's loss: wrong directional bets from whipsaw EMA signals
 - **Zero code changes** — update one value in `config.json` on the VM
-- On Feb 17: Entry #1 (BEARISH→call-only) and Entry #4 (BULLISH→put-only) would likely have been NEUTRAL→full ICs. The surviving sides would have partially offset stop losses. **Saves ~$330.**
+- On Feb 17: Entry #1 (BEARISH→call-only) would likely have been NEUTRAL→full IC. The surviving side would have partially offset the stop loss. Entry #4 would also reclassify, but MKT-016 cascade blocks it (3 stops already reached). **Saves ~$290** (Entry #1 only).
 - On Feb 12 (genuine sell-off, 149pts): EMA divergence was >0.3%, so BEARISH signals would still fire at 0.2%. **Zero cost on genuine trending days.**
 
 **Code verification**: Line 194 of `bots/meic_tf/strategy.py` reads `self.trend_config.get("ema_neutral_threshold", 0.001)`. Lines 294-299 use strict `>` and `<` operators. Pure config change.
@@ -478,6 +478,38 @@ Track when each improvement was implemented, deployed, and verified.
 
 ## 9. Post-Improvement Performance Tracking
 
+### How to Do a Weekly Review
+
+**Step 1: Pull daily summary data from Google Sheets**
+- Open the "Calypso_MEIC-TF_Live_Data" spreadsheet → "Daily Summary" tab
+- Copy the rows for the review period into the template table below
+
+**Step 2: Pull EMA divergence data from VM logs**
+```bash
+# Get all trend signal logs for a specific date (replace DATE)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf --since 'DATE 14:00' --until 'DATE 21:00' --no-pager | grep -E '(EMA|trend_signal|divergence|BULLISH|BEARISH|NEUTRAL|cascade|MKT-016)'"
+```
+Note: journalctl timestamps are UTC. Market hours 9:30-4:00 ET = 14:30-21:00 UTC.
+
+**Step 3: Check if cascade breaker triggered**
+```bash
+# Look for MKT-016 cascade events
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf --since 'DATE 14:00' --until 'DATE 21:00' --no-pager | grep -i 'cascade\|MKT-016\|pause.*entry\|skipping.*entry'"
+```
+
+**Step 4: Check state file for EMA values (most precise)**
+```bash
+# View today's state file (has exact ema_20_at_entry / ema_40_at_entry)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso cat /opt/calypso/data/meic_tf_state.json | python3 -m json.tool"
+```
+
+**Step 5: Check cumulative metrics**
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso cat /opt/calypso/data/meic_metrics.json | python3 -m json.tool"
+```
+
+**Step 6: Fill in the template table and improvement assessment below, then update this document.**
+
 ### Template for Future Analysis
 
 When reviewing performance after implementing improvements, fill in this section with new data:
@@ -508,7 +540,7 @@ When reviewing performance after implementing improvements, fill in this section
 
 | Rec | Priority | Implemented? | Triggered? | Estimated Savings | Actual Impact | Assessment |
 |-----|----------|-------------|------------|-------------------|---------------|------------|
-| 9.3 EMA Threshold (0.2%) | #1 | v1.2.8 (Feb 17) | TBD | ~$330/bad day | | |
+| 9.3 EMA Threshold (0.2%) | #1 | v1.2.8 (Feb 17) | TBD | ~$290/bad day | | |
 | 9.1 Stop Cascade (3 stops) | #2 | v1.2.8 (Feb 17) | TBD | ~$195/bad day | | |
 | 9.4 Trend Persistence | Deferred | | | Overlaps with 9.3 | | |
 | 9.2 Stop Cooldown | Deferred | | | ~$80 (redundant with 9.1+9.3) | | |
@@ -772,6 +804,8 @@ Any threshold in this range flips the same set of entries:
 
 **CORRECTION (Feb 18, 2026):** The original version of this appendix contained P&L projection errors. The calculations didn't properly apply the MEIC IC breakeven formula: when one side of a full IC is stopped, the stop debit ≈ total credit collected, so net P&L ≈ -$5 (with MEIC+) regardless of individual side credits. The original analysis incorrectly added "expired call credit" on top of the stop-debit calculation, double-counting credit that was already part of total_credit. All projections have been corrected below.
 
+**Note on per-entry P&L precision:** "Actual P&L" values below are from the bot's recorded data and include fill slippage (market orders may execute $10-$20 beyond the stop level). Impact values (actual vs projected) should be treated as ±$10 approximations. The daily aggregate totals in Section 2 are authoritative.
+
 ### Feb 10: $0 impact
 All entries NEUTRAL at both thresholds (max divergence 0.035%). No entries affected.
 
@@ -794,7 +828,7 @@ All entries NEUTRAL at both thresholds (max divergence 0.035%). No entries affec
 ### Feb 13: +$445 improvement
 
 **Entry #2** changes from BULLISH (put-only, ~$430 credit) to NEUTRAL (full IC, ~$675 total):
-- **Actual (put-only)**: Put stopped → stop = 2×$430 = $860 debit, net = $430 - $860 - $20 commission = **-$450 net**
+- **Actual (put-only)**: Put stopped → stop ≈ 2×$430 - $10 (MEIC+) = $850, net loss = $850 - $430 = $420, plus $10 commission and ~$20 fill slippage = **~-$450 net** (recorded value)
 - **Projected (full IC)**: Put still stopped (IC stop level = ~$675 < one-sided $860, so triggers sooner but at lower cost). IC breakeven: collected ~$675, stop debit ≈ $665 (MEIC+), commission ~$15 → **~-$5 net**
 - **Impact**: **+$445**
 - **Why it saves $445**: Wrong BULLISH signal caused -$450 as put-only. In a full IC, the breakeven design absorbs the stop — loss drops from -$450 to just -$5.
@@ -859,9 +893,36 @@ All entries NEUTRAL at both thresholds (max divergence 0.035%). No entries affec
 | #5 | Full IC (NEUTRAL) | $250 | $30 | $85 (call) | $15 | +$40 | -$40 cost |
 | **Net** | | | | | | | **+$195** |
 
+### Combined Impact: Both Improvements Together (v1.2.8)
+
+The two improvements affect **different entries** on Feb 17, so their combined savings equals the simple sum — no overlap.
+
+- **Threshold (Rec 9.3)** affects: Feb 11 #2, Feb 12 #3, Feb 13 #2, Feb 17 #1
+- **Cascade (Rec 9.1)** affects: Feb 17 #4, Feb 17 #5
+- Entry #4 would also be flipped by threshold (BULLISH→NEUTRAL), but cascade blocks it first, so threshold has no effect on Entry #4.
+
+| Day | Threshold Impact | Cascade Impact | Combined Impact | Notes |
+|-----|-----------------|----------------|-----------------|-------|
+| Feb 10 | $0 | $0 | **$0** | No entries affected |
+| Feb 11 | +$295 | $0 | **+$295** | No overlap |
+| Feb 12 | -$180 | $0 | **-$180** | No overlap |
+| Feb 13 | +$445 | $0 | **+$445** | No overlap |
+| Feb 17 | +$290 (Entry #1) | +$195 (Entries #4, #5) | **+$485** | Different entries, no overlap |
+| **TOTAL** | **+$850** | **+$195** | **+$1,045** | Simple sum (improvements are disjoint) |
+
+**Likely combined: +$1,045. Worst case (if Feb 11 #2 put also stopped): +$615.**
+
+Feb 17 combined breakdown:
+- Entry #1: threshold flips to full IC → P&L improves from -$295 to ~-$5 → **+$290**
+- Entry #4: cascade blocks → saves -$235 net (Appendix E) → **+$235**
+- Entry #5: cascade blocks → loses +$40 net winner → **-$40**
+- Combined Feb 17: $290 + $235 - $40 = **+$485**
+
 ---
 
-## Appendix F: Strategy Configuration (Baseline)
+## Appendix F: Strategy Configuration
+
+### Baseline Config (v1.2.7, Feb 10-17 data)
 
 ```
 Entries per day: 5
@@ -874,7 +935,26 @@ Spread width: 50-60 pts (VIX-adjusted)
 Stop level (full IC): total_credit
 Stop level (one-sided): 2 × credit
 MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
+Max daily stops before pause: N/A (not implemented)
 ```
+
+### Current Config (v1.2.8, deployed Feb 17 post-market)
+
+```
+Entries per day: 5
+Entry times: 10:05, 10:35, 11:05, 11:35, 12:05 ET
+EMA short period: 20
+EMA long period: 40
+EMA neutral threshold: 0.002 (0.2%)              ← CHANGED from 0.001 (Rec 9.3)
+Min viable credit per side: $0.50 (MKT-011)
+Spread width: 50-60 pts (VIX-adjusted)
+Stop level (full IC): total_credit
+Stop level (one-sided): 2 × credit
+MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
+Max daily stops before pause: 3                   ← NEW (Rec 9.1, MKT-016)
+```
+
+**Config location**: `bots/meic_tf/config/config.json` on VM at `/opt/calypso/`. Template at `bots/meic_tf/config/config.json.template` in repo.
 
 ## Appendix G: Formulas
 
@@ -886,6 +966,20 @@ MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
 - **Net Capture Rate** = Net P&L / Total Credit Collected × 100
 - **Win Rate** = Entries with 0 stops / Total entries × 100
 - **Sortino Ratio** = daily_average_return / downside_deviation × sqrt(252)
+
+### Commission Per Entry Type
+
+Commission = $2.50 per leg per transaction (from `strategy.py` line 816: `commission_per_leg = 2.50`).
+
+| Entry Type | Outcome | Legs Opened | Legs Closed | Total Commission |
+|------------|---------|-------------|-------------|-----------------|
+| Full IC | Both expire | 4 | 0 | **$10** |
+| Full IC | One side stopped | 4 | 2 | **$15** |
+| Full IC | Both stopped | 4 | 4 | **$20** |
+| One-sided | Expires | 2 | 0 | **$5** |
+| One-sided | Stopped | 2 | 2 | **$10** |
+
+**Key**: Expired options have ZERO close commission (no transaction). Only stopped sides incur close commission.
 
 ### CRITICAL: IC Breakeven Formula (Used in All What-If Projections)
 
