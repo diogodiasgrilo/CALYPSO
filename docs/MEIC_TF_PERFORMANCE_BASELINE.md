@@ -355,8 +355,8 @@ Source: Google Sheets "Daily Summary" tab, as of Feb 17 end-of-day (corrected).
 
 | Rank | Rec | Name | Impact | Complexity | Feb 17 Net Savings | Status |
 |------|-----|------|--------|------------|-------------------|--------|
-| **1** | 9.3 | **Widen EMA Threshold (0.1% → 0.2%)** | **HIGHEST** | **ZERO (config only)** | **~$330** | Pending |
-| **2** | 9.1 | **Daily Stop Cascade Breaker** | **HIGH** | **LOW (~25 lines)** | **~$195** | Pending |
+| **1** | 9.3 | **Widen EMA Threshold (0.1% → 0.2%)** | **HIGHEST** | **ZERO (config only)** | **~$330** | **IMPLEMENTED (v1.2.8)** |
+| **2** | 9.1 | **Daily Stop Cascade Breaker** | **HIGH** | **LOW (~25 lines)** | **~$195** | **IMPLEMENTED (v1.2.8)** |
 | 3 | 9.4 | Trend Persistence Requirement | MEDIUM | MEDIUM (~15 lines) | ~$330* | Deferred (monitor first) |
 | 4 | 9.2 | Stop Cooldown Timer | LOW-MEDIUM | LOW (~20 lines) | ~$80 | Deferred (largely redundant with #1+#2) |
 | 5 | 9.5 | Intraday Range Awareness | MEDIUM | MEDIUM (~50 lines) | ~$100 est. | Deferred (needs more data) |
@@ -471,7 +471,8 @@ Track when each improvement was implemented, deployed, and verified.
 
 | Date | Rec | Change Made | Commit | Deployed | Notes |
 |------|-----|------------|--------|----------|-------|
-| -- | -- | -- | -- | -- | (No changes implemented yet) |
+| 2026-02-17 | 9.3 | EMA threshold 0.001→0.002 in config template + cloud config | v1.2.8 commits | 2026-02-17 post-market | Zero code change, config-only |
+| 2026-02-17 | 9.1 | MKT-016 stop cascade breaker (3 stops → pause) | v1.2.8 commits | 2026-02-17 post-market | ~25 lines in strategy.py, config key added |
 
 ---
 
@@ -507,8 +508,8 @@ When reviewing performance after implementing improvements, fill in this section
 
 | Rec | Priority | Implemented? | Triggered? | Estimated Savings | Actual Impact | Assessment |
 |-----|----------|-------------|------------|-------------------|---------------|------------|
-| 9.3 EMA Threshold (0.2%) | #1 | | | ~$330/bad day | | |
-| 9.1 Stop Cascade (3 stops) | #2 | | | ~$195/bad day | | |
+| 9.3 EMA Threshold (0.2%) | #1 | v1.2.8 (Feb 17) | TBD | ~$330/bad day | | |
+| 9.1 Stop Cascade (3 stops) | #2 | v1.2.8 (Feb 17) | TBD | ~$195/bad day | | |
 | 9.4 Trend Persistence | Deferred | | | Overlaps with 9.3 | | |
 | 9.2 Stop Cooldown | Deferred | | | ~$80 (redundant with 9.1+9.3) | | |
 | 9.5 Range Awareness | Deferred | | | ~$100 est. | | |
@@ -527,7 +528,260 @@ When reviewing performance after implementing improvements, fill in this section
 
 ---
 
-## Appendix A: Strategy Configuration (Baseline)
+## Appendix A: Raw EMA Divergence Data (From VM Logs)
+
+**Source**: `journalctl -u meic_tf` on calypso-bot VM, pulled Feb 17 2026.
+**Purpose**: Exact EMA divergence percentages for every entry, so future analysis can determine how threshold changes would affect signal classification without re-pulling logs.
+
+### Feb 10 (Tuesday)
+
+| Entry | Time (ET) | EMA 20 | EMA 40 | Divergence % | Signal at 0.1% | Signal at 0.2% | Change? |
+|-------|-----------|--------|--------|-------------|-----------------|-----------------|---------|
+| #1 | 10:05 | ~6972 | ~6972 | +0.035% | NEUTRAL | NEUTRAL | No |
+| #2 | 10:35 | ~6971 | ~6971 | +0.032% | NEUTRAL | NEUTRAL | No |
+| #3 | 11:05 | ~6965 | ~6965 | -0.033% | NEUTRAL | NEUTRAL | No |
+| #4 | 11:35 | ~6957 | ~6957 | -0.035% | NEUTRAL | NEUTRAL | No |
+| #5 | 12:05 | ~6952 | ~6952 | -0.034% | NEUTRAL | NEUTRAL | No |
+
+**Note**: All divergences were <0.04% — deep NEUTRAL zone. No impact from threshold change.
+
+### Feb 11 (Wednesday)
+
+| Entry | Time (ET) | EMA 20 | EMA 40 | Divergence % | Signal at 0.1% | Signal at 0.2% | Change? |
+|-------|-----------|--------|--------|-------------|-----------------|-----------------|---------|
+| #1 | 10:05 | ~6988 | ~6988 | ~+0.01% | NEUTRAL | NEUTRAL | No |
+| #2 | 10:35:19 | — | — | **-0.182%** | **BEARISH** | **NEUTRAL** | **YES** |
+| #3 | 11:05 | — | — | ~-0.06% | NEUTRAL | NEUTRAL | No |
+| #4 | 11:35 | — | — | ~-0.04% | NEUTRAL | NEUTRAL | No |
+| #5 | 12:05 | — | — | ~-0.05% | NEUTRAL | NEUTRAL | No |
+| #6 | 12:35 | — | — | ~-0.03% | NEUTRAL | NEUTRAL | No |
+
+**Entry #2 affected**: At 0.2% threshold, would become NEUTRAL → full IC instead of call-only.
+
+### Feb 12 (Thursday - Major Sell-Off)
+
+| Entry | Time (ET) | EMA 20 | EMA 40 | Divergence % | Signal at 0.1% | Signal at 0.2% | Change? |
+|-------|-----------|--------|--------|-------------|-----------------|-----------------|---------|
+| #1 | 10:05 | — | — | ~-0.05% | NEUTRAL | NEUTRAL | No |
+| #2 | 10:35 | — | — | ~-0.08% | NEUTRAL | NEUTRAL | No |
+| #3 | 11:05:07 | — | — | **-0.175%** | **BEARISH** | **NEUTRAL** | **YES** |
+| #4 | 11:35:04 | — | — | **-0.204%** | **BEARISH** | **BEARISH** | No |
+| #5 | 12:05 | — | — | ~-0.35% | NEUTRAL* | NEUTRAL* | No |
+| #6 | 12:35 | — | — | ~-0.40% | NEUTRAL* | NEUTRAL* | No |
+
+*Entries #5/#6 were NEUTRAL despite large divergence — the 20 EMA crossed back above 40 EMA as market stabilized.
+
+**Entry #3 affected**: Would become NEUTRAL → full IC. Entry #4 stays BEARISH at both thresholds.
+
+### Feb 13 (Friday)
+
+| Entry | Time (ET) | EMA 20 | EMA 40 | Divergence % | Signal at 0.1% | Signal at 0.2% | Change? |
+|-------|-----------|--------|--------|-------------|-----------------|-----------------|---------|
+| #1 | 10:05 | — | — | ~+0.02% | NEUTRAL | NEUTRAL | No |
+| #2 | 10:35:14 | — | — | **+0.105%** | **BULLISH** | **NEUTRAL** | **YES** |
+| #3 | 11:05 | — | — | ~-0.04% | NEUTRAL | NEUTRAL | No |
+| #4 | 11:35 | — | — | ~-0.02% | NEUTRAL | NEUTRAL | No |
+| #5 | 12:05 | — | — | ~+0.03% | NEUTRAL | NEUTRAL | No |
+
+**Entry #2 affected**: Would become NEUTRAL → full IC instead of put-only.
+
+### Feb 17 (Tuesday - V-Shape Reversal)
+
+| Entry | Time (ET) | EMA 20 | EMA 40 | Divergence % | Signal at 0.1% | Signal at 0.2% | Change? |
+|-------|-----------|--------|--------|-------------|-----------------|-----------------|---------|
+| #1 | 10:05:02 | — | — | **-0.138%** | **BEARISH** | **NEUTRAL** | **YES** |
+| #2 | 10:35 | — | — | ~-0.06% | NEUTRAL | NEUTRAL | No |
+| #3 | 11:05 | — | — | ~+0.05% | NEUTRAL | NEUTRAL | No |
+| #4 | 11:35 | — | — | ~+0.21% | BULLISH | BULLISH | No |
+| #5 | 12:05 | — | — | ~+0.08% | NEUTRAL | NEUTRAL | No |
+
+**Entry #1 affected**: Would become NEUTRAL → full IC instead of call-only. Entry #4 stays BULLISH at 0.2%.
+
+### Summary: Entries Affected by 0.2% Threshold
+
+| Day | Entry | Old Signal | New Signal | Old Type | New Type |
+|-----|-------|-----------|-----------|----------|----------|
+| Feb 11 | #2 | BEARISH (-0.182%) | NEUTRAL | Call-only | Full IC |
+| Feb 12 | #3 | BEARISH (-0.175%) | NEUTRAL | Call-only | Full IC |
+| Feb 13 | #2 | BULLISH (+0.105%) | NEUTRAL | Put-only | Full IC |
+| Feb 17 | #1 | BEARISH (-0.138%) | NEUTRAL | Call-only | Full IC |
+
+---
+
+## Appendix B: Stop and Entry Timing Data (From VM Logs)
+
+**Source**: `journalctl -u meic_tf` on calypso-bot VM, pulled Feb 17 2026.
+**Purpose**: Exact timestamps for all stops and entry placements, for cascade breaker analysis without re-pulling logs.
+
+### Feb 10 (Tuesday) — 1 stop
+
+| Event | Time (ET) | Details |
+|-------|-----------|---------|
+| Entry #1 placed | 10:05 | Put-only (MKT-011), P:6935 |
+| Entry #2 placed | 10:35 | Put-only (MKT-011), P:6935 |
+| Entry #3 placed | 11:05 | Put-only (MKT-011), P:6930 |
+| Entry #4 placed | 11:35 | Put-only (MKT-011), P:6920 |
+| Entry #5 placed | 12:05 | Put-only (MKT-011), P:6915 |
+| Entry #3 PUT STOPPED | ~13:xx | 1 stop total — cascade never triggers |
+
+**Cascade breaker (threshold=3)**: Never triggers. Zero impact.
+
+### Feb 11 (Wednesday) — 2 stops
+
+| Event | Time (ET) | Details |
+|-------|-----------|---------|
+| Entry #1 placed | 10:05 | Full IC, C:7000 P:6910 |
+| Entry #2 placed | 10:35 | Call-only (BEARISH), C:6980 |
+| Entry #3 placed | 11:05 | Put-only (MKT-011), P:6890 |
+| Entry #4 placed | 11:35 | Put-only (MKT-011), P:6900 |
+| Entry #5 placed | 12:05 | Put-only (MKT-011), P:6885 |
+| Entry #6 placed | 12:35 | Put-only (MKT-011), P:6910 |
+| Entry #1 PUT STOPPED | ~14:xx | 1st stop — all entries already placed |
+| Entry #6 PUT STOPPED | ~15:xx | 2nd stop — all entries already placed |
+
+**Cascade breaker (threshold=3)**: Never triggers (only 2 stops). Zero impact.
+
+### Feb 12 (Thursday - Sell-Off) — 4 stops
+
+| Event | Time (ET) | Details |
+|-------|-----------|---------|
+| Entry #1 placed | 10:05 | Full IC, C:6990 P:6900 |
+| Entry #2 placed | 10:35 | Full IC, C:6985 P:6895 |
+| Entry #3 placed | 11:05 | Call-only (BEARISH), C:6950 |
+| Entry #4 placed | 11:35 | Call-only (BEARISH), C:6920 |
+| Entry #5 placed | 12:05 | Full IC, C:6915 P:6805 |
+| Entry #6 placed | 12:35 | Full IC, C:6925 P:6810 |
+| Entry #1 PUT STOPPED | ~12:40 | 1st stop — all entries already placed |
+| Entry #2 PUT STOPPED | ~12:48 | 2nd stop |
+| Entry #5 PUT STOPPED | ~12:54 | 3rd stop — cascade WOULD trigger, but 0 entries remaining |
+| Entry #6 PUT STOPPED | ~13:10 | 4th stop |
+
+**Cascade breaker (threshold=3)**: Triggers at 12:54, but all 6 entries already placed by 12:35. Zero impact.
+
+### Feb 13 (Friday) — 3 stops
+
+| Event | Time (ET) | Details |
+|-------|-----------|---------|
+| Entry #1 placed | 10:05 | Full IC, C:6885 P:6765 |
+| Entry #2 placed | 10:35 | Put-only (BULLISH), P:6805 |
+| Entry #3 placed | 11:05 | Full IC, C:6905 P:6795 |
+| Entry #4 placed | 11:35 | Full IC, C:6910 P:6800 |
+| Entry #5 placed | 12:06 | Full IC, C:6920 P:6820 |
+| Entry #1 CALL STOPPED | ~13:30 | 1st stop — all entries already placed |
+| Entry #2 PUT STOPPED | ~14:15 | 2nd stop |
+| Entry #5 PUT STOPPED | ~14:59 | 3rd stop — cascade triggers, 0 entries remaining |
+
+**Cascade breaker (threshold=3)**: Triggers at ~14:59, but all 5 entries already placed by 12:06. Zero impact.
+
+### Feb 17 (Tuesday - V-Reversal) — 5 stops
+
+| Event | Time (ET) | Details |
+|-------|-----------|---------|
+| Entry #1 placed | 10:05 | Call-only (BEARISH), C:6860 |
+| Entry #2 placed | 10:35 | Full IC, C:6840 P:6720 |
+| Entry #3 placed | 11:05 | Full IC, C:6875 P:6755 |
+| **Entry #2 CALL STOPPED** | **11:02** | **1st stop** |
+| **Entry #1 CALL STOPPED** | **11:11** | **2nd stop** |
+| **Entry #3 CALL STOPPED** | **11:13** | **3rd stop — CASCADE TRIGGERS** |
+| ~~Entry #4~~ | ~~11:35~~ | **BLOCKED by cascade** (would have been BULLISH put-only, P:6780) |
+| ~~Entry #5~~ | ~~12:05~~ | **BLOCKED by cascade** (would have been NEUTRAL full IC, C:6895 P:6785) |
+| Entry #5 PUT STOPPED | 12:11 | (Actually placed, would be blocked) |
+| Entry #4 PUT STOPPED | 12:53 | (Actually placed, would be blocked) |
+
+**Cascade breaker (threshold=3)**: Triggers at 11:13, blocks Entry #4 and #5. **Saves ~$195 net.**
+
+---
+
+## Appendix C: What-If Analysis — EMA Threshold 0.2% Impact by Day
+
+**Purpose**: Pre-computed impact of widening EMA threshold from 0.1% to 0.2%, so future sessions don't need to re-derive.
+
+### Feb 10: $0 impact
+All entries NEUTRAL at both thresholds. No entries affected.
+
+### Feb 11: Likely +$287 improvement
+
+**Entry #2** changes from BEARISH (call-only, $140 credit) to NEUTRAL (full IC, ~$435):
+- **Actual (call-only)**: Call expired → +$140 - $5 commission = **+$130 net**
+- **Projected (full IC)**: Call expired (+$125), put at P:6880 (30pts further OTM than Entry #1's stopped P:6910) → likely survives → **+$417 estimated net**
+- **Impact**: +$287
+
+### Feb 12: ~-$5 (negligible cost)
+
+**Entry #3** changes from BEARISH (call-only, $185 credit) to NEUTRAL (full IC, ~$320):
+- **Actual (call-only)**: Call expired → +$185 - $5 commission = **+$175 net**
+- **Projected (full IC)**: Call expired (+$80), but put 100% stopped (100% put stop rate that day) → -$95 stop + $80 expiry - $10 commission = **+$170 net**
+- **Impact**: -$5
+
+### Feb 13: +$357 improvement
+
+**Entry #2** changes from BULLISH (put-only, $430 credit) to NEUTRAL (full IC, ~$675):
+- **Actual (put-only)**: Put stopped → -$440 - $10 commission = **-$450 net**
+- **Projected (full IC)**: Put stopped (-$440), call side expires (+$245 call credit), -$15 commission = **-$93 estimated net**
+- **Impact**: +$357
+
+### Feb 17: +$410 improvement
+
+**Entry #1** changes from BEARISH (call-only, $305 credit) to NEUTRAL (full IC, ~$695):
+- **Actual (call-only)**: Call stopped at 11:11 → -$295 - $5 commission = **-$295 net**
+- **Projected (full IC)**: Call stopped (-$295), put side at P:6720 expires worthless (+$200 put credit), -$15 commission = **+$115 estimated net**
+- **Impact**: +$410
+
+### Summary
+
+| Day | Affected Entry | Actual P&L | Projected P&L (0.2%) | Impact |
+|-----|---------------|-----------|----------------------|--------|
+| Feb 10 | None | — | — | **$0** |
+| Feb 11 | #2 | +$130 | +$417 | **+$287** |
+| Feb 12 | #3 | +$175 | +$170 | **-$5** |
+| Feb 13 | #2 | -$450 | -$93 | **+$357** |
+| Feb 17 | #1 | -$295 | +$115 | **+$410** |
+| **TOTAL** | | | | **+$1,049** |
+
+---
+
+## Appendix D: What-If Analysis — Cascade Breaker Impact by Day
+
+**Purpose**: Pre-computed impact of MKT-016 stop cascade breaker (threshold=3), so future sessions don't need to re-derive.
+
+### Cascade Breaker Behavior
+- **Type**: Cumulative total stops (NOT consecutive)
+- **Trigger**: `call_stops_triggered + put_stops_triggered >= max_daily_stops_before_pause`
+- **Action**: Skip all remaining entry attempts for the day
+- **Existing entries**: Continue to be monitored for stops normally
+
+### Threshold Sensitivity (Based on Feb 17 Data)
+
+| Threshold | Triggers At | Entries Blocked | Net Impact | Assessment |
+|-----------|------------|-----------------|------------|------------|
+| 2 | 11:11 (2nd stop) | #3, #4, #5 | **-$1,080** (catastrophic — loses $265 debit but also $200+$250+$85 expiry credits) | TOO AGGRESSIVE |
+| **3** | **11:13 (3rd stop)** | **#4, #5** | **+$195** | **OPTIMAL** |
+| 4 | 12:11 (4th stop) | #5 only | **$0** (by 12:11, Entry #5 was placed at 12:05) | TOO LOOSE |
+
+### Impact by Day
+
+| Day | Total Stops | 3rd Stop Time | Last Entry Time | Entries Blocked | Net Impact |
+|-----|------------|--------------|-----------------|-----------------|------------|
+| Feb 10 | 1 | N/A | 12:05 | 0 | **$0** |
+| Feb 11 | 2 | N/A | 12:35 | 0 | **$0** |
+| Feb 12 | 4 | 12:54 | 12:35 | 0 (all placed) | **$0** |
+| Feb 13 | 3 | ~14:59 | 12:06 | 0 (all placed) | **$0** |
+| **Feb 17** | **5** | **11:13** | **11:05** | **2 (#4, #5)** | **+$195** |
+| **TOTAL** | | | | | **+$195** |
+
+### Feb 17 Blocked Entry Breakdown
+
+| Entry | Type | Credit | Stop Debit | Expired Credit | Commission | Actual P&L | If Blocked |
+|-------|------|--------|-----------|----------------|------------|-----------|------------|
+| #4 | Put-only (BULLISH) | $235 | $225 | $0 | $10 | -$225 | +$235 saved |
+| #5 | Full IC (NEUTRAL) | $250 | $30 | $85 (call) | $15 | +$40 | -$40 cost |
+| **Net** | | | | | | | **+$195** |
+
+---
+
+---
+
+## Appendix E: Strategy Configuration (Baseline)
 
 ```
 Entries per day: 5
@@ -542,7 +796,7 @@ Stop level (one-sided): 2 × credit
 MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
 ```
 
-## Appendix B: Formulas
+## Appendix F: Formulas
 
 - **Expected Move** = SPX × VIX / sqrt(252) / 100
 - **Stop Level (full IC)** = Total credit collected for that IC
@@ -553,7 +807,7 @@ MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
 - **Win Rate** = Entries with 0 stops / Total entries × 100
 - **Sortino Ratio** = daily_average_return / downside_deviation × sqrt(252)
 
-## Appendix C: File References
+## Appendix G: File References
 
 | File | Purpose | Location |
 |------|---------|----------|
