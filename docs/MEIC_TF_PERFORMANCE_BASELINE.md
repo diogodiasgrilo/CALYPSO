@@ -592,10 +592,12 @@ When reviewing performance after implementing improvements, fill in this section
 | #1 | 10:05:02 | — | — | **-0.138%** | **BEARISH** | **NEUTRAL** | **YES** |
 | #2 | 10:35 | — | — | ~-0.06% | NEUTRAL | NEUTRAL | No |
 | #3 | 11:05 | — | — | ~+0.05% | NEUTRAL | NEUTRAL | No |
-| #4 | 11:35 | — | — | ~+0.21% | BULLISH | BULLISH | No |
+| #4 | 11:35 | 6835.504 | 6825.909 | **+0.141%** | **BULLISH** | **NEUTRAL** | **YES*** |
 | #5 | 12:05 | — | — | ~+0.08% | NEUTRAL | NEUTRAL | No |
 
-**Entry #1 affected**: Would become NEUTRAL → full IC instead of call-only. Entry #4 stays BULLISH at 0.2%.
+*Entry #4 corrected from initial ~0.21% estimate: state file EMA values are authoritative. Cascade breaker blocks Entry #4 regardless.
+
+**Entry #1 and #4 affected**: Both would become NEUTRAL → full IC. However, Entry #4 is blocked by cascade breaker (MKT-016) after 3rd stop at 11:13, so only Entry #1's flip matters in practice.
 
 ### Summary: Entries Affected by 0.2% Threshold
 
@@ -605,6 +607,9 @@ When reviewing performance after implementing improvements, fill in this section
 | Feb 12 | #3 | BEARISH (-0.175%) | NEUTRAL | Call-only | Full IC |
 | Feb 13 | #2 | BULLISH (+0.105%) | NEUTRAL | Put-only | Full IC |
 | Feb 17 | #1 | BEARISH (-0.138%) | NEUTRAL | Call-only | Full IC |
+| Feb 17 | #4 | BULLISH (+0.141%)* | NEUTRAL | Put-only | Full IC |
+
+*Corrected from initial ~0.21% estimate. Cascade breaker blocks Entry #4 regardless, so this flip has no practical impact when both improvements are active.
 
 ---
 
@@ -692,12 +697,72 @@ When reviewing performance after implementing improvements, fill in this section
 
 ---
 
-## Appendix C: What-If Analysis — EMA Threshold 0.2% Impact by Day
+## Appendix C: Threshold Sensitivity Analysis — Which Value Is Optimal?
 
-**Purpose**: Pre-computed impact of widening EMA threshold from 0.1% to 0.2%, so future sessions don't need to re-derive.
+**Purpose**: Rigorous comparison of threshold candidates (0.125%, 0.15%, 0.175%, 0.2%) against actual entry data to determine the optimal EMA neutral threshold.
+
+### All Directional Entries — Precise Divergence Values
+
+Sources: Feb 17 from state file `ema_20_at_entry`/`ema_40_at_entry` (authoritative). Feb 10-13 from VM logs (approximate, marked with ~).
+
+| Day | Entry | Divergence | Flips to NEUTRAL at ≥ | Actual Outcome | Signal Correct? |
+|-----|-------|-----------|----------------------|----------------|-----------------|
+| Feb 11 | #2 | ~-0.182% | 0.182% | Call-only EXPIRED (+$130) | Yes |
+| Feb 12 | #3 | ~-0.175% | 0.175% | Call-only EXPIRED (+$175) | Yes |
+| Feb 12 | #4 | ~-0.204% | 0.204% | Call-only EXPIRED (+$250) | Yes |
+| Feb 13 | #2 | ~+0.105% | 0.105% | Put-only STOPPED (-$450) | **No** |
+| Feb 17 | #1 | -0.1377% (exact) | 0.138% | Call-only STOPPED (-$295) | **No** |
+| Feb 17 | #4 | +0.1406% (exact) | 0.141% | Put-only STOPPED (-$225) | **No** |
+
+### Impact Per Flipped Entry (One-Sided → Full IC)
+
+| Entry | Actual P&L (one-sided) | Projected P&L (full IC) | Impact |
+|-------|----------------------|------------------------|--------|
+| Feb 13 #2 | -$450 | -$93 | **+$357** |
+| Feb 17 #1 | -$295 | +$115 | **+$410** |
+| Feb 17 #4 | -$225 | ~-$105 | **~+$120** |
+| Feb 12 #3 | +$175 | +$170 | **-$5** |
+| Feb 11 #2 | +$130 | +$417 | **+$287** |
+| Feb 12 #4 | +$250 | ~-$50 | **~-$300** |
+
+### Threshold Comparison (With Cascade Breaker Active)
+
+Note: Feb 17 Entry #4 is blocked by cascade breaker (MKT-016) at all thresholds, so its flip doesn't contribute to the combined impact.
+
+| Threshold | Entries Flipped (non-cascade-blocked) | Net Impact | Key Trade-off |
+|-----------|--------------------------------------|-----------|---------------|
+| 0.1% (old) | None | $0 (baseline) | 3 wrong directional bets unchecked |
+| **0.125%** | Feb 13 #2 | **+$357** | Catches worst wrong signal only |
+| **0.15%** | +Feb 17 #1 | **+$767** | Catches both wrong signals |
+| **0.175%** | +Feb 12 #3 | **+$762** | Tiny -$5 cost, no real change from 0.15% |
+| **0.2%** | +Feb 11 #2 | **+$1,049** | Best: Feb 11 #2 as full IC = +$287 more |
+| 0.205%+ | +Feb 12 #4 | **~+$749** | DANGER: flips correct BEARISH (-$300) |
+
+### Optimal Range: 0.183% to 0.203%
+
+Any threshold in this range flips the same set of entries:
+- **Below 0.183%**: Misses Feb 11 #2 (0.182% stays BEARISH) — loses +$287 benefit
+- **Above 0.203%**: Flips Feb 12 #4 (0.204% becomes NEUTRAL) — costs ~$300 on genuine trend days
+- **0.2%** is the natural round number in this optimal range
+
+### Why Not Lower Thresholds?
+
+**0.15%** catches the two WRONG signals (Feb 13 #2, Feb 17 #1) but misses Feb 11 #2. That entry at -0.182% was correctly BEARISH (call-only expired profitably), but as a full IC it would have been *more profitable* (+$417 vs +$130) because the additional put at P:6880 was 30pts further OTM than the day's stopped put at P:6910 and likely survived. Going from 0.15% to 0.2% adds +$282 with no additional risk in our data.
+
+**0.125%** only catches one of three wrong signals. Feb 17 Entry #1 at -0.138% stays BEARISH — the biggest single-entry loss that the threshold is designed to prevent.
+
+### Conclusion
+
+**0.2% is confirmed optimal** against 5 days of actual data. It catches all wrong signals, converts a correct-but-marginal signal into an even more profitable full IC, and stops precisely before flipping the one strongly correct BEARISH signal (Feb 12 #4 at -0.204%).
+
+---
+
+## Appendix D: What-If — EMA Threshold 0.2% Impact by Day (Detail)
+
+**Purpose**: Detailed P&L projections for the 0.2% threshold at the entry level.
 
 ### Feb 10: $0 impact
-All entries NEUTRAL at both thresholds. No entries affected.
+All entries NEUTRAL at both thresholds (max divergence 0.035%). No entries affected.
 
 ### Feb 11: Likely +$287 improvement
 
@@ -727,7 +792,7 @@ All entries NEUTRAL at both thresholds. No entries affected.
 - **Projected (full IC)**: Call stopped (-$295), put side at P:6720 expires worthless (+$200 put credit), -$15 commission = **+$115 estimated net**
 - **Impact**: +$410
 
-### Summary
+### Summary (0.2% Threshold Only, Without Cascade Breaker)
 
 | Day | Affected Entry | Actual P&L | Projected P&L (0.2%) | Impact |
 |-----|---------------|-----------|----------------------|--------|
@@ -740,7 +805,7 @@ All entries NEUTRAL at both thresholds. No entries affected.
 
 ---
 
-## Appendix D: What-If Analysis — Cascade Breaker Impact by Day
+## Appendix E: What-If Analysis — Cascade Breaker Impact by Day
 
 **Purpose**: Pre-computed impact of MKT-016 stop cascade breaker (threshold=3), so future sessions don't need to re-derive.
 
@@ -781,7 +846,7 @@ All entries NEUTRAL at both thresholds. No entries affected.
 
 ---
 
-## Appendix E: Strategy Configuration (Baseline)
+## Appendix F: Strategy Configuration (Baseline)
 
 ```
 Entries per day: 5
@@ -796,7 +861,7 @@ Stop level (one-sided): 2 × credit
 MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
 ```
 
-## Appendix F: Formulas
+## Appendix G: Formulas
 
 - **Expected Move** = SPX × VIX / sqrt(252) / 100
 - **Stop Level (full IC)** = Total credit collected for that IC
@@ -807,7 +872,7 @@ MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
 - **Win Rate** = Entries with 0 stops / Total entries × 100
 - **Sortino Ratio** = daily_average_return / downside_deviation × sqrt(252)
 
-## Appendix G: File References
+## Appendix H: File References
 
 | File | Purpose | Location |
 |------|---------|----------|
