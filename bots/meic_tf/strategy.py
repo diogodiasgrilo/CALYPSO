@@ -6,9 +6,9 @@ Before each entry, it checks 20 EMA vs 40 EMA on SPX 1-minute bars to determine
 whether to place a full iron condor, call spread only, or put spread only.
 
 Trend Detection:
-- BULLISH (20 EMA > 40 EMA by >0.1%): Place PUT spread only (calls are risky)
-- BEARISH (20 EMA < 40 EMA by >0.1%): Place CALL spread only (puts are risky)
-- NEUTRAL (within 0.1%): Place full iron condor (standard MEIC behavior)
+- BULLISH (20 EMA > 40 EMA by >0.2%): Place PUT spread only (calls are risky)
+- BEARISH (20 EMA < 40 EMA by >0.2%): Place CALL spread only (puts are risky)
+- NEUTRAL (within 0.2%): Place full iron condor (standard MEIC behavior)
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
@@ -229,17 +229,27 @@ class MEICTFStrategy(MEICStrategy):
         self._stop_cascade_triggered = False
         logger.info(f"  Stop cascade breaker: pause after {self.max_daily_stops_before_pause} stops")
 
+        # MKT-017: Daily loss limit - pause entries when realized P&L drops below threshold
+        # This catches scenarios where stops are large but few (e.g., high-slippage day)
+        # while MKT-016 catches many small stops. They complement each other.
+        self.max_daily_loss = float(strategy_config.get("max_daily_loss", 500))
+        self._daily_loss_limit_triggered = False
+        logger.info(f"  Daily loss limit: pause after -${self.max_daily_loss:.0f} realized P&L")
+
     # =========================================================================
-    # ENTRY GATING (MKT-016)
+    # ENTRY GATING (MKT-016, MKT-017)
     # =========================================================================
 
     def _should_attempt_entry(self, now) -> bool:
         """
-        Override parent to add stop cascade breaker (MKT-016).
+        Override parent to add stop cascade breaker (MKT-016) and daily loss
+        limit (MKT-017).
 
-        After max_daily_stops_before_pause stops in a single day, skip all
-        remaining entries. This prevents placing new entries into a market
-        that has already stopped multiple existing positions.
+        MKT-016: After max_daily_stops_before_pause stops in a single day, skip
+        all remaining entries. Catches many small stops (cascade/whipsaw).
+
+        MKT-017: After realized P&L drops below -max_daily_loss, skip all
+        remaining entries. Catches few large stops (high slippage, gap moves).
 
         Existing positions continue to be monitored for stops normally.
         """
@@ -259,6 +269,26 @@ class MEICTFStrategy(MEICStrategy):
             return False
 
         if self._stop_cascade_triggered:
+            return False
+
+        # MKT-017: Check daily loss limit (complements MKT-016)
+        # total_realized_pnl is negative when stops exceed expired credits
+        # During market hours, this only reflects stop losses (expired credits
+        # are added at settlement). So -$260 means $260 in net stop losses.
+        realized_pnl = self.daily_state.total_realized_pnl
+        if realized_pnl < -self.max_daily_loss and not self._daily_loss_limit_triggered:
+            self._daily_loss_limit_triggered = True
+            remaining = max(0, len(self.entry_times) - self._next_entry_index)
+            logger.warning(
+                f"MKT-017 DAILY LOSS LIMIT: realized P&L ${realized_pnl:.2f} "
+                f"exceeds -${self.max_daily_loss:.0f} threshold - "
+                f"pausing {remaining} remaining entries"
+            )
+            self.daily_state.entries_skipped += remaining
+            self._next_entry_index = len(self.entry_times)
+            return False
+
+        if self._daily_loss_limit_triggered:
             return False
 
         # Delegate to parent for normal time-window checks
@@ -520,6 +550,9 @@ class MEICTFStrategy(MEICStrategy):
 
                     if gate_result == "skip":
                         # Both sides non-viable, skip this entry
+                        # Fix #79: Increment skip counters (was missing - all other skip paths have this)
+                        self.daily_state.entries_skipped += 1
+                        self.daily_state.credit_gate_skips += 1
                         self._entry_in_progress = False
                         self._current_entry = None
                         self.state = MEICState.MONITORING
@@ -1898,6 +1931,8 @@ class MEICTFStrategy(MEICStrategy):
                 "credit_gate_skips": self.daily_state.credit_gate_skips,
                 # MKT-016: Stop cascade breaker state
                 "stop_cascade_triggered": self._stop_cascade_triggered,
+                # MKT-017: Daily loss limit state
+                "daily_loss_limit_triggered": self._daily_loss_limit_triggered,
                 "entries": []
             }
 
@@ -2162,6 +2197,7 @@ class MEICTFStrategy(MEICStrategy):
         self._consecutive_failures = 0
         self._api_results_window.clear()
         self._stop_cascade_triggered = False  # MKT-016: Reset cascade breaker
+        self._daily_loss_limit_triggered = False  # MKT-017: Reset daily loss limit
 
         # P3: Reset intraday market data tracking
         self.market_data.reset_daily_tracking()
@@ -2745,6 +2781,8 @@ class MEICTFStrategy(MEICStrategy):
 
             # MKT-016: Restore cascade breaker state (prevents double-trigger on restart)
             self._stop_cascade_triggered = saved_state.get("stop_cascade_triggered", False)
+            # MKT-017: Restore daily loss limit state
+            self._daily_loss_limit_triggered = saved_state.get("daily_loss_limit_triggered", False)
 
             # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
             ohlc = saved_state.get("market_data_ohlc", {})
@@ -3000,7 +3038,8 @@ class MEICTFStrategy(MEICStrategy):
             preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
             preserved_market_ohlc = {}
             preserved_stop_cascade_triggered = False  # MKT-016
-            preserved_next_entry_index = 0  # MKT-016: cascade may advance beyond entry count
+            preserved_daily_loss_limit_triggered = False  # MKT-017
+            preserved_next_entry_index = 0  # MKT-016/017: may advance beyond entry count
             try:
                 if os.path.exists(self.state_file):
                     with open(self.state_file, "r") as f:
@@ -3022,6 +3061,8 @@ class MEICTFStrategy(MEICStrategy):
                             preserved_market_ohlc = saved_state.get("market_data_ohlc", {})
                             # MKT-016: Preserve cascade breaker state
                             preserved_stop_cascade_triggered = saved_state.get("stop_cascade_triggered", False)
+                            # MKT-017: Preserve daily loss limit state
+                            preserved_daily_loss_limit_triggered = saved_state.get("daily_loss_limit_triggered", False)
                             preserved_next_entry_index = saved_state.get("next_entry_index", 0)
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
@@ -3287,6 +3328,8 @@ class MEICTFStrategy(MEICStrategy):
 
             # MKT-016: Restore cascade breaker state
             self._stop_cascade_triggered = preserved_stop_cascade_triggered
+            # MKT-017: Restore daily loss limit state
+            self._daily_loss_limit_triggered = preserved_daily_loss_limit_triggered
 
             # Set state based on recovered positions
             # FIX #43 + FIX #47: For one-sided entries, check only the placed side
