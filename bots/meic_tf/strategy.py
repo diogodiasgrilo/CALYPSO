@@ -225,7 +225,7 @@ class MEICTFStrategy(MEICStrategy):
 
         # MKT-016: Stop cascade breaker - pause entries after N stops in a day
         strategy_config = config.get("strategy", {})
-        self.max_daily_stops_before_pause = strategy_config.get("max_daily_stops_before_pause", 3)
+        self.max_daily_stops_before_pause = int(strategy_config.get("max_daily_stops_before_pause", 3))
         self._stop_cascade_triggered = False
         logger.info(f"  Stop cascade breaker: pause after {self.max_daily_stops_before_pause} stops")
 
@@ -248,7 +248,7 @@ class MEICTFStrategy(MEICStrategy):
         if total_stops >= self.max_daily_stops_before_pause and not self._stop_cascade_triggered:
             # First time detecting cascade - log and skip remaining entries
             self._stop_cascade_triggered = True
-            remaining = len(self.entry_times) - self._next_entry_index
+            remaining = max(0, len(self.entry_times) - self._next_entry_index)
             logger.warning(
                 f"MKT-016 STOP CASCADE BREAKER: {total_stops} stops today "
                 f"(threshold: {self.max_daily_stops_before_pause}) - "
