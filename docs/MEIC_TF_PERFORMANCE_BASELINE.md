@@ -716,14 +716,21 @@ Sources: Feb 17 from state file `ema_20_at_entry`/`ema_40_at_entry` (authoritati
 
 ### Impact Per Flipped Entry (One-Sided → Full IC)
 
+**Key principle:** Full IC with one side stopped ≈ **breakeven** minus commission ≈ **-$5** net (with MEIC+). This is because `stop_level = total_credit`, so the stop debit ≈ total credit collected. The surviving side's expired credit is already included in the total credit — it doesn't add extra profit. See Appendix G for full formula.
+
+**CORRECTION (Feb 18):** Previous version of this table used incorrect P&L projections that didn't properly apply the IC breakeven formula. All "Projected P&L (full IC)" values for stopped scenarios are now ~-$5 (MEIC+ breakeven).
+
 | Entry | Actual P&L (one-sided) | Projected P&L (full IC) | Impact |
 |-------|----------------------|------------------------|--------|
-| Feb 13 #2 | -$450 | -$93 | **+$357** |
-| Feb 17 #1 | -$295 | +$115 | **+$410** |
-| Feb 17 #4 | -$225 | ~-$105 | **~+$120** |
-| Feb 12 #3 | +$175 | +$170 | **-$5** |
-| Feb 11 #2 | +$130 | +$417 | **+$287** |
-| Feb 12 #4 | +$250 | ~-$50 | **~-$300** |
+| Feb 13 #2 | -$450 (put stopped) | ~-$5 (put stopped, IC breakeven) | **+$445** |
+| Feb 17 #1 | -$295 (call stopped) | ~-$5 (call stopped, IC breakeven) | **+$290** |
+| Feb 17 #4 | -$225 (put stopped) | ~-$5 (put stopped, IC breakeven) | **~+$220** |
+| Feb 12 #3 | +$175 (call expired) | ~-$5 (put stopped†, IC breakeven) | **-$180** |
+| Feb 11 #2 | +$130 (call expired) | ~+$425 (both expire)‡ | **+$295** |
+| Feb 12 #4 | +$250 (call expired) | ~-$5 (put stopped†, IC breakeven) | **~-$255** |
+
+†Feb 12 had 100% put stop rate — all 4 put sides were stopped.
+‡Feb 11 #2 put at P:6880 would be 30pts further OTM than stopped P:6910 — likely survives. If put also stopped: projected ≈ -$5, impact ≈ -$135.
 
 ### Threshold Comparison (With Cascade Breaker Active)
 
@@ -732,28 +739,30 @@ Note: Feb 17 Entry #4 is blocked by cascade breaker (MKT-016) at all thresholds,
 | Threshold | Entries Flipped (non-cascade-blocked) | Net Impact | Key Trade-off |
 |-----------|--------------------------------------|-----------|---------------|
 | 0.1% (old) | None | $0 (baseline) | 3 wrong directional bets unchecked |
-| **0.125%** | Feb 13 #2 | **+$357** | Catches worst wrong signal only |
-| **0.15%** | +Feb 17 #1 | **+$767** | Catches both wrong signals |
-| **0.175%** | +Feb 12 #3 | **+$762** | Tiny -$5 cost, no real change from 0.15% |
-| **0.2%** | +Feb 11 #2 | **+$1,049** | Best: Feb 11 #2 as full IC = +$287 more |
-| 0.205%+ | +Feb 12 #4 | **~+$749** | DANGER: flips correct BEARISH (-$300) |
+| **0.125%** | Feb 13 #2 | **+$445** | Catches worst wrong signal only |
+| **0.15%** | +Feb 17 #1 | **+$735** | Catches both wrong signals |
+| **0.175%** | +Feb 12 #3 | **+$555** | -$180 cost from flipping correct BEARISH on sell-off |
+| **0.2%** | +Feb 11 #2 | **+$850** (or +$420)‡ | Best likely: Feb 11 #2 as full IC = +$295 more |
+| 0.205%+ | +Feb 12 #4 | **~+$595** (or +$165)‡ | Flips another correct BEARISH (-$255) |
+
+‡Range depends on whether Feb 11 #2's put at P:6880 survives (likely) or is stopped (unlikely). See impact table above.
 
 ### Optimal Range: 0.183% to 0.203%
 
 Any threshold in this range flips the same set of entries:
-- **Below 0.183%**: Misses Feb 11 #2 (0.182% stays BEARISH) — loses +$287 benefit
-- **Above 0.203%**: Flips Feb 12 #4 (0.204% becomes NEUTRAL) — costs ~$300 on genuine trend days
+- **Below 0.183%**: Misses Feb 11 #2 (0.182% stays BEARISH) — loses +$295 likely benefit
+- **Above 0.203%**: Flips Feb 12 #4 (0.204% becomes NEUTRAL) — costs ~$255 on genuine trend days
 - **0.2%** is the natural round number in this optimal range
 
 ### Why Not Lower Thresholds?
 
-**0.15%** catches the two WRONG signals (Feb 13 #2, Feb 17 #1) but misses Feb 11 #2. That entry at -0.182% was correctly BEARISH (call-only expired profitably), but as a full IC it would have been *more profitable* (+$417 vs +$130) because the additional put at P:6880 was 30pts further OTM than the day's stopped put at P:6910 and likely survived. Going from 0.15% to 0.2% adds +$282 with no additional risk in our data.
+**0.15%** catches the two WRONG signals (Feb 13 #2, Feb 17 #1) but misses Feb 11 #2. That entry at -0.182% was correctly BEARISH (call-only expired profitably), but as a full IC it would have been *more profitable* (~+$425 vs +$130) because the additional put at P:6880 was 30pts further OTM than the day's stopped put at P:6910 and likely survived. However, going from 0.15% to 0.175% costs -$180 (Feb 12 #3 flips a correct BEARISH on a sell-off day), then 0.175% to 0.2% recovers via Feb 11 #2 (+$295). Net: 0.2% is still the best choice despite the Feb 12 cost.
 
 **0.125%** only catches one of three wrong signals. Feb 17 Entry #1 at -0.138% stays BEARISH — the biggest single-entry loss that the threshold is designed to prevent.
 
 ### Conclusion
 
-**0.2% is confirmed optimal** against 5 days of actual data. It catches all wrong signals, converts a correct-but-marginal signal into an even more profitable full IC, and stops precisely before flipping the one strongly correct BEARISH signal (Feb 12 #4 at -0.204%).
+**0.2% is confirmed optimal** against 5 days of actual data (net impact: **+$850 likely**, +$420 worst case). It catches all wrong signals (saving +$445 and +$290), accepts a -$180 cost on Feb 12 (correct BEARISH flipped to full IC → put stopped on sell-off), but more than recovers via Feb 11 #2 (+$295 likely). It stops precisely before flipping the strongly correct BEARISH signal (Feb 12 #4 at -0.204%, which would cost another -$255).
 
 ---
 
@@ -761,47 +770,55 @@ Any threshold in this range flips the same set of entries:
 
 **Purpose**: Detailed P&L projections for the 0.2% threshold at the entry level.
 
+**CORRECTION (Feb 18, 2026):** The original version of this appendix contained P&L projection errors. The calculations didn't properly apply the MEIC IC breakeven formula: when one side of a full IC is stopped, the stop debit ≈ total credit collected, so net P&L ≈ -$5 (with MEIC+) regardless of individual side credits. The original analysis incorrectly added "expired call credit" on top of the stop-debit calculation, double-counting credit that was already part of total_credit. All projections have been corrected below.
+
 ### Feb 10: $0 impact
 All entries NEUTRAL at both thresholds (max divergence 0.035%). No entries affected.
 
-### Feb 11: Likely +$287 improvement
+### Feb 11: Likely +$295 improvement
 
-**Entry #2** changes from BEARISH (call-only, $140 credit) to NEUTRAL (full IC, ~$435):
-- **Actual (call-only)**: Call expired → +$140 - $5 commission = **+$130 net**
-- **Projected (full IC)**: Call expired (+$125), put at P:6880 (30pts further OTM than Entry #1's stopped P:6910) → likely survives → **+$417 estimated net**
-- **Impact**: +$287
+**Entry #2** changes from BEARISH (call-only, ~$140 credit) to NEUTRAL (full IC, ~$435 total):
+- **Actual (call-only)**: Call expired → +$140 - $10 commission = **+$130 net**
+- **Projected (full IC)**: Put at P:6880 is 30pts further OTM than Entry #1's stopped P:6910 → likely survives → both sides expire → ~$435 - $10 commission = **~+$425 net**
+- **Impact**: **+$295**
+- **Risk**: If put also stopped (unlikely), projected ≈ -$5, impact ≈ -$135
 
-### Feb 12: ~-$5 (negligible cost)
+### Feb 12: -$180 (significant cost — correct BEARISH flipped on sell-off)
 
-**Entry #3** changes from BEARISH (call-only, $185 credit) to NEUTRAL (full IC, ~$320):
-- **Actual (call-only)**: Call expired → +$185 - $5 commission = **+$175 net**
-- **Projected (full IC)**: Call expired (+$80), but put 100% stopped (100% put stop rate that day) → -$95 stop + $80 expiry - $10 commission = **+$170 net**
-- **Impact**: -$5
+**Entry #3** changes from BEARISH (call-only, ~$185 credit) to NEUTRAL (full IC, ~$320 total):
+- **Actual (call-only)**: Call expired → +$185 - $10 commission = **+$175 net**
+- **Projected (full IC)**: Put side 100% stopped (all put sides stopped that day). IC breakeven: collected ~$320, stop debit ≈ $310 (MEIC+), commission ~$15 → **~-$5 net**
+- **Impact**: **-$180**
+- **Why it costs $180**: The BEARISH signal was correct — call expired profitably. Converting to full IC adds a put spread that gets stopped on this sell-off day. IC breakeven limits damage to ~-$5, but we lose the +$175 call-only profit.
 
-### Feb 13: +$357 improvement
+### Feb 13: +$445 improvement
 
-**Entry #2** changes from BULLISH (put-only, $430 credit) to NEUTRAL (full IC, ~$675):
-- **Actual (put-only)**: Put stopped → -$440 - $10 commission = **-$450 net**
-- **Projected (full IC)**: Put stopped (-$440), call side expires (+$245 call credit), -$15 commission = **-$93 estimated net**
-- **Impact**: +$357
+**Entry #2** changes from BULLISH (put-only, ~$430 credit) to NEUTRAL (full IC, ~$675 total):
+- **Actual (put-only)**: Put stopped → stop = 2×$430 = $860 debit, net = $430 - $860 - $20 commission = **-$450 net**
+- **Projected (full IC)**: Put still stopped (IC stop level = ~$675 < one-sided $860, so triggers sooner but at lower cost). IC breakeven: collected ~$675, stop debit ≈ $665 (MEIC+), commission ~$15 → **~-$5 net**
+- **Impact**: **+$445**
+- **Why it saves $445**: Wrong BULLISH signal caused -$450 as put-only. In a full IC, the breakeven design absorbs the stop — loss drops from -$450 to just -$5.
 
-### Feb 17: +$410 improvement
+### Feb 17: +$290 improvement
 
-**Entry #1** changes from BEARISH (call-only, $305 credit) to NEUTRAL (full IC, ~$695):
-- **Actual (call-only)**: Call stopped at 11:11 → -$295 - $5 commission = **-$295 net**
-- **Projected (full IC)**: Call stopped (-$295), put side at P:6720 expires worthless (+$200 put credit), -$15 commission = **+$115 estimated net**
-- **Impact**: +$410
+**Entry #1** changes from BEARISH (call-only, ~$305 credit) to NEUTRAL (full IC, ~$695 total):
+- **Actual (call-only)**: Call stopped at 11:11 → **-$295 net** (including MEIC+ and commission)
+- **Projected (full IC)**: Call stopped, but IC breakeven absorbs it. Collected ~$695, stop debit ≈ $685 (MEIC+), commission ~$15 → **~-$5 net**
+- **Impact**: **+$290**
+- **Why it saves $290**: Wrong BEARISH signal caused -$295 as call-only. In a full IC, the surviving put side (at P:6720, far OTM) expires worthless — its credit is part of the total that offsets the call stop debit.
 
 ### Summary (0.2% Threshold Only, Without Cascade Breaker)
 
 | Day | Affected Entry | Actual P&L | Projected P&L (0.2%) | Impact |
 |-----|---------------|-----------|----------------------|--------|
 | Feb 10 | None | — | — | **$0** |
-| Feb 11 | #2 | +$130 | +$417 | **+$287** |
-| Feb 12 | #3 | +$175 | +$170 | **-$5** |
-| Feb 13 | #2 | -$450 | -$93 | **+$357** |
-| Feb 17 | #1 | -$295 | +$115 | **+$410** |
-| **TOTAL** | | | | **+$1,049** |
+| Feb 11 | #2 | +$130 | ~+$425 (both expire)† | **+$295** |
+| Feb 12 | #3 | +$175 | ~-$5 (put stopped) | **-$180** |
+| Feb 13 | #2 | -$450 | ~-$5 (put stopped) | **+$445** |
+| Feb 17 | #1 | -$295 | ~-$5 (call stopped) | **+$290** |
+| **TOTAL** | | | | **+$850** |
+
+†Feb 11 #2 put at P:6880 likely survives. If also stopped: projected ≈ -$5, impact ≈ -$135, total ≈ **+$420**.
 
 ---
 
@@ -844,8 +861,6 @@ All entries NEUTRAL at both thresholds (max divergence 0.035%). No entries affec
 
 ---
 
----
-
 ## Appendix F: Strategy Configuration (Baseline)
 
 ```
@@ -871,6 +886,34 @@ MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
 - **Net Capture Rate** = Net P&L / Total Credit Collected × 100
 - **Win Rate** = Entries with 0 stops / Total entries × 100
 - **Sortino Ratio** = daily_average_return / downside_deviation × sqrt(252)
+
+### CRITICAL: IC Breakeven Formula (Used in All What-If Projections)
+
+**Full IC with one side stopped (MEIC breakeven design):**
+```
+Collected at entry:     +total_credit  (call_credit + put_credit)
+Stop closes one side:   -stop_level    ≈ total_credit (or total_credit - $10 with MEIC+)
+Other side expires:     $0             (credit already counted in total_credit above)
+Commission:             -$15           (4 legs entry + 2 legs stop close, at ~$5/spread)
+─────────────────────────────────────
+Net P&L:                ≈ -$5 (MEIC+) or -$15 (without MEIC+)
+```
+
+**Why the surviving side doesn't add extra profit:** The `total_credit` already includes both sides' credits. When the stop debit ≈ total_credit, ALL collected premium is consumed by the stop. The surviving side expiring worthless means no additional cash flow — its credit was already received at entry and spent on the stop debit.
+
+**One-sided entry when stopped:**
+```
+Collected at entry:     +credit
+Stop closes spread:     -2 × credit    (stop_level = 2× for one-sided)
+Commission:             -$10           (2 legs entry + 2 legs close)
+─────────────────────────────────────
+Net P&L:                ≈ -credit - $10  (you lose everything you collected plus commission)
+```
+
+**Key asymmetry for what-if analysis:**
+- Wrong one-sided → full IC: saves ~$credit (from -$credit to -$5). Typical savings: $290-$445
+- Correct one-sided expired → full IC with stopped side: costs ~$credit (from +$credit to -$5). Typical cost: $180-$255
+- Correct one-sided expired → full IC both expire: gains ~$credit (extra side also expires). Typical gain: $295
 
 ## Appendix H: File References
 
