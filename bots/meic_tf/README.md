@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.2.8 | **Last Updated:** 2026-02-17
+**Version:** 1.2.9 | **Last Updated:** 2026-02-18
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -102,12 +102,24 @@ After a configurable number of total stops (call + put) in a single day, pause a
 
 **Why this works:** On Feb 17, 2026, a V-shaped reversal caused 5/5 entries to stop. Entries #4 and #5 together lost $195 net. A cascade breaker at 3 stops would have paused Entry #4 and #5, saving $195.
 
+### Daily Loss Limit (MKT-017) - Added v1.2.9
+
+Complements MKT-016 by checking loss *magnitude* instead of stop *count*. After realized P&L drops below the threshold during market hours, pause all remaining entries. Catches days with few but high-slippage stops where MKT-016 wouldn't trigger.
+
+| Realized P&L | Remaining Entries | Action |
+|-------------|-------------------|--------|
+| > -$threshold | Any | Continue normally |
+| <= -$threshold | N remaining | **Skip all N entries** |
+
+**Threshold calibration:** -$500 default, based on 6 days of baseline data. Feb 13 (best day, +$675 net) had an intraday trough of -$450, so -$500 provides a $50 buffer while never triggering on profitable days.
+
 ### Credit Gate Config (strategy section)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `min_viable_credit_per_side` | `0.50` | MKT-011: Skip/convert if estimated credit below this |
 | `max_daily_stops_before_pause` | `3` | MKT-016: Pause entries after N total stops in a day |
+| `max_daily_loss` | `500` | MKT-017: Pause entries after this much realized loss ($) |
 
 ## Usage
 
@@ -189,6 +201,12 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.2.9** (2026-02-18): Daily loss limit + daily summary accuracy
+  - MKT-017: Daily loss limit - pause entries when realized P&L drops below -$500 (complements MKT-016)
+  - Fix #77: Post-restart settlement processes expired credits even when registry is empty
+  - Fix #78: Stop Loss Debits derived from P&L identity (not theoretical stop levels with slippage error)
+  - Fix #79: MKT-011 "both non-viable" skip path now increments entries_skipped counter
 
 - **1.2.8** (2026-02-17): EMA threshold widening + stop cascade breaker
   - EMA neutral threshold widened from 0.1% to 0.2% (fewer false trend signals on low-conviction moves)

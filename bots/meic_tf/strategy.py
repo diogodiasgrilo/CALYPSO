@@ -10,13 +10,18 @@ Trend Detection:
 - BEARISH (20 EMA < 40 EMA by >0.2%): Place CALL spread only (puts are risky)
 - NEUTRAL (within 0.2%): Place full iron condor (standard MEIC behavior)
 
+Risk Management (beyond base MEIC):
+- MKT-011: Pre-entry credit gate (skip/convert if credit non-viable)
+- MKT-016: Stop cascade breaker (pause after 3 total stops in a day)
+- MKT-017: Daily loss limit (pause after -$500 realized P&L intraday)
+
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
 
 Author: Trading Bot Developer
 Date: 2026-02-04
 
-Based on: bots/meic/strategy.py (MEIC v1.2.8)
+Based on: bots/meic/strategy.py (MEIC v1.2.9)
 See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
 """
 
@@ -191,7 +196,7 @@ class MEICTFStrategy(MEICStrategy):
         self.trend_enabled = self.trend_config.get("enabled", True)
         self.ema_short_period = self.trend_config.get("ema_short_period", 20)
         self.ema_long_period = self.trend_config.get("ema_long_period", 40)
-        self.ema_neutral_threshold = self.trend_config.get("ema_neutral_threshold", 0.001)
+        self.ema_neutral_threshold = self.trend_config.get("ema_neutral_threshold", 0.002)
         self.recheck_each_entry = self.trend_config.get("recheck_each_entry", True)
         self.chart_bars_count = self.trend_config.get("chart_bars_count", 50)
         self.chart_horizon_minutes = self.trend_config.get("chart_horizon_minutes", 1)

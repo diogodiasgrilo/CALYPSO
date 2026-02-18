@@ -19,6 +19,7 @@ Strategy Details:
 - Stop loss: Total credit per side (MEIC+ subtracts configurable amount)
 
 Version History:
+- 1.2.9 (2026-02-18): Fix #77 post-restart settlement, Fix #78 stop loss debits accuracy
 - 1.2.8 (2026-02-13): Fix #75 - Async deferred stop fill lookup (non-blocking P&L correction)
 - 1.2.7 (2026-02-13): Fix #74 - Stop loss fill price accuracy (deferred lookup was bypassed by quote fallback)
 - 1.2.6 (2026-02-11): Fix #63 - EUR conversion in Trades tab (pass saxo_client to log_trade)
