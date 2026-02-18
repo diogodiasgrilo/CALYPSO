@@ -5796,6 +5796,83 @@ class MEICStrategy:
     # AFTER-HOURS SETTLEMENT RECONCILIATION (POS-004)
     # =========================================================================
 
+    def _process_expired_credits(self) -> float:
+        """
+        FIX #77: Process entries with un-finalized sides as expired.
+
+        Iterates through daily_state.entries and marks any side that:
+        - Had positions (strike > 0)
+        - Has no position IDs (positions gone from Saxo)
+        - Is NOT already stopped, expired, or skipped
+
+        ...as EXPIRED, adding its credit to total_realized_pnl.
+
+        Returns:
+            float: Total expired credit added to realized P&L
+        """
+        expired_call_credit = 0.0
+        expired_put_credit = 0.0
+
+        for entry in self.daily_state.entries:
+            # Check call side
+            call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
+            call_positions_gone = not entry.short_call_position_id and not entry.long_call_position_id
+
+            if call_had_positions and call_positions_gone:
+                if not entry.call_side_stopped and not entry.call_side_expired and not getattr(entry, 'call_side_skipped', False):
+                    entry.call_side_expired = True
+                    credit = entry.call_spread_credit
+                    if credit > 0:
+                        expired_call_credit += credit
+                        logger.info(
+                            f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
+                            f"+${credit:.2f} profit (credit kept)"
+                        )
+
+            # Check put side
+            put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
+            put_positions_gone = not entry.short_put_position_id and not entry.long_put_position_id
+
+            if put_had_positions and put_positions_gone:
+                if not entry.put_side_stopped and not entry.put_side_expired and not getattr(entry, 'put_side_skipped', False):
+                    entry.put_side_expired = True
+                    credit = entry.put_spread_credit
+                    if credit > 0:
+                        expired_put_credit += credit
+                        logger.info(
+                            f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
+                            f"+${credit:.2f} profit (credit kept)"
+                        )
+
+            # Mark complete if both sides done
+            call_only = getattr(entry, 'call_only', False)
+            put_only = getattr(entry, 'put_only', False)
+
+            if call_only:
+                if entry.call_side_stopped or entry.call_side_expired:
+                    entry.is_complete = True
+            elif put_only:
+                if entry.put_side_stopped or entry.put_side_expired:
+                    entry.is_complete = True
+            else:
+                call_done = entry.call_side_stopped or entry.call_side_expired or getattr(entry, 'call_side_skipped', False) or not call_had_positions
+                put_done = entry.put_side_stopped or entry.put_side_expired or getattr(entry, 'put_side_skipped', False) or not put_had_positions
+                if call_done and put_done:
+                    entry.is_complete = True
+
+        total_expired_credit = expired_call_credit + expired_put_credit
+        if total_expired_credit > 0:
+            self.daily_state.total_realized_pnl += total_expired_credit
+            logger.info(
+                f"POS-004: Added ${total_expired_credit:.2f} from expired positions to realized P&L "
+                f"(Calls: ${expired_call_credit:.2f}, Puts: ${expired_put_credit:.2f})"
+            )
+            logger.info(
+                f"POS-004: Updated total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f}"
+            )
+
+        return total_expired_credit
+
     def check_after_hours_settlement(self) -> bool:
         """
         POS-004: Check if 0DTE positions have been settled after market close.
@@ -5816,7 +5893,12 @@ class MEICStrategy:
         my_position_ids = self.registry.get_positions("MEIC")
 
         if not my_position_ids:
-            # Registry is already empty - mark as complete
+            # FIX #77: Registry empty — but entries may have un-finalized surviving sides
+            # that need expired credit processing (e.g., post-restart with partial ICs).
+            expired_credit = self._process_expired_credits()
+            if expired_credit > 0:
+                logger.info(f"FIX #77: Processed ${expired_credit:.2f} expired credits from surviving sides (registry was empty)")
+                self._save_state_to_disk()
             logger.info("POS-004: No MEIC positions in registry - settlement reconciliation complete")
             self._settlement_reconciliation_complete = True
             return True
@@ -5855,83 +5937,9 @@ class MEICStrategy:
                             setattr(entry, f"{leg_name}_uic", None)  # Also clear UIC
                             logger.debug(f"  Cleared {leg_name} position_id and uic from entry #{entry.entry_number}")
 
-                # FIX #43 (2026-02-10): Track expired positions and add their credit to realized P&L
-                # BUG: Previously, when positions expired worthless at settlement, the code just
-                # marked them as "stopped" without adding the credit (which is now profit) to
-                # total_realized_pnl. This caused Feb 9 to show -$360 when actual P&L was +$170.
-                #
-                # The fix distinguishes between:
-                # - STOPPED: Side was closed during the day due to stop loss (LOSS - already tracked)
-                # - EXPIRED: Side expired worthless at settlement (PROFIT - credit is kept)
-                expired_call_credit = 0.0
-                expired_put_credit = 0.0
-
-                for entry in self.daily_state.entries:
-                    # Check call side - only process if it had positions (not a put-only entry)
-                    call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
-                    call_positions_gone = not entry.short_call_position_id and not entry.long_call_position_id
-
-                    if call_had_positions and call_positions_gone:
-                        # Only mark as expired if it wasn't already stopped, expired, OR skipped
-                        if not entry.call_side_stopped and not entry.call_side_expired and not entry.call_side_skipped:
-                            # Call side EXPIRED (not stopped) - credit is profit!
-                            entry.call_side_expired = True
-                            credit = entry.call_spread_credit
-                            if credit > 0:
-                                expired_call_credit += credit
-                                logger.info(
-                                    f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
-                                    f"+${credit:.2f} profit (credit kept)"
-                                )
-
-                    # Check put side - only process if it had positions (not a call-only entry)
-                    put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
-                    put_positions_gone = not entry.short_put_position_id and not entry.long_put_position_id
-
-                    if put_had_positions and put_positions_gone:
-                        # Only mark as expired if it wasn't already stopped, expired, OR skipped
-                        if not entry.put_side_stopped and not entry.put_side_expired and not entry.put_side_skipped:
-                            # Put side EXPIRED (not stopped) - credit is profit!
-                            entry.put_side_expired = True
-                            credit = entry.put_spread_credit
-                            if credit > 0:
-                                expired_put_credit += credit
-                                logger.info(
-                                    f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
-                                    f"+${credit:.2f} profit (credit kept)"
-                                )
-
-                    # Mark complete if both sides done (stopped OR expired)
-                    # For one-sided entries (MEIC-TF), check the appropriate side
-                    call_only = getattr(entry, 'call_only', False)
-                    put_only = getattr(entry, 'put_only', False)
-
-                    if call_only:
-                        # Call-only entry - done when call side is stopped or expired
-                        if entry.call_side_stopped or entry.call_side_expired:
-                            entry.is_complete = True
-                    elif put_only:
-                        # Put-only entry - done when put side is stopped or expired
-                        if entry.put_side_stopped or entry.put_side_expired:
-                            entry.is_complete = True
-                    else:
-                        # Full IC - done when both sides are done (stopped/expired/skipped)
-                        call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped or not call_had_positions
-                        put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped or not put_had_positions
-                        if call_done and put_done:
-                            entry.is_complete = True
-
-                # Add expired credits to realized P&L
-                total_expired_credit = expired_call_credit + expired_put_credit
-                if total_expired_credit > 0:
-                    self.daily_state.total_realized_pnl += total_expired_credit
-                    logger.info(
-                        f"POS-004: Added ${total_expired_credit:.2f} from expired positions to realized P&L "
-                        f"(Calls: ${expired_call_credit:.2f}, Puts: ${expired_put_credit:.2f})"
-                    )
-                    logger.info(
-                        f"POS-004: Updated total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f}"
-                    )
+                # FIX #43 / FIX #77: Process expired positions and add credit to realized P&L.
+                # Extracted to _process_expired_credits() helper to share with empty-registry path.
+                self._process_expired_credits()
 
                 # Save updated state
                 self._save_state_to_disk()

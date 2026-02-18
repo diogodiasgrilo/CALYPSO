@@ -2180,6 +2180,80 @@ class MEICTFStrategy(MEICStrategy):
         # Save clean state to disk
         self._save_state_to_disk()
 
+    def _process_expired_credits(self) -> float:
+        """
+        FIX #77: Process entries with un-finalized sides as expired.
+
+        Iterates through daily_state.entries and marks any side that:
+        - Had positions (strike > 0)
+        - Has no position IDs (positions gone from Saxo)
+        - Is NOT already stopped, expired, or skipped
+
+        ...as EXPIRED, adding its credit to total_realized_pnl.
+
+        Returns:
+            float: Total expired credit added to realized P&L
+        """
+        expired_call_credit = 0.0
+        expired_put_credit = 0.0
+
+        for entry in self.daily_state.entries:
+            # Check call side
+            call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
+            call_positions_gone = not entry.short_call_position_id and not entry.long_call_position_id
+
+            if call_had_positions and call_positions_gone:
+                if not entry.call_side_stopped and not entry.call_side_expired and not entry.call_side_skipped:
+                    entry.call_side_expired = True
+                    credit = entry.call_spread_credit
+                    if credit > 0:
+                        expired_call_credit += credit
+                        logger.info(
+                            f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
+                            f"+${credit:.2f} profit (credit kept)"
+                        )
+
+            # Check put side
+            put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
+            put_positions_gone = not entry.short_put_position_id and not entry.long_put_position_id
+
+            if put_had_positions and put_positions_gone:
+                if not entry.put_side_stopped and not entry.put_side_expired and not entry.put_side_skipped:
+                    entry.put_side_expired = True
+                    credit = entry.put_spread_credit
+                    if credit > 0:
+                        expired_put_credit += credit
+                        logger.info(
+                            f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
+                            f"+${credit:.2f} profit (credit kept)"
+                        )
+
+            # Mark complete if both sides done
+            if entry.call_only:
+                if entry.call_side_stopped or entry.call_side_expired:
+                    entry.is_complete = True
+            elif entry.put_only:
+                if entry.put_side_stopped or entry.put_side_expired:
+                    entry.is_complete = True
+            else:
+                call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped or not call_had_positions
+                put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped or not put_had_positions
+                if call_done and put_done:
+                    entry.is_complete = True
+
+        total_expired_credit = expired_call_credit + expired_put_credit
+        if total_expired_credit > 0:
+            self.daily_state.total_realized_pnl += total_expired_credit
+            logger.info(
+                f"POS-004: Added ${total_expired_credit:.2f} from expired positions to realized P&L "
+                f"(Calls: ${expired_call_credit:.2f}, Puts: ${expired_put_credit:.2f})"
+            )
+            logger.info(
+                f"POS-004: Updated total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f}"
+            )
+
+        return total_expired_credit
+
     def check_after_hours_settlement(self) -> bool:
         """
         POS-004: Check if 0DTE positions have been settled after market close.
@@ -2202,7 +2276,13 @@ class MEICTFStrategy(MEICStrategy):
         my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
 
         if not my_position_ids:
-            # Registry is already empty - mark as complete
+            # FIX #77: Registry empty — but entries may have un-finalized surviving sides
+            # that need expired credit processing (e.g., post-restart with partial ICs).
+            # Previously returned True immediately, skipping expired credit processing.
+            expired_credit = self._process_expired_credits()
+            if expired_credit > 0:
+                logger.info(f"FIX #77: Processed ${expired_credit:.2f} expired credits from surviving sides (registry was empty)")
+                self._save_state_to_disk()
             logger.info(f"POS-004: No {self.BOT_NAME} positions in registry - settlement reconciliation complete")
             self._settlement_reconciliation_complete = True
             return True
@@ -2240,77 +2320,9 @@ class MEICTFStrategy(MEICStrategy):
                             setattr(entry, f"{leg_name}_uic", None)  # Also clear UIC
                             logger.debug(f"  Cleared {leg_name} position_id and uic from entry #{entry.entry_number}")
 
-                # FIX #43 (2026-02-10): Track expired positions and add their credit to realized P&L
-                # BUG: Previously, when positions expired worthless at settlement, the code just
-                # marked them as "stopped" without adding the credit (which is now profit) to
-                # total_realized_pnl. This caused Feb 9 to show -$360 when actual P&L was +$170.
-                expired_call_credit = 0.0
-                expired_put_credit = 0.0
-
-                for entry in self.daily_state.entries:
-                    # FIX #47: Check skipped flag - skipped sides were never opened
-                    # Check call side - only process if it had positions (not a put-only entry)
-                    call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
-                    call_positions_gone = not entry.short_call_position_id and not entry.long_call_position_id
-
-                    if call_had_positions and call_positions_gone:
-                        # Only mark as expired if it wasn't already stopped, expired, OR skipped
-                        if not entry.call_side_stopped and not entry.call_side_expired and not entry.call_side_skipped:
-                            # Call side EXPIRED (not stopped) - credit is profit!
-                            entry.call_side_expired = True
-                            credit = entry.call_spread_credit
-                            if credit > 0:
-                                expired_call_credit += credit
-                                logger.info(
-                                    f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
-                                    f"+${credit:.2f} profit (credit kept)"
-                                )
-
-                    # Check put side - only process if it had positions (not a call-only entry)
-                    put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
-                    put_positions_gone = not entry.short_put_position_id and not entry.long_put_position_id
-
-                    if put_had_positions and put_positions_gone:
-                        # Only mark as expired if it wasn't already stopped, expired, OR skipped
-                        if not entry.put_side_stopped and not entry.put_side_expired and not entry.put_side_skipped:
-                            # Put side EXPIRED (not stopped) - credit is profit!
-                            entry.put_side_expired = True
-                            credit = entry.put_spread_credit
-                            if credit > 0:
-                                expired_put_credit += credit
-                                logger.info(
-                                    f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
-                                    f"+${credit:.2f} profit (credit kept)"
-                                )
-
-                    # Mark complete if both sides done (stopped OR expired OR skipped)
-                    # For one-sided entries (MEIC-TF), check the appropriate side
-                    if entry.call_only:
-                        # Call-only entry - done when call side is stopped or expired
-                        if entry.call_side_stopped or entry.call_side_expired:
-                            entry.is_complete = True
-                    elif entry.put_only:
-                        # Put-only entry - done when put side is stopped or expired
-                        if entry.put_side_stopped or entry.put_side_expired:
-                            entry.is_complete = True
-                    else:
-                        # Full IC - done when both sides are done (stopped/expired/skipped)
-                        call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped or not call_had_positions
-                        put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped or not put_had_positions
-                        if call_done and put_done:
-                            entry.is_complete = True
-
-                # Add expired credits to realized P&L
-                total_expired_credit = expired_call_credit + expired_put_credit
-                if total_expired_credit > 0:
-                    self.daily_state.total_realized_pnl += total_expired_credit
-                    logger.info(
-                        f"POS-004: Added ${total_expired_credit:.2f} from expired positions to realized P&L "
-                        f"(Calls: ${expired_call_credit:.2f}, Puts: ${expired_put_credit:.2f})"
-                    )
-                    logger.info(
-                        f"POS-004: Updated total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f}"
-                    )
+                # FIX #43 / FIX #77: Process expired positions and add credit to realized P&L.
+                # Extracted to _process_expired_credits() helper to share with empty-registry path.
+                self._process_expired_credits()
 
                 # Save updated state
                 self._save_state_to_disk()
@@ -2748,9 +2760,13 @@ class MEICTFStrategy(MEICStrategy):
                 if vix_low > 0:
                     self.market_data.vix_low = vix_low
 
-            # Restore stopped entries (entries that have no live positions)
-            # FIX #47: Also consider expired and skipped flags
+            # FIX #77: Restore ALL entries from state file, not just "fully done" ones.
+            # Previously, entries with surviving sides (e.g., IC with call stopped but put
+            # still live) were silently dropped. This caused post-restart settlement to miss
+            # $660 in expired credits on Feb 17, logging -$1400 net instead of -$740 net.
+            # Now we restore all entries; settlement will process un-finalized sides as expired.
             stopped_entries_restored = 0
+            surviving_entries_restored = 0
             for entry_data in saved_state.get("entries", []):
                 call_stopped = entry_data.get("call_side_stopped", False)
                 put_stopped = entry_data.get("put_side_stopped", False)
@@ -2774,63 +2790,68 @@ class MEICTFStrategy(MEICStrategy):
                 elif not call_only and not put_only and call_done and put_done:
                     is_fully_done = True
 
-                if is_fully_done:
-                    # Reconstruct the entry from saved state
-                    entry_num = entry_data.get("entry_number")
-                    stopped_entry = TFIronCondorEntry(entry_number=entry_num)
+                # Reconstruct the entry from saved state (ALL entries, not just done ones)
+                entry_num = entry_data.get("entry_number")
+                restored_entry = TFIronCondorEntry(entry_number=entry_num)
 
-                    # Parse entry_time if it's a string
-                    entry_time_str = entry_data.get("entry_time")
-                    if entry_time_str:
-                        if isinstance(entry_time_str, str):
-                            try:
-                                stopped_entry.entry_time = datetime.fromisoformat(entry_time_str)
-                            except ValueError:
-                                stopped_entry.entry_time = None
-                        else:
-                            stopped_entry.entry_time = entry_time_str
-
-                    stopped_entry.strategy_id = entry_data.get("strategy_id", f"meic_tf_{today.replace('-', '')}_{entry_num:03d}")
-                    stopped_entry.short_call_strike = entry_data.get("short_call_strike", 0)
-                    stopped_entry.long_call_strike = entry_data.get("long_call_strike", 0)
-                    stopped_entry.short_put_strike = entry_data.get("short_put_strike", 0)
-                    stopped_entry.long_put_strike = entry_data.get("long_put_strike", 0)
-                    stopped_entry.call_spread_credit = entry_data.get("call_spread_credit", 0)
-                    stopped_entry.put_spread_credit = entry_data.get("put_spread_credit", 0)
-                    stopped_entry.call_side_stop = entry_data.get("call_side_stop", 0)
-                    stopped_entry.put_side_stop = entry_data.get("put_side_stop", 0)
-                    # FIX #47: Restore all status flags (stopped/expired/skipped)
-                    stopped_entry.call_side_stopped = call_stopped
-                    stopped_entry.put_side_stopped = put_stopped
-                    stopped_entry.call_side_expired = call_expired
-                    stopped_entry.put_side_expired = put_expired
-                    stopped_entry.call_side_skipped = call_skipped
-                    stopped_entry.put_side_skipped = put_skipped
-                    # Fix #61: Restore merge flags
-                    stopped_entry.call_side_merged = entry_data.get("call_side_merged", False)
-                    stopped_entry.put_side_merged = entry_data.get("put_side_merged", False)
-                    stopped_entry.is_complete = True
-                    stopped_entry.open_commission = entry_data.get("open_commission", 0)
-                    stopped_entry.close_commission = entry_data.get("close_commission", 0)
-                    stopped_entry.call_only = call_only
-                    stopped_entry.put_only = put_only
-                    # Fix #52: Restore contract count (default to current config if not saved)
-                    stopped_entry.contracts = entry_data.get("contracts", self.contracts_per_entry)
-
-                    if entry_data.get("trend_signal"):
+                # Parse entry_time if it's a string
+                entry_time_str = entry_data.get("entry_time")
+                if entry_time_str:
+                    if isinstance(entry_time_str, str):
                         try:
-                            stopped_entry.trend_signal = TrendSignal(entry_data["trend_signal"])
+                            restored_entry.entry_time = datetime.fromisoformat(entry_time_str)
                         except ValueError:
-                            pass
+                            restored_entry.entry_time = None
+                    else:
+                        restored_entry.entry_time = entry_time_str
 
-                    # Fix #49: Restore override_reason for correct logging
-                    stopped_entry.override_reason = entry_data.get("override_reason", None)
-                    # Fix #59: Restore EMA values for Trades tab logging
-                    stopped_entry.ema_20_at_entry = entry_data.get("ema_20_at_entry", None)
-                    stopped_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)
+                restored_entry.strategy_id = entry_data.get("strategy_id", f"meic_tf_{today.replace('-', '')}_{entry_num:03d}")
+                restored_entry.short_call_strike = entry_data.get("short_call_strike", 0)
+                restored_entry.long_call_strike = entry_data.get("long_call_strike", 0)
+                restored_entry.short_put_strike = entry_data.get("short_put_strike", 0)
+                restored_entry.long_put_strike = entry_data.get("long_put_strike", 0)
+                restored_entry.call_spread_credit = entry_data.get("call_spread_credit", 0)
+                restored_entry.put_spread_credit = entry_data.get("put_spread_credit", 0)
+                restored_entry.call_side_stop = entry_data.get("call_side_stop", 0)
+                restored_entry.put_side_stop = entry_data.get("put_side_stop", 0)
+                # FIX #47: Restore all status flags (stopped/expired/skipped)
+                restored_entry.call_side_stopped = call_stopped
+                restored_entry.put_side_stopped = put_stopped
+                restored_entry.call_side_expired = call_expired
+                restored_entry.put_side_expired = put_expired
+                restored_entry.call_side_skipped = call_skipped
+                restored_entry.put_side_skipped = put_skipped
+                # Fix #61: Restore merge flags
+                restored_entry.call_side_merged = entry_data.get("call_side_merged", False)
+                restored_entry.put_side_merged = entry_data.get("put_side_merged", False)
+                restored_entry.open_commission = entry_data.get("open_commission", 0)
+                restored_entry.close_commission = entry_data.get("close_commission", 0)
+                restored_entry.call_only = call_only
+                restored_entry.put_only = put_only
+                # Fix #52: Restore contract count (default to current config if not saved)
+                restored_entry.contracts = entry_data.get("contracts", self.contracts_per_entry)
 
-                    self.daily_state.entries.append(stopped_entry)
+                if entry_data.get("trend_signal"):
+                    try:
+                        restored_entry.trend_signal = TrendSignal(entry_data["trend_signal"])
+                    except ValueError:
+                        pass
+
+                # Fix #49: Restore override_reason for correct logging
+                restored_entry.override_reason = entry_data.get("override_reason", None)
+                # Fix #59: Restore EMA values for Trades tab logging
+                restored_entry.ema_20_at_entry = entry_data.get("ema_20_at_entry", None)
+                restored_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)
+
+                if is_fully_done:
+                    restored_entry.is_complete = True
                     stopped_entries_restored += 1
+                else:
+                    # FIX #77: Entry has surviving sides — restore but don't mark complete.
+                    # Settlement will process these sides as expired after market close.
+                    surviving_entries_restored += 1
+
+                self.daily_state.entries.append(restored_entry)
 
             # Update next_entry_index: use saved value if higher than entry-based calc
             # (MKT-016 cascade breaker sets next_entry_index beyond completed entries)
@@ -2844,6 +2865,7 @@ class MEICTFStrategy(MEICStrategy):
             logger.info(f"FIX #41: Loaded state file history - P&L: ${self.daily_state.total_realized_pnl:.2f}, "
                        f"entries_completed: {self.daily_state.entries_completed}, "
                        f"stopped_entries_restored: {stopped_entries_restored}, "
+                       f"surviving_entries_restored: {surviving_entries_restored}, "
                        f"next_entry_index: {self._next_entry_index}")
 
             return True
