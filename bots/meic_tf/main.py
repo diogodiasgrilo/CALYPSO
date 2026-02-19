@@ -607,8 +607,8 @@ Examples:
     parser.add_argument(
         "--interval", "-i",
         type=int,
-        default=5,
-        help="Strategy check interval in seconds (default: 5)"
+        default=1,
+        help="Strategy check interval in seconds (default: 1)"
     )
     parser.add_argument(
         "--verbose", "-v",
