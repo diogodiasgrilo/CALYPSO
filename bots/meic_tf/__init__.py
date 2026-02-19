@@ -18,7 +18,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
 
 Version History:
-- 1.3.0 (2026-02-19): MKT-018 early close based on ROC, batch quote API (7x rate limit reduction), Fix #80 Sheets resize
+- 1.3.0 (2026-02-19): MKT-019 virtual equal credit stop, MKT-018 early close based on ROC, batch quote API (7x rate limit reduction), Fix #80 Sheets resize
 - 1.2.9 (2026-02-18): MKT-017 daily loss limit, Fix #77/#78/#79 (settlement, summary accuracy, counters)
 - 1.2.8 (2026-02-17): EMA threshold 0.2%, MKT-016 stop cascade breaker
 - 1.2.7 (2026-02-16): Daily Summary column redesign, Fix #76 fill price field names

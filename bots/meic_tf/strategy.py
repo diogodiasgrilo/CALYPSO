@@ -1452,22 +1452,16 @@ class MEICTFStrategy(MEICStrategy):
         """
         Calculate stop loss levels for trend-following entries.
 
-        FIX #40 (2026-02-06): For one-sided entries, stop = 2× credit received.
+        All entry types use 2× credit as their stop basis:
+        - One-sided (Fix #40): stop = 2 × single_side_credit
+        - Full IC (MKT-019): stop = 2 × max(call_credit, put_credit)
 
-        PROBLEM: Previously used stop = credit, but spread_value (cost-to-close)
-        approximately equals credit at entry time (due to bid-ask spread, mid prices
-        are slightly higher than fill prices). This caused immediate stop triggers
-        ~10 seconds after entry when spread_value >= stop_level became true.
+        MKT-019 rationale: Volatility skew makes puts 2-7× more expensive than
+        calls at the same delta. Using total_credit as stop means the low-credit
+        side triggers prematurely from bid-ask noise. Using 2× max(credit) gives
+        both sides equal headroom relative to the dominant credit side.
 
-        SOLUTION: Use 2× credit as stop level for one-sided entries to match the
-        effective behavior of full ICs:
-        - Full IC: stop_level = total_credit, each side's value ≈ total_credit/2
-          → Each side has ~2× headroom before stop
-        - One-sided: stop_level = 2 × single_side_credit
-          → Same ~2× headroom as full ICs
-
-        This means: Stop triggers when cost-to-close = 2× credit received,
-        which equals P&L = -credit (you've lost what you collected).
+        Stop triggers when cost-to-close = 2× credit basis, i.e. P&L ≈ -credit.
 
         Args:
             entry: TFIronCondorEntry to calculate stops for
@@ -1523,8 +1517,36 @@ class MEICTFStrategy(MEICStrategy):
             logger.info(f"Stop level for put spread: ${stop_level:.2f} (2× credit ${credit:.2f})")
 
         else:
-            # Full IC - use parent's logic
-            self._calculate_stop_levels(entry)
+            # Full IC — MKT-019: Virtual Equal Credit Stop
+            # Use 2× the higher-credit side as stop for BOTH sides.
+            # Volatility skew makes puts 2-7× more expensive than calls at same delta.
+            # Using total_credit as stop means the low-credit side triggers prematurely.
+            # 2× max(credit) gives both sides equal headroom relative to the dominant side.
+            call_credit = entry.call_spread_credit
+            put_credit = entry.put_spread_credit
+            max_credit = max(call_credit, put_credit)
+
+            if max_credit < MIN_STOP_LEVEL / 2:
+                logger.critical(f"CRITICAL: Max credit ${max_credit:.2f} very low, using minimum stop")
+                max_credit = MIN_STOP_LEVEL / 2
+
+            base_stop = max_credit * 2
+
+            if self.meic_plus_enabled:
+                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
+                if max_credit > min_credit_for_meic_plus:
+                    stop_level = base_stop - self.meic_plus_reduction
+                else:
+                    stop_level = base_stop
+            else:
+                stop_level = base_stop
+
+            entry.call_side_stop = stop_level
+            entry.put_side_stop = stop_level
+            logger.info(
+                f"Stop level for full IC: ${stop_level:.2f} per side "
+                f"(2× max credit: call=${call_credit:.2f}, put=${put_credit:.2f}, max=${max_credit:.2f})"
+            )
 
     # =========================================================================
     # OVERRIDE: P&L sanity validation for one-sided entries (Fix #39)
@@ -2961,9 +2983,6 @@ class MEICTFStrategy(MEICStrategy):
 
         entry.is_complete = has_all_legs
 
-        # Calculate stop levels based on recovered credit
-        total_credit = entry.call_spread_credit + entry.put_spread_credit
-
         # CRITICAL SAFETY CHECK: Prevent zero stop levels
         MIN_STOP_LEVEL = 50.0
 
@@ -3022,25 +3041,35 @@ class MEICTFStrategy(MEICStrategy):
             entry.call_side_stop = 0  # No call side to monitor
             logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (2× credit ${credit:.2f})")
         else:
-            # Full IC or stopped entry - use total credit per side
-            if total_credit < MIN_STOP_LEVEL:
+            # Full IC or stopped entry — MKT-019: Virtual Equal Credit Stop
+            call_credit = entry.call_spread_credit
+            put_credit = entry.put_spread_credit
+            max_credit = max(call_credit, put_credit)
+
+            if max_credit < MIN_STOP_LEVEL / 2:
                 logger.critical(
-                    f"Recovery CRITICAL: Entry #{entry.entry_number} has low credit "
-                    f"(${total_credit:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+                    f"Recovery CRITICAL: Entry #{entry.entry_number} max credit too low "
+                    f"(${max_credit:.2f}). Using minimum."
                 )
-                total_credit = MIN_STOP_LEVEL
+                max_credit = MIN_STOP_LEVEL / 2
+
+            base_stop = max_credit * 2
 
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if total_credit > min_credit_for_meic_plus:
-                    stop_level = total_credit - self.meic_plus_reduction
+                if max_credit > min_credit_for_meic_plus:
+                    stop_level = base_stop - self.meic_plus_reduction
                 else:
-                    stop_level = total_credit
-                entry.call_side_stop = stop_level
-                entry.put_side_stop = stop_level
+                    stop_level = base_stop
             else:
-                entry.call_side_stop = total_credit
-                entry.put_side_stop = total_credit
+                stop_level = base_stop
+
+            entry.call_side_stop = stop_level
+            entry.put_side_stop = stop_level
+            logger.info(
+                f"Recovery: Full IC stop = ${stop_level:.2f} per side "
+                f"(2× max credit: call=${call_credit:.2f}, put=${put_credit:.2f})"
+            )
 
         return entry
 

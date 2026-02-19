@@ -138,6 +138,18 @@ After all entries are placed, monitors Return on Capital (ROC) every heartbeat. 
 - Bot transitions to DAILY_COMPLETE state (no settlement needed)
 - Alert sent with locked-in P&L and ROC
 
+### Virtual Equal Credit Stop (MKT-019) - Added v1.3.0
+
+For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) instead of total_credit. Volatility skew makes puts 2-7× more expensive than calls at the same delta, causing the low-credit call side to hit stops prematurely when using total_credit.
+
+| Entry Type | Stop Formula | Example (C=$105, P=$370) |
+|-----------|-------------|--------------------------|
+| Full IC (OLD) | total_credit | $475 per side |
+| Full IC (NEW) | 2 × max(credit) | $740 per side |
+| One-sided | 2 × credit | Unchanged |
+
+**Why this works:** Over 7 trading days, 3 call-side stops would have been avoided (SPX never reached the short strike) saving ~$1,675, with ~$635 additional cost on stops that still fire. Net benefit: +$1,040.
+
 ### Credit Gate Config (strategy section)
 
 | Setting | Default | Description |
@@ -230,7 +242,7 @@ bots/meic_tf/
 
 ## Version History
 
-- **1.3.0** (2026-02-19): MKT-018 early close based on Return on Capital (ROC) + batch quote API
+- **1.3.0** (2026-02-19): MKT-019 virtual equal credit stop + MKT-018 early close based on Return on Capital (ROC) + batch quote API
   - Closes ALL positions when ROC >= 2.0% after all entries are placed
   - ROC = (net_pnl - close_cost) / capital_deployed, checked every heartbeat
   - Close cost: active_legs × $5.00 ($2.50 commission + $2.50 slippage)
