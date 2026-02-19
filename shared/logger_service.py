@@ -514,7 +514,7 @@ class GoogleSheetsLogger:
                         "Rolled Today", "Recentered Today", "Notes"
                     ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:AH1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:AJ1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Daily Summary worksheet ({self.strategy_type} format, {len(headers)} cols)")
 
             self.worksheets["Daily Summary"] = worksheet

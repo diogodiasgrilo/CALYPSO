@@ -443,17 +443,33 @@ class MEICTFStrategy(MEICStrategy):
         if deferred_legs:
             self._spawn_async_early_close_fill_correction(deferred_legs)
 
-        # Phase 3: Unregister ALL positions from registry
+        # Phase 3: Unregister positions from registry
+        # Only clear position IDs for sides that were successfully closed.
+        # If a leg failed to close, keep its position_id/uic so it remains
+        # trackable (settlement will handle it as a normal expiration).
         for entry in self.daily_state.entries:
-            for leg in ["short_call", "long_call", "short_put", "long_put"]:
-                pos_id = getattr(entry, f"{leg}_position_id", None)
-                if pos_id:
-                    try:
-                        self.registry.unregister(pos_id)
-                    except Exception:
-                        pass  # Position may already be unregistered
-                    setattr(entry, f"{leg}_position_id", None)
-                    setattr(entry, f"{leg}_uic", 0)
+            # Call side: only clear if marked as early-closed (expired flag set by _close_entry_early)
+            if entry.call_side_expired or entry.call_side_stopped or getattr(entry, 'call_side_skipped', False):
+                for leg in ["short_call", "long_call"]:
+                    pos_id = getattr(entry, f"{leg}_position_id", None)
+                    if pos_id:
+                        try:
+                            self.registry.unregister(pos_id)
+                        except Exception:
+                            pass
+                        setattr(entry, f"{leg}_position_id", None)
+                        setattr(entry, f"{leg}_uic", 0)
+            # Put side: same logic
+            if entry.put_side_expired or entry.put_side_stopped or getattr(entry, 'put_side_skipped', False):
+                for leg in ["short_put", "long_put"]:
+                    pos_id = getattr(entry, f"{leg}_position_id", None)
+                    if pos_id:
+                        try:
+                            self.registry.unregister(pos_id)
+                        except Exception:
+                            pass
+                        setattr(entry, f"{leg}_position_id", None)
+                        setattr(entry, f"{leg}_uic", 0)
 
         # Phase 4: Mark bot state
         self.state = MEICState.DAILY_COMPLETE
@@ -485,6 +501,11 @@ class MEICTFStrategy(MEICStrategy):
 
         # Phase 8: Log daily summary IMMEDIATELY
         # No need to wait for settlement — all positions are already closed.
+        # Wait for async fill corrections first (base class waits 15s, but early close
+        # can have many deferred legs needing 3s sleep + retries each).
+        if deferred_legs:
+            wait_time = min(3.0 + len(deferred_legs) * 5.0, 60.0)  # Scale with legs, cap at 60s
+            self._wait_for_pending_fill_corrections(timeout=wait_time)
         try:
             self.log_daily_summary()
             self.log_account_summary()
@@ -2362,6 +2383,8 @@ class MEICTFStrategy(MEICStrategy):
                 "daily_loss_limit_triggered": self._daily_loss_limit_triggered,
                 # MKT-018: Early close state
                 "early_close_triggered": self._early_close_triggered,
+                "early_close_time": self._early_close_time.isoformat() if self._early_close_time else None,
+                "early_close_pnl": self._early_close_pnl,
                 "entries": []
             }
 
@@ -3219,6 +3242,14 @@ class MEICTFStrategy(MEICStrategy):
             self._daily_loss_limit_triggered = saved_state.get("daily_loss_limit_triggered", False)
             # MKT-018: Restore early close state
             self._early_close_triggered = saved_state.get("early_close_triggered", False)
+            ec_time_str = saved_state.get("early_close_time")
+            if ec_time_str:
+                try:
+                    from datetime import datetime as dt_cls
+                    self._early_close_time = dt_cls.fromisoformat(ec_time_str)
+                except (ValueError, TypeError):
+                    self._early_close_time = None
+            self._early_close_pnl = saved_state.get("early_close_pnl")
 
             # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
             ohlc = saved_state.get("market_data_ohlc", {})
@@ -3478,6 +3509,8 @@ class MEICTFStrategy(MEICStrategy):
             preserved_stop_cascade_triggered = False  # MKT-016
             preserved_daily_loss_limit_triggered = False  # MKT-017
             preserved_early_close_triggered = False  # MKT-018
+            preserved_early_close_time = None  # MKT-018
+            preserved_early_close_pnl = None  # MKT-018
             preserved_next_entry_index = 0  # MKT-016/017: may advance beyond entry count
             try:
                 if os.path.exists(self.state_file):
@@ -3504,6 +3537,14 @@ class MEICTFStrategy(MEICStrategy):
                             preserved_daily_loss_limit_triggered = saved_state.get("daily_loss_limit_triggered", False)
                             # MKT-018: Preserve early close state
                             preserved_early_close_triggered = saved_state.get("early_close_triggered", False)
+                            ec_time_str = saved_state.get("early_close_time")
+                            if ec_time_str:
+                                try:
+                                    from datetime import datetime as dt_cls
+                                    preserved_early_close_time = dt_cls.fromisoformat(ec_time_str)
+                                except (ValueError, TypeError):
+                                    pass
+                            preserved_early_close_pnl = saved_state.get("early_close_pnl")
                             preserved_next_entry_index = saved_state.get("next_entry_index", 0)
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
@@ -3779,6 +3820,8 @@ class MEICTFStrategy(MEICStrategy):
             self._daily_loss_limit_triggered = preserved_daily_loss_limit_triggered
             # MKT-018: Restore early close state
             self._early_close_triggered = preserved_early_close_triggered
+            self._early_close_time = preserved_early_close_time
+            self._early_close_pnl = preserved_early_close_pnl
 
             # Set state based on recovered positions
             # FIX #43 + FIX #47: For one-sided entries, check only the placed side
