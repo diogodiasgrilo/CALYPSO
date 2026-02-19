@@ -1633,65 +1633,31 @@ class MEICTFStrategy(MEICStrategy):
     # OVERRIDE: Price updates for one-sided entries (Fix #41, 2026-02-05)
     # =========================================================================
 
-    def _update_entry_prices(self, entry: IronCondorEntry):
+    def _batch_update_entry_prices(self):
         """
-        Update option prices for an entry.
+        Override parent to handle TF one-sided entry simulation in dry-run.
 
-        OVERRIDE (Fix #41, 2026-02-05): Parent class fetches prices for ALL 4 legs
-        unconditionally. For MEIC-TF one-sided entries, this causes DATA-004 warnings
-        because it tries to fetch prices for legs that don't exist (UIC=0).
+        In live mode, the parent's batch approach works correctly for one-sided
+        entries because it only collects non-zero UICs (one-sided entries have
+        UIC=0 for the non-placed side).
 
-        This override only fetches prices for the legs that were actually placed:
-        - call_only entries: Only fetch call side prices
-        - put_only entries: Only fetch put side prices
-        - Full IC entries: Fetch all 4 legs (via parent method)
-
-        Args:
-            entry: The entry to update prices for
+        In dry-run mode, we need to use _simulate_tf_entry_prices() for
+        one-sided entries instead of the parent's _simulate_entry_prices().
         """
-        # Check if this is a TFIronCondorEntry with one-sided flags
-        is_tf_entry = isinstance(entry, TFIronCondorEntry)
-
-        if is_tf_entry and entry.call_only:
-            # CALL-ONLY ENTRY: Only fetch call side prices
-            if self.dry_run:
-                self._simulate_tf_entry_prices(entry)
-                return
-
-            # Short Call
-            if entry.short_call_uic:
-                quote = self.client.get_quote(entry.short_call_uic, asset_type="StockIndexOption")
-                entry.short_call_price = self._extract_mid_price(quote) or 0
-
-            # Long Call
-            if entry.long_call_uic:
-                quote = self.client.get_quote(entry.long_call_uic, asset_type="StockIndexOption")
-                entry.long_call_price = self._extract_mid_price(quote) or 0
-
-            # Put side prices stay at 0 - they were never placed
-            # No DATA-004 warnings because we don't try to fetch non-existent legs
-
-        elif is_tf_entry and entry.put_only:
-            # PUT-ONLY ENTRY: Only fetch put side prices
-            if self.dry_run:
-                self._simulate_tf_entry_prices(entry)
-                return
-
-            # Short Put
-            if entry.short_put_uic:
-                quote = self.client.get_quote(entry.short_put_uic, asset_type="StockIndexOption")
-                entry.short_put_price = self._extract_mid_price(quote) or 0
-
-            # Long Put
-            if entry.long_put_uic:
-                quote = self.client.get_quote(entry.long_put_uic, asset_type="StockIndexOption")
-                entry.long_put_price = self._extract_mid_price(quote) or 0
-
-            # Call side prices stay at 0 - they were never placed
-
-        else:
-            # FULL IC: Use parent's method to fetch all 4 legs
-            super()._update_entry_prices(entry)
+        if self.dry_run:
+            for entry in self.daily_state.active_entries:
+                call_done = entry.call_side_stopped or getattr(entry, 'call_side_expired', False) or getattr(entry, 'call_side_skipped', False)
+                put_done = entry.put_side_stopped or getattr(entry, 'put_side_expired', False) or getattr(entry, 'put_side_skipped', False)
+                if call_done and put_done:
+                    continue
+                is_tf = isinstance(entry, TFIronCondorEntry)
+                if is_tf and (entry.call_only or entry.put_only):
+                    self._simulate_tf_entry_prices(entry)
+                else:
+                    self._simulate_entry_prices(entry)
+            return
+        # Live mode: parent's batch handles one-sided entries naturally
+        super()._batch_update_entry_prices()
 
     def _simulate_tf_entry_prices(self, entry: IronCondorEntry):
         """
@@ -1742,10 +1708,14 @@ class MEICTFStrategy(MEICStrategy):
         Check all active entries for stop loss triggers.
 
         Overrides parent to handle one-sided entries correctly.
+        Prices are batch-fetched via _batch_update_entry_prices() before the loop.
 
         Returns:
             str describing stop action taken, or None
         """
+        # Batch-fetch ALL option prices in a single API call
+        self._batch_update_entry_prices()
+
         for entry in self.daily_state.active_entries:
             # Handle as TFIronCondorEntry if possible
             is_tf_entry = isinstance(entry, TFIronCondorEntry)
@@ -1754,8 +1724,6 @@ class MEICTFStrategy(MEICStrategy):
                 # Only check call side
                 if entry.call_side_stopped:
                     continue
-
-                self._update_entry_prices(entry)
 
                 pnl_valid, pnl_message = self._validate_pnl_sanity(entry)
                 if not pnl_valid:
@@ -1775,8 +1743,6 @@ class MEICTFStrategy(MEICStrategy):
                 if entry.put_side_stopped:
                     continue
 
-                self._update_entry_prices(entry)
-
                 pnl_valid, pnl_message = self._validate_pnl_sanity(entry)
                 if not pnl_valid:
                     logger.error(f"DATA-003: Skipping stop check - {pnl_message}")
@@ -1791,14 +1757,12 @@ class MEICTFStrategy(MEICStrategy):
                     return self._execute_stop_loss(entry, "put")
 
             else:
-                # Full IC - use parent's logic
+                # Full IC
                 # FIX #47: Check stopped/expired/skipped for completeness
                 call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped
                 put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped
                 if call_done and put_done:
                     continue
-
-                self._update_entry_prices(entry)
 
                 pnl_valid, pnl_message = self._validate_pnl_sanity(entry)
                 if not pnl_valid:

@@ -3571,13 +3571,14 @@ class MEICStrategy:
         Returns:
             str describing stop action taken, or None
         """
+        # Batch-fetch ALL option prices in a single API call
+        # (was: 4 API calls per entry × N entries = 4N calls per cycle)
+        self._batch_update_entry_prices()
+
         for entry in self.daily_state.active_entries:
             # Skip if both sides already stopped
             if entry.call_side_stopped and entry.put_side_stopped:
                 continue
-
-            # Update option prices
-            self._update_entry_prices(entry)
 
             # DATA-003: Validate P&L sanity before using values
             pnl_valid, pnl_message = self._validate_pnl_sanity(entry)
@@ -3649,6 +3650,46 @@ class MEICStrategy:
         if entry.long_put_uic:
             quote = self.client.get_quote(entry.long_put_uic, asset_type="StockIndexOption")
             entry.long_put_price = self._extract_mid_price(quote) or 0
+
+    def _batch_update_entry_prices(self):
+        """
+        Fetch prices for ALL active entry legs in a single API call.
+
+        Instead of calling get_quote() per leg (4 calls × N entries = 4N calls),
+        this collects all UICs and makes one get_quotes_batch() call.
+        Reduces trade service group API calls from ~20/cycle to 1/cycle.
+        """
+        if self.dry_run:
+            for entry in self.daily_state.active_entries:
+                if entry.call_side_stopped and entry.put_side_stopped:
+                    continue
+                self._simulate_entry_prices(entry)
+            return
+
+        # Collect all non-zero UICs from active entries
+        uic_map = {}  # UIC -> list of (entry, leg_name) to update
+        for entry in self.daily_state.active_entries:
+            if entry.call_side_stopped and entry.put_side_stopped:
+                continue
+            for leg in ("short_call", "long_call", "short_put", "long_put"):
+                uic = getattr(entry, f"{leg}_uic", 0)
+                if uic:
+                    uic_map.setdefault(uic, []).append((entry, leg))
+
+        if not uic_map:
+            return
+
+        # Single batch API call for all option UICs
+        quotes = self.client.get_quotes_batch(
+            list(uic_map.keys()), asset_type="StockIndexOption"
+        )
+
+        # Distribute prices back to entries
+        for uic, targets in uic_map.items():
+            quote = quotes.get(uic)
+            mid_price = self._extract_mid_price(quote) or 0
+            for entry, leg in targets:
+                setattr(entry, f"{leg}_price", mid_price)
 
     def _extract_mid_price(self, quote: Optional[Dict]) -> Optional[float]:
         """Extract mid price from quote for option pricing."""

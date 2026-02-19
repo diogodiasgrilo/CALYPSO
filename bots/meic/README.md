@@ -1,8 +1,8 @@
 # MEIC (Multiple Entry Iron Condors) Trading Bot
 
-**Last Updated:** 2026-02-18
+**Last Updated:** 2026-02-19
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.2.9)
+**Status:** IMPLEMENTED - Production Ready (v1.3.0)
 
 ---
 
@@ -213,6 +213,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u m
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-02-19 | 1.3.0 | Batch quote API for stop loss monitoring (`get_quotes_batch()`) — 7x rate limit reduction |
 | 2026-02-18 | 1.2.9 | Fix #77: Post-restart settlement processes expired credits; Fix #78: Stop loss debits accuracy |
 | 2026-02-13 | 1.2.8 | Fix #75: Async deferred stop fill lookup (non-blocking P&L correction) |
 | 2026-02-13 | 1.2.7 | Fix #74: Stop loss fill price accuracy (deferred lookup was bypassed by quote fallback) |

@@ -230,7 +230,7 @@ bots/meic_tf/
 
 ## Version History
 
-- **1.3.0** (2026-02-19): MKT-018 early close based on Return on Capital (ROC)
+- **1.3.0** (2026-02-19): MKT-018 early close based on Return on Capital (ROC) + batch quote API
   - Closes ALL positions when ROC >= 2.0% after all entries are placed
   - ROC = (net_pnl - close_cost) / capital_deployed, checked every heartbeat
   - Close cost: active_legs × $5.00 ($2.50 commission + $2.50 slippage)
@@ -241,6 +241,9 @@ bots/meic_tf/
   - State persistence: early_close_triggered saved/restored across restarts
   - Skip ROC check in last 15 minutes before close (positions expire naturally)
   - Based on 6-day backtest: -$8 total cost, captures high-profit days before late-day reversals
+  - Batch quote API: `get_quotes_batch()` fetches all option prices in single API call (7x rate limit reduction)
+  - Stop loss monitoring now uses `_batch_update_entry_prices()` instead of per-entry individual calls
+  - Fix #80: Google Sheets Positions snapshot uses unconditional resize (prevents stale row_count after timeout)
 
 - **1.2.9** (2026-02-18): Daily loss limit + daily summary accuracy
   - MKT-017: Daily loss limit - pause entries when realized P&L drops below -$500 (complements MKT-016)

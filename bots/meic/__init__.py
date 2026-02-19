@@ -19,6 +19,7 @@ Strategy Details:
 - Stop loss: Total credit per side (MEIC+ subtracts configurable amount)
 
 Version History:
+- 1.3.0 (2026-02-19): Batch quote API for stop loss monitoring (7x rate limit reduction), Fix #80 Sheets resize
 - 1.2.9 (2026-02-18): Fix #77 post-restart settlement, Fix #78 stop loss debits accuracy
 - 1.2.8 (2026-02-13): Fix #75 - Async deferred stop fill lookup (non-blocking P&L correction)
 - 1.2.7 (2026-02-13): Fix #74 - Stop loss fill price accuracy (deferred lookup was bypassed by quote fallback)

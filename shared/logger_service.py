@@ -1412,25 +1412,19 @@ class GoogleSheetsLogger:
                 # Batch write all rows at once (single API call)
                 if all_rows:
                     end_row = 1 + len(all_rows)
-                    # Ensure sheet has enough rows for data (delete_rows above may have shrunk it)
-                    if worksheet.row_count < end_row:
-                        self._sheets_call_with_timeout(
-                            worksheet.resize, end_row, 17
-                        )
+                    # Always resize to exact needed size — cached row_count can be
+                    # stale after a timed-out delete_rows (Fix #80: sheet may have
+                    # shrunk server-side but gspread cache still shows old count)
+                    self._sheets_call_with_timeout(
+                        worksheet.resize, end_row, 17
+                    )
                     self._sheets_call_with_timeout(
                         worksheet.update, f"A2:Q{end_row}", all_rows
                     )
 
-                    # Clear any leftover rows from previous snapshot with more entries
-                    if worksheet.row_count > end_row:
-                        self._sheets_call_with_timeout(
-                            worksheet.delete_rows, end_row + 1, worksheet.row_count
-                        )
-
                     # Clear any bold formatting from data rows
-                    last_row = end_row
                     self._sheets_call_with_timeout(
-                        worksheet.format, f"A2:Q{last_row}", {"textFormat": {"bold": False}}
+                        worksheet.format, f"A2:Q{end_row}", {"textFormat": {"bold": False}}
                     )
 
             else:

@@ -17,7 +17,7 @@ AssetType enum includes:
 
 Author: Trading Bot Developer
 Date: 2024
-Last Updated: 2026-01-29
+Last Updated: 2026-02-19
 
 Code Audit: 2026-01-29
 - HIGH FIX: Session capability auto-recovery for VIX NoAccess (Issue #11)
@@ -1229,6 +1229,75 @@ class SaxoClient:
             logger.debug(f"get_quote: Single endpoint response for UIC {uic}: {response}")
             return response
         return None
+
+    def get_quotes_batch(self, uics: list, asset_type: str = "StockIndexOption") -> Dict[int, Dict]:
+        """
+        Get quotes for multiple instruments in a single API call.
+
+        Uses /trade/v1/infoprices/list with comma-separated UICs.
+        All UICs must share the same AssetType (Saxo API constraint).
+
+        Args:
+            uics: List of Unique Instrument Codes
+            asset_type: Type of asset (must be same for all UICs)
+
+        Returns:
+            Dict mapping UIC -> quote data (same format as get_quote() response)
+        """
+        if not uics:
+            return {}
+
+        unique_uics = list(set(int(u) for u in uics if u))
+        if not unique_uics:
+            return {}
+
+        results = {}
+
+        # Check WebSocket cache first
+        remaining_uics = []
+        if self.is_websocket_healthy():
+            for uic in unique_uics:
+                cached = self._get_from_cache(uic)
+                if cached and "Quote" in cached:
+                    bid = cached["Quote"].get("Bid", 0)
+                    ask = cached["Quote"].get("Ask", 0)
+                    mid = cached["Quote"].get("Mid", 0)
+                    if (bid > 0 and ask > 0) or mid > 0:
+                        results[uic] = cached
+                        continue
+                remaining_uics.append(uic)
+        else:
+            remaining_uics = unique_uics
+
+        if not remaining_uics:
+            return results
+
+        # Single batch REST API call for all remaining UICs
+        endpoint = "/trade/v1/infoprices/list"
+        params = {
+            "AccountKey": self.account_key,
+            "Uics": ",".join(str(u) for u in remaining_uics),
+            "AssetType": asset_type,
+            "Amount": 1,
+            "FieldGroups": "DisplayAndFormat,Quote,PriceInfo,PriceInfoDetails"
+        }
+
+        logger.debug(f"get_quotes_batch: Fetching {len(remaining_uics)} UICs in single call")
+
+        response = self._make_request("GET", endpoint, params=params)
+
+        if response and "Data" in response:
+            for item in response["Data"]:
+                # UIC is at the root level of each item
+                uic = item.get("Uic")
+                if uic:
+                    results[int(uic)] = item
+
+        missing = set(remaining_uics) - set(results.keys())
+        if missing:
+            logger.warning(f"get_quotes_batch: No data returned for UICs: {missing}")
+
+        return results
 
     def get_option_greeks(self, uic: int) -> Optional[Dict]:
         """
