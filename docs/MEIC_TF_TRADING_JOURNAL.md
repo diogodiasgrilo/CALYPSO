@@ -8,7 +8,7 @@
 
 ## Table of Contents
 
-1. [Trading Period: Feb 10-18, 2026](#1-trading-period-feb-10-18-2026)
+1. [Trading Period: Feb 10-19, 2026](#1-trading-period-feb-10-19-2026)
 2. [Daily Summary Data (Raw)](#2-daily-summary-data-raw)
 3. [Entry-Level Detail by Day](#3-entry-level-detail-by-day)
 4. [Market Conditions](#4-market-conditions)
@@ -20,22 +20,23 @@
 
 ---
 
-## 1. Trading Period: Feb 10-18, 2026
+## 1. Trading Period: Feb 10-19, 2026
 
-**Bot Versions**: v1.2.7 (Feb 10-17), v1.2.8 (Feb 18+)
-**Trading Days**: 6 (Feb 10, 11, 12, 13, 17, 18)
+**Bot Versions**: v1.2.7 (Feb 10-17), v1.2.8 (Feb 18), v1.2.9 (Feb 18 post-market), v1.3.0 (Feb 19+)
+**Trading Days**: 7 (Feb 10, 11, 12, 13, 17, 18, 19)
 **Config**: 5 entries per day, EMA 20/40 trend filter
 - Feb 10-17: 0.1% neutral threshold, no cascade breaker (baseline)
 - Feb 18+: 0.2% neutral threshold (Rec 9.3), cascade breaker at 3 stops (MKT-016)
+- Feb 19+: daily loss limit -$500 (MKT-017), early close ROC 2% (MKT-018)
 **Capital Deployed**: $20,000-$32,000 per day (varies by entry count and spread width)
 
 ### Period Result
-- **Net P&L**: +$1,385
-- **Winning Days**: 5 (83.3%)
-- **Losing Days**: 1 (16.7%)
-- **Total Entries**: 31
-- **Total Stops**: 17 (54.8% stop rate)
-- **Win Rate (entries with 0 stops)**: 45.2% (14/31)
+- **Net P&L**: +$1,355
+- **Winning Days**: 5 (71.4%)
+- **Losing Days**: 2 (28.6%)
+- **Total Entries**: 35
+- **Total Stops**: 20 (57.1% stop rate)
+- **Win Rate (entries with 0 stops)**: 42.9% (15/35)
 
 ---
 
@@ -43,44 +44,44 @@
 
 Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500 to $30,500 (Fix #77 bug dropped entries with surviving sides from daily_state).
 
-| Column | Feb 10 | Feb 11 | Feb 12 | Feb 13 | Feb 17 | **Feb 18** |
-|--------|--------|--------|--------|--------|--------|--------|
-| Date | 2026-02-10 | 2026-02-11 | 2026-02-12 | 2026-02-13 | 2026-02-17 | **2026-02-18** |
-| SPX Open | 6970.55 | 6988.93 | 6961.62 | 6832.04 | 6814.71 | **~6857** |
-| SPX Close | 6943.87 | 6939.96 | 6834.14 | 6834.38 | 6845.81 | **6878.07** |
-| SPX High | 6985.81 | 6990.65 | 6973.34 | 6881.57 | 6866.63 | **~6909** |
-| SPX Low | 6937.67 | 6913.86 | 6824.12 | 6791.34 | 6775.17 | **~6858** |
-| VIX Open | 17.35 | 16.95 | 17.36 | 20.97 | 21.86 | **~19.37** |
-| VIX Close | 17.81 | 17.65 | 20.74 | 20.62 | 20.29 | **~19.56** |
-| VIX High | 17.97 | 18.96 | 21.21 | 22.40 | 22.96 | **~20.21** |
-| VIX Low | 17.14 | 16.75 | 17.08 | 18.93 | 19.76 | **~18.48** |
-| Entries Completed | 5 | 6 | 6 | 5 | 5 | **4** |
-| Entries Skipped | 1 | 0 | 0 | 0 | 0 | **1** |
-| Full ICs | 0 | 1 | 4 | 4 | 3 | **1** |
-| One-Sided Entries | 5 | 5 | 2 | 1 | 2 | **3** |
-| Bullish Signals | 0 | 0 | 0 | 1 | 1 | **0** |
-| Bearish Signals | 0 | 1 | 2 | 0 | 1 | **0** |
-| Neutral Signals | 5 | 5 | 4 | 4 | 3 | **4** |
-| Total Credit ($) | 640 | 1170 | 1610 | 3045 | 1885 | **810** |
-| Call Stops | 0 | 0 | 0 | 1 | 3 | **0** |
-| Put Stops | 1 | 2 | 4 | 2 | 2 | **2** |
-| Double Stops | 0 | 0 | 0 | 0 | 0 | **0** |
-| Stop Loss Debits ($) | 140 | 290 | 410 | 1145 | 1335 | **260** |
-| Commission ($) | 30 | 45 | 70 | 60 | 65 | **35** |
-| Expired Credits ($) | 520 | 760 | 840 | 1880 | 660 | **610** |
-| Daily P&L ($) | 350 | 425 | 360 | 675 | -740 | **315** |
-| Daily P&L (EUR) | 294.27 | 357.99 | 303.31 | 568.71 | -624.26 | **~265** |
-| Cumulative P&L ($) | 350 | 775 | 1135 | 1810 | 1070 | **1385** |
-| Cumulative P&L (EUR) | 294.27 | 652.81 | 956.27 | 1524.98 | 902.64 | **~1168** |
-| Win Rate (%) | 80.0 | 66.7 | 33.3 | 40.0 | 0.0 | **50.0** |
-| Capital Deployed ($) | 25000 | 30000 | 32000 | 28000 | **30500** | **20000** |
-| Return on Capital (%) | 1.40 | 1.42 | 1.13 | 2.41 | **-2.43** | **1.58** |
-| Sortino Ratio | 0.00 | 99.99 | 99.99 | 99.99 | **11.49** | **14.69** |
-| Max Loss Stops ($) | 640 | 1170 | 1610 | 3045 | 1885 | **810** |
-| Max Loss Catastrophic ($) | 24360 | 28830 | 30390 | 24955 | **28615** | **19190** |
-| Notes | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement | **Post-settlement (v1.2.8)** |
+| Column | Feb 10 | Feb 11 | Feb 12 | Feb 13 | Feb 17 | Feb 18 | **Feb 19** |
+|--------|--------|--------|--------|--------|--------|--------|--------|
+| Date | 2026-02-10 | 2026-02-11 | 2026-02-12 | 2026-02-13 | 2026-02-17 | 2026-02-18 | **2026-02-19** |
+| SPX Open | 6970.55 | 6988.93 | 6961.62 | 6832.04 | 6814.71 | ~6857 | **6858.05** |
+| SPX Close | 6943.87 | 6939.96 | 6834.14 | 6834.38 | 6845.81 | 6878.07 | **~6861** |
+| SPX High | 6985.81 | 6990.65 | 6973.34 | 6881.57 | 6866.63 | ~6909 | **6877.89** |
+| SPX Low | 6937.67 | 6913.86 | 6824.12 | 6791.34 | 6775.17 | ~6858 | **6836.88** |
+| VIX Open | 17.35 | 16.95 | 17.36 | 20.97 | 21.86 | ~19.37 | **20.42** |
+| VIX Close | 17.81 | 17.65 | 20.74 | 20.62 | 20.29 | ~19.56 | **~20.3** |
+| VIX High | 17.97 | 18.96 | 21.21 | 22.40 | 22.96 | ~20.21 | **21.06** |
+| VIX Low | 17.14 | 16.75 | 17.08 | 18.93 | 19.76 | ~18.48 | **19.82** |
+| Entries Completed | 5 | 6 | 6 | 5 | 5 | 4 | **4** |
+| Entries Skipped | 1 | 0 | 0 | 0 | 0 | 1 | **1** |
+| Full ICs | 0 | 1 | 4 | 4 | 3 | 1 | **2** |
+| One-Sided Entries | 5 | 5 | 2 | 1 | 2 | 3 | **2** |
+| Bullish Signals | 0 | 0 | 0 | 1 | 1 | 0 | **0** |
+| Bearish Signals | 0 | 1 | 2 | 0 | 1 | 0 | **0** |
+| Neutral Signals | 5 | 5 | 4 | 4 | 3 | 4 | **4** |
+| Total Credit ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | **1265** |
+| Call Stops | 0 | 0 | 0 | 1 | 3 | 0 | **0** |
+| Put Stops | 1 | 2 | 4 | 2 | 2 | 2 | **3** |
+| Double Stops | 0 | 0 | 0 | 0 | 0 | 0 | **0** |
+| Stop Loss Debits ($) | 140 | 290 | 410 | 1145 | 1335 | 260 | **380** |
+| Commission ($) | 30 | 45 | 70 | 60 | 65 | 35 | **45** |
+| Expired Credits ($) | 520 | 760 | 840 | 1880 | 660 | 610 | **395** |
+| Daily P&L ($) | 350 | 425 | 360 | 675 | -740 | 315 | **-30** |
+| Daily P&L (EUR) | 294.27 | 357.99 | 303.31 | 568.71 | -624.26 | ~265 | **~-25** |
+| Cumulative P&L ($) | 350 | 775 | 1135 | 1810 | 1070 | 1385 | **1355** |
+| Cumulative P&L (EUR) | 294.27 | 652.81 | 956.27 | 1524.98 | 902.64 | ~1168 | **~1142** |
+| Win Rate (%) | 80.0 | 66.7 | 33.3 | 40.0 | 0.0 | 50.0 | **25.0** |
+| Capital Deployed ($) | 25000 | 30000 | 32000 | 28000 | 30500 | 20000 | **23000** |
+| Return on Capital (%) | 1.40 | 1.42 | 1.13 | 2.41 | -2.43 | 1.58 | **-0.13** |
+| Sortino Ratio | 0.00 | 99.99 | 99.99 | 99.99 | 11.49 | 14.69 | **~12** |
+| Max Loss Stops ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | **1265** |
+| Max Loss Catastrophic ($) | 24360 | 28830 | 30390 | 24955 | 28615 | 19190 | **21735** |
+| Notes | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement (v1.2.8) | **Post-settlement (v1.3.0)** |
 
-**Note**: Feb 18 SPX/VIX OHLC values marked with ~ are derived from bot heartbeat logs (10:00-16:00 ET only). Verify against Google Sheets for exact values.
+**Note**: Feb 18-19 SPX/VIX OHLC values marked with ~ are derived from bot heartbeat logs (10:00-16:00 ET only). Feb 19 SPX Open/High/Low and VIX Open/High/Low from state file OHLC. Verify against Google Sheets for exact values.
 
 ### P&L Verification Formula
 `Daily P&L = Expired Credits - Stop Loss Debits - Commission`
@@ -90,18 +91,19 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - Feb 13: 1880 - 1145 - 60 = 675 ✓
 - Feb 17: 660 - 1335 - 65 = -740 ✓
 - Feb 18: 610 - 260 - 35 = 315 ✓
+- Feb 19: 395 - 380 - 45 = -30 ✓
 
-### Cumulative Metrics (meic_metrics.json as of Feb 18 EOD)
+### Cumulative Metrics (meic_metrics.json as of Feb 19 EOD)
 ```json
 {
-  "cumulative_pnl": 1385.0,
-  "total_entries": 31,
+  "cumulative_pnl": 1355.0,
+  "total_entries": 35,
   "winning_days": 5,
-  "losing_days": 1,
-  "total_credit_collected": 9160.0,
-  "total_stops": 17,
+  "losing_days": 2,
+  "total_credit_collected": 10425.0,
+  "total_stops": 20,
   "double_stops": 0,
-  "last_updated": "2026-02-18T17:00:20.259150-05:00"
+  "last_updated": "2026-02-19"
 }
 ```
 
@@ -270,6 +272,57 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - Entry #4: ($2.70 - $0.50) × 100 = $220, credit was $85 → net loss: $135
 - Total stop loss debits: $260
 
+### Feb 19 (Thursday) - NET P&L: -$30 ★ FIRST DAY WITH v1.3.0 (MKT-017 + MKT-018)
+
+**Market**: Choppy, range-bound with downside pressure. SPX range 41 pts (0.6%). VIX elevated 20-21 — higher premium but put sides vulnerable.
+**Bot Version**: v1.3.0 (MKT-017 daily loss limit -$500, MKT-018 early close ROC 2%)
+**Multiple bot restarts**: 6 PID changes during the day (deployment iterations before market open + recovery tests)
+
+| Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
+|-------|------|--------|------|---------------|--------|---------|------------|
+| #1 | 10:05 | NEUTRAL | Full IC | C:6925 P:6815 | $475 (C:$105, P:$370) | Put STOPPED at 10:07, Call EXPIRED | -$265 + $105 |
+| #2 | 10:35 | NEUTRAL | Full IC | C:6930 P:6820 | $370 (C:$45, P:$325) | Put STOPPED at 10:51, Call EXPIRED | -$280 + $45 |
+| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6810 | $245 | PUT EXPIRED | +$245 |
+| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6815 | $175 | PUT STOPPED at 11:45 | -$175 |
+| #5 | 12:05 | -- | SKIPPED (MKT-016) | -- | -- | Cascade breaker (3 stops) | -- |
+
+**Key observations**:
+- **ALL entries NEUTRAL** — max EMA divergence ~-0.084%, deep within the 0.2% threshold
+- **MKT-016 CASCADE BREAKER TRIGGERED** at 11:45 ET (3rd stop: Entry #4 put) — **blocked Entry #5**
+- MKT-017 daily loss limit NOT triggered (realized P&L = -$380, threshold is -$500, buffer of $120)
+- MKT-018 early close NOT triggered (ROC was negative all day, ~-0.26% at 3:59 PM vs 2.0% threshold)
+- Entry #1 put stopped just 2 minutes after placement — fastest stop of the entire period
+- Entry #3 was the ONLY clean winner — put-only (MKT-011 converted due to call credit $45 < $50)
+- MKT-011 converted Entries #3 and #4 to put-only (call credits $45 and $12.50, below $50 min)
+- Entry #4 call credit was only $12.50 because MKT-013 shifted call strikes from 6925/6975 to 6935/6985 (further OTM)
+- Total expired credits ($395) nearly offset total stop debits ($380) — day was near breakeven before commission
+- 25% entry win rate (1 of 4 entries with 0 stops) — worst entry win rate after Feb 17's 0%
+
+### Stop Timing Log (Feb 19)
+
+```
+10:05 ET - Entry #1 PLACED (NEUTRAL full IC, C:6925/6960 P:6815/6755, $475 credit)
+10:07 ET - Entry #1 PUT STOPPED (2 min after placement!)
+              short_put fill: $6.10, long_put fill: $1.25
+              Close cost: ($6.10-$1.25)×100=$485, credit was $370 → net side loss: ~$115
+              But IC breakeven: total credit $475, stop debit ~$475 → net entry loss: ~$0 + commission
+10:35 ET - Entry #2 PLACED (NEUTRAL full IC, C:6930/6990 P:6820/6760, $370 credit)
+10:51 ET - Entry #2 PUT STOPPED (16 min after placement)
+              short_put fill: $5.00, long_put fill: $0.90
+              Close cost: ($5.00-$0.90)×100=$410, credit was $325 → net side loss: ~$85
+              === 2 stops, MKT-016 not yet triggered ===
+11:05 ET - Entry #3 PLACED (NEUTRAL → put-only MKT-011, P:6810/6750, $245 credit)
+11:35 ET - Entry #4 PLACED (NEUTRAL → put-only MKT-011, P:6815/6765, $175 credit)
+              Call strikes shifted by MKT-013: 6925→6935, 6975→6985 (overlap with #1/#2)
+              Call credit after shift: $12.50 < $50 → MKT-011 converted to put-only
+11:45 ET - Entry #4 PUT STOPPED (10 min after placement)
+              === 3 stops total — MKT-016 CASCADE BREAKER TRIGGERED ===
+12:05 ET - Entry #5 SKIPPED (MKT-016: 3 stops reached threshold of 3)
+15:59 ET - Last heartbeat: P&L: $15.00 gross, -$30.00 net ($45 comm)
+              MKT-018-SHADOW: ROC=-0.26% / 2.0% threshold
+16:00+ ET - Settlement: 6 positions expired, +$395 expired credits added
+```
+
 ---
 
 ## 4. Market Conditions
@@ -284,7 +337,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 13 | Fri | Consolidation | +0.03% | 90 pts (1.3%) | 21 (elevated) | CPI soft (2.4% vs 2.5%) |
 | Feb 14-16 | -- | CLOSED | -- | -- | -- | Presidents' Day weekend |
 | Feb 17 | Tue | **V-shape reversal** | +0.5% | **92 pts (1.3%)** | **22 (elevated)** | Post-holiday volatility |
-| **Feb 18** | **Wed** | **Quiet recovery** | **+0.3%** | **~52 pts (0.8%)** | **19 (normal)** | **VIX normalizing, low premium** |
+| Feb 18 | Wed | Quiet recovery | +0.3% | ~52 pts (0.8%) | 19 (normal) | VIX normalizing, low premium |
+| **Feb 19** | **Thu** | **Choppy, downside** | **~+0.05%** | **41 pts (0.6%)** | **20 (elevated)** | **VIX back up, fast put stops** |
 
 ### Expected Move vs Actual Range
 
@@ -295,7 +349,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 12 | 19.1 | ~84 pts | 149 pts | 1.77x | FAR above expected (extreme) |
 | Feb 13 | 20.8 | ~90 pts | 90 pts | 1.00x | At expected (normal) |
 | Feb 17 | 21.4 | ~92 pts | 92 pts | 1.00x | At expected (normal) |
-| **Feb 18** | **~19.5** | **~85 pts** | **~52 pts** | **0.61x** | **Below expected (calm)** |
+| Feb 18 | ~19.5 | ~85 pts | ~52 pts | 0.61x | Below expected (calm) |
+| **Feb 19** | **~20.4** | **~89 pts** | **41 pts** | **0.46x** | **Far below expected (compressed)** |
 
 **Key insight**: Feb 17 was NOT an abnormal range day. The 92-point range was exactly at its expected move. The damage came from the SHAPE (V-reversal), not the MAGNITUDE.
 
@@ -311,40 +366,40 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 ## 5. Key Performance Metrics
 
-### Financial Metrics (6 days: Feb 10-18)
+### Financial Metrics (7 days: Feb 10-19)
 
 | Metric | Value |
 |--------|-------|
-| Total Credit Collected | $9,160 |
-| Total Expired Credits | $5,270 (57.5% of credit) |
-| Total Stop Loss Debits | $3,580 (39.1% of credit) |
-| Total Commission | $305 (3.3% of credit) |
-| Net P&L | +$1,385 (15.1% net capture rate) |
-| Average Daily Credit | $1,527 |
-| Average Daily P&L | +$231 |
+| Total Credit Collected | $10,425 |
+| Total Expired Credits | $5,665 (54.3% of credit) |
+| Total Stop Loss Debits | $3,960 (38.0% of credit) |
+| Total Commission | $350 (3.4% of credit) |
+| Net P&L | +$1,355 (13.0% net capture rate) |
+| Average Daily Credit | $1,489 |
+| Average Daily P&L | +$194 |
 | Best Day | +$675 (Feb 13) |
 | Worst Day | -$740 (Feb 17) |
-| Win/Loss Day Ratio | 5:1 |
-| Win/Loss Dollar Ratio | 2.87:1 ($2,125 / $740) |
+| Win/Loss Day Ratio | 5:2 |
+| Win/Loss Dollar Ratio | 2.76:1 ($2,125 / $770) |
 
 ### Entry Performance
 
 | Metric | Value |
 |--------|-------|
-| Total Entries | 31 |
-| Clean Wins (0 stops) | 14 (45.2%) |
-| Partial Wins (1 side stopped, IC) | 10 (32.3%) |
-| Full Losses (stopped, 1-sided) | 7 (22.6%) |
-| Entries with Call Stop | 4 (12.9%) |
-| Entries with Put Stop | 13 (41.9%) |
+| Total Entries | 35 |
+| Clean Wins (0 stops) | 15 (42.9%) |
+| Partial Wins (1 side stopped, IC) | 12 (34.3%) |
+| Full Losses (stopped, 1-sided) | 8 (22.9%) |
+| Entries with Call Stop | 4 (11.4%) |
+| Entries with Put Stop | 16 (45.7%) |
 | Double Stops | 0 (0%) |
 
 ### Entry Type Distribution
 
 | Entry Type | Count | Stops | Stop Rate | Avg Credit |
 |------------|-------|-------|-----------|------------|
-| Full IC | 12 | 9 sides stopped* | ~38% per side | $454 |
-| Put-only (MKT-011) | 13 | 6 | 46.2% | $136 |
+| Full IC | 14 | 11 sides stopped* | ~39% per side | $437 |
+| Put-only (MKT-011) | 15 | 8 | 53.3% | $145 |
 | Call-only (trend) | 4 | 3 | 75% | $220 |
 | Put-only (trend) | 2 | 2 | 100% | $333 |
 
@@ -360,6 +415,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 13 | 3 | Spread throughout day | 0 | $0 |
 | **Feb 17** | **5** | **3 in 11 minutes** | **2 entries placed after** | **-$255** |
 | Feb 18 | 2 | Simultaneous (13:53) | 0 (Entry #5 skipped by MKT-011 before stops) | $0 |
+| **Feb 19** | **3** | **3 in 98 min (10:07-11:45)** | **1 (#5 blocked by MKT-016)** | **$0 (saved)** |
 
 ### Trend Filter Accuracy
 
@@ -371,6 +427,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 13 | 4 NEUTRAL, 1 BULLISH | Mixed - BULLISH call was right but put got stopped anyway | Neutral |
 | Feb 17 | 3 NEUTRAL, 1 BEARISH, 1 BULLISH | **WRONG** - both directional calls were reversed | **STRONG NEGATIVE** - amplified losses |
 | Feb 18 | 4 NEUTRAL | Yes (range-bound, max 0.034%) | Neutral - MKT-011 overrode anyway |
+| **Feb 19** | **4 NEUTRAL** | **Yes (choppy, max ~-0.084%)** | **Neutral - MKT-011 overrode #3/#4** |
 
 ---
 
@@ -615,6 +672,44 @@ When reviewing performance after implementing improvements, fill in this section
 
 **Feb 18 Assessment**: Calm, range-bound day with low VIX. Neither Rec 9.3 (EMA threshold) nor Rec 9.1 (cascade breaker) had an opportunity to demonstrate impact — no directional signals were generated and only 2 stops occurred. The real test will come on a volatile day with V-shaped reversals or fast stop cascades.
 
+#### Post-Improvement Day 2: Feb 19 (v1.3.0)
+
+| Column | Feb 19 |
+|--------|--------|
+| Date | 2026-02-19 |
+| SPX Open | 6858.05 |
+| SPX Close | ~6861 |
+| SPX Range | 41 pts (0.6%) |
+| VIX Open | 20.42 |
+| VIX Close | ~20.3 |
+| Entries | 4 (+1 skipped by MKT-016) |
+| Full ICs | 2 |
+| One-Sided | 2 (MKT-011 put-only) |
+| Total Credit | $1,265 |
+| Call Stops | 0 |
+| Put Stops | 3 |
+| Stop Debits | $380 |
+| Commission | $45 |
+| Expired Credits | $395 |
+| Daily P&L | -$30 |
+| Cumulative P&L | $1,355 |
+
+#### Improvement Impact Assessment — Feb 19
+
+| Rec | Implemented? | Triggered? | Actual Impact | Assessment |
+|-----|-------------|------------|---------------|------------|
+| 9.3 EMA Threshold (0.2%) | v1.2.8 | **NO** — all signals deep NEUTRAL (max ~-0.084%) | $0 (no directional signals to filter) | Cannot assess on NEUTRAL day |
+| 9.1 Stop Cascade (3 stops) | v1.2.8 | **YES** — 3rd stop at 11:45, blocked Entry #5 | **Prevented 1 entry** (unknown savings — depends on whether Entry #5 would have been stopped) | **FIRST REAL TRIGGER** |
+| MKT-017 Daily Loss Limit | v1.2.9 | **NO** — realized P&L = -$380, threshold = -$500, buffer of $120 | $0 (never triggered) | Close but not triggered — calibration appears correct |
+| MKT-018 Early Close (ROC) | v1.3.0 | **NO** — ROC was negative all day (~-0.26% at 3:59 PM vs 2.0% threshold) | $0 (never triggered) | Cannot assess on losing day — designed for profitable days |
+| 9.4 Trend Persistence | Deferred | | | |
+| 9.2 Stop Cooldown | Deferred | | | |
+| 9.5 Range Awareness | Deferred | | | |
+| 9.6 Holiday Caution | Deferred | | | |
+| 9.7 Entry #5 Monitor | Ongoing | Entry #5 SKIPPED by MKT-016 | Cannot assess — blocked by cascade | |
+
+**Feb 19 Assessment**: First day where MKT-016 cascade breaker actually triggered in live trading. Three put stops in 98 minutes (10:07, 10:51, 11:45) triggered the 3-stop threshold, blocking Entry #5 at 12:05. This prevented adding more exposure to a day that was already generating losses. Without the cascade breaker, Entry #5 would have been placed — possibly another put-only (MKT-011) that could have been stopped given the put-heavy loss pattern. MKT-017 daily loss limit came within $120 of triggering (-$380 vs -$500 threshold) — the calibration from Feb 13's -$450 trough is holding. MKT-018 early close had no opportunity on a losing day (designed for profitable days). The -$30 result was near breakeven — expired credits ($395) nearly covered stop debits ($380), with commission ($45) making it a small loss.
+
 #### Week 2 Performance Template (Date Range: ___ to ___)
 
 | Column | Day 1 | Day 2 | Day 3 | Day 4 | Day 5 |
@@ -746,6 +841,18 @@ When reviewing performance after implementing improvements, fill in this section
 
 **Note**: All divergences were <0.04% — deep NEUTRAL zone. Zero impact from threshold change. Max divergence of the day was +0.034% at Entry #1. This is the first day with the 0.2% threshold active, but it made no difference since all signals were deep NEUTRAL at both thresholds.
 
+### Feb 19 (Thursday - Choppy Downside, v1.3.0)
+
+| Entry | Time (ET) | EMA 20 | EMA 40 | Divergence % | Signal at 0.1% | Signal at 0.2% | Change? |
+|-------|-----------|--------|--------|-------------|-----------------|-----------------|---------|
+| #1 | 10:05 | — | — | ~-0.023% | NEUTRAL | NEUTRAL | No |
+| #2 | 10:35 | — | — | ~-0.044% | NEUTRAL | NEUTRAL | No |
+| #3 | 11:05 | — | — | ~-0.084% | NEUTRAL | NEUTRAL | No |
+| #4 | 11:35 | — | — | ~-0.060% | NEUTRAL | NEUTRAL | No |
+| #5 | 12:05 | — | — | N/A (skipped by MKT-016) | NEUTRAL | NEUTRAL | No |
+
+**Note**: All divergences were <0.09% — deep NEUTRAL zone. Max divergence ~-0.084% at Entry #3. Zero impact from threshold change. MKT-016 cascade breaker blocked Entry #5 before any EMA check.
+
 ### Summary: Entries Affected by 0.2% Threshold
 
 | Day | Entry | Old Signal | New Signal | Old Type | New Type |
@@ -855,6 +962,25 @@ When reviewing performance after implementing improvements, fill in this section
 | Entry #4 PUT STOPPED | 13:53 | Close cost: ($2.70-$0.50)×100=$220 → net loss: $135 |
 
 **Cascade breaker (threshold=3)**: Never triggers (only 2 stops). Zero impact. Entry #5 was already skipped by MKT-011 before any stops occurred.
+
+### Feb 19 (Thursday - v1.3.0 Active) — 3 stops
+
+| Event | Time (ET) | Details |
+|-------|-----------|---------|
+| Entry #1 placed | 10:05 | Full IC (NEUTRAL), C:6925/6960 P:6815/6755, $475 credit |
+| **Entry #1 PUT STOPPED** | **10:07** | **1st stop — 2 min after placement! SP $6.10, LP $1.25** |
+| Entry #2 placed | 10:35 | Full IC (NEUTRAL), C:6930/6990 P:6820/6760, $370 credit |
+| **Entry #2 PUT STOPPED** | **10:51** | **2nd stop — SP $5.00, LP $0.90** |
+| Entry #3 placed | 11:05 | Put-only (NEUTRAL→MKT-011, call $45 < $50), P:6810/6750, $245 credit |
+| Entry #4 placed | 11:35 | Put-only (NEUTRAL→MKT-011, call $12.50 < $50 post-MKT-013), P:6815/6765, $175 credit |
+| **Entry #4 PUT STOPPED** | **11:45** | **3rd stop — MKT-016 CASCADE BREAKER TRIGGERS** |
+| ~~Entry #5~~ | ~~12:05~~ | **BLOCKED by MKT-016** (3 stops reached threshold) |
+| MKT-018 shadow | 15:59 | ROC=-0.26% / 2.0% threshold — not triggered |
+| Settlement | ~16:00+ | 6 positions expired: Entry #1 call ($105), Entry #2 call ($45), Entry #3 put ($245) |
+
+**Cascade breaker (threshold=3)**: Triggers at 11:45 (3rd stop), blocks Entry #5. **First live trigger of MKT-016.**
+**MKT-017 (daily loss limit)**: NOT triggered. Realized P&L = -$380 vs -$500 threshold. $120 buffer.
+**MKT-018 (early close)**: NOT triggered. ROC was negative all day — designed for profitable days only.
 
 ---
 
@@ -1012,7 +1138,11 @@ All entries NEUTRAL at both thresholds (max divergence 0.035%). No entries affec
 | Feb 12 | 4 | 12:54 | 12:35 | 0 (all placed) | **$0** |
 | Feb 13 | 3 | ~14:59 | 12:06 | 0 (all placed) | **$0** |
 | **Feb 17** | **5** | **11:13** | **11:05** | **2 (#4, #5)** | **+$195** |
-| **TOTAL** | | | | | **+$195** |
+| Feb 18 | 2 | N/A | 12:05 (skipped by MKT-011) | 0 | **$0** |
+| **Feb 19** | **3** | **11:45** | **11:35** | **1 (#5)** | **Unknown*** |
+| **TOTAL** | | | | | **+$195 confirmed + Feb 19 TBD** |
+
+*Feb 19 Entry #5 was blocked by cascade breaker. Impact unknown — depends on what Entry #5 would have done (likely another MKT-011 put-only that may or may not have been stopped).
 
 ### Feb 17 Blocked Entry Breakdown
 
