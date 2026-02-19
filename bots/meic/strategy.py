@@ -6674,7 +6674,14 @@ class MEICStrategy:
             "capital_deployed": capital_deployed,
             "return_on_capital": (net_pnl / capital_deployed * 100) if capital_deployed > 0 else 0,
             "sortino_ratio": self._calculate_sortino_ratio(net_pnl, capital_deployed),
-            "notes": "Post-settlement" if self._settlement_reconciliation_complete else ""
+            # MKT-018: Early close columns (safe for base MEIC which doesn't have these attrs)
+            "early_close": "Yes" if getattr(self, '_early_close_triggered', False) else "No",
+            "early_close_time": getattr(self, '_early_close_time', None).strftime('%H:%M ET') if getattr(self, '_early_close_time', None) else "",
+            "notes": (
+                f"MKT-018 Early close at {getattr(self, '_early_close_time', None).strftime('%I:%M %p ET')}"
+                if getattr(self, '_early_close_triggered', False) and getattr(self, '_early_close_time', None)
+                else ("Post-settlement" if self._settlement_reconciliation_complete else "")
+            ),
         }
 
         # Convert P&L to EUR if exchange rate available

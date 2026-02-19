@@ -14,6 +14,7 @@ Risk Management (beyond base MEIC):
 - MKT-011: Pre-entry credit gate (skip/convert if credit non-viable)
 - MKT-016: Stop cascade breaker (pause after 3 total stops in a day)
 - MKT-017: Daily loss limit (pause after -$500 realized P&L intraday)
+- MKT-018: Early close on ROC >= 2% (close all positions after entries placed)
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
@@ -29,6 +30,7 @@ import json
 import logging
 import os
 import time
+import threading
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
@@ -127,6 +129,9 @@ class TFIronCondorEntry(IronCondorEntry):
     # Fix #59: Track EMA values at entry time for Trades tab logging
     ema_20_at_entry: Optional[float] = None
     ema_40_at_entry: Optional[float] = None
+
+    # MKT-018: True if closed early by ROC threshold (display only)
+    early_closed: bool = False
 
     @property
     def is_one_sided(self) -> bool:
@@ -241,6 +246,18 @@ class MEICTFStrategy(MEICStrategy):
         self._daily_loss_limit_triggered = False
         logger.info(f"  Daily loss limit: pause after -${self.max_daily_loss:.0f} realized P&L")
 
+        # MKT-018: Early close based on Return on Capital (ROC)
+        # Closes ALL positions when day's ROC reaches threshold after all entries placed.
+        # ROC = (net_pnl - close_cost) / capital_deployed
+        # close_cost = active_legs × cost_per_position ($2.50 commission + $2.50 slippage)
+        self.early_close_enabled = bool(strategy_config.get("early_close_enabled", True))
+        self.early_close_roc_threshold = float(strategy_config.get("early_close_roc_threshold", 0.02))
+        self.early_close_cost_per_position = float(strategy_config.get("early_close_cost_per_position", 5.00))
+        self._early_close_triggered = False
+        self._early_close_time = None   # ET datetime when early close triggered
+        self._early_close_pnl = None    # Net P&L locked in at early close
+        logger.info(f"  Early close (MKT-018): {'ENABLED' if self.early_close_enabled else 'DISABLED'} at {self.early_close_roc_threshold*100:.1f}% ROC")
+
     # =========================================================================
     # ENTRY GATING (MKT-016, MKT-017)
     # =========================================================================
@@ -298,6 +315,376 @@ class MEICTFStrategy(MEICStrategy):
 
         # Delegate to parent for normal time-window checks
         return super()._should_attempt_entry(now)
+
+    # =========================================================================
+    # MKT-018: EARLY CLOSE BASED ON RETURN ON CAPITAL (ROC)
+    # =========================================================================
+
+    def _handle_monitoring(self) -> str:
+        """
+        Override parent to add MKT-018 early close check after stop loss monitoring.
+
+        Flow: parent handles stops + entry scheduling → then we check ROC threshold.
+        Early close only runs AFTER all entries are placed and if positions are open.
+        """
+        # Run parent monitoring (stop checks, entry scheduling, etc.)
+        result = super()._handle_monitoring()
+
+        # MKT-018: Check early close AFTER parent monitoring completes
+        # Only check if:
+        # 1. Early close is enabled
+        # 2. Not already triggered
+        # 3. All entries have been placed (or skipped/failed)
+        # 4. There are active positions to close
+        # 5. Not in last 15 minutes before close (positions will expire naturally)
+        if (self.early_close_enabled
+            and not self._early_close_triggered
+            and self._next_entry_index >= len(self.entry_times)
+            and len(self.daily_state.active_entries) > 0):
+
+            now = get_us_market_time()
+            if now.hour < 15 or (now.hour == 15 and now.minute < 45):
+                early_close_result = self._check_early_close()
+                if early_close_result:
+                    return early_close_result
+
+        return result
+
+    def _check_early_close(self) -> Optional[str]:
+        """
+        MKT-018: Check if Return on Capital threshold is met for early close.
+
+        Calculates: ROC = (net_pnl - close_cost) / capital_deployed
+        If ROC >= threshold, triggers _execute_early_close().
+
+        Returns:
+            Action string if early close triggered, None otherwise.
+        """
+        # Calculate current net P&L (same as heartbeat: realized + unrealized - commission)
+        unrealized = self._get_total_saxo_pnl()
+        total_pnl = self.daily_state.total_realized_pnl + unrealized
+        net_pnl = total_pnl - self.daily_state.total_commission
+
+        # Count active position LEGS (not entries)
+        active_legs = self._count_active_position_legs()
+        close_cost = active_legs * self.early_close_cost_per_position
+
+        # Calculate ROC
+        capital_deployed = self._calculate_capital_deployed()
+        if capital_deployed <= 0:
+            return None
+
+        pnl_after_close = net_pnl - close_cost
+        roc = pnl_after_close / capital_deployed
+
+        if roc >= self.early_close_roc_threshold:
+            logger.warning(
+                f"MKT-018 EARLY CLOSE TRIGGERED: ROC {roc*100:.2f}% >= "
+                f"{self.early_close_roc_threshold*100:.1f}% threshold | "
+                f"net_pnl=${net_pnl:.2f} - close_cost=${close_cost:.2f} = "
+                f"${pnl_after_close:.2f} / capital=${capital_deployed:.0f}"
+            )
+            return self._execute_early_close(roc)
+
+        return None
+
+    def _count_active_position_legs(self) -> int:
+        """Count individual position legs still open across all active entries."""
+        count = 0
+        for entry in self.daily_state.active_entries:
+            if not entry.call_side_stopped and not entry.call_side_expired and not getattr(entry, 'call_side_skipped', False):
+                if entry.short_call_position_id:
+                    count += 1
+                if entry.long_call_position_id:
+                    count += 1
+            if not entry.put_side_stopped and not entry.put_side_expired and not getattr(entry, 'put_side_skipped', False):
+                if entry.short_put_position_id:
+                    count += 1
+                if entry.long_put_position_id:
+                    count += 1
+        return count
+
+    def _execute_early_close(self, roc: float) -> str:
+        """
+        MKT-018: Close ALL active positions to lock in profit.
+
+        This is an IRREVERSIBLE action — once triggered, all positions are closed
+        via market orders and the daily summary is sent immediately.
+
+        Args:
+            roc: Return on Capital that triggered the close
+        """
+        now = get_us_market_time()
+        self._early_close_triggered = True
+        self._early_close_time = now
+
+        logger.info("=" * 60)
+        logger.info("MKT-018: EXECUTING EARLY CLOSE - closing all active positions")
+        logger.info("=" * 60)
+
+        # Phase 1: Close each active entry's open legs
+        entries_closed = 0
+        legs_closed = 0
+        legs_failed = 0
+        deferred_legs = []  # For async fill lookup
+
+        # Take a snapshot of active entries (list may change as we mark sides)
+        active_snapshot = list(self.daily_state.active_entries)
+
+        for entry in active_snapshot:
+            entry_legs_closed, entry_legs_failed, entry_deferred = self._close_entry_early(entry)
+            legs_closed += entry_legs_closed
+            legs_failed += entry_legs_failed
+            deferred_legs.extend(entry_deferred)
+            if entry_legs_closed > 0 or entry_legs_failed > 0:
+                entries_closed += 1
+
+        # Phase 2: Run deferred fill lookup in background thread if any legs had fill_price=None
+        if deferred_legs:
+            self._spawn_async_early_close_fill_correction(deferred_legs)
+
+        # Phase 3: Unregister ALL positions from registry
+        for entry in self.daily_state.entries:
+            for leg in ["short_call", "long_call", "short_put", "long_put"]:
+                pos_id = getattr(entry, f"{leg}_position_id", None)
+                if pos_id:
+                    try:
+                        self.registry.unregister(pos_id)
+                    except Exception:
+                        pass  # Position may already be unregistered
+                    setattr(entry, f"{leg}_position_id", None)
+                    setattr(entry, f"{leg}_uic", 0)
+
+        # Phase 4: Mark bot state
+        self.state = MEICState.DAILY_COMPLETE
+        self._settlement_reconciliation_complete = True  # No settlement needed
+        self._daily_summary_sent = True  # Prevent duplicate alert in _handle_daily_complete
+
+        # Phase 5: Record the locked-in P&L
+        final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
+        self._early_close_pnl = final_net_pnl
+
+        # Phase 6: Save state before any logging (crash safety)
+        self._save_state_to_disk()
+
+        # Phase 7: Send alert (MEDIUM priority — profit locked in)
+        try:
+            capital_deployed = self._calculate_capital_deployed()
+            self.alert_service.send_alert(
+                alert_type=AlertType.PROFIT_TARGET,
+                title=f"MKT-018 Early Close: +${final_net_pnl:.2f} ({roc*100:.1f}% ROC)",
+                message=(
+                    f"Closed all {entries_closed} entries ({legs_closed} legs) at {now.strftime('%I:%M %p ET')}\n"
+                    f"ROC: {roc*100:.2f}% (threshold: {self.early_close_roc_threshold*100:.1f}%)\n"
+                    f"Net P&L: ${final_net_pnl:.2f} | Capital: ${capital_deployed:,.0f}"
+                ),
+                priority=AlertPriority.MEDIUM,
+            )
+        except Exception as e:
+            logger.error(f"MKT-018: Alert failed: {e}")
+
+        # Phase 8: Log daily summary IMMEDIATELY
+        # No need to wait for settlement — all positions are already closed.
+        try:
+            self.log_daily_summary()
+            self.log_account_summary()
+            self.log_performance_metrics()
+            self.log_position_snapshot()
+        except Exception as e:
+            logger.error(f"MKT-018: Daily summary logging failed: {e}")
+
+        logger.info("=" * 60)
+        logger.info(
+            f"MKT-018: EARLY CLOSE COMPLETE | {entries_closed} entries, "
+            f"{legs_closed} legs closed, {legs_failed} failed | "
+            f"Net P&L: ${final_net_pnl:.2f} | ROC: {roc*100:.2f}%"
+        )
+        logger.info("=" * 60)
+
+        return (
+            f"MKT-018 EARLY CLOSE: +${final_net_pnl:.2f} ({roc*100:.1f}% ROC) - "
+            f"all positions closed at {now.strftime('%I:%M %p ET')}"
+        )
+
+    def _close_entry_early(self, entry) -> Tuple[int, int, list]:
+        """
+        Close all open legs of an entry for MKT-018 early close.
+
+        Returns: (legs_closed, legs_failed, deferred_legs)
+            deferred_legs: List of (entry, side_name, leg_name, order_id, uic) for async lookup
+        """
+        legs_closed = 0
+        legs_failed = 0
+        deferred_legs = []
+
+        sides_to_close = []
+
+        # Check call side
+        if (not entry.call_side_stopped and not entry.call_side_expired
+            and not getattr(entry, 'call_side_skipped', False) and entry.short_call_position_id):
+            sides_to_close.append(("call", [
+                ("short_call", entry.short_call_position_id, entry.short_call_uic),
+                ("long_call", entry.long_call_position_id, entry.long_call_uic),
+            ]))
+
+        # Check put side
+        if (not entry.put_side_stopped and not entry.put_side_expired
+            and not getattr(entry, 'put_side_skipped', False) and entry.short_put_position_id):
+            sides_to_close.append(("put", [
+                ("short_put", entry.short_put_position_id, entry.short_put_uic),
+                ("long_put", entry.long_put_position_id, entry.long_put_uic),
+            ]))
+
+        for side_name, legs in sides_to_close:
+            side_close_cost = 0.0
+            side_legs_closed = 0
+
+            for leg_name, pos_id, uic in legs:
+                if not pos_id:
+                    continue
+                success, fill_price, order_id = self._close_position_with_retry(
+                    pos_id, leg_name, uic=uic, entry_number=entry.entry_number
+                )
+                if success:
+                    legs_closed += 1
+                    side_legs_closed += 1
+                    if fill_price and fill_price > 0:
+                        cost = fill_price * 100 * entry.contracts
+                        if leg_name.startswith("short"):
+                            side_close_cost += cost  # Pay to buy back short
+                        else:
+                            side_close_cost -= cost  # Receive from selling long
+                    else:
+                        # Deferred fill lookup needed — capture UIC now before Phase 3 clears it
+                        deferred_legs.append((entry, side_name, leg_name, order_id, uic))
+                    # Track close commission
+                    entry.close_commission += self.commission_per_leg
+                    self.daily_state.total_commission += self.commission_per_leg
+                else:
+                    legs_failed += 1
+                    logger.error(f"MKT-018: Failed to close {leg_name} for Entry #{entry.entry_number}")
+
+            # Mark side as early-closed (reuse expired flag for compatibility)
+            if side_legs_closed > 0:
+                credit = getattr(entry, f"{side_name}_spread_credit", 0)
+                setattr(entry, f"{side_name}_side_expired", True)
+                entry.early_closed = True
+
+                if credit > 0 and side_close_cost != 0:
+                    # Net P&L for this side = credit - net_close_cost
+                    # side_close_cost is positive when we spent more buying back short than
+                    # we received from selling long (net outflow)
+                    self.daily_state.total_realized_pnl += credit
+                    self.daily_state.total_realized_pnl -= side_close_cost
+                    logger.info(
+                        f"  Entry #{entry.entry_number} {side_name} side early-closed: "
+                        f"credit=${credit:.2f}, close_cost=${side_close_cost:.2f}, "
+                        f"net=${credit - side_close_cost:.2f}"
+                    )
+                elif credit > 0:
+                    # No fill prices yet — use credit only, deferred lookup will correct
+                    self.daily_state.total_realized_pnl += credit
+                    logger.info(
+                        f"  Entry #{entry.entry_number} {side_name} side early-closed: "
+                        f"credit=${credit:.2f} (fill prices deferred)"
+                    )
+
+            # Mark entry complete if all sides now done
+            call_done = entry.call_side_stopped or entry.call_side_expired or getattr(entry, 'call_side_skipped', False)
+            put_done = entry.put_side_stopped or entry.put_side_expired or getattr(entry, 'put_side_skipped', False)
+            if getattr(entry, 'call_only', False):
+                entry.is_complete = call_done
+            elif getattr(entry, 'put_only', False):
+                entry.is_complete = put_done
+            else:
+                entry.is_complete = call_done and put_done
+
+        return legs_closed, legs_failed, deferred_legs
+
+    def _spawn_async_early_close_fill_correction(self, deferred_legs: list):
+        """
+        MKT-018: Spawn background thread to look up actual fill prices for early close legs.
+
+        Same pattern as FIX #75's _spawn_async_fill_correction but handles multiple
+        entries/sides at once. Non-blocking — main loop continues immediately.
+        """
+        def worker():
+            try:
+                logger.info(
+                    f"MKT-018: Deferred fill lookup for {len(deferred_legs)} legs, "
+                    f"waiting 3s for Saxo sync..."
+                )
+                time.sleep(3)
+
+                total_correction = 0.0
+                for entry, side_name, leg_name, order_id, uic in deferred_legs:
+                    fill_price = None
+                    source = None
+
+                    try:
+                        # Tier 1: Activities endpoint
+                        # Note: uic is captured at close time (5th tuple element) because
+                        # Phase 3 of _execute_early_close clears entry UICs to 0
+                        if order_id:
+                            filled, fill_details = self.client.check_order_filled_by_activity(
+                                order_id=order_id,
+                                uic=uic,
+                                max_retries=3,
+                                retry_delay=1.5
+                            )
+                            if filled and fill_details:
+                                fp = fill_details.get("fill_price", 0)
+                                if fp and fp > 0:
+                                    fill_price = fp
+                                    source = "activities"
+
+                        # Tier 2: Closed positions endpoint
+                        if fill_price is None and uic:
+                            buy_or_sell = "Sell" if leg_name.startswith("short") else "Buy"
+                            closed_info = self.client.get_closed_position_price(uic, buy_or_sell=buy_or_sell)
+                            if closed_info:
+                                cp = closed_info.get("closing_price")
+                                if cp and cp > 0:
+                                    fill_price = cp
+                                    source = "closedpositions"
+
+                        if fill_price is not None:
+                            actual_cost = fill_price * 100 * entry.contracts
+                            if leg_name.startswith("short"):
+                                # We paid to buy back — this is a cost
+                                self.daily_state.total_realized_pnl -= actual_cost
+                                total_correction -= actual_cost
+                            else:
+                                # We received from selling — this reduces cost
+                                self.daily_state.total_realized_pnl += actual_cost
+                                total_correction += actual_cost
+                            logger.info(
+                                f"MKT-018: Deferred fill for Entry #{entry.entry_number} {leg_name} "
+                                f"via {source}: ${fill_price:.2f}"
+                            )
+                        else:
+                            logger.warning(
+                                f"MKT-018: No fill price found for Entry #{entry.entry_number} {leg_name}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"MKT-018: Deferred lookup error for {leg_name}: {e}")
+
+                if abs(total_correction) > 0.01:
+                    self._save_state_to_disk()
+                    logger.info(f"MKT-018: Async fill correction applied: ${total_correction:+.2f}")
+                else:
+                    logger.info("MKT-018: Async fill lookup complete (no correction needed)")
+
+            except Exception as e:
+                logger.warning(f"MKT-018: Async fill correction thread failed: {e}")
+
+        thread = threading.Thread(
+            target=worker, daemon=True,
+            name="mkt018_fill_correction"
+        )
+        thread.start()
+        self._pending_fill_corrections.append(thread)
+        logger.info(f"MKT-018: Spawned async fill correction thread for {len(deferred_legs)} legs")
 
     # =========================================================================
     # TREND DETECTION
@@ -1446,6 +1833,32 @@ class MEICTFStrategy(MEICStrategy):
         status['ema_long'] = self._last_ema_long
         status['ema_diff_pct'] = self._last_ema_diff_pct
 
+        # MKT-018: Early close status for heartbeat display
+        if self.early_close_enabled:
+            if self._early_close_triggered:
+                status['early_close_status'] = {
+                    'triggered': True,
+                    'trigger_time': self._early_close_time.strftime('%I:%M %p ET') if self._early_close_time else 'N/A',
+                    'locked_pnl': self._early_close_pnl or 0,
+                }
+            elif self._next_entry_index >= len(self.entry_times) and len(self.daily_state.active_entries) > 0:
+                unrealized = status.get('unrealized_pnl', 0)
+                total_pnl = status['realized_pnl'] + unrealized
+                net_pnl_val = total_pnl - status.get('total_commission', 0)
+                active_legs = self._count_active_position_legs()
+                close_cost = active_legs * self.early_close_cost_per_position
+                capital = status.get('capital_deployed', 0)
+                roc = (net_pnl_val - close_cost) / capital if capital > 0 else 0
+                status['early_close_status'] = {
+                    'tracking': True,
+                    'roc': roc,
+                    'threshold': self.early_close_roc_threshold,
+                    'close_cost': close_cost,
+                    'active_legs': active_legs,
+                }
+            else:
+                status['early_close_status'] = {}
+
         return status
 
     def get_detailed_position_status(self) -> List[str]:
@@ -1627,7 +2040,11 @@ class MEICTFStrategy(MEICStrategy):
                 "daily_loss_percent": metrics["pnl_percent"],
                 "circuit_breaker": metrics["circuit_breaker_open"],
                 # State
-                "state": metrics["state"]
+                "state": metrics["state"],
+                # MKT-018: Early close status
+                "early_close": "TRIGGERED" if self._early_close_triggered else (
+                    "Tracking" if (self._next_entry_index >= len(self.entry_times) and len(self.daily_state.active_entries) > 0) else "Waiting"
+                ),
             })
         except Exception as e:
             logger.error(f"Failed to log MEIC-TF account summary: {e}")
@@ -1699,6 +2116,9 @@ class MEICTFStrategy(MEICStrategy):
                     "max_loss_catastrophic": self._calculate_max_loss_catastrophic(),
                     "capital_deployed": capital_deployed,
                     "return_on_capital": (net_pnl / capital_deployed * 100) if capital_deployed > 0 else 0,
+                    # MKT-018: Early close tracking
+                    "early_close_triggered": self._early_close_triggered,
+                    "early_close_time": self._early_close_time.strftime('%H:%M') if self._early_close_time else "",
                 },
                 saxo_client=self.client
             )
@@ -1737,12 +2157,13 @@ class MEICTFStrategy(MEICStrategy):
                 # Call side
                 call_skipped = getattr(entry, 'call_side_skipped', False)
                 if not call_skipped:
+                    is_early_closed = getattr(entry, 'early_closed', False)
                     if entry.call_side_stopped:
                         status = "STOPPED"
                         current_value = entry.call_side_stop
                         pnl = -(entry.call_side_stop - entry.call_spread_credit)
                     elif getattr(entry, 'call_side_expired', False):
-                        status = "EXPIRED"
+                        status = "EARLY_CLOSED" if is_early_closed else "EXPIRED"
                         current_value = 0
                         pnl = entry.call_spread_credit
                     else:
@@ -1776,12 +2197,13 @@ class MEICTFStrategy(MEICStrategy):
                 # Put side
                 put_skipped = getattr(entry, 'put_side_skipped', False)
                 if not put_skipped:
+                    is_early_closed = getattr(entry, 'early_closed', False)
                     if entry.put_side_stopped:
                         status = "STOPPED"
                         current_value = entry.put_side_stop
                         pnl = -(entry.put_side_stop - entry.put_spread_credit)
                     elif getattr(entry, 'put_side_expired', False):
-                        status = "EXPIRED"
+                        status = "EARLY_CLOSED" if is_early_closed else "EXPIRED"
                         current_value = 0
                         pnl = entry.put_spread_credit
                     else:
@@ -1938,6 +2360,8 @@ class MEICTFStrategy(MEICStrategy):
                 "stop_cascade_triggered": self._stop_cascade_triggered,
                 # MKT-017: Daily loss limit state
                 "daily_loss_limit_triggered": self._daily_loss_limit_triggered,
+                # MKT-018: Early close state
+                "early_close_triggered": self._early_close_triggered,
                 "entries": []
             }
 
@@ -1996,6 +2420,8 @@ class MEICTFStrategy(MEICStrategy):
                     # Fix #59: EMA values at entry time for Trades tab logging
                     "ema_20_at_entry": getattr(entry, 'ema_20_at_entry', None),
                     "ema_40_at_entry": getattr(entry, 'ema_40_at_entry', None),
+                    # MKT-018: Early close marker
+                    "early_closed": getattr(entry, 'early_closed', False),
                 }
                 state_data["entries"].append(entry_data)
 
@@ -2203,6 +2629,9 @@ class MEICTFStrategy(MEICStrategy):
         self._api_results_window.clear()
         self._stop_cascade_triggered = False  # MKT-016: Reset cascade breaker
         self._daily_loss_limit_triggered = False  # MKT-017: Reset daily loss limit
+        self._early_close_triggered = False  # MKT-018: Reset early close
+        self._early_close_time = None
+        self._early_close_pnl = None
 
         # P3: Reset intraday market data tracking
         self.market_data.reset_daily_tracking()
@@ -2788,6 +3217,8 @@ class MEICTFStrategy(MEICStrategy):
             self._stop_cascade_triggered = saved_state.get("stop_cascade_triggered", False)
             # MKT-017: Restore daily loss limit state
             self._daily_loss_limit_triggered = saved_state.get("daily_loss_limit_triggered", False)
+            # MKT-018: Restore early close state
+            self._early_close_triggered = saved_state.get("early_close_triggered", False)
 
             # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
             ohlc = saved_state.get("market_data_ohlc", {})
@@ -2885,6 +3316,8 @@ class MEICTFStrategy(MEICStrategy):
                 # Fix #59: Restore EMA values for Trades tab logging
                 restored_entry.ema_20_at_entry = entry_data.get("ema_20_at_entry", None)
                 restored_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)
+                # MKT-018: Restore early_closed marker
+                restored_entry.early_closed = entry_data.get("early_closed", False)
 
                 if is_fully_done:
                     restored_entry.is_complete = True
@@ -3044,6 +3477,7 @@ class MEICTFStrategy(MEICStrategy):
             preserved_market_ohlc = {}
             preserved_stop_cascade_triggered = False  # MKT-016
             preserved_daily_loss_limit_triggered = False  # MKT-017
+            preserved_early_close_triggered = False  # MKT-018
             preserved_next_entry_index = 0  # MKT-016/017: may advance beyond entry count
             try:
                 if os.path.exists(self.state_file):
@@ -3068,6 +3502,8 @@ class MEICTFStrategy(MEICStrategy):
                             preserved_stop_cascade_triggered = saved_state.get("stop_cascade_triggered", False)
                             # MKT-017: Preserve daily loss limit state
                             preserved_daily_loss_limit_triggered = saved_state.get("daily_loss_limit_triggered", False)
+                            # MKT-018: Preserve early close state
+                            preserved_early_close_triggered = saved_state.get("early_close_triggered", False)
                             preserved_next_entry_index = saved_state.get("next_entry_index", 0)
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
@@ -3100,6 +3536,8 @@ class MEICTFStrategy(MEICStrategy):
                                         "long_put_uic": entry_data.get("long_put_uic"),
                                         "short_call_uic": entry_data.get("short_call_uic"),
                                         "short_put_uic": entry_data.get("short_put_uic"),
+                                        # MKT-018: Early close marker
+                                        "early_closed": entry_data.get("early_closed", False),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -3174,6 +3612,8 @@ class MEICTFStrategy(MEICStrategy):
                             pass  # Invalid trend signal value, ignore
                     # Fix #65: Restore override_reason for correct logging (was missing)
                     entry.override_reason = saved.get("override_reason", None)
+                    # MKT-018: Restore early_closed marker
+                    entry.early_closed = saved.get("early_closed", False)
 
                     if entry.call_side_stopped and entry.short_call_strike == 0:
                         entry.short_call_strike = saved.get("short_call_strike", 0)
@@ -3271,6 +3711,8 @@ class MEICTFStrategy(MEICStrategy):
                     # Fix #59: Restore EMA values for Trades tab logging
                     stopped_entry.ema_20_at_entry = stopped_entry_data.get("ema_20_at_entry", None)
                     stopped_entry.ema_40_at_entry = stopped_entry_data.get("ema_40_at_entry", None)
+                    # MKT-018: Restore early_closed marker
+                    stopped_entry.early_closed = stopped_entry_data.get("early_closed", False)
 
                     # Position IDs are None (positions closed)
                     stopped_entry.short_call_position_id = None
@@ -3335,6 +3777,8 @@ class MEICTFStrategy(MEICStrategy):
             self._stop_cascade_triggered = preserved_stop_cascade_triggered
             # MKT-017: Restore daily loss limit state
             self._daily_loss_limit_triggered = preserved_daily_loss_limit_triggered
+            # MKT-018: Restore early close state
+            self._early_close_triggered = preserved_early_close_triggered
 
             # Set state based on recovered positions
             # FIX #43 + FIX #47: For one-sided entries, check only the placed side

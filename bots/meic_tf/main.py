@@ -386,6 +386,24 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
                         f"Return: {return_sign}{return_pct:.1f}%"
                     )
 
+                    # MKT-018: Early close ROC tracking
+                    ec_status = status.get('early_close_status', {})
+                    if ec_status.get('tracking'):
+                        roc_current = ec_status.get('roc', 0)
+                        roc_threshold = ec_status.get('threshold', 0.02)
+                        roc_sign = "+" if roc_current >= 0 else ""
+                        close_cost = ec_status.get('close_cost', 0)
+                        trade_logger.log_event(
+                            f"  Early Close: ROC {roc_sign}{roc_current*100:.2f}% / "
+                            f"{roc_threshold*100:.1f}% threshold | "
+                            f"Close cost: ${close_cost:.0f} ({ec_status.get('active_legs', 0)} legs)"
+                        )
+                    elif ec_status.get('triggered'):
+                        trade_logger.log_event(
+                            f"  Early Close: TRIGGERED at {ec_status.get('trigger_time', 'N/A')} | "
+                            f"Locked P&L: ${ec_status.get('locked_pnl', 0):.2f}"
+                        )
+
                     strategy.log_account_summary()
                     strategy.log_performance_metrics()
                     strategy.log_position_snapshot()

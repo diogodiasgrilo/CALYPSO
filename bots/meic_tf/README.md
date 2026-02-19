@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.2.9 | **Last Updated:** 2026-02-18
+**Version:** 1.3.0 | **Last Updated:** 2026-02-19
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -113,6 +113,31 @@ Complements MKT-016 by checking loss *magnitude* instead of stop *count*. After 
 
 **Threshold calibration:** -$500 default, based on 6 days of baseline data. Feb 13 (best day, +$675 net) had an intraday trough of -$450, so -$500 provides a $50 buffer while never triggering on profitable days.
 
+### Early Close on ROC (MKT-018) - Added v1.3.0
+
+After all entries are placed, monitors Return on Capital (ROC) every heartbeat. When ROC reaches the threshold, closes ALL active positions via market orders to lock in profit. Prevents late-day reversals from erasing gains built early in the session.
+
+**ROC formula:** `(net_pnl - close_cost) / capital_deployed`
+- `net_pnl`: realized + unrealized - commission
+- `close_cost`: active_legs × $5.00 ($2.50 commission + $2.50 slippage estimate)
+- `capital_deployed`: from existing `_calculate_capital_deployed()`
+
+| Condition | Action |
+|-----------|--------|
+| All entries placed, ROC >= 2.0% | Close ALL positions, log daily summary, send alert |
+| All entries placed, ROC < 2.0% | Continue monitoring (shadow-log ROC when > 1%) |
+| Not all entries placed yet | Skip ROC check |
+| Last 15 minutes before close (3:45+ PM) | Skip ROC check (positions expire naturally) |
+| Early close already triggered | Skip (idempotent) |
+
+**Why this works:** On Feb 18, 2026, the bot had $645 unrealized profit at 1:04 PM but finished with only $315 after 2 late stops. A 2.0% ROC threshold would have closed all positions around 12:08 PM, locking in ~$400 net. Backtest over 6 trading days showed -$8 total cost (negligible) while providing early exit on high-profit days.
+
+**After early close:**
+- All positions closed via market orders (deferred fill lookup for accurate P&L)
+- Daily summary, account summary, performance metrics logged immediately
+- Bot transitions to DAILY_COMPLETE state (no settlement needed)
+- Alert sent with locked-in P&L and ROC
+
 ### Credit Gate Config (strategy section)
 
 | Setting | Default | Description |
@@ -120,6 +145,9 @@ Complements MKT-016 by checking loss *magnitude* instead of stop *count*. After 
 | `min_viable_credit_per_side` | `0.50` | MKT-011: Skip/convert if estimated credit below this |
 | `max_daily_stops_before_pause` | `3` | MKT-016: Pause entries after N total stops in a day |
 | `max_daily_loss` | `500` | MKT-017: Pause entries after this much realized loss ($) |
+| `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
+| `early_close_roc_threshold` | `0.02` | MKT-018: ROC threshold for early close (2.0%) |
+| `early_close_cost_per_position` | `5.00` | MKT-018: Estimated cost per leg to close ($2.50 commission + $2.50 slippage) |
 
 ## Usage
 
@@ -201,6 +229,18 @@ bots/meic_tf/
 - [Technical Indicators](../../shared/technical_indicators.py)
 
 ## Version History
+
+- **1.3.0** (2026-02-19): MKT-018 early close based on Return on Capital (ROC)
+  - Closes ALL positions when ROC >= 2.0% after all entries are placed
+  - ROC = (net_pnl - close_cost) / capital_deployed, checked every heartbeat
+  - Close cost: active_legs × $5.00 ($2.50 commission + $2.50 slippage)
+  - Immediate daily summary, account summary, performance metrics logging after early close
+  - Deferred fill lookup for accurate close P&L (non-blocking background thread)
+  - Heartbeat displays live ROC vs threshold after all entries placed
+  - Google Sheets: new early_close and notes columns in Daily Summary tab
+  - State persistence: early_close_triggered saved/restored across restarts
+  - Skip ROC check in last 15 minutes before close (positions expire naturally)
+  - Based on 6-day backtest: -$8 total cost, captures high-profit days before late-day reversals
 
 - **1.2.9** (2026-02-18): Daily loss limit + daily summary accuracy
   - MKT-017: Daily loss limit - pause entries when realized P&L drops below -$500 (complements MKT-016)
