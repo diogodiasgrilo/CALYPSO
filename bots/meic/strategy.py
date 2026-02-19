@@ -68,7 +68,7 @@ MAX_FAILED_ENTRIES_BEFORE_HALT = 4  # Stop trying if 4+ entries fail in a day
 
 # CONN-001: Entry window retry settings
 ENTRY_MAX_RETRIES = 3  # Retry entry this many times
-ENTRY_RETRY_DELAY_SECONDS = 30  # Delay between retries
+ENTRY_RETRY_DELAY_SECONDS = 15  # Delay between retries (reduced from 30s with batch quote headroom)
 ENTRY_WINDOW_MINUTES = 5  # How long after scheduled time to attempt entry
 
 # ORDER-002: Naked position safety - CRITICAL
@@ -103,7 +103,7 @@ ORDER_TIMEOUT_EMERGENCY_SECONDS = 15  # Even shorter for emergency closes
 
 # ORDER-009: Retry delay to prevent API conflicts
 # Without this, rapid retries cause 409 Conflict (stale order state) and 429 Rate Limit
-ORDER_RETRY_DELAY_SECONDS = 2.0
+ORDER_RETRY_DELAY_SECONDS = 1.2  # Reduced from 2.0s with batch quote headroom
 
 # CONN-005: Position verification
 POSITION_VERIFY_DELAY_SECONDS = 0.5  # Wait before verifying position exists
@@ -133,11 +133,11 @@ FLASH_CRASH_THRESHOLD_PERCENT = 2.0  # 2% move in 5 minutes
 # MONITORING: Dynamic interval thresholds
 # When price is within this % of stop level, use faster monitoring
 VIGILANT_THRESHOLD_PERCENT = 50  # 50% of stop level used = vigilant mode
-# RATE LIMIT FIX (2026-02-04): Increased intervals to stay under Saxo's 120 req/min limit
-# With 2 entries: 10 calls/cycle. At 6s interval = 600 cycles/hr = 6,000 calls/hr (under 7,200 limit)
-# With 6 entries: 26 calls/cycle. At 15s interval = 240 cycles/hr = 6,240 calls/hr (under 7,200 limit)
-VIGILANT_CHECK_INTERVAL_SECONDS = 5  # Was 2s - still faster when near stops
-NORMAL_CHECK_INTERVAL_SECONDS = 10   # Was 3s - safe for up to 4 entries
+# RATE LIMIT UPDATE (2026-02-19): Batch quote API reduces monitoring to ~2-3 calls/cycle
+# (was 26 calls/cycle with individual quotes). Safe to use faster intervals.
+# Vigilant at 2s = ~90 calls/min. Normal at 5s = ~36 calls/min. Limit: 120/min.
+VIGILANT_CHECK_INTERVAL_SECONDS = 2  # Near stops: 2s detection (was 5s pre-batch)
+NORMAL_CHECK_INTERVAL_SECONDS = 5    # Far from stops: 5s detection (was 10s pre-batch)
 
 # ORDER-004: Pre-entry margin check
 MIN_BUYING_POWER_PER_IC = 5000  # Minimum BP required per iron condor ($5000)
@@ -174,7 +174,7 @@ SLIPPAGE_CRITICAL_THRESHOLD_PERCENT = 15.0  # Critical at 15% slippage
 
 # EMERGENCY-001: Emergency close retry settings
 EMERGENCY_CLOSE_MAX_ATTEMPTS = 5
-EMERGENCY_CLOSE_RETRY_DELAY_SECONDS = 3
+EMERGENCY_CLOSE_RETRY_DELAY_SECONDS = 2  # Reduced from 3s with batch quote headroom
 
 # ORDER-008: SPX Option Tick Size Rules (CBOE Official)
 # Source: https://www.cboe.com/tradable_products/sp_500/spx_options/specifications/
@@ -2734,7 +2734,7 @@ class MEICStrategy:
             quote = self.client.get_quote(uic, asset_type="StockIndexOption")
             if not quote or "Quote" not in quote:
                 logger.warning(f"  Attempt {attempt + 1}: No quote for {leg_description}")
-                time.sleep(1)
+                time.sleep(0.5)  # Brief wait for quote cache (reduced from 1s)
                 continue
 
             bid = quote["Quote"].get("Bid") or 0
@@ -2781,7 +2781,7 @@ class MEICStrategy:
                 if market_result and market_result.get("OrderId"):
                     order_id = market_result.get("OrderId")
                     # Market orders fill immediately - verify via activities
-                    time.sleep(1)  # Brief wait for activity sync (uses module-level import)
+                    time.sleep(0.5)  # Brief wait for activity sync (reduced from 1s)
                     filled, fill_details = self.client.check_order_filled_by_activity(order_id, uic)
                     if filled:
                         fill_price = fill_details.get("fill_price") if fill_details else expected_price
@@ -6953,7 +6953,8 @@ class MEICStrategy:
         P2: Get the recommended check interval in seconds based on monitoring mode.
 
         Returns:
-            2 for vigilant mode, 5 for normal mode
+            VIGILANT_CHECK_INTERVAL_SECONDS for vigilant mode,
+            NORMAL_CHECK_INTERVAL_SECONDS for normal mode
         """
         mode = self.get_monitoring_mode()
         if mode == "vigilant":

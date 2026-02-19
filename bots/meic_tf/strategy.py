@@ -1798,10 +1798,10 @@ class MEICTFStrategy(MEICStrategy):
         Returns:
             Dict with status information including current trend and EMA values
         """
-        # Refresh trend if not checked recently (every 60 seconds)
+        # Refresh trend if not checked recently (every 30 seconds)
         # This ensures heartbeat shows current trend without excessive API calls
         now = get_us_market_time()
-        if self._last_trend_check is None or (now - self._last_trend_check).total_seconds() >= 60:
+        if self._last_trend_check is None or (now - self._last_trend_check).total_seconds() >= 30:
             try:
                 self._get_trend_signal()
             except Exception as e:
