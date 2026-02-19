@@ -480,7 +480,7 @@ class GoogleSheetsLogger:
                     ]
                 elif self.strategy_type == "meic_tf":
                     # MEIC-TF: MEIC with trend following - full OHLC, P&L breakdown, trend signals
-                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=34)
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=36)
                     headers = [
                         # Market Context (9 cols)
                         "Date", "SPX Open", "SPX Close", "SPX High", "SPX Low",
@@ -499,6 +499,8 @@ class GoogleSheetsLogger:
                         "Win Rate (%)",
                         "Capital Deployed ($)", "Return on Capital (%)", "Sortino Ratio",
                         "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
+                        # MKT-018 Early Close (2 cols)
+                        "Early Close", "Early Close Time",
                         # Other
                         "Notes"
                     ]
@@ -624,8 +626,8 @@ class GoogleSheetsLogger:
                         "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)"
                     ]
                 elif self.strategy_type == "meic_tf":
-                    # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries (29 columns)
-                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=29)
+                    # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries (31 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=31)
                     headers = [
                         # Meta
                         "Timestamp", "Period",
@@ -647,7 +649,9 @@ class GoogleSheetsLogger:
                         "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)",
                         # Risk & Return Metrics
                         "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
-                        "Capital Deployed ($)", "Return on Capital (%)"
+                        "Capital Deployed ($)", "Return on Capital (%)",
+                        # MKT-018 Early Close (2 cols)
+                        "Early Close Triggered", "Early Close Time"
                     ]
                 else:
                     # Delta Neutral: Weekly theta strategy - track theta, rolls
@@ -731,8 +735,8 @@ class GoogleSheetsLogger:
                         "State", "Environment"
                     ]
                 elif self.strategy_type == "meic_tf":
-                    # MEIC-TF: MEIC with trend following snapshot (17 columns)
-                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=17)
+                    # MEIC-TF: MEIC with trend following snapshot (18 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=18)
                     headers = [
                         # Market Data
                         "Timestamp", "SPX Price", "VIX",
@@ -746,6 +750,8 @@ class GoogleSheetsLogger:
                         "Current Trend", "EMA 20", "EMA 40",
                         # Risk
                         "Circuit Breaker",
+                        # MKT-018 Early Close
+                        "Early Close",
                         # Meta
                         "State", "Environment"
                     ]
@@ -2050,6 +2056,9 @@ class GoogleSheetsLogger:
                     f"{summary.get('sortino_ratio', 0):.2f}",
                     f"{summary.get('max_loss_stops', 0):.2f}",
                     f"{summary.get('max_loss_catastrophic', 0):.2f}",
+                    # MKT-018 Early Close (2 cols)
+                    summary.get("early_close", "No"),
+                    summary.get("early_close_time", ""),
                     # Other
                     summary.get("notes", "")
                 ]
@@ -2537,7 +2546,8 @@ class GoogleSheetsLogger:
                 #          Trend Overrides, Credit Gate Skips,
                 #          Max Drawdown ($), Max Drawdown (%), Avg Daily P&L ($),
                 #          Max Loss Stops ($), Max Loss Catastrophic ($),
-                #          Capital Deployed ($), Return on Capital (%)
+                #          Capital Deployed ($), Return on Capital (%),
+                #          Early Close Triggered, Early Close Time
                 row = [
                     # Meta
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2576,9 +2586,12 @@ class GoogleSheetsLogger:
                     f"{metrics.get('max_loss_stops', 0):.2f}",
                     f"{metrics.get('max_loss_catastrophic', 0):.2f}",
                     f"{metrics.get('capital_deployed', 0):.2f}",
-                    f"{metrics.get('return_on_capital', 0):.2f}"
+                    f"{metrics.get('return_on_capital', 0):.2f}",
+                    # MKT-018 Early Close (2 cols)
+                    "Yes" if metrics.get("early_close_triggered", False) else "No",
+                    metrics.get("early_close_time", "")
                 ]
-                col_range = "A2:AC2"  # 29 columns
+                col_range = "A2:AE2"  # 31 columns
             else:
                 # Delta Neutral: Weekly theta strategy - track theta, rolls
                 row = [
@@ -2790,7 +2803,7 @@ class GoogleSheetsLogger:
                 #          Total Credit ($), Unrealized P&L ($), Realized P&L ($),
                 #          Call Stops, Put Stops,
                 #          Current Trend, EMA 20, EMA 40,
-                #          Circuit Breaker, State, Environment
+                #          Circuit Breaker, Early Close, State, Environment
                 spx_price = strategy_data.get("spx_price", 0)
                 vix = strategy_data.get("vix", 0)
                 entries_completed = strategy_data.get("entries_completed", 0)
@@ -2830,11 +2843,13 @@ class GoogleSheetsLogger:
                     f"{ema_40:.2f}" if ema_40 else "N/A",
                     # Risk
                     "YES" if circuit_breaker else "NO",
+                    # MKT-018 Early Close
+                    strategy_data.get("early_close", ""),
                     # Meta
                     state,
                     environment
                 ]
-                col_range = "A2:Q2"  # 17 columns
+                col_range = "A2:R2"  # 18 columns
             else:
                 # Delta Neutral: Straddle + Strangle position snapshot
                 spy_price = strategy_data.get("spy_price", 0)
