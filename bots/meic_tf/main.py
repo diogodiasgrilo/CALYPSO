@@ -157,7 +157,7 @@ def print_banner():
     print(banner)
 
 
-def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
+def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
     """Run the main trading bot loop."""
     global shutdown_requested
 
