@@ -262,7 +262,7 @@ class MEICTFStrategy(MEICStrategy):
         # exceeds early close threshold. Prevents diluting profitable positions
         # with new entries that add capital + close costs but ~$0 P&L.
         # Only active when MKT-018 early close is enabled.
-        self.min_entries_before_roc_gate = int(strategy_config.get("min_entries_before_roc_gate", 3))
+        self.min_entries_before_roc_gate = int(strategy_config.get("min_entries_before_roc_gate", 2))
         self._roc_gate_triggered = False
         if self.early_close_enabled:
             logger.info(f"  Pre-entry ROC gate (MKT-021): active after {self.min_entries_before_roc_gate} entries")
@@ -625,6 +625,29 @@ class MEICTFStrategy(MEICStrategy):
             for leg_name, pos_id, uic in legs:
                 if not pos_id:
                     continue
+
+                # Fix #81: Skip closing long legs with $0 bid (worthless, expire naturally)
+                # Deeply OTM long legs often have no market - Saxo rejects market orders
+                # with 409 Conflict and limit orders at $0.05 can also fail. These legs
+                # expire worthless at 4 PM, so closing them wastes API calls for ~$0 value.
+                if leg_name.startswith("long") and uic:
+                    try:
+                        quote = self.client.get_quote(uic)
+                        bid = 0
+                        if quote:
+                            bid = quote.get("Quote", {}).get("Bid", 0) or quote.get("Bid", 0) or 0
+                        if bid <= 0:
+                            logger.info(
+                                f"  Fix #81: Skipping {leg_name} close for Entry #{entry.entry_number} "
+                                f"(bid=${bid:.2f}, expires worthless) — avoiding 409 risk"
+                            )
+                            # Count as closed (it will expire worthless, no P&L impact)
+                            legs_closed += 1
+                            side_legs_closed += 1
+                            continue
+                    except Exception as e:
+                        logger.warning(f"  Fix #81: Quote check failed for {leg_name}: {e}, proceeding with close")
+
                 success, fill_price, order_id = self._close_position_with_retry(
                     pos_id, leg_name, uic=uic, entry_number=entry.entry_number
                 )
