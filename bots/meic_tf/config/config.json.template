@@ -50,7 +50,15 @@
         "contracts_per_entry": 1,
 
         "_comment_cascade": "MKT-016: Pause entries after N total stops in a day (call + put)",
-        "max_daily_stops_before_pause": 3
+        "max_daily_stops_before_pause": 3,
+
+        "_comment_loss_limit": "MKT-017: Pause entries after realized P&L drops below this ($)",
+        "max_daily_loss": 500,
+
+        "_comment_early_close": "MKT-018: Close ALL positions when ROC >= threshold after all entries placed",
+        "early_close_enabled": true,
+        "early_close_roc_threshold": 0.02,
+        "early_close_cost_per_position": 5.00
     },
     "trend_filter": {
         "_comment": "EMA-based trend direction detection for MEIC-TF",

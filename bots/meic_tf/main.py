@@ -10,7 +10,7 @@ Strategy Summary:
 1. Before each entry, check 20 EMA vs 40 EMA on SPX 1-minute bars
 2. BULLISH (20 > 40): Place PUT spread only (calls are risky in uptrend)
 3. BEARISH (20 < 40): Place CALL spread only (puts are risky in downtrend)
-4. NEUTRAL (within 0.1%): Place full iron condor (standard MEIC)
+4. NEUTRAL (within 0.2%): Place full iron condor (standard MEIC)
 5. Same entry times, strikes, and stop loss rules as MEIC
 
 Why This Helps:
