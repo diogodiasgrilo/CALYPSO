@@ -1390,6 +1390,12 @@ class MEICStrategy:
         if self._should_attempt_entry(now):
             return self._initiate_entry()
 
+        # Check if all entries have been used (e.g., restored from state file after restart)
+        if self._next_entry_index >= len(self.entry_times) and not self.daily_state.active_entries:
+            self.state = MEICState.DAILY_COMPLETE
+            logger.info("All entry times used with no active positions - transitioning to DAILY_COMPLETE")
+            return "All entries complete, daily session done"
+
         # Calculate time until next entry
         next_entry = self._get_next_entry_time()
         if next_entry:
