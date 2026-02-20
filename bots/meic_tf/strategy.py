@@ -258,6 +258,15 @@ class MEICTFStrategy(MEICStrategy):
         self._early_close_pnl = None    # Net P&L locked in at early close
         logger.info(f"  Early close (MKT-018): {'ENABLED' if self.early_close_enabled else 'DISABLED'} at {self.early_close_roc_threshold*100:.1f}% ROC")
 
+        # MKT-021: Pre-entry ROC gate - skip remaining entries if ROC already
+        # exceeds early close threshold. Prevents diluting profitable positions
+        # with new entries that add capital + close costs but ~$0 P&L.
+        # Only active when MKT-018 early close is enabled.
+        self.min_entries_before_roc_gate = int(strategy_config.get("min_entries_before_roc_gate", 3))
+        self._roc_gate_triggered = False
+        if self.early_close_enabled:
+            logger.info(f"  Pre-entry ROC gate (MKT-021): active after {self.min_entries_before_roc_gate} entries")
+
         # MKT-020: Progressive call OTM tightening - move short call closer to ATM
         # until credit >= min or OTM floor reached
         self.min_call_otm_distance = int(strategy_config.get("min_call_otm_distance", 25))
@@ -268,19 +277,23 @@ class MEICTFStrategy(MEICStrategy):
         logger.info(f"  Min viable credit per side: ${self.min_viable_credit_per_side / 100:.2f}")
 
     # =========================================================================
-    # ENTRY GATING (MKT-016, MKT-017)
+    # ENTRY GATING (MKT-016, MKT-017, MKT-021)
     # =========================================================================
 
     def _should_attempt_entry(self, now) -> bool:
         """
-        Override parent to add stop cascade breaker (MKT-016) and daily loss
-        limit (MKT-017).
+        Override parent to add stop cascade breaker (MKT-016), daily loss
+        limit (MKT-017), and pre-entry ROC gate (MKT-021).
 
         MKT-016: After max_daily_stops_before_pause stops in a single day, skip
         all remaining entries. Catches many small stops (cascade/whipsaw).
 
         MKT-017: After realized P&L drops below -max_daily_loss, skip all
         remaining entries. Catches few large stops (high slippage, gap moves).
+
+        MKT-021: After min_entries_before_roc_gate entries placed, if ROC on
+        existing positions >= early_close_roc_threshold, skip remaining entries.
+        MKT-018 early close fires on same heartbeat cycle at undiluted ROC.
 
         Existing positions continue to be monitored for stops normally.
         """
@@ -321,6 +334,46 @@ class MEICTFStrategy(MEICStrategy):
 
         if self._daily_loss_limit_triggered:
             return False
+
+        # MKT-021: Pre-entry ROC gate (only when MKT-018 early close is enabled)
+        # If ROC on existing entries already exceeds early close threshold,
+        # skip remaining entries. Early close will fire on the same heartbeat
+        # cycle since _next_entry_index will equal len(entry_times).
+        if self._roc_gate_triggered:
+            return False
+
+        if (self.early_close_enabled
+            and not self._roc_gate_triggered
+            and self._next_entry_index >= self.min_entries_before_roc_gate
+            and len(self.daily_state.active_entries) > 0):
+
+            # Calculate current ROC (same formula as _check_early_close)
+            unrealized = self._get_total_saxo_pnl()
+            total_pnl = self.daily_state.total_realized_pnl + unrealized
+            net_pnl = total_pnl - self.daily_state.total_commission
+            active_legs = self._count_active_position_legs()
+            close_cost = active_legs * self.early_close_cost_per_position
+            capital_deployed = self._calculate_capital_deployed()
+
+            if capital_deployed > 0:
+                roc = (net_pnl - close_cost) / capital_deployed
+                if roc >= self.early_close_roc_threshold:
+                    self._roc_gate_triggered = True
+                    remaining = max(0, len(self.entry_times) - self._next_entry_index)
+                    logger.warning(
+                        f"MKT-021 PRE-ENTRY ROC GATE: ROC {roc*100:.2f}% >= "
+                        f"{self.early_close_roc_threshold*100:.1f}% threshold with "
+                        f"{self._next_entry_index} entries placed - "
+                        f"skipping {remaining} remaining entries to preserve ROC"
+                    )
+                    self._log_safety_event(
+                        "MKT-021_ROC_GATE",
+                        f"ROC {roc*100:.2f}% on {self._next_entry_index} entries, "
+                        f"skipped {remaining} remaining"
+                    )
+                    self.daily_state.entries_skipped += remaining
+                    self._next_entry_index = len(self.entry_times)
+                    return False
 
         # Delegate to parent for normal time-window checks
         return super()._should_attempt_entry(now)
@@ -2548,6 +2601,8 @@ class MEICTFStrategy(MEICStrategy):
                 "early_close_triggered": self._early_close_triggered,
                 "early_close_time": self._early_close_time.isoformat() if self._early_close_time else None,
                 "early_close_pnl": self._early_close_pnl,
+                # MKT-021: Pre-entry ROC gate state
+                "roc_gate_triggered": self._roc_gate_triggered,
                 "entries": []
             }
 
@@ -2816,6 +2871,7 @@ class MEICTFStrategy(MEICStrategy):
         self._stop_cascade_triggered = False  # MKT-016: Reset cascade breaker
         self._daily_loss_limit_triggered = False  # MKT-017: Reset daily loss limit
         self._early_close_triggered = False  # MKT-018: Reset early close
+        self._roc_gate_triggered = False  # MKT-021: Reset ROC gate
         self._early_close_time = None
         self._early_close_pnl = None
 
@@ -3420,6 +3476,8 @@ class MEICTFStrategy(MEICStrategy):
                 except (ValueError, TypeError):
                     self._early_close_time = None
             self._early_close_pnl = saved_state.get("early_close_pnl")
+            # MKT-021: Restore ROC gate state
+            self._roc_gate_triggered = saved_state.get("roc_gate_triggered", False)
 
             # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
             ohlc = saved_state.get("market_data_ohlc", {})
@@ -3681,6 +3739,7 @@ class MEICTFStrategy(MEICStrategy):
             preserved_early_close_triggered = False  # MKT-018
             preserved_early_close_time = None  # MKT-018
             preserved_early_close_pnl = None  # MKT-018
+            preserved_roc_gate_triggered = False  # MKT-021
             preserved_next_entry_index = 0  # MKT-016/017: may advance beyond entry count
             try:
                 if os.path.exists(self.state_file):
@@ -3715,6 +3774,8 @@ class MEICTFStrategy(MEICStrategy):
                                 except (ValueError, TypeError):
                                     pass
                             preserved_early_close_pnl = saved_state.get("early_close_pnl")
+                            # MKT-021: Preserve ROC gate state
+                            preserved_roc_gate_triggered = saved_state.get("roc_gate_triggered", False)
                             preserved_next_entry_index = saved_state.get("next_entry_index", 0)
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
@@ -3992,6 +4053,8 @@ class MEICTFStrategy(MEICStrategy):
             self._early_close_triggered = preserved_early_close_triggered
             self._early_close_time = preserved_early_close_time
             self._early_close_pnl = preserved_early_close_pnl
+            # MKT-021: Restore ROC gate state
+            self._roc_gate_triggered = preserved_roc_gate_triggered
 
             # Set state based on recovered positions
             # FIX #43 + FIX #47: For one-sided entries, check only the placed side

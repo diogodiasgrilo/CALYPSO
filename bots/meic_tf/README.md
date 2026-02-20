@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.3.1 | **Last Updated:** 2026-02-20
+**Version:** 1.3.2 | **Last Updated:** 2026-02-20
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -138,6 +138,26 @@ After all entries are placed, monitors Return on Capital (ROC) every heartbeat. 
 - Bot transitions to DAILY_COMPLETE state (no settlement needed)
 - Alert sent with locked-in P&L and ROC
 
+### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
+
+Before placing each entry (after a minimum of 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (2%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
+
+**Problem:** MKT-018 early close only fires after ALL entries are placed. When earlier entries are already profitable (4%+ ROC), opening more entries dilutes ROC by adding capital deployed and close costs with ~$0 P&L. The new entries either trigger early close at a lower profit, or push ROC below the threshold entirely.
+
+**Example (Feb 20):**
+- After 3 entries: +$675 net, $15K capital, ROC = 4.17%
+- If entries #4/#5 opened: +$655 net, $25K capital, ROC = 2.26% (diluted)
+- MKT-021 skips #4/#5, early close fires at 4.17%, locks in ~$625 instead of ~$565
+
+| Condition | Action |
+|-----------|--------|
+| < 3 entries placed | Skip check (too early) |
+| ROC < early_close_threshold | Continue normally, place entry |
+| ROC >= early_close_threshold | Skip remaining entries, MKT-018 fires same cycle |
+| Early close disabled | MKT-021 inactive |
+
+Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` — no separate threshold needed. Follows the same pattern as MKT-016/017 (set flag, skip remaining, persist state).
+
 ### Progressive Call OTM Tightening (MKT-020) - Added v1.3.1
 
 For full IC entries (NEUTRAL trend), the initial VIX-adjusted OTM distance produces much lower call credit than put credit due to structural volatility skew. MKT-020 progressively moves the short call closer to ATM in 5pt steps until credit >= $1.00/side or a 25pt OTM floor is reached.
@@ -173,6 +193,7 @@ For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) ins
 | `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
 | `early_close_roc_threshold` | `0.02` | MKT-018: ROC threshold for early close (2.0%) |
 | `early_close_cost_per_position` | `5.00` | MKT-018: Estimated cost per leg to close ($2.50 commission + $2.50 slippage) |
+| `min_entries_before_roc_gate` | `3` | MKT-021: Minimum entries placed before pre-entry ROC gate activates |
 
 ## Usage
 
@@ -255,6 +276,12 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.3.2** (2026-02-20): MKT-021 pre-entry ROC gate
+  - Before placing entry #4+, checks if ROC on existing entries already exceeds early close threshold (2%)
+  - If so, skips remaining entries and MKT-018 early close fires immediately at undiluted ROC
+  - Prevents wasteful entries that dilute ROC with capital + close costs but ~$0 P&L
+  - Only active when MKT-018 early close is enabled; minimum 3 entries before gate activates
+  - Same pattern as MKT-016/017: flag + skip remaining + persist state across restart
 - **1.3.1** (2026-02-20): MKT-020 progressive call OTM tightening + raise min credit to $1.00/side
   - Progressively moves short call closer to ATM in 5pt steps until credit >= $1.00 or 25pt OTM floor
   - Batch API: 1 option chain + 1 batch quote = 2 API calls regardless of candidate count
