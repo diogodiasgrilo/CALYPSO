@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.3.0 | **Last Updated:** 2026-02-19
+**Version:** 1.3.1 | **Last Updated:** 2026-02-20
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -138,6 +138,18 @@ After all entries are placed, monitors Return on Capital (ROC) every heartbeat. 
 - Bot transitions to DAILY_COMPLETE state (no settlement needed)
 - Alert sent with locked-in P&L and ROC
 
+### Progressive Call OTM Tightening (MKT-020) - Added v1.3.1
+
+For full IC entries (NEUTRAL trend), the initial VIX-adjusted OTM distance produces much lower call credit than put credit due to structural volatility skew. MKT-020 progressively moves the short call closer to ATM in 5pt steps until credit >= $1.00/side or a 25pt OTM floor is reached.
+
+```
+Flow: _calculate_strikes() → MKT-020 → MKT-011 credit gate
+  - If tightened call meets $1.00: proceed as full IC
+  - If can't reach $1.00 at 25pt floor: MKT-011 converts to put-only
+```
+
+Uses batch quote API for efficiency: 1 option chain fetch + 1 batch quote call = 2 API calls total regardless of how many candidate strikes are evaluated. Only runs for NEUTRAL trend entries.
+
 ### Virtual Equal Credit Stop (MKT-019) - Added v1.3.0
 
 For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) instead of total_credit. Volatility skew makes puts 2-7× more expensive than calls at the same delta, causing the low-credit call side to hit stops prematurely when using total_credit.
@@ -154,7 +166,8 @@ For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) ins
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `min_viable_credit_per_side` | `0.50` | MKT-011: Skip/convert if estimated credit below this |
+| `min_viable_credit_per_side` | `1.00` | MKT-011: Skip/convert if estimated credit below this (MEIC-TF override, base is $0.50) |
+| `min_call_otm_distance` | `25` | MKT-020: Minimum OTM distance (points) for call tightening floor |
 | `max_daily_stops_before_pause` | `3` | MKT-016: Pause entries after N total stops in a day |
 | `max_daily_loss` | `500` | MKT-017: Pause entries after this much realized loss ($) |
 | `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
@@ -242,6 +255,11 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.3.1** (2026-02-20): MKT-020 progressive call OTM tightening + raise min credit to $1.00/side
+  - Progressively moves short call closer to ATM in 5pt steps until credit >= $1.00 or 25pt OTM floor
+  - Batch API: 1 option chain + 1 batch quote = 2 API calls regardless of candidate count
+  - Min credit raised from $0.50 to $1.00 per side (ensures meaningful call contribution to total credit)
+  - Only runs for NEUTRAL trend (full IC candidates); one-sided entries unaffected
 - **1.3.0** (2026-02-19): MKT-019 virtual equal credit stop + MKT-018 early close based on Return on Capital (ROC) + batch quote API
   - Closes ALL positions when ROC >= 2.0% after all entries are placed
   - ROC = (net_pnl - close_cost) / capital_deployed, checked every heartbeat

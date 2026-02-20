@@ -31,8 +31,9 @@
         "max_credit_per_side": 1.75,
         "credit_balance_tolerance": 0.25,
 
-        "_comment_credit_gate": "MKT-011: Skip/convert entry if ESTIMATED credit below this (prevents illiquid trades)",
-        "min_viable_credit_per_side": 0.50,
+        "_comment_credit_gate": "MKT-011/MKT-020: Min credit per side. MKT-020 tightens calls to reach this, MKT-011 converts/skips if not met",
+        "min_viable_credit_per_side": 1.00,
+        "min_call_otm_distance": 25,
 
         "_comment_delta": "Delta targeting for strike selection",
         "target_delta": 8,
