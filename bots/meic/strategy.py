@@ -261,6 +261,7 @@ class MEICState(Enum):
     State transitions:
     IDLE -> WAITING_FIRST_ENTRY (9:30 AM)
     WAITING_FIRST_ENTRY -> ENTRY_IN_PROGRESS (10:00 AM)
+    WAITING_FIRST_ENTRY -> DAILY_COMPLETE (all entries used, no active positions - e.g. post-restart)
     ENTRY_IN_PROGRESS -> MONITORING (after entry completes)
     MONITORING -> ENTRY_IN_PROGRESS (next scheduled entry time)
     MONITORING -> STOP_TRIGGERED (price hits stop level)

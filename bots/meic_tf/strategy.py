@@ -162,15 +162,19 @@ class MEICTFStrategy(MEICStrategy):
     - BEARISH: Place CALL spread only (puts are risky in downtrend)
     - NEUTRAL: Place full iron condor (standard MEIC behavior)
 
-    Credit Gate (MKT-011):
-    - Estimates credit from quotes BEFORE placing orders
-    - Skips or converts entry if credit < min_viable_credit_per_side
-    - MKT-010 illiquidity check is fallback when quotes unavailable
+    Key Features (MEIC-TF specific, beyond base MEIC):
+    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, min $1.00/side
+    - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
+    - Stop Cascade Breaker (MKT-016): Pause entries after 3 stops in a day
+    - Daily Loss Limit (MKT-017): Pause entries after -$500 realized P&L
+    - Early Close (MKT-018): Close all positions when ROC >= 2%
+    - Virtual Equal Credit Stop (MKT-019): Stop based on max(call, put) credit
+    - Pre-Entry ROC Gate (MKT-021): Skip dilutive entries when ROC already high
 
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.2.7 (2026-02-16)
+    Version: 1.3.2 (2026-02-20)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -632,7 +636,7 @@ class MEICTFStrategy(MEICStrategy):
                 # expire worthless at 4 PM, so closing them wastes API calls for ~$0 value.
                 if leg_name.startswith("long") and uic:
                     try:
-                        quote = self.client.get_quote(uic)
+                        quote = self.client.get_quote(uic, asset_type="StockIndexOption")
                         bid = 0
                         if quote:
                             bid = quote.get("Quote", {}).get("Bid", 0) or quote.get("Bid", 0) or 0
