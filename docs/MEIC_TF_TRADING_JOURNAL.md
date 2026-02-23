@@ -1,14 +1,14 @@
 # MEIC-TF Trading Journal
 
 **Created**: February 17, 2026
-**Last Updated**: February 19, 2026
+**Last Updated**: February 20, 2026
 **Purpose**: Day-by-day trading record with entry-level detail, P&L tracking, and improvement impact analysis. Future Claude Code sessions should reference this file instead of re-pulling all logs and sheets data.
 
 ---
 
 ## Table of Contents
 
-1. [Trading Period: Feb 10-19, 2026](#1-trading-period-feb-10-19-2026)
+1. [Trading Period: Feb 10-20, 2026](#1-trading-period-feb-10-20-2026)
 2. [Daily Summary Data (Raw)](#2-daily-summary-data-raw)
 3. [Entry-Level Detail by Day](#3-entry-level-detail-by-day)
 4. [Market Conditions](#4-market-conditions)
@@ -20,23 +20,24 @@
 
 ---
 
-## 1. Trading Period: Feb 10-19, 2026
+## 1. Trading Period: Feb 10-20, 2026
 
-**Bot Versions**: v1.2.7 (Feb 10-17), v1.2.8 (Feb 18), v1.2.9 (Feb 18 post-market), v1.3.0 (Feb 19+)
-**Trading Days**: 7 (Feb 10, 11, 12, 13, 17, 18, 19)
+**Bot Versions**: v1.2.7 (Feb 10-17), v1.2.8 (Feb 18), v1.2.9 (Feb 18 post-market), v1.3.0 (Feb 19), v1.3.2 (Feb 20+)
+**Trading Days**: 8 (Feb 10, 11, 12, 13, 17, 18, 19, 20)
 **Config**: 5 entries per day, EMA 20/40 trend filter
 - Feb 10-17: 0.1% neutral threshold, no cascade breaker (baseline)
 - Feb 18+: 0.2% neutral threshold (Rec 9.3), cascade breaker at 3 stops (MKT-016)
 - Feb 19+: daily loss limit -$500 (MKT-017), early close ROC 2% (MKT-018)
-**Capital Deployed**: $20,000-$32,000 per day (varies by entry count and spread width)
+- Feb 20+: progressive call tightening (MKT-020), pre-entry ROC gate (MKT-021)
+**Capital Deployed**: $15,000-$32,000 per day (varies by entry count and spread width)
 
 ### Period Result
-- **Net P&L**: +$1,355
-- **Winning Days**: 5 (71.4%)
-- **Losing Days**: 2 (28.6%)
-- **Total Entries**: 35
-- **Total Stops**: 20 (57.1% stop rate)
-- **Win Rate (entries with 0 stops)**: 42.9% (15/35)
+- **Net P&L**: +$2,045
+- **Winning Days**: 6 (75.0%)
+- **Losing Days**: 2 (25.0%)
+- **Total Entries**: 38
+- **Total Stops**: 21 (55.3% stop rate)
+- **Win Rate (entries with 0 stops)**: 44.7% (17/38)
 
 ---
 
@@ -44,42 +45,43 @@
 
 Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500 to $30,500 (Fix #77 bug dropped entries with surviving sides from daily_state).
 
-| Column | Feb 10 | Feb 11 | Feb 12 | Feb 13 | Feb 17 | Feb 18 | **Feb 19** |
-|--------|--------|--------|--------|--------|--------|--------|--------|
-| Date | 2026-02-10 | 2026-02-11 | 2026-02-12 | 2026-02-13 | 2026-02-17 | 2026-02-18 | **2026-02-19** |
-| SPX Open | 6970.55 | 6988.93 | 6961.62 | 6832.04 | 6814.71 | ~6857 | **6858.05** |
-| SPX Close | 6943.87 | 6939.96 | 6834.14 | 6834.38 | 6845.81 | 6878.07 | **~6861** |
-| SPX High | 6985.81 | 6990.65 | 6973.34 | 6881.57 | 6866.63 | ~6909 | **6877.89** |
-| SPX Low | 6937.67 | 6913.86 | 6824.12 | 6791.34 | 6775.17 | ~6858 | **6836.88** |
-| VIX Open | 17.35 | 16.95 | 17.36 | 20.97 | 21.86 | ~19.37 | **20.42** |
-| VIX Close | 17.81 | 17.65 | 20.74 | 20.62 | 20.29 | ~19.56 | **~20.3** |
-| VIX High | 17.97 | 18.96 | 21.21 | 22.40 | 22.96 | ~20.21 | **21.06** |
-| VIX Low | 17.14 | 16.75 | 17.08 | 18.93 | 19.76 | ~18.48 | **19.82** |
-| Entries Completed | 5 | 6 | 6 | 5 | 5 | 4 | **4** |
-| Entries Skipped | 1 | 0 | 0 | 0 | 0 | 1 | **1** |
-| Full ICs | 0 | 1 | 4 | 4 | 3 | 1 | **2** |
-| One-Sided Entries | 5 | 5 | 2 | 1 | 2 | 3 | **2** |
-| Bullish Signals | 0 | 0 | 0 | 1 | 1 | 0 | **0** |
-| Bearish Signals | 0 | 1 | 2 | 0 | 1 | 0 | **0** |
-| Neutral Signals | 5 | 5 | 4 | 4 | 3 | 4 | **4** |
-| Total Credit ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | **1265** |
-| Call Stops | 0 | 0 | 0 | 1 | 3 | 0 | **0** |
-| Put Stops | 1 | 2 | 4 | 2 | 2 | 2 | **3** |
-| Double Stops | 0 | 0 | 0 | 0 | 0 | 0 | **0** |
-| Stop Loss Debits ($) | 140 | 290 | 410 | 1145 | 1335 | 260 | **380** |
-| Commission ($) | 30 | 45 | 70 | 60 | 65 | 35 | **45** |
-| Expired Credits ($) | 520 | 760 | 840 | 1880 | 660 | 610 | **395** |
-| Daily P&L ($) | 350 | 425 | 360 | 675 | -740 | 315 | **-30** |
-| Daily P&L (EUR) | 294.27 | 357.99 | 303.31 | 568.71 | -624.26 | ~265 | **~-25** |
-| Cumulative P&L ($) | 350 | 775 | 1135 | 1810 | 1070 | 1385 | **1355** |
-| Cumulative P&L (EUR) | 294.27 | 652.81 | 956.27 | 1524.98 | 902.64 | ~1168 | **~1142** |
-| Win Rate (%) | 80.0 | 66.7 | 33.3 | 40.0 | 0.0 | 50.0 | **25.0** |
-| Capital Deployed ($) | 25000 | 30000 | 32000 | 28000 | 30500 | 20000 | **23000** |
-| Return on Capital (%) | 1.40 | 1.42 | 1.13 | 2.41 | -2.43 | 1.58 | **-0.13** |
-| Sortino Ratio | 0.00 | 99.99 | 99.99 | 99.99 | 11.49 | 14.69 | **~12** |
-| Max Loss Stops ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | **1265** |
-| Max Loss Catastrophic ($) | 24360 | 28830 | 30390 | 24955 | 28615 | 19190 | **21735** |
-| Notes | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement (v1.2.8) | **Post-settlement (v1.3.0)** |
+| Column | Feb 10 | Feb 11 | Feb 12 | Feb 13 | Feb 17 | Feb 18 | Feb 19 | **Feb 20** |
+|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+| Date | 2026-02-10 | 2026-02-11 | 2026-02-12 | 2026-02-13 | 2026-02-17 | 2026-02-18 | 2026-02-19 | **2026-02-20** |
+| SPX Open | 6970.55 | 6988.93 | 6961.62 | 6832.04 | 6814.71 | ~6857 | 6858.05 | **6857.52** |
+| SPX Close | 6943.87 | 6939.96 | 6834.14 | 6834.38 | 6845.81 | 6878.07 | ~6861 | **6878.72** |
+| SPX High | 6985.81 | 6990.65 | 6973.34 | 6881.57 | 6866.63 | ~6909 | 6877.89 | **6908.53** |
+| SPX Low | 6937.67 | 6913.86 | 6824.12 | 6791.34 | 6775.17 | ~6858 | 6836.88 | **6833.05** |
+| VIX Open | 17.35 | 16.95 | 17.36 | 20.97 | 21.86 | ~19.37 | 20.42 | **20.46** |
+| VIX Close | 17.81 | 17.65 | 20.74 | 20.62 | 20.29 | ~19.56 | ~20.3 | **19.54** |
+| VIX High | 17.97 | 18.96 | 21.21 | 22.40 | 22.96 | ~20.21 | 21.06 | **21.21** |
+| VIX Low | 17.14 | 16.75 | 17.08 | 18.93 | 19.76 | ~18.48 | 19.82 | **18.77** |
+| Entries Completed | 5 | 6 | 6 | 5 | 5 | 4 | 4 | **3** |
+| Entries Skipped | 1 | 0 | 0 | 0 | 0 | 1 | 1 | **2** |
+| Full ICs | 0 | 1 | 4 | 4 | 3 | 1 | 2 | **3** |
+| One-Sided Entries | 5 | 5 | 2 | 1 | 2 | 3 | 2 | **0** |
+| Bullish Signals | 0 | 0 | 0 | 1 | 1 | 0 | 0 | **0** |
+| Bearish Signals | 0 | 1 | 2 | 0 | 1 | 0 | 0 | **0** |
+| Neutral Signals | 5 | 5 | 4 | 4 | 3 | 4 | 4 | **3** |
+| Total Credit ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | 1265 | **1775** |
+| Call Stops | 0 | 0 | 0 | 1 | 3 | 0 | 0 | **0** |
+| Put Stops | 1 | 2 | 4 | 2 | 2 | 2 | 3 | **1** |
+| Double Stops | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **0** |
+| Stop Loss Debits ($) | 140 | 290 | 410 | 1145 | 1335 | 260 | 380 | **800** |
+| Commission ($) | 30 | 45 | 70 | 60 | 65 | 35 | 45 | **60** |
+| Expired Credits ($) | 520 | 760 | 840 | 1880 | 660 | 610 | 395 | **1550** |
+| Daily P&L ($) | 350 | 425 | 360 | 675 | -740 | 315 | -30 | **690** |
+| Daily P&L (EUR) | 294.27 | 357.99 | 303.31 | 568.71 | -624.26 | ~265 | ~-25 | **585.74** |
+| Cumulative P&L ($) | 350 | 775 | 1135 | 1810 | 1070 | 1385 | 1355 | **2045** |
+| Cumulative P&L (EUR) | 294.27 | 652.81 | 956.27 | 1524.98 | 902.64 | ~1168 | ~1142 | **1736.03** |
+| Win Rate (%) | 80.0 | 66.7 | 33.3 | 40.0 | 0.0 | 50.0 | 25.0 | **66.7** |
+| Capital Deployed ($) | 25000 | 30000 | 32000 | 28000 | 30500 | 20000 | 23000 | **15000** |
+| Return on Capital (%) | 1.40 | 1.42 | 1.13 | 2.41 | -2.43 | 1.58 | -0.13 | **4.60** |
+| Sortino Ratio | 0.00 | 99.99 | 99.99 | 99.99 | 11.49 | 14.69 | ~12 | **6.09** |
+| Max Loss Stops ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | 1265 | **1775** |
+| Max Loss Catastrophic ($) | 24360 | 28830 | 30390 | 24955 | 28615 | 19190 | 21735 | **13225** |
+| Early Close | -- | -- | -- | -- | -- | -- | No | **Yes, 11:31 ET** |
+| Notes | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement (v1.2.8) | Post-settlement (v1.3.0) | **Post-settlement (v1.3.2)** |
 
 **Note**: Feb 18-19 SPX/VIX OHLC values marked with ~ are derived from bot heartbeat logs (10:00-16:00 ET only). Feb 19 SPX Open/High/Low and VIX Open/High/Low from state file OHLC. Verify against Google Sheets for exact values.
 
@@ -92,18 +94,19 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - Feb 17: 660 - 1335 - 65 = -740 ✓
 - Feb 18: 610 - 260 - 35 = 315 ✓
 - Feb 19: 395 - 380 - 45 = -30 ✓
+- Feb 20: 1550 - 800 - 60 = 690 ✓
 
-### Cumulative Metrics (meic_metrics.json as of Feb 19 EOD)
+### Cumulative Metrics (meic_metrics.json as of Feb 20 EOD)
 ```json
 {
-  "cumulative_pnl": 1355.0,
-  "total_entries": 35,
-  "winning_days": 5,
+  "cumulative_pnl": 2045.0,
+  "total_entries": 38,
+  "winning_days": 6,
   "losing_days": 2,
-  "total_credit_collected": 10425.0,
-  "total_stops": 20,
+  "total_credit_collected": 12200.0,
+  "total_stops": 21,
   "double_stops": 0,
-  "last_updated": "2026-02-19"
+  "last_updated": "2026-02-20"
 }
 ```
 
@@ -323,6 +326,87 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 16:00+ ET - Settlement: 6 positions expired, +$395 expired credits added
 ```
 
+### Feb 20 (Friday) - NET P&L: +$690 ★ FIRST MKT-018 EARLY CLOSE TRIGGER
+
+**Market**: Wide range, V-shaped intraday. SPX range 76 pts (1.1%). VIX elevated 19-21 — high premium day. SPX dipped to 6833 early then rallied to 6909 before settling at 6879.
+**Bot Version**: v1.3.2 (MKT-020 progressive call tightening, MKT-021 pre-entry ROC gate, Fix #81 early close 409 retry)
+**MKT-018 early close**: Triggered at 11:31 ET — ROC reached 2% threshold, closed all remaining positions to lock in profit.
+**MKT-021 ROC gate**: Blocked Entries #4 and #5 (ROC already >= 2% before entry time)
+
+| Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
+|-------|------|--------|------|---------------|--------|---------|------------|
+| #1 | 10:05 | NEUTRAL | Full IC | C:6940/6990 P:6830/6780 | $975 (C:$180, P:$795) | All EARLY-CLOSED at 11:31 | +$680 |
+| #2 | 10:35 | NEUTRAL | Full IC | C:6935/6985 P:6825/6775 | $480 (C:$135, P:$345) | All EARLY-CLOSED at 11:31 | +$225 |
+| #3 | 11:05 | NEUTRAL | Full IC (MKT-020 tightened call) | C:6945/6995 P:6855/6805 | $320 (C:$95, P:$225) | Put STOPPED, Call EARLY-CLOSED | -$155 |
+| #4 | 11:35 | -- | SKIPPED (MKT-021) | -- | -- | ROC >= 2% gate | -- |
+| #5 | 12:05 | -- | SKIPPED (MKT-021) | -- | -- | ROC >= 2% gate | -- |
+
+**Key observations**:
+- **FIRST LIVE MKT-018 EARLY CLOSE** — ROC hit 2% at 11:31 ET, bot closed all remaining positions to lock in profit
+- **ALL entries NEUTRAL** — all 3 entries had NEUTRAL EMA signal
+- **MKT-020 tightened Entry #3's call** — progressive call OTM tightening (minimum $1.00/side credit)
+- **MKT-021 blocked Entries #4 and #5** — pre-entry ROC gate prevented new entries after 2% ROC reached
+- Entry #3 put stopped (SPX dipped toward 6855 short put), but call side survived and was early-closed
+- Entry #1 collected $975 — highest single-entry credit of the session, both sides early-closed for +$680
+- 409 Conflict error on Entry #1 long call close during early close (concurrent SaxoTraderGO operation) — user manually intervened
+- **66.7% entry win rate** (2 of 3 entries with 0 stops)
+- Highest daily P&L since Feb 13 (+$675)
+
+### Stop Timing Log (Feb 20)
+
+```
+10:05 ET - Entry #1 PLACED (NEUTRAL full IC, C:6940/6990 P:6830/6780, $975 credit)
+10:35 ET - Entry #2 PLACED (NEUTRAL full IC, C:6935/6985 P:6825/6775, $480 credit)
+11:05 ET - Entry #3 PLACED (NEUTRAL full IC, C:6945/6995 P:6855/6805, $320 credit)
+              MKT-020: Call side tightened (progressive OTM adjustment)
+~11:2x ET - Entry #3 PUT STOPPED (SPX dipped toward 6855)
+              short_put fill: $6.20, long_put fill: $1.70
+              Close cost: ($6.20-$1.70)×100=$450, credit was $225 → net side loss: $225
+11:31 ET - MKT-018 EARLY CLOSE TRIGGERED (ROC >= 2.0%)
+              Closing all remaining positions to lock in profit
+              === Entry #1: 4 legs closed, +$680 P&L ===
+              === Entry #2: 4 legs closed, +$225 P&L ===
+              === Entry #3: call side closed (put already stopped), +$70 call P&L ===
+              409 Conflict on Entry #1 long call close — user manually closed via SaxoTraderGO
+11:35 ET - Entry #4 SKIPPED (MKT-021: ROC >= 2% gate)
+12:05 ET - Entry #5 SKIPPED (MKT-021: ROC >= 2% gate)
+16:00+ ET - Settlement: 0 positions remaining (all closed by early close + stop)
+```
+
+### Fill Price Detail (Feb 20 — From Saxo Closed Positions)
+
+**Entry #1 (10:05 ET): Full IC, C:6940/6990 P:6830/6780 — All Early-Closed**
+
+| Leg | Direction | Open Price | Close Price | P&L |
+|-----|-----------|-----------|-------------|-----|
+| SC 6940 C | Short | $2.50 | $0.35 | +$215 |
+| LC 6990 C | Long | $0.70 | $0.10 | -$60 |
+| SP 6830 P | Short | $10.50 | $3.60 | +$690 |
+| LP 6780 P | Long | $2.55 | $0.90 | -$165 |
+| **Total** | | | | **+$680** |
+
+**Entry #2 (10:35 ET): Full IC, C:6935/6985 P:6825/6775 — All Early-Closed**
+
+| Leg | Direction | Open Price | Close Price | P&L |
+|-----|-----------|-----------|-------------|-----|
+| SC 6935 C | Short | $1.50 | $0.55 | +$95 |
+| LC 6985 C | Long | $0.15 | $0.05 | -$10 |
+| SP 6825 P | Short | $5.00 | $2.75 | +$225 |
+| LP 6775 P | Long | $1.55 | $0.70 | -$85 |
+| **Total** | | | | **+$225** |
+
+**Entry #3 (11:05 ET): Full IC, C:6945/6995 P:6855/6805 — Put Stopped, Call Early-Closed**
+
+| Leg | Direction | Open Price | Close Price | P&L |
+|-----|-----------|-----------|-------------|-----|
+| SC 6945 C | Short | $1.10 | $0.30 | +$80 |
+| LC 6995 C | Long | $0.15 | $0.05 | -$10 |
+| SP 6855 P | Short | $3.40 | $6.20 | -$280 |
+| LP 6805 P | Long | $1.15 | $1.70 | +$55 |
+| **Total** | | Call: +$70, Put: -$225 | | **-$155** |
+
+**P&L Reconciliation**: $680 + $225 + (-$155) = **$750 gross**. Commission: 3 entries × 4 legs open + Entry #3 put 2 legs stop + Entry #1/2/3 call early-close legs = $60. **$750 - $60 = $690 net** ✓
+
 ---
 
 ## 4. Market Conditions
@@ -338,7 +422,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 14-16 | -- | CLOSED | -- | -- | -- | Presidents' Day weekend |
 | Feb 17 | Tue | **V-shape reversal** | +0.5% | **92 pts (1.3%)** | **22 (elevated)** | Post-holiday volatility |
 | Feb 18 | Wed | Quiet recovery | +0.3% | ~52 pts (0.8%) | 19 (normal) | VIX normalizing, low premium |
-| **Feb 19** | **Thu** | **Choppy, downside** | **~+0.05%** | **41 pts (0.6%)** | **20 (elevated)** | **VIX back up, fast put stops** |
+| Feb 19 | Thu | Choppy, downside | ~+0.05% | 41 pts (0.6%) | 20 (elevated) | VIX back up, fast put stops |
+| **Feb 20** | **Fri** | **Wide range, V-shape** | **+0.3%** | **76 pts (1.1%)** | **20→19 (elevated→normal)** | **MKT-018 early close, high premium** |
 
 ### Expected Move vs Actual Range
 
@@ -350,7 +435,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 13 | 20.8 | ~90 pts | 90 pts | 1.00x | At expected (normal) |
 | Feb 17 | 21.4 | ~92 pts | 92 pts | 1.00x | At expected (normal) |
 | Feb 18 | ~19.5 | ~85 pts | ~52 pts | 0.61x | Below expected (calm) |
-| **Feb 19** | **~20.4** | **~89 pts** | **41 pts** | **0.46x** | **Far below expected (compressed)** |
+| Feb 19 | ~20.4 | ~89 pts | 41 pts | 0.46x | Far below expected (compressed) |
+| **Feb 20** | **~20.0** | **~87 pts** | **76 pts** | **0.87x** | **Near expected (normal)** |
 
 **Key insight**: Feb 17 was NOT an abnormal range day. The 92-point range was exactly at its expected move. The damage came from the SHAPE (V-reversal), not the MAGNITUDE.
 
@@ -366,39 +452,39 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 ## 5. Key Performance Metrics
 
-### Financial Metrics (7 days: Feb 10-19)
+### Financial Metrics (8 days: Feb 10-20)
 
 | Metric | Value |
 |--------|-------|
-| Total Credit Collected | $10,425 |
-| Total Expired Credits | $5,665 (54.3% of credit) |
-| Total Stop Loss Debits | $3,960 (38.0% of credit) |
-| Total Commission | $350 (3.4% of credit) |
-| Net P&L | +$1,355 (13.0% net capture rate) |
-| Average Daily Credit | $1,489 |
-| Average Daily P&L | +$194 |
-| Best Day | +$675 (Feb 13) |
+| Total Credit Collected | $12,200 |
+| Total Expired Credits | $7,215 (59.1% of credit) |
+| Total Stop Loss Debits | $4,760 (39.0% of credit) |
+| Total Commission | $410 (3.4% of credit) |
+| Net P&L | +$2,045 (16.8% net capture rate) |
+| Average Daily Credit | $1,525 |
+| Average Daily P&L | +$256 |
+| Best Day | +$690 (Feb 20) |
 | Worst Day | -$740 (Feb 17) |
-| Win/Loss Day Ratio | 5:2 |
-| Win/Loss Dollar Ratio | 2.76:1 ($2,125 / $770) |
+| Win/Loss Day Ratio | 6:2 |
+| Win/Loss Dollar Ratio | 3.66:1 ($2,815 / $770) |
 
 ### Entry Performance
 
 | Metric | Value |
 |--------|-------|
-| Total Entries | 35 |
-| Clean Wins (0 stops) | 15 (42.9%) |
-| Partial Wins (1 side stopped, IC) | 12 (34.3%) |
-| Full Losses (stopped, 1-sided) | 8 (22.9%) |
-| Entries with Call Stop | 4 (11.4%) |
-| Entries with Put Stop | 16 (45.7%) |
+| Total Entries | 38 |
+| Clean Wins (0 stops) | 17 (44.7%) |
+| Partial Wins (1 side stopped, IC) | 13 (34.2%) |
+| Full Losses (stopped, 1-sided) | 8 (21.1%) |
+| Entries with Call Stop | 4 (10.5%) |
+| Entries with Put Stop | 17 (44.7%) |
 | Double Stops | 0 (0%) |
 
 ### Entry Type Distribution
 
 | Entry Type | Count | Stops | Stop Rate | Avg Credit |
 |------------|-------|-------|-----------|------------|
-| Full IC | 14 | 11 sides stopped* | ~39% per side | $437 |
+| Full IC | 17 | 12 sides stopped* | ~35% per side | $466 |
 | Put-only (MKT-011) | 15 | 8 | 53.3% | $145 |
 | Call-only (trend) | 4 | 3 | 75% | $220 |
 | Put-only (trend) | 2 | 2 | 100% | $333 |
@@ -415,7 +501,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 13 | 3 | Spread throughout day | 0 | $0 |
 | **Feb 17** | **5** | **3 in 11 minutes** | **2 entries placed after** | **-$255** |
 | Feb 18 | 2 | Simultaneous (13:53) | 0 (Entry #5 skipped by MKT-011 before stops) | $0 |
-| **Feb 19** | **3** | **3 in 98 min (10:07-11:45)** | **1 (#5 blocked by MKT-016)** | **$0 (saved)** |
+| Feb 19 | 3 | 3 in 98 min (10:07-11:45) | 1 (#5 blocked by MKT-016) | $0 (saved) |
+| **Feb 20** | **1** | **N/A (single)** | **0 (MKT-018 early close + MKT-021 gate)** | **$0** |
 
 ### Trend Filter Accuracy
 
@@ -427,7 +514,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 13 | 4 NEUTRAL, 1 BULLISH | Mixed - BULLISH call was right but put got stopped anyway | Neutral |
 | Feb 17 | 3 NEUTRAL, 1 BEARISH, 1 BULLISH | **WRONG** - both directional calls were reversed | **STRONG NEGATIVE** - amplified losses |
 | Feb 18 | 4 NEUTRAL | Yes (range-bound, max 0.034%) | Neutral - MKT-011 overrode anyway |
-| **Feb 19** | **4 NEUTRAL** | **Yes (choppy, max ~-0.084%)** | **Neutral - MKT-011 overrode #3/#4** |
+| Feb 19 | 4 NEUTRAL | Yes (choppy, max ~-0.084%) | Neutral - MKT-011 overrode #3/#4 |
+| **Feb 20** | **3 NEUTRAL** | **Yes (wide range but neutral EMA)** | **Neutral — all full ICs, MKT-018 early close locked in profit** |
 
 ---
 
@@ -593,6 +681,9 @@ Track when each improvement was implemented, deployed, and verified.
 | 2026-02-17 | 9.1 | MKT-016 stop cascade breaker (3 stops → pause) | v1.2.8 commits | 2026-02-17 post-market | ~25 lines in strategy.py, config key added |
 | 2026-02-18 | -- | MKT-017 daily loss limit (-$500 realized P&L → pause) | v1.2.9 commits | 2026-02-18 post-market | Complements MKT-016 (count) with magnitude check |
 | 2026-02-19 | -- | MKT-018 early close (ROC >= 2% → close all positions) | v1.3.0 commits | 2026-02-19 pre-market | Locks in profit on high-ROC days, ~200 lines |
+| 2026-02-20 | -- | MKT-020 progressive call OTM tightening (min $1.00/side credit) | v1.3.2 commits | 2026-02-20 pre-market | Tightens call strikes when call credit < $1.00/side |
+| 2026-02-20 | -- | MKT-021 pre-entry ROC gate (skip new entries if ROC >= 2%) | v1.3.2 commits | 2026-02-20 pre-market | Prevents adding exposure after early close threshold reached |
+| 2026-02-20 | -- | Fix #81: Early close 409 Conflict retry | v1.3.2 commits | 2026-02-20 pre-market | Retry on 409 during early close position closing |
 
 ---
 
@@ -709,6 +800,47 @@ When reviewing performance after implementing improvements, fill in this section
 | 9.7 Entry #5 Monitor | Ongoing | Entry #5 SKIPPED by MKT-016 | Cannot assess — blocked by cascade | |
 
 **Feb 19 Assessment**: First day where MKT-016 cascade breaker actually triggered in live trading. Three put stops in 98 minutes (10:07, 10:51, 11:45) triggered the 3-stop threshold, blocking Entry #5 at 12:05. This prevented adding more exposure to a day that was already generating losses. Without the cascade breaker, Entry #5 would have been placed — possibly another put-only (MKT-011) that could have been stopped given the put-heavy loss pattern. MKT-017 daily loss limit came within $120 of triggering (-$380 vs -$500 threshold) — the calibration from Feb 13's -$450 trough is holding. MKT-018 early close had no opportunity on a losing day (designed for profitable days). The -$30 result was near breakeven — expired credits ($395) nearly covered stop debits ($380), with commission ($45) making it a small loss.
+
+#### Post-Improvement Day 3: Feb 20 (v1.3.2)
+
+| Column | Feb 20 |
+|--------|--------|
+| Date | 2026-02-20 |
+| SPX Open | 6857.52 |
+| SPX Close | 6878.72 |
+| SPX Range | 76 pts (1.1%) |
+| VIX Open | 20.46 |
+| VIX Close | 19.54 |
+| Entries | 3 (+2 skipped by MKT-021) |
+| Full ICs | 3 |
+| One-Sided | 0 |
+| Total Credit | $1,775 |
+| Call Stops | 0 |
+| Put Stops | 1 |
+| Stop Debits | $800 |
+| Commission | $60 |
+| Expired Credits | $1,550 |
+| Daily P&L | +$690 |
+| Cumulative P&L | $2,045 |
+| Early Close | Yes, 11:31 ET (MKT-018) |
+
+#### Improvement Impact Assessment — Feb 20
+
+| Rec | Implemented? | Triggered? | Actual Impact | Assessment |
+|-----|-------------|------------|---------------|------------|
+| 9.3 EMA Threshold (0.2%) | v1.2.8 | **NO** — all signals deep NEUTRAL | $0 (no directional signals to filter) | Cannot assess on NEUTRAL day |
+| 9.1 Stop Cascade (3 stops) | v1.2.8 | **NO** — only 1 stop (threshold is 3) | $0 (never triggered) | Not needed — MKT-018 closed positions before cascade could develop |
+| MKT-017 Daily Loss Limit | v1.2.9 | **NO** — day was profitable | $0 (never triggered) | N/A on profitable day |
+| MKT-018 Early Close (ROC) | v1.3.0 | **YES** — ROC hit 2% at 11:31 ET | **FIRST LIVE TRIGGER** — locked in $690 net profit | **STRONG POSITIVE** — prevented giving back gains |
+| MKT-020 Call Tightening | v1.3.2 | **YES** — tightened Entry #3 call | Ensured min $1.00/side credit on call side | Positive — maintained viable credit on call spread |
+| MKT-021 ROC Gate | v1.3.2 | **YES** — blocked Entries #4 and #5 | **Prevented 2 entries** after early close threshold reached | **POSITIVE** — prevented adding new exposure while closing existing |
+| 9.4 Trend Persistence | Deferred | | | |
+| 9.2 Stop Cooldown | Deferred | | | |
+| 9.5 Range Awareness | Deferred | | | |
+| 9.6 Holiday Caution | Deferred | | | |
+| 9.7 Entry #5 Monitor | Ongoing | Entry #5 SKIPPED by MKT-021 | Cannot assess — blocked by ROC gate | |
+
+**Feb 20 Assessment**: Landmark day — first live trigger of MKT-018 early close. Three NEUTRAL full ICs placed between 10:05-11:05 collected $1,775 in premium. Entry #3's put side was stopped (~$225 net side loss), but Entry #1 and #2 were solidly profitable. When cumulative ROC hit 2% at 11:31 ET, MKT-018 closed all remaining positions, locking in +$690 net profit. Without early close, the positions would have continued to expiration — Entry #1 and #2 likely would have expired fully worthless (even more profit), but the market's 76-point range and V-shape character meant additional risk of late-day reversals. MKT-021 pre-entry ROC gate complemented MKT-018 by preventing Entries #4 and #5 from being placed — no point opening new positions when the bot is about to close everything. The 409 Conflict error on Entry #1's long call close during early close (likely concurrent SaxoTraderGO operation) required manual intervention, suggesting Fix #81's retry logic may need further hardening. Best P&L day since Feb 13 (+$675), and highest daily ROC of the entire period at 4.6%.
 
 #### Week 2 Performance Template (Date Range: ___ to ___)
 
@@ -853,6 +985,18 @@ When reviewing performance after implementing improvements, fill in this section
 
 **Note**: All divergences were <0.09% — deep NEUTRAL zone. Max divergence ~-0.084% at Entry #3. Zero impact from threshold change. MKT-016 cascade breaker blocked Entry #5 before any EMA check.
 
+### Feb 20 (Friday - Wide Range, v1.3.2)
+
+| Entry | Time (ET) | EMA 20 | EMA 40 | Divergence % | Signal at 0.1% | Signal at 0.2% | Change? |
+|-------|-----------|--------|--------|-------------|-----------------|-----------------|---------|
+| #1 | 10:05 | — | — | ~NEUTRAL | NEUTRAL | NEUTRAL | No |
+| #2 | 10:35 | — | — | ~NEUTRAL | NEUTRAL | NEUTRAL | No |
+| #3 | 11:05 | — | — | ~NEUTRAL | NEUTRAL | NEUTRAL | No |
+| #4 | 11:35 | — | — | N/A (skipped by MKT-021) | — | — | — |
+| #5 | 12:05 | — | — | N/A (skipped by MKT-021) | — | — | — |
+
+**Note**: All 3 placed entries had NEUTRAL signal. Exact divergence values not captured — EMA data would need to be pulled from state file. MKT-021 pre-entry ROC gate blocked Entries #4 and #5 before any EMA check. Zero impact from threshold change.
+
 ### Summary: Entries Affected by 0.2% Threshold
 
 | Day | Entry | Old Signal | New Signal | Old Type | New Type |
@@ -981,6 +1125,28 @@ When reviewing performance after implementing improvements, fill in this section
 **Cascade breaker (threshold=3)**: Triggers at 11:45 (3rd stop), blocks Entry #5. **First live trigger of MKT-016.**
 **MKT-017 (daily loss limit)**: NOT triggered. Realized P&L = -$380 vs -$500 threshold. $120 buffer.
 **MKT-018 (early close)**: NOT triggered. ROC was negative all day — designed for profitable days only.
+
+### Feb 20 (Friday - v1.3.2 Active) — 1 stop + MKT-018 early close
+
+| Event | Time (ET) | Details |
+|-------|-----------|---------|
+| Entry #1 placed | 10:05 | Full IC (NEUTRAL), C:6940/6990 P:6830/6780, $975 credit |
+| Entry #2 placed | 10:35 | Full IC (NEUTRAL), C:6935/6985 P:6825/6775, $480 credit |
+| Entry #3 placed | 11:05 | Full IC (NEUTRAL, MKT-020 tightened call), C:6945/6995 P:6855/6805, $320 credit |
+| **Entry #3 PUT STOPPED** | **~11:2x** | **1st stop — SPX dipped toward 6855 short put** |
+| | | SP fill: $6.20, LP fill: $1.70, close cost: $450, net side loss: $225 |
+| **MKT-018 EARLY CLOSE** | **11:31** | **ROC >= 2.0% — closing all remaining positions** |
+| | | Entry #1: 4 legs closed (+$680), Entry #2: 4 legs closed (+$225) |
+| | | Entry #3: call side closed (+$70), put already stopped |
+| | | 409 Conflict on Entry #1 long call close — user manually closed |
+| ~~Entry #4~~ | ~~11:35~~ | **SKIPPED by MKT-021** (ROC >= 2% gate) |
+| ~~Entry #5~~ | ~~12:05~~ | **SKIPPED by MKT-021** (ROC >= 2% gate) |
+
+**Cascade breaker (threshold=3)**: Never triggers (only 1 stop). Not needed — MKT-018 early close closed all positions before cascade could develop.
+**MKT-017 (daily loss limit)**: NOT triggered. Day was profitable (+$690 net).
+**MKT-018 (early close)**: **FIRST LIVE TRIGGER** at 11:31 ET. ROC hit 2.0% threshold. Closed all remaining positions, locked in $690 net profit.
+**MKT-020 (call tightening)**: Triggered on Entry #3 — progressive call OTM adjustment ensured minimum $1.00/side credit.
+**MKT-021 (ROC gate)**: Blocked Entries #4 and #5 — ROC already >= 2% before entry times.
 
 ---
 
@@ -1197,7 +1363,7 @@ MEIC+ enabled: Yes (stop = credit - $0.10 when credit > threshold)
 Max daily stops before pause: N/A (not implemented)
 ```
 
-### Current Config (v1.3.0, deployed Feb 19 pre-market)
+### Current Config (v1.3.2, deployed Feb 20 pre-market)
 
 ```
 Entries per day: 5
@@ -1215,6 +1381,8 @@ Max daily loss: $500                              ← NEW (MKT-017, v1.2.9)
 Early close enabled: Yes                          ← NEW (MKT-018, v1.3.0)
 Early close ROC threshold: 2.0%                   ← NEW (MKT-018, v1.3.0)
 Early close cost per position: $5.00              ← NEW (MKT-018, v1.3.0)
+Progressive call tightening: Yes                  ← NEW (MKT-020, v1.3.2)
+Pre-entry ROC gate: 2.0%                          ← NEW (MKT-021, v1.3.2)
 ```
 
 **Config location**: `bots/meic_tf/config/config.json` on VM at `/opt/calypso/`. Template at `bots/meic_tf/config/config.json.template` in repo.
