@@ -138,7 +138,7 @@ If worst-case hold > close now → **HOLD** (don't close). If worst-case hold <=
 
 ### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
 
-Before placing each entry (after all 5 entries placed), checks if ROC on existing positions already exceeds the early close threshold (2%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
+Before placing each entry (after min 5 entries attempted), checks if ROC on existing positions already exceeds the early close threshold (2%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
 
 **Problem:** MKT-018 early close only fires after ALL entries are placed. When earlier entries are already profitable (4%+ ROC), opening more entries dilutes ROC by adding capital deployed and close costs with ~$0 P&L. The new entries either trigger early close at a lower profit, or push ROC below the threshold entirely.
 
@@ -300,7 +300,7 @@ bots/meic_tf/
   - Removed MKT-017 (daily loss limit): was pausing entries after -$500 realized P&L
   - Override base MEIC `_is_daily_loss_limit_reached()` to return False
 - **1.3.2** (2026-02-20): MKT-021 pre-entry ROC gate + Fix #81
-  - Before placing entry #3+, checks if ROC on existing entries already exceeds early close threshold (2%)
+  - Before placing entry #6+ (min 5 entries), checks if ROC on existing entries already exceeds early close threshold (2%)
   - If so, skips remaining entries and MKT-018 early close fires immediately at undiluted ROC
   - Prevents wasteful entries that dilute ROC with capital + close costs but ~$0 P&L
   - Only active when MKT-018 early close is enabled; minimum 5 entries before gate activates

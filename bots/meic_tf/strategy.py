@@ -169,6 +169,7 @@ class MEICTFStrategy(MEICStrategy):
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
     - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
     - Early Close (MKT-018): Close all positions when ROC >= 2%
+    - Smart Hold Check (MKT-023): Before early close, compare close-now vs worst-case-hold
     - Virtual Equal Credit Stop (MKT-019): Stop based on max(call, put) credit
     - Pre-Entry ROC Gate (MKT-021): Skip dilutive entries when ROC already high
 
@@ -509,6 +510,7 @@ class MEICTFStrategy(MEICStrategy):
 
         # --- Step C: Calculate worst-case hold P&L ---
         safe_credit_sum = 0.0
+        stressed_credit_sum = 0.0
         stressed_net_sum = 0.0
         stressed_sides_count = 0
 
@@ -516,6 +518,7 @@ class MEICTFStrategy(MEICStrategy):
             if side == stressed_side:
                 # Worst case: this side gets stopped
                 # Net = credit collected - cost to close at stop level
+                stressed_credit_sum += credit
                 stressed_net_sum += (credit - stop_level)
                 stressed_sides_count += 1
             else:
@@ -535,8 +538,17 @@ class MEICTFStrategy(MEICStrategy):
             - stop_close_commission                # Additional commission for stops
         )
 
+        # Best case: ALL active sides expire worthless (no stops at all)
+        all_expire_pnl = (
+            self.daily_state.total_realized_pnl
+            + safe_credit_sum + stressed_credit_sum  # All credits kept
+            - self.daily_state.total_commission
+        )
+
         details['worst_case_hold_pnl'] = worst_case_hold_pnl
+        details['all_expire_pnl'] = all_expire_pnl
         details['safe_credit_sum'] = safe_credit_sum
+        details['stressed_credit_sum'] = stressed_credit_sum
         details['stressed_net_sum'] = stressed_net_sum
         details['stressed_sides_count'] = stressed_sides_count
         details['stop_close_commission'] = stop_close_commission

@@ -412,9 +412,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                                 cn = hc.get('close_now_pnl', 0)
                                 diff = wc - cn
                                 diff_sign = "+" if diff >= 0 else ""
+                                expire_str = ""
+                                if 'all_expire_pnl' in hc:
+                                    expire_str = f" | expire=${hc['all_expire_pnl']:.0f}"
                                 trade_logger.log_event(
                                     f"  Hold Check: {decision} | close=${cn:.0f} vs hold=${wc:.0f} "
-                                    f"({diff_sign}{diff:.0f}) | {lean} "
+                                    f"({diff_sign}{diff:.0f}){expire_str} | {lean} "
                                     f"(C:{hc.get('avg_call_cushion', 0):.0f}%/P:{hc.get('avg_put_cushion', 0):.0f}%)"
                                 )
                     elif ec_status.get('triggered'):
