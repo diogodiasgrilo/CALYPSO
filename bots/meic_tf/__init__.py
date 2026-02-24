@@ -11,13 +11,14 @@ Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars:
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both sides viable: Proceed with trend signal
-- One side non-viable in NEUTRAL market: Convert to one-sided entry on viable side
-- One side non-viable in trending market: Skip if preferred side is non-viable
+- One side non-viable in NEUTRAL market: Skip entry (one-sided only for clear trends)
+- One side non-viable in trending market: Convert if matching trend, skip otherwise
 - Both non-viable: Skip entry entirely
 
 Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
 
 Version History:
+- 1.3.6 (2026-02-24): MKT-011 one-sided entries only for clear trends (NEUTRAL always full IC or skip)
 - 1.3.5 (2026-02-24): MKT-022 progressive put OTM tightening (mirror of MKT-020 for calls)
 - 1.3.4 (2026-02-23): Fix #82 - Settlement gate lock bug (midnight reset locked gate for entire day, preventing post-market settlement)
 - 1.3.3 (2026-02-23): Remove MKT-016 (stop cascade) + MKT-017 (daily loss limit) + base MEIC loss limit — bot always places all 5 entries

@@ -45,13 +45,14 @@ MKT-011 respects the trend filter - it won't force you into a trade that contrad
 
 | Trend | Preferred Side | If Non-Viable | Action |
 |-------|----------------|---------------|--------|
-| NEUTRAL | Full IC | Call non-viable | Convert to PUT-only ✅ |
-| NEUTRAL | Full IC | Put non-viable | Convert to CALL-only ✅ |
+| NEUTRAL | Full IC | Either side non-viable | **Skip entry** (one-sided only for clear trends) |
 | NEUTRAL | Full IC | Both non-viable | Skip entry |
+| BULLISH | PUT spread | Call non-viable | Convert to PUT-only ✅ (trend confirms puts) |
 | BULLISH | PUT spread | Put non-viable | **Skip entry** (won't place calls in uptrend) |
+| BEARISH | CALL spread | Put non-viable | Convert to CALL-only ✅ (trend confirms calls) |
 | BEARISH | CALL spread | Call non-viable | **Skip entry** (won't place puts in downtrend) |
 
-**Why this design?** The trend filter exists to protect against directional risk. If the market is trending up (BULLISH), we don't want to sell call spreads - even if they're the only "viable" option. Better to skip the entry than contradict the safety mechanism.
+**Why this design?** One-sided entries are directional bets. They should only happen when the trend filter confirms that direction (>= 0.2% EMA separation). In NEUTRAL markets, placing a one-sided entry creates unwanted directional exposure — better to skip and wait for the next entry.
 
 ### Illiquidity Fallback (MKT-010)
 
@@ -59,10 +60,11 @@ If the credit gate can't get valid quotes (rare), it falls back to wing illiquid
 
 | Trend | Illiquid Wing | Action |
 |-------|---------------|--------|
-| NEUTRAL | Call wing | Convert to PUT-only |
-| NEUTRAL | Put wing | Convert to CALL-only |
-| BULLISH | Put wing | **Skip entry** (won't place calls) |
-| BEARISH | Call wing | **Skip entry** (won't place puts) |
+| NEUTRAL | Either wing | **Skip entry** (one-sided only for clear trends) |
+| BULLISH | Call wing | Convert to PUT-only ✅ (trend confirms puts) |
+| BEARISH | Put wing | Convert to CALL-only ✅ (trend confirms calls) |
+| BULLISH | Put wing | **Skip entry** (won't place calls in uptrend) |
+| BEARISH | Call wing | **Skip entry** (won't place puts in downtrend) |
 | Any | Both wings | Skip entry |
 
 ## Configuration
@@ -143,7 +145,7 @@ For full IC entries (NEUTRAL trend), VIX-adjusted OTM distances can produce cred
 ```
 Flow: _calculate_strikes() → MKT-020 (calls) → MKT-022 (puts) → MKT-011 credit gate
   - If tightened strikes meet $1.00: proceed as full IC
-  - If can't reach $1.00 at 25pt floor: MKT-011 converts to one-sided or skips
+  - If can't reach $1.00 at 25pt floor: MKT-011 skips (NEUTRAL) or converts if trend matches
 ```
 
 Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote call = 2 API calls each. Only run for NEUTRAL trend entries. Include liquidity checks (skip candidates with bid/ask = 0).
@@ -164,7 +166,7 @@ For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) ins
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `min_viable_credit_per_side` | `1.00` | MKT-011: Skip/convert if estimated credit below this (MEIC-TF override, base is $0.50) |
+| `min_viable_credit_per_side` | `1.00` | MKT-011: Skip if estimated credit below this; one-sided conversion only for clear trends (MEIC-TF override, base is $0.50) |
 | `min_call_otm_distance` | `25` | MKT-020: Minimum OTM distance (points) for call tightening floor |
 | `min_put_otm_distance` | `25` | MKT-022: Minimum OTM distance (points) for put tightening floor |
 | `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
@@ -253,6 +255,11 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.3.6** (2026-02-24): MKT-011 one-sided entries only for clear trends
+  - NEUTRAL markets: if either side is non-viable, skip entry (no more one-sided conversions)
+  - One-sided entries only allowed when trend filter confirms direction (BULLISH/BEARISH >= 0.2% EMA)
+  - Same logic applied to MKT-010 illiquidity fallback
+  - Prevents unintended directional bets in range-bound markets (e.g., Entry #4 on Feb 24)
 - **1.3.5** (2026-02-24): MKT-022 progressive put OTM tightening
   - Mirror of MKT-020 for put side — moves short put closer to ATM in 5pt steps until credit >= $1.00 or 25pt OTM floor
   - Batch API: 1 option chain + 1 batch quote = 2 API calls total
@@ -406,9 +413,9 @@ bots/meic_tf/
 
 - **1.1.1** (2026-02-09): Hybrid credit gate - respects trend filter
   - MKT-011/MKT-010 now respect trend direction
-  - In trending markets: skip entry if preferred side is non-viable (won't contradict trend)
-  - In NEUTRAL markets: convert to one-sided entry (same as before)
-  - New safety event: MKT-011_TREND_CONFLICT logged when skipping due to trend conflict
+  - In trending markets: convert only if trend matches viable side, skip otherwise
+  - In NEUTRAL markets: skip entry if either side non-viable (one-sided only for clear trends)
+  - Safety events: MKT-011_SKIP / MKT-010_SKIP logged when skipping
 
 - **1.1.0** (2026-02-08): Credit gate and illiquidity handling
   - MKT-011: Pre-entry credit estimation - skips/converts non-viable entries

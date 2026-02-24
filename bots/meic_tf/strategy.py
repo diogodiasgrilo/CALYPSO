@@ -110,10 +110,13 @@ class TFIronCondorEntry(IronCondorEntry):
     - BEARISH trend: call_only = True (only call spread placed)
     - NEUTRAL: full IC (both sides placed, call_only=False, put_only=False)
 
+    One-sided entries are ONLY allowed for clear trending markets.
+    In NEUTRAL markets, if either side is non-viable, the entry is skipped.
+
     Override reasons (Fix #49):
     - "trend": One-sided due to EMA trend filter (BULLISH/BEARISH)
-    - "mkt-011": One-sided due to credit gate (non-viable credit)
-    - "mkt-010": One-sided due to illiquidity fallback
+    - "mkt-011": One-sided due to credit gate in trending market
+    - "mkt-010": One-sided due to illiquidity fallback in trending market
     - None: Full IC (no override)
     """
     # Track what was actually placed
@@ -162,6 +165,7 @@ class MEICTFStrategy(MEICStrategy):
 
     Key Features (MEIC-TF specific, beyond base MEIC):
     - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, min $1.00/side
+      One-sided conversions only for clear trends; NEUTRAL skips if either side non-viable
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
     - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
     - Early Close (MKT-018): Close all positions when ROC >= 2%
@@ -171,7 +175,7 @@ class MEICTFStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.3.5 (2026-02-24)
+    Version: 1.3.6 (2026-02-24)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -837,8 +841,10 @@ class MEICTFStrategy(MEICStrategy):
         """
         MKT-011: Check if estimated credit is above minimum viable threshold.
 
-        Unlike base MEIC which skips entire entry if either side is non-viable,
-        MEIC-TF can convert to one-sided entry when only one side is non-viable.
+        Returns raw viability assessment. The call site in _initiate_entry()
+        applies trend logic: one-sided entries are only allowed for clear
+        trending markets (BULLISH/BEARISH). In NEUTRAL markets, if either
+        side is non-viable, the entry is skipped entirely.
 
         Args:
             entry: TFIronCondorEntry with strikes calculated
@@ -1343,61 +1349,57 @@ class MEICTFStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         return f"Entry #{entry_num} skipped - both sides below minimum viable credit"
                     elif gate_result == "call_only":
-                        # Put credit too low - but respect trend filter!
-                        if original_trend == TrendSignal.BULLISH:
-                            # BULLISH wants puts, but puts non-viable - skip entirely
-                            # Don't place calls in a bullish market (contradicts trend filter)
-                            logger.warning(
-                                f"MKT-011: Entry #{entry_num} put credit non-viable, "
-                                f"but trend is BULLISH (can't place calls) - SKIPPING"
-                            )
-                            self._log_safety_event(
-                                "MKT-011_TREND_CONFLICT",
-                                f"Entry #{entry_num} - put non-viable + BULLISH trend → skip",
-                                "Skipped - Trend Conflict"
-                            )
-                            # Fix #53/#57: Track skipped entries and credit gate skips
-                            self.daily_state.entries_skipped += 1
-                            self.daily_state.credit_gate_skips += 1
-                            self._entry_in_progress = False
-                            self._current_entry = None
-                            self.state = MEICState.MONITORING
-                            self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - put non-viable in bullish market"
-                        else:
-                            # NEUTRAL or BEARISH - OK to convert to call-only
-                            logger.info(f"MKT-011: Put credit non-viable → converting to CALL-only (trend: {original_trend.value})")
+                        # Put credit too low - only convert if clear trend supports calls
+                        if original_trend == TrendSignal.BEARISH:
+                            # BEARISH wants calls, and calls are viable - OK to convert
+                            logger.info(f"MKT-011: Put credit non-viable → converting to CALL-only (trend: BEARISH)")
                             trend = TrendSignal.BEARISH  # Force bearish to get call-only
                             entry.override_reason = "mkt-011"  # Fix #49: Track override reason
                             credit_gate_handled = True
-                    elif gate_result == "put_only":
-                        # Call credit too low - but respect trend filter!
-                        if original_trend == TrendSignal.BEARISH:
-                            # BEARISH wants calls, but calls non-viable - skip entirely
-                            # Don't place puts in a bearish market (contradicts trend filter)
+                        else:
+                            # NEUTRAL or BULLISH - one-sided entries only for clear matching trends
                             logger.warning(
-                                f"MKT-011: Entry #{entry_num} call credit non-viable, "
-                                f"but trend is BEARISH (can't place puts) - SKIPPING"
+                                f"MKT-011: Entry #{entry_num} put credit non-viable, "
+                                f"trend is {original_trend.value} - one-sided only for clear trends - SKIPPING"
                             )
                             self._log_safety_event(
-                                "MKT-011_TREND_CONFLICT",
-                                f"Entry #{entry_num} - call non-viable + BEARISH trend → skip",
-                                "Skipped - Trend Conflict"
+                                "MKT-011_SKIP",
+                                f"Entry #{entry_num} - put non-viable + {original_trend.value} → skip",
+                                "Skipped - No Matching Trend"
                             )
-                            # Fix #53/#57: Track skipped entries and credit gate skips
                             self.daily_state.entries_skipped += 1
                             self.daily_state.credit_gate_skips += 1
                             self._entry_in_progress = False
                             self._current_entry = None
                             self.state = MEICState.MONITORING
                             self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - call non-viable in bearish market"
-                        else:
-                            # NEUTRAL or BULLISH - OK to convert to put-only
-                            logger.info(f"MKT-011: Call credit non-viable → converting to PUT-only (trend: {original_trend.value})")
+                            return f"Entry #{entry_num} skipped - put non-viable, no clear trend for calls"
+                    elif gate_result == "put_only":
+                        # Call credit too low - only convert if clear trend supports puts
+                        if original_trend == TrendSignal.BULLISH:
+                            # BULLISH wants puts, and puts are viable - OK to convert
+                            logger.info(f"MKT-011: Call credit non-viable → converting to PUT-only (trend: BULLISH)")
                             trend = TrendSignal.BULLISH  # Force bullish to get put-only
                             entry.override_reason = "mkt-011"  # Fix #49: Track override reason
                             credit_gate_handled = True
+                        else:
+                            # NEUTRAL or BEARISH - one-sided entries only for clear matching trends
+                            logger.warning(
+                                f"MKT-011: Entry #{entry_num} call credit non-viable, "
+                                f"trend is {original_trend.value} - one-sided only for clear trends - SKIPPING"
+                            )
+                            self._log_safety_event(
+                                "MKT-011_SKIP",
+                                f"Entry #{entry_num} - call non-viable + {original_trend.value} → skip",
+                                "Skipped - No Matching Trend"
+                            )
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
+                            self._entry_in_progress = False
+                            self._current_entry = None
+                            self.state = MEICState.MONITORING
+                            self._next_entry_index += 1
+                            return f"Entry #{entry_num} skipped - call non-viable, no clear trend for puts"
                     elif estimation_worked:
                         # MKT-011 worked and said proceed - skip MKT-010
                         credit_gate_handled = True
@@ -1412,59 +1414,61 @@ class MEICTFStrategy(MEICStrategy):
                     if entry.call_wing_illiquid and not entry.put_wing_illiquid:
                         # Call wing illiquid = call spread has reduced width/credit
                         # Put spread is unaffected = has viable credit
-                        if original_trend == TrendSignal.BEARISH:
-                            # BEARISH wants calls, but calls illiquid - skip entirely
+                        if original_trend == TrendSignal.BULLISH:
+                            # BULLISH wants puts, and call is illiquid - OK to convert to put-only
+                            logger.info(
+                                f"MKT-010: Call wing illiquid → "
+                                f"converting to PUT-only (trend: BULLISH)"
+                            )
+                            trend = TrendSignal.BULLISH  # Force to get put-only
+                            entry.override_reason = "mkt-010"  # Fix #49: Track override reason
+                        else:
+                            # NEUTRAL or BEARISH - one-sided entries only for clear matching trends
                             logger.warning(
                                 f"MKT-010: Entry #{entry_num} call wing illiquid, "
-                                f"but trend is BEARISH (can't place puts) - SKIPPING"
+                                f"trend is {original_trend.value} - one-sided only for clear trends - SKIPPING"
                             )
                             self._log_safety_event(
-                                "MKT-010_TREND_CONFLICT",
-                                f"Entry #{entry_num} - call illiquid + BEARISH trend → skip",
-                                "Skipped - Trend Conflict"
+                                "MKT-010_SKIP",
+                                f"Entry #{entry_num} - call illiquid + {original_trend.value} → skip",
+                                "Skipped - No Matching Trend"
                             )
-                            # Fix #53/#57: Track skipped entries and credit gate skips
                             self.daily_state.entries_skipped += 1
                             self.daily_state.credit_gate_skips += 1
                             self._entry_in_progress = False
                             self._current_entry = None
                             self.state = MEICState.MONITORING
                             self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - call illiquid in bearish market"
-                        logger.info(
-                            f"MKT-010: Call wing illiquid → "
-                            f"converting to PUT-only (trend: {original_trend.value})"
-                        )
-                        trend = TrendSignal.BULLISH  # Force to get put-only
-                        entry.override_reason = "mkt-010"  # Fix #49: Track override reason
+                            return f"Entry #{entry_num} skipped - call illiquid, no clear trend for puts"
                     elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
                         # Put wing illiquid = put spread has reduced width/credit
                         # Call spread is unaffected = has viable credit
-                        if original_trend == TrendSignal.BULLISH:
-                            # BULLISH wants puts, but puts illiquid - skip entirely
+                        if original_trend == TrendSignal.BEARISH:
+                            # BEARISH wants calls, and put is illiquid - OK to convert to call-only
+                            logger.info(
+                                f"MKT-010: Put wing illiquid → "
+                                f"converting to CALL-only (trend: BEARISH)"
+                            )
+                            trend = TrendSignal.BEARISH  # Force to get call-only
+                            entry.override_reason = "mkt-010"  # Fix #49: Track override reason
+                        else:
+                            # NEUTRAL or BULLISH - one-sided entries only for clear matching trends
                             logger.warning(
                                 f"MKT-010: Entry #{entry_num} put wing illiquid, "
-                                f"but trend is BULLISH (can't place calls) - SKIPPING"
+                                f"trend is {original_trend.value} - one-sided only for clear trends - SKIPPING"
                             )
                             self._log_safety_event(
-                                "MKT-010_TREND_CONFLICT",
-                                f"Entry #{entry_num} - put illiquid + BULLISH trend → skip",
-                                "Skipped - Trend Conflict"
+                                "MKT-010_SKIP",
+                                f"Entry #{entry_num} - put illiquid + {original_trend.value} → skip",
+                                "Skipped - No Matching Trend"
                             )
-                            # Fix #53/#57: Track skipped entries and credit gate skips
                             self.daily_state.entries_skipped += 1
                             self.daily_state.credit_gate_skips += 1
                             self._entry_in_progress = False
                             self._current_entry = None
                             self.state = MEICState.MONITORING
                             self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - put illiquid in bullish market"
-                        logger.info(
-                            f"MKT-010: Put wing illiquid → "
-                            f"converting to CALL-only (trend: {original_trend.value})"
-                        )
-                        trend = TrendSignal.BEARISH  # Force to get call-only
-                        entry.override_reason = "mkt-010"  # Fix #49: Track override reason
+                            return f"Entry #{entry_num} skipped - put illiquid, no clear trend for calls"
                     elif entry.call_wing_illiquid and entry.put_wing_illiquid:
                         # Both wings illiquid = very unusual, skip entry
                         # Fix #53: Skip immediately, don't retry (this isn't a transient failure)
