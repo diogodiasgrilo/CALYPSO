@@ -134,7 +134,7 @@ If worst-case hold > close now → **HOLD** (don't close). If worst-case hold <=
 | All entries one-sided (no opposing side) | Skip hold check → MKT-018 closes normally |
 | Equal cushion both sides (within tolerance) | Skip hold check → MKT-018 closes normally |
 
-**Heartbeat display:** `Hold Check: HOLD | close=$380 vs hold=$450 (+70) | CALLS_STRESSED (C:35%/P:82%)`
+**Heartbeat display:** `Hold Check: HOLD | close=$380 vs hold=$450 (+70) | expire=$685 | CALLS_STRESSED (C:35%/P:82%)`
 
 ### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
 
