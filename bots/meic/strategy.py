@@ -88,6 +88,10 @@ CIRCUIT_BREAKER_COOLDOWN_MINUTES = 5
 MAX_BID_ASK_SPREAD_PERCENT_WARNING = 50  # Log warning
 MAX_BID_ASK_SPREAD_PERCENT_SKIP = 100  # Skip entry
 MAX_ABSOLUTE_SLIPPAGE = 2.00  # Max $ slippage before aborting MARKET order
+# Fix #83: Far-OTM wings (bid <= $0.25) always have wide % spreads but tiny $ impact.
+# A $0.05 bid / $0.10 ask = 100% spread, but only $5 absolute slippage per contract.
+# Skip percentage check for cheap options — ORDER-005 absolute check still protects.
+ORDER_006_CHEAP_OPTION_THRESHOLD = 0.25
 
 # ORDER-007: Progressive slippage retry sequence for 0DTE (tighter timeouts)
 # Format: (slippage_percent, is_market_order)
@@ -2751,7 +2755,13 @@ class MEICStrategy:
             # ORDER-006: Check bid-ask spread
             if bid > 0:
                 spread_percent = (spread / bid) * 100
-                if spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_SKIP:
+                if bid <= ORDER_006_CHEAP_OPTION_THRESHOLD:
+                    # Fix #83: Cheap wings (far-OTM hedges) always have wide % spreads
+                    # but negligible $ impact. Skip % check; ORDER-005 absolute check
+                    # still protects against genuinely wide $ spreads on market orders.
+                    if spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_SKIP:
+                        logger.info(f"  ORDER-006: Cheap wing exempt (bid=${bid:.2f}, ask=${ask:.2f}, {spread_percent:.0f}% spread, ${spread:.2f} absolute)")
+                elif spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_SKIP:
                     logger.warning(f"  ORDER-006: Spread {spread_percent:.1f}% too wide (bid=${bid:.2f}, ask=${ask:.2f}), skipping attempt")
                     continue
                 elif spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_WARNING:
@@ -7442,8 +7452,10 @@ class MEICStrategy:
             # Check if liquid
             if bid > 0 and ask > 0:
                 spread_percent = ((ask - bid) / bid) * 100 if bid > 0 else float('inf')
-                if spread_percent < MAX_BID_ASK_SPREAD_PERCENT_SKIP:
-                    # Found liquid strike
+                # Fix #83: Cheap wings (bid <= $0.25) always have wide % spreads
+                # but tiny $ impact — accept them as liquid enough
+                if spread_percent < MAX_BID_ASK_SPREAD_PERCENT_SKIP or bid <= ORDER_006_CHEAP_OPTION_THRESHOLD:
+                    # Found liquid (or acceptably cheap) strike
                     if long_strike != original_long_strike:
                         original_spread = abs(original_long_strike - short_strike)
                         new_spread = abs(long_strike - short_strike)
