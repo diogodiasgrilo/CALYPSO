@@ -12,8 +12,6 @@ Trend Detection:
 
 Risk Management (beyond base MEIC):
 - MKT-011: Pre-entry credit gate (skip/convert if credit non-viable)
-- MKT-016: Stop cascade breaker (pause after 3 total stops in a day)
-- MKT-017: Daily loss limit (pause after -$500 realized P&L intraday)
 - MKT-018: Early close on ROC >= 2% (close all positions after entries placed)
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
@@ -165,8 +163,6 @@ class MEICTFStrategy(MEICStrategy):
     Key Features (MEIC-TF specific, beyond base MEIC):
     - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, min $1.00/side
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
-    - Stop Cascade Breaker (MKT-016): Pause entries after 3 stops in a day
-    - Daily Loss Limit (MKT-017): Pause entries after -$500 realized P&L
     - Early Close (MKT-018): Close all positions when ROC >= 2%
     - Virtual Equal Credit Stop (MKT-019): Stop based on max(call, put) credit
     - Pre-Entry ROC Gate (MKT-021): Skip dilutive entries when ROC already high
@@ -174,7 +170,7 @@ class MEICTFStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.3.2 (2026-02-20)
+    Version: 1.3.3 (2026-02-23)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -237,20 +233,8 @@ class MEICTFStrategy(MEICStrategy):
         logger.info(f"  Neutral threshold: {self.ema_neutral_threshold * 100:.2f}%")
         logger.info(f"  Recheck each entry: {self.recheck_each_entry}")
 
-        # MKT-016: Stop cascade breaker - pause entries after N stops in a day
-        strategy_config = config.get("strategy", {})
-        self.max_daily_stops_before_pause = int(strategy_config.get("max_daily_stops_before_pause", 3))
-        self._stop_cascade_triggered = False
-        logger.info(f"  Stop cascade breaker: pause after {self.max_daily_stops_before_pause} stops")
-
-        # MKT-017: Daily loss limit - pause entries when realized P&L drops below threshold
-        # This catches scenarios where stops are large but few (e.g., high-slippage day)
-        # while MKT-016 catches many small stops. They complement each other.
-        self.max_daily_loss = float(strategy_config.get("max_daily_loss", 500))
-        self._daily_loss_limit_triggered = False
-        logger.info(f"  Daily loss limit: pause after -${self.max_daily_loss:.0f} realized P&L")
-
         # MKT-018: Early close based on Return on Capital (ROC)
+        strategy_config = config.get("strategy", {})
         # Closes ALL positions when day's ROC reaches threshold after all entries placed.
         # ROC = (net_pnl - close_cost) / capital_deployed
         # close_cost = active_legs × cost_per_position ($2.50 commission + $2.50 slippage)
@@ -281,19 +265,12 @@ class MEICTFStrategy(MEICStrategy):
         logger.info(f"  Min viable credit per side: ${self.min_viable_credit_per_side / 100:.2f}")
 
     # =========================================================================
-    # ENTRY GATING (MKT-016, MKT-017, MKT-021)
+    # ENTRY GATING (MKT-021)
     # =========================================================================
 
     def _should_attempt_entry(self, now) -> bool:
         """
-        Override parent to add stop cascade breaker (MKT-016), daily loss
-        limit (MKT-017), and pre-entry ROC gate (MKT-021).
-
-        MKT-016: After max_daily_stops_before_pause stops in a single day, skip
-        all remaining entries. Catches many small stops (cascade/whipsaw).
-
-        MKT-017: After realized P&L drops below -max_daily_loss, skip all
-        remaining entries. Catches few large stops (high slippage, gap moves).
+        Override parent to add pre-entry ROC gate (MKT-021).
 
         MKT-021: After min_entries_before_roc_gate entries placed, if ROC on
         existing positions >= early_close_roc_threshold, skip remaining entries.
@@ -301,44 +278,6 @@ class MEICTFStrategy(MEICStrategy):
 
         Existing positions continue to be monitored for stops normally.
         """
-        # MKT-016: Check if stop cascade breaker has been triggered
-        total_stops = self.daily_state.call_stops_triggered + self.daily_state.put_stops_triggered
-        if total_stops >= self.max_daily_stops_before_pause and not self._stop_cascade_triggered:
-            # First time detecting cascade - log and skip remaining entries
-            self._stop_cascade_triggered = True
-            remaining = max(0, len(self.entry_times) - self._next_entry_index)
-            logger.warning(
-                f"MKT-016 STOP CASCADE BREAKER: {total_stops} stops today "
-                f"(threshold: {self.max_daily_stops_before_pause}) - "
-                f"pausing {remaining} remaining entries"
-            )
-            self.daily_state.entries_skipped += remaining
-            self._next_entry_index = len(self.entry_times)
-            return False
-
-        if self._stop_cascade_triggered:
-            return False
-
-        # MKT-017: Check daily loss limit (complements MKT-016)
-        # total_realized_pnl is negative when stops exceed expired credits
-        # During market hours, this only reflects stop losses (expired credits
-        # are added at settlement). So -$260 means $260 in net stop losses.
-        realized_pnl = self.daily_state.total_realized_pnl
-        if realized_pnl < -self.max_daily_loss and not self._daily_loss_limit_triggered:
-            self._daily_loss_limit_triggered = True
-            remaining = max(0, len(self.entry_times) - self._next_entry_index)
-            logger.warning(
-                f"MKT-017 DAILY LOSS LIMIT: realized P&L ${realized_pnl:.2f} "
-                f"exceeds -${self.max_daily_loss:.0f} threshold - "
-                f"pausing {remaining} remaining entries"
-            )
-            self.daily_state.entries_skipped += remaining
-            self._next_entry_index = len(self.entry_times)
-            return False
-
-        if self._daily_loss_limit_triggered:
-            return False
-
         # MKT-021: Pre-entry ROC gate (only when MKT-018 early close is enabled)
         # If ROC on existing entries already exceeds early close threshold,
         # skip remaining entries. Early close will fire on the same heartbeat
@@ -381,6 +320,10 @@ class MEICTFStrategy(MEICStrategy):
 
         # Delegate to parent for normal time-window checks
         return super()._should_attempt_entry(now)
+
+    def _is_daily_loss_limit_reached(self) -> bool:
+        """Disabled for MEIC-TF — bot always attempts all 5 entries."""
+        return False
 
     # =========================================================================
     # MKT-018: EARLY CLOSE BASED ON RETURN ON CAPITAL (ROC)
@@ -2620,10 +2563,6 @@ class MEICTFStrategy(MEICStrategy):
                 "one_sided_entries": self.daily_state.one_sided_entries,
                 "trend_overrides": self.daily_state.trend_overrides,
                 "credit_gate_skips": self.daily_state.credit_gate_skips,
-                # MKT-016: Stop cascade breaker state
-                "stop_cascade_triggered": self._stop_cascade_triggered,
-                # MKT-017: Daily loss limit state
-                "daily_loss_limit_triggered": self._daily_loss_limit_triggered,
                 # MKT-018: Early close state
                 "early_close_triggered": self._early_close_triggered,
                 "early_close_time": self._early_close_time.isoformat() if self._early_close_time else None,
@@ -2895,8 +2834,6 @@ class MEICTFStrategy(MEICStrategy):
         self._circuit_breaker_open = False
         self._consecutive_failures = 0
         self._api_results_window.clear()
-        self._stop_cascade_triggered = False  # MKT-016: Reset cascade breaker
-        self._daily_loss_limit_triggered = False  # MKT-017: Reset daily loss limit
         self._early_close_triggered = False  # MKT-018: Reset early close
         self._roc_gate_triggered = False  # MKT-021: Reset ROC gate
         self._early_close_time = None
@@ -3489,10 +3426,6 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.trend_overrides = saved_state.get("trend_overrides", 0)
             self.daily_state.credit_gate_skips = saved_state.get("credit_gate_skips", 0)
 
-            # MKT-016: Restore cascade breaker state (prevents double-trigger on restart)
-            self._stop_cascade_triggered = saved_state.get("stop_cascade_triggered", False)
-            # MKT-017: Restore daily loss limit state
-            self._daily_loss_limit_triggered = saved_state.get("daily_loss_limit_triggered", False)
             # MKT-018: Restore early close state
             self._early_close_triggered = saved_state.get("early_close_triggered", False)
             ec_time_str = saved_state.get("early_close_time")
@@ -3616,7 +3549,7 @@ class MEICTFStrategy(MEICStrategy):
                 self.daily_state.entries.append(restored_entry)
 
             # Update next_entry_index: use saved value if higher than entry-based calc
-            # (MKT-016 cascade breaker sets next_entry_index beyond completed entries)
+            # (MKT-021 ROC gate or MKT-011 skips may advance it beyond completed entries)
             saved_next_idx = saved_state.get("next_entry_index", 0)
             entry_based_idx = 0
             if self.daily_state.entries:
@@ -3761,13 +3694,11 @@ class MEICTFStrategy(MEICStrategy):
             preserved_entry_credits = {}
             preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
             preserved_market_ohlc = {}
-            preserved_stop_cascade_triggered = False  # MKT-016
-            preserved_daily_loss_limit_triggered = False  # MKT-017
             preserved_early_close_triggered = False  # MKT-018
             preserved_early_close_time = None  # MKT-018
             preserved_early_close_pnl = None  # MKT-018
             preserved_roc_gate_triggered = False  # MKT-021
-            preserved_next_entry_index = 0  # MKT-016/017: may advance beyond entry count
+            preserved_next_entry_index = 0
             try:
                 if os.path.exists(self.state_file):
                     with open(self.state_file, "r") as f:
@@ -3787,10 +3718,6 @@ class MEICTFStrategy(MEICStrategy):
                             preserved_trend_overrides = saved_state.get("trend_overrides", 0)
                             preserved_credit_gate_skips = saved_state.get("credit_gate_skips", 0)
                             preserved_market_ohlc = saved_state.get("market_data_ohlc", {})
-                            # MKT-016: Preserve cascade breaker state
-                            preserved_stop_cascade_triggered = saved_state.get("stop_cascade_triggered", False)
-                            # MKT-017: Preserve daily loss limit state
-                            preserved_daily_loss_limit_triggered = saved_state.get("daily_loss_limit_triggered", False)
                             # MKT-018: Preserve early close state
                             preserved_early_close_triggered = saved_state.get("early_close_triggered", False)
                             ec_time_str = saved_state.get("early_close_time")
@@ -4065,17 +3992,12 @@ class MEICTFStrategy(MEICStrategy):
                     self.market_data.vix_low = vix_low
 
             # Determine next entry index
-            # Use saved next_entry_index if higher (MKT-016 cascade may have advanced it)
             if recovered_entries:
                 max_entry_num = max(e.entry_number for e in recovered_entries)
                 self._next_entry_index = max(max_entry_num, preserved_next_entry_index)
             else:
                 self._next_entry_index = preserved_next_entry_index
 
-            # MKT-016: Restore cascade breaker state
-            self._stop_cascade_triggered = preserved_stop_cascade_triggered
-            # MKT-017: Restore daily loss limit state
-            self._daily_loss_limit_triggered = preserved_daily_loss_limit_triggered
             # MKT-018: Restore early close state
             self._early_close_triggered = preserved_early_close_triggered
             self._early_close_time = preserved_early_close_time

@@ -45,15 +45,8 @@
         "meic_plus_reduction": 0.10,
 
         "_comment_risk": "Risk management settings",
-        "max_daily_loss_percent": 2.0,
         "max_vix_entry": 25,
         "contracts_per_entry": 1,
-
-        "_comment_cascade": "MKT-016: Pause entries after N total stops in a day (call + put)",
-        "max_daily_stops_before_pause": 3,
-
-        "_comment_loss_limit": "MKT-017: Pause entries after realized P&L drops below this ($)",
-        "max_daily_loss": 500,
 
         "_comment_early_close": "MKT-018: Close ALL positions when ROC >= threshold after all entries placed",
         "early_close_enabled": true,
