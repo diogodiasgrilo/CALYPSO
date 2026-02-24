@@ -6435,11 +6435,22 @@ class MEICStrategy:
             "last_updated": None
         }
 
-    def _save_cumulative_metrics(self):
-        """Save cumulative metrics to disk."""
+    def _save_cumulative_metrics(self, trading_date: str = None):
+        """Save cumulative metrics to disk.
+
+        Args:
+            trading_date: The trading date being summarized (YYYY-MM-DD format).
+                Fix #83: Must use the TRADING date, not datetime.now(). When midnight
+                settlement processes the previous day's data, datetime.now() returns
+                the NEW day, poisoning the Fix #71 idempotency guard for the entire
+                next trading day.
+        """
         try:
             os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
-            self.cumulative_metrics["last_updated"] = get_us_market_time().isoformat()
+            # Fix #83: Store trading date, not current timestamp
+            # Previous code used get_us_market_time().isoformat() which caused midnight
+            # settlement for day N to store day N+1's date, blocking day N+1's summary
+            self.cumulative_metrics["last_updated"] = trading_date or get_us_market_time().strftime("%Y-%m-%d")
             with open(METRICS_FILE, 'w') as f:
                 json.dump(self.cumulative_metrics, f, indent=2)
         except Exception as e:
@@ -6671,10 +6682,13 @@ class MEICStrategy:
         3. Updates cumulative metrics (winning/losing days, total P&L)
         4. Saves cumulative metrics to disk
         """
-        # Fix #71: Guard against duplicate daily summary after restart
+        # Fix #71 + Fix #83: Guard against duplicate daily summary after restart
         # On restart, main.py's local daily_summary_sent_date resets to None,
         # which allows this method to be called again for the same day.
-        # Check last_updated date in cumulative_metrics to detect duplicates.
+        # Check last_updated trading date in cumulative_metrics to detect duplicates.
+        # Fix #83: last_updated now stores the TRADING DATE (YYYY-MM-DD), not a timestamp.
+        # Previously, midnight settlement for day N stored day N+1's timestamp, blocking
+        # the entire next trading day's summary.
         last_updated_str = self.cumulative_metrics.get("last_updated", "")
         if last_updated_str:
             try:
@@ -6682,8 +6696,8 @@ class MEICStrategy:
                 today_et = get_us_market_time().date()
                 if metrics_date == today_et:
                     logger.warning(
-                        "FIX-71: Daily summary already sent today (metrics last_updated=%s) - skipping duplicate",
-                        last_updated_str
+                        "FIX-71: Daily summary already sent for trading date %s - skipping duplicate",
+                        last_updated_str[:10]
                     )
                     return
             except (ValueError, TypeError):
@@ -6779,7 +6793,7 @@ class MEICStrategy:
                 "return_pct": net_pnl / capital_deployed
             })
 
-        self._save_cumulative_metrics()
+        self._save_cumulative_metrics(trading_date=summary["date"])
 
     def update_market_data(self):
         """Public method to update market data (called by main.py)."""
