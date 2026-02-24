@@ -260,6 +260,10 @@ class MEICTFStrategy(MEICStrategy):
         self.min_call_otm_distance = int(strategy_config.get("min_call_otm_distance", 25))
         logger.info(f"  Progressive call tightening (MKT-020): min OTM {self.min_call_otm_distance}pt")
 
+        # MKT-022: Progressive put OTM tightening - same as MKT-020 but for puts
+        self.min_put_otm_distance = int(strategy_config.get("min_put_otm_distance", 25))
+        logger.info(f"  Progressive put tightening (MKT-022): min OTM {self.min_put_otm_distance}pt")
+
         # Override min credit from base class $0.50 to $1.00 for MEIC-TF
         self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 1.00) * 100
         logger.info(f"  Min viable credit per side: ${self.min_viable_credit_per_side / 100:.2f}")
@@ -1068,6 +1072,171 @@ class MEICTFStrategy(MEICStrategy):
         )
         return False
 
+    def _apply_progressive_put_tightening(self, entry: TFIronCondorEntry) -> bool:
+        """
+        MKT-022: Progressive put OTM tightening for full IC entries.
+
+        Mirror of MKT-020 (call tightening) for the put side.
+        When initial put credit is below minimum, moves the short put closer
+        to ATM in 5pt steps until credit >= minimum or OTM floor is reached.
+
+        Only applies to NEUTRAL trend entries (full IC candidates).
+        One-sided entries are unaffected.
+
+        Uses batch quote API for efficiency: 1 chain fetch + 1 batch quote
+        regardless of how many candidate strikes are evaluated.
+
+        Args:
+            entry: TFIronCondorEntry with strikes already calculated
+
+        Returns:
+            True if put strikes were tightened, False if no change needed
+        """
+        if entry.call_only or entry.put_only:
+            return False
+
+        spx = round(self.current_price / 5) * 5
+        min_otm = self.min_put_otm_distance
+        min_credit = self.min_viable_credit_per_side  # In dollars (e.g., $100 for $1.00)
+        spread_width = self._get_vix_adjusted_spread_width(self.current_vix)
+
+        initial_short_put = entry.short_put_strike
+        initial_otm = spx - initial_short_put  # Put OTM = SPX - short_put
+
+        if initial_otm <= min_otm:
+            logger.debug(f"MKT-022: Put already at OTM floor ({initial_otm}pt <= {min_otm}pt)")
+            return False
+
+        # Build candidate strike pairs: current OTM down to floor, in 5pt steps
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            return False
+
+        candidates = []  # [(otm, short_strike, long_strike), ...]
+        otm = initial_otm
+        while otm >= min_otm:
+            short_s = spx - otm          # Put: BELOW SPX
+            long_s = short_s - spread_width  # Put: FURTHER below
+            candidates.append((otm, short_s, long_s))
+            otm -= 5
+
+        if not candidates:
+            return False
+
+        # Fetch option chain ONCE to get UICs for all candidate strikes
+        try:
+            chain_response = self.client.get_option_chain(
+                option_root_id=self.option_root_uic,
+                expiry_dates=[expiry]
+            )
+        except Exception as e:
+            logger.warning(f"MKT-022: Option chain fetch failed: {e}")
+            return False
+
+        if not chain_response:
+            return False
+
+        option_space = chain_response.get("OptionSpace", [])
+        if not option_space:
+            return False
+
+        # Build strike -> UIC mapping for puts from the chain
+        put_uic_map = {}
+        specific_options = option_space[0].get("SpecificOptions", [])
+        for opt in specific_options:
+            strike = opt.get("StrikePrice", 0)
+            put_call = opt.get("PutCall", "")
+            if put_call == "Put":
+                put_uic_map[strike] = opt.get("Uic")
+
+        # Collect UICs for all candidate strikes
+        candidate_uics = []  # [(otm, short_s, long_s, short_uic, long_uic), ...]
+        all_uics = []
+        for otm_val, short_s, long_s in candidates:
+            short_uic = put_uic_map.get(short_s)
+            long_uic = put_uic_map.get(long_s)
+            candidate_uics.append((otm_val, short_s, long_s, short_uic, long_uic))
+            if short_uic:
+                all_uics.append(short_uic)
+            if long_uic:
+                all_uics.append(long_uic)
+
+        if not all_uics:
+            logger.warning("MKT-022: No UICs found for candidate put strikes")
+            return False
+
+        # Batch fetch quotes for all candidates (1 API call)
+        try:
+            quotes = self.client.get_quotes_batch(all_uics, asset_type="StockIndexOption")
+        except Exception as e:
+            logger.warning(f"MKT-022: Batch quote fetch failed: {e}")
+            return False
+
+        # Evaluate candidates from widest OTM to narrowest
+        for otm_val, short_s, long_s, short_uic, long_uic in candidate_uics:
+            if not short_uic or not long_uic:
+                continue
+
+            short_quote = quotes.get(short_uic, {})
+            long_quote = quotes.get(long_uic, {}) if long_uic else {}
+
+            sq = short_quote.get("Quote", {})
+            lq = long_quote.get("Quote", {})
+            short_bid = sq.get("Bid", 0) or 0
+            short_ask = sq.get("Ask", 0) or 0
+            long_bid = lq.get("Bid", 0) or 0
+            long_ask = lq.get("Ask", 0) or 0
+
+            if short_bid <= 0 or short_ask <= 0:
+                continue  # Short illiquid, skip
+
+            short_mid = (short_bid + short_ask) / 2
+
+            # Long leg: use actual quote if available, else 0 (deep OTM longs
+            # at 50-100pt OTM are worth $0-$25, so ignoring is minor).
+            # MKT-011 re-validates with independent fresh quotes after MKT-022.
+            if long_bid > 0 and long_ask > 0:
+                long_mid = (long_bid + long_ask) / 2
+            else:
+                long_mid = 0
+
+            put_credit = (short_mid - long_mid) * 100
+
+            if put_credit >= min_credit:
+                if otm_val < initial_otm:
+                    # Tightened — update entry strikes
+                    entry.short_put_strike = short_s
+                    entry.long_put_strike = long_s
+                    logger.info(
+                        f"MKT-022: Put tightened {initial_otm}pt → {otm_val}pt OTM "
+                        f"(credit: ${put_credit:.2f}, min: ${min_credit:.2f})"
+                    )
+                    self._log_safety_event(
+                        "MKT-022_PUT_TIGHTENED",
+                        f"Entry #{entry.entry_number}: put OTM {initial_otm}→{otm_val}pt, "
+                        f"credit ${put_credit:.2f}"
+                    )
+
+                    # Re-run all strike conflict checks on tightened strikes
+                    self._adjust_for_strike_conflicts(entry)
+                    self._adjust_for_same_strike_overlap(entry)
+                    self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
+                    self._adjust_for_long_strike_overlap(entry)
+                    return True
+                else:
+                    # Current OTM already viable — no tightening needed
+                    logger.debug(
+                        f"MKT-022: Put credit ${put_credit:.2f} already viable at {otm_val}pt OTM"
+                    )
+                    return False
+
+        # Couldn't find viable credit even at OTM floor
+        logger.info(
+            f"MKT-022: Put credit non-viable even at {min_otm}pt OTM floor. "
+            f"MKT-011 will handle (convert to call-only or skip)."
+        )
+        return False
+
     # =========================================================================
     # OVERRIDE: Entry initiation with trend detection
     # =========================================================================
@@ -1151,9 +1320,10 @@ class MEICTFStrategy(MEICStrategy):
                     last_error = "Failed to calculate strikes"
                     continue
 
-                # MKT-020: Progressive call OTM tightening for full IC candidates
+                # MKT-020/MKT-022: Progressive OTM tightening for full IC candidates
                 if trend == TrendSignal.NEUTRAL and not self.dry_run:
                     self._apply_progressive_call_tightening(entry)
+                    self._apply_progressive_put_tightening(entry)
 
                 # MKT-011: Check minimum credit gate before placing orders (primary check)
                 credit_gate_handled = False

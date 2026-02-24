@@ -136,17 +136,17 @@ Before placing each entry (after all 5 entries placed), checks if ROC on existin
 
 Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` — no separate threshold needed. Sets a flag, skips remaining entries, and persists state across restarts.
 
-### Progressive Call OTM Tightening (MKT-020) - Added v1.3.1
+### Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts) - Added v1.3.1 / v1.3.5
 
-For full IC entries (NEUTRAL trend), the initial VIX-adjusted OTM distance produces much lower call credit than put credit due to structural volatility skew. MKT-020 progressively moves the short call closer to ATM in 5pt steps until credit >= $1.00/side or a 25pt OTM floor is reached.
+For full IC entries (NEUTRAL trend), VIX-adjusted OTM distances can produce credit below the $1.00/side minimum on either side. MKT-020 (calls) and MKT-022 (puts) progressively move the short strike closer to ATM in 5pt steps until credit >= $1.00/side or a 25pt OTM floor is reached.
 
 ```
-Flow: _calculate_strikes() → MKT-020 → MKT-011 credit gate
-  - If tightened call meets $1.00: proceed as full IC
-  - If can't reach $1.00 at 25pt floor: MKT-011 converts to put-only
+Flow: _calculate_strikes() → MKT-020 (calls) → MKT-022 (puts) → MKT-011 credit gate
+  - If tightened strikes meet $1.00: proceed as full IC
+  - If can't reach $1.00 at 25pt floor: MKT-011 converts to one-sided or skips
 ```
 
-Uses batch quote API for efficiency: 1 option chain fetch + 1 batch quote call = 2 API calls total regardless of how many candidate strikes are evaluated. Only runs for NEUTRAL trend entries.
+Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote call = 2 API calls each. Only run for NEUTRAL trend entries. Include liquidity checks (skip candidates with bid/ask = 0).
 
 ### Virtual Equal Credit Stop (MKT-019) - Added v1.3.0
 
@@ -166,6 +166,7 @@ For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) ins
 |---------|---------|-------------|
 | `min_viable_credit_per_side` | `1.00` | MKT-011: Skip/convert if estimated credit below this (MEIC-TF override, base is $0.50) |
 | `min_call_otm_distance` | `25` | MKT-020: Minimum OTM distance (points) for call tightening floor |
+| `min_put_otm_distance` | `25` | MKT-022: Minimum OTM distance (points) for put tightening floor |
 | `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
 | `early_close_roc_threshold` | `0.02` | MKT-018: ROC threshold for early close (2.0%) |
 | `early_close_cost_per_position` | `5.00` | MKT-018: Estimated cost per leg to close ($2.50 commission + $2.50 slippage) |
