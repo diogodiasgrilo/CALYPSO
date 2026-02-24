@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.3.2 | **Last Updated:** 2026-02-20
+**Version:** 1.3.4 | **Last Updated:** 2026-02-23
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -91,28 +91,6 @@ If the credit gate can't get valid quotes (rare), it falls back to wing illiquid
 | `chart_bars_count` | `50` | Number of 1-min bars to fetch |
 | `chart_horizon_minutes` | `1` | Bar interval (1 = 1 minute) |
 
-### Stop Cascade Breaker (MKT-016) - Added v1.2.8
-
-After a configurable number of total stops (call + put) in a single day, pause all remaining entries. Prevents compounding losses on whipsaw/reversal days where the EMA trend filter lags rapid price changes.
-
-| Trend | Stops Hit | Remaining Entries | Action |
-|-------|-----------|-------------------|--------|
-| Any | < threshold | Any | Continue normally |
-| Any | >= threshold | N remaining | **Skip all N entries** |
-
-**Why this works:** On Feb 17, 2026, a V-shaped reversal caused 5/5 entries to stop. Entries #4 and #5 together lost $195 net. A cascade breaker at 3 stops would have paused Entry #4 and #5, saving $195.
-
-### Daily Loss Limit (MKT-017) - Added v1.2.9
-
-Complements MKT-016 by checking loss *magnitude* instead of stop *count*. After realized P&L drops below the threshold during market hours, pause all remaining entries. Catches days with few but high-slippage stops where MKT-016 wouldn't trigger.
-
-| Realized P&L | Remaining Entries | Action |
-|-------------|-------------------|--------|
-| > -$threshold | Any | Continue normally |
-| <= -$threshold | N remaining | **Skip all N entries** |
-
-**Threshold calibration:** -$500 default, based on 6 days of baseline data. Feb 13 (best day, +$675 net) had an intraday trough of -$450, so -$500 provides a $50 buffer while never triggering on profitable days.
-
 ### Early Close on ROC (MKT-018) - Added v1.3.0
 
 After all entries are placed, monitors Return on Capital (ROC) every heartbeat. When ROC reaches the threshold, closes ALL active positions via market orders to lock in profit. Prevents late-day reversals from erasing gains built early in the session.
@@ -156,7 +134,7 @@ Before placing each entry (after a minimum of 2 entries placed), checks if ROC o
 | ROC >= early_close_threshold | Skip remaining entries, MKT-018 fires same cycle |
 | Early close disabled | MKT-021 inactive |
 
-Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` — no separate threshold needed. Follows the same pattern as MKT-016/017 (set flag, skip remaining, persist state).
+Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` — no separate threshold needed. Sets a flag, skips remaining entries, and persists state across restarts.
 
 ### Progressive Call OTM Tightening (MKT-020) - Added v1.3.1
 
@@ -188,8 +166,6 @@ For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) ins
 |---------|---------|-------------|
 | `min_viable_credit_per_side` | `1.00` | MKT-011: Skip/convert if estimated credit below this (MEIC-TF override, base is $0.50) |
 | `min_call_otm_distance` | `25` | MKT-020: Minimum OTM distance (points) for call tightening floor |
-| `max_daily_stops_before_pause` | `3` | MKT-016: Pause entries after N total stops in a day |
-| `max_daily_loss` | `500` | MKT-017: Pause entries after this much realized loss ($) |
 | `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
 | `early_close_roc_threshold` | `0.02` | MKT-018: ROC threshold for early close (2.0%) |
 | `early_close_cost_per_position` | `5.00` | MKT-018: Estimated cost per leg to close ($2.50 commission + $2.50 slippage) |
@@ -276,12 +252,20 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.3.4** (2026-02-23): Fix #82 - Settlement gate lock bug
+  - At midnight ET, `_reset_for_new_day()` + empty-registry settlement locked `daily_summary_sent_date` for the entire day
+  - Post-market settlement at 4 PM was skipped, stale registry caused HALT loop next midnight
+  - Fix: Don't lock gate pre-market with no activity; verify stale registry against Saxo before halting
+- **1.3.3** (2026-02-23): Remove MKT-016/017/base loss limit — bot always places all 5 entries
+  - Removed MKT-016 (stop cascade breaker): was pausing entries after 3 stops
+  - Removed MKT-017 (daily loss limit): was pausing entries after -$500 realized P&L
+  - Override base MEIC `_is_daily_loss_limit_reached()` to return False
 - **1.3.2** (2026-02-20): MKT-021 pre-entry ROC gate + Fix #81
   - Before placing entry #3+, checks if ROC on existing entries already exceeds early close threshold (2%)
   - If so, skips remaining entries and MKT-018 early close fires immediately at undiluted ROC
   - Prevents wasteful entries that dilute ROC with capital + close costs but ~$0 P&L
   - Only active when MKT-018 early close is enabled; minimum 2 entries before gate activates
-  - Same pattern as MKT-016/017: flag + skip remaining + persist state across restart
+  - Flag + skip remaining + persist state across restart
   - Fix #81: Skip closing long legs with $0 bid during early close (worthless, expire naturally at 4 PM)
 - **1.3.1** (2026-02-20): MKT-020 progressive call OTM tightening + raise min credit to $1.00/side
   - Progressively moves short call closer to ATM in 5pt steps until credit >= $1.00 or 25pt OTM floor
@@ -303,18 +287,17 @@ bots/meic_tf/
   - Stop loss monitoring now uses `_batch_update_entry_prices()` instead of per-entry individual calls
   - Fix #80: Google Sheets Positions snapshot uses unconditional resize (prevents stale row_count after timeout)
 
-- **1.2.9** (2026-02-18): Daily loss limit + daily summary accuracy
-  - MKT-017: Daily loss limit - pause entries when realized P&L drops below -$500 (complements MKT-016)
+- **1.2.9** (2026-02-18): ~~Daily loss limit~~ + daily summary accuracy
+  - ~~MKT-017: Daily loss limit~~ *(removed in v1.3.3)*
   - Fix #77: Post-restart settlement processes expired credits even when registry is empty
   - Fix #78: Stop Loss Debits derived from P&L identity (not theoretical stop levels with slippage error)
   - Fix #79: MKT-011 "both non-viable" skip path now increments entries_skipped counter
 
-- **1.2.8** (2026-02-17): EMA threshold widening + stop cascade breaker
+- **1.2.8** (2026-02-17): EMA threshold widening + ~~stop cascade breaker~~
   - EMA neutral threshold widened from 0.1% to 0.2% (fewer false trend signals on low-conviction moves)
-  - MKT-016: Stop cascade breaker - pause all remaining entries after N total stops in a day (default: 3)
+  - ~~MKT-016: Stop cascade breaker~~ *(removed in v1.3.3)*
   - Based on Feb 10-17 performance analysis: 4 winning days then $740 loss on V-shaped reversal
   - EMA threshold change would have saved ~$330 on Feb 17 (fewer one-sided entries on weak trends)
-  - Cascade breaker would have saved ~$195 on Feb 17 (blocked Entry #4 and #5 after 3 stops)
   - See `docs/MEIC_TF_PERFORMANCE_BASELINE.md` for full analysis and baseline data
 
 - **1.2.7** (2026-02-16): Daily Summary column redesign (24 → 34 columns)

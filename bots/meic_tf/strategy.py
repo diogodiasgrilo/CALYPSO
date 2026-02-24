@@ -170,7 +170,7 @@ class MEICTFStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.3.3 (2026-02-23)
+    Version: 1.3.4 (2026-02-23)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
