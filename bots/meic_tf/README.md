@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.3.6 | **Last Updated:** 2026-02-24
+**Version:** 1.3.7 | **Last Updated:** 2026-02-24
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -104,7 +104,7 @@ After all entries are placed, monitors Return on Capital (ROC) every heartbeat. 
 
 | Condition | Action |
 |-----------|--------|
-| All entries placed, ROC >= 2.0% | Close ALL positions, log daily summary, send alert |
+| All entries placed, ROC >= 2.0% | MKT-023 hold check → close if hold check agrees, else hold |
 | All entries placed, ROC < 2.0% | Continue monitoring (shadow-log ROC when > 1%) |
 | Not all entries placed yet | Skip ROC check |
 | Last 15 minutes before close (3:45+ PM) | Skip ROC check (positions expire naturally) |
@@ -117,6 +117,24 @@ After all entries are placed, monitors Return on Capital (ROC) every heartbeat. 
 - Daily summary, account summary, performance metrics logged immediately
 - Bot transitions to DAILY_COMPLETE state (no settlement needed)
 - Alert sent with locked-in P&L and ROC
+
+### Smart Hold Check (MKT-023) - Added v1.3.7
+
+When MKT-018's ROC threshold is met, MKT-023 checks whether holding to expiration is mathematically better than closing now — even in the worst case. It determines market lean from average cushion per side, then calculates:
+
+- **Close now P&L**: current net P&L minus close costs (same as ROC numerator)
+- **Worst-case hold P&L**: assume all stressed sides get stopped, all safe sides expire worthless
+
+If worst-case hold > close now → **HOLD** (don't close). If worst-case hold <= close now → **CLOSE** (proceed with MKT-018).
+
+| Condition | Action |
+|-----------|--------|
+| ROC >= threshold, worst-case hold > close now | HOLD — don't close (safe side credits outweigh stressed stops) |
+| ROC >= threshold, worst-case hold <= close now | CLOSE — MKT-018 proceeds normally |
+| All entries one-sided (no opposing side) | Skip hold check → MKT-018 closes normally |
+| Equal cushion both sides (within tolerance) | Skip hold check → MKT-018 closes normally |
+
+**Heartbeat display:** `Hold Check: HOLD | close=$380 vs hold=$450 (+70) | CALLS_STRESSED (C:35%/P:82%)`
 
 ### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
 
@@ -172,6 +190,8 @@ For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) ins
 | `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
 | `early_close_roc_threshold` | `0.02` | MKT-018: ROC threshold for early close (2.0%) |
 | `early_close_cost_per_position` | `5.00` | MKT-018: Estimated cost per leg to close ($2.50 commission + $2.50 slippage) |
+| `hold_check_enabled` | `true` | MKT-023: Enable/disable smart hold check before early close |
+| `hold_check_lean_tolerance` | `1.0` | MKT-023: Min cushion difference (%) to determine market lean |
 | `min_entries_before_roc_gate` | `5` | MKT-021: Minimum entries placed before pre-entry ROC gate activates |
 
 ## Usage
@@ -255,6 +275,12 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.3.7** (2026-02-24): MKT-023 smart hold check before early close
+  - When MKT-018 ROC threshold is met, compares close-now P&L vs worst-case-hold P&L
+  - Determines market lean from average cushion per side (calls vs puts)
+  - If holding is better even when all stressed sides get stopped: HOLD (don't close)
+  - Falls through to MKT-018 close when: no clear lean, all one-sided, or close-now is better
+  - Heartbeat shows live hold check decision with dollar comparison
 - **1.3.6** (2026-02-24): MKT-011 one-sided entries only for clear trends
   - NEUTRAL markets: if either side is non-viable, skip entry (no more one-sided conversions)
   - One-sided entries only allowed when trend filter confirms direction (BULLISH/BEARISH >= 0.2% EMA)

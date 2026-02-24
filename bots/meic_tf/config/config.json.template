@@ -54,6 +54,10 @@
         "early_close_roc_threshold": 0.02,
         "early_close_cost_per_position": 5.00,
 
+        "_comment_hold_check": "MKT-023: Compare close-now vs worst-case-hold before early close triggers. Lean tolerance = min cushion difference (%) to determine market direction",
+        "hold_check_enabled": true,
+        "hold_check_lean_tolerance": 1.0,
+
         "_comment_roc_gate": "MKT-021: Min entries placed before pre-entry ROC gate activates",
         "min_entries_before_roc_gate": 5
     },

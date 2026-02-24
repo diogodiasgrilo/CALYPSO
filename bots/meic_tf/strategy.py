@@ -175,7 +175,7 @@ class MEICTFStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.3.6 (2026-02-24)
+    Version: 1.3.7 (2026-02-24)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -268,6 +268,13 @@ class MEICTFStrategy(MEICStrategy):
         # MKT-022: Progressive put OTM tightening - same as MKT-020 but for puts
         self.min_put_otm_distance = int(strategy_config.get("min_put_otm_distance", 25))
         logger.info(f"  Progressive put tightening (MKT-022): min OTM {self.min_put_otm_distance}pt")
+
+        # MKT-023: Smart hold check before early close
+        # Compares close-now P&L vs worst-case-hold P&L (stressed side stopped, safe side expires)
+        self.hold_check_enabled = bool(strategy_config.get("hold_check_enabled", True))
+        self.hold_check_lean_tolerance = float(strategy_config.get("hold_check_lean_tolerance", 1.0))
+        if self.early_close_enabled:
+            logger.info(f"  Hold check (MKT-023): {'ENABLED' if self.hold_check_enabled else 'DISABLED'} (lean tolerance {self.hold_check_lean_tolerance}%)")
 
         # Override min credit from base class $0.50 to $1.00 for MEIC-TF
         self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 1.00) * 100
@@ -396,6 +403,27 @@ class MEICTFStrategy(MEICStrategy):
         roc = pnl_after_close / capital_deployed
 
         if roc >= self.early_close_roc_threshold:
+            # MKT-023: Check if holding is better than closing now
+            if self.hold_check_enabled:
+                should_close, hold_details = self._check_hold_vs_close(pnl_after_close)
+                if not should_close:
+                    wc = hold_details['worst_case_hold_pnl']
+                    advantage = wc - pnl_after_close
+                    logger.info(
+                        f"MKT-023 HOLD CHECK: ROC {roc*100:.2f}% >= threshold, "
+                        f"BUT holding is better | close_now=${pnl_after_close:.2f} vs "
+                        f"worst_hold=${wc:.2f} (+${advantage:.2f}) | "
+                        f"Lean: {hold_details['market_lean']} | "
+                        f"Cushion: Call {hold_details['avg_call_cushion']:.0f}% / "
+                        f"Put {hold_details['avg_put_cushion']:.0f}%"
+                    )
+                    self._log_safety_event(
+                        "MKT-023_HOLD",
+                        f"ROC {roc*100:.2f}% but hold better by ${advantage:.2f} "
+                        f"({hold_details['market_lean']})"
+                    )
+                    return None  # Don't close — hold is better
+
             logger.warning(
                 f"MKT-018 EARLY CLOSE TRIGGERED: ROC {roc*100:.2f}% >= "
                 f"{self.early_close_roc_threshold*100:.1f}% threshold | "
@@ -405,6 +433,122 @@ class MEICTFStrategy(MEICStrategy):
             return self._execute_early_close(roc)
 
         return None
+
+    def _check_hold_vs_close(self, close_now_pnl: float) -> Tuple[bool, Dict[str, Any]]:
+        """
+        MKT-023: Compare close-now P&L vs worst-case hold P&L.
+
+        Determines market lean from average cushion per side, then calculates
+        what happens if the stressed side gets fully stopped and the safe side
+        expires worthless. If holding is better even in that worst case, returns
+        should_close=False.
+
+        Args:
+            close_now_pnl: Net P&L if we close all positions now (net_pnl - close_cost)
+
+        Returns:
+            (should_close, details_dict) where details_dict has diagnostic data.
+        """
+        details: Dict[str, Any] = {
+            'close_now_pnl': close_now_pnl,
+        }
+
+        # --- Step A: Collect per-side cushions across active entries ---
+        call_cushions: List[float] = []
+        put_cushions: List[float] = []
+        # (entry, side_name, credit, stop_level)
+        active_sides: List[Tuple[Any, str, float, float]] = []
+
+        for entry in self.daily_state.active_entries:
+            call_active = not (
+                entry.call_side_stopped
+                or getattr(entry, 'call_side_expired', False)
+                or getattr(entry, 'call_side_skipped', False)
+            )
+            put_active = not (
+                entry.put_side_stopped
+                or getattr(entry, 'put_side_expired', False)
+                or getattr(entry, 'put_side_skipped', False)
+            )
+
+            if call_active and entry.call_side_stop > 0:
+                cushion = (entry.call_side_stop - entry.call_spread_value) / entry.call_side_stop * 100
+                call_cushions.append(cushion)
+                active_sides.append((entry, "call", entry.call_spread_credit, entry.call_side_stop))
+
+            if put_active and entry.put_side_stop > 0:
+                cushion = (entry.put_side_stop - entry.put_spread_value) / entry.put_side_stop * 100
+                put_cushions.append(cushion)
+                active_sides.append((entry, "put", entry.put_spread_credit, entry.put_side_stop))
+
+        # --- Step B: Determine market lean ---
+        avg_call = sum(call_cushions) / len(call_cushions) if call_cushions else 0
+        avg_put = sum(put_cushions) / len(put_cushions) if put_cushions else 0
+        details['avg_call_cushion'] = avg_call
+        details['avg_put_cushion'] = avg_put
+
+        # Can't determine lean if only one side exists (all one-sided entries)
+        if not call_cushions or not put_cushions:
+            details['market_lean'] = 'ONE_SIDED'
+            details['reason'] = 'all_one_sided'
+            return (True, details)  # Let MKT-018 close
+
+        # No clear lean if cushions are nearly equal
+        if abs(avg_call - avg_put) < self.hold_check_lean_tolerance:
+            details['market_lean'] = 'EQUAL'
+            details['reason'] = 'no_clear_lean'
+            return (True, details)  # Let MKT-018 close
+
+        # Lower cushion = stressed
+        if avg_call < avg_put:
+            stressed_side = "call"
+            details['market_lean'] = 'CALLS_STRESSED'
+        else:
+            stressed_side = "put"
+            details['market_lean'] = 'PUTS_STRESSED'
+
+        # --- Step C: Calculate worst-case hold P&L ---
+        safe_credit_sum = 0.0
+        stressed_net_sum = 0.0
+        stressed_sides_count = 0
+
+        for entry, side, credit, stop_level in active_sides:
+            if side == stressed_side:
+                # Worst case: this side gets stopped
+                # Net = credit collected - cost to close at stop level
+                stressed_net_sum += (credit - stop_level)
+                stressed_sides_count += 1
+            else:
+                # Safe side expires worthless = keep full credit
+                safe_credit_sum += credit
+
+        # Commission for stop closes (2 legs per stopped side)
+        stop_close_commission = (
+            stressed_sides_count * 2 * self.commission_per_leg * self.contracts_per_entry
+        )
+
+        worst_case_hold_pnl = (
+            self.daily_state.total_realized_pnl   # Already-realized P&L
+            + safe_credit_sum                      # Safe sides expire worthless
+            + stressed_net_sum                     # Stressed sides get stopped
+            - self.daily_state.total_commission    # Commission already incurred
+            - stop_close_commission                # Additional commission for stops
+        )
+
+        details['worst_case_hold_pnl'] = worst_case_hold_pnl
+        details['safe_credit_sum'] = safe_credit_sum
+        details['stressed_net_sum'] = stressed_net_sum
+        details['stressed_sides_count'] = stressed_sides_count
+        details['stop_close_commission'] = stop_close_commission
+
+        # --- Step D: Decision ---
+        # Strictly > : if equal, close (bird-in-hand principle)
+        if worst_case_hold_pnl > close_now_pnl:
+            details['decision'] = 'HOLD'
+            return (False, details)
+        else:
+            details['decision'] = 'CLOSE'
+            return (True, details)
 
     def _count_active_position_legs(self) -> int:
         """Count individual position legs still open across all active entries."""
@@ -2231,13 +2375,20 @@ class MEICTFStrategy(MEICStrategy):
                 close_cost = active_legs * self.early_close_cost_per_position
                 capital = status.get('capital_deployed', 0)
                 roc = (net_pnl_val - close_cost) / capital if capital > 0 else 0
-                status['early_close_status'] = {
+                ec_dict: Dict[str, Any] = {
                     'tracking': True,
                     'roc': roc,
                     'threshold': self.early_close_roc_threshold,
                     'close_cost': close_cost,
                     'active_legs': active_legs,
                 }
+                # MKT-023: Add hold check preview for heartbeat display
+                if self.hold_check_enabled:
+                    pnl_after_close = net_pnl_val - close_cost
+                    should_close, hold_details = self._check_hold_vs_close(pnl_after_close)
+                    hold_details['should_close'] = should_close
+                    ec_dict['hold_check'] = hold_details
+                status['early_close_status'] = ec_dict
             else:
                 status['early_close_status'] = {}
 

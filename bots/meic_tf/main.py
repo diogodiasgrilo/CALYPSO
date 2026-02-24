@@ -402,6 +402,21 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                             f"{roc_threshold*100:.1f}% threshold | "
                             f"Close cost: ${close_cost:.0f} ({ec_status.get('active_legs', 0)} legs)"
                         )
+                        # MKT-023: Hold check preview
+                        hc = ec_status.get('hold_check', {})
+                        if hc:
+                            lean = hc.get('market_lean', '')
+                            if lean and lean not in ('ONE_SIDED', 'EQUAL') and 'worst_case_hold_pnl' in hc:
+                                decision = "HOLD" if not hc.get('should_close', True) else "CLOSE"
+                                wc = hc['worst_case_hold_pnl']
+                                cn = hc.get('close_now_pnl', 0)
+                                diff = wc - cn
+                                diff_sign = "+" if diff >= 0 else ""
+                                trade_logger.log_event(
+                                    f"  Hold Check: {decision} | close=${cn:.0f} vs hold=${wc:.0f} "
+                                    f"({diff_sign}{diff:.0f}) | {lean} "
+                                    f"(C:{hc.get('avg_call_cushion', 0):.0f}%/P:{hc.get('avg_put_cushion', 0):.0f}%)"
+                                )
                     elif ec_status.get('triggered'):
                         trade_logger.log_event(
                             f"  Early Close: TRIGGERED at {ec_status.get('trigger_time', 'N/A')} | "
