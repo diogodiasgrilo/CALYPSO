@@ -163,6 +163,7 @@ class MEICTFStrategy(MEICStrategy):
     Key Features (MEIC-TF specific, beyond base MEIC):
     - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, min $1.00/side
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
+    - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
     - Early Close (MKT-018): Close all positions when ROC >= 2%
     - Virtual Equal Credit Stop (MKT-019): Stop based on max(call, put) credit
     - Pre-Entry ROC Gate (MKT-021): Skip dilutive entries when ROC already high
@@ -170,7 +171,7 @@ class MEICTFStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.3.4 (2026-02-23)
+    Version: 1.3.5 (2026-02-24)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"

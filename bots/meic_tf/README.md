@@ -253,6 +253,11 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.3.5** (2026-02-24): MKT-022 progressive put OTM tightening
+  - Mirror of MKT-020 for put side — moves short put closer to ATM in 5pt steps until credit >= $1.00 or 25pt OTM floor
+  - Batch API: 1 option chain + 1 batch quote = 2 API calls total
+  - Prevents MKT-011 from converting full IC to call-only when put credit is low in flat/low-VIX markets
+  - New config: `min_put_otm_distance` (default 25pt)
 - **1.3.4** (2026-02-23): Fix #82 - Settlement gate lock bug
   - At midnight ET, `_reset_for_new_day()` + empty-registry settlement locked `daily_summary_sent_date` for the entire day
   - Post-market settlement at 4 PM was skipped, stale registry caused HALT loop next midnight
@@ -265,7 +270,7 @@ bots/meic_tf/
   - Before placing entry #3+, checks if ROC on existing entries already exceeds early close threshold (2%)
   - If so, skips remaining entries and MKT-018 early close fires immediately at undiluted ROC
   - Prevents wasteful entries that dilute ROC with capital + close costs but ~$0 P&L
-  - Only active when MKT-018 early close is enabled; minimum 2 entries before gate activates
+  - Only active when MKT-018 early close is enabled; minimum 5 entries before gate activates
   - Flag + skip remaining + persist state across restart
   - Fix #81: Skip closing long legs with $0 bid during early close (worthless, expire naturally at 4 PM)
 - **1.3.1** (2026-02-20): MKT-020 progressive call OTM tightening + raise min credit to $1.00/side
