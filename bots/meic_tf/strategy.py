@@ -2811,20 +2811,60 @@ class MEICTFStrategy(MEICStrategy):
             logger.error(f"Registry error checking for overnight positions: {e}")
             my_position_ids = set()
         if my_position_ids:
-            # This is a critical error - 0DTE positions should never survive to next day
-            error_msg = f"CRITICAL: {len(my_position_ids)} {self.BOT_NAME} positions survived overnight! 0DTE should expire same day."
-            logger.critical(error_msg)
-            self.alert_service.send_alert(
-                alert_type=AlertType.CRITICAL_INTERVENTION,
-                title=f"{self.BOT_NAME} Overnight Position Detected!",
-                message=error_msg,
-                priority=AlertPriority.CRITICAL,
-                details={"position_ids": list(my_position_ids)}
-            )
-            # Halt trading - manual intervention required
-            self._critical_intervention_required = True
-            self._critical_intervention_reason = "Overnight 0DTE positions detected - investigate immediately"
-            return  # Don't reset state, need to handle existing positions
+            # FIX #82: Registry has positions, but they may be stale (already settled on Saxo).
+            # Verify against Saxo before halting - 0DTE options always settle same day.
+            try:
+                actual_positions = self.client.get_positions()
+                actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
+                still_open = my_position_ids & actual_position_ids
+
+                if not still_open:
+                    # Positions are gone from Saxo — registry is stale, clean it up
+                    logger.info(
+                        f"FIX #82: Registry had {len(my_position_ids)} stale position IDs "
+                        f"but Saxo confirms 0 still open — cleaning up registry"
+                    )
+                    for pos_id in my_position_ids:
+                        try:
+                            self.registry.unregister(pos_id)
+                        except Exception as e:
+                            logger.error(f"Registry error unregistering stale {pos_id}: {e}")
+                    # Fall through to normal reset below
+                else:
+                    # Positions genuinely still open on Saxo — this is a real problem
+                    error_msg = (
+                        f"CRITICAL: {len(still_open)} {self.BOT_NAME} positions still open on Saxo overnight! "
+                        f"0DTE should expire same day. IDs: {list(still_open)}"
+                    )
+                    logger.critical(error_msg)
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.CRITICAL_INTERVENTION,
+                        title=f"{self.BOT_NAME} Overnight Position Detected!",
+                        message=error_msg,
+                        priority=AlertPriority.CRITICAL,
+                        details={"position_ids": list(still_open)}
+                    )
+                    # Halt trading - manual intervention required
+                    self._critical_intervention_required = True
+                    self._critical_intervention_reason = "Overnight 0DTE positions detected - investigate immediately"
+                    return  # Don't reset state, need to handle existing positions
+            except Exception as e:
+                # Can't verify — be conservative and halt
+                error_msg = (
+                    f"CRITICAL: {len(my_position_ids)} {self.BOT_NAME} positions in registry and "
+                    f"Saxo verification failed ({e}) — halting for safety"
+                )
+                logger.critical(error_msg)
+                self.alert_service.send_alert(
+                    alert_type=AlertType.CRITICAL_INTERVENTION,
+                    title=f"{self.BOT_NAME} Overnight Position Check Failed!",
+                    message=error_msg,
+                    priority=AlertPriority.CRITICAL,
+                    details={"position_ids": list(my_position_ids), "error": str(e)}
+                )
+                self._critical_intervention_required = True
+                self._critical_intervention_reason = f"Overnight position verification failed: {e}"
+                return
 
         self.daily_state = MEICDailyState()
         self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
@@ -2944,9 +2984,21 @@ class MEICTFStrategy(MEICStrategy):
             True if all positions are settled (or were already confirmed settled)
             False if positions still exist on Saxo (settlement pending)
         """
-        # Already confirmed settled for today - skip check
+        # Already confirmed settled for today - but check if new positions appeared
+        # FIX #82: The flag gets set at midnight when registry is empty (pre-market).
+        # If trading happens during the day, registry gets new positions. We must
+        # reset the flag so post-market settlement actually processes them.
         if self._settlement_reconciliation_complete:
-            return True
+            my_position_ids = self.registry.get_positions(self.BOT_NAME)
+            if my_position_ids:
+                logger.info(
+                    f"FIX #82: Settlement was marked complete but registry has "
+                    f"{len(my_position_ids)} positions - resetting flag for proper settlement"
+                )
+                self._settlement_reconciliation_complete = False
+                # Fall through to normal settlement logic below
+            else:
+                return True
 
         # Check how many positions we think we have in registry
         my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC

@@ -296,8 +296,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                                 daily_summary_sent_date = today_date
                                 trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
                             else:
-                                trade_logger.log_event("Settlement complete - no trading activity today, skipping empty summary")
-                                daily_summary_sent_date = today_date  # Mark as sent to avoid repeated checks
+                                # FIX #82: Do NOT lock the settlement gate pre-market when there's no activity.
+                                # At midnight ET, _reset_for_new_day() clears the registry, then settlement
+                                # finds nothing and returns True. If we set daily_summary_sent_date here,
+                                # the gate stays locked ALL DAY, preventing post-market settlement at 4 PM.
+                                # Only lock the gate after market close (is_after_market_close handled above).
+                                trade_logger.log_event("Settlement complete - no trading activity yet (pre-market), gate stays open")
 
                     sleep_time = calculate_sleep_duration(max_sleep=900)
                     market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
