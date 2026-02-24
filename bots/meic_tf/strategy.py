@@ -250,7 +250,7 @@ class MEICTFStrategy(MEICStrategy):
         # exceeds early close threshold. Prevents diluting profitable positions
         # with new entries that add capital + close costs but ~$0 P&L.
         # Only active when MKT-018 early close is enabled.
-        self.min_entries_before_roc_gate = int(strategy_config.get("min_entries_before_roc_gate", 3))
+        self.min_entries_before_roc_gate = int(strategy_config.get("min_entries_before_roc_gate", 5))
         self._roc_gate_triggered = False
         if self.early_close_enabled:
             logger.info(f"  Pre-entry ROC gate (MKT-021): active after {self.min_entries_before_roc_gate} entries")

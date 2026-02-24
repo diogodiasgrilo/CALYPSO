@@ -118,7 +118,7 @@ After all entries are placed, monitors Return on Capital (ROC) every heartbeat. 
 
 ### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
 
-Before placing each entry (after a minimum of 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (2%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
+Before placing each entry (after all 5 entries placed), checks if ROC on existing positions already exceeds the early close threshold (2%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
 
 **Problem:** MKT-018 early close only fires after ALL entries are placed. When earlier entries are already profitable (4%+ ROC), opening more entries dilutes ROC by adding capital deployed and close costs with ~$0 P&L. The new entries either trigger early close at a lower profit, or push ROC below the threshold entirely.
 
@@ -129,7 +129,7 @@ Before placing each entry (after a minimum of 3 entries placed), checks if ROC o
 
 | Condition | Action |
 |-----------|--------|
-| < 3 entries placed | Skip check (too early) |
+| < 5 entries placed | Skip check (too early) |
 | ROC < early_close_threshold | Continue normally, place entry |
 | ROC >= early_close_threshold | Skip remaining entries, MKT-018 fires same cycle |
 | Early close disabled | MKT-021 inactive |
@@ -169,7 +169,7 @@ For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) ins
 | `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
 | `early_close_roc_threshold` | `0.02` | MKT-018: ROC threshold for early close (2.0%) |
 | `early_close_cost_per_position` | `5.00` | MKT-018: Estimated cost per leg to close ($2.50 commission + $2.50 slippage) |
-| `min_entries_before_roc_gate` | `3` | MKT-021: Minimum entries placed before pre-entry ROC gate activates |
+| `min_entries_before_roc_gate` | `5` | MKT-021: Minimum entries placed before pre-entry ROC gate activates |
 
 ## Usage
 

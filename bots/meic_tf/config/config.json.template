@@ -54,7 +54,7 @@
         "early_close_cost_per_position": 5.00,
 
         "_comment_roc_gate": "MKT-021: Min entries placed before pre-entry ROC gate activates",
-        "min_entries_before_roc_gate": 3
+        "min_entries_before_roc_gate": 5
     },
     "trend_filter": {
         "_comment": "EMA-based trend direction detection for MEIC-TF",
