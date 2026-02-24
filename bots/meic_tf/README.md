@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.3.4 | **Last Updated:** 2026-02-23
+**Version:** 1.3.6 | **Last Updated:** 2026-02-24
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -145,7 +145,7 @@ For full IC entries (NEUTRAL trend), VIX-adjusted OTM distances can produce cred
 ```
 Flow: _calculate_strikes() → MKT-020 (calls) → MKT-022 (puts) → MKT-011 credit gate
   - If tightened strikes meet $1.00: proceed as full IC
-  - If can't reach $1.00 at 25pt floor: MKT-011 skips (NEUTRAL) or converts if trend matches
+  - If can't reach $1.00 at 25pt floor: MKT-011 skips entry (tightening only runs for NEUTRAL, which always skips)
 ```
 
 Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote call = 2 API calls each. Only run for NEUTRAL trend entries. Include liquidity checks (skip candidates with bid/ask = 0).

@@ -889,7 +889,7 @@ class MEICTFStrategy(MEICStrategy):
             )
             return ("skip", True)  # estimation_worked = True
 
-        # One side viable, other not - convert to one-sided entry
+        # One side viable, other not - return recommendation (caller applies trend logic)
         if not call_viable:
             logger.warning(
                 f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
