@@ -480,7 +480,7 @@ class GoogleSheetsLogger:
                     ]
                 elif self.strategy_type == "meic_tf":
                     # MEIC-TF: MEIC with trend following - full OHLC, P&L breakdown, trend signals
-                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=36)
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=40)
                     headers = [
                         # Market Context (9 cols)
                         "Date", "SPX Open", "SPX Close", "SPX High", "SPX Low",
@@ -502,7 +502,10 @@ class GoogleSheetsLogger:
                         # MKT-018 Early Close (2 cols)
                         "Early Close", "Early Close Time",
                         # Other
-                        "Notes"
+                        "Notes",
+                        # Cumulative ROC metrics (4 cols)
+                        "Avg Capital Deployed ($)", "Cumulative ROC (%)",
+                        "Avg Daily ROC (%)", "Annualized Return (%)"
                     ]
                 else:
                     # Delta Neutral: Theta tracking for weekly strategy
@@ -516,6 +519,26 @@ class GoogleSheetsLogger:
                 worksheet.append_row(headers)
                 worksheet.format("A1:AJ1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Daily Summary worksheet ({self.strategy_type} format, {len(headers)} cols)")
+
+            # Check if existing MEIC-TF sheet needs new columns appended
+            if self.strategy_type == "meic_tf":
+                try:
+                    header_row = self._sheets_call_with_timeout(worksheet.row_values, 1)
+                    if header_row and len(header_row) < 40:
+                        new_headers = [
+                            "Avg Capital Deployed ($)", "Cumulative ROC (%)",
+                            "Avg Daily ROC (%)", "Annualized Return (%)"
+                        ]
+                        start_col = len(header_row) + 1
+                        for i, h in enumerate(new_headers):
+                            self._sheets_call_with_timeout(
+                                worksheet.update_cell, 1, start_col + i, h
+                            )
+                        if worksheet.col_count < 40:
+                            self._sheets_call_with_timeout(worksheet.resize, cols=40)
+                        logger.info(f"Extended Daily Summary headers: added {len(new_headers)} new columns (total now 40)")
+                except Exception as e:
+                    logger.warning(f"Failed to extend Daily Summary headers: {e}")
 
             self.worksheets["Daily Summary"] = worksheet
         except Exception as e:
@@ -2054,7 +2077,12 @@ class GoogleSheetsLogger:
                     summary.get("early_close", "No"),
                     summary.get("early_close_time", ""),
                     # Other
-                    summary.get("notes", "")
+                    summary.get("notes", ""),
+                    # Cumulative ROC metrics (4 cols)
+                    f"{summary.get('avg_capital_deployed', 0):.2f}",
+                    f"{summary.get('cumulative_roc', 0):.2f}",
+                    f"{summary.get('avg_daily_roc', 0):.4f}",
+                    f"{summary.get('annualized_return', 0):.1f}",
                 ]
                 logger.debug(f"MEIC-TF daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
             else:

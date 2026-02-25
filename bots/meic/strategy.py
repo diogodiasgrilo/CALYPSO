@@ -6721,6 +6721,16 @@ class MEICStrategy:
         # Add extra fields needed by the logger
         capital_deployed = self._calculate_capital_deployed()
         cumulative_pnl = self.cumulative_metrics.get("cumulative_pnl", 0) + net_pnl
+
+        # Compute cumulative ROC metrics (including today's values)
+        past_returns = self.cumulative_metrics.get("daily_returns", [])
+        past_capital_sum = sum(r.get("capital_deployed", 0) for r in past_returns)
+        trading_days = len(past_returns) + 1  # +1 for today
+        avg_capital_deployed = (past_capital_sum + capital_deployed) / trading_days if trading_days > 0 else 0
+        cumulative_roc = (cumulative_pnl / avg_capital_deployed * 100) if avg_capital_deployed > 0 else 0
+        avg_daily_roc = cumulative_roc / trading_days if trading_days > 0 else 0
+        annualized_return = ((1 + avg_daily_roc / 100) ** 252 - 1) * 100 if avg_daily_roc > -100 else -100
+
         sheets_summary = {
             **summary,
             # Market data OHLC
@@ -6746,6 +6756,11 @@ class MEICStrategy:
             "capital_deployed": capital_deployed,
             "return_on_capital": (net_pnl / capital_deployed * 100) if capital_deployed > 0 else 0,
             "sortino_ratio": self._calculate_sortino_ratio(net_pnl, capital_deployed),
+            # Cumulative ROC metrics
+            "avg_capital_deployed": avg_capital_deployed,
+            "cumulative_roc": cumulative_roc,
+            "avg_daily_roc": avg_daily_roc,
+            "annualized_return": annualized_return,
             # MKT-018: Early close columns (safe for base MEIC which doesn't have these attrs)
             "early_close": "Yes" if getattr(self, '_early_close_triggered', False) else "No",
             "early_close_time": getattr(self, '_early_close_time', None).strftime('%H:%M ET') if getattr(self, '_early_close_time', None) else "",

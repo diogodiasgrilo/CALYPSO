@@ -76,23 +76,22 @@ CRITICAL IMPLEMENTATION NOTES - READ BEFORE MODIFYING SAXO API CODE
 ================================================================================
 Full documentation: docs/SAXO_API_PATTERNS.md
 
-1. ORDER FILL PRICES (2026-01-31 - CRITICAL BUG FIX)
+1. ORDER FILL PRICES (Updated 2026-02-17 - Fix #76)
    --------------------------------------------------
    NEVER use quoted bid/ask prices for P&L calculation!
    Market orders fill at actual prices which may differ from quotes.
 
    WRONG: credit = quoted_bid - quoted_ask
-   RIGHT: credit = fill_details.get("FilledPrice") - ...
+   RIGHT: credit = activity.get("AveragePrice") or activity.get("ExecutionPrice")
 
-   Fill price fields (check in order):
-   - fill_details.get("FilledPrice")   # From /activities/ endpoint (MOST COMMON)
-   - fill_details.get("fill_price")    # Normalized field
-   - fill_details.get("Price")         # From order details
+   CRITICAL (Fix #76): "FilledPrice" does NOT exist in Saxo's API!
+   Fill price fields from /activities/ endpoint (check in order):
+   - activity.get("AveragePrice")     # Actual execution price (CORRECT)
+   - activity.get("ExecutionPrice")   # Alternative field name (CORRECT)
+   - activity.get("Price")            # Only on LIMIT orders (submitted price, NOT execution)
 
-   BUG FIXED (2026-01-31): check_order_filled_by_activity() was using
-   activity.get("Price", 0) but Saxo returns "FilledPrice" not "Price".
-   This caused P&L to always fall back to quoted prices, showing wrong values.
-   Example: Real P&L +$10, Bot showed +$160.
+   For OPEN positions: PositionBase.OpenPrice is the authoritative fill price.
+   For CLOSED positions: /port/v1/closedpositions → ClosingPrice is authoritative.
 
    ACTIVITIES SYNC DELAY (2026-02-01): The activities endpoint may take 1-3
    seconds to sync fill data. Retry up to 3 times with 1s delay before

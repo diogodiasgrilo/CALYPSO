@@ -297,14 +297,15 @@ class MEICTFStrategy(MEICStrategy):
         """
         # MKT-021: Pre-entry ROC gate (only when MKT-018 early close is enabled)
         # If ROC on existing entries already exceeds early close threshold,
-        # skip remaining entries. Early close will fire on the same heartbeat
-        # cycle since _next_entry_index will equal len(entry_times).
+        # skip remaining entries (counts actual placed entries, not time slots).
+        # Early close will fire on the same heartbeat cycle since the gate
+        # blocks all remaining entry attempts.
         if self._roc_gate_triggered:
             return False
 
         if (self.early_close_enabled
             and not self._roc_gate_triggered
-            and self._next_entry_index >= self.min_entries_before_roc_gate
+            and len(self.daily_state.entries) >= self.min_entries_before_roc_gate
             and len(self.daily_state.active_entries) > 0):
 
             # Calculate current ROC (same formula as _check_early_close)
@@ -323,12 +324,12 @@ class MEICTFStrategy(MEICStrategy):
                     logger.warning(
                         f"MKT-021 PRE-ENTRY ROC GATE: ROC {roc*100:.2f}% >= "
                         f"{self.early_close_roc_threshold*100:.1f}% threshold with "
-                        f"{self._next_entry_index} entries placed - "
+                        f"{len(self.daily_state.entries)} entries placed - "
                         f"skipping {remaining} remaining entries to preserve ROC"
                     )
                     self._log_safety_event(
                         "MKT-021_ROC_GATE",
-                        f"ROC {roc*100:.2f}% on {self._next_entry_index} entries, "
+                        f"ROC {roc*100:.2f}% on {len(self.daily_state.entries)} entries, "
                         f"skipped {remaining} remaining"
                     )
                     self.daily_state.entries_skipped += remaining

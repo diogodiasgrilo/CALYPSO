@@ -412,7 +412,9 @@ Three rules work together to manage profits after entries are placed:
 
 **Example (Feb 20):** After 3 entries, ROC = 4.17%. If entries #4/#5 were placed, ROC would dilute to 2.26%. MKT-021 skipped them, MKT-018 fired at 4.17%, locking in +$690.
 
-**Interaction:** Setting `_next_entry_index = len(entry_times)` immediately satisfies MKT-018's gate condition, so early close checks begin on the same heartbeat cycle.
+**Gate counts actual placed entries** — skipped or failed entries do not count toward the minimum. This ensures enough capital is deployed for ROC to be meaningful.
+
+**Interaction:** When MKT-021 blocks remaining entry attempts, MKT-018's gate condition is satisfied and early close checks begin on the same heartbeat cycle.
 
 ### MKT-018: Early Close on ROC
 
