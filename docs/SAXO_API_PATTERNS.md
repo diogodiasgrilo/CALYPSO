@@ -85,19 +85,22 @@ def get_fill_price(fill_detail: Optional[Dict], fallback: float) -> float:
     """
     Extract fill price from Saxo fill_details response.
 
-    CRITICAL: Saxo returns fill price in MULTIPLE possible fields depending
-    on the response type. Must check all of them.
+    CRITICAL (Fix #76, 2026-02-17): "FilledPrice" does NOT exist in Saxo's API!
+    Correct fields: AveragePrice, ExecutionPrice. "Price" is only on LIMIT orders.
 
     Priority order:
-    1. "fill_price" - Normalized field (if we added it)
-    2. "FilledPrice" - From activities endpoint
-    3. "Price" - From order details
+    1. "AveragePrice" - Actual execution price from activities (CORRECT)
+    2. "ExecutionPrice" - Alternative field name (CORRECT)
+    3. "Price" - Only on LIMIT orders (submitted price, NOT execution)
     4. fallback - Quoted price (last resort)
+
+    For OPEN positions: PositionBase.OpenPrice is authoritative.
+    For CLOSED positions: /port/v1/closedpositions → ClosingPrice is authoritative.
     """
     if fill_detail:
         price = (
-            fill_detail.get("fill_price") or
-            fill_detail.get("FilledPrice") or
+            fill_detail.get("AveragePrice") or
+            fill_detail.get("ExecutionPrice") or
             fill_detail.get("Price")
         )
         if price and price > 0:
@@ -112,17 +115,19 @@ def get_fill_price(fill_detail: Optional[Dict], fallback: float) -> float:
 {
     "OrderId": "123456",
     "FilledAmount": 1.0,
-    "FilledPrice": 12.50,        // <-- ACTUAL FILL PRICE (use this!)
+    "AveragePrice": 12.50,       // <-- ACTUAL FILL PRICE (use this!)
     "Status": "FinalFill",
     "ActivityTime": "2026-01-23T15:00:00Z"
 }
 ```
 
-**CRITICAL BUG (Fixed 2026-01-31):** The activities endpoint uses `"FilledPrice"`, NOT `"Price"`.
-Previous code used `activity.get("Price", 0)` which always returned 0, causing P&L to use
-quoted prices as fallback. Correct extraction:
+**CRITICAL (Fix #76, 2026-02-17):** The field `"FilledPrice"` does NOT exist in Saxo's API.
+Previous code used `activity.get("FilledPrice")` which always returned None, causing 17 days of
+fill_price=0 errors. Correct fields are `"AveragePrice"` or `"ExecutionPrice"`.
+`"Price"` only exists on LIMIT orders (the submitted limit price, not execution price).
+Correct extraction:
 ```python
-fill_price = activity.get("FilledPrice") or activity.get("Price", 0)  # FilledPrice FIRST
+fill_price = activity.get("AveragePrice") or activity.get("ExecutionPrice") or activity.get("Price", 0)
 fill_amount = activity.get("FilledAmount") or activity.get("Amount", 0)
 ```
 

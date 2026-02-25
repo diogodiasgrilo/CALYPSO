@@ -138,7 +138,7 @@ If worst-case hold > close now → **HOLD** (don't close). If worst-case hold <=
 
 ### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
 
-Before placing entries #4 and #5 (after min 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (2%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
+Before placing entries #4 and #5 (after min 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (3%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
 
 **Problem:** MKT-018 early close only fires after ALL entries are placed. When earlier entries are already profitable (4%+ ROC), opening more entries dilutes ROC by adding capital deployed and close costs with ~$0 P&L. The new entries either trigger early close at a lower profit, or push ROC below the threshold entirely.
 
@@ -281,8 +281,8 @@ bots/meic_tf/
 - **1.3.9** (2026-02-25): MKT-021 ROC gate lowered from 5 to 3 entries
   - Re-enables MKT-021 pre-entry ROC gate (gate=5 in a 5-entry system was effectively disabled)
   - Unblocks MKT-018 early close on early-trigger days (prevents ROC dilution from entries #4/#5)
-  - On Feb 20-style days where ROC >= 2% after 3 entries, MKT-021 skips remaining entries and MKT-018 fires immediately
-  - On normal days (ROC < 2% after 3 entries), entries #4/#5 proceed as usual — no behavior change
+  - On Feb 20-style days where ROC >= 3% after 3 entries, MKT-021 skips remaining entries and MKT-018 fires immediately
+  - On normal days (ROC < 3% after 3 entries), entries #4/#5 proceed as usual — no behavior change
 - **1.3.7** (2026-02-24): MKT-023 smart hold check before early close
   - When MKT-018 ROC threshold is met, compares close-now P&L vs worst-case-hold P&L
   - Determines market lean from average cushion per side (calls vs puts)
@@ -308,7 +308,7 @@ bots/meic_tf/
   - Removed MKT-017 (daily loss limit): was pausing entries after -$500 realized P&L
   - Override base MEIC `_is_daily_loss_limit_reached()` to return False
 - **1.3.2** (2026-02-20): MKT-021 pre-entry ROC gate + Fix #81
-  - Before placing entries #4/#5 (after min 3 entries, lowered from 5 in v1.3.9), checks if ROC on existing entries already exceeds early close threshold (2%)
+  - Before placing entries #4/#5 (after min 3 entries, lowered from 5 in v1.3.9), checks if ROC on existing entries already exceeds early close threshold (3%)
   - If so, skips remaining entries and MKT-018 early close fires immediately at undiluted ROC
   - Prevents wasteful entries that dilute ROC with capital + close costs but ~$0 P&L
   - Only active when MKT-018 early close is enabled; minimum 3 entries before gate activates (lowered from 5 in v1.3.9)

@@ -59,7 +59,7 @@ On top of the trend filter, MEIC-TF adds a suite of "MKT" rules — pre-entry cr
 | Entries per day | 6 | 5 |
 | Stop formula (full IC) | total_credit per side | 2 × max(call, put) per side (MKT-019) |
 | Credit gate | Skip if both non-viable | Trend-aware: convert or skip (MKT-011) |
-| Profit management | Hold to expiration | Early close at 2% ROC (MKT-018/023/021) |
+| Profit management | Hold to expiration | Early close at 3% ROC (MKT-018/023/021) |
 | OTM tightening | None | Progressive 5pt steps (MKT-020/022) |
 
 ---
@@ -430,7 +430,7 @@ capital_deployed = sum(spread_width × $100 × contracts) per entry
 ROC = (net_pnl - close_cost) / capital_deployed
 ```
 
-**Trigger:** ROC >= 2.0% → check MKT-023 hold check before closing.
+**Trigger:** ROC >= 3.0% → check MKT-023 hold check before closing.
 
 **Execution:** Close all active positions via market orders, spawn async fill correction threads, log daily summary immediately, transition to DAILY_COMPLETE.
 
