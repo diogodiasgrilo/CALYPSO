@@ -269,7 +269,10 @@ bots/meic_tf/
 
 ## Related Documentation
 
-- [MEIC Strategy Specification](../../docs/MEIC_STRATEGY_SPECIFICATION.md)
+- [MEIC-TF Strategy Specification](../../docs/MEIC_TF_STRATEGY_SPECIFICATION.md) — Full strategy spec: decision flows, MKT rules, performance data
+- [MEIC Strategy Specification](../../docs/MEIC_STRATEGY_SPECIFICATION.md) — Base MEIC spec (inherited strike selection, stop math)
+- [MEIC-TF Trading Journal](../../docs/MEIC_TF_TRADING_JOURNAL.md) — Daily results and analysis
+- [MEIC-TF Early Close Analysis](../../docs/MEIC_TF_EARLY_CLOSE_ANALYSIS.md) — MKT-018 research
 - [MEIC Edge Cases](../../docs/MEIC_EDGE_CASES.md)
 - [Technical Indicators](../../shared/technical_indicators.py)
 

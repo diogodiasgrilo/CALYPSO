@@ -1011,6 +1011,8 @@ SCRIPT
 | **Iron Fly strategy** | [IRON_FLY_STRATEGY_SPECIFICATION.md](docs/IRON_FLY_STRATEGY_SPECIFICATION.md) | Wing width rules, profit targets, Doc Severson + Jim Olson |
 | **Delta Neutral strategy** | [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md) | Roll mechanics, credit/debit logic, full spec |
 | **MEIC strategy spec** | [MEIC_STRATEGY_SPECIFICATION.md](docs/MEIC_STRATEGY_SPECIFICATION.md) | Full MEIC implementation details |
+| **MEIC-TF strategy spec** | [MEIC_TF_STRATEGY_SPECIFICATION.md](docs/MEIC_TF_STRATEGY_SPECIFICATION.md) | Full MEIC-TF spec: decision flows, MKT rules, performance data |
+| **MEIC-TF trading journal** | [MEIC_TF_TRADING_JOURNAL.md](docs/MEIC_TF_TRADING_JOURNAL.md) | Daily results, analysis, what-if projections |
 | **MEIC edge cases** | [MEIC_EDGE_CASES.md](docs/MEIC_EDGE_CASES.md) | 79 edge cases for MEIC bot |
 | SMS/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
 | **Next bots to build** | [THETA_PROFITS_STRATEGY_ANALYSIS.md](docs/THETA_PROFITS_STRATEGY_ANALYSIS.md) | Top 3: MEIC, METF, SPX Put Credit |
@@ -1030,6 +1032,9 @@ SCRIPT
 | `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
 | `docs/IRON_FLY_EDGE_CASES.md` | 64 edge cases analyzed for Iron Fly bot |
 | `docs/MEIC_STRATEGY_SPECIFICATION.md` | **MEIC strategy** - Full Tammy Chambless MEIC implementation spec |
+| `docs/MEIC_TF_STRATEGY_SPECIFICATION.md` | **MEIC-TF strategy** - Full spec: decision flows, MKT rules, stop math, performance data |
+| `docs/MEIC_TF_TRADING_JOURNAL.md` | **MEIC-TF journal** - 10 days of live trading results and analysis |
+| `docs/MEIC_TF_EARLY_CLOSE_ANALYSIS.md` | **Early close research** - ROC vs credit-based thresholds, slippage analysis |
 | `docs/MEIC_EDGE_CASES.md` | 79 edge cases analyzed for MEIC bot |
 | `docs/DELTA_NEUTRAL_EDGE_CASES.md` | **55 edge cases** for Delta Neutral bot (updated 2026-01-28) |
 | `docs/ROLLING_PUT_DIAGONAL_EDGE_CASES.md` | Edge cases for Rolling Put Diagonal bot |
