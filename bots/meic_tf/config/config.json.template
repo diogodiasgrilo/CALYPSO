@@ -58,8 +58,8 @@
         "hold_check_enabled": true,
         "hold_check_lean_tolerance": 1.0,
 
-        "_comment_roc_gate": "MKT-021: Min entries placed before pre-entry ROC gate activates",
-        "min_entries_before_roc_gate": 5
+        "_comment_roc_gate": "MKT-021: Min entries placed before pre-entry ROC gate activates (3 = after entries #1-3, gate checks before #4/#5)",
+        "min_entries_before_roc_gate": 3
     },
     "trend_filter": {
         "_comment": "EMA-based trend direction detection for MEIC-TF",

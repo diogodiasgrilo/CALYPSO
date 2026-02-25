@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.3.7 | **Last Updated:** 2026-02-24
+**Version:** 1.3.9 | **Last Updated:** 2026-02-25
 
 A modified MEIC bot that adds EMA-based trend direction detection to avoid losses on strong trend days, plus pre-entry credit validation to skip illiquid entries.
 
@@ -138,7 +138,7 @@ If worst-case hold > close now → **HOLD** (don't close). If worst-case hold <=
 
 ### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
 
-Before placing each entry (after min 5 entries attempted), checks if ROC on existing positions already exceeds the early close threshold (2%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
+Before placing entries #4 and #5 (after min 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (2%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
 
 **Problem:** MKT-018 early close only fires after ALL entries are placed. When earlier entries are already profitable (4%+ ROC), opening more entries dilutes ROC by adding capital deployed and close costs with ~$0 P&L. The new entries either trigger early close at a lower profit, or push ROC below the threshold entirely.
 
@@ -149,7 +149,7 @@ Before placing each entry (after min 5 entries attempted), checks if ROC on exis
 
 | Condition | Action |
 |-----------|--------|
-| < 5 entries placed | Skip check (too early) |
+| < 3 entries placed | Skip check (too early) |
 | ROC < early_close_threshold | Continue normally, place entry |
 | ROC >= early_close_threshold | Skip remaining entries, MKT-018 fires same cycle |
 | Early close disabled | MKT-021 inactive |
@@ -192,7 +192,7 @@ For full iron condor entries, stop_level = 2 × max(call_credit, put_credit) ins
 | `early_close_cost_per_position` | `5.00` | MKT-018: Estimated cost per leg to close ($2.50 commission + $2.50 slippage) |
 | `hold_check_enabled` | `true` | MKT-023: Enable/disable smart hold check before early close |
 | `hold_check_lean_tolerance` | `1.0` | MKT-023: Min cushion difference (%) to determine market lean |
-| `min_entries_before_roc_gate` | `5` | MKT-021: Minimum entries placed before pre-entry ROC gate activates |
+| `min_entries_before_roc_gate` | `3` | MKT-021: Minimum entries placed before pre-entry ROC gate activates (gate checks before #4/#5) |
 
 ## Usage
 
@@ -275,6 +275,11 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.3.9** (2026-02-25): MKT-021 ROC gate lowered from 5 to 3 entries
+  - Re-enables MKT-021 pre-entry ROC gate (gate=5 in a 5-entry system was effectively disabled)
+  - Unblocks MKT-018 early close on early-trigger days (prevents ROC dilution from entries #4/#5)
+  - On Feb 20-style days where ROC >= 2% after 3 entries, MKT-021 skips remaining entries and MKT-018 fires immediately
+  - On normal days (ROC < 2% after 3 entries), entries #4/#5 proceed as usual — no behavior change
 - **1.3.7** (2026-02-24): MKT-023 smart hold check before early close
   - When MKT-018 ROC threshold is met, compares close-now P&L vs worst-case-hold P&L
   - Determines market lean from average cushion per side (calls vs puts)
@@ -300,10 +305,10 @@ bots/meic_tf/
   - Removed MKT-017 (daily loss limit): was pausing entries after -$500 realized P&L
   - Override base MEIC `_is_daily_loss_limit_reached()` to return False
 - **1.3.2** (2026-02-20): MKT-021 pre-entry ROC gate + Fix #81
-  - Before placing entry #6+ (min 5 entries), checks if ROC on existing entries already exceeds early close threshold (2%)
+  - Before placing entries #4/#5 (after min 3 entries, lowered from 5 in v1.3.9), checks if ROC on existing entries already exceeds early close threshold (2%)
   - If so, skips remaining entries and MKT-018 early close fires immediately at undiluted ROC
   - Prevents wasteful entries that dilute ROC with capital + close costs but ~$0 P&L
-  - Only active when MKT-018 early close is enabled; minimum 5 entries before gate activates
+  - Only active when MKT-018 early close is enabled; minimum 3 entries before gate activates (lowered from 5 in v1.3.9)
   - Flag + skip remaining + persist state across restart
   - Fix #81: Skip closing long legs with $0 bid during early close (worthless, expire naturally at 4 PM)
 - **1.3.1** (2026-02-20): MKT-020 progressive call OTM tightening + raise min credit to $1.00/side
