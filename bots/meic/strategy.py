@@ -6729,7 +6729,7 @@ class MEICStrategy:
         avg_capital_deployed = (past_capital_sum + capital_deployed) / trading_days if trading_days > 0 else 0
         cumulative_roc = (cumulative_pnl / avg_capital_deployed * 100) if avg_capital_deployed > 0 else 0
         avg_daily_roc = cumulative_roc / trading_days if trading_days > 0 else 0
-        annualized_return = ((1 + avg_daily_roc / 100) ** 252 - 1) * 100 if avg_daily_roc > -100 else -100
+        annualized_return = avg_daily_roc * 252  # Simple (non-compounded) annualization
 
         sheets_summary = {
             **summary,
