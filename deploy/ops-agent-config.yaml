@@ -2,32 +2,39 @@
 #
 # Collects:
 # 1. All systemd journal logs (filtered at dashboard level for meic_tf)
-# 2. Bot file log at /opt/calypso/logs/meic_tf/bot.log
+# 2. Bot file log at /opt/calypso/logs/meic_tf/bot.log (parsed into structured fields)
 # 3. Shared monitor log at /opt/calypso/logs/monitor.log
 #
 # Deploy:
 #   sudo cp /opt/calypso/deploy/ops-agent-config.yaml /etc/google-cloud-ops-agent/config.yaml
 #   sudo systemctl restart google-cloud-ops-agent
 #
+# Log format: "2026-02-26 09:16:01 | INFO     | shared.logger_service | HEARTBEAT | Market closed..."
+# After parsing: jsonPayload.et_time = "2026-02-26 09:16:01", jsonPayload.message = "HEARTBEAT | Market closed..."
+#
 # Last Updated: 2026-02-26
 
 logging:
   receivers:
-    # Capture all systemd journal logs (meic_tf filtered at dashboard level)
     journal:
       type: systemd_journald
 
-    # Capture the bot's dedicated log file
     meic_tf_logfile:
       type: files
       include_paths:
         - /opt/calypso/logs/meic_tf/bot.log
 
-    # Capture the shared monitor log (all bots)
     monitor_log:
       type: files
       include_paths:
         - /opt/calypso/logs/monitor.log
+
+  processors:
+    # Parse bot log: "2026-02-26 09:01:00 | INFO | shared.logger_service | HEARTBEAT | ..."
+    # Extracts: et_time, severity, module, message (the actual content after module)
+    meic_tf_parser:
+      type: parse_regex
+      regex: '(?P<et_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<severity>\w+)\s+\| (?P<module>[\w.]+)\s+\| (?P<message>.*)'
 
   service:
     pipelines:
@@ -38,6 +45,8 @@ logging:
       meic_tf_logfile_pipeline:
         receivers:
           - meic_tf_logfile
+        processors:
+          - meic_tf_parser
 
       monitor_pipeline:
         receivers:
