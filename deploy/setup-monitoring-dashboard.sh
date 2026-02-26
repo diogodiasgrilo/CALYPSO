@@ -83,17 +83,17 @@ sleep 15
 
 echo "  Checking for meic_tf logs..."
 LOG_COUNT=$(gcloud logging read \
-    "resource.type=\"gce_instance\" AND resource.labels.instance_id=\"${VM_NAME}\" AND (labels.\"agent.googleapis.com/log_file_path\"=\"meic_tf\" OR log_name=\"projects/${PROJECT}/logs/meic_tf\")" \
+    "resource.type=\"gce_instance\" AND log_id(\"meic_tf_logfile\")" \
     --limit=3 \
     --project="${PROJECT}" \
-    --format="value(textPayload)" 2>/dev/null | wc -l || echo "0")
+    --format="value(jsonPayload.message)" 2>/dev/null | wc -l || echo "0")
 
 if [[ "${LOG_COUNT}" -gt 0 ]]; then
     echo "  SUCCESS: Found ${LOG_COUNT} log entries in Cloud Logging"
 else
     echo "  WARNING: No logs found yet. This may take up to 60 seconds."
     echo "  Verify manually:"
-    echo "    gcloud logging read 'resource.type=\"gce_instance\"' --limit=5 --project=${PROJECT}"
+    echo "    gcloud logging read 'log_id(\"meic_tf_logfile\")' --limit=5 --project=${PROJECT}"
 fi
 echo ""
 
@@ -177,7 +177,7 @@ echo "Dashboard URL:"
 echo "  ${DASHBOARD_URL}"
 echo ""
 echo "Verify logs manually:"
-echo "  gcloud logging read 'resource.type=\"gce_instance\"' --limit=5 --project=${PROJECT}"
+echo "  gcloud logging read 'log_id(\"meic_tf_logfile\")' --limit=5 --project=${PROJECT}"
 echo ""
 echo "View live heartbeats via CLI:"
 echo "  gcloud compute ssh ${VM_NAME} --zone=${ZONE} --command=\"sudo journalctl -u meic_tf -f\" | grep HEARTBEAT"

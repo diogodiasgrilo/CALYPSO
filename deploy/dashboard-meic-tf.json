@@ -20,26 +20,11 @@
         "xPos": 0,
         "yPos": 2,
         "width": 12,
-        "height": 8,
+        "height": 16,
         "widget": {
-          "title": "Bot Live Heartbeat Feed",
+          "title": "Bot Live Terminal Output",
           "logsPanel": {
-            "filter": "resource.type=\"gce_instance\"\nresource.labels.instance_id=\"calypso-bot\"\n(labels.\"agent.googleapis.com/log_file_path\"=\"meic_tf\" OR log_name=\"projects/calypso-trading-bot/logs/meic_tf\")\ntextPayload:\"HEARTBEAT\"",
-            "resourceNames": [
-              "projects/calypso-trading-bot"
-            ]
-          }
-        }
-      },
-      {
-        "xPos": 0,
-        "yPos": 10,
-        "width": 12,
-        "height": 8,
-        "widget": {
-          "title": "All Bot Activity (Entries, Stops, Alerts)",
-          "logsPanel": {
-            "filter": "resource.type=\"gce_instance\"\nresource.labels.instance_id=\"calypso-bot\"\n(labels.\"agent.googleapis.com/log_file_path\"=\"meic_tf\" OR log_name=\"projects/calypso-trading-bot/logs/meic_tf\")\n-textPayload:\"HEARTBEAT\"\n-textPayload:\"token\"\n-textPayload:\"Session already has\"",
+            "filter": "resource.type=\"gce_instance\"\nlog_id(\"meic_tf_logfile\")\n-jsonPayload.message:\"Attempting to refresh access token\"\n-jsonPayload.message:\"Another process already refreshed tokens\"\n-jsonPayload.message:\"Session already has FullTradingAndChat\"",
             "resourceNames": [
               "projects/calypso-trading-bot"
             ]
