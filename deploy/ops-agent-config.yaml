@@ -34,7 +34,7 @@ logging:
     # Extracts: et_time, severity, module, message (the actual content after module)
     meic_tf_parser:
       type: parse_regex
-      regex: '(?P<et_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<severity>\w+)\s+\| (?P<module>[\w.]+)\s+\| (?P<message>.*)'
+      regex: '(?<et_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?<severity>\w+)\s+\| (?<module>[\w.]+)\s+\| (?<message>.*)'
 
   service:
     pipelines:
