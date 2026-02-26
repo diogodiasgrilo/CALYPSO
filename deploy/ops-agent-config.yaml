@@ -10,7 +10,7 @@
 #   sudo systemctl restart google-cloud-ops-agent
 #
 # Verify logs appear in Cloud Logging:
-#   gcloud logging read 'resource.type="gce_instance" AND labels."compute.googleapis.com/resource_name"="calypso-bot" AND labels."agent.googleapis.com/log_file_path"="meic_tf"' --limit=5 --project=calypso-trading-bot
+#   gcloud logging read 'resource.type="gce_instance" AND log_id("meic_tf")' --limit=5 --project=calypso-trading-bot
 #
 # Last Updated: 2026-02-26
 
@@ -27,14 +27,12 @@ logging:
       type: files
       include_paths:
         - /opt/calypso/logs/meic_tf/bot.log
-      record_log_name: meic_tf_bot_log
 
     # Capture the shared monitor log (all bots)
     monitor_log:
       type: files
       include_paths:
         - /opt/calypso/logs/monitor.log
-      record_log_name: calypso_monitor
 
   processors:
     # Parse the bot's log format: "2026-02-26 09:01:00 | INFO     | module | message"
