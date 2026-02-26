@@ -1,0 +1,82 @@
+# Google Cloud Ops Agent - Custom Configuration for CALYPSO
+#
+# This config tells the Ops Agent to collect:
+# 1. System journal logs from the meic_tf systemd service
+# 2. The bot's file-based log at /opt/calypso/logs/meic_tf/bot.log
+# 3. The shared monitor log at /opt/calypso/logs/monitor.log
+#
+# Deploy to VM:
+#   sudo cp /opt/calypso/deploy/ops-agent-config.yaml /etc/google-cloud-ops-agent/config.yaml
+#   sudo systemctl restart google-cloud-ops-agent
+#
+# Verify logs appear in Cloud Logging:
+#   gcloud logging read 'resource.type="gce_instance" AND labels."compute.googleapis.com/resource_name"="calypso-bot" AND labels."agent.googleapis.com/log_file_path"="meic_tf"' --limit=5 --project=calypso-trading-bot
+#
+# Last Updated: 2026-02-26
+
+logging:
+  receivers:
+    # Capture systemd journal logs from meic_tf service
+    meic_tf_journal:
+      type: systemd_journald
+      units:
+        - meic_tf
+
+    # Capture the bot's dedicated log file
+    meic_tf_logfile:
+      type: files
+      include_paths:
+        - /opt/calypso/logs/meic_tf/bot.log
+      record_log_name: meic_tf_bot_log
+
+    # Capture the shared monitor log (all bots)
+    monitor_log:
+      type: files
+      include_paths:
+        - /opt/calypso/logs/monitor.log
+      record_log_name: calypso_monitor
+
+  processors:
+    # Parse the bot's log format: "2026-02-26 09:01:00 | INFO     | module | message"
+    meic_tf_parser:
+      type: parse_regex
+      regex: '(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<severity>\w+)\s+\| (?P<module>[\w.]+)\s+\| (?P<message>.*)'
+      time_key: timestamp
+      time_format: '%Y-%m-%d %H:%M:%S'
+
+  service:
+    pipelines:
+      meic_tf_journal_pipeline:
+        receivers:
+          - meic_tf_journal
+        processors: []
+
+      meic_tf_logfile_pipeline:
+        receivers:
+          - meic_tf_logfile
+        processors:
+          - meic_tf_parser
+
+      monitor_pipeline:
+        receivers:
+          - monitor_log
+        processors: []
+
+metrics:
+  receivers:
+    hostmetrics:
+      type: hostmetrics
+      collection_interval: 60s
+
+  processors:
+    metrics_filter:
+      type: exclude_metrics
+      metrics_pattern: []
+
+  service:
+    pipelines:
+      default_pipeline:
+        receivers:
+          - hostmetrics
+        processors:
+          - metrics_filter

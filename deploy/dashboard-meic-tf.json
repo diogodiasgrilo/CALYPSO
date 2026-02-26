@@ -1,0 +1,109 @@
+{
+  "displayName": "MEIC-TF Bot - Live Dashboard",
+  "mosaicLayout": {
+    "columns": 12,
+    "tiles": [
+      {
+        "xPos": 0,
+        "yPos": 0,
+        "width": 12,
+        "height": 2,
+        "widget": {
+          "title": "Bot Status",
+          "text": {
+            "content": "## MEIC-TF Trading Bot (SPX 0DTE Iron Condors)\n\nThis dashboard shows the live heartbeat feed from the MEIC-TF bot running on the `calypso-bot` VM. Heartbeats are logged every ~10 seconds during market hours (9:30 AM - 4:00 PM ET). Outside market hours, the bot logs a sleeping heartbeat every 15 minutes.\n\n**Key fields:** SPX price | VIX level | Entries placed/total | Active positions | Trend (BULLISH/BEARISH/NEUTRAL)",
+            "format": "MARKDOWN"
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 2,
+        "width": 12,
+        "height": 8,
+        "widget": {
+          "title": "Bot Live Heartbeat Feed",
+          "logsPanel": {
+            "filter": "resource.type=\"gce_instance\"\nresource.labels.instance_id=\"calypso-bot\"\n(labels.\"agent.googleapis.com/log_file_path\"=\"meic_tf\" OR log_name=\"projects/calypso-trading-bot/logs/meic_tf\")\ntextPayload:\"HEARTBEAT\"",
+            "resourceNames": [
+              "projects/calypso-trading-bot"
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 10,
+        "width": 12,
+        "height": 8,
+        "widget": {
+          "title": "All Bot Activity (Entries, Stops, Alerts)",
+          "logsPanel": {
+            "filter": "resource.type=\"gce_instance\"\nresource.labels.instance_id=\"calypso-bot\"\n(labels.\"agent.googleapis.com/log_file_path\"=\"meic_tf\" OR log_name=\"projects/calypso-trading-bot/logs/meic_tf\")\n-textPayload:\"HEARTBEAT\"\n-textPayload:\"token\"\n-textPayload:\"Session already has\"",
+            "resourceNames": [
+              "projects/calypso-trading-bot"
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 18,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "VM CPU Utilization",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "resource.type=\"gce_instance\" AND metric.type=\"compute.googleapis.com/instance/cpu/utilization\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN"
+                    }
+                  }
+                },
+                "plotType": "LINE"
+              }
+            ],
+            "yAxis": {
+              "label": "CPU %",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 18,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "VM Memory Usage",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "resource.type=\"gce_instance\" AND metric.type=\"agent.googleapis.com/memory/percent_used\" AND metric.labels.state=\"used\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN"
+                    }
+                  }
+                },
+                "plotType": "LINE"
+              }
+            ],
+            "yAxis": {
+              "label": "Memory %",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      }
+    ]
+  }
+}
