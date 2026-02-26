@@ -1,26 +1,21 @@
 # Google Cloud Ops Agent - Custom Configuration for CALYPSO
 #
-# This config tells the Ops Agent to collect:
-# 1. System journal logs from the meic_tf systemd service
-# 2. The bot's file-based log at /opt/calypso/logs/meic_tf/bot.log
-# 3. The shared monitor log at /opt/calypso/logs/monitor.log
+# Collects:
+# 1. All systemd journal logs (filtered at dashboard level for meic_tf)
+# 2. Bot file log at /opt/calypso/logs/meic_tf/bot.log
+# 3. Shared monitor log at /opt/calypso/logs/monitor.log
 #
-# Deploy to VM:
+# Deploy:
 #   sudo cp /opt/calypso/deploy/ops-agent-config.yaml /etc/google-cloud-ops-agent/config.yaml
 #   sudo systemctl restart google-cloud-ops-agent
-#
-# Verify logs appear in Cloud Logging:
-#   gcloud logging read 'resource.type="gce_instance" AND log_id("meic_tf")' --limit=5 --project=calypso-trading-bot
 #
 # Last Updated: 2026-02-26
 
 logging:
   receivers:
-    # Capture systemd journal logs from meic_tf service
-    meic_tf_journal:
+    # Capture all systemd journal logs (meic_tf filtered at dashboard level)
+    journal:
       type: systemd_journald
-      units:
-        - meic_tf
 
     # Capture the bot's dedicated log file
     meic_tf_logfile:
@@ -34,31 +29,19 @@ logging:
       include_paths:
         - /opt/calypso/logs/monitor.log
 
-  processors:
-    # Parse the bot's log format: "2026-02-26 09:01:00 | INFO     | module | message"
-    meic_tf_parser:
-      type: parse_regex
-      regex: '(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<severity>\w+)\s+\| (?P<module>[\w.]+)\s+\| (?P<message>.*)'
-      time_key: timestamp
-      time_format: '%Y-%m-%d %H:%M:%S'
-
   service:
     pipelines:
-      meic_tf_journal_pipeline:
+      journal_pipeline:
         receivers:
-          - meic_tf_journal
-        processors: []
+          - journal
 
       meic_tf_logfile_pipeline:
         receivers:
           - meic_tf_logfile
-        processors:
-          - meic_tf_parser
 
       monitor_pipeline:
         receivers:
           - monitor_log
-        processors: []
 
 metrics:
   receivers:
