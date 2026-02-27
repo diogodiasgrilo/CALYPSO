@@ -904,7 +904,9 @@ class MEICStrategy:
         logger.info(f"MEICStrategy initialized - State: {self.state.value}")
         logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
         logger.info(f"  Entry times: {[t.strftime('%H:%M') for t in self.entry_times]}")
-        logger.info(f"  Spread width: {self.spread_width} points")
+        min_spread = self.strategy_config.get("min_spread_width", 25)
+        max_spread = self.strategy_config.get("max_spread_width", 100)
+        logger.info(f"  Spread width: {min_spread}-{max_spread}pt (VIX-adjusted, floor={min_spread}pt)")
         logger.info(f"  MEIC+ enabled: {self.meic_plus_enabled}")
         logger.info(f"  Position Registry: {REGISTRY_FILE}")
 
@@ -1752,7 +1754,7 @@ class MEICStrategy:
                         details={
                             "spx_price": self.current_price,
                             "entry_number": entry_num,
-                            "spread_width": self.spread_width,
+                            "spread_width": int(entry.long_call_strike - entry.short_call_strike),
                             "attempts": attempt + 1
                         }
                     )
