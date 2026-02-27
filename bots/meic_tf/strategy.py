@@ -279,7 +279,147 @@ class MEICTFStrategy(MEICStrategy):
 
         # Override min credit from base class $0.50 to $1.00 for MEIC-TF
         self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 1.00) * 100
-        logger.info(f"  Min viable credit per side: ${self.min_viable_credit_per_side / 100:.2f}")
+
+        # Separate put minimum credit — Tammy's range is $1.00-$1.75/side
+        # Calls use $1.00 (bottom of range, MKT-020 tightens to reach it)
+        # Puts use $1.75 (top of range, MKT-022 widens to bring credit down to it)
+        self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 1.75) * 100
+        logger.info(f"  Min viable credit - call: ${self.min_viable_credit_per_side / 100:.2f}, put: ${self.min_viable_credit_put_side / 100:.2f}")
+
+        # MKT-024: Wider starting OTM multipliers
+        # Start strike search at N× the VIX-adjusted distance so MKT-020/022
+        # scan a wider range. Gives more breathing room on volatile days.
+        self.call_starting_otm_multiplier = float(strategy_config.get("call_starting_otm_multiplier", 2.0))
+        self.put_starting_otm_multiplier = float(strategy_config.get("put_starting_otm_multiplier", 2.0))
+        logger.info(f"  Starting OTM multipliers (MKT-024): call ×{self.call_starting_otm_multiplier}, put ×{self.put_starting_otm_multiplier}")
+
+    # =========================================================================
+    # OVERRIDE: Strike calculation with wider starting OTM (MKT-024)
+    # =========================================================================
+
+    def _calculate_strikes(self, entry: TFIronCondorEntry) -> bool:
+        """
+        Override base MEIC strike calculation to apply MKT-024 wider starting OTM.
+
+        Uses separate multipliers for call and put starting OTM distances.
+        At 2× multiplier, the starting distance is doubled — MKT-020/MKT-022
+        then scan inward from there to find the widest viable strike at or
+        above the minimum credit threshold.
+
+        This gives puts more breathing room on volatile days (put skew means
+        $1.75 credit is found much further OTM) while calls still tighten
+        to reach $1.00 as before.
+
+        Args:
+            entry: TFIronCondorEntry to populate with strikes
+
+        Returns:
+            True if strikes calculated successfully
+        """
+        spx = self.current_price
+        if spx <= 0:
+            logger.error("Cannot calculate strikes - no SPX price")
+            return False
+
+        vix = self.current_vix
+        if vix <= 0:
+            logger.warning("No VIX available - using default VIX=15 for strike calculation")
+            vix = 15.0
+
+        # Round SPX to nearest 5 (SPX strikes are 5-point increments)
+        rounded_spx = round(spx / 5) * 5
+
+        # Same base OTM calculation as parent MEIC
+        base_distance_at_vix15 = 40  # Points OTM for ~8 delta at VIX 15
+        delta_adjustment = 8.0 / self.target_delta
+        vix_factor = max(0.7, min(2.5, vix / 15.0))
+        otm_distance = base_distance_at_vix15 * vix_factor * delta_adjustment
+        otm_distance = round(otm_distance / 5) * 5
+        otm_distance = max(25, min(120, otm_distance))
+
+        # MKT-024: Apply separate multipliers for wider starting distance
+        call_otm = round((otm_distance * self.call_starting_otm_multiplier) / 5) * 5
+        call_otm = max(25, min(240, call_otm))  # Extended upper clamp for 2× range
+        put_otm = round((otm_distance * self.put_starting_otm_multiplier) / 5) * 5
+        put_otm = max(25, min(240, put_otm))
+
+        # MKT-009: VIX-adjusted spread width (same as parent)
+        dynamic_spread_width = self._get_vix_adjusted_spread_width(vix)
+
+        logger.info(
+            f"MKT-024 strike calc: VIX={vix:.1f}, base_otm={otm_distance}pt, "
+            f"call_otm={call_otm}pt (×{self.call_starting_otm_multiplier}), "
+            f"put_otm={put_otm}pt (×{self.put_starting_otm_multiplier}), "
+            f"spread={dynamic_spread_width}pt"
+        )
+
+        # Call side (above current price) — starts wider than base MEIC
+        entry.short_call_strike = rounded_spx + call_otm
+        entry.long_call_strike = entry.short_call_strike + dynamic_spread_width
+
+        # Put side (below current price) — starts wider than base MEIC
+        entry.short_put_strike = rounded_spx - put_otm
+        entry.long_put_strike = entry.short_put_strike - dynamic_spread_width
+
+        # MKT-007: Check liquidity and adjust strikes if needed
+        expiry = self._get_todays_expiry()
+        if expiry:
+            # Check short call liquidity (move closer to ATM if illiquid)
+            adjusted_call, call_msg = self._adjust_strike_for_liquidity(
+                entry.short_call_strike, "Call", expiry,
+                adjustment_direction=-1  # Move closer to ATM (lower for calls)
+            )
+            if adjusted_call and adjusted_call != entry.short_call_strike:
+                entry.short_call_strike = adjusted_call
+                entry.long_call_strike = adjusted_call + dynamic_spread_width
+                logger.info(f"MKT-007: {call_msg}")
+
+            # Check short put liquidity (move closer to ATM if illiquid)
+            adjusted_put, put_msg = self._adjust_strike_for_liquidity(
+                entry.short_put_strike, "Put", expiry,
+                adjustment_direction=1  # Move closer to ATM (higher for puts)
+            )
+            if adjusted_put and adjusted_put != entry.short_put_strike:
+                entry.short_put_strike = adjusted_put
+                entry.long_put_strike = adjusted_put - dynamic_spread_width
+                logger.info(f"MKT-007: {put_msg}")
+
+            # MKT-008: Check long wing liquidity and reduce spread width if needed
+            adjusted_long_call, call_adjusted = self._adjust_long_wing_for_liquidity(
+                entry.long_call_strike, entry.short_call_strike,
+                "Call", expiry, is_call=True
+            )
+            if call_adjusted:
+                entry.long_call_strike = adjusted_long_call
+                entry.call_wing_illiquid = True
+
+            adjusted_long_put, put_adjusted = self._adjust_long_wing_for_liquidity(
+                entry.long_put_strike, entry.short_put_strike,
+                "Put", expiry, is_call=False
+            )
+            if put_adjusted:
+                entry.long_put_strike = adjusted_long_put
+                entry.put_wing_illiquid = True
+
+        # Fix #44: Check for strike conflicts with existing entries
+        self._adjust_for_strike_conflicts(entry)
+
+        # Fix #50/MKT-013: Check for same-strike overlap with existing entries
+        self._adjust_for_same_strike_overlap(entry)
+
+        # Fix #66: Re-run Fix #44 after MKT-013
+        self._adjust_for_strike_conflicts(entry)
+
+        # MKT-015: Check for long-long strike overlap
+        self._adjust_for_long_strike_overlap(entry)
+
+        logger.info(
+            f"Strikes calculated for SPX {spx:.2f}: "
+            f"Call {entry.short_call_strike}/{entry.long_call_strike}, "
+            f"Put {entry.short_put_strike}/{entry.long_put_strike}"
+        )
+
+        return True
 
     # =========================================================================
     # ENTRY GATING (MKT-021)
@@ -1021,22 +1161,26 @@ class MEICTFStrategy(MEICStrategy):
             )
             return ("proceed", False)  # estimation_worked = False
 
-        call_viable = estimated_call >= self.min_viable_credit_per_side
-        put_viable = estimated_put >= self.min_viable_credit_per_side
+        # Separate thresholds: calls use min_viable_credit_per_side ($1.00),
+        # puts use min_viable_credit_put_side ($1.75 — top of Tammy's range)
+        call_min = self.min_viable_credit_per_side
+        put_min = self.min_viable_credit_put_side
+        call_viable = estimated_call >= call_min
+        put_viable = estimated_put >= put_min
 
         if call_viable and put_viable:
             logger.info(
                 f"MKT-011: Credit gate PASSED for Entry #{entry.entry_number}: "
-                f"Call ${estimated_call:.2f}, Put ${estimated_put:.2f} "
-                f"(min: ${self.min_viable_credit_per_side:.2f})"
+                f"Call ${estimated_call:.2f} (min: ${call_min:.2f}), "
+                f"Put ${estimated_put:.2f} (min: ${put_min:.2f})"
             )
             return ("proceed", True)  # estimation_worked = True
 
         if not call_viable and not put_viable:
             logger.warning(
                 f"MKT-011: SKIPPING Entry #{entry.entry_number} - both sides non-viable. "
-                f"Call ${estimated_call:.2f}, Put ${estimated_put:.2f} "
-                f"(min: ${self.min_viable_credit_per_side:.2f})"
+                f"Call ${estimated_call:.2f} (min: ${call_min:.2f}), "
+                f"Put ${estimated_put:.2f} (min: ${put_min:.2f})"
             )
             self._log_safety_event(
                 "MKT-011_ENTRY_SKIPPED",
@@ -1049,7 +1193,7 @@ class MEICTFStrategy(MEICStrategy):
         if not call_viable:
             logger.warning(
                 f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
-                f"(${estimated_call:.2f} < ${self.min_viable_credit_per_side:.2f}) - "
+                f"(${estimated_call:.2f} < ${call_min:.2f}) - "
                 f"put ${estimated_put:.2f} is viable but no one-sided entries allowed"
             )
             self._log_safety_event(
@@ -1061,7 +1205,7 @@ class MEICTFStrategy(MEICStrategy):
         else:
             logger.warning(
                 f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
-                f"(${estimated_put:.2f} < ${self.min_viable_credit_per_side:.2f}) - "
+                f"(${estimated_put:.2f} < ${put_min:.2f}) - "
                 f"call ${estimated_call:.2f} is viable but no one-sided entries allowed"
             )
             self._log_safety_event(
@@ -1200,6 +1344,12 @@ class MEICTFStrategy(MEICStrategy):
 
             call_credit = (short_mid - long_mid) * 100
 
+            # Enhanced logging: premium curve data for calibration
+            logger.debug(
+                f"MKT-020: {otm_val}pt OTM → credit ${call_credit:.2f} "
+                f"(short ${short_mid:.2f}, long ${long_mid:.2f})"
+            )
+
             if call_credit >= min_credit:
                 if otm_val < initial_otm:
                     # Tightened — update entry strikes
@@ -1243,8 +1393,8 @@ class MEICTFStrategy(MEICStrategy):
         When initial put credit is below minimum, moves the short put closer
         to ATM in 5pt steps until credit >= minimum or OTM floor is reached.
 
-        Only applies to NEUTRAL trend entries (full IC candidates).
-        One-sided entries are unaffected.
+        Uses put-specific minimum credit (min_viable_credit_put_side, default
+        $1.75) which is the top of Tammy's $1.00-$1.75 per-side range.
 
         Uses batch quote API for efficiency: 1 chain fetch + 1 batch quote
         regardless of how many candidate strikes are evaluated.
@@ -1260,7 +1410,7 @@ class MEICTFStrategy(MEICStrategy):
 
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_put_otm_distance
-        min_credit = self.min_viable_credit_per_side  # In dollars (e.g., $100 for $1.00)
+        min_credit = self.min_viable_credit_put_side  # Put-specific: $175 for $1.75
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix)
 
         initial_short_put = entry.short_put_strike
@@ -1364,6 +1514,12 @@ class MEICTFStrategy(MEICStrategy):
                 long_mid = 0
 
             put_credit = (short_mid - long_mid) * 100
+
+            # Enhanced logging: premium curve data for calibration
+            logger.debug(
+                f"MKT-022: {otm_val}pt OTM → credit ${put_credit:.2f} "
+                f"(short ${short_mid:.2f}, long ${long_mid:.2f})"
+            )
 
             if put_credit >= min_credit:
                 if otm_val < initial_otm:

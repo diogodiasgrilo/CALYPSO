@@ -1,7 +1,7 @@
 # MEIC-TF (Trend Following Hybrid) Strategy Specification
 
 **Last Updated:** 2026-02-27
-**Version:** 1.4.0
+**Version:** 1.4.1
 **Purpose:** Complete strategy specification for the MEIC-TF 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -264,20 +264,20 @@ Each entry goes through these phases in order:
 
 ```
 17. MKT-020: Call tightening — move short call closer in 5pt steps
-    └── Until credit >= $1.00/side or 25pt OTM floor
+    └── Until credit >= $1.00 (call minimum) or 25pt OTM floor
     └── If tightened, re-runs steps 13-16
 18. MKT-022: Put tightening — mirror of MKT-020 for put side
-    └── Same 5pt steps, $1.00 target, 25pt floor
+    └── Same 5pt steps, $1.75 target (put minimum), 25pt floor
     └── If tightened, re-runs steps 13-16
 ```
 
 ### Phase 7: Credit Gate
 
 ```
-19. MKT-011: Estimate credit from live quotes
-    ├── Both sides >= $1.00 → PROCEED with full iron condor
-    ├── Either side < $1.00 → SKIP entry (no one-sided entries since v1.4.0)
-    └── Both sides < $1.00 → SKIP entry
+19. MKT-011: Estimate credit from live quotes (call >= $1.00, put >= $1.75)
+    ├── Both sides viable → PROCEED with full iron condor
+    ├── Either side below minimum → SKIP entry (no one-sided entries since v1.4.0)
+    └── Both sides below minimum → SKIP entry
 20. MKT-010 fallback: If MKT-011 can't get quotes, use illiquidity flags
     └── Any wing illiquid → SKIP entry (no one-sided entries since v1.4.0)
 ```
@@ -344,10 +344,12 @@ This pipeline prevents Saxo from rejecting orders or merging positions:
 | 3 | MKT-014 | Warn if MKT-013 landed on illiquid strike | MKT-013 can undo MKT-007's liquidity optimization |
 | 4 | Fix #66 | Re-run Fix #44 after MKT-013 | MKT-013 shifts longs too, potentially creating new conflicts |
 | 5 | MKT-015 | Move new long strikes 5pt further OTM if they overlap existing long strikes | Saxo merges same-strike longs, deleting older position ID |
-| 6 | MKT-020 | Tighten call OTM distance (NEUTRAL only) | Get call credit above $1.00 minimum |
-| 7 | MKT-022 | Tighten put OTM distance (NEUTRAL only) | Get put credit above $1.00 minimum |
+| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $1.00 minimum |
+| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $1.75 minimum |
 
 Steps 6-7 internally re-run steps 1-5 if they change strikes.
+
+**MKT-024 (v1.4.1):** Both sides start at 2× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $1.75 (top of Tammy's range), calls use $1.00 (bottom). This gives puts more breathing room on volatile days where put skew means $1.75 is found much further OTM.
 
 ---
 
@@ -371,7 +373,7 @@ stop_level = entry.total_credit          (both sides get the SAME level)
 |-----------|-------------|--------------------------|
 | Full IC | total_credit | $125 + $185 = $310 per side |
 
-**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + $1.00/side minimum reduced credit skew from 3-7x to 1-2x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
+**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($1.00 calls, $1.75 puts) reduced credit skew from 3-7x to 1-2x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
 
 **MEIC+ applies after:** If `meic_plus_enabled` and credit exceeds threshold, subtract $0.10 (× 100 = $10) from the stop level.
 
@@ -500,8 +502,9 @@ Entry #1 → #2 → #3 placed normally
 | MKT-018 | Early Close on ROC | v1.3.0 | Close all positions when ROC >= 3% |
 | MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $1.00 |
 | MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5 if ROC already >= 3% (after 3 entries placed) |
-| MKT-022 | Progressive Put Tightening | v1.3.5 | Mirror of MKT-020 for put side |
+| MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $1.75 |
 | MKT-023 | Smart Hold Check | v1.3.7 | Compare close-now vs worst-case-hold before MKT-018 fires |
+| MKT-024 | Wider Starting OTM | v1.4.1 | Start both sides at 2× VIX-adjusted distance; MKT-020/022 scan inward |
 
 ### Removed Rules
 
@@ -519,7 +522,8 @@ Entry #1 → #2 → #3 placed normally
 |--------|--------|-------------|
 | MKT-007 | MKT-013 | MKT-007 moves strikes closer (liquid); MKT-013 moves them further (overlap). Can undo each other. |
 | MKT-013 | Fix #44/66 | MKT-013 shifts longs; Fix #66 re-checks for new long-vs-short conflicts. |
-| MKT-020/022 | MKT-011 | Tightening runs first; MKT-011 re-validates with fresh quotes. |
+| MKT-024 | MKT-020/022 | MKT-024 sets wider starting OTM; MKT-020/022 scan inward from there. |
+| MKT-020/022 | MKT-011 | Tightening runs first; MKT-011 re-validates with fresh quotes (call $1.00, put $1.75). |
 | MKT-021 | MKT-018 | MKT-021 skips entries → satisfies MKT-018 gate → early close fires same cycle. |
 | MKT-018 | MKT-023 | MKT-023 is a sub-check within MKT-018; can override close decision with HOLD. |
 
@@ -685,7 +689,10 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `max_delta` | `15` | Maximum acceptable delta |
 | `min_credit_per_side` | `1.00` | Credit warning threshold ($/side) |
 | `max_credit_per_side` | `1.75` | Credit warning ceiling ($/side) |
-| `min_viable_credit_per_side` | `1.00` | MKT-011 minimum (MEIC-TF override; base MEIC uses 0.50) |
+| `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020 call minimum (MEIC-TF override; base MEIC uses 0.50) |
+| `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022 put minimum (top of Tammy's $1.00-$1.75 range) |
+| `call_starting_otm_multiplier` | `2.0` | MKT-024: call starting OTM = base × multiplier |
+| `put_starting_otm_multiplier` | `2.0` | MKT-024: put starting OTM = base × multiplier |
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
 | `meic_plus_enabled` | `true` | Enable MEIC+ stop reduction |
@@ -716,8 +723,10 @@ EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at
 ### Volatility Skew
 
 Put premiums are typically 2-7× higher than call premiums at the same delta. This means:
-- MKT-011 frequently skips entries when call credit is below $1.00/side
-- MKT-020 call tightening often can't reach $1.00 even at the 25pt OTM floor
+- MKT-024 starts both sides at 2× base OTM to give MKT-020/022 room to find optimal strikes
+- MKT-011 uses separate thresholds: calls $1.00, puts $1.75 (Tammy's $1.00-$1.75 range)
+- MKT-020 call tightening often can't reach $1.00 even at the 25pt OTM floor → MKT-011 skips
+- MKT-022 with $1.75 put minimum finds the widest viable put strike, reducing unnecessary tightness
 - Total_credit stop (shared by both sides) is adequate because MKT-020/022 keeps skew at 1-2x
 
 ### Saxo Position Merging
