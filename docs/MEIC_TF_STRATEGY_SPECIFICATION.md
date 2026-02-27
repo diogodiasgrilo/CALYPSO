@@ -1,7 +1,7 @@
 # MEIC-TF (Trend Following Hybrid) Strategy Specification
 
 **Last Updated:** 2026-02-27
-**Version:** 1.4.1
+**Version:** 1.4.2
 **Purpose:** Complete strategy specification for the MEIC-TF 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -74,7 +74,7 @@ If the bot had detected the downtrend and placed only call spreads, it would hav
 
 ### The Core Insight
 
-MEIC's breakeven design means a full IC with one side stopped loses only ~$5-$15 net (MEIC+ reduction + commission). But a one-sided entry that gets stopped loses the full credit plus commission. This creates an asymmetry:
+MEIC's breakeven design means a full IC with one side stopped nets $0 after commission (MEIC+ reduction = $0.15 covers the $15 commission exactly). But a one-sided entry that gets stopped loses the full credit plus commission. This creates an asymmetry:
 
 - **Full IC in a range-bound market:** Very safe. One side stopped = breakeven. Both sides expire = full profit.
 - **One-sided entry in a trending market:** Risky if wrong. But if the trend is correctly identified, the spread is far OTM on the safe side and has a high probability of expiring worthless.
@@ -359,7 +359,7 @@ Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
 MEIC's core insight: **set the stop loss per side equal to total credit collected**. If one side is stopped and the other expires worthless, the loss on the stopped side exactly equals the profit from the surviving side = breakeven.
 
-With MEIC+ modification: stop = total_credit - $0.10, so breakeven days become +$10 days.
+With MEIC+ modification: stop = total_credit - $0.15, covering the $15 commission on a one-side-stop (6 legs × $2.50). Net P&L on a one-side-stop = $0 (true breakeven after commission).
 
 ### MEIC-TF Stop Formula
 
@@ -375,7 +375,7 @@ stop_level = entry.total_credit          (both sides get the SAME level)
 
 **Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($1.00 calls, $1.75 puts) reduced credit skew from 3-7x to 1-2x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
 
-**MEIC+ applies after:** If `meic_plus_enabled` and credit exceeds threshold, subtract $0.10 (× 100 = $10) from the stop level.
+**MEIC+ applies after:** If `meic_plus_enabled` and credit exceeds threshold, subtract $0.15 (× 100 = $15) from the stop level. This covers the $15 commission on a one-side-stop (4 entry legs + 2 close legs × $2.50 each), achieving true breakeven after commission.
 
 **Safety floor:** MIN_STOP_LEVEL = $50. If stop_level is below $50 (e.g., due to zero fill price from API sync issues), skip stop monitoring for that side.
 
@@ -695,7 +695,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
 | `meic_plus_enabled` | `true` | Enable MEIC+ stop reduction |
-| `meic_plus_reduction` | `0.10` | MEIC+ reduction amount ($/contract) |
+| `meic_plus_reduction` | `0.15` | MEIC+ reduction (covers $15 commission on one-side-stop) |
 | `max_vix_entry` | `25` | Maximum VIX for new entries |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `true` | MKT-018 enable |

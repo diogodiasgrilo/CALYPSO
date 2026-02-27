@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.4.1 | **Last Updated:** 2026-02-27
+**Version:** 1.4.2 | **Last Updated:** 2026-02-27
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and early close on Return on Capital.
 
@@ -181,7 +181,7 @@ sudo journalctl -u meic_tf -f
 | Credit minimums | $0.50/side | $1.00 calls, $1.75 puts |
 | Trend signal | None | EMA 20/40 (informational only) |
 | Profit management | Hold to expiration | Early close at 3% ROC (MKT-018/023/021) |
-| Stop formula | total_credit | total_credit (same) |
+| Stop formula | total_credit - $0.10 | total_credit - $0.15 (covers commission) |
 
 ## Risk Considerations
 
@@ -223,6 +223,7 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.4.2** (2026-02-27): MEIC+ reduction raised from $0.10 to $0.15 to cover commission on one-side-stop (true breakeven)
 - **1.4.1** (2026-02-27): MKT-024 wider starting OTM (2× multiplier both sides), separate put minimum $1.75 (Tammy's $1.00-$1.75 range), enhanced MKT-020/022 scan logging
 - **1.4.0** (2026-02-27): Remove MKT-019 (revert to total_credit stop), disable all one-sided entries (EMA signal informational only, always full IC or skip)
 - **1.3.11** (2026-02-25): MKT-018 early close threshold raised from 2% to 3% ROC

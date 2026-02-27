@@ -46,9 +46,9 @@
         "min_delta": 5,
         "max_delta": 15,
 
-        "_comment_meic_plus": "MEIC+ modification: stop = credit - $0.10 for better breakeven days",
+        "_comment_meic_plus": "MEIC+ modification: stop = credit - $0.15 to cover commission on one-side-stop (6 legs × $2.50 = $15)",
         "meic_plus_enabled": true,
-        "meic_plus_reduction": 0.10,
+        "meic_plus_reduction": 0.15,
 
         "_comment_risk": "Risk management settings",
         "max_vix_entry": 25,
