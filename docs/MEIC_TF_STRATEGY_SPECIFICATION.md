@@ -1,7 +1,7 @@
 # MEIC-TF (Trend Following Hybrid) Strategy Specification
 
 **Last Updated:** 2026-02-28
-**Version:** 1.4.4
+**Version:** 1.4.5
 **Purpose:** Complete strategy specification for the MEIC-TF 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -333,7 +333,7 @@ otm_distance = clamp(otm_distance, 25, 120)  # Never closer than 25, never wider
 | 25-30 | 70 pts |
 | > 30 | 80 pts |
 
-Minimum: 25 pts (config). SPX options use 5-point strike increments.
+Minimum: 60 pts (MKT-026, config `min_spread_width`). On low-VIX days, longs end up 10pt further OTM = cheaper. Since MKT-025 never closes longs, this is pure savings. SPX options use 5-point strike increments.
 
 ### Strike Adjustment Pipeline (Exact Order)
 
@@ -516,6 +516,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-007 | Short Strike Liquidity | v1.0.0 | Move short strikes closer to ATM if illiquid |
 | MKT-008 | Long Wing Liquidity | v1.0.0 | Reduce spread width if long wing illiquid; sets illiquidity flags |
 | MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | 40-80pt spreads based on VIX level |
+| MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days, pure savings with MKT-025) |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
 | MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; skip if either side non-viable (no one-sided) |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
@@ -706,7 +707,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `entry_times` | `["10:05","10:35","11:05","11:35","12:05","12:35"]` | Entry schedule (ET) |
 | `entry_window_minutes` | `5` | Window around entry time |
 | `spread_width` | `50` | Default spread width (points) |
-| `min_spread_width` | `25` | Minimum spread width |
+| `min_spread_width` | `60` | Minimum spread width (MKT-026: floor ensures 60pt on low-VIX days) |
 | `max_spread_width` | `100` | Maximum spread width |
 | `target_delta` | `8` | Target delta for short strikes |
 | `min_delta` | `5` | Minimum acceptable delta |

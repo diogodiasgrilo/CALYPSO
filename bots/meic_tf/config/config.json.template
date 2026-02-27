@@ -21,9 +21,9 @@
         "entry_times": ["10:05", "10:35", "11:05", "11:35", "12:05", "12:35"],
         "entry_window_minutes": 5,
 
-        "_comment_spread": "Spread configuration",
+        "_comment_spread": "Spread configuration. min_spread_width=60 ensures 60pt floor even on low-VIX days (longs 10pt cheaper, MKT-025 never closes longs so pure savings)",
         "spread_width": 50,
-        "min_spread_width": 25,
+        "min_spread_width": 60,
         "max_spread_width": 100,
 
         "_comment_credit": "Credit targets per side (call spread OR put spread)",
