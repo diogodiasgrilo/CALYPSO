@@ -454,13 +454,13 @@ def get_next_market_open() -> Tuple[datetime, int]:
 
     # If we're past today's market hours, start from tomorrow
     if now.time() >= MARKET_CLOSE_TIME:
-        next_open = next_open.replace(day=next_open.day + 1)
+        next_open = next_open + timedelta(days=1)
 
     # Skip weekends and holidays
     max_attempts = 10  # Prevent infinite loop
     attempts = 0
     while (is_weekend(next_open) or is_market_holiday(next_open)) and attempts < max_attempts:
-        next_open = next_open.replace(day=next_open.day + 1)
+        next_open = next_open + timedelta(days=1)
         attempts += 1
 
     # Calculate seconds until market open
