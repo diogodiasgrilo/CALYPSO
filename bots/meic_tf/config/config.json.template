@@ -46,7 +46,7 @@
         "min_delta": 5,
         "max_delta": 15,
 
-        "_comment_meic_plus": "MEIC+ modification: stop = credit - $0.15 to cover commission on one-side-stop (6 legs × $2.50 = $15)",
+        "_comment_meic_plus": "MEIC+ modification: stop = credit - $0.15 to cover commission on one-side-stop (4 entry + 1 close = 5 legs × $2.50 = $12.50, buffered to $15)",
         "meic_plus_enabled": true,
         "meic_plus_reduction": 0.15,
 

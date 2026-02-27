@@ -1,7 +1,7 @@
 # MEIC-TF (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-02-27
-**Version:** 1.4.2
+**Last Updated:** 2026-02-28
+**Version:** 1.4.3
 **Purpose:** Complete strategy specification for the MEIC-TF 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -58,6 +58,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 | Entry type | Always full iron condor | Always full iron condor (skip if either side non-viable) |
 | Entries per day | 6 | 5 |
 | Stop formula (full IC) | total_credit per side | total_credit per side (same as base MEIC) |
+| Stop execution | Close both legs (short + long) | Close SHORT only, long expires (MKT-025) |
 | Credit gate | Skip if both non-viable | Skip if either side non-viable (MKT-011) |
 | Profit management | Hold to expiration | Early close at 3% ROC (MKT-018/023/021) |
 | OTM tightening | None | Progressive 5pt steps (MKT-020/022) |
@@ -359,7 +360,7 @@ Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
 MEIC's core insight: **set the stop loss per side equal to total credit collected**. If one side is stopped and the other expires worthless, the loss on the stopped side exactly equals the profit from the surviving side = breakeven.
 
-With MEIC+ modification: stop = total_credit - $0.15, covering the $15 commission on a one-side-stop (6 legs × $2.50). Net P&L on a one-side-stop = $0 (true breakeven after commission).
+With MEIC+ modification: stop = total_credit - $0.15, covering commission on a one-side-stop (4 entry + 1 close = 5 legs × $2.50 = $12.50, buffered to $15). Net P&L on a one-side-stop = +$2.50 (true breakeven with small buffer).
 
 ### MEIC-TF Stop Formula
 
@@ -375,9 +376,28 @@ stop_level = entry.total_credit          (both sides get the SAME level)
 
 **Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($1.00 calls, $1.75 puts) reduced credit skew from 3-7x to 1-2x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
 
-**MEIC+ applies after:** If `meic_plus_enabled` and credit exceeds threshold, subtract $0.15 (× 100 = $15) from the stop level. This covers the $15 commission on a one-side-stop (4 entry legs + 2 close legs × $2.50 each), achieving true breakeven after commission.
+**MEIC+ applies after:** If `meic_plus_enabled` and credit exceeds threshold, subtract $0.15 (× 100 = $15) from the stop level. MKT-025 closes only the short leg on stop, so commission is 4 entry + 1 close = 5 legs × $2.50 = $12.50. The $15 reduction provides a $2.50 buffer for slippage.
 
 **Safety floor:** MIN_STOP_LEVEL = $50. If stop_level is below $50 (e.g., due to zero fill price from API sync issues), skip stop monitoring for that side.
+
+### MKT-025: Short-Only Stop Close (v1.4.3)
+
+When a stop triggers, MEIC-TF only closes the **SHORT leg** via market order. The long leg stays open and expires at end-of-day settlement (0DTE = same-day expiry, zero overnight risk).
+
+**Why:** Research from the 0DTE iron condor community (Tammy Chambless, John Einar Sandvand with 1,344+ trades) shows that long wings (far OTM, illiquid) are where most slippage occurs on stop closes. Closing only the short leg:
+- **Reduces slippage** — one market order instead of two; the short leg (closer to ATM) has tighter markets
+- **Saves $2.50 commission** — 1 close leg instead of 2 (1 × $2.50 vs 2 × $2.50)
+- **Matches Tammy's approach** — "set stops on the short only, not on the spread"
+
+**Tradeoff:** We lose the long leg's residual value (it expires worthless instead of being sold). With MKT-024's 2× wider OTM, long wings are further out and less valuable:
+- Call long wings: typically $0.05-$0.15 ($5-$15 lost)
+- Put long wings: typically $0.20-$0.65 ($20-$65 lost)
+
+This is offset by saved slippage ($5-$15) and saved commission ($2.50). Net impact is roughly neutral for call stops and slightly negative for put stops — acceptable given the execution simplicity and community validation.
+
+**Settlement handling:** The orphaned long leg is cleaned up automatically at settlement. `check_after_hours_settlement()` detects positions in registry but gone from Saxo (expired), clears position_ids and UICs, and runs `_process_expired_credits()`. The expired credit logic correctly skips stopped sides (`if not entry.call_side_stopped`), so there is no double-counting risk.
+
+**Stop trigger is unchanged:** `spread_value >= stop_level` still uses BOTH leg mid prices (short - long) for the trigger condition. Only the close execution changes.
 
 ### Stop Monitoring
 
@@ -386,7 +406,8 @@ The main loop checks stops every ~1-2 seconds:
 1. Batch-fetch current spread values for all active entries
 2. For each active side of each entry:
    - If `spread_value >= stop_level`: trigger stop
-   - Close both legs via emergency market orders
+   - Close SHORT leg only via emergency market order (MKT-025)
+   - Long leg stays open, expires at settlement
    - Record fill prices (deferred async lookup for accurate P&L)
    - Update realized P&L
 
@@ -505,6 +526,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $1.75 |
 | MKT-023 | Smart Hold Check | v1.3.7 | Compare close-now vs worst-case-hold before MKT-018 fires |
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start both sides at 2× VIX-adjusted distance; MKT-020/022 scan inward |
+| MKT-025 | Short-Only Stop Close | v1.4.3 | Close SHORT leg only on stop; long expires at settlement |
 
 ### Removed Rules
 
@@ -526,6 +548,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-020/022 | MKT-011 | Tightening runs first; MKT-011 re-validates with fresh quotes (call $1.00, put $1.75). |
 | MKT-021 | MKT-018 | MKT-021 skips entries → satisfies MKT-018 gate → early close fires same cycle. |
 | MKT-018 | MKT-023 | MKT-023 is a sub-check within MKT-018; can override close decision with HOLD. |
+| MKT-025 | Settlement | Short-only close leaves long leg open; settlement auto-cleans orphaned positions. |
 
 ---
 

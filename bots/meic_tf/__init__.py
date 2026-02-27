@@ -16,6 +16,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
 
 Version History:
+- 1.4.3 (2026-02-28): MKT-025 short-only stop loss close (close short, let long expire — per Tammy/Sandvand community best practice)
 - 1.4.2 (2026-02-27): MEIC+ reduction raised from $0.10 to $0.15 to cover commission on one-side-stop (true breakeven)
 - 1.4.1 (2026-02-27): MKT-024 wider starting OTM (2× multiplier both sides), separate put minimum $1.75 (Tammy's $1.00-$1.75 range), enhanced MKT-020/022 scan logging
 - 1.4.0 (2026-02-27): Remove MKT-019 (revert to total_credit stop), disable all one-sided entries (EMA signal informational only, always full IC or skip)

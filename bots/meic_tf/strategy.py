@@ -1845,13 +1845,202 @@ class MEICTFStrategy(MEICStrategy):
         return f"Entry #{entry_num} failed after {ENTRY_MAX_RETRIES} retries: {last_error}"
 
     # =========================================================================
-    # STOP LOSS CALCULATION
+    # STOP LOSS EXECUTION & CALCULATION
     # =========================================================================
+    # MKT-025: Short-only stop loss close. When a stop triggers, only close
+    # the SHORT leg via market order. The LONG leg stays open and expires
+    # worthless at end-of-day settlement (0DTE). This matches Tammy Chambless
+    # and Sandvand's approach: "set stops on the short only, not on the spread."
+    #
+    # Benefits: reduces slippage (1 market order instead of 2), saves $2.50
+    # commission per stop (1 leg instead of 2), avoids selling illiquid long
+    # wings at terrible fill prices.
+    #
+    # Tradeoff: we lose the long leg's residual value (it expires worthless
+    # instead of being sold for $5-$65). For far-OTM long wings (MKT-024 2×
+    # wider starting distance), this is typically $5-$15 for calls and $20-$50
+    # for puts.
+    #
     # NOTE: _execute_call_spread_only(), _execute_put_spread_only(), and
     # _simulate_one_sided_entry() removed in v1.4.0 — all entries are full IC.
     # One-sided stop calculation blocks kept in _calculate_stop_levels_tf()
     # for recovery compatibility with pre-v1.4.0 state files.
     # =========================================================================
+
+    def _execute_stop_loss(self, entry, side: str) -> str:
+        """
+        MKT-025: Execute a stop loss closing only the SHORT leg.
+
+        Override of base MEIC's _execute_stop_loss() that closes both legs.
+        Only the short leg is closed via market order. The long leg stays open
+        and expires worthless at end-of-day settlement (0DTE options).
+
+        Why: Tammy Chambless and Sandvand (1,344+ trades) both recommend
+        "stop on short only, not on the spread" to reduce slippage on the
+        illiquid long wing. CBOE post-Aug-2023 improvements make market
+        orders on the liquid short leg reliable.
+
+        Settlement cleanup: check_after_hours_settlement() detects the
+        orphaned long position (in registry but gone from Saxo after expiry),
+        unregisters it, and clears the position_id/uic. _process_expired_credits()
+        correctly skips stopped sides (no double-counting).
+
+        Args:
+            entry: IronCondorEntry (or TFIronCondorEntry) with stop triggered
+            side: "call" or "put"
+
+        Returns:
+            str describing action taken
+        """
+        logger.warning(
+            f"MKT-025 STOP TRIGGERED: Entry #{entry.entry_number} {side} side "
+            f"(closing SHORT only, long expires at settlement)"
+        )
+
+        self.state = MEICState.STOP_TRIGGERED
+
+        if side == "call":
+            entry.call_side_stopped = True
+            self.daily_state.call_stops_triggered += 1
+            # MKT-025: Only close the short leg — long expires at settlement
+            positions_to_close = [
+                (entry.short_call_position_id, "short_call", entry.short_call_uic),
+            ]
+            stop_level = entry.call_side_stop
+        else:
+            entry.put_side_stopped = True
+            self.daily_state.put_stops_triggered += 1
+            # MKT-025: Only close the short leg — long expires at settlement
+            positions_to_close = [
+                (entry.short_put_position_id, "short_put", entry.short_put_uic),
+            ]
+            stop_level = entry.put_side_stop
+
+        # Check for double stop
+        if entry.call_side_stopped and entry.put_side_stopped:
+            self.daily_state.double_stops += 1
+            logger.warning(f"DOUBLE STOP on Entry #{entry.entry_number}")
+
+        # Track actual fill prices for accurate P&L calculation
+        actual_close_cost = 0.0  # Cost to close the short leg only
+        fill_prices_captured = True
+        deferred_legs = []
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would close {side} SHORT of Entry #{entry.entry_number}")
+            actual_close_cost = stop_level
+        else:
+            # Close only the short leg via market order
+            for pos_id, leg_name, uic in positions_to_close:
+                if pos_id:
+                    _, fill_price, order_id = self._close_position_with_retry(
+                        pos_id, leg_name, uic=uic, entry_number=entry.entry_number
+                    )
+                    if fill_price is not None:
+                        # Short leg: we BUY to close (costs money)
+                        actual_close_cost += fill_price * 100 * entry.contracts
+                        logger.info(f"MKT-025: {leg_name} close cost: +${fill_price * 100 * entry.contracts:.2f}")
+                    else:
+                        fill_prices_captured = False
+                        logger.info(f"MKT-025: No immediate fill price for {leg_name}, will use deferred lookup")
+                        if order_id:
+                            deferred_legs.append((order_id, uic, leg_name))
+
+        # Calculate net loss
+        # MKT-025: close_cost is SHORT only. credit_received is NET of long cost.
+        # So net_loss = short_close - (short_premium - long_cost)
+        # = short_close - short_premium + long_cost
+        # This includes the long leg's original cost (it expires worthless).
+        if side == "call":
+            credit_received = entry.call_spread_credit
+        else:
+            credit_received = entry.put_spread_credit
+
+        if fill_prices_captured and not self.dry_run:
+            net_loss = actual_close_cost - credit_received
+            logger.info(
+                f"MKT-025: Actual P&L for Entry #{entry.entry_number} {side}: "
+                f"short_close=${actual_close_cost:.2f} - credit=${credit_received:.2f} = "
+                f"net_loss=${net_loss:.2f} (long expires at settlement)"
+            )
+        else:
+            net_loss = stop_level - credit_received
+            if not self.dry_run:
+                logger.warning(
+                    f"MKT-025: Using theoretical P&L (fill prices unavailable): "
+                    f"stop_level=${stop_level:.2f} - credit=${credit_received:.2f} = "
+                    f"net_loss=${net_loss:.2f} (may be inaccurate!)"
+                )
+
+        self.daily_state.total_realized_pnl -= net_loss
+
+        # MKT-025: Commission for 1 close leg only ($2.50 instead of $5.00)
+        close_commission = 1 * self.commission_per_leg * self.contracts_per_entry
+        entry.close_commission += close_commission
+        self.daily_state.total_commission += close_commission
+
+        # Log stop loss to Google Sheets
+        self._log_stop_loss(entry, side, stop_level, net_loss)
+
+        # Queue alert
+        self._queue_stop_alert(entry, side, stop_level, net_loss)
+
+        # Save state
+        self._save_state_to_disk()
+
+        # Spawn background thread for deferred fill price lookup (short leg only)
+        if not self.dry_run and deferred_legs:
+            self._spawn_async_fill_correction(
+                deferred_legs, actual_close_cost, entry, side, credit_received, net_loss
+            )
+
+        # Flush batched alerts
+        time.sleep(0.1)
+        self._flush_batched_alerts()
+
+        return (
+            f"MKT-025 Stop loss: Entry #{entry.entry_number} {side} "
+            f"SHORT closed at ${stop_level:.2f} (long expires at settlement)"
+        )
+
+    def _get_saxo_pnl_for_entry(self, entry, positions=None):
+        """MKT-025: Exclude stopped sides' positions from Saxo P&L lookup.
+
+        When MKT-025 stops only the short leg, the long leg remains open on Saxo.
+        Its ProfitLossOnTrade would double-count loss already in total_realized_pnl.
+        Only include positions for non-stopped sides.
+        """
+        try:
+            if positions is None:
+                positions = self.client.get_positions()
+
+            total_pnl = 0.0
+            position_ids = []
+
+            # Only include position IDs for non-stopped sides
+            if not entry.call_side_stopped:
+                if entry.short_call_position_id:
+                    position_ids.append(entry.short_call_position_id)
+                if entry.long_call_position_id:
+                    position_ids.append(entry.long_call_position_id)
+            if not entry.put_side_stopped:
+                if entry.short_put_position_id:
+                    position_ids.append(entry.short_put_position_id)
+                if entry.long_put_position_id:
+                    position_ids.append(entry.long_put_position_id)
+
+            for pos in positions:
+                pos_id = str(pos.get("PositionId", ""))
+                if pos_id in position_ids:
+                    pos_view = pos.get("PositionView", {})
+                    pnl = pos_view.get("ProfitLossOnTrade", 0) or 0
+                    total_pnl += pnl
+
+            return total_pnl
+
+        except Exception as e:
+            logger.debug(f"Error getting Saxo P&L for Entry #{entry.entry_number}: {e}")
+            return entry.unrealized_pnl
 
     def _calculate_stop_levels_tf(self, entry: TFIronCondorEntry):
         """
