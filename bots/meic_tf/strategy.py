@@ -164,7 +164,7 @@ class MEICTFStrategy(MEICStrategy):
 
     Key Features (MEIC-TF specific, beyond base MEIC):
     - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
-    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, min $1.00/side
+    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $1.00, put min $1.75
       Always skips entry if either side non-viable (no one-sided entries)
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
     - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
@@ -1860,8 +1860,8 @@ class MEICTFStrategy(MEICStrategy):
         - Full IC: stop = total_credit (original Tammy Chambless MEIC rule)
         - One-sided (legacy, kept for recovery): stop = 2 × single_side_credit
 
-        MKT-020/MKT-022 progressive tightening + $1.00/side minimum keeps
-        credit skew at 1-2x, so total_credit gives adequate per-side headroom.
+        MKT-020/MKT-022 progressive tightening + credit minimums ($1.00 calls,
+        $1.75 puts) keep skew at 1-2x, so total_credit gives adequate per-side headroom.
 
         Args:
             entry: TFIronCondorEntry to calculate stops for
@@ -1919,7 +1919,7 @@ class MEICTFStrategy(MEICStrategy):
         else:
             # Full IC — original Tammy Chambless MEIC rule: stop = total_credit
             # MKT-019 (2× max credit) removed in v1.4.0: MKT-020/MKT-022 tightening
-            # + $1.00/side min reduced skew from 3-7x to 1-2x, making it unnecessary.
+            # + credit minimums ($1.00 calls, $1.75 puts) reduced skew from 3-7x to 1-2x.
             total_credit = entry.total_credit
 
             if total_credit < MIN_STOP_LEVEL:

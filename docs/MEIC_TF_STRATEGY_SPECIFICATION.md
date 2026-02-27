@@ -216,7 +216,7 @@ Each entry goes through these phases in order:
 
 ```
 1. MKT-021 ROC Gate (before entries #4+)
-   ├── Is ROC >= 2.0% on existing positions?
+   ├── Is ROC >= 3.0% on existing positions?
    │   ├── YES → Skip ALL remaining entries, MKT-018 fires immediately
    │   └── NO → Continue
    └── Only checked after min_entries_before_roc_gate (default 3) entries placed
@@ -406,7 +406,7 @@ Three rules work together to manage profits after entries are placed:
 
 **When:** Before placing entries #4 and #5 (after min 3 entries placed).
 
-**Logic:** If ROC on existing positions already exceeds 2%, skip remaining entries. This prevents ROC dilution — new entries add capital and close costs but start at ~$0 P&L.
+**Logic:** If ROC on existing positions already exceeds 3%, skip remaining entries. This prevents ROC dilution — new entries add capital and close costs but start at ~$0 P&L.
 
 **Example (Feb 20):** After 3 entries, ROC = 4.17%. If entries #4/#5 were placed, ROC would dilute to 2.26%. MKT-021 skipped them, MKT-018 fired at 4.17%, locking in +$690.
 
@@ -470,7 +470,7 @@ Entry #1 → #2 → #3 placed normally
                          │
               ┌──────────┴──────────┐
               │                     │
-         ROC < 2%              ROC >= 2%
+         ROC < 3%              ROC >= 3%
               │                     │
          Place #4, #5          Skip #4, #5
               │                     │
@@ -478,7 +478,7 @@ Entry #1 → #2 → #3 placed normally
               │                     │
          MKT-018 monitors      MKT-023 hold check
               │                     │
-         ROC >= 2%?          HOLD or CLOSE?
+         ROC >= 3%?          HOLD or CLOSE?
               │                     │
          MKT-023 check         Execute decision
 ```
@@ -645,7 +645,7 @@ HEARTBEAT | Monitoring | SPX: 6012.45 | VIX: 19.5 | Entries: 5/5 | Active: 3 | T
 ### Key Observations
 
 1. **Put stops dominate:** 19 put stops vs 5 call stops. Market had downside bias.
-2. **MKT-011 conversions are frequent:** 36.4% of entries converted from NEUTRAL IC to put-only due to low call credit. This means calls are often underpriced in the current market.
+2. **MKT-011 conversions were frequent (pre-v1.4.0):** 36.4% of entries converted from NEUTRAL IC to put-only due to low call credit. One-sided entries were removed in v1.4.0; MKT-011 now skips instead of converting.
 3. **Most signals are NEUTRAL:** 86.4% at 0.2% threshold. Trend filter rarely activates.
 4. **No double stops:** In 44 entries, both sides were never stopped on the same entry.
 5. **Early close is strongly positive:** Both MKT-018 triggers (Feb 20: +$690, Feb 24: +$435) are top P&L days.
@@ -655,7 +655,6 @@ HEARTBEAT | Monitoring | SPX: 6012.45 | VIX: 19.5 | Entries: 5/5 | Active: 3 | T
 | Entry Type | Expires | One Side Stopped | Both Stopped |
 |-----------|---------|-----------------|--------------|
 | Full IC | $10 | $15 | $20 |
-| One-sided | $5 | $10 | N/A |
 
 Commission = $2.50 per leg per transaction. Expired options incur no close commission.
 
@@ -700,7 +699,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `max_vix_entry` | `25` | Maximum VIX for new entries |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `true` | MKT-018 enable |
-| `early_close_roc_threshold` | `0.02` | MKT-018 ROC threshold (2.0%) |
+| `early_close_roc_threshold` | `0.03` | MKT-018 ROC threshold (3.0%) |
 | `early_close_cost_per_position` | `5.00` | Close cost estimate per leg |
 | `hold_check_enabled` | `true` | MKT-023 enable |
 | `hold_check_lean_tolerance` | `1.0` | MKT-023 lean threshold (%) |
@@ -718,7 +717,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 ### EMA Lag
 
-EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at 10:05 (correct for the first move) then BULLISH at 11:35 (correct for the reversal) — but both one-sided entries were stopped because the market continued moving against them. The 0.2% threshold reduces but doesn't eliminate this risk.
+EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at 10:05 (correct for the first move) then BULLISH at 11:35 (correct for the reversal). Since v1.4.0, the EMA signal is informational only (all entries are full ICs), so lag only affects the logged signal — not entry type.
 
 ### Volatility Skew
 
@@ -743,12 +742,9 @@ Saxo merges positions at the same strike and direction into a single position, d
 
 0DTE options settle between 4:00 PM and 2:00 AM ET. The bot checks for settlement after market close. Fix #82 prevents the midnight reset from locking the settlement gate. Fix #77 ensures expired credits are processed even when the position registry is empty.
 
-### One-Sided Entry Risk
+### One-Sided Entry Risk (Historical — removed in v1.4.0)
 
-One-sided entries that get stopped lose the full credit plus commission. This is worse than a full IC stop (which is breakeven). MEIC-TF mitigates this by:
-- Only allowing one-sided entries for strong trends (>= 0.2% EMA separation)
-- Never converting NEUTRAL to one-sided (v1.3.6)
-- Using 2× credit stop level to match full IC breakeven behavior
+One-sided entries were removed in v1.4.0. All entries are now full iron condors or skipped entirely. Historical context: one-sided entries (v1.0.0-v1.3.x) that got stopped lost the full credit plus commission, which was worse than a full IC stop (breakeven by design). This was a key motivation for switching to full-IC-only in v1.4.0.
 
 ---
 
