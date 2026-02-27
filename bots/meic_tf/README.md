@@ -1,6 +1,6 @@
 # MEIC-TF (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.4.3 | **Last Updated:** 2026-02-28
+**Version:** 1.4.4 | **Last Updated:** 2026-02-28
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and early close on Return on Capital.
 
@@ -16,7 +16,7 @@ MEIC-TF combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. MEIC-TF addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), wider starting OTM (MKT-024), and early close on profitable days (MKT-018).
 
-### Entry Schedule (5 entries, reduced from MEIC's 6)
+### Entry Schedule (6 entries, matching MEIC's 6)
 
 | Entry | Time (ET) |
 |-------|-----------|
@@ -25,6 +25,7 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 | 3 | 11:05 AM |
 | 4 | 11:35 AM |
 | 5 | 12:05 PM |
+| 6 | 12:35 PM |
 
 ### Credit Gate (MKT-011)
 
@@ -117,7 +118,7 @@ If worst-case hold > close now → **HOLD** (don't close). If worst-case hold <=
 
 ### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
 
-Before placing entries #4 and #5 (after min 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (3%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
+Before placing entries #4, #5, and #6 (after min 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (3%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
 
 Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` — no separate threshold needed. Sets a flag, skips remaining entries, and persists state across restarts.
 
@@ -224,6 +225,7 @@ bots/meic_tf/
 
 ## Version History
 
+- **1.4.4** (2026-02-28): Add 6th entry at 12:35 PM (matching base MEIC schedule — MKT-011 credit gate ensures zero-cost skip when non-viable)
 - **1.4.3** (2026-02-28): MKT-025 short-only stop loss close (close short, let long expire — per Tammy/Sandvand best practice)
 - **1.4.2** (2026-02-27): MEIC+ reduction raised from $0.10 to $0.15 to cover commission on one-side-stop (true breakeven)
 - **1.4.1** (2026-02-27): MKT-024 wider starting OTM (2× multiplier both sides), separate put minimum $1.75 (Tammy's $1.00-$1.75 range), enhanced MKT-020/022 scan logging

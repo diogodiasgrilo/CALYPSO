@@ -1,7 +1,7 @@
 # MEIC-TF (Trend Following Hybrid) Strategy Specification
 
 **Last Updated:** 2026-02-28
-**Version:** 1.4.3
+**Version:** 1.4.4
 **Purpose:** Complete strategy specification for the MEIC-TF 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -56,7 +56,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 |--------|-----------|---------|
 | Philosophy | Always market-neutral | Always full IC + EMA signal (informational) |
 | Entry type | Always full iron condor | Always full iron condor (skip if either side non-viable) |
-| Entries per day | 6 | 5 |
+| Entries per day | 6 | 6 |
 | Stop formula (full IC) | total_credit per side | total_credit per side (same as base MEIC) |
 | Stop execution | Close both legs (short + long) | Close SHORT only, long expires (MKT-025) |
 | Credit gate | Skip if both non-viable | Skip if either side non-viable (MKT-011) |
@@ -106,7 +106,7 @@ MEIC-TF started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, ea
 
 ### Entry Schedule
 
-5 entries per day, spaced 30 minutes apart:
+6 entries per day, spaced 30 minutes apart:
 
 | Entry | Time (ET) | Notes |
 |-------|-----------|-------|
@@ -115,6 +115,7 @@ MEIC-TF started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, ea
 | 3 | 11:05 AM | |
 | 4 | 11:35 AM | MKT-021 ROC gate checks before #4 |
 | 5 | 12:05 PM | MKT-021 ROC gate checks before #5 |
+| 6 | 12:35 PM | MKT-021 ROC gate checks before #6 |
 
 Each entry has a 5-minute window. If the entry time passes and the bot hasn't placed the entry (e.g., pending previous stop), it still attempts within the window.
 
@@ -425,11 +426,11 @@ Three rules work together to manage profits after entries are placed:
 
 ### MKT-021: Pre-Entry ROC Gate
 
-**When:** Before placing entries #4 and #5 (after min 3 entries placed).
+**When:** Before placing entries #4, #5, and #6 (after min 3 entries placed).
 
 **Logic:** If ROC on existing positions already exceeds 3%, skip remaining entries. This prevents ROC dilution — new entries add capital and close costs but start at ~$0 P&L.
 
-**Example (Feb 20):** After 3 entries, ROC = 4.17%. If entries #4/#5 were placed, ROC would dilute to 2.26%. MKT-021 skipped them, MKT-018 fired at 4.17%, locking in +$690.
+**Example (Feb 20):** After 3 entries, ROC = 4.17%. If entries #4/#5/#6 were placed, ROC would dilute to 2.26%. MKT-021 skipped them, MKT-018 fired at 4.17%, locking in +$690.
 
 **Gate counts actual placed entries** — skipped or failed entries do not count toward the minimum. This ensures enough capital is deployed for ROC to be meaningful.
 
@@ -522,7 +523,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
 | MKT-018 | Early Close on ROC | v1.3.0 | Close all positions when ROC >= 3% |
 | MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $1.00 |
-| MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5 if ROC already >= 3% (after 3 entries placed) |
+| MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5/#6 if ROC already >= 3% (after 3 entries placed) |
 | MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $1.75 |
 | MKT-023 | Smart Hold Check | v1.3.7 | Compare close-now vs worst-case-hold before MKT-018 fires |
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start both sides at 2× VIX-adjusted distance; MKT-020/022 scan inward |
@@ -592,7 +593,8 @@ Any → HALTED                         (critical: overnight positions, stale reg
 | 11:05 AM | Entry #3 |
 | 11:35 AM | Entry #4 (MKT-021 ROC gate check first) |
 | 12:05 PM | Entry #5 (MKT-021 ROC gate check first) |
-| 12:05+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s, MKT-018 ROC checks |
+| 12:35 PM | Entry #6 (MKT-021 ROC gate check first) |
+| 12:35+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s, MKT-018 ROC checks |
 | 3:45 PM | MKT-018 stops checking (last 15 min, positions expire naturally) |
 | 4:00 PM | Market close, 0DTE options expire/settle |
 | 4:00-5:00 PM | `check_after_hours_settlement()`: process expired credits |
@@ -701,7 +703,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `entry_times` | `["10:05","10:35","11:05","11:35","12:05"]` | Entry schedule (ET) |
+| `entry_times` | `["10:05","10:35","11:05","11:35","12:05","12:35"]` | Entry schedule (ET) |
 | `entry_window_minutes` | `5` | Window around entry time |
 | `spread_width` | `50` | Default spread width (points) |
 | `min_spread_width` | `25` | Minimum spread width |

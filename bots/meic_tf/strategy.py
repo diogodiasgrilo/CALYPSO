@@ -480,7 +480,7 @@ class MEICTFStrategy(MEICStrategy):
         return super()._should_attempt_entry(now)
 
     def _is_daily_loss_limit_reached(self) -> bool:
-        """Disabled for MEIC-TF — bot always attempts all 5 entries."""
+        """Disabled for MEIC-TF — bot always attempts all entries."""
         return False
 
     # =========================================================================

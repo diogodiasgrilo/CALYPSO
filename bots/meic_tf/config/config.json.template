@@ -18,7 +18,7 @@
         "vix_spot_uic": 10606,
 
         "_comment_entry_times": "Entry times in HH:MM format (US Eastern)",
-        "entry_times": ["10:05", "10:35", "11:05", "11:35", "12:05"],
+        "entry_times": ["10:05", "10:35", "11:05", "11:35", "12:05", "12:35"],
         "entry_window_minutes": 5,
 
         "_comment_spread": "Spread configuration",
@@ -63,7 +63,7 @@
         "hold_check_enabled": true,
         "hold_check_lean_tolerance": 1.0,
 
-        "_comment_roc_gate": "MKT-021: Min entries placed before pre-entry ROC gate activates (3 = after entries #1-3, gate checks before #4/#5)",
+        "_comment_roc_gate": "MKT-021: Min entries placed before pre-entry ROC gate activates (3 = after entries #1-3, gate checks before #4/#5/#6)",
         "min_entries_before_roc_gate": 3
     },
     "trend_filter": {
