@@ -1585,7 +1585,10 @@ class MEICStrategy:
                 break
 
         if skipped > 0:
-            logger.info(f"TIME-002: Skipped {skipped} missed entries, next is Entry #{self._next_entry_index + 1}")
+            if self._next_entry_index < len(self.entry_times):
+                logger.info(f"TIME-002: Skipped {skipped} missed entries, next is Entry #{self._next_entry_index + 1}")
+            else:
+                logger.info(f"TIME-002: Skipped {skipped} missed entries, all entries complete")
 
     def _minutes_until(self, target_time: dt_time) -> float:
         """Calculate minutes until a target time (today)."""
