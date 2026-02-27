@@ -1,18 +1,18 @@
 """
 strategy.py - MEIC-TF (Trend Following Hybrid) Strategy Implementation
 
-This module extends the base MEIC strategy with EMA-based trend direction detection.
-Before each entry, it checks 20 EMA vs 40 EMA on SPX 1-minute bars to determine
-whether to place a full iron condor, call spread only, or put spread only.
+This module extends the base MEIC strategy with EMA-based trend direction detection
+and credit validation. Before each entry, it checks 20 EMA vs 40 EMA on SPX 1-minute
+bars. The EMA signal is informational only — all entries are full iron condors.
 
-Trend Detection:
-- BULLISH (20 EMA > 40 EMA by >0.2%): Place PUT spread only (calls are risky)
-- BEARISH (20 EMA < 40 EMA by >0.2%): Place CALL spread only (puts are risky)
-- NEUTRAL (within 0.2%): Place full iron condor (standard MEIC behavior)
+Trend Detection (informational only, does NOT drive entry type):
+- BULLISH (20 EMA > 40 EMA by >0.2%): Logged, stored for analysis
+- BEARISH (20 EMA < 40 EMA by >0.2%): Logged, stored for analysis
+- NEUTRAL (within 0.2%): Logged, stored for analysis
 
 Risk Management (beyond base MEIC):
-- MKT-011: Pre-entry credit gate (skip/convert if credit non-viable)
-- MKT-018: Early close on ROC >= 2% (close all positions after entries placed)
+- MKT-011: Pre-entry credit gate (skip if either side non-viable, no one-sided entries)
+- MKT-018: Early close on ROC >= 3% (close all positions after entries placed)
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
@@ -159,24 +159,24 @@ class MEICTFStrategy(MEICStrategy):
 
     Extends MEICStrategy with EMA-based trend detection and credit validation:
     - Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars
-    - BULLISH: Place PUT spread only (calls are risky in uptrend)
-    - BEARISH: Place CALL spread only (puts are risky in downtrend)
-    - NEUTRAL: Place full iron condor (standard MEIC behavior)
+    - Signal is informational only — logged and stored but does NOT drive entry type
+    - All entries are full iron condors (one-sided entries removed in v1.4.0)
 
     Key Features (MEIC-TF specific, beyond base MEIC):
+    - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
     - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, min $1.00/side
-      One-sided conversions only for clear trends; NEUTRAL skips if either side non-viable
+      Always skips entry if either side non-viable (no one-sided entries)
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
     - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
-    - Early Close (MKT-018): Close all positions when ROC >= 2%
+    - Early Close (MKT-018): Close all positions when ROC >= 3%
     - Smart Hold Check (MKT-023): Before early close, compare close-now vs worst-case-hold
-    - Virtual Equal Credit Stop (MKT-019): Stop based on max(call, put) credit
     - Pre-Entry ROC Gate (MKT-021): Skip dilutive entries when ROC already high
+    - Stop formula: total_credit (original Tammy Chambless MEIC rule)
 
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.3.7 (2026-02-24)
+    Version: 1.4.0 (2026-02-27)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -991,7 +991,7 @@ class MEICTFStrategy(MEICStrategy):
             return TrendSignal.NEUTRAL
 
     # =========================================================================
-    # MKT-011: Credit Gate for MEIC-TF (one-sided entry support)
+    # MKT-011: Credit Gate for MEIC-TF
     # =========================================================================
 
     def _check_credit_gate_tf(self, entry: TFIronCondorEntry) -> Tuple[str, bool]:
@@ -999,9 +999,8 @@ class MEICTFStrategy(MEICStrategy):
         MKT-011: Check if estimated credit is above minimum viable threshold.
 
         Returns raw viability assessment. The call site in _initiate_entry()
-        applies trend logic: one-sided entries are only allowed for clear
-        trending markets (BULLISH/BEARISH). In NEUTRAL markets, if either
-        side is non-viable, the entry is skipped entirely.
+        always skips when either side is non-viable (no one-sided entries
+        since v1.4.0).
 
         Args:
             entry: TFIronCondorEntry with strikes calculated
@@ -1046,29 +1045,29 @@ class MEICTFStrategy(MEICStrategy):
             )
             return ("skip", True)  # estimation_worked = True
 
-        # One side viable, other not - return recommendation (caller applies trend logic)
+        # One side viable, other not - return assessment (caller will skip in v1.4.0)
         if not call_viable:
             logger.warning(
                 f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
                 f"(${estimated_call:.2f} < ${self.min_viable_credit_per_side:.2f}) - "
-                f"converting to PUT-only (put ${estimated_put:.2f} is viable)"
+                f"put ${estimated_put:.2f} is viable but no one-sided entries allowed"
             )
             self._log_safety_event(
-                "MKT-011_CREDIT_OVERRIDE",
-                f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable → put-only",
-                "Converted to Put-Only"
+                "MKT-011_SKIP",
+                f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable",
+                "Skipped (no one-sided)"
             )
             return ("put_only", True)  # estimation_worked = True
         else:
             logger.warning(
                 f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
                 f"(${estimated_put:.2f} < ${self.min_viable_credit_per_side:.2f}) - "
-                f"converting to CALL-only (call ${estimated_call:.2f} is viable)"
+                f"call ${estimated_call:.2f} is viable but no one-sided entries allowed"
             )
             self._log_safety_event(
-                "MKT-011_CREDIT_OVERRIDE",
-                f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable → call-only",
-                "Converted to Call-Only"
+                "MKT-011_SKIP",
+                f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable",
+                "Skipped (no one-sided)"
             )
             return ("call_only", True)  # estimation_worked = True
 
@@ -1484,8 +1483,8 @@ class MEICTFStrategy(MEICStrategy):
                     last_error = "Failed to calculate strikes"
                     continue
 
-                # MKT-020/MKT-022: Progressive OTM tightening for full IC candidates
-                if trend == TrendSignal.NEUTRAL and not self.dry_run:
+                # MKT-020/MKT-022: Progressive OTM tightening for all entries (all are full IC)
+                if not self.dry_run:
                     self._apply_progressive_call_tightening(entry)
                     self._apply_progressive_put_tightening(entry)
 
@@ -1506,130 +1505,88 @@ class MEICTFStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         return f"Entry #{entry_num} skipped - both sides below minimum viable credit"
                     elif gate_result == "call_only":
-                        # Put credit too low - only convert if clear trend supports calls
-                        if original_trend == TrendSignal.BEARISH:
-                            # BEARISH wants calls, and calls are viable - OK to convert
-                            logger.info(f"MKT-011: Put credit non-viable → converting to CALL-only (trend: BEARISH)")
-                            trend = TrendSignal.BEARISH  # Force bearish to get call-only
-                            entry.override_reason = "mkt-011"  # Fix #49: Track override reason
-                            credit_gate_handled = True
-                        else:
-                            # NEUTRAL or BULLISH - one-sided entries only for clear matching trends
-                            logger.warning(
-                                f"MKT-011: Entry #{entry_num} put credit non-viable, "
-                                f"trend is {original_trend.value} - one-sided only for clear trends - SKIPPING"
-                            )
-                            self._log_safety_event(
-                                "MKT-011_SKIP",
-                                f"Entry #{entry_num} - put non-viable + {original_trend.value} → skip",
-                                "Skipped - No Matching Trend"
-                            )
-                            self.daily_state.entries_skipped += 1
-                            self.daily_state.credit_gate_skips += 1
-                            self._entry_in_progress = False
-                            self._current_entry = None
-                            self.state = MEICState.MONITORING
-                            self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - put non-viable, no clear trend for calls"
+                        # Put credit too low — no one-sided entries allowed (v1.4.0)
+                        logger.warning(
+                            f"MKT-011: Entry #{entry_num} put credit non-viable — "
+                            f"SKIPPING (no one-sided entries, trend: {original_trend.value})"
+                        )
+                        self._log_safety_event(
+                            "MKT-011_SKIP",
+                            f"Entry #{entry_num} - put non-viable → skip (no one-sided)",
+                            "Skipped - No One-Sided"
+                        )
+                        self.daily_state.entries_skipped += 1
+                        self.daily_state.credit_gate_skips += 1
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        self._next_entry_index += 1
+                        return f"Entry #{entry_num} skipped - put non-viable, no one-sided entries"
                     elif gate_result == "put_only":
-                        # Call credit too low - only convert if clear trend supports puts
-                        if original_trend == TrendSignal.BULLISH:
-                            # BULLISH wants puts, and puts are viable - OK to convert
-                            logger.info(f"MKT-011: Call credit non-viable → converting to PUT-only (trend: BULLISH)")
-                            trend = TrendSignal.BULLISH  # Force bullish to get put-only
-                            entry.override_reason = "mkt-011"  # Fix #49: Track override reason
-                            credit_gate_handled = True
-                        else:
-                            # NEUTRAL or BEARISH - one-sided entries only for clear matching trends
-                            logger.warning(
-                                f"MKT-011: Entry #{entry_num} call credit non-viable, "
-                                f"trend is {original_trend.value} - one-sided only for clear trends - SKIPPING"
-                            )
-                            self._log_safety_event(
-                                "MKT-011_SKIP",
-                                f"Entry #{entry_num} - call non-viable + {original_trend.value} → skip",
-                                "Skipped - No Matching Trend"
-                            )
-                            self.daily_state.entries_skipped += 1
-                            self.daily_state.credit_gate_skips += 1
-                            self._entry_in_progress = False
-                            self._current_entry = None
-                            self.state = MEICState.MONITORING
-                            self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - call non-viable, no clear trend for puts"
+                        # Call credit too low — no one-sided entries allowed (v1.4.0)
+                        logger.warning(
+                            f"MKT-011: Entry #{entry_num} call credit non-viable — "
+                            f"SKIPPING (no one-sided entries, trend: {original_trend.value})"
+                        )
+                        self._log_safety_event(
+                            "MKT-011_SKIP",
+                            f"Entry #{entry_num} - call non-viable → skip (no one-sided)",
+                            "Skipped - No One-Sided"
+                        )
+                        self.daily_state.entries_skipped += 1
+                        self.daily_state.credit_gate_skips += 1
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        self._next_entry_index += 1
+                        return f"Entry #{entry_num} skipped - call non-viable, no one-sided entries"
                     elif estimation_worked:
                         # MKT-011 worked and said proceed - skip MKT-010
                         credit_gate_handled = True
                     # else: estimation failed, fall through to MKT-010
 
                 # MKT-010: Fallback ONLY when MKT-011 couldn't estimate credit
-                # When one wing is illiquid, that spread has REDUCED width and POOR credit
-                # Trade the OTHER side which has full width and viable credit
-                # IMPORTANT: Also respects trend filter (same hybrid logic as MKT-011)
+                # No one-sided entries allowed (v1.4.0) — skip if any wing illiquid
                 if not credit_gate_handled and not self.dry_run:
                     logger.info("MKT-010: Running as fallback (credit estimation failed)")
                     if entry.call_wing_illiquid and not entry.put_wing_illiquid:
-                        # Call wing illiquid = call spread has reduced width/credit
-                        # Put spread is unaffected = has viable credit
-                        if original_trend == TrendSignal.BULLISH:
-                            # BULLISH wants puts, and call is illiquid - OK to convert to put-only
-                            logger.info(
-                                f"MKT-010: Call wing illiquid → "
-                                f"converting to PUT-only (trend: BULLISH)"
-                            )
-                            trend = TrendSignal.BULLISH  # Force to get put-only
-                            entry.override_reason = "mkt-010"  # Fix #49: Track override reason
-                        else:
-                            # NEUTRAL or BEARISH - one-sided entries only for clear matching trends
-                            logger.warning(
-                                f"MKT-010: Entry #{entry_num} call wing illiquid, "
-                                f"trend is {original_trend.value} - one-sided only for clear trends - SKIPPING"
-                            )
-                            self._log_safety_event(
-                                "MKT-010_SKIP",
-                                f"Entry #{entry_num} - call illiquid + {original_trend.value} → skip",
-                                "Skipped - No Matching Trend"
-                            )
-                            self.daily_state.entries_skipped += 1
-                            self.daily_state.credit_gate_skips += 1
-                            self._entry_in_progress = False
-                            self._current_entry = None
-                            self.state = MEICState.MONITORING
-                            self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - call illiquid, no clear trend for puts"
+                        # Call wing illiquid — no one-sided entries, skip
+                        logger.warning(
+                            f"MKT-010: Entry #{entry_num} call wing illiquid — "
+                            f"SKIPPING (no one-sided entries, trend: {original_trend.value})"
+                        )
+                        self._log_safety_event(
+                            "MKT-010_SKIP",
+                            f"Entry #{entry_num} - call illiquid → skip (no one-sided)",
+                            "Skipped - No One-Sided"
+                        )
+                        self.daily_state.entries_skipped += 1
+                        self.daily_state.credit_gate_skips += 1
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        self._next_entry_index += 1
+                        return f"Entry #{entry_num} skipped - call illiquid, no one-sided entries"
                     elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
-                        # Put wing illiquid = put spread has reduced width/credit
-                        # Call spread is unaffected = has viable credit
-                        if original_trend == TrendSignal.BEARISH:
-                            # BEARISH wants calls, and put is illiquid - OK to convert to call-only
-                            logger.info(
-                                f"MKT-010: Put wing illiquid → "
-                                f"converting to CALL-only (trend: BEARISH)"
-                            )
-                            trend = TrendSignal.BEARISH  # Force to get call-only
-                            entry.override_reason = "mkt-010"  # Fix #49: Track override reason
-                        else:
-                            # NEUTRAL or BULLISH - one-sided entries only for clear matching trends
-                            logger.warning(
-                                f"MKT-010: Entry #{entry_num} put wing illiquid, "
-                                f"trend is {original_trend.value} - one-sided only for clear trends - SKIPPING"
-                            )
-                            self._log_safety_event(
-                                "MKT-010_SKIP",
-                                f"Entry #{entry_num} - put illiquid + {original_trend.value} → skip",
-                                "Skipped - No Matching Trend"
-                            )
-                            self.daily_state.entries_skipped += 1
-                            self.daily_state.credit_gate_skips += 1
-                            self._entry_in_progress = False
-                            self._current_entry = None
-                            self.state = MEICState.MONITORING
-                            self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - put illiquid, no clear trend for calls"
+                        # Put wing illiquid — no one-sided entries, skip
+                        logger.warning(
+                            f"MKT-010: Entry #{entry_num} put wing illiquid — "
+                            f"SKIPPING (no one-sided entries, trend: {original_trend.value})"
+                        )
+                        self._log_safety_event(
+                            "MKT-010_SKIP",
+                            f"Entry #{entry_num} - put illiquid → skip (no one-sided)",
+                            "Skipped - No One-Sided"
+                        )
+                        self.daily_state.entries_skipped += 1
+                        self.daily_state.credit_gate_skips += 1
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        self._next_entry_index += 1
+                        return f"Entry #{entry_num} skipped - put illiquid, no one-sided entries"
                     elif entry.call_wing_illiquid and entry.put_wing_illiquid:
-                        # Both wings illiquid = very unusual, skip entry
-                        # Fix #53: Skip immediately, don't retry (this isn't a transient failure)
-                        # Fix #57: Track credit gate skip
+                        # Both wings illiquid — skip entry
                         logger.warning(
                             f"MKT-010: Both wings illiquid, skipping entry #{entry.entry_number}"
                         )
@@ -1646,42 +1603,16 @@ class MEICTFStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         return f"Entry #{entry_num} skipped - both wings illiquid"
 
-                # Execute based on trend signal (may have been overridden by MKT-011 or MKT-010)
-                # Fix #49: Log the actual reason for one-sided entries
-                if trend == TrendSignal.BULLISH:
-                    if entry.override_reason == "mkt-011":
-                        logger.info(f"MKT-011 override → placing PUT spread only (actual trend: {original_trend.value})")
-                    elif entry.override_reason == "mkt-010":
-                        logger.info(f"MKT-010 fallback → placing PUT spread only (actual trend: {original_trend.value})")
-                    else:
-                        logger.info(f"BULLISH trend → placing PUT spread only")
-                        entry.override_reason = "trend"  # Track that trend was the reason
-                    entry.put_only = True
-                    if self.dry_run:
-                        success = self._simulate_one_sided_entry(entry, "put")
-                    else:
-                        success = self._execute_put_spread_only(entry)
-
-                elif trend == TrendSignal.BEARISH:
-                    if entry.override_reason == "mkt-011":
-                        logger.info(f"MKT-011 override → placing CALL spread only (actual trend: {original_trend.value})")
-                    elif entry.override_reason == "mkt-010":
-                        logger.info(f"MKT-010 fallback → placing CALL spread only (actual trend: {original_trend.value})")
-                    else:
-                        logger.info(f"BEARISH trend → placing CALL spread only")
-                        entry.override_reason = "trend"  # Track that trend was the reason
-                    entry.call_only = True
-                    if self.dry_run:
-                        success = self._simulate_one_sided_entry(entry, "call")
-                    else:
-                        success = self._execute_call_spread_only(entry)
-
-                else:  # NEUTRAL
+                # v1.4.0: Always place full iron condor — EMA signal is informational only
+                if original_trend != TrendSignal.NEUTRAL:
+                    logger.info(f"EMA signal: {original_trend.value} (informational only) → placing full iron condor")
+                else:
                     logger.info(f"NEUTRAL → placing full iron condor")
-                    if self.dry_run:
-                        success = self._simulate_entry(entry)
-                    else:
-                        success = self._execute_entry(entry)
+
+                if self.dry_run:
+                    success = self._simulate_entry(entry)
+                else:
+                    success = self._execute_entry(entry)
 
                 if success:
                     entry.entry_time = get_us_market_time()
@@ -1693,16 +1624,8 @@ class MEICTFStrategy(MEICStrategy):
                     self.daily_state.entries_completed += 1
                     self.daily_state.total_credit_received += entry.total_credit
 
-                    # Fix #55/#56: Track one-sided entries and trend overrides
-                    if entry.is_one_sided:
-                        self.daily_state.one_sided_entries += 1
-                        if entry.override_reason == "trend":
-                            # Trend filter (not MKT-011/MKT-010) caused one-sided entry
-                            self.daily_state.trend_overrides += 1
-
-                    # Track commission (2 or 4 legs)
-                    legs = 2 if entry.is_one_sided else 4
-                    entry.open_commission = legs * self.commission_per_leg * self.contracts_per_entry
+                    # Track commission (always 4 legs — full IC only since v1.4.0)
+                    entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
                     self.daily_state.total_commission += entry.open_commission
 
                     # Calculate stop losses
@@ -1711,21 +1634,8 @@ class MEICTFStrategy(MEICStrategy):
                     # Log to Google Sheets
                     self._log_entry(entry)
 
-                    # Send alert with trend/illiquidity info
-                    if entry.call_only:
-                        if entry.put_wing_illiquid:
-                            # MKT-010: Call-only because PUT wing was illiquid (reduced credit)
-                            position_summary = f"MEIC-TF Entry #{entry_num} [MKT-010]: Call {entry.short_call_strike}/{entry.long_call_strike} (put illiq→call)"
-                        else:
-                            position_summary = f"MEIC-TF Entry #{entry_num} [BEARISH]: Call {entry.short_call_strike}/{entry.long_call_strike}"
-                    elif entry.put_only:
-                        if entry.call_wing_illiquid:
-                            # MKT-010: Put-only because CALL wing was illiquid (reduced credit)
-                            position_summary = f"MEIC-TF Entry #{entry_num} [MKT-010]: Put {entry.short_put_strike}/{entry.long_put_strike} (call illiq→put)"
-                        else:
-                            position_summary = f"MEIC-TF Entry #{entry_num} [BULLISH]: Put {entry.short_put_strike}/{entry.long_put_strike}"
-                    else:
-                        position_summary = f"MEIC-TF Entry #{entry_num} [NEUTRAL]: Full IC"
+                    # Send alert — always full IC, include EMA signal for reference
+                    position_summary = f"MEIC-TF Entry #{entry_num} [{original_trend.value.upper()}]: Full IC"
 
                     self.alert_service.position_opened(
                         position_summary=position_summary,
@@ -1733,8 +1643,7 @@ class MEICTFStrategy(MEICStrategy):
                         details={
                             "spx_price": self.current_price,
                             "entry_number": entry_num,
-                            "trend": trend.value,
-                            "one_sided": entry.is_one_sided,
+                            "trend": original_trend.value,
                             "attempts": attempt + 1
                         }
                     )
@@ -1751,15 +1660,7 @@ class MEICTFStrategy(MEICStrategy):
 
                     self._save_state_to_disk()
 
-                    # Fix #49: Show correct label in completion message
-                    if entry.override_reason == "mkt-011":
-                        label = "MKT-011"
-                    elif entry.override_reason == "mkt-010":
-                        label = "MKT-010"
-                    else:
-                        label = original_trend.value.upper()
-
-                    result_msg = f"Entry #{entry_num} [{label}] complete - Credit: ${entry.total_credit:.2f}"
+                    result_msg = f"Entry #{entry_num} [{original_trend.value.upper()}] complete - Credit: ${entry.total_credit:.2f}"
                     if attempt > 0:
                         result_msg += f" (after {attempt + 1} attempts)"
                     return result_msg
@@ -1788,212 +1689,23 @@ class MEICTFStrategy(MEICStrategy):
         return f"Entry #{entry_num} failed after {ENTRY_MAX_RETRIES} retries: {last_error}"
 
     # =========================================================================
-    # ONE-SIDED ENTRY EXECUTION
+    # STOP LOSS CALCULATION
     # =========================================================================
-
-    def _execute_call_spread_only(self, entry: TFIronCondorEntry) -> bool:
-        """
-        Execute only the call spread (for BEARISH signal).
-
-        Leg order (safest):
-        1. Long Call (buy protection first)
-        2. Short Call (sell, now hedged)
-
-        Args:
-            entry: TFIronCondorEntry to execute
-
-        Returns:
-            True if both legs filled successfully
-        """
-        expiry = self._get_todays_expiry()
-        if not expiry:
-            logger.error("Could not determine today's expiry")
-            return False
-
-        filled_legs = []
-
-        try:
-            # 1. Long Call (buy protection first)
-            logger.info(f"Placing Long Call at {entry.long_call_strike}")
-            long_call_result = self._place_option_order(
-                strike=entry.long_call_strike,
-                put_call="Call",
-                buy_sell=BuySell.BUY,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_LC"
-            )
-            if not long_call_result:
-                raise Exception("Long Call order failed")
-            entry.long_call_position_id = long_call_result.get("position_id")
-            entry.long_call_uic = long_call_result.get("uic")
-            long_call_debit = long_call_result.get("debit", 0)
-            filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
-            self._register_position(entry, "long_call")
-
-            # 2. Short Call (now hedged)
-            logger.info(f"Placing Short Call at {entry.short_call_strike}")
-            short_call_result = self._place_option_order(
-                strike=entry.short_call_strike,
-                put_call="Call",
-                buy_sell=BuySell.SELL,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_SC"
-            )
-            if not short_call_result:
-                raise Exception("Short Call order failed")
-            entry.short_call_position_id = short_call_result.get("position_id")
-            entry.short_call_uic = short_call_result.get("uic")
-            short_call_credit = short_call_result.get("credit", 0)
-            entry.call_spread_credit = short_call_credit - long_call_debit
-            filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
-            self._register_position(entry, "short_call")
-
-            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
-            self._verify_entry_fill_prices(entry)
-
-            logger.info(f"Call spread complete: Credit ${entry.call_spread_credit:.2f}")
-
-            # FIX #47: Mark put side as "skipped" (not stopped) since it was never opened
-            # For BEARISH (call-only) entries, there's no put spread to monitor
-            # Skipped is semantically different from stopped (which implies a loss was incurred)
-            entry.put_side_skipped = True
-            logger.info(f"Entry #{entry.entry_number}: Put side SKIPPED (call-only entry, no loss)")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Call spread entry failed: {e}")
-            # Unwind if needed
-            if filled_legs:
-                self._unwind_partial_entry(filled_legs, entry)
-            return False
-
-    def _execute_put_spread_only(self, entry: TFIronCondorEntry) -> bool:
-        """
-        Execute only the put spread (for BULLISH signal).
-
-        Leg order (safest):
-        1. Long Put (buy protection first)
-        2. Short Put (sell, now hedged)
-
-        Args:
-            entry: TFIronCondorEntry to execute
-
-        Returns:
-            True if both legs filled successfully
-        """
-        expiry = self._get_todays_expiry()
-        if not expiry:
-            logger.error("Could not determine today's expiry")
-            return False
-
-        filled_legs = []
-
-        try:
-            # 1. Long Put (buy protection first)
-            logger.info(f"Placing Long Put at {entry.long_put_strike}")
-            long_put_result = self._place_option_order(
-                strike=entry.long_put_strike,
-                put_call="Put",
-                buy_sell=BuySell.BUY,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_LP"
-            )
-            if not long_put_result:
-                raise Exception("Long Put order failed")
-            entry.long_put_position_id = long_put_result.get("position_id")
-            entry.long_put_uic = long_put_result.get("uic")
-            long_put_debit = long_put_result.get("debit", 0)
-            filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
-            self._register_position(entry, "long_put")
-
-            # 2. Short Put (now hedged)
-            logger.info(f"Placing Short Put at {entry.short_put_strike}")
-            short_put_result = self._place_option_order(
-                strike=entry.short_put_strike,
-                put_call="Put",
-                buy_sell=BuySell.SELL,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_SP"
-            )
-            if not short_put_result:
-                raise Exception("Short Put order failed")
-            entry.short_put_position_id = short_put_result.get("position_id")
-            entry.short_put_uic = short_put_result.get("uic")
-            short_put_credit = short_put_result.get("credit", 0)
-            entry.put_spread_credit = short_put_credit - long_put_debit
-            filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
-            self._register_position(entry, "short_put")
-
-            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
-            self._verify_entry_fill_prices(entry)
-
-            logger.info(f"Put spread complete: Credit ${entry.put_spread_credit:.2f}")
-
-            # FIX #47: Mark call side as "skipped" (not stopped) since it was never opened
-            # For BULLISH (put-only) entries, there's no call spread to monitor
-            # Skipped is semantically different from stopped (which implies a loss was incurred)
-            entry.call_side_skipped = True
-            logger.info(f"Entry #{entry.entry_number}: Call side SKIPPED (put-only entry, no loss)")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Put spread entry failed: {e}")
-            # Unwind if needed
-            if filled_legs:
-                self._unwind_partial_entry(filled_legs, entry)
-            return False
-
-    def _simulate_one_sided_entry(self, entry: TFIronCondorEntry, side: str) -> bool:
-        """
-        Simulate a one-sided entry (dry-run mode).
-
-        Args:
-            entry: TFIronCondorEntry to simulate
-            side: "call" or "put"
-
-        Returns:
-            True if simulation successful
-        """
-        credit_ratio = 0.025
-        base_id = int(datetime.now().timestamp() * 1000)
-
-        if side == "call":
-            entry.call_spread_credit = self.spread_width * credit_ratio * 100
-            entry.short_call_position_id = f"DRY_{base_id}_SC"
-            entry.long_call_position_id = f"DRY_{base_id}_LC"
-            # FIX #47: Mark put side as SKIPPED (not stopped) since it was never opened
-            entry.put_side_skipped = True
-            logger.info(f"[DRY RUN] Simulated Call Spread: Credit ${entry.call_spread_credit:.2f} (put side skipped)")
-        else:
-            entry.put_spread_credit = self.spread_width * credit_ratio * 100
-            entry.short_put_position_id = f"DRY_{base_id}_SP"
-            entry.long_put_position_id = f"DRY_{base_id}_LP"
-            # FIX #47: Mark call side as SKIPPED (not stopped) since it was never opened
-            entry.call_side_skipped = True
-            logger.info(f"[DRY RUN] Simulated Put Spread: Credit ${entry.put_spread_credit:.2f} (call side skipped)")
-
-        return True
-
-    # =========================================================================
-    # STOP LOSS CALCULATION FOR ONE-SIDED ENTRIES
+    # NOTE: _execute_call_spread_only(), _execute_put_spread_only(), and
+    # _simulate_one_sided_entry() removed in v1.4.0 — all entries are full IC.
+    # One-sided stop calculation blocks kept in _calculate_stop_levels_tf()
+    # for recovery compatibility with pre-v1.4.0 state files.
     # =========================================================================
 
     def _calculate_stop_levels_tf(self, entry: TFIronCondorEntry):
         """
         Calculate stop loss levels for trend-following entries.
 
-        All entry types use 2× credit as their stop basis:
-        - One-sided (Fix #40): stop = 2 × single_side_credit
-        - Full IC (MKT-019): stop = 2 × max(call_credit, put_credit)
+        - Full IC: stop = total_credit (original Tammy Chambless MEIC rule)
+        - One-sided (legacy, kept for recovery): stop = 2 × single_side_credit
 
-        MKT-019 rationale: Volatility skew makes puts 2-7× more expensive than
-        calls at the same delta. Using total_credit as stop means the low-credit
-        side triggers prematurely from bid-ask noise. Using 2× max(credit) gives
-        both sides equal headroom relative to the dominant credit side.
-
-        Stop triggers when cost-to-close = 2× credit basis, i.e. P&L ≈ -credit.
+        MKT-020/MKT-022 progressive tightening + $1.00/side minimum keeps
+        credit skew at 1-2x, so total_credit gives adequate per-side headroom.
 
         Args:
             entry: TFIronCondorEntry to calculate stops for
@@ -2049,35 +1761,31 @@ class MEICTFStrategy(MEICStrategy):
             logger.info(f"Stop level for put spread: ${stop_level:.2f} (2× credit ${credit:.2f})")
 
         else:
-            # Full IC — MKT-019: Virtual Equal Credit Stop
-            # Use 2× the higher-credit side as stop for BOTH sides.
-            # Volatility skew makes puts 2-7× more expensive than calls at same delta.
-            # Using total_credit as stop means the low-credit side triggers prematurely.
-            # 2× max(credit) gives both sides equal headroom relative to the dominant side.
-            call_credit = entry.call_spread_credit
-            put_credit = entry.put_spread_credit
-            max_credit = max(call_credit, put_credit)
+            # Full IC — original Tammy Chambless MEIC rule: stop = total_credit
+            # MKT-019 (2× max credit) removed in v1.4.0: MKT-020/MKT-022 tightening
+            # + $1.00/side min reduced skew from 3-7x to 1-2x, making it unnecessary.
+            total_credit = entry.total_credit
 
-            if max_credit < MIN_STOP_LEVEL / 2:
-                logger.critical(f"CRITICAL: Max credit ${max_credit:.2f} very low, using minimum stop")
-                max_credit = MIN_STOP_LEVEL / 2
+            if total_credit < MIN_STOP_LEVEL:
+                logger.critical(f"CRITICAL: Total credit ${total_credit:.2f} very low, using minimum stop")
+                total_credit = MIN_STOP_LEVEL
 
-            base_stop = max_credit * 2
+            base_stop = total_credit
 
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if max_credit > min_credit_for_meic_plus:
+                if total_credit > min_credit_for_meic_plus:
                     stop_level = base_stop - self.meic_plus_reduction
                 else:
                     stop_level = base_stop
             else:
-                stop_level = base_stop
+                stop_level = total_credit
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = stop_level
             logger.info(
                 f"Stop level for full IC: ${stop_level:.2f} per side "
-                f"(2× max credit: call=${call_credit:.2f}, put=${put_credit:.2f}, max=${max_credit:.2f})"
+                f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f})"
             )
 
     # =========================================================================
@@ -3629,34 +3337,33 @@ class MEICTFStrategy(MEICStrategy):
             entry.call_side_stop = 0  # No call side to monitor
             logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (2× credit ${credit:.2f})")
         else:
-            # Full IC or stopped entry — MKT-019: Virtual Equal Credit Stop
-            call_credit = entry.call_spread_credit
-            put_credit = entry.put_spread_credit
-            max_credit = max(call_credit, put_credit)
+            # Full IC or stopped entry — total_credit stop (Tammy Chambless MEIC rule)
+            # MKT-019 removed in v1.4.0
+            total_credit = entry.total_credit
 
-            if max_credit < MIN_STOP_LEVEL / 2:
+            if total_credit < MIN_STOP_LEVEL:
                 logger.critical(
-                    f"Recovery CRITICAL: Entry #{entry.entry_number} max credit too low "
-                    f"(${max_credit:.2f}). Using minimum."
+                    f"Recovery CRITICAL: Entry #{entry.entry_number} total credit too low "
+                    f"(${total_credit:.2f}). Using minimum."
                 )
-                max_credit = MIN_STOP_LEVEL / 2
+                total_credit = MIN_STOP_LEVEL
 
-            base_stop = max_credit * 2
+            base_stop = total_credit
 
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if max_credit > min_credit_for_meic_plus:
+                if total_credit > min_credit_for_meic_plus:
                     stop_level = base_stop - self.meic_plus_reduction
                 else:
                     stop_level = base_stop
             else:
-                stop_level = base_stop
+                stop_level = total_credit
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = stop_level
             logger.info(
                 f"Recovery: Full IC stop = ${stop_level:.2f} per side "
-                f"(2× max credit: call=${call_credit:.2f}, put=${put_credit:.2f})"
+                f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f})"
             )
 
         return entry

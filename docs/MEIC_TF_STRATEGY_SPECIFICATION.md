@@ -1,7 +1,7 @@
 # MEIC-TF (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-02-25
-**Version:** 1.3.9
+**Last Updated:** 2026-02-27
+**Version:** 1.4.0
 **Purpose:** Complete strategy specification for the MEIC-TF 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -32,9 +32,9 @@
 
 ### What is MEIC-TF?
 
-MEIC-TF is MEIC (Multiple Entry Iron Condors) with a trend-following overlay. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. In a trending market, it places only the safe-side spread. In a range-bound market, it places a full iron condor.
+MEIC-TF is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — all entries are full iron condors.
 
-On top of the trend filter, MEIC-TF adds a suite of "MKT" rules — pre-entry credit validation, progressive OTM tightening, virtual equal credit stops, early close on ROC, smart hold checks, and pre-entry ROC gating — developed iteratively from 10 days of live trading data (Feb 10-24, 2026).
+Key MKT rules include: pre-entry credit validation, progressive OTM tightening, early close on ROC, smart hold checks, and pre-entry ROC gating — developed iteratively from 12 days of live trading data (Feb 10-26, 2026).
 
 ### Key Numbers (10 Trading Days: Feb 10-24, 2026)
 
@@ -54,11 +54,11 @@ On top of the trend filter, MEIC-TF adds a suite of "MKT" rules — pre-entry cr
 
 | Aspect | Base MEIC | MEIC-TF |
 |--------|-----------|---------|
-| Philosophy | Always market-neutral | Conditionally directional |
-| Entry type | Always full iron condor | Trend-dependent (IC / call-only / put-only) |
+| Philosophy | Always market-neutral | Always full IC + EMA signal (informational) |
+| Entry type | Always full iron condor | Always full iron condor (skip if either side non-viable) |
 | Entries per day | 6 | 5 |
-| Stop formula (full IC) | total_credit per side | 2 × max(call, put) per side (MKT-019) |
-| Credit gate | Skip if both non-viable | Trend-aware: convert or skip (MKT-011) |
+| Stop formula (full IC) | total_credit per side | total_credit per side (same as base MEIC) |
+| Credit gate | Skip if both non-viable | Skip if either side non-viable (MKT-011) |
 | Profit management | Hold to expiration | Early close at 3% ROC (MKT-018/023/021) |
 | OTM tightening | None | Progressive 5pt steps (MKT-020/022) |
 
@@ -80,7 +80,7 @@ MEIC's breakeven design means a full IC with one side stopped loses only ~$5-$15
 - **One-sided entry in a trending market:** Risky if wrong. But if the trend is correctly identified, the spread is far OTM on the safe side and has a high probability of expiring worthless.
 - **Full IC in a trending market:** The stressed side gets stopped, but the surviving side's credit offsets the loss. Still safe (~$5 loss), but you tie up capital for a near-zero return.
 
-MEIC-TF's philosophy: **Use full ICs as the default (safe), switch to one-sided only when the trend filter has strong conviction (>= 0.2% EMA separation), and let full IC's breakeven shield absorb mistakes.**
+MEIC-TF's philosophy: **Always use full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds either side non-viable, skip the entry entirely (no one-sided entries).**
 
 ### Evolution Through Live Trading
 
@@ -91,7 +91,7 @@ MEIC-TF started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, ea
 | Feb 7 | Illiquid wings → bad fills | MKT-011 (credit gate) |
 | Feb 9 | One-sided stop = full loss | Fix #40 (2× stop for one-sided) |
 | Feb 10 | Same strikes merged by Saxo | MKT-013 (overlap prevention) |
-| Feb 13 | High VIX → huge premium, stops late | MKT-019 (virtual equal credit stop) |
+| Feb 13 | High VIX → huge premium, stops late | MKT-019 (removed v1.4.0) |
 | Feb 17 | Wrong trend signals amplify losses | EMA threshold 0.1% → 0.2% |
 | Feb 18 | Late stops erased morning gains | MKT-018 (early close on ROC) |
 | Feb 19 | Cascade breaker blocked winner | MKT-016/017 removed (v1.3.3) |
@@ -145,13 +145,17 @@ Each entry has a 5-minute window. If the entry time passes and the bot hasn't pl
                   Put Spread Side
 ```
 
-### Trend-Based Entry Logic
+### Trend Signal (Informational Only — v1.4.0)
 
-| Trend Signal | What Gets Placed | Rationale |
-|--------------|------------------|-----------|
-| BULLISH (EMA20 > EMA40 by >= 0.2%) | PUT spread only | Uptrend → calls risky, puts safe |
-| BEARISH (EMA20 < EMA40 by >= 0.2%) | CALL spread only | Downtrend → puts risky, calls safe |
-| NEUTRAL (within 0.2%) | Full iron condor | Range-bound → both sides safe |
+The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. All entries are full iron condors.
+
+| Trend Signal | What Gets Placed | Note |
+|--------------|------------------|------|
+| BULLISH (EMA20 > EMA40 by >= 0.2%) | Full iron condor | Signal logged, not acted on |
+| BEARISH (EMA20 < EMA40 by >= 0.2%) | Full iron condor | Signal logged, not acted on |
+| NEUTRAL (within 0.2%) | Full iron condor | Standard behavior |
+
+**Why one-sided entries were removed (v1.4.0):** 12-day analysis (Feb 10-26) showed combined one-sided P&L was -$175 across 23 entries. V-shape reversal days (Feb 17, Feb 26) amplified losses. EMA correctly identifies current direction but cannot predict reversals.
 
 ### Leg Placement Order (Safety-First)
 
@@ -160,8 +164,6 @@ For every entry type, protection (long) legs are placed before income (short) le
 | Entry Type | Order |
 |-----------|-------|
 | Full IC | Long Call → Long Put → Short Call → Short Put |
-| Call spread only | Long Call → Short Call |
-| Put spread only | Long Put → Short Put |
 
 This ensures the account is never momentarily exposed with a naked short position.
 
@@ -258,7 +260,7 @@ Each entry goes through these phases in order:
 16. MKT-015: Long-long overlap prevention (5pt further OTM)
 ```
 
-### Phase 6: Progressive OTM Tightening (NEUTRAL only)
+### Phase 6: Progressive OTM Tightening (all entries)
 
 ```
 17. MKT-020: Call tightening — move short call closer in 5pt steps
@@ -273,28 +275,26 @@ Each entry goes through these phases in order:
 
 ```
 19. MKT-011: Estimate credit from live quotes
-    ├── Both sides >= $1.00 → PROCEED with trend signal
-    ├── Both sides < $1.00 → SKIP entry
-    ├── One side < $1.00 + NEUTRAL trend → SKIP (no one-sided in neutral)
-    ├── One side < $1.00 + matching trend → CONVERT to one-sided
-    └── One side < $1.00 + opposing trend → SKIP
+    ├── Both sides >= $1.00 → PROCEED with full iron condor
+    ├── Either side < $1.00 → SKIP entry (no one-sided entries since v1.4.0)
+    └── Both sides < $1.00 → SKIP entry
 20. MKT-010 fallback: If MKT-011 can't get quotes, use illiquidity flags
-    └── Same trend-respecting logic as MKT-011
+    └── Any wing illiquid → SKIP entry (no one-sided entries since v1.4.0)
 ```
 
 ### Phase 8: Entry Execution
 
 ```
-21. BULLISH → Place PUT spread only (Long Put → Short Put)
-22. BEARISH → Place CALL spread only (Long Call → Short Call)
-23. NEUTRAL → Place full IC (Long Call → Long Put → Short Call → Short Put)
+21. Log EMA signal (informational only)
+22. Place full iron condor (Long Call → Long Put → Short Call → Short Put)
+    (No one-sided entries — all trends get full IC since v1.4.0)
 ```
 
 ### Phase 9: Post-Entry
 
 ```
-24. Calculate stop levels (MKT-019 for full ICs)
-25. Verify fill prices against PositionBase.OpenPrice
+23. Calculate stop levels (total_credit for full ICs)
+24. Verify fill prices against PositionBase.OpenPrice
 26. Log to Google Sheets
 27. Send alert
 28. Save state to disk
@@ -359,23 +359,19 @@ MEIC's core insight: **set the stop loss per side equal to total credit collecte
 
 With MEIC+ modification: stop = total_credit - $0.10, so breakeven days become +$10 days.
 
-### MEIC-TF Stop Formula (MKT-019)
+### MEIC-TF Stop Formula
 
-**Problem:** Volatility skew makes puts 2-7× more expensive than calls at the same delta. In a standard MEIC, `stop_level = total_credit` means both sides share the same stop. But the call side, with much less credit, hits its stop much sooner because the ratio `spread_value / stop_level` is much higher for the low-credit side.
-
-**Solution (MKT-019):** For full IC entries, use virtual equal credit:
+Full IC stop uses the same formula as base MEIC: `stop_level = total_credit`.
 
 ```
-max_credit = max(call_credit, put_credit)
-stop_level = 2 × max_credit           (both sides get the SAME level)
+stop_level = entry.total_credit          (both sides get the SAME level)
 ```
 
-| Entry Type | Stop Formula | Example (C=$105, P=$370) |
+| Entry Type | Stop Formula | Example (C=$125, P=$185) |
 |-----------|-------------|--------------------------|
-| Full IC (MKT-019) | 2 × max(call, put) | 2 × $370 = $740 per side |
-| One-sided | 2 × credit | 2 × credit per side |
+| Full IC | total_credit | $125 + $185 = $310 per side |
 
-**Why 2× for one-sided:** A one-sided entry's stop triggers when cost-to-close equals 2× credit, meaning P&L = -credit (you lost what you collected). This matches the behavior of a full IC where one side stopped = ~breakeven.
+**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + $1.00/side minimum reduced credit skew from 3-7x to 1-2x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
 
 **MEIC+ applies after:** If `meic_plus_enabled` and credit exceeds threshold, subtract $0.10 (× 100 = $10) from the stop level.
 
@@ -489,7 +485,7 @@ Entry #1 → #2 → #3 placed normally
 
 ## MKT Rules Reference
 
-### Active Rules (as of v1.3.9)
+### Active Rules (as of v1.4.0)
 
 | Rule | Name | Added | What It Does |
 |------|------|-------|-------------|
@@ -497,14 +493,13 @@ Entry #1 → #2 → #3 placed normally
 | MKT-008 | Long Wing Liquidity | v1.0.0 | Reduce spread width if long wing illiquid; sets illiquidity flags |
 | MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | 40-80pt spreads based on VIX level |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
-| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; skip/convert based on viability + trend |
+| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; skip if either side non-viable (no one-sided) |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
-| MKT-018 | Early Close on ROC | v1.3.0 | Close all positions when ROC >= 2% |
-| MKT-019 | Virtual Equal Credit Stop | v1.3.0 | Full IC stop = 2 × max(call, put) instead of total |
+| MKT-018 | Early Close on ROC | v1.3.0 | Close all positions when ROC >= 3% |
 | MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $1.00 |
-| MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5 if ROC already >= 2% |
+| MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5 if ROC already >= 3% (after 3 entries placed) |
 | MKT-022 | Progressive Put Tightening | v1.3.5 | Mirror of MKT-020 for put side |
 | MKT-023 | Smart Hold Check | v1.3.7 | Compare close-now vs worst-case-hold before MKT-018 fires |
 
@@ -514,6 +509,7 @@ Entry #1 → #2 → #3 placed normally
 |------|------|-------|---------|-------------|
 | MKT-016 | Stop Cascade Breaker | v1.2.8 | v1.3.3 | Net +$80 over 10 days (noise); blocked profitable entries |
 | MKT-017 | Daily Loss Limit | v1.2.9 | v1.3.3 | Cost $1,200 on Feb 23 by blocking 3 winning entries |
+| MKT-019 | Virtual Equal Credit Stop | v1.3.0 | v1.4.0 | MKT-020/022 reduced skew to 1-2x; ~$825 saved across 6 stops with tighter total_credit |
 
 **Why removed:** Full IC breakeven means stopped entries cost only ~$5-$30. Post-cascade entries are placed at safer levels (lower SPX = puts further OTM). Blocking entries is counterproductive.
 
@@ -594,13 +590,13 @@ Every 10 seconds when market is open:
 ```
 HEARTBEAT | Monitoring | SPX: 6012.45 | VIX: 19.5 | Entries: 5/5 | Active: 3 | Trend: NEUTRAL
   Entry #1 [IC]: C:78% cushion | P:45% cushion | Credit: $475
-  Entry #2 [PUT-ONLY/MKT-011]: P:62% cushion | Credit: $185
+  Entry #2 [IC/SKIPPED]: MKT-011 skipped (put non-viable)
   Entry #3 [IC]: C:52% cushion | P:STOPPED | Credit: $510
   [▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓]
   [░░░░░░░░░░░  +$305.00 net ($35 comm)  ░░░░░░░░░░░░]
   [▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓]
   Capital: $25,000 | Return: +1.4%
-  Early Close: ROC +1.85% / 2.0% threshold | Close cost: $50 (10 legs)
+  Early Close: ROC +1.85% / 3.0% threshold | Close cost: $50 (10 legs)
   Hold Check: HOLD | close=$380 vs hold=$450 (+70) | CALLS_STRESSED (C:35%/P:82%)
 ```
 
@@ -720,9 +716,9 @@ EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at
 ### Volatility Skew
 
 Put premiums are typically 2-7× higher than call premiums at the same delta. This means:
-- MKT-011 frequently converts NEUTRAL → put-only (36.4% of entries) because call credit is below $1.00
+- MKT-011 frequently skips entries when call credit is below $1.00/side
 - MKT-020 call tightening often can't reach $1.00 even at the 25pt OTM floor
-- MKT-019 virtual equal credit stop is essential for full ICs to prevent premature call-side stops
+- Total_credit stop (shared by both sides) is adequate because MKT-020/022 keeps skew at 1-2x
 
 ### Saxo Position Merging
 

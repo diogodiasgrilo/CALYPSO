@@ -1,23 +1,22 @@
 """
 MEIC-TF (Trend Following Hybrid) Trading Bot
 
-A modified MEIC bot that adds EMA-based trend direction detection and
-pre-entry credit validation.
+A modified MEIC bot that adds EMA-based trend direction detection,
+pre-entry credit validation, and progressive OTM tightening.
 
-Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars:
-- BULLISH: Place PUT spread only (calls are risky in uptrend)
-- BEARISH: Place CALL spread only (puts are risky in downtrend)
-- NEUTRAL: Place full iron condor (standard MEIC behavior)
+Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars.
+The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
+but is informational only — all entries are full iron condors.
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
-- Both sides viable: Proceed with trend signal
-- One side non-viable in NEUTRAL market: Skip entry (one-sided only for clear trends)
-- One side non-viable in trending market: Convert if matching trend, skip otherwise
+- Both sides viable: Proceed with full iron condor
+- Either side non-viable: Skip entry (no one-sided entries)
 - Both non-viable: Skip entry entirely
 
 Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
 
 Version History:
+- 1.4.0 (2026-02-27): Remove MKT-019 (revert to total_credit stop), disable all one-sided entries (EMA signal informational only, always full IC or skip)
 - 1.3.11 (2026-02-25): MKT-018 early close threshold raised from 2% to 3% ROC (config change, 11-day analysis showed 2% left $1,025 on table)
 - 1.3.10 (2026-02-25): Daily Summary: avg capital deployed, cumulative ROC, avg daily ROC, annualized return columns
 - 1.3.9 (2026-02-25): MKT-021 ROC gate lowered from 5 to 3 entries, gate now counts actual placed entries not time slots (skipped/failed entries don't count)
