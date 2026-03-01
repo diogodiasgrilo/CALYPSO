@@ -41,14 +41,13 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - Expected: ~20.7% CAGR, 4.31% max drawdown, ~70% win rate
 
 ### 5. HYDRA - Trend Following MEIC (S&P 500)
-**MEIC + EMA 20/40 Trend Filter** - directional filtering to avoid losses on strong trend days:
-- Same entry schedule as MEIC (10:00-12:30 PM ET)
-- Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
-- **BULLISH** (20 > 40): Place PUT spread only (calls are risky in uptrend)
-- **BEARISH** (20 < 40): Place CALL spread only (puts are risky in downtrend)
-- **NEUTRAL**: Place full iron condor (standard MEIC behavior)
-- **Credit Gate (MKT-011)**: Estimates credit BEFORE placing orders, skips/converts non-viable entries
-- Designed to avoid full stop-outs on strong trend days and illiquid entries
+**MEIC + EMA 20/40 Trend Filter** - credit validation and profit management on top of MEIC:
+- 6 entries per day (10:05-12:35 PM ET), always full iron condors
+- EMA 20/40 trend signal is informational only (logged, does NOT drive entry type)
+- **Credit Gate (MKT-011)**: Estimates credit BEFORE placing orders, skips entry if either side non-viable
+- **MKT-025**: Short-only stop close (long expires at settlement, saves commission + slippage)
+- **MKT-018/023**: Early close at 3% ROC with smart hold check
+- Wider starting OTM (2×), min 60pt spreads, progressive tightening
 
 ---
 

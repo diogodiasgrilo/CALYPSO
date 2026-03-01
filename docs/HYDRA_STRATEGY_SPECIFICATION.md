@@ -509,7 +509,7 @@ Entry #1 → #2 → #3 placed normally
 
 ## MKT Rules Reference
 
-### Active Rules (as of v1.4.0)
+### Active Rules (as of v1.4.5)
 
 | Rule | Name | Added | What It Does |
 |------|------|-------|-------------|
@@ -618,7 +618,7 @@ If the bot restarts mid-day:
 Every 10 seconds when market is open:
 
 ```
-HEARTBEAT | Monitoring | SPX: 6012.45 | VIX: 19.5 | Entries: 5/5 | Active: 3 | Trend: NEUTRAL
+HEARTBEAT | Monitoring | SPX: 6012.45 | VIX: 19.5 | Entries: 6/6 | Active: 3 | Trend: NEUTRAL
   Entry #1 [IC]: C:78% cushion | P:45% cushion | Credit: $475
   Entry #2 [IC/SKIPPED]: MKT-011 skipped (put non-viable)
   Entry #3 [IC]: C:52% cushion | P:STOPPED | Credit: $510
@@ -794,4 +794,4 @@ One-sided entries were removed in v1.4.0. All entries are now full iron condors 
 | `bots/meic/strategy.py` | Base MEIC strategy (inherited methods) |
 | `bots/hydra/config/config.json.template` | Config template |
 | `data/hydra_state.json` | Daily state persistence (on VM) |
-| `data/meic_metrics.json` | Cumulative metrics (on VM) |
+| `data/hydra_metrics.json` | Cumulative metrics (on VM) |
