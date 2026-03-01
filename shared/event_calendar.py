@@ -15,6 +15,8 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
+from shared.market_hours import get_us_market_time
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,7 +39,7 @@ class MarketEvent:
     @property
     def days_until(self) -> int:
         """Calculate days until this event from today."""
-        today = date.today()
+        today = get_us_market_time().date()
         return (self.event_date - today).days
 
 
@@ -138,7 +140,7 @@ def is_fomc_meeting_day(check_date: date = None) -> bool:
         True if the date is any FOMC meeting day
     """
     if check_date is None:
-        check_date = date.today()
+        check_date = get_us_market_time().date()
 
     all_fomc_dates = get_fomc_dates(check_date.year)
     return check_date in all_fomc_dates
@@ -157,7 +159,7 @@ def is_fomc_announcement_day(check_date: date = None) -> bool:
         True if the date is an FOMC announcement day
     """
     if check_date is None:
-        check_date = date.today()
+        check_date = get_us_market_time().date()
 
     announcement_dates = get_fomc_announcement_dates(check_date.year)
     return check_date in announcement_dates
@@ -174,7 +176,7 @@ def get_next_fomc_date(from_date: date = None) -> Optional[date]:
         Next FOMC meeting date, or None if not found
     """
     if from_date is None:
-        from_date = date.today()
+        from_date = get_us_market_time().date()
 
     # Check current and next year
     for year in [from_date.year, from_date.year + 1]:
@@ -198,7 +200,7 @@ def is_fomc_approaching(days_ahead: int = 1, from_date: date = None) -> bool:
         True if FOMC meeting is within days_ahead days
     """
     if from_date is None:
-        from_date = date.today()
+        from_date = get_us_market_time().date()
 
     next_fomc = get_next_fomc_date(from_date)
     if next_fomc is None:
@@ -218,7 +220,7 @@ def get_fomc_blackout_range(days_before: int = 2) -> Tuple[Optional[date], Optio
     Returns:
         Tuple of (blackout_start, fomc_date) if in blackout, else (None, None)
     """
-    today = date.today()
+    today = get_us_market_time().date()
     next_fomc = get_next_fomc_date(today)
 
     if next_fomc is None:
@@ -317,7 +319,7 @@ def get_upcoming_qqq_earnings(days_ahead: int = 7, from_date: date = None) -> Li
         List of MarketEvent objects for upcoming earnings
     """
     if from_date is None:
-        from_date = date.today()
+        from_date = get_us_market_time().date()
 
     end_date = from_date + timedelta(days=days_ahead)
     upcoming = []
@@ -363,7 +365,7 @@ def get_next_earnings_date(symbol: str, from_date: date = None) -> Optional[date
         Next earnings date or None
     """
     if from_date is None:
-        from_date = date.today()
+        from_date = get_us_market_time().date()
 
     earnings_dates = EARNINGS_CALENDAR_2026.get(symbol.upper(), [])
 
@@ -390,7 +392,7 @@ def get_all_upcoming_events(days_ahead: int = 7, from_date: date = None) -> List
         List of MarketEvent objects sorted by date
     """
     if from_date is None:
-        from_date = date.today()
+        from_date = get_us_market_time().date()
 
     events = []
 
@@ -442,7 +444,7 @@ def get_event_status_message(from_date: date = None) -> str:
         Status message describing upcoming events
     """
     if from_date is None:
-        from_date = date.today()
+        from_date = get_us_market_time().date()
 
     # Check next 7 days
     events = get_all_upcoming_events(days_ahead=7, from_date=from_date)
@@ -481,7 +483,7 @@ def should_close_for_event(
         Tuple of (should_close, reason)
     """
     if from_date is None:
-        from_date = date.today()
+        from_date = get_us_market_time().date()
 
     # Check FOMC
     next_fomc = get_next_fomc_date(from_date)
@@ -508,7 +510,7 @@ if __name__ == "__main__":
     print("EVENT CALENDAR TEST")
     print("=" * 70)
 
-    today = date.today()
+    today = get_us_market_time().date()
     print(f"\nToday: {today}")
 
     # Test FOMC dates

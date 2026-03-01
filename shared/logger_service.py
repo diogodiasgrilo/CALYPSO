@@ -1213,7 +1213,7 @@ class GoogleSheetsLogger:
                 logger.warning("check_recovery_logged_today skipped due to timeout")
                 return False  # Assume not logged if we can't read
 
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_str = get_us_market_time().strftime("%Y-%m-%d")
 
             for record in records:
                 event_type = record.get("Event", "")
@@ -1286,7 +1286,7 @@ class GoogleSheetsLogger:
                     from datetime import datetime
                     # Parse expiry (format: YYYYMMDD)
                     expiry_date = datetime.strptime(str(expiry), "%Y%m%d")
-                    dte = (expiry_date - datetime.now()).days
+                    dte = (expiry_date - get_us_market_time().replace(tzinfo=None)).days
                 except:
                     dte = None
 
@@ -1342,7 +1342,7 @@ class GoogleSheetsLogger:
                 self._sheets_call_with_timeout(worksheet.delete_rows, 2, worksheet.row_count)
                 # Ignore failures - we'll overwrite anyway
 
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = get_us_market_time().strftime("%Y-%m-%d %H:%M:%S")
 
             if self.strategy_type == "iron_fly":
                 # Iron Fly: No theta tracking, add hold time and distance to wing
@@ -1525,7 +1525,7 @@ class GoogleSheetsLogger:
 
         try:
             worksheet = self.worksheets["Positions"]
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = get_us_market_time().strftime("%Y-%m-%d %H:%M:%S")
 
             # Calculate theta display values
             theta = position.get("theta", 0)
@@ -1707,7 +1707,7 @@ class GoogleSheetsLogger:
             return False
 
         success = True
-        timestamp = datetime.now()
+        timestamp = get_us_market_time()
 
         try:
             # 1. Log each individual position to Trades tab
@@ -1734,7 +1734,7 @@ class GoogleSheetsLogger:
                             continue
 
                     if expiry_date:
-                        dte = (expiry_date - datetime.now()).days
+                        dte = (expiry_date - get_us_market_time().replace(tzinfo=None)).days
                         expiry_formatted = expiry_date.strftime("%Y-%m-%d")
                     else:
                         logger.warning(f"Could not parse expiry date: {expiry_str}")
@@ -1811,7 +1811,7 @@ class GoogleSheetsLogger:
                 if pos.get("expiry"):
                     try:
                         expiry_date = datetime.strptime(str(pos["expiry"]), "%Y%m%d")
-                        dte = (expiry_date - datetime.now()).days
+                        dte = (expiry_date - get_us_market_time().replace(tzinfo=None)).days
                         expiry_formatted = expiry_date.strftime("%Y-%m-%d")
                     except:
                         pass
@@ -1925,7 +1925,7 @@ class GoogleSheetsLogger:
             if self.strategy_type == "iron_fly":
                 # Iron Fly: Premium-based tracking
                 row = [
-                    summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    summary.get("date", get_us_market_time().strftime("%Y-%m-%d")),
                     f"{summary.get('underlying_close', summary.get('spy_close', 0)):.2f}",
                     f"{summary.get('vix', 0):.2f}",
                     f"{summary.get('premium_collected', 0):.2f}",
@@ -1942,7 +1942,7 @@ class GoogleSheetsLogger:
             elif self.strategy_type == "rolling_put_diagonal":
                 # Rolling Put Diagonal: Campaign/roll-based tracking with technical indicators
                 row = [
-                    summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    summary.get("date", get_us_market_time().strftime("%Y-%m-%d")),
                     f"{summary.get('qqq_close', 0):.2f}",
                     f"{summary.get('ema_9', 0):.2f}",
                     f"{summary.get('macd_histogram', 0):.4f}",
@@ -1984,7 +1984,7 @@ class GoogleSheetsLogger:
                 is_breakeven = 1 if abs(daily_pnl) <= 50 else 0
 
                 row = [
-                    summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    summary.get("date", get_us_market_time().strftime("%Y-%m-%d")),
                     f"{summary.get('spx_close', summary.get('underlying_close', 0)):.2f}",
                     f"{summary.get('vix_close', summary.get('vix', 0)):.2f}",
                     str(entries_completed),
@@ -2036,7 +2036,7 @@ class GoogleSheetsLogger:
 
                 row = [
                     # Market Context (9 cols)
-                    summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    summary.get("date", get_us_market_time().strftime("%Y-%m-%d")),
                     f"{summary.get('spx_open', 0):.2f}",
                     f"{summary.get('spx_close', summary.get('underlying_close', 0)):.2f}",
                     f"{summary.get('spx_high', 0):.2f}",
@@ -2092,7 +2092,7 @@ class GoogleSheetsLogger:
                 recentered_today = "Yes" if summary.get("recentered_today", False) else "No"
 
                 row = [
-                    summary.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    summary.get("date", get_us_market_time().strftime("%Y-%m-%d")),
                     f"{summary.get('spy_close', 0):.2f}",
                     f"{summary.get('vix', summary.get('vix_avg', 0)):.2f}",
                     f"{net_theta:.2f}",
@@ -2313,7 +2313,7 @@ class GoogleSheetsLogger:
                 new_strikes = "N/A"
 
             row = [
-                event.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                event.get("timestamp", get_us_market_time().strftime("%Y-%m-%d %H:%M:%S")),
                 event.get("event_type", "N/A"),
                 f"{event.get('spy_price', 0):.2f}",
                 f"{event.get('vix', 0):.2f}",
@@ -2365,7 +2365,7 @@ class GoogleSheetsLogger:
 
         try:
             row = [
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                 level,
                 component,
                 message[:500],  # Truncate long messages
@@ -2458,7 +2458,7 @@ class GoogleSheetsLogger:
                 #          Avg Hold Time (min), Best Trade ($), Worst Trade ($)
                 row = [
                     # Meta
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     period,
                     # P&L (Total)
                     f"{total_pnl:.2f}",
@@ -2492,7 +2492,7 @@ class GoogleSheetsLogger:
                 #          Win Rate (%), Max Drawdown ($), Avg Campaign Days
                 row = [
                     # Meta
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     period,
                     # P&L (Total)
                     f"{total_pnl:.2f}",
@@ -2528,7 +2528,7 @@ class GoogleSheetsLogger:
                 #          Max Drawdown ($), Max Drawdown (%), Avg Daily P&L ($)
                 row = [
                     # Meta
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     period,
                     # P&L (Total)
                     f"{total_pnl:.2f}",
@@ -2572,7 +2572,7 @@ class GoogleSheetsLogger:
                 #          Early Close Triggered, Early Close Time
                 row = [
                     # Meta
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     period,
                     # P&L (Total)
                     f"{total_pnl:.2f}",
@@ -2618,7 +2618,7 @@ class GoogleSheetsLogger:
                 # Delta Neutral: Weekly theta strategy - track theta, rolls
                 row = [
                     # Meta
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     period,
                     # P&L (Total)
                     f"{total_pnl:.2f}",
@@ -2708,7 +2708,7 @@ class GoogleSheetsLogger:
 
                 row = [
                     # Market Data
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     f"{underlying_price:.2f}",
                     f"{vix:.2f}" if vix else "N/A",
                     # Position Values
@@ -2753,7 +2753,7 @@ class GoogleSheetsLogger:
 
                 row = [
                     # Market Data + Indicators
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     f"{qqq_price:.2f}",
                     f"{ema_9:.2f}" if ema_9 else "N/A",
                     f"{macd:.4f}" if macd else "N/A",
@@ -2797,7 +2797,7 @@ class GoogleSheetsLogger:
 
                 row = [
                     # Market Data
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     f"{spx_price:.2f}",
                     f"{vix:.2f}" if vix else "N/A",
                     # Entry Status
@@ -2845,7 +2845,7 @@ class GoogleSheetsLogger:
 
                 row = [
                     # Market Data
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     f"{spx_price:.2f}",
                     f"{vix:.2f}" if vix else "N/A",
                     # Entry Status
@@ -2896,7 +2896,7 @@ class GoogleSheetsLogger:
 
                 row = [
                     # Market Data
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                     f"{spy_price:.2f}",
                     f"{vix:.2f}" if vix else "N/A",
                     # Position Values
@@ -2980,7 +2980,7 @@ class GoogleSheetsLogger:
             # Parse the timestamp
             try:
                 last_timestamp = datetime.strptime(last_timestamp_str, "%Y-%m-%d %H:%M:%S")
-                age_minutes = (datetime.now() - last_timestamp).total_seconds() / 60
+                age_minutes = (get_us_market_time().replace(tzinfo=None) - last_timestamp).total_seconds() / 60
 
                 if age_minutes > stale_minutes:
                     logger.info(f"Last Account Summary entry is {age_minutes:.1f} minutes old (stale threshold: {stale_minutes}min) - will log initial metrics")
@@ -3304,7 +3304,7 @@ class EmailAlerter:
 CALYPSO TRADING BOT ALERT
 ========================
 Severity: {severity}
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Time: {get_us_market_time().strftime('%Y-%m-%d %H:%M:%S')} ET
 
 {body}
 
@@ -3382,7 +3382,7 @@ Short Positions:
 Daily Trading Summary
 =====================
 
-Date: {summary.get('date', datetime.now().strftime('%Y-%m-%d'))}
+Date: {summary.get('date', get_us_market_time().strftime('%Y-%m-%d'))}
 
 Performance:
 - Total P&L: ${summary.get('total_pnl', 0):.2f}

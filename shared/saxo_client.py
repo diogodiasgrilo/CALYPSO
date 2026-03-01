@@ -64,6 +64,9 @@ from shared.external_price_feed import ExternalPriceFeed
 # Import token coordinator for multi-bot environments
 from shared.token_coordinator import get_token_coordinator, TokenCoordinator
 
+# Import ET time for DTE calculations (VM runs UTC, trading is ET)
+from shared.market_hours import get_us_market_time
+
 # Configure module logger
 logger = logging.getLogger(__name__)
 
@@ -1476,7 +1479,7 @@ class SaxoClient:
             logger.error("Failed to get option expirations")
             return None
 
-        today = datetime.now().date()
+        today = get_us_market_time().date()
         target_expiration = None
 
         if target_dte is not None:
@@ -1608,7 +1611,7 @@ class SaxoClient:
             return None
 
         # For weekly, find appropriate Friday expiration based on context
-        today = datetime.now().date()
+        today = get_us_market_time().date()
         target_expiration = None
 
         if weekly:
@@ -1761,7 +1764,7 @@ class SaxoClient:
         # the risk/reward profile and theta decay. NEVER fall back to 1 DTE - if no 0 DTE
         # options exist, abort entry and log error.
         # Bug fix (2026-02-02): Removed 1 DTE fallback - this strategy MUST use 0 DTE only.
-        today = datetime.now().date()
+        today = get_us_market_time().date()
         target_expiration = None
 
         for exp_data in expirations:
@@ -1938,7 +1941,7 @@ class SaxoClient:
             return None
 
         # Find weekly expiration based on context (rolling vs initial entry)
-        today = datetime.now().date()
+        today = get_us_market_time().date()
         target_expiration = None
         weekly_dte = 7
 
@@ -4434,10 +4437,8 @@ class SaxoClient:
             >>> for pos in closed:
             ...     print(f"{pos['Symbol']}: P&L ${pos.get('ProfitLoss', 0):.2f}")
         """
-        from datetime import datetime
-
         if not to_date:
-            to_date = datetime.now().strftime("%Y-%m-%d")
+            to_date = get_us_market_time().strftime("%Y-%m-%d")
 
         # Endpoint: /cs/v1/reports/closedPositions/{ClientKey}/{FromDate}/{ToDate}
         endpoint = f"/cs/v1/reports/closedPositions/{self.client_key}/{from_date}/{to_date}"
@@ -4586,7 +4587,7 @@ class SaxoClient:
             return None
 
         # Find the target expiration
-        today = datetime.now().date()
+        today = get_us_market_time().date()
         target_expiration = None
 
         # Use the specified DTE range.
@@ -4863,7 +4864,7 @@ class SaxoClient:
             return None
 
         # Find closest expiration to target DTE
-        today = datetime.now().date()
+        today = get_us_market_time().date()
         target_expiration = None
         selected_dte = None
         closest_diff = float('inf')
@@ -5007,7 +5008,7 @@ class SaxoClient:
             logger.error("Failed to get option expirations")
             return None
 
-        today = datetime.now().date()
+        today = get_us_market_time().date()
 
         # Find the first expiration that is 1 or more days away
         for exp_data in expirations:
@@ -5089,7 +5090,7 @@ class SaxoClient:
         # Find the put at ATM strike
         for option in specific_options:
             if option.get("StrikePrice") == atm_strike and option.get("PutCall") == "Put":
-                today = datetime.now().date()
+                today = get_us_market_time().date()
                 exp_date = datetime.strptime(target_date, "%Y-%m-%d").date()
                 dte = (exp_date - today).days
 
