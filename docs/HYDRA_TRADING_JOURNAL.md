@@ -1,4 +1,4 @@
-# MEIC-TF Trading Journal
+# HYDRA Trading Journal
 
 **Created**: February 17, 2026
 **Last Updated**: February 26, 2026
@@ -177,7 +177,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - ALL 4 put sides that were placed got stopped (100% put stop rate)
 - ALL 6 call sides expired (100% call survival) - market moved away from calls
 - Despite 4 stops, net P&L was positive (+$360) because call expirations offset put stops
-- This is exactly the scenario MEIC-TF was designed for
+- This is exactly the scenario HYDRA was designed for
 
 ### Feb 13 (Friday) - NET P&L: +$675
 
@@ -996,7 +996,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - On Feb 17: Entry #1 (BEARISH→call-only) would likely have been NEUTRAL→full IC. The surviving side would have partially offset the stop loss. Entry #4 would also reclassify, but MKT-016 cascade blocks it (3 stops already reached). **Saves ~$290** (Entry #1 only).
 - On Feb 12 (genuine sell-off, 149pts): EMA divergence was >0.3%, so BEARISH signals would still fire at 0.2%. **Zero cost on genuine trending days.**
 
-**Code verification**: Line 194 of `bots/meic_tf/strategy.py` reads `self.trend_config.get("ema_neutral_threshold", 0.001)`. Lines 294-299 use strict `>` and `<` operators. Pure config change.
+**Code verification**: Line 194 of `bots/hydra/strategy.py` reads `self.trend_config.get("ema_neutral_threshold", 0.001)`. Lines 294-299 use strict `>` and `<` operators. Pure config change.
 
 **Risk**: If a genuine but small trend has 0.1%-0.2% EMA divergence, the bot would place a full IC instead of one-sided, adding exposure on the risky side. Mitigated by the fact that small trends rarely breach short strikes.
 
@@ -1112,26 +1112,26 @@ Track when each improvement was implemented, deployed, and verified.
 ### How to Do a Weekly Review
 
 **Step 1: Pull daily summary data from Google Sheets**
-- Open the "Calypso_MEIC-TF_Live_Data" spreadsheet → "Daily Summary" tab
+- Open the "Calypso_HYDRA_Live_Data" spreadsheet → "Daily Summary" tab
 - Copy the rows for the review period into the template table below
 
 **Step 2: Pull EMA divergence data from VM logs**
 ```bash
 # Get all trend signal logs for a specific date (replace DATE)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf --since 'DATE 14:00' --until 'DATE 21:00' --no-pager | grep -E '(EMA|trend_signal|divergence|BULLISH|BEARISH|NEUTRAL|cascade|MKT-016)'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra --since 'DATE 14:00' --until 'DATE 21:00' --no-pager | grep -E '(EMA|trend_signal|divergence|BULLISH|BEARISH|NEUTRAL|cascade|MKT-016)'"
 ```
 Note: journalctl timestamps are UTC. Market hours 9:30-4:00 ET = 14:30-21:00 UTC.
 
 **Step 3: Check if cascade breaker triggered**
 ```bash
 # Look for MKT-016 cascade events
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf --since 'DATE 14:00' --until 'DATE 21:00' --no-pager | grep -i 'cascade\|MKT-016\|pause.*entry\|skipping.*entry'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra --since 'DATE 14:00' --until 'DATE 21:00' --no-pager | grep -i 'cascade\|MKT-016\|pause.*entry\|skipping.*entry'"
 ```
 
 **Step 4: Check state file for EMA values (most precise)**
 ```bash
 # View today's state file (has exact ema_20_at_entry / ema_40_at_entry)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso cat /opt/calypso/data/meic_tf_state.json | python3 -m json.tool"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso cat /opt/calypso/data/hydra_state.json | python3 -m json.tool"
 ```
 
 **Step 5: Check cumulative metrics**
@@ -1486,7 +1486,7 @@ When reviewing performance after implementing improvements, fill in this section
 
 ## Appendix A: Raw EMA Divergence Data (From VM Logs)
 
-**Source**: `journalctl -u meic_tf` on calypso-bot VM, pulled Feb 17 2026.
+**Source**: `journalctl -u hydra` on calypso-bot VM, pulled Feb 17 2026.
 **Purpose**: Exact EMA divergence percentages for every entry, so future analysis can determine how threshold changes would affect signal classification without re-pulling logs.
 
 ### Feb 10 (Tuesday)
@@ -1657,7 +1657,7 @@ When reviewing performance after implementing improvements, fill in this section
 
 ## Appendix B: Stop and Entry Timing Data (From VM Logs)
 
-**Source**: `journalctl -u meic_tf` on calypso-bot VM, pulled Feb 17 2026.
+**Source**: `journalctl -u hydra` on calypso-bot VM, pulled Feb 17 2026.
 **Purpose**: Exact timestamps for all stops and entry placements, for cascade breaker analysis without re-pulling logs.
 
 ### Feb 10 (Tuesday) — 1 stop
@@ -2205,7 +2205,7 @@ MKT-011 NEUTRAL skip: Yes                         ← (v1.3.6) one side non-viab
 Pre-entry ROC gate: 2.0%                          ← (MKT-021, v1.3.2)
 ```
 
-**Config location**: `bots/meic_tf/config/config.json` on VM at `/opt/calypso/`. Template at `bots/meic_tf/config/config.json.template` in repo.
+**Config location**: `bots/hydra/config/config.json` on VM at `/opt/calypso/`. Template at `bots/hydra/config/config.json.template` in repo.
 
 ## Appendix G: Formulas
 
@@ -2264,12 +2264,12 @@ Net P&L:                ≈ -credit - $10  (you lose everything you collected pl
 
 | File | Purpose | Location |
 |------|---------|----------|
-| Strategy code | MEIC-TF strategy | `bots/meic_tf/strategy.py` |
-| Main loop | Entry scheduling, settlement | `bots/meic_tf/main.py` |
-| State file | Daily state persistence | `/opt/calypso/data/meic_tf_state.json` (VM) |
+| Strategy code | HYDRA strategy | `bots/hydra/strategy.py` |
+| Main loop | Entry scheduling, settlement | `bots/hydra/main.py` |
+| State file | Daily state persistence | `/opt/calypso/data/hydra_state.json` (VM) |
 | Metrics file | Cumulative metrics | `/opt/calypso/data/meic_metrics.json` (VM) |
 | Strategy spec | MEIC base specification | `docs/MEIC_STRATEGY_SPECIFICATION.md` |
 | Edge cases | 79 analyzed edge cases | `docs/MEIC_EDGE_CASES.md` |
-| Bot README | MEIC-TF hybrid documentation | `bots/meic_tf/README.md` |
-| Daily Summary | Google Sheets tab | "Daily Summary" tab in MEIC-TF spreadsheet |
-| This document | Trading journal | `docs/MEIC_TF_TRADING_JOURNAL.md` |
+| Bot README | HYDRA hybrid documentation | `bots/hydra/README.md` |
+| Daily Summary | Google Sheets tab | "Daily Summary" tab in HYDRA spreadsheet |
+| This document | Trading journal | `docs/HYDRA_TRADING_JOURNAL.md` |

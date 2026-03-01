@@ -300,7 +300,7 @@ class IronCondorEntry:
     - **Active**: Position is open and being monitored (default)
     - **Stopped**: Side was opened but hit stop loss (LOSS)
     - **Expired**: Side was opened and expired worthless (PROFIT - kept credit)
-    - **Skipped**: Side was never opened (MEIC-TF one-sided entry, NO P&L IMPACT)
+    - **Skipped**: Side was never opened (HYDRA one-sided entry, NO P&L IMPACT)
 
     The flags are mutually exclusive - a side can only be in one state at a time.
     """
@@ -345,13 +345,13 @@ class IronCondorEntry:
     put_side_stopped: bool = False   # Put spread was stopped out (LOSS)
     call_side_expired: bool = False  # Call spread expired worthless (PROFIT - kept credit)
     put_side_expired: bool = False   # Put spread expired worthless (PROFIT - kept credit)
-    call_side_skipped: bool = False  # Call side was never opened (MEIC-TF one-sided entry)
-    put_side_skipped: bool = False   # Put side was never opened (MEIC-TF one-sided entry)
+    call_side_skipped: bool = False  # Call side was never opened (HYDRA one-sided entry)
+    put_side_skipped: bool = False   # Put side was never opened (HYDRA one-sided entry)
     strategy_id: str = ""  # For Position Registry tracking
 
     # MKT-010: Wing illiquidity tracking (set by MKT-008 adjustment)
     # If a wing was illiquid and adjusted, that side is far OTM = SAFE
-    # Used by MEIC-TF to place one-sided entries on the safe side
+    # Used by HYDRA to place one-sided entries on the safe side
     call_wing_illiquid: bool = False  # Call wing was adjusted (calls far OTM = safe)
     put_wing_illiquid: bool = False   # Put wing was adjusted (puts far OTM = safe)
 
@@ -511,8 +511,8 @@ class MEICDailyState:
     # Circuit breaker
     circuit_breaker_opens: int = 0
 
-    # MEIC-TF specific counters (used by trend-following variant)
-    # These remain 0 for base MEIC, but are tracked in MEIC-TF
+    # HYDRA specific counters (used by trend-following variant)
+    # These remain 0 for base MEIC, but are tracked in HYDRA
     one_sided_entries: int = 0  # Fix #55: Count of one-sided (put-only or call-only) entries
     trend_overrides: int = 0    # Fix #56: Times trend filter caused one-sided entry
     credit_gate_skips: int = 0  # Fix #57: Times credit gate skipped/modified entry
@@ -534,7 +534,7 @@ class MEICDailyState:
         """
         active = []
         for e in self.entries:
-            # FIX #43: For one-sided entries (MEIC-TF), check only the placed side
+            # FIX #43: For one-sided entries (HYDRA), check only the placed side
             call_only = getattr(e, 'call_only', False)
             put_only = getattr(e, 'put_only', False)
 
@@ -820,10 +820,12 @@ class MEICStrategy:
         # Saxo Bank charges $2.50 per leg per contract, round-trip = $5.00 per leg
         self.commission_per_leg = self.strategy_config.get("commission_per_leg", 2.50)
 
-        # State file path - can be overridden by subclasses BEFORE calling super().__init__()
-        # Check if subclass already set it to avoid overwriting (e.g., MEIC-TF uses different file)
+        # State and metrics file paths - can be overridden by subclasses BEFORE calling super().__init__()
+        # Check if subclass already set them to avoid overwriting (e.g., HYDRA uses different files)
         if not hasattr(self, 'state_file') or self.state_file is None:
             self.state_file = STATE_FILE
+        if not hasattr(self, 'metrics_file') or self.metrics_file is None:
+            self.metrics_file = METRICS_FILE
 
         # State
         self.state = MEICState.IDLE
@@ -2502,7 +2504,7 @@ class MEICStrategy:
             return (False, reason)
 
         # One side is viable, other is not
-        # In base MEIC, we skip the entry entirely (one-sided entries are MEIC-TF only)
+        # In base MEIC, we skip the entry entirely (one-sided entries are HYDRA only)
         if not call_viable:
             reason = (
                 f"MKT-011: SKIPPING Entry #{entry.entry_number} - call side below minimum viable credit. "
@@ -5090,14 +5092,14 @@ class MEICStrategy:
                                         # Commission tracking
                                         "open_commission": entry_data.get("open_commission", 0),
                                         "close_commission": entry_data.get("close_commission", 0),
-                                        # FIX #43: Preserve one-sided entry flags for MEIC-TF
+                                        # FIX #43: Preserve one-sided entry flags for HYDRA
                                         "call_only": entry_data.get("call_only", False),
                                         "put_only": entry_data.get("put_only", False),
                                         "trend_signal": entry_data.get("trend_signal"),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
-                                    # Skipped = never opened (MEIC-TF one-sided entry)
+                                    # Skipped = never opened (HYDRA one-sided entry)
                                     # For one-sided entries: done if placed side is done
                                     # For full IC: done if both sides are done
                                     call_stopped = entry_data.get("call_side_stopped", False)
@@ -5150,7 +5152,7 @@ class MEICStrategy:
                         entry.call_side_expired = True
                     if saved.get("put_side_expired"):
                         entry.put_side_expired = True
-                    # FIX #47: Also restore skipped flags (for MEIC-TF one-sided entries)
+                    # FIX #47: Also restore skipped flags (for HYDRA one-sided entries)
                     if saved.get("call_side_skipped"):
                         entry.call_side_skipped = True
                     if saved.get("put_side_skipped"):
@@ -5223,14 +5225,14 @@ class MEICStrategy:
                     stopped_entry.open_commission = stopped_entry_data.get("open_commission", 0)
                     stopped_entry.close_commission = stopped_entry_data.get("close_commission", 0)
 
-                    # One-sided entry flags (MEIC-TF uses TFIronCondorEntry which has these)
+                    # One-sided entry flags (HYDRA uses HydraIronCondorEntry which has these)
                     # For base MEIC, these attributes don't exist in the dataclass, so we add them dynamically
-                    # This allows MEIC-TF subclass to work with the preserved data
+                    # This allows HYDRA subclass to work with the preserved data
                     call_only = stopped_entry_data.get("call_only", False)
                     put_only = stopped_entry_data.get("put_only", False)
                     trend_signal = stopped_entry_data.get("trend_signal")
                     if call_only or put_only or trend_signal:
-                        # Only set these for one-sided entries (MEIC-TF)
+                        # Only set these for one-sided entries (HYDRA)
                         stopped_entry.call_only = call_only
                         stopped_entry.put_only = put_only
                         stopped_entry.trend_signal = trend_signal
@@ -6422,8 +6424,8 @@ class MEICStrategy:
     def _load_cumulative_metrics(self) -> Dict:
         """Load cumulative metrics from disk."""
         try:
-            if os.path.exists(METRICS_FILE):
-                with open(METRICS_FILE, 'r') as f:
+            if os.path.exists(self.metrics_file):
+                with open(self.metrics_file, 'r') as f:
                     return json.load(f)
         except Exception as e:
             logger.warning(f"Could not load cumulative metrics: {e}")
@@ -6451,12 +6453,12 @@ class MEICStrategy:
                 next trading day.
         """
         try:
-            os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
+            os.makedirs(os.path.dirname(self.metrics_file), exist_ok=True)
             # Fix #83: Store trading date, not current timestamp
             # Previous code used get_us_market_time().isoformat() which caused midnight
             # settlement for day N to store day N+1's date, blocking day N+1's summary
             self.cumulative_metrics["last_updated"] = trading_date or get_us_market_time().strftime("%Y-%m-%d")
-            with open(METRICS_FILE, 'w') as f:
+            with open(self.metrics_file, 'w') as f:
                 json.dump(self.cumulative_metrics, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save cumulative metrics: {e}")
@@ -7023,7 +7025,7 @@ class MEICStrategy:
         A win means:
         - Neither side was stopped (both expired worthless = kept credit), OR
         - Side(s) were merged with another entry (credit preserved)
-        - Skipped sides don't count against win (MEIC-TF one-sided entries)
+        - Skipped sides don't count against win (HYDRA one-sided entries)
 
         Args:
             entry: IronCondorEntry to evaluate
@@ -7031,7 +7033,7 @@ class MEICStrategy:
         Returns:
             True if this entry is a win
         """
-        # For one-sided entries (MEIC-TF), only check the side that was opened
+        # For one-sided entries (HYDRA), only check the side that was opened
         call_only = getattr(entry, 'call_only', False)
         put_only = getattr(entry, 'put_only', False)
 
@@ -7056,7 +7058,7 @@ class MEICStrategy:
         Returns:
             True if this entry is breakeven
         """
-        # For one-sided entries (MEIC-TF), can't be breakeven (either win or loss)
+        # For one-sided entries (HYDRA), can't be breakeven (either win or loss)
         call_only = getattr(entry, 'call_only', False)
         put_only = getattr(entry, 'put_only', False)
 
@@ -7077,7 +7079,7 @@ class MEICStrategy:
         Returns:
             True if this entry is a loss
         """
-        # For one-sided entries (MEIC-TF), loss if the placed side was stopped
+        # For one-sided entries (HYDRA), loss if the placed side was stopped
         call_only = getattr(entry, 'call_only', False)
         put_only = getattr(entry, 'put_only', False)
 
@@ -7511,7 +7513,7 @@ class MEICStrategy:
                 long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
 
         # Could not find liquid long wing - return original
-        # MKT-010: Still mark as illiquid so MEIC-TF can use one-sided entry
+        # MKT-010: Still mark as illiquid so HYDRA can use one-sided entry
         # The wing IS illiquid even though we're using the original strike
         logger.warning(
             f"MKT-008: Could not find liquid long {put_call} near {original_long_strike}, "

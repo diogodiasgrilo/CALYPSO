@@ -1,8 +1,8 @@
-# MEIC-TF (Trend Following Hybrid) Strategy Specification
+# HYDRA (Trend Following Hybrid) Strategy Specification
 
 **Last Updated:** 2026-02-28
 **Version:** 1.4.5
-**Purpose:** Complete strategy specification for the MEIC-TF 0DTE trading bot
+**Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
 **Status:** LIVE — deployed on Google Cloud VM, sole active trading bot
@@ -12,7 +12,7 @@
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [Philosophy: Why MEIC-TF Exists](#philosophy-why-meic-tf-exists)
+2. [Philosophy: Why HYDRA Exists](#philosophy-why-hydra-exists)
 3. [Strategy Overview](#strategy-overview)
 4. [Trend Detection](#trend-detection)
 5. [Complete Entry Decision Flow](#complete-entry-decision-flow)
@@ -30,9 +30,9 @@
 
 ## Executive Summary
 
-### What is MEIC-TF?
+### What is HYDRA?
 
-MEIC-TF is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — all entries are full iron condors.
+HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — all entries are full iron condors.
 
 Key MKT rules include: pre-entry credit validation, progressive OTM tightening, early close on ROC, smart hold checks, and pre-entry ROC gating — developed iteratively from 12 days of live trading data (Feb 10-26, 2026).
 
@@ -52,7 +52,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 
 ### How It Differs from Base MEIC
 
-| Aspect | Base MEIC | MEIC-TF |
+| Aspect | Base MEIC | HYDRA |
 |--------|-----------|---------|
 | Philosophy | Always market-neutral | Always full IC + EMA signal (informational) |
 | Entry type | Always full iron condor | Always full iron condor (skip if either side non-viable) |
@@ -65,13 +65,13 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 
 ---
 
-## Philosophy: Why MEIC-TF Exists
+## Philosophy: Why HYDRA Exists
 
 ### The Catalyst: February 4, 2026
 
 Pure MEIC entered 6 iron condors in a sustained downtrend. All 6 put sides were stopped. Loss: ~$1,500. The call sides all expired worthless — collecting ~$750 in credit — but it wasn't enough to offset 6 put-side stops.
 
-If the bot had detected the downtrend and placed only call spreads, it would have collected ~$750 with zero stops. MEIC-TF was built to do exactly that.
+If the bot had detected the downtrend and placed only call spreads, it would have collected ~$750 with zero stops. HYDRA was built to do exactly that.
 
 ### The Core Insight
 
@@ -81,11 +81,11 @@ MEIC's breakeven design means a full IC with one side stopped nets $0 after comm
 - **One-sided entry in a trending market:** Risky if wrong. But if the trend is correctly identified, the spread is far OTM on the safe side and has a high probability of expiring worthless.
 - **Full IC in a trending market:** The stressed side gets stopped, but the surviving side's credit offsets the loss. Still safe (~$5 loss), but you tie up capital for a near-zero return.
 
-MEIC-TF's philosophy: **Always use full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds either side non-viable, skip the entry entirely (no one-sided entries).**
+HYDRA's philosophy: **Always use full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds either side non-viable, skip the entry entirely (no one-sided entries).**
 
 ### Evolution Through Live Trading
 
-MEIC-TF started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each day's results revealed edge cases that led to new MKT rules:
+HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each day's results revealed edge cases that led to new MKT rules:
 
 | Date | Lesson | Rule Added |
 |------|--------|------------|
@@ -363,7 +363,7 @@ MEIC's core insight: **set the stop loss per side equal to total credit collecte
 
 With MEIC+ modification: stop = total_credit - $0.15, covering commission on a one-side-stop (4 entry + 1 close = 5 legs × $2.50 = $12.50, buffered to $15). Net P&L on a one-side-stop = +$2.50 (true breakeven with small buffer).
 
-### MEIC-TF Stop Formula
+### HYDRA Stop Formula
 
 Full IC stop uses the same formula as base MEIC: `stop_level = total_credit`.
 
@@ -383,7 +383,7 @@ stop_level = entry.total_credit          (both sides get the SAME level)
 
 ### MKT-025: Short-Only Stop Close (v1.4.3)
 
-When a stop triggers, MEIC-TF only closes the **SHORT leg** via market order. The long leg stays open and expires at end-of-day settlement (0DTE = same-day expiry, zero overnight risk).
+When a stop triggers, HYDRA only closes the **SHORT leg** via market order. The long leg stays open and expires at end-of-day settlement (0DTE = same-day expiry, zero overnight risk).
 
 **Why:** Research from the 0DTE iron condor community (Tammy Chambless, John Einar Sandvand with 1,344+ trades) shows that long wings (far OTM, illiquid) are where most slippage occurs on stop closes. Closing only the short leg:
 - **Reduces slippage** — one market order instead of two; the short leg (closer to ATM) has tighter markets
@@ -606,10 +606,10 @@ Any → HALTED                         (critical: overnight positions, stale reg
 If the bot restarts mid-day:
 
 1. Query Saxo API for all open positions
-2. Filter by Position Registry (bot name = "MEIC-TF")
+2. Filter by Position Registry (bot name = "HYDRA")
 3. Group by entry number using registry metadata
 4. Load state file for today's date
-5. Reconstruct `TFIronCondorEntry` objects with correct flags
+5. Reconstruct `HydraIronCondorEntry` objects with correct flags
 6. **State file is authoritative** for: entry classification, status flags, counters, credits (Fix #65)
 7. Resume monitoring from where it left off
 
@@ -714,7 +714,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `max_delta` | `15` | Maximum acceptable delta |
 | `min_credit_per_side` | `1.00` | Credit warning threshold ($/side) |
 | `max_credit_per_side` | `1.75` | Credit warning ceiling ($/side) |
-| `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020 call minimum (MEIC-TF override; base MEIC uses 0.50) |
+| `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020 call minimum (HYDRA override; base MEIC uses 0.50) |
 | `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022 put minimum (top of Tammy's $1.00-$1.75 range) |
 | `call_starting_otm_multiplier` | `2.0` | MKT-024: call starting OTM = base × multiplier |
 | `put_starting_otm_multiplier` | `2.0` | MKT-024: put starting OTM = base × multiplier |
@@ -780,18 +780,18 @@ One-sided entries were removed in v1.4.0. All entries are now full iron condors 
 |----------|---------|
 | [MEIC Strategy Specification](MEIC_STRATEGY_SPECIFICATION.md) | Base MEIC spec (strike selection, stop math, sources) |
 | [MEIC Edge Cases](MEIC_EDGE_CASES.md) | 79 edge cases for base MEIC |
-| [MEIC-TF Trading Journal](MEIC_TF_TRADING_JOURNAL.md) | Daily results, analysis, what-if projections |
-| [MEIC-TF Early Close Analysis](MEIC_TF_EARLY_CLOSE_ANALYSIS.md) | MKT-018 research: ROC vs credit-based thresholds |
-| [MEIC-TF README](../bots/meic_tf/README.md) | Operational guide: config, deployment, version history |
+| [HYDRA Trading Journal](HYDRA_TRADING_JOURNAL.md) | Daily results, analysis, what-if projections |
+| [HYDRA Early Close Analysis](HYDRA_EARLY_CLOSE_ANALYSIS.md) | MKT-018 research: ROC vs credit-based thresholds |
+| [HYDRA README](../bots/hydra/README.md) | Operational guide: config, deployment, version history |
 | [Saxo API Patterns](SAXO_API_PATTERNS.md) | Fill prices, order handling, WebSocket |
 
 ### Key Source Files
 
 | File | Purpose |
 |------|---------|
-| `bots/meic_tf/strategy.py` | MEIC-TF strategy (extends base MEIC) |
-| `bots/meic_tf/main.py` | Entry point, main loop, heartbeat, settlement |
+| `bots/hydra/strategy.py` | HYDRA strategy (extends base MEIC) |
+| `bots/hydra/main.py` | Entry point, main loop, heartbeat, settlement |
 | `bots/meic/strategy.py` | Base MEIC strategy (inherited methods) |
-| `bots/meic_tf/config/config.json.template` | Config template |
-| `data/meic_tf_state.json` | Daily state persistence (on VM) |
+| `bots/hydra/config/config.json.template` | Config template |
+| `data/hydra_state.json` | Daily state persistence (on VM) |
 | `data/meic_metrics.json` | Cumulative metrics (on VM) |

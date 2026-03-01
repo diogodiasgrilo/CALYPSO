@@ -40,7 +40,7 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - Per-side stop = total credit received (breakeven design)
 - Expected: ~20.7% CAGR, 4.31% max drawdown, ~70% win rate
 
-### 5. MEIC-TF - Trend Following MEIC (S&P 500)
+### 5. HYDRA - Trend Following MEIC (S&P 500)
 **MEIC + EMA 20/40 Trend Filter** - directional filtering to avoid losses on strong trend days:
 - Same entry schedule as MEIC (10:00-12:30 PM ET)
 - Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars
@@ -79,7 +79,7 @@ calypso/
 │   │   ├── main.py
 │   │   ├── strategy.py
 │   │   └── config/config.json
-│   └── meic_tf/                 # MEIC-TF (Trend Following MEIC)
+│   └── hydra/                 # HYDRA (Trend Following MEIC)
 │       ├── main.py
 │       ├── strategy.py
 │       └── config/config.json
@@ -159,11 +159,11 @@ sudo systemctl start delta_neutral
 sudo systemctl stop iron_fly_0dte
 sudo systemctl restart rolling_put_diagonal
 sudo systemctl restart meic
-sudo systemctl restart meic_tf
+sudo systemctl restart hydra
 
 # Start/stop ALL bots (token keeper keeps running)
-sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal meic meic_tf
-sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal meic meic_tf
+sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal meic hydra
+sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal meic hydra
 
 # Emergency kill (immediate)
 sudo systemctl kill -s SIGKILL delta_neutral
@@ -189,7 +189,7 @@ cd /opt/calypso
 sudo -u calypso git pull
 # Clear Python cache to ensure new code runs
 find bots shared services -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
-sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic meic_tf
+sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic hydra
 ```
 
 ---
@@ -205,7 +205,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 | Iron Fly 0DTE | `logs/iron_fly_0dte/bot.log` | Full logs for IF bot |
 | Rolling Put Diagonal | `logs/rolling_put_diagonal/bot.log` | Full logs for RPD bot |
 | MEIC | `logs/meic/bot.log` | Full logs for MEIC bot |
-| MEIC-TF | `logs/meic_tf/bot.log` | Full logs for MEIC-TF bot |
+| HYDRA | `logs/hydra/bot.log` | Full logs for HYDRA bot |
 
 ---
 
@@ -220,7 +220,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - **[Iron Fly Code Audit](docs/IRON_FLY_CODE_AUDIT.md)** - Pre-LIVE comprehensive code review
 - **[MEIC Strategy Spec](docs/MEIC_STRATEGY_SPECIFICATION.md)** - Full MEIC implementation details
 - **[MEIC Edge Cases](docs/MEIC_EDGE_CASES.md)** - Risk analysis (79 edge cases)
-- **[MEIC-TF README](bots/meic_tf/README.md)** - Trend Following MEIC bot details
+- **[HYDRA README](bots/hydra/README.md)** - Trend Following MEIC bot details
 - **[Configuration Reference](config/README.md)** - Config file reference
 - **[Token Keeper Service](services/token_keeper/README.md)** - OAuth token refresh service
 

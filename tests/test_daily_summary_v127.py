@@ -800,7 +800,7 @@ class TestStateFileOHLCPersistence:
             "vix_low": 17.14,
         }
 
-        # Replicate restore logic from meic_tf/strategy.py
+        # Replicate restore logic from hydra/strategy.py
         if ohlc:
             md.spx_open = ohlc.get("spx_open", 0.0)
             md.spx_high = ohlc.get("spx_high", 0.0)

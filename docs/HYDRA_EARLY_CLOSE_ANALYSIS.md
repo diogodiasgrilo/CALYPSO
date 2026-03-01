@@ -1,4 +1,4 @@
-# MEIC-TF Early Close Analysis: Profit-Taking Strategies
+# HYDRA Early Close Analysis: Profit-Taking Strategies
 
 **Created**: February 18, 2026
 **Updated**: February 18, 2026 (v4 - ROC method added, slippage research, user-selected 2.00% ROC threshold)
@@ -42,7 +42,7 @@ Two early close methods were analyzed using **actual P&L data from the bot's hea
 
 ## 1. The Core Question
 
-MEIC-TF collects credit by selling 0DTE SPX iron condor spreads. The full credit is "earned" when options expire worthless at 4:00 PM. But the risk exposure is asymmetric:
+HYDRA collects credit by selling 0DTE SPX iron condor spreads. The full credit is "earned" when options expire worthless at 4:00 PM. But the risk exposure is asymmetric:
 
 - **Unrealized P&L can reach 60-80% of credit by early afternoon** (as seen on Feb 18)
 - **Stop risk remains constant**: A late-day reversal costs the same as an early one
@@ -100,7 +100,7 @@ With the credit-based approach, Feb 13 never triggers any threshold. With ROC, i
 
 ### P&L Source: Actual Heartbeat Data
 
-The bot logs net P&L every ~13 seconds using Saxo's `ProfitLossOnTrade` field. This captures the **real mark-to-market value** including delta, gamma, and theta effects. P&L data was extracted from `journalctl -u meic_tf` logs for all 6 trading days.
+The bot logs net P&L every ~13 seconds using Saxo's `ProfitLossOnTrade` field. This captures the **real mark-to-market value** including delta, gamma, and theta effects. P&L data was extracted from `journalctl -u hydra` logs for all 6 trading days.
 
 ### Close Costs (Researched)
 
@@ -401,7 +401,7 @@ The credit-based approach was superseded because the credit denominator varies 5
 
 ## Sources
 
-- Bot heartbeat logs: `journalctl -u meic_tf` (Feb 10-18, 2026)
+- Bot heartbeat logs: `journalctl -u hydra` (Feb 10-18, 2026)
 - `scripts/early_close_backtest.py` v3 simulation code (credit-based)
 - `scripts/early_close_roc_backtest.py` v4 simulation code (ROC-based)
 - Daily Summary tab from Google Sheets trading log (capital deployed, P&L, commission)

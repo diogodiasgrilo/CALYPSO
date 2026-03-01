@@ -1,8 +1,8 @@
 # Google Cloud Ops Agent - Custom Configuration for CALYPSO
 #
 # Collects:
-# 1. All systemd journal logs (filtered at dashboard level for meic_tf)
-# 2. Bot file log at /opt/calypso/logs/meic_tf/bot.log (parsed into structured fields)
+# 1. All systemd journal logs (filtered at dashboard level for hydra)
+# 2. Bot file log at /opt/calypso/logs/hydra/bot.log (parsed into structured fields)
 # 3. Shared monitor log at /opt/calypso/logs/monitor.log
 #
 # Deploy:
@@ -12,17 +12,17 @@
 # Log format: "2026-02-26 09:16:01 | INFO     | shared.logger_service | HEARTBEAT | Market closed..."
 # After parsing: jsonPayload.et_time = "2026-02-26 09:16:01", jsonPayload.message = "HEARTBEAT | Market closed..."
 #
-# Last Updated: 2026-02-26
+# Last Updated: 2026-02-28
 
 logging:
   receivers:
     journal:
       type: systemd_journald
 
-    meic_tf_logfile:
+    hydra_logfile:
       type: files
       include_paths:
-        - /opt/calypso/logs/meic_tf/bot.log
+        - /opt/calypso/logs/hydra/bot.log
 
     monitor_log:
       type: files
@@ -32,7 +32,7 @@ logging:
   processors:
     # Parse bot log: "2026-02-26 09:01:00 | INFO | shared.logger_service | HEARTBEAT | ..."
     # Extracts: et_time, severity, module, message (the actual content after module)
-    meic_tf_parser:
+    hydra_parser:
       type: parse_regex
       regex: '(?<et_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?<severity>\w+)\s+\| (?<module>[\w.]+)\s+\| (?<message>.*)'
 
@@ -42,11 +42,11 @@ logging:
         receivers:
           - journal
 
-      meic_tf_logfile_pipeline:
+      hydra_logfile_pipeline:
         receivers:
-          - meic_tf_logfile
+          - hydra_logfile
         processors:
-          - meic_tf_parser
+          - hydra_parser
 
       monitor_pipeline:
         receivers:

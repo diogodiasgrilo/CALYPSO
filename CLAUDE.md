@@ -49,7 +49,7 @@ bots/
   delta_neutral/      # Brian's Delta Neutral strategy
   rolling_put_diagonal/  # Bill Belt's Rolling Put Diagonal strategy
   meic/               # Tammy Chambless's MEIC strategy (Multiple Entry Iron Condors)
-  meic_tf/            # MEIC + Trend Following (EMA 20/40 direction filter)
+  hydra/              # HYDRA: MEIC + Trend Following hybrid (EMA 20/40 direction filter)
 
 shared/               # Shared modules used by all bots
   saxo_client.py      # Saxo Bank API client (orders, positions, streaming)
@@ -135,7 +135,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 | Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral/config/config.json` | STOPPED |
 | Rolling Put Diagonal | `rolling_put_diagonal.service` | Bill Belt's Rolling Put Diagonal | `bots/rolling_put_diagonal/config/config.json` | STOPPED |
 | MEIC | `meic.service` | Tammy Chambless's MEIC (Multiple Entry Iron Condors) | `bots/meic/config/config.json` | STOPPED |
-| MEIC-TF | `meic_tf.service` | MEIC + Trend Following (EMA 20/40 filter) | `bots/meic_tf/config/config.json` | **LIVE** |
+| HYDRA | `hydra.service` | MEIC + Trend Following hybrid (EMA 20/40 filter) | `bots/hydra/config/config.json` | **LIVE** |
 
 All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `StartLimitBurst=5`
 
@@ -171,10 +171,10 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 | Iron Fly | `false` | LIVE | **STOPPED** |
 | Delta Neutral | `false` | LIVE | **STOPPED** |
 | MEIC | `false` | LIVE | **STOPPED** |
-| MEIC-TF | `false` | LIVE | **RUNNING** |
+| HYDRA | `false` | LIVE | **RUNNING** |
 | Rolling Put Diagonal | `true` | DRY-RUN | **STOPPED** |
 
-**Active Services:** `token_keeper`, `meic_tf`
+**Active Services:** `token_keeper`, `hydra`
 
 ### Iron Fly Bot Details
 - **Entry:** 10:00 AM EST (after 30-min opening range)
@@ -232,7 +232,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
-### MEIC-TF Bot Details (v1.4.5 - Updated 2026-02-28)
+### HYDRA Bot Details (v1.4.5 - Updated 2026-02-28)
 - **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
 - **Structure:** 6 entries per day (10:05, 10:35, 11:05, 11:35, 12:05, 12:35) — always full iron condors + credit gate
 - **EMA Trend Signal:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars. Signal (BULLISH/BEARISH/NEUTRAL) is informational only — logged and stored but does NOT drive entry type. All entries are full iron condors.
@@ -246,10 +246,10 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 - **Stop Formula:** Full IC stop = total_credit - $0.15 (MEIC+ covers $15 commission on one-side-stop for true breakeven). MKT-019 (2× max credit) removed in v1.4.0.
 - **Short-Only Stop (MKT-025):** When a stop triggers, only the SHORT leg is closed via market order. The long leg stays open and expires at end-of-day settlement (0DTE). Matches Tammy/Sandvand best practice: "stop on short only, not on the spread." Reduces slippage (1 market order vs 2) and saves $2.50 commission per stop.
 - **Illiquidity Fallback (MKT-010):** When credit estimation fails, checks wing illiquidity flags. Any wing illiquid → skip entry (no one-sided entries).
-- **State file:** `data/meic_tf_state.json` (separate from MEIC's `meic_state.json`)
-- **Why it exists:** On Feb 4, 2026, pure MEIC had all 6 put sides stopped in a sustained downtrend. MEIC-TF adds credit validation + progressive tightening to improve fill quality and profit management.
+- **State file:** `data/hydra_state.json` (separate from MEIC's `meic_state.json`)
+- **Why it exists:** On Feb 4, 2026, pure MEIC had all 6 put sides stopped in a sustained downtrend. HYDRA adds credit validation + progressive tightening to improve fill quality and profit management.
 
-**Note:** MEIC-TF and MEIC can run simultaneously - they use separate state files but share the Position Registry for multi-bot SPX position isolation.
+**Note:** HYDRA and MEIC can run simultaneously - they use separate state files but share the Position Registry for multi-bot SPX position isolation.
 
 ### Delta Neutral Bot Details
 - **Version:** 2.0.6 (Updated 2026-02-03 with margin settlement delay and improved retry logic)
@@ -515,10 +515,10 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-tradin
 ### Emergency Stop (All Bots + Token Keeper)
 ```bash
 # Stop all trading bots (token keeper keeps running to preserve auth)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
 
 # Stop EVERYTHING including token keeper (token will expire in ~20 min!)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf token_keeper"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra token_keeper"
 ```
 
 ### Stop Individual Services
@@ -535,8 +535,8 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop 
 # MEIC
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop meic"
 
-# MEIC-TF (Trend Following)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop meic_tf"
+# HYDRA (MEIC + Trend Following)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
 
 # Token Keeper (WARNING: token will expire in ~20 min without this!)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop token_keeper"
@@ -548,27 +548,27 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop 
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start token_keeper"
 
 # Start all trading bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
 
 # Individual bots
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start delta_neutral"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start rolling_put_diagonal"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start meic"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start meic_tf"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra"
 ```
 
 ### Restart Services
 ```bash
 # Restart all trading bots (token keeper usually doesn't need restart)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
 
 # Individual bots
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart delta_neutral"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart rolling_put_diagonal"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart meic"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart meic_tf"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
 
 # Token Keeper (rarely needed)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart token_keeper"
@@ -577,10 +577,10 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 ### Check Status
 ```bash
 # All services (bots + token keeper)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
 
 # List running Calypso services
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling|meic|token_keeper)'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling|meic|hydra|token_keeper)'"
 ```
 
 ### View Logs
@@ -593,19 +593,19 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u i
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u delta_neutral -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u rolling_put_diagonal -n 50 --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -n 50 --no-pager"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf -n 50 --no-pager"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 50 --no-pager"
 
 # Follow logs (live)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -f"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte -f"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -f"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf -f"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -f"
 
 # Today's logs
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper --since today --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte --since today --no-pager"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic --since today --no-pager"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic_tf --since today --no-pager"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra --since today --no-pager"
 ```
 
 ---
@@ -644,12 +644,12 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 3. **Restart bots to apply changes:**
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
 ```
 
 4. **Verify status:**
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal meic meic_tf"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
 ```
 
 5. **Post-Deployment Documentation Update (MANDATORY):**
@@ -980,16 +980,16 @@ SCRIPT
 ## Important Notes
 
 1. **Git on VM:** Must run as `calypso` user: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
-2. **Service names use underscores:** `iron_fly_0dte`, `delta_neutral`, `rolling_put_diagonal`, `meic`, `meic_tf`
-3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral,rolling_put_diagonal,meic,meic_tf}/bot.log`
+2. **Service names use underscores:** `iron_fly_0dte`, `delta_neutral`, `rolling_put_diagonal`, `meic`, `hydra`
+3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral,rolling_put_diagonal,meic,hydra}/bot.log`
 4. **Position data:** `/opt/calypso/data/iron_fly_position.json`
 5. **Config files are gitignored:** Real credentials come from Secret Manager
 6. **All API calls are direct:** No caching for order status or positions (always fresh from Saxo)
 7. **Iron Fly bot:** STOPPED (as of 2026-02-04) - Position Registry integration complete, paused to focus on MEIC
 8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
 9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
-10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by MEIC-TF for trend filtering
-11. **MEIC-TF bot:** Running in LIVE mode (v1.4.5, deployed 2026-02-28) - ONLY active trading bot - 6 entries per day (matching base MEIC) + EMA 20/40 trend signal (informational only, all entries full IC) + wider starting OTM 2× multiplier (MKT-024) + min spread width 60pt floor (MKT-026: cheaper longs on low-VIX days, MKT-025 never closes longs = pure savings) + credit gate with separate thresholds: call $1.00, put $1.75 (MKT-011) + early close on ROC >= 3% (MKT-018) + smart hold check before early close (MKT-023) + pre-entry ROC gate after 3 entries (MKT-021) + stop formula = total_credit - $0.15 (MEIC+ covers commission for true breakeven) + short-only stop close (MKT-025: close short, let long expire at settlement) + progressive OTM tightening for all entries (MKT-020/MKT-022) + no one-sided entries + proper P&L tracking (Fix #46/#47) + accurate log labels (Fix #49) + same-strike overlap prevention (Fix #50/MKT-013) + liquidity re-check after overlap adjustment (MKT-014) + Google Sheets timeout protection (Fix #64) + recovery entry classification fix (Fix #65) + post-MKT-013 strike conflict re-check (Fix #66) + long-long overlap prevention (Fix #67/MKT-015) + comprehensive timeout protection for all blocking calls (Fix #68) + accurate fill price tracking (Fix #70) + duplicate daily summary prevention (Fix #71) + net P&L in daily summary (Fix #72) + active entries property fix (Fix #73) + stop loss fill price deferred lookup fix (Fix #74) + async deferred stop fill lookup (Fix #75) + correct Saxo API field name for fill prices + closedpositions fallback (Fix #76) + post-restart settlement expired credits fix (Fix #77) + stop_loss_debits derived from P&L identity (Fix #78) + entries_skipped counter for MKT-011 skip (Fix #79) + batch quote API 7x rate limit reduction + Fix #80 Sheets Positions resize + min credit raised to $1.00/side (v1.3.1) + skip $0 long legs during early close (Fix #81) + removed MKT-016/017/base loss limit (v1.3.3) + Fix #82 midnight settlement gate lock (v1.3.4) + cumulative ROC columns in Daily Summary (v1.3.10)
+10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by HYDRA for trend filtering
+11. **HYDRA bot:** Running in LIVE mode (v1.4.5, deployed 2026-02-28) - ONLY active trading bot - 6 entries per day (matching base MEIC) + EMA 20/40 trend signal (informational only, all entries full IC) + wider starting OTM 2× multiplier (MKT-024) + min spread width 60pt floor (MKT-026: cheaper longs on low-VIX days, MKT-025 never closes longs = pure savings) + credit gate with separate thresholds: call $1.00, put $1.75 (MKT-011) + early close on ROC >= 3% (MKT-018) + smart hold check before early close (MKT-023) + pre-entry ROC gate after 3 entries (MKT-021) + stop formula = total_credit - $0.15 (MEIC+ covers commission for true breakeven) + short-only stop close (MKT-025: close short, let long expire at settlement) + progressive OTM tightening for all entries (MKT-020/MKT-022) + no one-sided entries + proper P&L tracking (Fix #46/#47) + accurate log labels (Fix #49) + same-strike overlap prevention (Fix #50/MKT-013) + liquidity re-check after overlap adjustment (MKT-014) + Google Sheets timeout protection (Fix #64) + recovery entry classification fix (Fix #65) + post-MKT-013 strike conflict re-check (Fix #66) + long-long overlap prevention (Fix #67/MKT-015) + comprehensive timeout protection for all blocking calls (Fix #68) + accurate fill price tracking (Fix #70) + duplicate daily summary prevention (Fix #71) + net P&L in daily summary (Fix #72) + active entries property fix (Fix #73) + stop loss fill price deferred lookup fix (Fix #74) + async deferred stop fill lookup (Fix #75) + correct Saxo API field name for fill prices + closedpositions fallback (Fix #76) + post-restart settlement expired credits fix (Fix #77) + stop_loss_debits derived from P&L identity (Fix #78) + entries_skipped counter for MKT-011 skip (Fix #79) + batch quote API 7x rate limit reduction + Fix #80 Sheets Positions resize + min credit raised to $1.00/side (v1.3.1) + skip $0 long legs during early close (Fix #81) + removed MKT-016/017/base loss limit (v1.3.3) + Fix #82 midnight settlement gate lock (v1.3.4) + cumulative ROC columns in Daily Summary (v1.3.10)
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 
@@ -1011,8 +1011,8 @@ SCRIPT
 | **Iron Fly strategy** | [IRON_FLY_STRATEGY_SPECIFICATION.md](docs/IRON_FLY_STRATEGY_SPECIFICATION.md) | Wing width rules, profit targets, Doc Severson + Jim Olson |
 | **Delta Neutral strategy** | [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md) | Roll mechanics, credit/debit logic, full spec |
 | **MEIC strategy spec** | [MEIC_STRATEGY_SPECIFICATION.md](docs/MEIC_STRATEGY_SPECIFICATION.md) | Full MEIC implementation details |
-| **MEIC-TF strategy spec** | [MEIC_TF_STRATEGY_SPECIFICATION.md](docs/MEIC_TF_STRATEGY_SPECIFICATION.md) | Full MEIC-TF spec: decision flows, MKT rules, performance data |
-| **MEIC-TF trading journal** | [MEIC_TF_TRADING_JOURNAL.md](docs/MEIC_TF_TRADING_JOURNAL.md) | Daily results, analysis, what-if projections |
+| **HYDRA strategy spec** | [HYDRA_STRATEGY_SPECIFICATION.md](docs/HYDRA_STRATEGY_SPECIFICATION.md) | Full HYDRA spec: decision flows, MKT rules, performance data |
+| **HYDRA trading journal** | [HYDRA_TRADING_JOURNAL.md](docs/HYDRA_TRADING_JOURNAL.md) | Daily results, analysis, what-if projections |
 | **MEIC edge cases** | [MEIC_EDGE_CASES.md](docs/MEIC_EDGE_CASES.md) | 79 edge cases for MEIC bot |
 | SMS/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
 | **Next bots to build** | [THETA_PROFITS_STRATEGY_ANALYSIS.md](docs/THETA_PROFITS_STRATEGY_ANALYSIS.md) | Top 3: MEIC, METF, SPX Put Credit |
@@ -1032,9 +1032,9 @@ SCRIPT
 | `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
 | `docs/IRON_FLY_EDGE_CASES.md` | 64 edge cases analyzed for Iron Fly bot |
 | `docs/MEIC_STRATEGY_SPECIFICATION.md` | **MEIC strategy** - Full Tammy Chambless MEIC implementation spec |
-| `docs/MEIC_TF_STRATEGY_SPECIFICATION.md` | **MEIC-TF strategy** - Full spec: decision flows, MKT rules, stop math, performance data |
-| `docs/MEIC_TF_TRADING_JOURNAL.md` | **MEIC-TF journal** - 10 days of live trading results and analysis |
-| `docs/MEIC_TF_EARLY_CLOSE_ANALYSIS.md` | **Early close research** - ROC vs credit-based thresholds, slippage analysis |
+| `docs/HYDRA_STRATEGY_SPECIFICATION.md` | **HYDRA strategy** - Full spec: decision flows, MKT rules, stop math, performance data |
+| `docs/HYDRA_TRADING_JOURNAL.md` | **HYDRA journal** - 10 days of live trading results and analysis |
+| `docs/HYDRA_EARLY_CLOSE_ANALYSIS.md` | **Early close research** - ROC vs credit-based thresholds, slippage analysis |
 | `docs/MEIC_EDGE_CASES.md` | 79 edge cases analyzed for MEIC bot |
 | `docs/DELTA_NEUTRAL_EDGE_CASES.md` | **55 edge cases** for Delta Neutral bot (updated 2026-01-28) |
 | `docs/ROLLING_PUT_DIAGONAL_EDGE_CASES.md` | Edge cases for Rolling Put Diagonal bot |
@@ -1124,23 +1124,23 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 
 38. **Recovery Logic Position Order Bug (Fix #38, 2026-02-05)** - When MEIC recovered entries from positions after restart, the code processed positions in iteration order and assumed short legs came before long legs. If positions arrived in order `[long_call, short_call]`, then: (1) `long_call` subtracted from 0 → credit = -20, (2) `short_call` OVERWROTE → credit = 210 (wrong, should be 190). This caused $410 P&L discrepancy on Feb 4. Solution: Use dictionary approach - collect ALL entry prices in first pass, then calculate NET credit in second pass: `call_spread_credit = entry_prices["short_call"] - entry_prices["long_call"]`. (Cost: Feb 4 bot reported -$1285 P&L instead of actual -$875 from Saxo)
 
-39. **One-Sided Entry Stop Level Triggers Immediately (Fix #40, 2026-02-06)** - MEIC-TF one-sided entries (put-only or call-only from trend filtering) were being closed ~10 seconds after entry. Root cause: Stop level was set to `credit` received, but `spread_value` (cost-to-close at mid prices) approximately equals credit at entry time. Due to bid-ask spread, mid prices are slightly HIGHER than fill prices, so `spread_value >= stop_level` became true immediately. Full ICs didn't have this issue because stop_level = total_credit (2× per-side credit), giving each side ~2× headroom. Solution: For one-sided entries, use `stop_level = 2 × credit` to match full IC behavior. This means stop triggers when cost-to-close = 2× credit, i.e., P&L = -credit (lost what you collected). Fixed in both `_calculate_stop_levels_tf()` and recovery path. (Cost: All one-sided entries on Feb 5-6 were immediately stopped out, losing real premium)
+39. **One-Sided Entry Stop Level Triggers Immediately (Fix #40, 2026-02-06)** - HYDRA one-sided entries (put-only or call-only from trend filtering) were being closed ~10 seconds after entry. Root cause: Stop level was set to `credit` received, but `spread_value` (cost-to-close at mid prices) approximately equals credit at entry time. Due to bid-ask spread, mid prices are slightly HIGHER than fill prices, so `spread_value >= stop_level` became true immediately. Full ICs didn't have this issue because stop_level = total_credit (2× per-side credit), giving each side ~2× headroom. Solution: For one-sided entries, use `stop_level = 2 × credit` to match full IC behavior. This means stop triggers when cost-to-close = 2× credit, i.e., P&L = -credit (lost what you collected). Fixed in both `_calculate_stop_levels_hydra()` and recovery path. (Cost: All one-sided entries on Feb 5-6 were immediately stopped out, losing real premium)
 
-40. **State File History Lost on Restart with No Positions (Fix #41, 2026-02-06)** - When MEIC-TF restarted and found no active positions (e.g., all entries stopped out), it would "start fresh" and reset the state file, losing the day's P&L history, completed entries count, and stop counters. Root cause: The recovery logic returned early with `return False` when no positions were found in the registry, without first loading historical data from the state file. Solution: Added `_load_state_file_history()` helper that loads today's state file data (stopped entries, realized P&L, commission totals, entry counters) before returning False. Now the bot preserves the day's history even when all positions have been closed. (Cost: Lost -$75 P&L tracking from Entry #1 on Feb 6 restart)
+40. **State File History Lost on Restart with No Positions (Fix #41, 2026-02-06)** - When HYDRA restarted and found no active positions (e.g., all entries stopped out), it would "start fresh" and reset the state file, losing the day's P&L history, completed entries count, and stop counters. Root cause: The recovery logic returned early with `return False` when no positions were found in the registry, without first loading historical data from the state file. Solution: Added `_load_state_file_history()` helper that loads today's state file data (stopped entries, realized P&L, commission totals, entry counters) before returning False. Now the bot preserves the day's history even when all positions have been closed. (Cost: Lost -$75 P&L tracking from Entry #1 on Feb 6 restart)
 
 41. **Merged Position Stop Loss Closes Wrong Amount and Breaks Registry (Fix #45, 2026-02-06)** - When two entries share the same strike (e.g., Entry #4 and Entry #5 both have short calls at 6950), Saxo merges them into a single position with Amount=-2. When one entry's stop is triggered, the bot was: (1) Closing only 1 contract with `amount=contracts_per_entry`, (2) `_verify_position_closed()` returning False because position still exists with Amount=-1, (3) Retrying 5 times then giving up, (4) `registry.unregister()` removing the position for ALL shared entries, breaking the remaining entry's tracking. Solution: Added `_is_position_shared()` to check registry metadata for `shared_entries`, `_get_position_amount()` to get current Amount before closing, updated `_verify_position_closed()` to verify Amount decreased (not position gone) for partial closes, added `_update_registry_for_partial_close()` to update `shared_entries` metadata, and added `get_position_info()` to PositionRegistry. (Cost: Stop losses on merged positions would fail verification, potentially leaving positions open or breaking registry for remaining entries)
 
-42. **Pre-Entry Credit Estimation Prevents Illiquid Trades (MKT-011, 2026-02-08)** - On Friday Feb 7, Entry #4 placed with illiquid wings resulted in $1.55 credit instead of expected ~$2.50. The entry was placed blindly without checking if credit was viable. Solution: Added `_estimate_entry_credit()` that fetches option quotes BEFORE placing orders and calculates expected credit. Added `_check_minimum_credit_gate()` (MEIC base) and `_check_credit_gate_tf()` (MEIC-TF) to validate credit against `min_viable_credit_per_side` (default $0.50). MEIC skips entry entirely if non-viable; MEIC-TF can convert to one-sided entry if one side is viable. MKT-010 (illiquidity check) becomes fallback-only when MKT-011 can't get quotes. (Cost: Would have prevented ~$100 loss from Friday Entry #4's poor credit)
+42. **Pre-Entry Credit Estimation Prevents Illiquid Trades (MKT-011, 2026-02-08)** - On Friday Feb 7, Entry #4 placed with illiquid wings resulted in $1.55 credit instead of expected ~$2.50. The entry was placed blindly without checking if credit was viable. Solution: Added `_estimate_entry_credit()` that fetches option quotes BEFORE placing orders and calculates expected credit. Added `_check_minimum_credit_gate()` (MEIC base) and `_check_credit_gate()` (HYDRA) to validate credit against `min_viable_credit_per_side` (default $0.50). MEIC skips entry entirely if non-viable; HYDRA can convert to one-sided entry if one side is viable. MKT-010 (illiquidity check) becomes fallback-only when MKT-011 can't get quotes. (Cost: Would have prevented ~$100 loss from Friday Entry #4's poor credit)
 
 43. **MKT-011 Must Respect Trend Filter (Fix #43, 2026-02-09)** - Original MKT-011 implementation could override trend direction inappropriately. Example: BULLISH trend + put credit non-viable → old code forced CALL-only, placing calls in an uptrend. This contradicts the trend filter's safety purpose. Solution: Added `original_trend` tracking and hybrid logic: In NEUTRAL markets, convert to one-sided entry (same as before). In BULLISH markets with put non-viable, skip entry entirely (don't place calls that contradict trend). In BEARISH markets with call non-viable, skip entry entirely (don't place puts). New safety event `MKT-011_TREND_CONFLICT` logs when skipping due to trend conflict. Same logic applied to MKT-010 fallback. (Cost: Prevented potential losses from trading against detected trend direction)
 
 44. **Strike Conflict Detection Prevents Long/Short Same Strike (Fix #44, 2026-02-09)** - Entry #5 failed with "cannot open positions in opposite directions" because its long put at 6885 conflicted with Entry #1's short put at 6885. Saxo doesn't allow both long and short positions at the same strike. Root cause: When market is range-bound, later entries calculate similar strikes to earlier entries, and the long wing of a new entry can land on the short strike of an existing entry. Solution: Added `_get_occupied_short_strikes()` to collect all short strikes from active entries, then `_adjust_for_strike_conflicts()` to detect if new long strikes would conflict and offset them by 5 points if needed. Check runs after all other strike adjustments in `_calculate_strikes()`. (Cost: Entry #5 and #6 failed on Feb 9, missing 2 potential entries)
 
-45. **Expired Position P&L Not Added to Realized P&L (Fix #46, 2026-02-10)** - Feb 9 daily summary showed **-$360** when actual Saxo P&L was **+$170** - a $530 error! Root cause: When 0DTE positions expire worthless at settlement, `check_after_hours_settlement()` only unregistered them from the registry without adding their credit (now profit) to `total_realized_pnl`. The daily summary calculated `total_pnl = realized_pnl + unrealized`, but `_get_total_saxo_pnl()` returns 0 after settlement (positions are gone from Saxo). The code also incorrectly marked expired positions as "stopped" when they should be "expired". Solution: (1) Added `call_side_expired`/`put_side_expired` flags to `IronCondorEntry` to distinguish from stopped. (2) In settlement, before marking a side as done, check if it was already stopped - if not, it expired and we add its credit to `total_realized_pnl`. (3) Updated state serialization/deserialization to persist the new flags. (4) Applied same fix to MEIC-TF's override of `check_after_hours_settlement()`. (Cost: Feb 9 reported -$360 instead of +$170 - would have shown first winning day as massive loss)
+45. **Expired Position P&L Not Added to Realized P&L (Fix #46, 2026-02-10)** - Feb 9 daily summary showed **-$360** when actual Saxo P&L was **+$170** - a $530 error! Root cause: When 0DTE positions expire worthless at settlement, `check_after_hours_settlement()` only unregistered them from the registry without adding their credit (now profit) to `total_realized_pnl`. The daily summary calculated `total_pnl = realized_pnl + unrealized`, but `_get_total_saxo_pnl()` returns 0 after settlement (positions are gone from Saxo). The code also incorrectly marked expired positions as "stopped" when they should be "expired". Solution: (1) Added `call_side_expired`/`put_side_expired` flags to `IronCondorEntry` to distinguish from stopped. (2) In settlement, before marking a side as done, check if it was already stopped - if not, it expired and we add its credit to `total_realized_pnl`. (3) Updated state serialization/deserialization to persist the new flags. (4) Applied same fix to HYDRA's override of `check_after_hours_settlement()`. (Cost: Feb 9 reported -$360 instead of +$170 - would have shown first winning day as massive loss)
 
-46. **One-Sided Entry Non-Opened Side Marked as "Stopped" Instead of "Skipped" (Fix #47, 2026-02-10)** - MEIC-TF one-sided entries (e.g., BULLISH → put-only) were incorrectly marking the non-opened side as "stopped" (`call_side_stopped = True`). This is semantically incorrect - "stopped" implies a loss was incurred, but the side was never opened. This caused: (1) Incorrect P&L interpretation (skipped sides counted as losses), (2) Confusing logs showing sides as "stopped" that never existed, (3) Potential recovery issues when determining entry status. Solution: Added `call_side_skipped`/`put_side_skipped` flags to `IronCondorEntry` to properly distinguish three states: **Stopped** (side was opened but hit stop loss = LOSS), **Expired** (side was opened and expired worthless = PROFIT), **Skipped** (side was never opened = NO P&L IMPACT). Updated all entry creation, recovery, and "is_done" checks to use the appropriate flag. (Cost: Incorrect status tracking for MEIC-TF one-sided entries)
+46. **One-Sided Entry Non-Opened Side Marked as "Stopped" Instead of "Skipped" (Fix #47, 2026-02-10)** - HYDRA one-sided entries (e.g., BULLISH → put-only) were incorrectly marking the non-opened side as "stopped" (`call_side_stopped = True`). This is semantically incorrect - "stopped" implies a loss was incurred, but the side was never opened. This caused: (1) Incorrect P&L interpretation (skipped sides counted as losses), (2) Confusing logs showing sides as "stopped" that never existed, (3) Potential recovery issues when determining entry status. Solution: Added `call_side_skipped`/`put_side_skipped` flags to `IronCondorEntry` to properly distinguish three states: **Stopped** (side was opened but hit stop loss = LOSS), **Expired** (side was opened and expired worthless = PROFIT), **Skipped** (side was never opened = NO P&L IMPACT). Updated all entry creation, recovery, and "is_done" checks to use the appropriate flag. (Cost: Incorrect status tracking for HYDRA one-sided entries)
 
-47. **Log Messages Showed Wrong Trend Label for MKT-011 Overrides (Fix #49, 2026-02-10)** - When MKT-011 credit gate triggered a conversion (e.g., NEUTRAL → put-only because call credit was non-viable), logs showed "BULLISH trend → placing PUT spread only" and "Entry #1 [BULLISH] complete" even though the actual trend was NEUTRAL. The heartbeat also showed "Call: 0% cushion⚠️" for sides that were never opened (SKIPPED). Solution: (1) Added `override_reason` field to `TFIronCondorEntry` to track "mkt-011", "mkt-010", or "trend". (2) Log messages now show actual reason: "MKT-011 override → placing PUT spread only (actual trend: neutral)". (3) Completion messages show correct label: "[MKT-011]" not "[BULLISH]". (4) Heartbeat cushion display shows "SKIPPED" for never-opened sides. (5) Google Sheets entries tagged with correct reason. (Cost: Confusing logs made it hard to diagnose entry decisions)
+47. **Log Messages Showed Wrong Trend Label for MKT-011 Overrides (Fix #49, 2026-02-10)** - When MKT-011 credit gate triggered a conversion (e.g., NEUTRAL → put-only because call credit was non-viable), logs showed "BULLISH trend → placing PUT spread only" and "Entry #1 [BULLISH] complete" even though the actual trend was NEUTRAL. The heartbeat also showed "Call: 0% cushion⚠️" for sides that were never opened (SKIPPED). Solution: (1) Added `override_reason` field to `HydraIronCondorEntry` to track "mkt-011", "mkt-010", or "trend". (2) Log messages now show actual reason: "MKT-011 override → placing PUT spread only (actual trend: neutral)". (3) Completion messages show correct label: "[MKT-011]" not "[BULLISH]". (4) Heartbeat cushion display shows "SKIPPED" for never-opened sides. (5) Google Sheets entries tagged with correct reason. (Cost: Confusing logs made it hard to diagnose entry decisions)
 
 48. **Same-Strike Entries Cause Position Merging and Tracking Loss (Fix #50, 2026-02-10)** - Feb 10: Entry #1 and Entry #2 both landed on same strikes (Put 6935/6885) because SPX only moved 0.72 points in 30 minutes. Saxo merged the positions into a single position with Amount=2, but DELETED Entry #1's position IDs. Result: Entry #1's P&L showed $0 constantly, its position IDs were "missing", and it was incorrectly marked as "stopped (external close)". If Entry #2's stop triggered, it would only close 1 contract, leaving 1 orphaned. Root cause: VIX-adjusted delta calculation produces identical strikes when SPX barely moves. Saxo merges positions at same strike by keeping the NEWER position ID and deleting the older one. Solution: Added `_adjust_for_same_strike_overlap()` (MKT-013) that detects when new entry's short strikes match existing entries and offsets them by 5 points further OTM. Applied after Fix #44's long strike conflict check. (Cost: Feb 10 Entry #1 P&L tracking broken, potential orphaned contract if stop triggered)
 
@@ -1148,13 +1148,13 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 
 50. **MKT-013 Overlap Adjustment May Land on Illiquid Strike (MKT-014, 2026-02-11)** - MKT-007 moves shorts **closer to ATM** to find liquid strikes. MKT-013 moves shorts **further OTM** to avoid overlap. These work in **opposite directions**. If MKT-007 moved a strike from 6940→6935 (closer, better liquidity), and MKT-013 then moved it 6935→6940 (further OTM, to avoid overlap), we end up at 6940 which was deemed illiquid. This is NOT an infinite loop (code is sequential), but MKT-013 can undo MKT-007's optimization. Solution: Added `_warn_if_strike_illiquid()` (MKT-014) that checks liquidity AFTER MKT-013 adjustment. If the new strike is illiquid, logs a warning. MKT-011 credit gate will still catch low-credit entries - MKT-014 adds early visibility into the conflict. (Cost: Potential suboptimal strikes; MKT-014 provides visibility)
 
-51. **Google Sheets API Hang Freezes Entire Bot (Fix #64, 2026-02-11)** - MEIC-TF bot froze for 3+ minutes at 13:09 ET while Entry #6 cushion went from 11% to 0%. Stop loss couldn't trigger because main loop was blocked. Root cause: Google Sheets API returned 503 Service Unavailable and the synchronous `gspread` call (`worksheet.append_row()`) hung indefinitely waiting for response. The bot's main trading loop was blocked during this time. Solution: Added `_sheets_call_with_timeout()` wrapper in `logger_service.py` that runs all Google Sheets API calls in a daemon thread with 10-second timeout. If call exceeds timeout, wrapper logs warning and returns `None` instead of blocking. All 30+ gspread calls (`append_row`, `get_all_values`, `get_all_records`, `update`, `delete_rows`, `format`) now wrapped with timeout protection. Trading operations continue even if logging fails. (Cost: Entry #6 stop loss delayed by ~3 minutes, -$135 net loss instead of potentially smaller loss if stopped earlier)
+51. **Google Sheets API Hang Freezes Entire Bot (Fix #64, 2026-02-11)** - HYDRA bot froze for 3+ minutes at 13:09 ET while Entry #6 cushion went from 11% to 0%. Stop loss couldn't trigger because main loop was blocked. Root cause: Google Sheets API returned 503 Service Unavailable and the synchronous `gspread` call (`worksheet.append_row()`) hung indefinitely waiting for response. The bot's main trading loop was blocked during this time. Solution: Added `_sheets_call_with_timeout()` wrapper in `logger_service.py` that runs all Google Sheets API calls in a daemon thread with 10-second timeout. If call exceeds timeout, wrapper logs warning and returns `None` instead of blocking. All 30+ gspread calls (`append_row`, `get_all_values`, `get_all_records`, `update`, `delete_rows`, `format`) now wrapped with timeout protection. Trading operations continue even if logging fails. (Cost: Entry #6 stop loss delayed by ~3 minutes, -$135 net loss instead of potentially smaller loss if stopped earlier)
 
 53. **MKT-013 Overlap Adjustment Creates New Long-vs-Short Strike Conflict (Fix #66, 2026-02-12)** - Entry #5 failed all 15 order attempts with "cannot open positions in opposite directions". Root cause: Fix #44 (long-vs-short conflict check) runs BEFORE MKT-013 (short-short overlap adjustment). MKT-013 shifts BOTH short AND long strikes further OTM, but the new long strike can land on an existing entry's short strike. Example: Entry #5 calculated Long Call 6980 (passed Fix #44), then MKT-013 shifted it to 6985 to avoid short-short overlap — but 6985 was Entry #2's short call. No re-check ran after MKT-013. Solution: Re-run `_adjust_for_strike_conflicts()` after `_adjust_for_same_strike_overlap()` in `_calculate_strikes()`. (Cost: Entry #5 failed on Feb 12, missed entry until fix deployed mid-day)
 
 54. **Long-Long Strike Overlap Causes Position Merge and Tracking Loss (Fix #67/MKT-015, 2026-02-12)** - Entry #5 (LC=6975) and Entry #6 (LC=6975) had the same long call strike. Saxo merged both long call positions into a single position (Amount=2), DELETING Entry #5's original position ID. On recovery, `_reconstruct_entry_from_positions()` could only match the merged position to Entry #6 (newer). Entry #5 showed `long_call_uic=null, long_call_strike=0`, causing DATA-004 errors ("partial zero prices") and disabled stop monitoring. MKT-013 (Fix #50) only prevented SHORT-SHORT overlap; LONG-LONG overlap was unhandled. Solution: (1) Added `_adjust_for_long_strike_overlap()` (MKT-015) in `_calculate_strikes()` as the final check — offsets long calls +5pt or long puts -5pt if they collide with existing entries' longs. (2) Added UIC keys to `preserved_entry_credits` dict so state file recovery can restore missing long leg UICs. (3) Strike calculation order is now: Fix #44 → MKT-013 → Fix #66 (re-run Fix #44) → MKT-015. (Cost: Entry #5 stop monitoring disabled for ~1 hour on Feb 12, bot got stuck on restart until fix deployed)
 
-55. **Comprehensive Timeout Protection for All Blocking Calls (Fix #68, 2026-02-12)** - Audit of all code paths that MEIC-TF uses (own code, inherited MEIC base, shared modules) found 5 blocking calls that could freeze the bot indefinitely, preventing stop loss monitoring. The Feb 11 freeze (Fix #64) was caused by one such call (Google Sheets API hang). Fix #68 hardens ALL remaining paths: (1) `saxo_client.py` token exchange/refresh `requests.post` - added `timeout=30` (HIGH risk: called during trading when Token Keeper is down). (2) `logger_service.py` Google Sheets startup initialization - wrapped all worksheet setup in daemon thread with 30s timeout (MEDIUM risk: mid-day restart with degraded Sheets API). (3) `secret_manager.py` `access_secret_version` - added `timeout=10` (MEDIUM risk: startup only). (4) `position_registry.py` file locks - changed from blocking `fcntl.flock` to non-blocking `LOCK_NB` with 10s timeout polling loop (LOW risk: locks held for microseconds). All changes are backwards-compatible - the bot gracefully degrades (returns False/None/empty) rather than hanging. (Cost: Prevention - no incident, but Feb 11 freeze proved this class of bug is real)
+55. **Comprehensive Timeout Protection for All Blocking Calls (Fix #68, 2026-02-12)** - Audit of all code paths that HYDRA uses (own code, inherited MEIC base, shared modules) found 5 blocking calls that could freeze the bot indefinitely, preventing stop loss monitoring. The Feb 11 freeze (Fix #64) was caused by one such call (Google Sheets API hang). Fix #68 hardens ALL remaining paths: (1) `saxo_client.py` token exchange/refresh `requests.post` - added `timeout=30` (HIGH risk: called during trading when Token Keeper is down). (2) `logger_service.py` Google Sheets startup initialization - wrapped all worksheet setup in daemon thread with 30s timeout (MEDIUM risk: mid-day restart with degraded Sheets API). (3) `secret_manager.py` `access_secret_version` - added `timeout=10` (MEDIUM risk: startup only). (4) `position_registry.py` file locks - changed from blocking `fcntl.flock` to non-blocking `LOCK_NB` with 10s timeout polling loop (LOW risk: locks held for microseconds). All changes are backwards-compatible - the bot gracefully degrades (returns False/None/empty) rather than hanging. (Cost: Prevention - no incident, but Feb 11 freeze proved this class of bug is real)
 
 52. **Recovery Misclassifies Full IC Entries with Stopped Sides (Fix #65, 2026-02-12)** - After bot restart, `_reconstruct_entry_from_positions()` only sees live positions. A full IC with a stopped put side (closed) appears as call-only positions. The code at lines 2221-2228 set `call_only=True` and `put_side_skipped=True`, then the state file restoration only set flags to `True` but never cleared incorrect ones to `False`. This caused 4 cascading bugs: (1) Entry type wrong (full IC → call-only), (2) `total_credit_received` recalculated from wrong entry types ($860 vs $1170), (3) Signal counts used entry type instead of `trend_signal` field (MKT-011 neutral entries counted as bearish/bullish), (4) Account Summary and Performance Metrics only logged pre-settlement. Solution: State file restoration now uses authoritative assignment (always set from state file, not just when True). Total credit preserved from state file instead of recalculated. Signal counting uses `entry.trend_signal`. Post-settlement logging added for Account Summary and Performance Metrics. Also fixed missing `override_reason` restoration and missing preservation of `entries_failed`, `entries_skipped`, `one_sided_entries`, `trend_overrides`, `credit_gate_skips` counters. (Cost: Feb 11 showed wrong total credit, signal counts, win rate, and incomplete post-settlement metrics across 3 Google Sheets tabs)
 
@@ -1172,12 +1172,12 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 
 62. **Wrong Field Name "FilledPrice" Caused 17 Days of fill_price=0 (Fix #76, 2026-02-17)** - Every stop loss market order since Jan 31 returned `fill_price=0` from Saxo's activities endpoint. Root cause: Fix #14 (Jan 31) stated the field was "FilledPrice" but this field **does not exist** in Saxo's API. Live diagnostic on Feb 17 confirmed the correct fields are `AveragePrice` and `ExecutionPrice`. The field `Price` only exists on limit orders (submitted limit price, not execution price). Our code at `saxo_client.py:3031` was doing `activity.get("FilledPrice") or activity.get("Price", 0)` — both returned None/0 for market orders (no FilledPrice field, no Price field). All 5 deferred async lookups (Fix #75) also failed because they called the same broken function. Solution: (1) Changed field lookup order to `AveragePrice → ExecutionPrice → Price` in `check_order_filled_by_activity()`. (2) Added `get_closed_position_price()` method using `/port/v1/closedpositions` endpoint as authoritative fallback — returns `ClosingPrice` for any recently closed position (available immediately with Intraday netting mode). (3) Updated `_get_close_fill_price()` and `_deferred_stop_fill_lookup()` to use two-tier lookup: activities first, closedpositions fallback. Account netting mode confirmed as `AverageRealTime` (Intraday). (Cost: 17 days of theoretical P&L instead of actual — cumulative P&L accuracy unknown, estimated $15-75/day discrepancy based on Feb 13 data)
 
-63. **Post-Restart Settlement Skips Expired Credits When Registry Empty (Fix #77, 2026-02-18)** - Feb 17 daily summary logged -$1,400 net instead of correct -$740 net ($660 error). Two cascading bugs: (1) `_load_state_file_history()` only restored "fully done" entries — entries with surviving sides (e.g., IC with call stopped but put still live) were silently dropped from `daily_state.entries`. (2) `check_after_hours_settlement()` returned True immediately when registry was empty, skipping the expired credit processing loop. Fix #71 then blocked all subsequent corrected summaries. Solution: (1) `_load_state_file_history()` now restores ALL entries, not just fully-done ones. Entries with surviving sides are restored but not marked `is_complete`. (2) Extracted expired credit processing into `_process_expired_credits()` helper method. (3) `check_after_hours_settlement()` now calls `_process_expired_credits()` even when registry is empty, before returning True. Same fix applied to both MEIC-TF override and MEIC base class. (Cost: Feb 17 daily summary and cumulative metrics had $660 error requiring manual correction)
+63. **Post-Restart Settlement Skips Expired Credits When Registry Empty (Fix #77, 2026-02-18)** - Feb 17 daily summary logged -$1,400 net instead of correct -$740 net ($660 error). Two cascading bugs: (1) `_load_state_file_history()` only restored "fully done" entries — entries with surviving sides (e.g., IC with call stopped but put still live) were silently dropped from `daily_state.entries`. (2) `check_after_hours_settlement()` returned True immediately when registry was empty, skipping the expired credit processing loop. Fix #71 then blocked all subsequent corrected summaries. Solution: (1) `_load_state_file_history()` now restores ALL entries, not just fully-done ones. Entries with surviving sides are restored but not marked `is_complete`. (2) Extracted expired credit processing into `_process_expired_credits()` helper method. (3) `check_after_hours_settlement()` now calls `_process_expired_credits()` even when registry is empty, before returning True. Same fix applied to both HYDRA override and MEIC base class. (Cost: Feb 17 daily summary and cumulative metrics had $660 error requiring manual correction)
 
 64. **Stop Loss Debits Uses Theoretical Stop Level Instead of Actual Close Cost (Fix #78, 2026-02-18)** - Feb 18 daily summary showed Stop Loss Debits=$200 when actual was $260 ($60 error). Root cause: `get_daily_summary()` calculated `stop_loss_debits += entry.call_side_stop - entry.call_spread_credit` where `call_side_stop` is the theoretical TRIGGER level, not the actual cost-to-close. Market orders get slippage (Entry #4 had 29% slippage: $220 actual vs $170 theoretical). The P&L identity `Expired Credits - Stop Loss Debits - Commission = Net P&L` was broken: $610-$200-$35=$375 != $315. Solution: Derive `stop_loss_debits` from the P&L identity instead: `stop_loss_debits = expired_credits - total_realized_pnl`. This is always accurate because `total_realized_pnl` already tracks actual close costs (including async fill corrections from Fix #75). (Cost: Stop Loss Debits column in daily summary was understated, P&L identity broken)
 
 65. **MKT-011 "Both Non-Viable" Skip Path Missing Counter Increments (Fix #79, 2026-02-18)** - Feb 18 Entry #5 was skipped by MKT-011 (both sides below minimum credit) but `entries_skipped` showed 0. Root cause: The "skip" gate result path at `_initiate_entry()` returned without incrementing `entries_skipped` or `credit_gate_skips`. All OTHER skip paths (trend conflict, illiquidity, etc.) correctly incremented both counters. Solution: Added `self.daily_state.entries_skipped += 1` and `self.daily_state.credit_gate_skips += 1` before the return statement. (Cost: Incorrect entries_skipped count in daily summary and state file)
 
-66. **~~Daily Loss Limit (MKT-017)~~ REMOVED in v1.3.3 (2026-02-23)** - MKT-016 (stop cascade breaker) and MKT-017 (daily loss limit) were both removed. Bot now always attempts all 6 entries regardless of stop count or realized P&L. Base MEIC's percentage-based loss limit also overridden to return False in MEIC-TF.
+66. **~~Daily Loss Limit (MKT-017)~~ REMOVED in v1.3.3 (2026-02-23)** - MKT-016 (stop cascade breaker) and MKT-017 (daily loss limit) were both removed. Bot now always attempts all 6 entries regardless of stop count or realized P&L. Base MEIC's percentage-based loss limit also overridden to return False in HYDRA.
 
 67. **Midnight Settlement Gate Lock Prevents Post-Market Settlement (Fix #82, 2026-02-23)** - Feb 23 bot failed to auto-reset for Feb 24 trading day. Root cause: At midnight ET, the main loop detects new day → `_reset_for_new_day()` clears registry → settlement check finds empty registry → returns True → `daily_summary_sent_date = today_date` (via "no trading activity, skipping" path). This **locks the settlement gate for the entire day**. At 4 PM when market closes, the gate check `daily_summary_sent_date != today_date` evaluates to `False` and settlement is completely skipped. Positions expire at settlement but registry still has stale IDs. At next midnight, `_reset_for_new_day()` finds stale registry entries → HALT. Bug was hidden because near-daily deployments reset `daily_summary_sent_date = None`. Three-part fix: (1) main.py: Don't set `daily_summary_sent_date` when `had_trading_activity=False AND is_after_market_close=False` — keep gate open pre-market. (2) `check_after_hours_settlement()`: When `_settlement_reconciliation_complete=True`, check if registry has new positions; if so, reset flag for proper settlement. (3) `_reset_for_new_day()`: When registry has positions, verify against Saxo API before halting — if positions are gone, clean up stale registry and proceed with normal reset. (Cost: Bot stuck in HALT loop requiring manual restart, missed Feb 24 trading day start)

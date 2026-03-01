@@ -356,14 +356,14 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Implementation** | `_parse_entry_times()` checks `is_early_close_day()` and filters to entries before 11:00 AM. See strategy.py:614-623 |
 | **Resolution** | Early close days use EARLY_CLOSE_ENTRY_TIMES (only 10:00 and 10:30 AM entries). |
 
-### 4.10 Wing Illiquidity Fallback (MEIC-TF Only)
+### 4.10 Wing Illiquidity Fallback (HYDRA Only)
 | | |
 |---|---|
 | **ID** | MKT-010 |
 | **Trigger** | Long wing strike has wide bid-ask spread (illiquid) |
 | **Expected Handling** | When credit estimation fails, check illiquidity flags. Trade the side with viable credit (opposite of illiquid wing). |
 | **Risk Level** | ✅ LOW |
-| **Implementation** | In MEIC-TF `_initiate_entry()`, if `credit_gate_handled=False` and `call_wing_illiquid=True`, force PUT-only (viable side). See meic_tf/strategy.py:479-503 |
+| **Implementation** | In HYDRA `_initiate_entry()`, if `credit_gate_handled=False` and `call_wing_illiquid=True`, force PUT-only (viable side). See hydra/strategy.py:479-503 |
 | **Resolution** | FIXED - MKT-010 is fallback when MKT-011 can't estimate credit. Trades the viable side, not the illiquid side (bug fixed 2026-02-08). |
 
 ### 4.11 Pre-Entry Credit Gate
@@ -373,7 +373,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Trigger** | Entry about to be placed, but market is illiquid or spread widths are unusual |
 | **Expected Handling** | Estimate credit from option quotes BEFORE placing orders. Skip or convert entry if credit non-viable. |
 | **Risk Level** | ✅ LOW |
-| **Implementation** | MEIC: `_check_minimum_credit_gate()` skips entry if either side < $0.50. MEIC-TF: `_check_credit_gate_tf()` can convert to one-sided entry if one side viable. See meic/strategy.py:1935-2008 and meic_tf/strategy.py:295-366 |
+| **Implementation** | MEIC: `_check_minimum_credit_gate()` skips entry if either side < $0.50. HYDRA: `_check_credit_gate()` can convert to one-sided entry if one side viable. See meic/strategy.py:1935-2008 and hydra/strategy.py:295-366 |
 | **Resolution** | FIXED - Pre-entry credit estimation prevents placing orders with non-viable premium. Prevents Friday Entry #4 scenario where $1.55 credit resulted instead of expected ~$2.50. |
 
 ---

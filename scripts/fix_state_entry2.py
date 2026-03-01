@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 
-state_file = "/opt/calypso/data/meic_tf_state.json"
+state_file = "/opt/calypso/data/hydra_state.json"
 with open(state_file, "r") as f:
     state = json.load(f)
 
@@ -20,7 +20,7 @@ entries = [e for e in state.get("entries", []) if e.get("entry_number") != 2]
 entry_2 = {
     "entry_number": 2,
     "entry_time": "2026-02-05T10:35:00-05:00",
-    "strategy_id": "meic_tf_20260205_002",
+    "strategy_id": "hydra_20260205_002",
     "trend_signal": "bearish",
     "call_only": True,
     "put_only": False,

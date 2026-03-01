@@ -1,4 +1,4 @@
-# MEIC-TF (Trend Following Hybrid) Trading Bot
+# HYDRA (Trend Following Hybrid) Trading Bot
 
 **Version:** 1.4.5 | **Last Updated:** 2026-02-28
 
@@ -6,7 +6,7 @@ A modified MEIC bot that adds EMA-based trend direction detection, pre-entry cre
 
 ## Strategy Overview
 
-MEIC-TF combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-following concepts from METF:
+HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-following concepts from METF:
 
 - **Before each entry**, check 20 EMA vs 40 EMA on SPX 1-minute bars
 - **EMA signal is informational only** — logged and stored but does NOT drive entry type
@@ -14,7 +14,7 @@ MEIC-TF combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend
 
 ### Why This Works
 
-On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. MEIC-TF addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), wider starting OTM (MKT-024), and early close on profitable days (MKT-018).
+On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), wider starting OTM (MKT-024), and early close on profitable days (MKT-018).
 
 ### Entry Schedule (6 entries, matching MEIC's 6)
 
@@ -29,7 +29,7 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 
 ### Credit Gate (MKT-011)
 
-Before placing any orders, MEIC-TF estimates the expected credit by fetching option quotes. Separate thresholds for calls ($1.00) and puts ($1.75), matching Tammy's $1.00-$1.75 per-side credit range.
+Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($1.00) and puts ($1.75), matching Tammy's $1.00-$1.75 per-side credit range.
 
 | Call Credit | Put Credit | Action |
 |-------------|------------|--------|
@@ -126,7 +126,7 @@ Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` �
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020: Call minimum credit (MEIC-TF override, base is $0.50) |
+| `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020: Call minimum credit (HYDRA override, base is $0.50) |
 | `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022: Put minimum credit (top of Tammy's $1.00-$1.75 range) |
 | `call_starting_otm_multiplier` | `2.0` | MKT-024: Call starting OTM = base × multiplier |
 | `put_starting_otm_multiplier` | `2.0` | MKT-024: Put starting OTM = base × multiplier |
@@ -143,39 +143,39 @@ Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` �
 
 ```bash
 # Run in simulation mode (no real orders)
-python -m bots.meic_tf.main --dry-run
+python -m bots.hydra.main --dry-run
 
 # Run with live data (real orders)
-python -m bots.meic_tf.main --live
+python -m bots.hydra.main --live
 
 # Show current status
-python -m bots.meic_tf.main --status
+python -m bots.hydra.main --status
 ```
 
 ## Deployment
 
 1. Copy config template and edit:
 ```bash
-cp bots/meic_tf/config/config.json.template bots/meic_tf/config/config.json
+cp bots/hydra/config/config.json.template bots/hydra/config/config.json
 # Edit config.json with your settings
 ```
 
 2. Install systemd service:
 ```bash
-sudo cp bots/meic_tf/meic_tf.service /etc/systemd/system/
+sudo cp bots/hydra/hydra.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable meic_tf
-sudo systemctl start meic_tf
+sudo systemctl enable hydra
+sudo systemctl start hydra
 ```
 
 3. Monitor:
 ```bash
-sudo journalctl -u meic_tf -f
+sudo journalctl -u hydra -f
 ```
 
 ## Differences from Pure MEIC
 
-| Aspect | Pure MEIC | MEIC-TF |
+| Aspect | Pure MEIC | HYDRA |
 |--------|-----------|---------|
 | Entry type | Always full IC | Full IC + credit gate (skip if non-viable) |
 | Starting OTM | VIX-adjusted | 2× VIX-adjusted (MKT-024), then tightened |
@@ -194,22 +194,22 @@ sudo journalctl -u meic_tf -f
 
 ## State Files
 
-MEIC-TF uses **separate state files** from MEIC to allow both bots to run simultaneously:
+HYDRA uses **separate state files** from MEIC to allow both bots to run simultaneously:
 
 | File | Description |
 |------|-------------|
-| `data/meic_tf_state.json` | MEIC-TF daily state (entries, P&L, stops) |
+| `data/hydra_state.json` | HYDRA daily state (entries, P&L, stops) |
 | `data/position_registry.json` | Shared with all SPX bots for position isolation |
 
-**Important**: The Position Registry is shared across all SPX bots (MEIC, MEIC-TF, Iron Fly) to prevent position conflicts when multiple bots trade the same underlying.
+**Important**: The Position Registry is shared across all SPX bots (MEIC, HYDRA, Iron Fly) to prevent position conflicts when multiple bots trade the same underlying.
 
 ## Files
 
 ```
-bots/meic_tf/
+bots/hydra/
 ├── main.py                 # Entry point
 ├── strategy.py             # Trend-following strategy (extends MEIC)
-├── meic_tf.service         # Systemd service file
+├── hydra.service         # Systemd service file
 ├── config/
 │   └── config.json.template
 └── README.md               # This file
@@ -217,10 +217,10 @@ bots/meic_tf/
 
 ## Related Documentation
 
-- [MEIC-TF Strategy Specification](../../docs/MEIC_TF_STRATEGY_SPECIFICATION.md) — Full strategy spec: decision flows, MKT rules, performance data
+- [HYDRA Strategy Specification](../../docs/HYDRA_STRATEGY_SPECIFICATION.md) — Full strategy spec: decision flows, MKT rules, performance data
 - [MEIC Strategy Specification](../../docs/MEIC_STRATEGY_SPECIFICATION.md) — Base MEIC spec (inherited strike selection, stop math)
-- [MEIC-TF Trading Journal](../../docs/MEIC_TF_TRADING_JOURNAL.md) — Daily results and analysis
-- [MEIC-TF Early Close Analysis](../../docs/MEIC_TF_EARLY_CLOSE_ANALYSIS.md) — MKT-018 research
+- [HYDRA Trading Journal](../../docs/HYDRA_TRADING_JOURNAL.md) — Daily results and analysis
+- [HYDRA Early Close Analysis](../../docs/HYDRA_EARLY_CLOSE_ANALYSIS.md) — MKT-018 research
 - [MEIC Edge Cases](../../docs/MEIC_EDGE_CASES.md)
 - [Technical Indicators](../../shared/technical_indicators.py)
 

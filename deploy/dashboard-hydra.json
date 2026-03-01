@@ -1,5 +1,5 @@
 {
-  "displayName": "MEIC-TF Bot - Live Dashboard",
+  "displayName": "HYDRA Bot - Live Dashboard",
   "mosaicLayout": {
     "columns": 12,
     "tiles": [
@@ -11,7 +11,7 @@
         "widget": {
           "title": "Bot Status",
           "text": {
-            "content": "## MEIC-TF Trading Bot (SPX 0DTE Iron Condors)\n\nThis dashboard shows the live heartbeat feed from the MEIC-TF bot running on the `calypso-bot` VM. Heartbeats are logged every ~10 seconds during market hours (9:30 AM - 4:00 PM ET). Outside market hours, the bot logs a sleeping heartbeat every 15 minutes.\n\n**Key fields:** SPX price | VIX level | Entries placed/total | Active positions | Trend (BULLISH/BEARISH/NEUTRAL)",
+            "content": "## HYDRA Trading Bot (SPX 0DTE Iron Condors)\n\nThis dashboard shows the live heartbeat feed from the HYDRA bot running on the `calypso-bot` VM. Heartbeats are logged every ~10 seconds during market hours (9:30 AM - 4:00 PM ET). Outside market hours, the bot logs a sleeping heartbeat every 15 minutes.\n\n**Key fields:** SPX price | VIX level | Entries placed/total | Active positions | Trend (BULLISH/BEARISH/NEUTRAL)",
             "format": "MARKDOWN"
           }
         }
@@ -24,7 +24,7 @@
         "widget": {
           "title": "Bot Live Terminal Output",
           "logsPanel": {
-            "filter": "resource.type=\"gce_instance\"\nlog_id(\"meic_tf_logfile\")\n-jsonPayload.message:\"Attempting to refresh access token\"\n-jsonPayload.message:\"Another process already refreshed tokens\"\n-jsonPayload.message:\"Session already has FullTradingAndChat\"",
+            "filter": "resource.type=\"gce_instance\"\nlog_id(\"hydra_logfile\")\n-jsonPayload.message:\"Attempting to refresh access token\"\n-jsonPayload.message:\"Another process already refreshed tokens\"\n-jsonPayload.message:\"Session already has FullTradingAndChat\"",
             "resourceNames": [
               "projects/calypso-trading-bot"
             ]

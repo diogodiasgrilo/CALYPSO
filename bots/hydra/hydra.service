@@ -1,27 +1,25 @@
-# MEIC-TF (Trend Following Hybrid) Trading Bot Systemd Service
+# HYDRA 0DTE Trading Bot Systemd Service
 #
-# This is a modified MEIC bot that adds EMA-based trend detection:
-# - BULLISH (20 EMA > 40 EMA): Place PUT spreads only
-# - BEARISH (20 EMA < 40 EMA): Place CALL spreads only
-# - NEUTRAL: Place full iron condor (standard MEIC)
+# Multi-Entry Iron Condors (SPX 0DTE) with credit gates, progressive OTM
+# tightening, and smart exits. Based on Tammy Chambless's MEIC strategy.
 #
 # Installation:
-#   sudo cp /opt/calypso/bots/meic_tf/meic_tf.service /etc/systemd/system/meic_tf.service
+#   sudo cp /opt/calypso/bots/hydra/hydra.service /etc/systemd/system/hydra.service
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable meic_tf.service
-#   sudo systemctl start meic_tf.service
+#   sudo systemctl enable hydra.service
+#   sudo systemctl start hydra.service
 #
 # Management:
-#   sudo systemctl status meic_tf
-#   sudo systemctl stop meic_tf
-#   sudo systemctl restart meic_tf
-#   sudo journalctl -u meic_tf -f
+#   sudo systemctl status hydra
+#   sudo systemctl stop hydra
+#   sudo systemctl restart hydra
+#   sudo journalctl -u hydra -f
 #
 # IMPORTANT: Never use `kill` or `pkill` - always use systemctl to stop the service!
 # The service has Restart=always, so killing it will cause auto-restart in 30 seconds.
 
 [Unit]
-Description=MEIC-TF 0DTE Trading Bot (Trend Following Hybrid)
+Description=HYDRA 0DTE Trading Bot (Multi-Entry Iron Condors)
 After=network.target
 Wants=network-online.target
 
@@ -31,12 +29,12 @@ User=calypso
 Group=calypso
 WorkingDirectory=/opt/calypso
 
-# Run the MEIC-TF bot
+# Run the HYDRA bot
 # Mode is controlled by config.json "dry_run" field:
 #   "dry_run": true  = simulation (no real orders)
 #   "dry_run": false = live trading
 # CLI flag --dry-run also works and takes priority over config
-ExecStart=/opt/calypso/.venv/bin/python -m bots.meic_tf.main
+ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main
 
 # Graceful shutdown - send SIGTERM, wait 60s for cleanup
 KillMode=mixed
@@ -54,7 +52,7 @@ StartLimitBurst=5
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=meic_tf
+SyslogIdentifier=hydra
 
 [Install]
 WantedBy=multi-user.target

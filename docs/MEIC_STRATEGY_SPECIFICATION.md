@@ -449,7 +449,7 @@ Before placing any orders, MEIC estimates the expected credit by fetching option
 
 ### Credit Gate Logic
 
-| Condition | MEIC Base | MEIC-TF |
+| Condition | MEIC Base | HYDRA |
 |-----------|-----------|---------|
 | Both sides ≥ $0.50 | Proceed normally | Proceed (trend signal decides) |
 | Call ≥ $0.50, Put < $0.50 | Skip entry | Force CALL-only |

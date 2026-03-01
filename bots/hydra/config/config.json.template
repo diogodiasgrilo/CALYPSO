@@ -1,5 +1,5 @@
 {
-    "bot_name": "MEIC-TF",
+    "bot_name": "HYDRA",
     "saxo_api": {
         "environment": "live",
         "app_key": "FROM_SECRET_MANAGER",
@@ -67,7 +67,7 @@
         "min_entries_before_roc_gate": 3
     },
     "trend_filter": {
-        "_comment": "EMA-based trend direction detection for MEIC-TF",
+        "_comment": "EMA-based trend direction detection for HYDRA",
         "enabled": true,
         "ema_short_period": 20,
         "ema_long_period": 40,
@@ -88,9 +88,9 @@
     },
     "logging": {
         "log_level": "INFO",
-        "log_dir": "logs/meic_tf",
+        "log_dir": "logs/hydra",
         "google_sheets_enabled": true,
-        "spreadsheet_name": "Calypso_MEIC-TF_Live_Data",
-        "strategy_type": "meic_tf"
+        "spreadsheet_name": "Calypso_HYDRA_Live_Data",
+        "strategy_type": "hydra"
     }
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Test script for MEIC-TF trend detection.
+Test script for HYDRA trend detection.
 
-This script tests the EMA-based trend detection logic that MEIC-TF uses
+This script tests the EMA-based trend detection logic that HYDRA uses
 to determine whether to place call spreads, put spreads, or full iron condors.
 
 Run on VM:
@@ -47,7 +47,7 @@ def get_trend_signal(ema_short: float, ema_long: float, threshold: float = 0.001
 
 def main():
     print("=" * 70)
-    print("MEIC-TF TREND DETECTION TEST")
+    print("HYDRA TREND DETECTION TEST")
     print("=" * 70)
     print()
 
@@ -57,9 +57,9 @@ def main():
     print(f"Current Time (ET): {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print()
 
-    # Load config (use MEIC-TF config if available, otherwise MEIC)
+    # Load config (use HYDRA config if available, otherwise MEIC)
     try:
-        config_path = "bots/meic_tf/config/config.json"
+        config_path = "bots/hydra/config/config.json"
         config_loader = ConfigLoader(config_path)
         config = config_loader.load_config()
         print(f"Loaded config: {config_path}")
@@ -173,33 +173,33 @@ def main():
         if signal == "BULLISH":
             print(f"  📈 SIGNAL: BULLISH (20 EMA > 40 EMA by {diff_pct * 100:.4f}%)")
             print()
-            print("  MEIC-TF Action: Place PUT SPREAD ONLY")
+            print("  HYDRA Action: Place PUT SPREAD ONLY")
             print("  Rationale: Uptrend detected - calls are risky, puts are safe")
         elif signal == "BEARISH":
             print(f"  📉 SIGNAL: BEARISH (20 EMA < 40 EMA by {abs(diff_pct) * 100:.4f}%)")
             print()
-            print("  MEIC-TF Action: Place CALL SPREAD ONLY")
+            print("  HYDRA Action: Place CALL SPREAD ONLY")
             print("  Rationale: Downtrend detected - puts are risky, calls are safe")
         else:
             print(f"  ↔️  SIGNAL: NEUTRAL (EMAs within {threshold * 100:.2f}% of each other)")
             print()
-            print("  MEIC-TF Action: Place FULL IRON CONDOR")
+            print("  HYDRA Action: Place FULL IRON CONDOR")
             print("  Rationale: Range-bound market - both sides are safe")
 
         print()
         print("=" * 70)
 
-        # Show what regular MEIC would do vs MEIC-TF
+        # Show what regular MEIC would do vs HYDRA
         print()
-        print("COMPARISON: MEIC vs MEIC-TF")
+        print("COMPARISON: MEIC vs HYDRA")
         print("-" * 40)
         print(f"  Regular MEIC:  Full Iron Condor (always)")
         if signal == "BULLISH":
-            print(f"  MEIC-TF:       Put Spread Only (call spread skipped)")
+            print(f"  HYDRA:       Put Spread Only (call spread skipped)")
         elif signal == "BEARISH":
-            print(f"  MEIC-TF:       Call Spread Only (put spread skipped)")
+            print(f"  HYDRA:       Call Spread Only (put spread skipped)")
         else:
-            print(f"  MEIC-TF:       Full Iron Condor (same as MEIC)")
+            print(f"  HYDRA:       Full Iron Condor (same as MEIC)")
         print()
 
         return 0

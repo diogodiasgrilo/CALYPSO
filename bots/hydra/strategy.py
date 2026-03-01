@@ -1,5 +1,5 @@
 """
-strategy.py - MEIC-TF (Trend Following Hybrid) Strategy Implementation
+strategy.py - HYDRA (Trend Following Hybrid) Strategy Implementation
 
 This module extends the base MEIC strategy with EMA-based trend direction detection
 and credit validation. Before each entry, it checks 20 EMA vs 40 EMA on SPX 1-minute
@@ -21,6 +21,7 @@ Author: Trading Bot Developer
 Date: 2026-02-04
 
 Based on: bots/meic/strategy.py (MEIC v1.2.9)
+See docs/HYDRA_STRATEGY_SPECIFICATION.md for full HYDRA details.
 See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
 """
 
@@ -58,10 +59,10 @@ from bots.meic.strategy import (
 )
 
 # =============================================================================
-# MEIC-TF SPECIFIC FILE PATHS (separate from MEIC)
+# HYDRA SPECIFIC FILE PATHS (separate from MEIC)
 # =============================================================================
 
-# CRITICAL: MEIC-TF must use separate state files from MEIC to prevent conflicts
+# CRITICAL: HYDRA must use separate state files from MEIC to prevent conflicts
 # when both bots run simultaneously. Each bot maintains its own:
 # - State file: Tracks entries, P&L, stops for the day
 # - Metrics file: Historical performance tracking
@@ -71,8 +72,8 @@ DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "data"
 )
-MEIC_TF_STATE_FILE = os.path.join(DATA_DIR, "meic_tf_state.json")
-MEIC_TF_METRICS_FILE = os.path.join(DATA_DIR, "meic_tf_metrics.json")
+HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
+HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ class TrendSignal(Enum):
 # =============================================================================
 
 @dataclass
-class TFIronCondorEntry(IronCondorEntry):
+class HydraIronCondorEntry(IronCondorEntry):
     """
     Extended IronCondorEntry that tracks which sides were placed.
 
@@ -150,19 +151,19 @@ class TFIronCondorEntry(IronCondorEntry):
 
 
 # =============================================================================
-# MEIC-TF STRATEGY
+# HYDRA STRATEGY
 # =============================================================================
 
-class MEICTFStrategy(MEICStrategy):
+class HydraStrategy(MEICStrategy):
     """
-    MEIC-TF (Trend Following Hybrid) Strategy Implementation.
+    HYDRA (Trend Following Hybrid) Strategy Implementation.
 
     Extends MEICStrategy with EMA-based trend detection and credit validation:
     - Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars
     - Signal is informational only — logged and stored but does NOT drive entry type
     - All entries are full iron condors (one-sided entries removed in v1.4.0)
 
-    Key Features (MEIC-TF specific, beyond base MEIC):
+    Key Features (HYDRA specific, beyond base MEIC):
     - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
     - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $1.00, put min $1.75
       Always skips entry if either side non-viable (no one-sided entries)
@@ -180,8 +181,8 @@ class MEICTFStrategy(MEICStrategy):
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
-    # This ensures MEIC-TF positions are isolated in the registry
-    BOT_NAME = "MEIC-TF"
+    # This ensures HYDRA positions are isolated in the registry
+    BOT_NAME = "HYDRA"
 
     def __init__(
         self,
@@ -192,7 +193,7 @@ class MEICTFStrategy(MEICStrategy):
         alert_service: Optional[AlertService] = None
     ):
         """
-        Initialize the MEIC-TF strategy.
+        Initialize the HYDRA strategy.
 
         Args:
             saxo_client: Authenticated Saxo API client
@@ -219,21 +220,24 @@ class MEICTFStrategy(MEICStrategy):
         self._last_ema_long: float = 0.0
         self._last_ema_diff_pct: float = 0.0
 
-        # CRITICAL: Set state file path BEFORE calling parent init
+        # CRITICAL: Set state/metrics file paths BEFORE calling parent init
         # Parent's __init__ calls _recover_positions_from_saxo() which needs the correct state file
-        # This prevents conflicts when both MEIC and MEIC-TF run simultaneously
-        self.state_file = MEIC_TF_STATE_FILE
+        # and _load_cumulative_metrics() which needs the correct metrics file
+        # This prevents conflicts when both MEIC and HYDRA run simultaneously
+        self.state_file = HYDRA_STATE_FILE
+        self.metrics_file = HYDRA_METRICS_FILE
 
         # Call parent init (this sets up everything else including recovery)
         super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
 
-        logger.info(f"MEIC-TF using state file: {self.state_file}")
+        logger.info(f"HYDRA using state file: {self.state_file}")
+        logger.info(f"HYDRA using metrics file: {self.metrics_file}")
 
         # Update alert service name
         if not alert_service:
-            self.alert_service = AlertService(config, "MEIC-TF")
+            self.alert_service = AlertService(config, "HYDRA")
 
-        logger.info(f"MEIC-TF Strategy initialized")
+        logger.info(f"HYDRA Strategy initialized")
         logger.info(f"  Trend filter enabled: {self.trend_enabled}")
         logger.info(f"  EMA periods: {self.ema_short_period}/{self.ema_long_period}")
         logger.info(f"  Neutral threshold: {self.ema_neutral_threshold * 100:.2f}%")
@@ -277,7 +281,7 @@ class MEICTFStrategy(MEICStrategy):
         if self.early_close_enabled:
             logger.info(f"  Hold check (MKT-023): {'ENABLED' if self.hold_check_enabled else 'DISABLED'} (lean tolerance {self.hold_check_lean_tolerance}%)")
 
-        # Override min credit from base class $0.50 to $1.00 for MEIC-TF
+        # Override min credit from base class $0.50 to $1.00 for HYDRA
         self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 1.00) * 100
 
         # Separate put minimum credit — Tammy's range is $1.00-$1.75/side
@@ -297,7 +301,7 @@ class MEICTFStrategy(MEICStrategy):
     # OVERRIDE: Strike calculation with wider starting OTM (MKT-024)
     # =========================================================================
 
-    def _calculate_strikes(self, entry: TFIronCondorEntry) -> bool:
+    def _calculate_strikes(self, entry: HydraIronCondorEntry) -> bool:
         """
         Override base MEIC strike calculation to apply MKT-024 wider starting OTM.
 
@@ -311,7 +315,7 @@ class MEICTFStrategy(MEICStrategy):
         to reach $1.00 as before.
 
         Args:
-            entry: TFIronCondorEntry to populate with strikes
+            entry: HydraIronCondorEntry to populate with strikes
 
         Returns:
             True if strikes calculated successfully
@@ -480,7 +484,7 @@ class MEICTFStrategy(MEICStrategy):
         return super()._should_attempt_entry(now)
 
     def _is_daily_loss_limit_reached(self) -> bool:
-        """Disabled for MEIC-TF — bot always attempts all entries."""
+        """Disabled for HYDRA — bot always attempts all entries."""
         return False
 
     # =========================================================================
@@ -1131,10 +1135,10 @@ class MEICTFStrategy(MEICStrategy):
             return TrendSignal.NEUTRAL
 
     # =========================================================================
-    # MKT-011: Credit Gate for MEIC-TF
+    # MKT-011: Credit Gate for HYDRA
     # =========================================================================
 
-    def _check_credit_gate_tf(self, entry: TFIronCondorEntry) -> Tuple[str, bool]:
+    def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool]:
         """
         MKT-011: Check if estimated credit is above minimum viable threshold.
 
@@ -1143,7 +1147,7 @@ class MEICTFStrategy(MEICStrategy):
         since v1.4.0).
 
         Args:
-            entry: TFIronCondorEntry with strikes calculated
+            entry: HydraIronCondorEntry with strikes calculated
 
         Returns:
             Tuple of (result, estimation_worked):
@@ -1215,7 +1219,7 @@ class MEICTFStrategy(MEICStrategy):
             )
             return ("call_only", True)  # estimation_worked = True
 
-    def _apply_progressive_call_tightening(self, entry: TFIronCondorEntry) -> bool:
+    def _apply_progressive_call_tightening(self, entry: HydraIronCondorEntry) -> bool:
         """
         MKT-020: Progressive call OTM tightening for full IC entries.
 
@@ -1229,7 +1233,7 @@ class MEICTFStrategy(MEICStrategy):
         regardless of how many candidate strikes are evaluated.
 
         Args:
-            entry: TFIronCondorEntry with strikes already calculated
+            entry: HydraIronCondorEntry with strikes already calculated
 
         Returns:
             True if call strikes were tightened, False if no change needed
@@ -1385,7 +1389,7 @@ class MEICTFStrategy(MEICStrategy):
         )
         return False
 
-    def _apply_progressive_put_tightening(self, entry: TFIronCondorEntry) -> bool:
+    def _apply_progressive_put_tightening(self, entry: HydraIronCondorEntry) -> bool:
         """
         MKT-022: Progressive put OTM tightening for full IC entries.
 
@@ -1400,7 +1404,7 @@ class MEICTFStrategy(MEICStrategy):
         regardless of how many candidate strikes are evaluated.
 
         Args:
-            entry: TFIronCondorEntry with strikes already calculated
+            entry: HydraIronCondorEntry with strikes already calculated
 
         Returns:
             True if put strikes were tightened, False if no change needed
@@ -1573,7 +1577,7 @@ class MEICTFStrategy(MEICStrategy):
             str: Description of action taken
         """
         entry_num = self._next_entry_index + 1
-        logger.info(f"MEIC-TF: Initiating Entry #{entry_num} of {len(self.entry_times)}")
+        logger.info(f"HYDRA: Initiating Entry #{entry_num} of {len(self.entry_times)}")
 
         # Check trend signal (or reuse if recent)
         if self.recheck_each_entry or self._current_trend is None:
@@ -1627,8 +1631,8 @@ class MEICTFStrategy(MEICStrategy):
                         trend = self._get_trend_signal()
 
                 # Create extended entry object
-                entry = TFIronCondorEntry(entry_number=entry_num)
-                entry.strategy_id = f"meic_tf_{get_us_market_time().strftime('%Y%m%d')}_entry{entry_num}"
+                entry = HydraIronCondorEntry(entry_number=entry_num)
+                entry.strategy_id = f"hydra_{get_us_market_time().strftime('%Y%m%d')}_entry{entry_num}"
                 entry.trend_signal = trend
                 # Fix #52: Set contract count for multi-contract support
                 entry.contracts = self.contracts_per_entry
@@ -1648,7 +1652,7 @@ class MEICTFStrategy(MEICStrategy):
                 credit_gate_handled = False
                 original_trend = trend  # Save original trend for hybrid logic
                 if not self.dry_run:
-                    gate_result, estimation_worked = self._check_credit_gate_tf(entry)
+                    gate_result, estimation_worked = self._check_credit_gate(entry)
 
                     if gate_result == "skip":
                         # Both sides non-viable, skip this entry
@@ -1785,13 +1789,13 @@ class MEICTFStrategy(MEICStrategy):
                     self.daily_state.total_commission += entry.open_commission
 
                     # Calculate stop losses
-                    self._calculate_stop_levels_tf(entry)
+                    self._calculate_stop_levels_hydra(entry)
 
                     # Log to Google Sheets
                     self._log_entry(entry)
 
                     # Send alert — always full IC, include EMA signal for reference
-                    position_summary = f"MEIC-TF Entry #{entry_num} [{original_trend.value.upper()}]: Full IC"
+                    position_summary = f"HYDRA Entry #{entry_num} [{original_trend.value.upper()}]: Full IC"
 
                     self.alert_service.position_opened(
                         position_summary=position_summary,
@@ -1863,7 +1867,7 @@ class MEICTFStrategy(MEICStrategy):
     #
     # NOTE: _execute_call_spread_only(), _execute_put_spread_only(), and
     # _simulate_one_sided_entry() removed in v1.4.0 — all entries are full IC.
-    # One-sided stop calculation blocks kept in _calculate_stop_levels_tf()
+    # One-sided stop calculation blocks kept in _calculate_stop_levels_hydra()
     # for recovery compatibility with pre-v1.4.0 state files.
     # =========================================================================
 
@@ -1886,7 +1890,7 @@ class MEICTFStrategy(MEICStrategy):
         correctly skips stopped sides (no double-counting).
 
         Args:
-            entry: IronCondorEntry (or TFIronCondorEntry) with stop triggered
+            entry: IronCondorEntry (or HydraIronCondorEntry) with stop triggered
             side: "call" or "put"
 
         Returns:
@@ -2042,7 +2046,7 @@ class MEICTFStrategy(MEICStrategy):
             logger.debug(f"Error getting Saxo P&L for Entry #{entry.entry_number}: {e}")
             return entry.unrealized_pnl
 
-    def _calculate_stop_levels_tf(self, entry: TFIronCondorEntry):
+    def _calculate_stop_levels_hydra(self, entry: HydraIronCondorEntry):
         """
         Calculate stop loss levels for trend-following entries.
 
@@ -2053,7 +2057,7 @@ class MEICTFStrategy(MEICStrategy):
         $1.75 puts) keep skew at 1-2x, so total_credit gives adequate per-side headroom.
 
         Args:
-            entry: TFIronCondorEntry to calculate stops for
+            entry: HydraIronCondorEntry to calculate stops for
         """
         MIN_STOP_LEVEL = 50.0
 
@@ -2148,7 +2152,7 @@ class MEICTFStrategy(MEICStrategy):
         placed.
 
         Args:
-            entry: IronCondorEntry (or TFIronCondorEntry) to validate
+            entry: IronCondorEntry (or HydraIronCondorEntry) to validate
 
         Returns:
             Tuple of (is_valid, message)
@@ -2156,12 +2160,12 @@ class MEICTFStrategy(MEICStrategy):
         if not PNL_SANITY_CHECK_ENABLED:
             return True, "P&L sanity check disabled"
 
-        is_tf_entry = isinstance(entry, TFIronCondorEntry)
+        is_hydra_entry = isinstance(entry, HydraIronCondorEntry)
 
         # =====================================================================
         # CALL-ONLY ENTRY: Only validate call side prices
         # =====================================================================
-        if is_tf_entry and entry.call_only:
+        if is_hydra_entry and entry.call_only:
             # Only check call side - put side was never placed
             if not entry.call_side_stopped:
                 if entry.short_call_price == 0 and entry.long_call_price == 0:
@@ -2197,7 +2201,7 @@ class MEICTFStrategy(MEICStrategy):
         # =====================================================================
         # PUT-ONLY ENTRY: Only validate put side prices
         # =====================================================================
-        elif is_tf_entry and entry.put_only:
+        elif is_hydra_entry and entry.put_only:
             # Only check put side - call side was never placed
             if not entry.put_side_stopped:
                 if entry.short_put_price == 0 and entry.long_put_price == 0:
@@ -2242,13 +2246,13 @@ class MEICTFStrategy(MEICStrategy):
 
     def _batch_update_entry_prices(self):
         """
-        Override parent to handle TF one-sided entry simulation in dry-run.
+        Override parent to handle Hydra one-sided entry simulation in dry-run.
 
         In live mode, the parent's batch approach works correctly for one-sided
         entries because it only collects non-zero UICs (one-sided entries have
         UIC=0 for the non-placed side).
 
-        In dry-run mode, we need to use _simulate_tf_entry_prices() for
+        In dry-run mode, we need to use _simulate_hydra_entry_prices() for
         one-sided entries instead of the parent's _simulate_entry_prices().
         """
         if self.dry_run:
@@ -2257,18 +2261,18 @@ class MEICTFStrategy(MEICStrategy):
                 put_done = entry.put_side_stopped or getattr(entry, 'put_side_expired', False) or getattr(entry, 'put_side_skipped', False)
                 if call_done and put_done:
                     continue
-                is_tf = isinstance(entry, TFIronCondorEntry)
-                if is_tf and (entry.call_only or entry.put_only):
-                    self._simulate_tf_entry_prices(entry)
+                is_hydra = isinstance(entry, HydraIronCondorEntry)
+                if is_hydra and (entry.call_only or entry.put_only):
+                    self._simulate_hydra_entry_prices(entry)
                 else:
-                    self._simulate_entry_prices(entry)
+                    self._simulate_hydra_entry_prices(entry)
             return
         # Live mode: parent's batch handles one-sided entries naturally
         super()._batch_update_entry_prices()
 
-    def _simulate_tf_entry_prices(self, entry: IronCondorEntry):
+    def _simulate_hydra_entry_prices(self, entry: IronCondorEntry):
         """
-        Simulate option prices for TF entries in dry-run mode.
+        Simulate option prices for Hydra entries in dry-run mode.
 
         Similar to parent's _simulate_entry_prices but handles one-sided entries.
 
@@ -2283,15 +2287,15 @@ class MEICTFStrategy(MEICStrategy):
         decay_factor = 1 - (hold_minutes / 360)  # Assume ~6 hours to expiry
         decay_factor = max(0.1, decay_factor)  # Floor at 10%
 
-        is_tf_entry = isinstance(entry, TFIronCondorEntry)
+        is_hydra_entry = isinstance(entry, HydraIronCondorEntry)
 
-        if is_tf_entry and entry.call_only:
+        if is_hydra_entry and entry.call_only:
             # Only simulate call side
             initial_short_price = entry.call_spread_credit / 100  # Per contract
             entry.short_call_price = initial_short_price * decay_factor
             entry.long_call_price = initial_short_price * decay_factor * 0.3
 
-        elif is_tf_entry and entry.put_only:
+        elif is_hydra_entry and entry.put_only:
             # Only simulate put side
             initial_short_price = entry.put_spread_credit / 100  # Per contract
             entry.short_put_price = initial_short_price * decay_factor
@@ -2324,10 +2328,10 @@ class MEICTFStrategy(MEICStrategy):
         self._batch_update_entry_prices()
 
         for entry in self.daily_state.active_entries:
-            # Handle as TFIronCondorEntry if possible
-            is_tf_entry = isinstance(entry, TFIronCondorEntry)
+            # Handle as HydraIronCondorEntry if possible
+            is_hydra_entry = isinstance(entry, HydraIronCondorEntry)
 
-            if is_tf_entry and entry.call_only:
+            if is_hydra_entry and entry.call_only:
                 # Only check call side
                 if entry.call_side_stopped:
                     continue
@@ -2345,7 +2349,7 @@ class MEICTFStrategy(MEICStrategy):
                 if entry.call_spread_value >= entry.call_side_stop:
                     return self._execute_stop_loss(entry, "call")
 
-            elif is_tf_entry and entry.put_only:
+            elif is_hydra_entry and entry.put_only:
                 # Only check put side
                 if entry.put_side_stopped:
                     continue
@@ -2487,7 +2491,7 @@ class MEICTFStrategy(MEICStrategy):
 
     def get_dashboard_metrics(self) -> Dict[str, Any]:
         """
-        Get dashboard metrics with MEIC-TF specific fields.
+        Get dashboard metrics with HYDRA specific fields.
 
         Adds to base MEIC metrics:
         - Current trend signal (BULLISH/BEARISH/NEUTRAL)
@@ -2526,13 +2530,13 @@ class MEICTFStrategy(MEICStrategy):
 
         for entry in self.daily_state.entries:
             # Count entry type (full IC vs one-sided)
-            if isinstance(entry, TFIronCondorEntry) and entry.is_one_sided:
+            if isinstance(entry, HydraIronCondorEntry) and entry.is_one_sided:
                 one_sided += 1
             else:
                 full_ics += 1
 
             # Count trend signals from actual trend_signal field
-            if isinstance(entry, TFIronCondorEntry) and entry.trend_signal:
+            if isinstance(entry, HydraIronCondorEntry) and entry.trend_signal:
                 if entry.trend_signal == TrendSignal.BULLISH:
                     bullish_count += 1
                 elif entry.trend_signal == TrendSignal.BEARISH:
@@ -2557,7 +2561,7 @@ class MEICTFStrategy(MEICStrategy):
 
     def get_daily_summary(self) -> Dict:
         """
-        Get daily summary with MEIC-TF specific fields.
+        Get daily summary with HYDRA specific fields.
 
         Adds to base MEIC summary:
         - Full IC vs one-sided entry counts
@@ -2578,13 +2582,13 @@ class MEICTFStrategy(MEICStrategy):
 
         for entry in self.daily_state.entries:
             # Count entry type (full IC vs one-sided)
-            if isinstance(entry, TFIronCondorEntry) and entry.is_one_sided:
+            if isinstance(entry, HydraIronCondorEntry) and entry.is_one_sided:
                 one_sided += 1
             else:
                 full_ics += 1
 
             # Count trend signals from actual trend_signal field
-            if isinstance(entry, TFIronCondorEntry) and entry.trend_signal:
+            if isinstance(entry, HydraIronCondorEntry) and entry.trend_signal:
                 if entry.trend_signal == TrendSignal.BULLISH:
                     bullish_count += 1
                 elif entry.trend_signal == TrendSignal.BEARISH:
@@ -2608,7 +2612,7 @@ class MEICTFStrategy(MEICStrategy):
 
     def log_account_summary(self):
         """
-        Log MEIC-TF account summary to Google Sheets dashboard.
+        Log HYDRA account summary to Google Sheets dashboard.
 
         Overrides parent to include EMA values in the Account Summary tab.
         Fix #62: EMA 20/40 values were showing as N/A because parent's
@@ -2631,7 +2635,7 @@ class MEICTFStrategy(MEICStrategy):
                 # Stops
                 "call_stops": metrics["call_stops"],
                 "put_stops": metrics["put_stops"],
-                # MEIC-TF specific: Trend data (Fix #62)
+                # HYDRA specific: Trend data (Fix #62)
                 "current_trend": metrics.get("current_trend", "NEUTRAL"),
                 "ema_20": metrics.get("ema_20"),
                 "ema_40": metrics.get("ema_40"),
@@ -2646,18 +2650,18 @@ class MEICTFStrategy(MEICStrategy):
                 ),
             })
         except Exception as e:
-            logger.error(f"Failed to log MEIC-TF account summary: {e}")
+            logger.error(f"Failed to log HYDRA account summary: {e}")
 
     def log_performance_metrics(self):
         """
-        Log MEIC-TF performance metrics to Google Sheets.
+        Log HYDRA performance metrics to Google Sheets.
 
-        Overrides parent to include TF-specific fields:
+        Overrides parent to include HYDRA-specific fields:
         - full_ics / one_sided_entries counts
         - trend_overrides / credit_gate_skips counts
 
         Fix #69: Parent's log_performance_metrics() builds a NEW dict that
-        doesn't include TF-specific keys from get_dashboard_metrics().
+        doesn't include HYDRA-specific keys from get_dashboard_metrics().
         The logger reads metrics.get("full_ics", 0) which defaults to 0.
         """
         try:
@@ -2692,7 +2696,7 @@ class MEICTFStrategy(MEICStrategy):
                     "total_entries": metrics["entries_scheduled"],
                     "entries_completed": metrics["entries_completed"],
                     "entries_skipped": metrics["entries_skipped"],
-                    # MEIC-TF specific: entry type counts
+                    # HYDRA specific: entry type counts
                     "full_ics": metrics.get("full_ics", 0),
                     "one_sided_entries": metrics.get("one_sided_entries", 0),
                     # Stop stats
@@ -2703,7 +2707,7 @@ class MEICTFStrategy(MEICStrategy):
                     "win_rate": win_rate,
                     "breakeven_rate": breakeven_rate,
                     "loss_rate": loss_rate,
-                    # MEIC-TF specific: trend stats
+                    # HYDRA specific: trend stats
                     "trend_overrides": metrics.get("trend_overrides", 0),
                     "credit_gate_skips": metrics.get("credit_gate_skips", 0),
                     # Risk
@@ -2722,7 +2726,7 @@ class MEICTFStrategy(MEICStrategy):
                 saxo_client=self.client
             )
         except Exception as e:
-            logger.error(f"Failed to log MEIC-TF performance metrics: {e}")
+            logger.error(f"Failed to log HYDRA performance metrics: {e}")
 
     def log_position_snapshot(self):
         """
@@ -2750,8 +2754,8 @@ class MEICTFStrategy(MEICStrategy):
                     eur_rate = 0
 
             for entry in self.daily_state.entries:
-                is_tf = isinstance(entry, TFIronCondorEntry)
-                trend_signal = entry.trend_signal.value.upper() if is_tf and entry.trend_signal else "NEUTRAL"
+                is_hydra = isinstance(entry, HydraIronCondorEntry)
+                trend_signal = entry.trend_signal.value.upper() if is_hydra and entry.trend_signal else "NEUTRAL"
 
                 # Call side
                 call_skipped = getattr(entry, 'call_side_skipped', False)
@@ -2835,14 +2839,14 @@ class MEICTFStrategy(MEICStrategy):
 
             self.trade_logger.log_position_snapshot(positions)
         except Exception as e:
-            logger.error(f"Failed to log MEIC-TF position snapshot: {e}")
+            logger.error(f"Failed to log HYDRA position snapshot: {e}")
 
     def _log_entry(self, entry):
         """
         Log entry to Google Sheets with trend info.
 
         Overrides parent to:
-        - Use "MEIC-TF" instead of "MEIC"
+        - Use "HYDRA" instead of "MEIC"
         - Include trend signal in the action
         - Handle one-sided entries (show only placed side's strikes)
 
@@ -2853,9 +2857,9 @@ class MEICTFStrategy(MEICStrategy):
         """
         try:
             # Determine entry type and format strikes accordingly
-            is_tf_entry = isinstance(entry, TFIronCondorEntry)
+            is_hydra_entry = isinstance(entry, HydraIronCondorEntry)
 
-            if is_tf_entry and entry.call_only:
+            if is_hydra_entry and entry.call_only:
                 # Call spread only
                 strike_str = f"C:{entry.short_call_strike}/{entry.long_call_strike}"
                 entry_type = "Call Spread"
@@ -2867,7 +2871,7 @@ class MEICTFStrategy(MEICStrategy):
                     trend_tag = "[MKT-010]"
                 else:
                     trend_tag = "[BEARISH]"
-            elif is_tf_entry and entry.put_only:
+            elif is_hydra_entry and entry.put_only:
                 # Put spread only
                 strike_str = f"P:{entry.short_put_strike}/{entry.long_put_strike}"
                 entry_type = "Put Spread"
@@ -2898,7 +2902,7 @@ class MEICTFStrategy(MEICStrategy):
                 ema_info = f" | EMA20: {ema_20:.2f}, EMA40: {ema_40:.2f}"
 
             self.trade_logger.log_trade(
-                action=f"MEIC-TF Entry #{entry.entry_number} {trend_tag}",
+                action=f"HYDRA Entry #{entry.entry_number} {trend_tag}",
                 strike=strike_str,
                 price=entry.total_credit,
                 delta=0.0,
@@ -2922,22 +2926,22 @@ class MEICTFStrategy(MEICStrategy):
             logger.error(f"Failed to log entry: {e}")
 
     # =========================================================================
-    # STATE FILE OVERRIDES (MEIC-TF uses separate state file from MEIC)
+    # STATE FILE OVERRIDES (HYDRA uses separate state file from MEIC)
     # =========================================================================
-    # CRITICAL: These overrides ensure MEIC-TF uses its own state file
-    # (meic_tf_state.json) instead of sharing with MEIC (meic_state.json).
+    # CRITICAL: These overrides ensure HYDRA uses its own state file
+    # (hydra_state.json) instead of sharing with MEIC (meic_state.json).
     # This is necessary when both bots may run simultaneously.
 
     def _save_state_to_disk(self):
         """
         Save current daily state to disk for crash recovery.
 
-        OVERRIDE: Uses MEIC_TF_STATE_FILE instead of MEIC's STATE_FILE.
+        OVERRIDE: Uses HYDRA_STATE_FILE instead of MEIC's STATE_FILE.
         Also saves trend-following specific fields (call_only, put_only, trend_signal).
         """
         try:
             state_data = {
-                "bot_type": "meic_tf",  # Identify this as MEIC-TF state
+                "bot_type": "hydra",  # Identify this as HYDRA state
                 "date": self.daily_state.date,
                 "state": self.state.value,
                 "next_entry_index": self._next_entry_index,
@@ -2951,7 +2955,7 @@ class MEICTFStrategy(MEICStrategy):
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
                 "double_stops": self.daily_state.double_stops,
                 "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
-                # Fix #55/#56/#57: MEIC-TF specific counters
+                # Fix #55/#56/#57: HYDRA specific counters
                 "one_sided_entries": self.daily_state.one_sided_entries,
                 "trend_overrides": self.daily_state.trend_overrides,
                 "credit_gate_skips": self.daily_state.credit_gate_skips,
@@ -2964,9 +2968,9 @@ class MEICTFStrategy(MEICStrategy):
                 "entries": []
             }
 
-            # Serialize each entry with TF-specific fields
+            # Serialize each entry with HYDRA-specific fields
             for entry in self.daily_state.entries:
-                is_tf_entry = isinstance(entry, TFIronCondorEntry)
+                is_hydra_entry = isinstance(entry, HydraIronCondorEntry)
                 entry_data = {
                     "entry_number": entry.entry_number,
                     "entry_time": entry.entry_time.isoformat() if hasattr(entry.entry_time, 'isoformat') else entry.entry_time,
@@ -3006,8 +3010,8 @@ class MEICTFStrategy(MEICStrategy):
                     # Commission tracking
                     "open_commission": entry.open_commission,
                     "close_commission": entry.close_commission,
-                    # MEIC-TF specific: trend-following fields
-                    # FIX #43: Use getattr to handle both TFIronCondorEntry and
+                    # HYDRA specific: trend-following fields
+                    # FIX #43: Use getattr to handle both HydraIronCondorEntry and
                     # dynamically-added attributes on IronCondorEntry (from recovery)
                     "call_only": getattr(entry, 'call_only', False),
                     "put_only": getattr(entry, 'put_only', False),
@@ -3044,16 +3048,16 @@ class MEICTFStrategy(MEICStrategy):
                 json.dump(state_data, f, indent=2)
 
             os.replace(temp_file, self.state_file)
-            logger.debug(f"MEIC-TF state saved to {self.state_file}")
+            logger.debug(f"HYDRA state saved to {self.state_file}")
 
         except Exception as e:
-            logger.error(f"Failed to save MEIC-TF state: {e}")
+            logger.error(f"Failed to save HYDRA state: {e}")
 
     def _register_position(self, entry: IronCondorEntry, leg_name: str):
         """
-        Register a position leg with the Position Registry using MEIC-TF bot name.
+        Register a position leg with the Position Registry using HYDRA bot name.
 
-        Override from MEIC to use "MEIC-TF" instead of "MEIC" for proper isolation
+        Override from MEIC to use "HYDRA" instead of "MEIC" for proper isolation
         when both bots run simultaneously.
 
         Args:
@@ -3072,7 +3076,7 @@ class MEICTFStrategy(MEICStrategy):
         try:
             self.registry.register(
                 position_id=position_id,
-                bot_name="MEIC-TF",  # Use MEIC-TF instead of MEIC for isolation
+                bot_name="HYDRA",  # Use HYDRA instead of MEIC for isolation
                 strategy_id=entry.strategy_id,
                 metadata={
                     "entry_number": entry.entry_number,
@@ -3087,7 +3091,7 @@ class MEICTFStrategy(MEICStrategy):
         """
         STATE-002: Validate that strategy state matches actual positions.
 
-        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
 
         Returns:
             Error message if inconsistent, None if OK
@@ -3095,7 +3099,7 @@ class MEICTFStrategy(MEICStrategy):
         from bots.meic.strategy import MEICState
 
         active_entries = len(self.daily_state.active_entries)
-        my_positions = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
+        my_positions = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
 
         # Check state vs position count
         if self.state == MEICState.MONITORING and active_entries == 0:
@@ -3121,7 +3125,7 @@ class MEICTFStrategy(MEICStrategy):
         """
         POS-003: Perform hourly position reconciliation during market hours.
 
-        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
 
         Compares expected positions vs actual Saxo positions to detect:
         - Early assignment
@@ -3173,7 +3177,7 @@ class MEICTFStrategy(MEICStrategy):
                 self._handle_missing_positions(missing)
 
             # Check for unexpected positions (assigned, etc.)
-            my_registry_positions = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
+            my_registry_positions = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
             unexpected = (actual_position_ids & my_registry_positions) - expected_position_ids
             if unexpected:
                 logger.warning(f"POS-003: {len(unexpected)} unexpected {self.BOT_NAME} positions found")
@@ -3190,7 +3194,7 @@ class MEICTFStrategy(MEICStrategy):
         """
         Reset state for a new trading day.
 
-        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
         """
         from bots.meic.strategy import MEICDailyState
 
@@ -3198,7 +3202,7 @@ class MEICTFStrategy(MEICStrategy):
 
         # STATE-004: Check for overnight 0DTE positions (should NEVER happen)
         try:
-            my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
+            my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
         except Exception as e:
             logger.error(f"Registry error checking for overnight positions: {e}")
             my_position_ids = set()
@@ -3366,7 +3370,7 @@ class MEICTFStrategy(MEICStrategy):
         """
         POS-004: Check if 0DTE positions have been settled after market close.
 
-        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
 
         Called on every heartbeat after market close until all positions
         are confirmed settled. This handles the fact that Saxo settles 0DTE
@@ -3393,7 +3397,7 @@ class MEICTFStrategy(MEICStrategy):
                 return True
 
         # Check how many positions we think we have in registry
-        my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use MEIC-TF, not MEIC
+        my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
 
         if not my_position_ids:
             # FIX #77: Registry empty — but entries may have un-finalized surviving sides
@@ -3472,7 +3476,7 @@ class MEICTFStrategy(MEICStrategy):
         """
         Log safety events to Google Sheets for audit trail.
 
-        OVERRIDE: Uses BOT_NAME ("MEIC-TF") instead of hardcoded "MEIC" in parent class.
+        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
 
         Args:
             event_type: Type of safety event (e.g., "CIRCUIT_BREAKER_OPEN", "NAKED_SHORT_DETECTED")
@@ -3483,7 +3487,7 @@ class MEICTFStrategy(MEICStrategy):
             self.trade_logger.log_safety_event({
                 "timestamp": get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                 "event_type": event_type,
-                "bot": self.BOT_NAME,  # Use MEIC-TF, not MEIC
+                "bot": self.BOT_NAME,  # Use HYDRA, not MEIC
                 "state": self.state.value,
                 "spy_price": self.current_price,  # Logger expects 'spy_price' not 'spx_price'
                 "vix": self.current_vix,
@@ -3500,13 +3504,13 @@ class MEICTFStrategy(MEICStrategy):
         self,
         entry_number: int,
         positions: List[Dict]
-    ) -> Optional[TFIronCondorEntry]:
+    ) -> Optional[HydraIronCondorEntry]:
         """
-        Reconstruct a TFIronCondorEntry from Saxo position data.
+        Reconstruct a HydraIronCondorEntry from Saxo position data.
 
         OVERRIDE (Fix #40, 2026-02-05): Parent class creates IronCondorEntry objects
-        which don't have call_only/put_only fields. For MEIC-TF, we must create
-        TFIronCondorEntry objects and set the one-sided flags based on which legs
+        which don't have call_only/put_only fields. For HYDRA, we must create
+        HydraIronCondorEntry objects and set the one-sided flags based on which legs
         exist. Without this, recovery of one-sided entries triggers false stops.
 
         Args:
@@ -3514,11 +3518,11 @@ class MEICTFStrategy(MEICStrategy):
             positions: List of parsed position dicts for this entry
 
         Returns:
-            Reconstructed TFIronCondorEntry or None if invalid
+            Reconstructed HydraIronCondorEntry or None if invalid
         """
-        # Create TFIronCondorEntry instead of IronCondorEntry
-        entry = TFIronCondorEntry(entry_number=entry_number)
-        entry.strategy_id = f"meic_tf_{get_us_market_time().strftime('%Y%m%d')}_{entry_number:03d}"
+        # Create HydraIronCondorEntry instead of IronCondorEntry
+        entry = HydraIronCondorEntry(entry_number=entry_number)
+        entry.strategy_id = f"hydra_{get_us_market_time().strftime('%Y%m%d')}_{entry_number:03d}"
         # Fix #52: Set contract count for multi-contract support
         entry.contracts = self.contracts_per_entry
 
@@ -3585,7 +3589,7 @@ class MEICTFStrategy(MEICStrategy):
         has_all_legs = has_call_side and has_put_side
 
         if not has_all_legs:
-            # Partial entry - determine if it's a one-sided TF entry or a stopped entry
+            # Partial entry - determine if it's a one-sided HYDRA entry or a stopped entry
             legs_found = []
             if entry.short_call_position_id:
                 legs_found.append("SC")
@@ -3598,9 +3602,9 @@ class MEICTFStrategy(MEICStrategy):
 
             logger.warning(f"Entry #{entry_number} is PARTIAL: only {legs_found}")
 
-            # MEIC-TF SPECIFIC: Determine if this is a one-sided entry (by design)
+            # HYDRA SPECIFIC: Determine if this is a one-sided entry (by design)
             # or if a side was stopped out
-            # If we have exactly call side OR put side, it's likely a one-sided TF entry
+            # If we have exactly call side OR put side, it's likely a one-sided HYDRA entry
             # FIX #47: Use "skipped" instead of "stopped" for sides that were never opened
             if has_call_side and not has_put_side:
                 # Has call spread only - could be BEARISH (call_only) entry
@@ -3628,7 +3632,7 @@ class MEICTFStrategy(MEICStrategy):
         MIN_STOP_LEVEL = 50.0
 
         # FIX #40 (2026-02-06): For one-sided entries, use 2× credit for stop
-        # This matches _calculate_stop_levels_tf behavior and prevents immediate false triggers
+        # This matches _calculate_stop_levels_hydra behavior and prevents immediate false triggers
         # due to bid-ask spread making spread_value slightly higher than credit at entry
         if entry.call_only:
             credit = entry.call_spread_credit
@@ -3642,7 +3646,7 @@ class MEICTFStrategy(MEICStrategy):
             # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
             base_stop = credit * 2
 
-            # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_tf behavior)
+            # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_hydra behavior)
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
                 if credit > min_credit_for_meic_plus:
@@ -3668,7 +3672,7 @@ class MEICTFStrategy(MEICStrategy):
             # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
             base_stop = credit * 2
 
-            # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_tf behavior)
+            # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_hydra behavior)
             if self.meic_plus_enabled:
                 min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
                 if credit > min_credit_for_meic_plus:
@@ -3715,11 +3719,11 @@ class MEICTFStrategy(MEICStrategy):
 
     def _recover_from_state_file_uics(self, all_positions: List[Dict]) -> Dict[int, List[Dict]]:
         """
-        Override to use MEIC-TF bot name in registry during UIC-based recovery.
+        Override to use HYDRA bot name in registry during UIC-based recovery.
 
         This is a fallback recovery method when registry-based recovery fails.
         Uses UICs stored in the state file to match positions and re-registers
-        them with the correct bot name (MEIC-TF instead of MEIC).
+        them with the correct bot name (HYDRA instead of MEIC).
 
         Args:
             all_positions: All positions from Saxo API
@@ -3795,11 +3799,11 @@ class MEICTFStrategy(MEICStrategy):
                             # Find the entry data to get strategy_id
                             for entry_data in entries_data:
                                 if entry_data.get("entry_number") == entry_num:
-                                    strategy_id = entry_data.get("strategy_id", f"meic_tf_{today}_entry{entry_num}")
+                                    strategy_id = entry_data.get("strategy_id", f"hydra_{today}_entry{entry_num}")
                                     try:
                                         self.registry.register(
                                             position_id=pos_id,
-                                            bot_name=self.BOT_NAME,  # Use MEIC-TF
+                                            bot_name=self.BOT_NAME,  # Use HYDRA
                                             strategy_id=strategy_id,
                                             metadata={
                                                 "entry_number": entry_num,
@@ -3864,7 +3868,7 @@ class MEICTFStrategy(MEICStrategy):
             self.daily_state.entries_failed = saved_state.get("entries_failed", 0)
             self.daily_state.entries_skipped = saved_state.get("entries_skipped", 0)
             self.daily_state.total_credit_received = saved_state.get("total_credit_received", 0.0)
-            # Fix #55/#56/#57: Restore MEIC-TF specific counters
+            # Fix #55/#56/#57: Restore HYDRA specific counters
             self.daily_state.one_sided_entries = saved_state.get("one_sided_entries", 0)
             self.daily_state.trend_overrides = saved_state.get("trend_overrides", 0)
             self.daily_state.credit_gate_skips = saved_state.get("credit_gate_skips", 0)
@@ -3928,7 +3932,7 @@ class MEICTFStrategy(MEICStrategy):
 
                 # Reconstruct the entry from saved state (ALL entries, not just done ones)
                 entry_num = entry_data.get("entry_number")
-                restored_entry = TFIronCondorEntry(entry_number=entry_num)
+                restored_entry = HydraIronCondorEntry(entry_number=entry_num)
 
                 # Parse entry_time if it's a string
                 entry_time_str = entry_data.get("entry_time")
@@ -3941,7 +3945,7 @@ class MEICTFStrategy(MEICStrategy):
                     else:
                         restored_entry.entry_time = entry_time_str
 
-                restored_entry.strategy_id = entry_data.get("strategy_id", f"meic_tf_{today.replace('-', '')}_{entry_num:03d}")
+                restored_entry.strategy_id = entry_data.get("strategy_id", f"hydra_{today.replace('-', '')}_{entry_num:03d}")
                 restored_entry.short_call_strike = entry_data.get("short_call_strike", 0)
                 restored_entry.long_call_strike = entry_data.get("long_call_strike", 0)
                 restored_entry.short_put_strike = entry_data.get("short_put_strike", 0)
@@ -4014,10 +4018,10 @@ class MEICTFStrategy(MEICStrategy):
 
     def _recover_positions_from_saxo(self) -> bool:
         """
-        Override to use MEIC-TF bot name in registry queries and logging.
+        Override to use HYDRA bot name in registry queries and logging.
 
         This is the main recovery method that queries Saxo API for positions
-        and uses the Position Registry to identify which belong to MEIC-TF.
+        and uses the Position Registry to identify which belong to HYDRA.
 
         Returns:
             bool: True if positions were recovered, False if starting fresh
@@ -4053,7 +4057,7 @@ class MEICTFStrategy(MEICStrategy):
             else:
                 logger.debug("Skipping orphan cleanup in dry-run mode")
 
-            # Step 3: Get MEIC-TF positions from registry (using class constant)
+            # Step 3: Get HYDRA positions from registry (using class constant)
             my_position_ids = self.registry.get_positions(self.BOT_NAME)
             if not my_position_ids:
                 logger.info(f"No {self.BOT_NAME} positions in registry")
@@ -4064,14 +4068,14 @@ class MEICTFStrategy(MEICStrategy):
 
             logger.info(f"Found {len(my_position_ids)} {self.BOT_NAME} positions in registry")
 
-            # Step 4: Filter Saxo positions to just MEIC-TF positions
-            meic_tf_positions = []
+            # Step 4: Filter Saxo positions to just HYDRA positions
+            hydra_positions = []
             for pos in all_positions:
                 pos_id = str(pos.get("PositionId"))
                 if pos_id in my_position_ids:
-                    meic_tf_positions.append(pos)
+                    hydra_positions.append(pos)
 
-            if not meic_tf_positions:
+            if not hydra_positions:
                 logger.warning(f"Registry says we have {self.BOT_NAME} positions but none found in Saxo! Cleaning registry...")
                 for pos_id in my_position_ids:
                     try:
@@ -4084,10 +4088,10 @@ class MEICTFStrategy(MEICStrategy):
                 self.daily_state.date = today
                 return False
 
-            logger.info(f"Matched {len(meic_tf_positions)} positions to {self.BOT_NAME} in Saxo")
+            logger.info(f"Matched {len(hydra_positions)} positions to {self.BOT_NAME} in Saxo")
 
             # Step 5: Group positions by entry number using registry metadata
-            entries_by_number = self._group_positions_by_entry(meic_tf_positions, my_position_ids)
+            entries_by_number = self._group_positions_by_entry(hydra_positions, my_position_ids)
 
             if not entries_by_number:
                 logger.warning("Could not group positions into entries via registry - trying UIC fallback...")
@@ -4194,7 +4198,7 @@ class MEICTFStrategy(MEICStrategy):
                                         "put_side_skipped": entry_data.get("put_side_skipped", False),
                                         "open_commission": entry_data.get("open_commission", 0),
                                         "close_commission": entry_data.get("close_commission", 0),
-                                        # MEIC-TF specific fields (Fix #40)
+                                        # HYDRA specific fields (Fix #40)
                                         "call_only": entry_data.get("call_only", False),
                                         "put_only": entry_data.get("put_only", False),
                                         "trend_signal": entry_data.get("trend_signal"),
@@ -4331,10 +4335,10 @@ class MEICTFStrategy(MEICStrategy):
             for stopped_entry_data in preserved_stopped_entries:
                 entry_num = stopped_entry_data.get("entry_number")
                 if entry_num and entry_num not in recovered_entry_nums:
-                    # Reconstruct TFIronCondorEntry from saved state data
-                    stopped_entry = TFIronCondorEntry(entry_number=entry_num)
+                    # Reconstruct HydraIronCondorEntry from saved state data
+                    stopped_entry = HydraIronCondorEntry(entry_number=entry_num)
                     stopped_entry.entry_time = stopped_entry_data.get("entry_time")
-                    stopped_entry.strategy_id = stopped_entry_data.get("strategy_id", f"meic_tf_{today.replace('-', '')}_{entry_num:03d}")
+                    stopped_entry.strategy_id = stopped_entry_data.get("strategy_id", f"hydra_{today.replace('-', '')}_{entry_num:03d}")
 
                     # Strikes
                     stopped_entry.short_call_strike = stopped_entry_data.get("short_call_strike", 0)
@@ -4364,7 +4368,7 @@ class MEICTFStrategy(MEICStrategy):
                     stopped_entry.open_commission = stopped_entry_data.get("open_commission", 0)
                     stopped_entry.close_commission = stopped_entry_data.get("close_commission", 0)
 
-                    # MEIC-TF specific: One-sided entry flags
+                    # HYDRA specific: One-sided entry flags
                     stopped_entry.call_only = stopped_entry_data.get("call_only", False)
                     stopped_entry.put_only = stopped_entry_data.get("put_only", False)
                     # Fix #52: Restore contract count (default to current config if not saved)

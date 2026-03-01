@@ -568,7 +568,7 @@ def print_roc_trajectory():
 
 if __name__ == "__main__":
     print("=" * 80)
-    print("  MEIC-TF EARLY CLOSE BACKTEST - RETURN ON CAPITAL (ROC) METHOD")
+    print("  HYDRA EARLY CLOSE BACKTEST - RETURN ON CAPITAL (ROC) METHOD")
     print("  Using ACTUAL P&L from bot heartbeat logs (not theta model)")
     print("  Data: 6 trading days (Feb 10-13, 17-18, 2026)")
     print("  Close cost: $5.00/position ($2.50 comm + $2.50 slippage)")

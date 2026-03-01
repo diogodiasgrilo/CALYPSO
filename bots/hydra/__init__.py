@@ -1,8 +1,8 @@
 """
-MEIC-TF (Trend Following Hybrid) Trading Bot
+HYDRA 0DTE Trading Bot
 
-A modified MEIC bot that adds EMA-based trend direction detection,
-pre-entry credit validation, and progressive OTM tightening.
+Multi-Entry Iron Condors (SPX 0DTE) with credit gates, progressive OTM
+tightening, and smart exits. Based on Tammy Chambless's MEIC strategy.
 
 Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars.
 The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
@@ -13,9 +13,8 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Either side non-viable: Skip entry (no one-sided entries)
 - Both non-viable: Skip entry entirely
 
-Based on Tammy Chambless's MEIC strategy with trend-following concepts from METF.
-
 Version History:
+- 1.5.0 (2026-02-28): Renamed from MEIC-TF to HYDRA
 - 1.4.5 (2026-02-28): MKT-026 min spread width raised from 25pt to 60pt (longs 10pt further OTM on low-VIX days = cheaper, MKT-025 never closes longs so pure savings)
 - 1.4.4 (2026-02-28): Add 6th entry at 12:35 PM (matching base MEIC schedule — MKT-011 credit gate ensures zero-cost skip when non-viable)
 - 1.4.3 (2026-02-28): MKT-025 short-only stop loss close (close short, let long expire — per Tammy/Sandvand community best practice)
@@ -56,10 +55,10 @@ Version History:
 - 1.0.0 (2026-02-04): Initial implementation with EMA trend detection
 """
 
-from bots.meic_tf.strategy import MEICTFStrategy, TrendSignal, TFIronCondorEntry
+from bots.hydra.strategy import HydraStrategy, TrendSignal, HydraIronCondorEntry
 
 __all__ = [
-    "MEICTFStrategy",
+    "HydraStrategy",
     "TrendSignal",
-    "TFIronCondorEntry",
+    "HydraIronCondorEntry",
 ]

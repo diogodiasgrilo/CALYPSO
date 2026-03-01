@@ -1,34 +1,31 @@
 #!/usr/bin/env python3
 """
-main.py - MEIC-TF (Trend Following Hybrid) Trading Bot Entry Point
+main.py - HYDRA 0DTE Trading Bot Entry Point
 
-This is a modified MEIC bot that adds EMA-based trend direction detection.
-Based on Tammy Chambless's MEIC strategy with trend filtering inspired by METF.
+HYDRA: Multi-entry iron condor bot with credit gates, progressive OTM tightening,
+and smart exit management. Based on Tammy Chambless's MEIC strategy with
+EMA-based trend detection (informational) and advanced risk controls.
 
 Strategy Summary:
 -----------------
-1. Before each entry, check 20 EMA vs 40 EMA on SPX 1-minute bars
-2. BULLISH (20 > 40): Place PUT spread only (calls are risky in uptrend)
-3. BEARISH (20 < 40): Place CALL spread only (puts are risky in downtrend)
-4. NEUTRAL (within 0.2%): Place full iron condor (standard MEIC)
-5. Same entry times, strikes, and stop loss rules as MEIC
-
-Why This Helps:
----------------
-On strong trend days (like Feb 4, 2026), pure MEIC had ALL 6 put sides stopped
-because the market was in a sustained downtrend. MEIC-TF would have detected
-the bearish trend and only placed call spreads, avoiding ~$1,500 in losses.
+1. 6 scheduled iron condor entries per day (10:05 - 12:35 ET)
+2. EMA 20/40 trend signal logged per entry (informational only)
+3. Credit gate validates minimum credit before each entry
+4. Progressive OTM tightening finds optimal strikes
+5. Smart early close on ROC threshold with hold check
+6. Short-only stop loss (longs expire at settlement)
 
 Usage:
 ------
-    python -m bots.meic_tf.main              # Run in SIM environment
-    python -m bots.meic_tf.main --live       # Run in LIVE environment
-    python -m bots.meic_tf.main --dry-run    # Simulate without orders
-    python -m bots.meic_tf.main --status     # Show current status only
+    python -m bots.hydra.main              # Run in SIM environment
+    python -m bots.hydra.main --live       # Run in LIVE environment
+    python -m bots.hydra.main --dry-run    # Simulate without orders
+    python -m bots.hydra.main --status     # Show current status only
 
 Author: Trading Bot Developer
 Date: 2026-02-04
 
+See docs/HYDRA_STRATEGY_SPECIFICATION.md for full HYDRA details.
 See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
 """
 
@@ -57,7 +54,7 @@ from shared.config_loader import ConfigLoader
 from shared.secret_manager import is_running_on_gcp
 
 # Import bot-specific strategy
-from bots.meic_tf.strategy import MEICTFStrategy
+from bots.hydra.strategy import HydraStrategy
 
 # Configure main logger
 logger = logging.getLogger(__name__)
@@ -87,14 +84,14 @@ def interruptible_sleep(seconds: int, check_interval: int = 1) -> bool:
 
 def kill_existing_instances() -> int:
     """
-    DUPLICATE-001: Find and kill any existing MEIC-TF bot instances before starting.
+    DUPLICATE-001: Find and kill any existing HYDRA bot instances before starting.
     """
     current_pid = os.getpid()
     killed_count = 0
 
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "meic_tf[./]main\\.py"],
+            ["pgrep", "-f", "hydra[./]main\\.py"],
             capture_output=True,
             text=True
         )
@@ -106,7 +103,7 @@ def kill_existing_instances() -> int:
                 try:
                     pid = int(pid_str.strip())
                     if pid != current_pid:
-                        logger.info(f"DUPLICATE-001: Found existing MEIC-TF instance (PID: {pid}), terminating...")
+                        logger.info(f"DUPLICATE-001: Found existing HYDRA instance (PID: {pid}), terminating...")
                         os.kill(pid, signal.SIGTERM)
                         killed_count += 1
                         time.sleep(1)
@@ -114,7 +111,7 @@ def kill_existing_instances() -> int:
                     pass
 
         if killed_count > 0:
-            logger.info(f"DUPLICATE-001: Terminated {killed_count} existing MEIC-TF instance(s)")
+            logger.info(f"DUPLICATE-001: Terminated {killed_count} existing HYDRA instance(s)")
             time.sleep(2)
 
     except FileNotFoundError:
@@ -125,7 +122,7 @@ def kill_existing_instances() -> int:
     return killed_count
 
 
-def load_config(config_path: str = "bots/meic_tf/config/config.json") -> dict:
+def load_config(config_path: str = "bots/hydra/config/config.json") -> dict:
     """Load configuration from appropriate source (cloud or local)."""
     loader = ConfigLoader(config_path)
     config = loader.load_config()
@@ -137,19 +134,15 @@ def print_banner():
     banner = """
     ╔═══════════════════════════════════════════════════════════════╗
     ║                                                               ║
-    ║         MEIC-TF 0DTE TRADING BOT                              ║
-    ║         ════════════════════════                              ║
+    ║         HYDRA 0DTE TRADING BOT                                ║
+    ║         ══════════════════════                                ║
     ║                                                               ║
-    ║         Strategy: MEIC + Trend Following Hybrid               ║
-    ║         (EMA 20/40 Direction Filter)                          ║
+    ║         Multi-Entry Iron Condors (SPX 0DTE)                   ║
+    ║         6 Entries | Credit Gates | Smart Exits                ║
     ║                                                               ║
-    ║         BULLISH → PUT spreads only                            ║
-    ║         BEARISH → CALL spreads only                           ║
-    ║         NEUTRAL → Full iron condor                            ║
+    ║         10:05  10:35  11:05  11:35  12:05  12:35              ║
     ║                                                               ║
-    ║         Entries: 10:05, 10:35, 11:05, 11:35, 12:05            ║
-    ║                                                               ║
-    ║         Version: 1.3.2                                        ║
+    ║         Version: 1.4.5                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
@@ -162,9 +155,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
     global shutdown_requested
 
     # Initialize logging service
-    trade_logger = setup_logging(config, bot_name="MEIC-TF")
+    trade_logger = setup_logging(config, bot_name="HYDRA")
     trade_logger.log_event("=" * 60)
-    trade_logger.log_event("MEIC-TF BOT STARTING")
+    trade_logger.log_event("HYDRA BOT STARTING")
     trade_logger.log_event(f"Mode: {'DRY RUN (Simulation)' if dry_run else 'LIVE TRADING'}")
     trade_logger.log_event(f"Check Interval: {check_interval} seconds")
     trade_logger.log_event("=" * 60)
@@ -184,7 +177,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
     # Initialize strategy
     strategy = None
     try:
-        strategy = MEICTFStrategy(client, config, trade_logger, dry_run=dry_run)
+        strategy = HydraStrategy(client, config, trade_logger, dry_run=dry_run)
     except Exception as e:
         trade_logger.log_error(f"Failed to initialize strategy: {e}")
         logger.exception("Strategy initialization failed")
@@ -441,7 +434,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                             ema_info = f", EMA20={status['ema_short']:.0f}/EMA40={status['ema_long']:.0f} ({diff_sign}{status['ema_diff_pct']*100:.2f}%)"
                         trade_logger.log_bot_activity(
                             level="INFO",
-                            component="MEICTFStrategy",
+                            component="HydraStrategy",
                             message=f"Hourly: State={status['state']}, Entries={status['entries_completed']}, Trend={status.get('current_trend', 'N/A')}{ema_info}, P&L=${status['realized_pnl'] + status['unrealized_pnl']:.2f}",
                             spy_price=status['underlying_price'],
                             vix=status['vix'],
@@ -474,7 +467,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
 
                 if consecutive_errors >= 5:
                     trade_logger.log_safety_event({
-                        "event_type": "MEIC_TF_CONSECUTIVE_ERRORS",
+                        "event_type": "HYDRA_CONSECUTIVE_ERRORS",
                         "spy_price": strategy.current_price,
                         "vix": strategy.current_vix,
                         "description": f"Main loop has {consecutive_errors} consecutive errors",
@@ -521,7 +514,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                         "Manual intervention may be required."
                     )
                     trade_logger.log_safety_event({
-                        "event_type": "MEIC_TF_SHUTDOWN_WITH_POSITION",
+                        "event_type": "HYDRA_SHUTDOWN_WITH_POSITION",
                         "spy_price": spy_price,
                         "vix": vix,
                         "description": f"Bot shutdown with {active} active positions",
@@ -538,7 +531,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
 
 def show_status(config: dict):
     """Show current status without entering trading loop."""
-    trade_logger = setup_logging(config, bot_name="MEIC-TF")
+    trade_logger = setup_logging(config, bot_name="HYDRA")
     client = SaxoClient(config)
 
     if not client.authenticate():
@@ -547,12 +540,12 @@ def show_status(config: dict):
         return
 
     try:
-        strategy = MEICTFStrategy(client, config, trade_logger)
+        strategy = HydraStrategy(client, config, trade_logger)
         strategy.update_market_data()
         status = strategy.get_status_summary()
 
         print("\n" + "=" * 60)
-        print("MEIC-TF CURRENT STATUS")
+        print("HYDRA CURRENT STATUS")
         print("=" * 60)
         print(f"  State: {status['state']}")
         print(f"  SPX Price: {status['underlying_price']:.2f}")
@@ -600,20 +593,20 @@ def main():
     kill_existing_instances()
 
     parser = argparse.ArgumentParser(
-        description="MEIC-TF 0DTE Trading Bot - Trend Following Hybrid",
+        description="HYDRA 0DTE Trading Bot - Multi-Entry Iron Condors",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m bots.meic_tf.main              Run in SIM environment
-  python -m bots.meic_tf.main --live       Run in LIVE environment
-  python -m bots.meic_tf.main --dry-run    Simulate without orders
-  python -m bots.meic_tf.main --status     Show current status only
+  python -m bots.hydra.main              Run in SIM environment
+  python -m bots.hydra.main --live       Run in LIVE environment
+  python -m bots.hydra.main --dry-run    Simulate without orders
+  python -m bots.hydra.main --status     Show current status only
         """
     )
 
     parser.add_argument(
         "--config", "-c",
-        default="bots/meic_tf/config/config.json",
+        default="bots/hydra/config/config.json",
         help="Path to configuration file"
     )
     parser.add_argument(
@@ -693,7 +686,7 @@ Examples:
 
     except FileNotFoundError as e:
         print(f"\n  Error: {e}")
-        print("  Make sure config file exists at: bots/meic_tf/config/config.json")
+        print("  Make sure config file exists at: bots/hydra/config/config.json")
         sys.exit(1)
 
     except ValueError as e:

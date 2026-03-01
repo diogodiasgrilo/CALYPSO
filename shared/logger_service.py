@@ -194,7 +194,7 @@ class GoogleSheetsLogger:
         # "iron_fly" = Iron Fly 0DTE strategy (no theta tracking, different metrics)
         # "delta_neutral" = Delta Neutral strategy (straddle + strangle, theta tracking)
         # "meic" = Multiple Entry Iron Condors (Tammy Chambless strategy)
-        # "meic_tf" = MEIC + Trend Following (EMA-based direction filter)
+        # "hydra" = HYDRA (Multi-Entry Iron Condors + Smart Exits)
         self.strategy_type = self.config.get("strategy_type", "delta_neutral")
 
         # Optional worksheets - only created for specific strategies
@@ -418,8 +418,8 @@ class GoogleSheetsLogger:
                         "Delta", "Entry Price", "Current Price", "P&L ($)", "P&L (EUR)",
                         "Campaign #", "Premium Collected", "Status"
                     ]
-                elif self.strategy_type in ("meic", "meic_tf"):
-                    # MEIC/MEIC-TF: Multiple iron condors with 4 legs each
+                elif self.strategy_type in ("meic", "hydra"):
+                    # MEIC/HYDRA: Multiple iron condors with 4 legs each
                     worksheet = self.spreadsheet.add_worksheet(title="Positions", rows=100, cols=17)
                     headers = [
                         "Last Updated", "Entry #", "Leg Type", "Strike", "Expiry",
@@ -478,8 +478,8 @@ class GoogleSheetsLogger:
                         "Daily P&L ($)", "Daily P&L (EUR)", "Cumulative P&L ($)",
                         "Win Rate (%)", "Breakeven Days", "Notes"
                     ]
-                elif self.strategy_type == "meic_tf":
-                    # MEIC-TF: MEIC with trend following - full OHLC, P&L breakdown, trend signals
+                elif self.strategy_type == "hydra":
+                    # HYDRA: MEIC with trend following - full OHLC, P&L breakdown, trend signals
                     worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=40)
                     headers = [
                         # Market Context (9 cols)
@@ -520,8 +520,8 @@ class GoogleSheetsLogger:
                 worksheet.format("A1:AJ1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Daily Summary worksheet ({self.strategy_type} format, {len(headers)} cols)")
 
-            # Check if existing MEIC-TF sheet needs new columns appended
-            if self.strategy_type == "meic_tf":
+            # Check if existing HYDRA sheet needs new columns appended
+            if self.strategy_type == "hydra":
                 try:
                     header_row = self._sheets_call_with_timeout(worksheet.row_values, 1)
                     if header_row and len(header_row) < 40:
@@ -648,8 +648,8 @@ class GoogleSheetsLogger:
                         # Risk
                         "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)"
                     ]
-                elif self.strategy_type == "meic_tf":
-                    # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries (31 columns)
+                elif self.strategy_type == "hydra":
+                    # HYDRA: MEIC with trend following - track trend signals and one-sided entries (31 columns)
                     worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=31)
                     headers = [
                         # Meta
@@ -666,7 +666,7 @@ class GoogleSheetsLogger:
                         "Call Stops Triggered", "Put Stops Triggered", "Double Stops",
                         # Outcome Stats
                         "Win Rate (%)", "Breakeven Rate (%)", "Loss Rate (%)",
-                        # Trend Stats (MEIC-TF specific)
+                        # Trend Stats (HYDRA specific)
                         "Trend Overrides", "Credit Gate Skips",
                         # Risk
                         "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)",
@@ -757,8 +757,8 @@ class GoogleSheetsLogger:
                         # Meta
                         "State", "Environment"
                     ]
-                elif self.strategy_type == "meic_tf":
-                    # MEIC-TF: MEIC with trend following snapshot (18 columns)
+                elif self.strategy_type == "hydra":
+                    # HYDRA: MEIC with trend following snapshot (18 columns)
                     worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=18)
                     headers = [
                         # Market Data
@@ -769,7 +769,7 @@ class GoogleSheetsLogger:
                         "Total Credit ($)", "Unrealized P&L ($)", "Realized P&L ($)",
                         # Stops
                         "Call Stops", "Put Stops",
-                        # Trend (MEIC-TF specific)
+                        # Trend (HYDRA specific)
                         "Current Trend", "EMA 20", "EMA 40",
                         # Risk
                         "Circuit Breaker",
@@ -1403,8 +1403,8 @@ class GoogleSheetsLogger:
                     if last_row > 1:
                         self._sheets_call_with_timeout(worksheet.format, f"A2:M{last_row}", {"textFormat": {"bold": False}})
 
-            elif self.strategy_type in ("meic", "meic_tf"):
-                # MEIC/MEIC-TF: Multiple iron condors - one row per side (call/put) per entry
+            elif self.strategy_type in ("meic", "hydra"):
+                # MEIC/HYDRA: Multiple iron condors - one row per side (call/put) per entry
                 # Columns: Last Updated, Entry #, Leg Type, Strike, Expiry,
                 #          Entry Credit, Current Value, P&L ($), P&L (EUR),
                 #          Stop Level, Distance to Stop ($), Stop Triggered,
@@ -2002,8 +2002,8 @@ class GoogleSheetsLogger:
                     summary.get("notes", "")
                 ]
                 logger.debug(f"MEIC daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
-            elif self.strategy_type == "meic_tf":
-                # MEIC-TF: MEIC with trend following - track trend signals and one-sided entries
+            elif self.strategy_type == "hydra":
+                # HYDRA: MEIC with trend following - track trend signals and one-sided entries
                 # Columns: Date, SPX Close, VIX, Entries Completed, Entries Skipped,
                 #          Full ICs, One-Sided Entries, Total Credit ($),
                 #          Call Stops, Put Stops, Double Stops,
@@ -2015,7 +2015,7 @@ class GoogleSheetsLogger:
                 put_stops = summary.get('put_stops', 0)
                 double_stops = summary.get('double_stops', 0)
 
-                # MEIC-TF specific: track full ICs vs one-sided entries
+                # HYDRA specific: track full ICs vs one-sided entries
                 full_ics = summary.get('full_ics', 0)
                 one_sided = summary.get('one_sided_entries', 0)
 
@@ -2084,7 +2084,7 @@ class GoogleSheetsLogger:
                     f"{summary.get('avg_daily_roc', 0):.4f}",
                     f"{summary.get('annualized_return', 0):.1f}",
                 ]
-                logger.debug(f"MEIC-TF daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
+                logger.debug(f"HYDRA daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
             else:
                 # Delta Neutral: Theta-based tracking
                 net_theta = summary.get('total_theta', summary.get('net_theta', 0))
@@ -2557,8 +2557,8 @@ class GoogleSheetsLogger:
                     f"{metrics.get('avg_daily_pnl', 0):.2f}"
                 ]
                 col_range = "A2:U2"  # 21 columns
-            elif self.strategy_type == "meic_tf":
-                # MEIC-TF: MEIC with trend following - track entries, stops, trend overrides
+            elif self.strategy_type == "hydra":
+                # HYDRA: MEIC with trend following - track entries, stops, trend overrides
                 # Columns: Timestamp, Period, Total P&L ($), Total P&L (EUR), Total P&L (%),
                 #          Realized P&L ($), Unrealized P&L ($), Total Credit ($), Avg Credit per IC ($),
                 #          Total Entries, Entries Completed, Entries Skipped,
@@ -2597,7 +2597,7 @@ class GoogleSheetsLogger:
                     f"{metrics.get('win_rate', 0):.2f}",
                     f"{metrics.get('breakeven_rate', 0):.2f}",
                     f"{metrics.get('loss_rate', 0):.2f}",
-                    # Trend Stats (MEIC-TF specific)
+                    # Trend Stats (HYDRA specific)
                     metrics.get("trend_overrides", 0),
                     metrics.get("credit_gate_skips", 0),
                     # Risk
@@ -2819,8 +2819,8 @@ class GoogleSheetsLogger:
                     environment
                 ]
                 col_range = "A2:O2"  # 15 columns
-            elif self.strategy_type == "meic_tf":
-                # MEIC-TF: MEIC with trend following snapshot
+            elif self.strategy_type == "hydra":
+                # HYDRA: MEIC with trend following snapshot
                 # Columns: Timestamp, SPX Price, VIX, Entries Completed, Active ICs, Entries Skipped,
                 #          Total Credit ($), Unrealized P&L ($), Realized P&L ($),
                 #          Call Stops, Put Stops,
@@ -2836,7 +2836,7 @@ class GoogleSheetsLogger:
                 realized_pnl = strategy_data.get("realized_pnl", 0)
                 call_stops = strategy_data.get("call_stops", 0)
                 put_stops = strategy_data.get("put_stops", 0)
-                # MEIC-TF specific: trend data
+                # HYDRA specific: trend data
                 current_trend = strategy_data.get("current_trend", "NEUTRAL")
                 ema_20 = strategy_data.get("ema_20", 0)
                 ema_40 = strategy_data.get("ema_40", 0)
@@ -2859,7 +2859,7 @@ class GoogleSheetsLogger:
                     # Stops
                     str(call_stops),
                     str(put_stops),
-                    # Trend (MEIC-TF specific)
+                    # Trend (HYDRA specific)
                     current_trend,
                     f"{ema_20:.2f}" if ema_20 else "N/A",
                     f"{ema_40:.2f}" if ema_40 else "N/A",

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================================
-# MEIC-TF Bot — Google Cloud Monitoring Dashboard Setup
+# HYDRA Bot — Google Cloud Monitoring Dashboard Setup
 #
 # This script:
 #   1. Grants the VM service account permissions to write logs & metrics
-#   2. Deploys the Ops Agent config to collect meic_tf journald + file logs
+#   2. Deploys the Ops Agent config to collect hydra journald + file logs
 #   3. Creates a Cloud Monitoring dashboard with live heartbeat feed
 #   4. Optionally grants a viewer (e.g., Dad) read-only access
 #
@@ -32,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VIEWER_EMAIL="${1:-}"
 
 echo "============================================"
-echo "  MEIC-TF Monitoring Dashboard Setup"
+echo "  HYDRA Monitoring Dashboard Setup"
 echo "============================================"
 echo ""
 echo "Project:  ${PROJECT}"
@@ -81,9 +81,9 @@ echo ""
 echo "--- Step 3: Waiting 15s for first logs to arrive in Cloud Logging ---"
 sleep 15
 
-echo "  Checking for meic_tf logs..."
+echo "  Checking for hydra logs..."
 LOG_COUNT=$(gcloud logging read \
-    "resource.type=\"gce_instance\" AND log_id(\"meic_tf_logfile\")" \
+    "resource.type=\"gce_instance\" AND log_id(\"hydra_logfile\")" \
     --limit=3 \
     --project="${PROJECT}" \
     --format="value(jsonPayload.message)" 2>/dev/null | wc -l || echo "0")
@@ -93,7 +93,7 @@ if [[ "${LOG_COUNT}" -gt 0 ]]; then
 else
     echo "  WARNING: No logs found yet. This may take up to 60 seconds."
     echo "  Verify manually:"
-    echo "    gcloud logging read 'log_id(\"meic_tf_logfile\")' --limit=5 --project=${PROJECT}"
+    echo "    gcloud logging read 'log_id(\"hydra_logfile\")' --limit=5 --project=${PROJECT}"
 fi
 echo ""
 
@@ -106,7 +106,7 @@ echo "--- Step 4: Creating Cloud Monitoring Dashboard ---"
 EXISTING=$(gcloud monitoring dashboards list \
     --project="${PROJECT}" \
     --format="value(name)" \
-    --filter="displayName='MEIC-TF Bot - Live Dashboard'" 2>/dev/null || true)
+    --filter="displayName='HYDRA Bot - Live Dashboard'" 2>/dev/null || true)
 
 if [[ -n "${EXISTING}" ]]; then
     echo "  Dashboard already exists. Deleting old version..."
@@ -117,7 +117,7 @@ fi
 
 # Create the dashboard
 DASHBOARD_ID=$(gcloud monitoring dashboards create \
-    --config-from-file="${SCRIPT_DIR}/dashboard-meic-tf.json" \
+    --config-from-file="${SCRIPT_DIR}/dashboard-hydra.json" \
     --project="${PROJECT}" \
     --format="value(name)" 2>/dev/null)
 
@@ -177,8 +177,8 @@ echo "Dashboard URL:"
 echo "  ${DASHBOARD_URL}"
 echo ""
 echo "Verify logs manually:"
-echo "  gcloud logging read 'log_id(\"meic_tf_logfile\")' --limit=5 --project=${PROJECT}"
+echo "  gcloud logging read 'log_id(\"hydra_logfile\")' --limit=5 --project=${PROJECT}"
 echo ""
 echo "View live heartbeats via CLI:"
-echo "  gcloud compute ssh ${VM_NAME} --zone=${ZONE} --command=\"sudo journalctl -u meic_tf -f\" | grep HEARTBEAT"
+echo "  gcloud compute ssh ${VM_NAME} --zone=${ZONE} --command=\"sudo journalctl -u hydra -f\" | grep HEARTBEAT"
 echo ""

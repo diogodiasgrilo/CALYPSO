@@ -239,7 +239,7 @@ class ConfigLoader:
             # ALERTS config from bot config
             "alerts": bot_config.get("alerts", {}),
 
-            # TREND FILTER config from bot config (MEIC-TF specific)
+            # TREND FILTER config from bot config (HYDRA specific)
             "trend_filter": bot_config.get("trend_filter", {})
         }
 

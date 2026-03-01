@@ -23,14 +23,14 @@ def main():
     print("=" * 60)
 
     # Load config and authenticate
-    config = load_config("bots/meic_tf/config/config.json")
+    config = load_config("bots/hydra/config/config.json")
     client = SaxoClient(config)
     client.authenticate()
     print(f"\nAuthenticated. Account: {client.account_key}")
 
     # Step 1: Get real option UICs from the state file
     print("\n--- Step 1: Getting real option UICs from state file ---")
-    state_file = "data/meic_tf_state.json"
+    state_file = "data/hydra_state.json"
     test_uics = []
 
     try:
