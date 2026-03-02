@@ -1,0 +1,29 @@
+[Unit]
+Description=Calypso APOLLO Morning Scout (oneshot)
+Documentation=https://github.com/calypso-trading/calypso
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+
+ExecStart=/opt/calypso/.venv/bin/python -m services.apollo.main
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-apollo
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/calypso/intel/apollo
+
+# Yahoo Finance + Claude API call can take time
+TimeoutStartSec=120

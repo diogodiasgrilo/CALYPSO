@@ -1,0 +1,11 @@
+[Unit]
+Description=Calypso APOLLO Morning Scout Timer (8:30 AM ET weekdays)
+Documentation=https://github.com/calypso-trading/calypso
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:30:00 America/New_York
+Persistent=true
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target
