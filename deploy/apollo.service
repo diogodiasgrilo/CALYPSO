@@ -25,5 +25,5 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/calypso/intel/apollo
 
-# Yahoo Finance + Claude API call can take time
-TimeoutStartSec=120
+# Claude API (120s) + Yahoo Finance (3x10s) + file reads + overhead
+TimeoutStartSec=240

@@ -25,5 +25,5 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/calypso/intel/hermes
 
-# Claude API call + Sheets reads can take time
-TimeoutStartSec=120
+# Claude API (120s) + Sheets reads (3x15s) + journalctl (15s) + overhead
+TimeoutStartSec=240

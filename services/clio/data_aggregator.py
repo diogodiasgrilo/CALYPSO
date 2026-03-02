@@ -34,7 +34,8 @@ def aggregate_weekly_data(config: Dict[str, Any], week_end_date) -> Dict[str, An
         friday = week_end_date - timedelta(days=2)
     else:
         # Running mid-week (manual run) — use last Friday
-        days_since_friday = (weekday + 2) % 7  # days since last Friday
+        # weekday: Mon=0→3, Tue=1→4, Wed=2→5, Thu=3→6, Fri=4→0(same day)
+        days_since_friday = (weekday - 4) % 7
         friday = week_end_date - timedelta(days=days_since_friday if days_since_friday > 0 else 7)
     monday = friday - timedelta(days=4)
 
