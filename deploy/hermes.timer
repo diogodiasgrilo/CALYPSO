@@ -1,0 +1,11 @@
+[Unit]
+Description=Calypso HERMES Daily Analysis Timer (5 PM ET weekdays)
+Documentation=https://github.com/calypso-trading/calypso
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 17:00:00 America/New_York
+Persistent=true
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target
