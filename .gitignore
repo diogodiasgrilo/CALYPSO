@@ -106,6 +106,15 @@ dmypy.json
 *.session
 *.state
 
+# Agent config (has alert credentials — created from template on VM)
+services/agents_config.json
+
+# Agent runtime reports (VM-only, regenerated daily)
+intel/argus/
+intel/hermes/
+intel/apollo/
+.odysseus_last_audit
+
 # Backup files from editors
 *~
 \#*\#

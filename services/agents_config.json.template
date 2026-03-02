@@ -1,0 +1,49 @@
+{
+    "_comment": "CALYPSO Agent Suite configuration. Copy to agents_config.json and fill in values.",
+
+    "anthropic": {
+        "_comment": "API key loaded from Secret Manager on GCP. Only needed for local dev.",
+        "api_key": "",
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 4096
+    },
+
+    "google_sheets": {
+        "spreadsheet_name": "Calypso_HYDRA_Live_Data",
+        "credentials_file": "config/google_credentials.json"
+    },
+
+    "alerts": {
+        "enabled": true,
+        "email": "your@email.com"
+    },
+
+    "argus": {
+        "check_interval_minutes": 15,
+        "report_dir": "intel/argus",
+        "incident_dir": "intel/argus/incidents",
+        "health_log": "intel/argus/health_log.jsonl"
+    },
+
+    "hermes": {
+        "report_dir": "intel/hermes",
+        "journal_lines": 200,
+        "state_file": "data/hydra_state.json",
+        "metrics_file": "data/hydra_metrics.json"
+    },
+
+    "apollo": {
+        "report_dir": "intel/apollo",
+        "strategy_memory_file": "intel/strategy_memory.md"
+    },
+
+    "clio": {
+        "report_dir": "intel/clio",
+        "strategy_memory_file": "intel/strategy_memory.md",
+        "retention_days": {
+            "hermes": 90,
+            "apollo": 30,
+            "argus": 90
+        }
+    }
+}

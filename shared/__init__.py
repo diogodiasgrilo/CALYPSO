@@ -14,8 +14,10 @@ This package contains common utilities used by all trading strategies:
 - technical_indicators: Technical analysis calculations
 - alert_service: Telegram/Email alerting via Google Cloud Pub/Sub
 - position_registry: Multi-bot position ownership tracking (for same underlying)
+- sheets_reader: Read-only Google Sheets access for agents (SheetsReader)
+- claude_client: Thin Claude API wrapper for agents (get_anthropic_client, ask_claude)
 
-Last Updated: 2026-02-13 (Timeout protection for all Sheets/API calls, account key validation, fill price accuracy)
+Last Updated: 2026-03-01 (Added SheetsReader and claude_client for agent infrastructure)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -275,6 +277,8 @@ from shared.event_calendar import (
 )
 from shared.position_registry import PositionRegistry
 from shared.token_coordinator import TokenCoordinator, get_token_coordinator
+from shared.sheets_reader import SheetsReader
+from shared.claude_client import get_anthropic_client, ask_claude
 
 __all__ = [
     # Saxo Client
@@ -308,4 +312,8 @@ __all__ = [
     'PositionRegistry',
     # Token Coordinator (for multi-bot token sharing, used by Token Keeper service)
     'TokenCoordinator', 'get_token_coordinator',
+    # Sheets Reader (read-only Google Sheets access for agents)
+    'SheetsReader',
+    # Claude Client (thin API wrapper for agents)
+    'get_anthropic_client', 'ask_claude',
 ]
