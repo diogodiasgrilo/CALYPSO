@@ -293,6 +293,31 @@ class HydraStrategy(MEICStrategy):
         self.put_starting_otm_multiplier = float(strategy_config.get("put_starting_otm_multiplier", 2.0))
         logger.info(f"  Starting OTM multipliers (MKT-024): call ×{self.call_starting_otm_multiplier}, put ×{self.put_starting_otm_multiplier}")
 
+        # MKT-027: VIX-scaled spread width (continuous formula replaces step function)
+        # Pushes long legs further OTM on high-VIX days → cheaper longs → higher net credit → more stop cushion
+        self.spread_vix_multiplier = float(strategy_config.get("spread_vix_multiplier", 3.5))
+        self.max_spread_width = int(strategy_config.get("max_spread_width", 120))
+        logger.info(f"  Spread width (MKT-027): VIX × {self.spread_vix_multiplier}, floor=60pt, cap={self.max_spread_width}pt")
+
+    # =========================================================================
+    # OVERRIDE: Spread width with VIX-scaled formula (MKT-027)
+    # =========================================================================
+
+    def _get_vix_adjusted_spread_width(self, vix: float) -> int:
+        """
+        MKT-027: VIX-scaled spread width (overrides MEIC step function).
+
+        Continuous formula pushes long legs further OTM on high-VIX days,
+        reducing their cost and raising the stop level (= more cushion).
+
+        Formula: max(60, round(vix * multiplier / 5) * 5), capped at max_spread.
+        Default multiplier 3.5: VIX 22 = 75pt, VIX 25 = 90pt.
+        """
+        spread_width = round(vix * self.spread_vix_multiplier / 5) * 5
+        spread_width = max(60, spread_width)           # MKT-026 floor
+        spread_width = min(spread_width, self.max_spread_width)  # cap
+        return spread_width
+
     # =========================================================================
     # OVERRIDE: Strike calculation with wider starting OTM (MKT-024)
     # =========================================================================
