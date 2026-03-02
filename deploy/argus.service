@@ -24,6 +24,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/calypso/intel/argus
+ReadOnlyPaths=/opt/calypso/data /opt/calypso/services/argus /opt/calypso/.venv /opt/calypso/shared /opt/calypso/bots/hydra/config
 
 # Timeout for the health check (should finish in seconds)
 TimeoutStartSec=60

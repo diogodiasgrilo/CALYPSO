@@ -89,15 +89,24 @@ def git_commit_and_push(report_path: str, memory_file: str, week_label: str):
             timeout=30,
         )
 
-        # Commit
+        # Commit (may fail if nothing to commit — that's OK)
         commit_msg = f"intel: Clio weekly report {week_label}"
-        subprocess.run(
+        result = subprocess.run(
             ["git", "commit", "-m", commit_msg],
             cwd=_project_root,
-            check=True,
+            capture_output=True,
+            text=True,
             timeout=30,
         )
-        logger.info(f"Committed: {commit_msg}")
+        if result.returncode == 0:
+            logger.info(f"Committed: {commit_msg}")
+        else:
+            if "nothing to commit" in result.stdout or "nothing to commit" in result.stderr:
+                logger.info("Nothing to commit — files unchanged")
+                return
+            else:
+                logger.error(f"git commit failed: {result.stderr}")
+                return
 
         # Push
         result = subprocess.run(

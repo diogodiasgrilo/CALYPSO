@@ -26,7 +26,16 @@ def aggregate_weekly_data(config: Dict[str, Any], week_end_date) -> Dict[str, An
     data = {}
 
     # Week boundaries: Monday through Friday
-    friday = week_end_date - timedelta(days=1)
+    # week_end_date is the day Clio runs (Saturday), but handle any day
+    weekday = week_end_date.weekday()  # 0=Mon, 5=Sat, 6=Sun
+    if weekday == 5:  # Saturday (expected)
+        friday = week_end_date - timedelta(days=1)
+    elif weekday == 6:  # Sunday
+        friday = week_end_date - timedelta(days=2)
+    else:
+        # Running mid-week (manual run) — use last Friday
+        days_since_friday = (weekday + 2) % 7  # days since last Friday
+        friday = week_end_date - timedelta(days=days_since_friday if days_since_friday > 0 else 7)
     monday = friday - timedelta(days=4)
 
     logger.info(f"Aggregating data for week: {monday} to {friday}")

@@ -4,7 +4,7 @@ Documentation=https://github.com/calypso-trading/calypso
 
 [Timer]
 OnCalendar=Mon..Fri *-*-* 08:30:00 America/New_York
-Persistent=true
+Persistent=false
 AccuracySec=60s
 
 [Install]

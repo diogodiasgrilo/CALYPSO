@@ -23,7 +23,7 @@ SyslogIdentifier=calypso-clio
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/calypso/intel
+ReadWritePaths=/opt/calypso/intel /opt/calypso/.git
 
 # Larger timeout for deep analysis + git operations
 TimeoutStartSec=300

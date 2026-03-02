@@ -16,7 +16,6 @@ Usage:
     raw = reader.read_tab_raw("Calypso_HYDRA_Live_Data", "Positions", limit_rows=50)
 """
 
-import json
 import logging
 import threading
 from typing import Any, Dict, List, Optional
@@ -150,18 +149,15 @@ class SheetsReader:
             return None
 
         try:
-            import gspread
-
             spreadsheet = self._call_with_timeout(
                 self.client.open, spreadsheet_name
             )
             if spreadsheet is None:
                 return None
 
-            try:
-                worksheet = spreadsheet.worksheet(tab_name)
-            except gspread.WorksheetNotFound:
-                logger.warning(f"Worksheet not found: {tab_name}")
+            worksheet = self._call_with_timeout(spreadsheet.worksheet, tab_name)
+            if worksheet is None:
+                logger.warning(f"Worksheet not found or timed out: {tab_name}")
                 return None
 
             records = self._call_with_timeout(worksheet.get_all_records)
@@ -199,18 +195,15 @@ class SheetsReader:
             return None
 
         try:
-            import gspread
-
             spreadsheet = self._call_with_timeout(
                 self.client.open, spreadsheet_name
             )
             if spreadsheet is None:
                 return None
 
-            try:
-                worksheet = spreadsheet.worksheet(tab_name)
-            except gspread.WorksheetNotFound:
-                logger.warning(f"Worksheet not found: {tab_name}")
+            worksheet = self._call_with_timeout(spreadsheet.worksheet, tab_name)
+            if worksheet is None:
+                logger.warning(f"Worksheet not found or timed out: {tab_name}")
                 return None
 
             all_data = self._call_with_timeout(worksheet.get_all_values)

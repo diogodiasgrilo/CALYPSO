@@ -75,7 +75,7 @@ def get_anthropic_client(config: Optional[Dict[str, Any]] = None):
         )
         return None
 
-    return anthropic.Anthropic(api_key=api_key)
+    return anthropic.Anthropic(api_key=api_key, timeout=120.0)
 
 
 def ask_claude(
@@ -104,7 +104,7 @@ def ask_claude(
 
     if not model:
         model = DEFAULT_MODEL
-    if not max_tokens:
+    if max_tokens is None:
         max_tokens = DEFAULT_MAX_TOKENS
 
     try:

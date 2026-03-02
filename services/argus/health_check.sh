@@ -5,7 +5,7 @@
 # appends result to health_log.jsonl, and calls notify.py on failure.
 #
 # Usage: /opt/calypso/services/argus/health_check.sh
-# Requires: bash, systemctl, jq, python3
+# Requires: bash, systemctl
 
 set -euo pipefail
 
@@ -133,7 +133,7 @@ fi
 # =========================================================================
 state_status="ok"
 if [[ -f "${STATE_FILE}" ]]; then
-    if ! python3 -c "import json; json.load(open('${STATE_FILE}'))" 2>/dev/null; then
+    if ! "${VENV_PYTHON}" -c "import json; json.load(open('${STATE_FILE}'))" 2>/dev/null; then
         state_status="corrupt"
         FAILURES+=("State file is not valid JSON: ${STATE_FILE}")
     fi

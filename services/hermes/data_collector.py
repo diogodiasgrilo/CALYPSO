@@ -6,8 +6,6 @@ import json
 import logging
 import os
 import subprocess
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -116,7 +114,7 @@ def _read_json_file(path: str) -> Optional[Dict]:
     try:
         with open(path) as f:
             data = json.load(f)
-        logger.info(f"Read {path} ({len(json.dumps(data))} chars)")
+        logger.info(f"Read {path}")
         return data
     except (json.JSONDecodeError, IOError) as e:
         logger.warning(f"Failed to read {path}: {e}")

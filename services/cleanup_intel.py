@@ -64,7 +64,7 @@ def cleanup_old_reports(config: Dict[str, Any]):
         cutoff = datetime.now() - timedelta(days=periods.get("argus", 90))
         deleted = 0
         for filepath in glob(os.path.join(incident_dir, "*")):
-            if os.path.isfile(filepath):
+            if os.path.isfile(filepath) and not filepath.endswith(".gitkeep"):
                 try:
                     mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
                     if mtime < cutoff:

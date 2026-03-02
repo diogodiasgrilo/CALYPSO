@@ -67,9 +67,7 @@ def gather_context(config: dict) -> dict:
     context = {}
     now_et = get_us_market_time()
 
-    # Yesterday's HERMES report
-    yesterday_str = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
-    # Check last 3 days (in case yesterday was weekend/holiday)
+    # Yesterday's HERMES report (check last 3 days for weekend/holiday)
     hermes_dir = config.get("hermes", {}).get("report_dir", "intel/hermes")
     for days_back in range(1, 4):
         check_date = (now_et - timedelta(days=days_back)).strftime("%Y-%m-%d")
