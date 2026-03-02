@@ -606,7 +606,6 @@ def get_my_positions(self):
     },
     "alerts": {
         "enabled": true,
-        "phone_number": "+1XXXXXXXXXX",
         "email": "your@email.com"
     },
     "logging": {

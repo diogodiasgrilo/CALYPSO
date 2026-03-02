@@ -1,20 +1,22 @@
 # CALYPSO Alert System Setup Guide
 
-This document describes how to deploy and configure the WhatsApp/SMS/Email alerting system for CALYPSO trading bots.
+This document describes how to deploy and configure the Telegram/Email alerting system for CALYPSO trading bots.
 
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         calypso-bot VM                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐    │
-│  │  Iron Fly    │  │Delta Neutral │  │ Rolling Put Diagonal   │    │
-│  └──────┬───────┘  └──────┬───────┘  └───────────┬────────────┘    │
-│         └─────────────────┼──────────────────────┘                  │
-│                  ┌────────▼────────┐                               │
-│                  │  AlertService   │ (shared/alert_service.py)     │
-│                  └────────┬────────┘                               │
-└───────────────────────────┼─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              calypso-bot VM                                  │
+│  ┌──────────┐ ┌──────────┐ ┌────────────────┐ ┌──────┐ ┌───────────────┐   │
+│  │ Iron Fly │ │  Delta   │ │ Rolling Put    │ │ MEIC │ │ HYDRA (LIVE)  │   │
+│  │          │ │ Neutral  │ │ Diagonal       │ │      │ │               │   │
+│  └────┬─────┘ └────┬─────┘ └───────┬────────┘ └──┬───┘ └───────┬───────┘   │
+│       └─────────────┼───────────────┼─────────────┼─────────────┘           │
+│                     └───────────────┼─────────────┘                         │
+│                            ┌────────▼────────┐                              │
+│                            │  AlertService   │ (shared/alert_service.py)    │
+│                            └────────┬────────┘                              │
+└─────────────────────────────────────┼────────────────────────────────────────┘
                             │ Pub/Sub publish (~50ms)
                             ▼
               ┌─────────────────────────────┐
@@ -28,12 +30,12 @@ This document describes how to deploy and configure the WhatsApp/SMS/Email alert
               │   "process-trading-alert"   │
               └─────────────┬───────────────┘
               ┌─────────────┼───────────────┐
-              ▼             ▼               ▼
-    ┌──────────────┐ ┌───────────┐ ┌─────────────┐
-    │ WhatsApp     │ │ SMS       │ │ Gmail SMTP  │
-    │ (Twilio)     │ │ (Twilio)  │ │             │
-    └──────┬───────┘ └─────┬─────┘ └──────┬──────┘
-           └───────────────┼──────────────┘
+              ▼                             ▼
+    ┌──────────────┐              ┌─────────────┐
+    │ Telegram     │              │ Gmail SMTP  │
+    │ (Bot API)    │              │             │
+    └──────┬───────┘              └──────┬──────┘
+           └──────────────────────────────┘
                            ▼
                       Your Devices
 ```
@@ -42,8 +44,9 @@ This document describes how to deploy and configure the WhatsApp/SMS/Email alert
 - **Non-blocking**: Bot publishes to Pub/Sub (~50ms) and continues immediately
 - **Reliable**: Pub/Sub retries for 7 days, dead-letter queue captures failures
 - **Accurate**: Alerts sent AFTER actions complete with actual results
-- **Global delivery**: WhatsApp works everywhere, no carrier issues
-- **Works on WiFi**: Perfect for traveling - no cellular needed for WhatsApp
+- **Free**: Telegram Bot API is completely free, no sandbox restrictions, no token expiry
+- **Global delivery**: Telegram works everywhere, no carrier issues
+- **Works on WiFi**: Perfect for traveling - no cellular needed
 - **Exchange timezone**: All timestamps in US Eastern Time (ET) - consistent regardless of where you are
 
 ---
@@ -69,38 +72,42 @@ gcloud pubsub subscriptions create calypso-alerts-dlq-sub \
 
 ---
 
-## Step 2: Set Up Twilio (WhatsApp + SMS)
+## Step 2: Set Up Telegram Bot
 
-### 2a. Create Twilio Account
+### 2a. Create the Bot
 
-1. Sign up at [twilio.com](https://www.twilio.com/try-twilio)
-2. Get your Account SID and Auth Token from the Console
-3. (Optional) Buy a phone number for SMS (~$1/month) - only needed if you want SMS fallback
+1. Open Telegram, search for `@BotFather`
+2. Send `/newbot`
+3. Choose a display name (e.g., "Calypso Alert Bot")
+4. Choose a username (e.g., `calypso_hydra_bot`) - must end with `bot`
+5. Copy the **bot token** (format: `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`)
 
-### 2b. Set Up WhatsApp Sandbox (Recommended)
+### 2b. Get Your Chat ID
 
-WhatsApp is the recommended delivery method - works globally, no carrier issues, works on WiFi.
+1. Send any message to your new bot in Telegram (e.g., "Start")
+2. Visit `https://api.telegram.org/bot{YOUR_TOKEN}/getUpdates`
+3. Find `"chat":{"id":XXXXXXXX}` in the response - that's your **chat_id**
 
-1. Go to [Twilio Console > Messaging > WhatsApp](https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn)
-2. Note the sandbox number: `+1 415 523 8886`
-3. **On your phone**: Open WhatsApp and send the join message (e.g., "join your-sandbox-code") to +1 415 523 8886
-4. You'll receive a confirmation that you've joined the sandbox
-
-**Note:** The sandbox is free and sufficient for personal alerts. For production apps with multiple recipients, apply for WhatsApp Business API approval.
-
-### 2c. Store Credentials in Secret Manager
+### 2c. Test the Bot
 
 ```bash
-# Create Twilio credentials secret
-gcloud secrets create calypso-twilio-credentials \
+curl -s "https://api.telegram.org/bot{YOUR_TOKEN}/sendMessage" \
+    -d "chat_id={YOUR_CHAT_ID}" \
+    -d "text=Test from CALYPSO" \
+    -d "parse_mode=Markdown"
+```
+
+### 2d. Store Credentials in Secret Manager
+
+```bash
+# Create Telegram credentials secret
+gcloud secrets create calypso-telegram-credentials \
     --project=calypso-trading-bot \
     --replication-policy="automatic"
 
 # Add the secret value (JSON format)
-# whatsapp_number is the Twilio sandbox number (prefix with whatsapp:)
-# phone_number is optional - only needed for SMS fallback
-echo '{"account_sid": "YOUR_SID", "auth_token": "YOUR_TOKEN", "whatsapp_number": "whatsapp:+14155238886", "phone_number": "+1XXXXXXXXXX"}' | \
-    gcloud secrets versions add calypso-twilio-credentials \
+echo '{"bot_token": "YOUR_BOT_TOKEN", "chat_id": "YOUR_CHAT_ID"}' | \
+    gcloud secrets versions add calypso-telegram-credentials \
     --project=calypso-trading-bot \
     --data-file=-
 ```
@@ -123,18 +130,11 @@ gcloud secrets create calypso-alert-config \
     --replication-policy="automatic"
 
 # Add the secret value
-# whatsapp_number is YOUR phone number (same as phone_number usually)
-# prefer_whatsapp: true = use WhatsApp first, SMS as fallback
-echo '{"phone_number": "+971XXXXXXXXX", "whatsapp_number": "+971XXXXXXXXX", "email": "your@email.com", "gmail_address": "your@gmail.com", "gmail_app_password": "YOUR_APP_PASSWORD", "prefer_whatsapp": true}' | \
+echo '{"phone_number": "+971XXXXXXXXX", "email": "your@email.com", "gmail_address": "your@gmail.com", "gmail_app_password": "YOUR_APP_PASSWORD", "telegram_chat_id": "YOUR_CHAT_ID"}' | \
     gcloud secrets versions add calypso-alert-config \
     --project=calypso-trading-bot \
     --data-file=-
 ```
-
-**Important for UAE/International numbers:**
-- Use E.164 format: `+971XXXXXXXXX` for UAE
-- WhatsApp works globally - no need for a US phone number
-- You can receive alerts anywhere in the world on WiFi
 
 ---
 
@@ -167,13 +167,12 @@ Add the following to each bot's `config.json`:
 {
     "alerts": {
         "enabled": true,
-        "phone_number": "+1XXXXXXXXXX",
         "email": "your@email.com"
     }
 }
 ```
 
-**Note:** Phone number and email can also be stored in Secret Manager (`calypso-alert-config`) and will be used as defaults if not specified in the message.
+**Note:** Telegram delivery uses `bot_token` and `chat_id` from Secret Manager (`calypso-telegram-credentials`), not from config files. Email address can also be stored in Secret Manager (`calypso-alert-config`) and will be used as default if not specified in the message.
 
 ---
 
@@ -207,12 +206,12 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 | Priority | Delivery | Examples |
 |----------|----------|----------|
-| **CRITICAL** | WhatsApp + Email | Circuit breaker, emergency exit, naked position |
-| **HIGH** | WhatsApp + Email | Stop loss, max loss, roll failed |
-| **MEDIUM** | WhatsApp + Email | Position opened/closed, profit target, roll complete |
-| **LOW** | WhatsApp + Email | Bot started/stopped, daily summary |
+| **CRITICAL** | Telegram + Email | Circuit breaker, emergency exit, naked position |
+| **HIGH** | Telegram + Email | Stop loss, max loss, roll failed |
+| **MEDIUM** | Telegram + Email | Position opened/closed, profit target, roll complete |
+| **LOW** | Telegram + Email | Bot started/stopped, daily summary |
 
-**Note:** ALL priority levels are sent to both WhatsApp and Email for immediate visibility. WhatsApp messages use rich formatting with emojis, bold text, and structured details. SMS is used as fallback only if WhatsApp delivery fails.
+**Note:** ALL priority levels are sent to both Telegram and Email for immediate visibility. Telegram messages use rich Markdown formatting with bold text and structured details.
 
 ---
 
@@ -323,7 +322,7 @@ Long straddle retained. Will check VIX before new entries.
 
 ### Daily Summary Alerts (All Bots) (2026-01-26)
 
-Each bot sends a comprehensive daily summary via WhatsApp and Email right after market close:
+Each bot sends a comprehensive daily summary via Telegram and Email right after market close:
 
 | Bot | Alert Content |
 |-----|---------------|
@@ -394,7 +393,7 @@ Publish a test message to Pub/Sub:
 ```bash
 gcloud pubsub topics publish calypso-alerts \
     --project=calypso-trading-bot \
-    --message='{"bot_name":"TEST","alert_type":"circuit_breaker","priority":"critical","title":"Test Alert","message":"Testing alert system","timestamp":"2026-01-26T12:00:00Z","details":{},"delivery":{"sms":true,"email":true}}'
+    --message='{"bot_name":"TEST","alert_type":"circuit_breaker","priority":"critical","title":"Test Alert","message":"Testing alert system","timestamp":"2026-01-26T12:00:00Z","details":{},"delivery":{"telegram":true,"email":true}}'
 ```
 
 ---
@@ -427,17 +426,10 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub \
 |---------|-----------|-----------------|--------------|
 | Pub/Sub | 10GB/month | ~1MB | $0.00 |
 | Cloud Functions | 2M invocations | ~1000 | $0.00 |
-| Twilio WhatsApp | Sandbox free | ~50 messages | $0.00 |
-| Twilio SMS (fallback) | N/A | ~10 SMS @ $0.10 | ~$1.00 |
+| Telegram Bot API | Free (unlimited) | ~50 messages | $0.00 |
 | Gmail SMTP | Free | ~200 emails | $0.00 |
 
-**Total: ~$0.00 - $1.00/month** (Free if using WhatsApp sandbox only)
-
-**Notes:**
-- WhatsApp sandbox is free for personal use (unlimited messages to yourself)
-- WhatsApp Business API: ~$0.005-0.05 per message depending on country
-- SMS to UAE: ~$0.10/message (use WhatsApp instead!)
-- Gmail SMTP allows 500 emails/day for regular accounts
+**Total: $0.00/month** (Telegram Bot API is completely free with no usage limits)
 
 ---
 
@@ -445,7 +437,7 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub \
 
 1. **Never hardcode credentials** - Always use Secret Manager or environment variables
 2. **Use service accounts** - Follow principle of least privilege (only Pub/Sub Publisher + Secret Accessor roles)
-3. **Phone number format** - Always use E.164 format (+1XXXXXXXXXX for US)
+3. **Telegram chat_id** - Store bot_token and chat_id in Secret Manager, never in config files
 4. **Gmail App Password** - Never use your regular Gmail password; always use App Password with 2FA enabled
 5. **Monitor dead-letter queue** - Check regularly for failed alerts that may indicate configuration issues
 
@@ -460,19 +452,12 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub \
 3. Check Cloud Function logs for errors
 4. Verify secrets exist in Secret Manager
 
-### WhatsApp Not Delivered
+### Telegram Not Delivered
 
-1. **Sandbox not joined**: Send "join <your-code>" to +1 415 523 8886 from your WhatsApp
-2. **24-hour window expired**: For sandbox, you must interact with the bot within 24 hours to receive messages. Send any message to refresh.
-3. Check Twilio console for delivery status
-4. Verify phone number format (+971XXXXXXXXX for UAE)
-
-### SMS Not Delivered (Fallback)
-
-1. Check Twilio console for delivery status
-2. Verify phone number format (E.164: +971XXXXXXXXX)
-3. Check Twilio account balance
-4. International SMS may be blocked by carriers - prefer WhatsApp
+1. **Bot not started**: Send any message to your bot in Telegram first
+2. **Wrong chat_id**: Re-fetch from `https://api.telegram.org/bot{TOKEN}/getUpdates`
+3. **Bot token invalid**: Verify token with `curl https://api.telegram.org/bot{TOKEN}/getMe`
+4. **Markdown parsing error**: Cloud Function retries without parse_mode if Markdown fails
 
 ### Email Not Delivered
 
@@ -488,6 +473,6 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub \
 | File | Purpose |
 |------|---------|
 | `shared/alert_service.py` | AlertService class used by bots |
-| `cloud_functions/alert_processor/main.py` | Cloud Function that sends SMS/email |
+| `cloud_functions/alert_processor/main.py` | Cloud Function that sends Telegram/Email |
 | `cloud_functions/alert_processor/requirements.txt` | Cloud Function dependencies |
 | `docs/ALERTING_SETUP.md` | This file |

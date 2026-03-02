@@ -40,7 +40,7 @@ CALYPSO is a monorepo containing multiple automated options trading bots that tr
 - **Google Secret Manager** for credentials (never in config files)
 - **Google Sheets** for trade logging and dashboards
 - **WebSocket streaming** for real-time price data
-- **Pub/Sub + Cloud Functions** for SMS/Email alerts (Twilio + Gmail)
+- **Pub/Sub + Cloud Functions** for Telegram/Email alerts (Telegram Bot API + Gmail)
 
 ### Codebase Structure
 ```
@@ -61,13 +61,13 @@ shared/               # Shared modules used by all bots
   token_coordinator.py # OAuth token refresh coordination
   external_price_feed.py # Yahoo Finance fallback for VIX
   technical_indicators.py # TA calculations
-  alert_service.py    # SMS/Email alerting via Pub/Sub
+  alert_service.py    # Telegram/Email alerting via Pub/Sub
 
 services/             # Standalone services (independent of trading bots)
   token_keeper/       # Keeps Saxo OAuth tokens fresh 24/7
 
 cloud_functions/      # Google Cloud Functions
-  alert_processor/    # Processes alerts from Pub/Sub, sends SMS/Email
+  alert_processor/    # Processes alerts from Pub/Sub, sends Telegram/Email
 
 scripts/              # Utility scripts (see scripts/README.md for full list)
   preview_live_entry.py    # PRIMARY: Shows what bot would do right now
@@ -425,28 +425,28 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start
 
 ---
 
-## Alert System (SMS/Email)
+## Alert System (Telegram/Email)
 
 All bots use a shared alerting system via Google Cloud Pub/Sub and Cloud Functions.
 
 ### Architecture
 ```
-Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail → User
+Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Telegram/Gmail → User
 ```
 
-**Key Design Principle:** Alerts are sent AFTER actions complete with ACTUAL results (not predictions). The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately. Cloud Function delivers SMS/email asynchronously.
+**Key Design Principle:** Alerts are sent AFTER actions complete with ACTUAL results (not predictions). The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately. Cloud Function delivers Telegram/Email asynchronously.
 
 **Timezone:** All alert timestamps use US Eastern Time (ET) - the exchange timezone. Consistent regardless of where you travel. DST transitions (EST ↔ EDT) are handled automatically.
 
 ### Alert Priority Levels
 | Priority | Delivery | Examples |
 |----------|----------|----------|
-| CRITICAL | WhatsApp + Email | Circuit breaker, emergency exit, naked position, ITM risk close |
-| HIGH | WhatsApp + Email | Stop loss, max loss, wing breach, roll failed, vigilant mode entry |
-| MEDIUM | WhatsApp + Email | Position opened/closed, profit target, roll complete, recenter |
-| LOW | WhatsApp + Email | Bot started/stopped, daily summary, vigilant mode exit |
+| CRITICAL | Telegram + Email | Circuit breaker, emergency exit, naked position, ITM risk close |
+| HIGH | Telegram + Email | Stop loss, max loss, wing breach, roll failed, vigilant mode entry |
+| MEDIUM | Telegram + Email | Position opened/closed, profit target, roll complete, recenter |
+| LOW | Telegram + Email | Bot started/stopped, daily summary, vigilant mode exit |
 
-**Note:** ALL alerts go to WhatsApp (rich formatting) + Email. SMS is fallback only.
+**Note:** ALL alerts go to Telegram (rich Markdown formatting) + Email.
 
 ### Alert Responsibilities by Bot (2026-01-27)
 
@@ -458,7 +458,7 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Twilio/Gmail →
 | **MEIC** | ✅ MEIC | ❌ |
 
 **MarketStatusMonitor** (only on Delta Neutral to avoid duplicates):
-- Market opening countdown (1h, 30m, 15m before open) - sends WhatsApp/Email alerts
+- Market opening countdown (1h, 30m, 15m before open) - sends Telegram/Email alerts
 - Market open notification (at 9:30 AM ET)
 - Market close notification (at 4:00 PM ET or early close)
 - Holiday notifications (weekday market closures)
@@ -476,17 +476,18 @@ Add to each bot's `config.json`:
 {
     "alerts": {
         "enabled": true,
-        "phone_number": "+1XXXXXXXXXX",
         "email": "your@email.com"
     }
 }
 ```
 
+**Note:** Telegram delivery uses `bot_token` and `chat_id` from Secret Manager (`calypso-telegram-credentials`), not from config files. Email address can also be stored in Secret Manager (`calypso-alert-config`).
+
 ### Key Files
 | File | Purpose |
 |------|---------|
 | `shared/alert_service.py` | AlertService class used by bots |
-| `cloud_functions/alert_processor/main.py` | Cloud Function that sends SMS/email |
+| `cloud_functions/alert_processor/main.py` | Cloud Function that sends Telegram/Email |
 | `docs/ALERTING_SETUP.md` | Full deployment guide |
 
 ### Testing Alerts Locally (Dry Run)
@@ -1014,7 +1015,7 @@ SCRIPT
 | **HYDRA strategy spec** | [HYDRA_STRATEGY_SPECIFICATION.md](docs/HYDRA_STRATEGY_SPECIFICATION.md) | Full HYDRA spec: decision flows, MKT rules, performance data |
 | **HYDRA trading journal** | [HYDRA_TRADING_JOURNAL.md](docs/HYDRA_TRADING_JOURNAL.md) | Daily results, analysis, what-if projections |
 | **MEIC edge cases** | [MEIC_EDGE_CASES.md](docs/MEIC_EDGE_CASES.md) | 79 edge cases for MEIC bot |
-| SMS/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
+| Telegram/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
 | **Next bots to build** | [THETA_PROFITS_STRATEGY_ANALYSIS.md](docs/THETA_PROFITS_STRATEGY_ANALYSIS.md) | Top 3: MEIC, METF, SPX Put Credit |
 | **Capital allocation** | [PORTFOLIO_ALLOCATION_ANALYSIS.md](docs/PORTFOLIO_ALLOCATION_ANALYSIS.md) | $50K optimal split: MEIC + Delta Neutral |
 | **Multi-bot same underlying** | [MULTI_BOT_POSITION_MANAGEMENT.md](docs/MULTI_BOT_POSITION_MANAGEMENT.md) | Position Registry design for SPX multi-bot |
@@ -1038,7 +1039,7 @@ SCRIPT
 | `docs/MEIC_EDGE_CASES.md` | 79 edge cases analyzed for MEIC bot |
 | `docs/DELTA_NEUTRAL_EDGE_CASES.md` | **55 edge cases** for Delta Neutral bot (updated 2026-01-28) |
 | `docs/ROLLING_PUT_DIAGONAL_EDGE_CASES.md` | Edge cases for Rolling Put Diagonal bot |
-| `docs/ALERTING_SETUP.md` | SMS/Email alert system deployment guide |
+| `docs/ALERTING_SETUP.md` | Telegram/Email alert system deployment guide |
 | `docs/DEPLOYMENT.md` | Deployment procedures |
 | `docs/GOOGLE_SHEETS.md` | Google Sheets logging setup |
 | `docs/VM_COMMANDS.md` | VM administration commands |

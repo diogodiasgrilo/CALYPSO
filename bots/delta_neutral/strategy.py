@@ -205,7 +205,7 @@ class DeltaNeutralStrategy:
             config: Configuration dictionary with strategy parameters
             trade_logger: Optional logger service for trade logging
             dry_run: If True, simulate trades without placing real orders
-            alert_service: Optional AlertService for SMS/email notifications
+            alert_service: Optional AlertService for Telegram/Email notifications
         """
         self.client = client
         self.config = config
@@ -213,7 +213,7 @@ class DeltaNeutralStrategy:
         self.trade_logger = trade_logger
         self.dry_run = dry_run
 
-        # Alert service for SMS/email notifications
+        # Alert service for Telegram/Email notifications
         if alert_service:
             self.alert_service = alert_service
         else:
@@ -5799,7 +5799,7 @@ class DeltaNeutralStrategy:
                         f"⚠️ VIGILANT MODE: Short call ${call_strike:.0f} - price ${price:.2f} is "
                         f"{pct_from_strike:.2f}% (${call_distance:.2f}) away. Monitoring every 2 seconds."
                     )
-                # Send WhatsApp/Email alert for vigilant entry
+                # Send Telegram/Email alert for vigilant entry
                 cushion_msg = f"Cushion consumed: {call_consumed_pct:.1f}% (roll at 75%)\n" if entry_price > 0 else ""
                 self.alert_service.send_alert(
                     alert_type=AlertType.VIGILANT_ENTERED,
@@ -5846,7 +5846,7 @@ class DeltaNeutralStrategy:
                         f"⚠️ VIGILANT MODE: Short put ${put_strike:.0f} - price ${price:.2f} is "
                         f"{pct_from_strike:.2f}% (${put_distance:.2f}) away. Monitoring every 2 seconds."
                     )
-                # Send WhatsApp/Email alert for vigilant entry
+                # Send Telegram/Email alert for vigilant entry
                 cushion_msg = f"Cushion consumed: {put_consumed_pct:.1f}% (roll at 75%)\n" if entry_price > 0 else ""
                 self.alert_service.send_alert(
                     alert_type=AlertType.VIGILANT_ENTERED,
@@ -10795,12 +10795,12 @@ class DeltaNeutralStrategy:
         day_type = "weekend/holiday" if is_non_trading_day else "trading day"
         logger.info(f"Daily summary logged ({day_type}): P&L ${daily_pnl:.2f}, Net Theta ${net_theta:.2f}")
 
-        # Send WhatsApp/Email daily summary alert (only on trading days)
+        # Send Telegram/Email daily summary alert (only on trading days)
         if not is_non_trading_day:
             summary_for_alert = summary.copy()
             summary_for_alert["dry_run"] = self.dry_run
             self.alert_service.daily_summary_delta_neutral(summary_for_alert)
-            logger.info("Daily summary alert sent to WhatsApp/Email")
+            logger.info("Daily summary alert sent to Telegram/Email")
 
         return True
 

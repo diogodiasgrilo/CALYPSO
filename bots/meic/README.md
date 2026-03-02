@@ -156,7 +156,6 @@ Legs are placed in safe order (longs before shorts):
     },
     "alerts": {
         "enabled": true,
-        "phone_number": "+1XXXXXXXXXX",
         "email": "your@email.com"
     }
 }

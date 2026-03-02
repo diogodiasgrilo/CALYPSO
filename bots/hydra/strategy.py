@@ -200,7 +200,7 @@ class HydraStrategy(MEICStrategy):
             config: Strategy configuration dictionary
             logger_service: Trade logging service
             dry_run: If True, simulate trades without placing real orders
-            alert_service: Optional AlertService for SMS/email notifications
+            alert_service: Optional AlertService for Telegram/Email notifications
         """
         # Initialize trend filter config BEFORE calling super().__init__
         # because parent __init__ calls methods that might need these values

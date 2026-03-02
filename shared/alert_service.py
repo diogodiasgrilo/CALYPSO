@@ -2,10 +2,10 @@
 """
 Alert Service Module
 
-Provides SMS and email alerting for CALYPSO trading bots via Google Cloud Pub/Sub.
+Provides Telegram and email alerting for CALYPSO trading bots via Google Cloud Pub/Sub.
 
 Architecture:
-    Bot → AlertService → Pub/Sub Topic → Cloud Function → Twilio/Gmail → User
+    Bot → AlertService → Pub/Sub Topic → Cloud Function → Telegram/Gmail → User
 
 IMPORTANT: Alerts are sent AFTER actions complete, with ACTUAL results.
     1. Event occurs (e.g., wing breach detected)
@@ -13,11 +13,11 @@ IMPORTANT: Alerts are sent AFTER actions complete, with ACTUAL results.
     3. Bot gets real result (e.g., actual P&L)
     4. Bot publishes alert with real data to Pub/Sub (~50ms)
     5. Bot continues to next iteration immediately
-    6. Cloud Function delivers SMS/email asynchronously
+    6. Cloud Function delivers Telegram/Email asynchronously
 
 Benefits:
     - Accurate: Alerts contain real outcomes, not predictions
-    - Non-blocking: Bot doesn't wait for Twilio/Gmail API (saves 1-2s per alert)
+    - Non-blocking: Bot doesn't wait for Telegram/Gmail API (saves 1-2s per alert)
     - Reliable: Pub/Sub retries for 7 days, dead-letter queue captures failures
     - Auditable: Full trail in Cloud Logging
     - Scalable: Add new alert channels without changing bot code
@@ -28,12 +28,12 @@ Timezone:
     DST transitions (EST ↔ EDT) are handled automatically via pytz.
 
 Alert Priorities:
-    CRITICAL: WhatsApp + Email (circuit breaker, emergency exit, naked positions)
-    HIGH: WhatsApp + Email (stop loss, max loss, position issues)
-    MEDIUM: WhatsApp + Email (position opened, profit target, daily summaries)
-    LOW: WhatsApp + Email (informational, startup/shutdown)
+    CRITICAL: Telegram + Email (circuit breaker, emergency exit, naked positions)
+    HIGH: Telegram + Email (stop loss, max loss, position issues)
+    MEDIUM: Telegram + Email (position opened, profit target, daily summaries)
+    LOW: Telegram + Email (informational, startup/shutdown)
 
-Note: All priority levels now send to WhatsApp for immediate visibility.
+Note: All priority levels send to Telegram for immediate visibility.
       Email provides a permanent record with rich HTML formatting.
 
 Usage:
@@ -41,7 +41,7 @@ Usage:
 
     alert_service = AlertService(config)
 
-    # Send a critical alert (SMS + Email)
+    # Send a critical alert (Telegram + Email)
     alert_service.send_alert(
         bot_name="IRON_FLY",
         alert_type="CIRCUIT_BREAKER",
@@ -71,10 +71,10 @@ logger = logging.getLogger(__name__)
 
 class AlertPriority(Enum):
     """Alert priority levels determining delivery channels."""
-    CRITICAL = "critical"  # SMS + Email - requires immediate attention
-    HIGH = "high"          # SMS + Email - significant event
-    MEDIUM = "medium"      # Email only - important but not urgent
-    LOW = "low"            # Email only - informational
+    CRITICAL = "critical"  # Telegram + Email - requires immediate attention
+    HIGH = "high"          # Telegram + Email - significant event
+    MEDIUM = "medium"      # Telegram + Email - important but not urgent
+    LOW = "low"            # Telegram + Email - informational
 
 
 class AlertType(Enum):
@@ -124,7 +124,7 @@ class AlertType(Enum):
     EMERGENCY_CLOSE = "emergency_close"      # Emergency position close event
     DATA_QUALITY = "data_quality"            # Data quality issue (stale quotes, invalid P&L)
 
-    # Market Status Events (WhatsApp only by default)
+    # Market Status Events (Telegram + Email)
     MARKET_OPENING_SOON = "market_opening_soon"  # 1h, 30m, 15m countdown
     MARKET_OPEN = "market_open"                   # Market just opened
     MARKET_CLOSED = "market_closed"               # Market just closed
@@ -188,7 +188,7 @@ class AlertService:
 
     On GCP:
         - Publishes to Pub/Sub topic "calypso-alerts"
-        - Cloud Function processes messages and sends SMS/email
+        - Cloud Function processes messages and sends Telegram/Email
 
     Locally:
         - Logs alerts but doesn't publish (no Pub/Sub available)
@@ -269,7 +269,7 @@ class AlertService:
 
         Args:
             alert_type: Type of alert (from AlertType enum)
-            title: Short alert title (shown in SMS subject)
+            title: Short alert title (shown in Telegram header and email subject)
             message: Alert message body
             priority: Priority level (defaults to DEFAULT_PRIORITIES mapping)
             details: Additional structured data (e.g., prices, P&L)
@@ -295,7 +295,7 @@ class AlertService:
             "timestamp": datetime.now(US_EASTERN).isoformat(),
             "details": details or {},
             "delivery": {
-                "sms": True,  # All priorities get WhatsApp (Cloud Function handles WhatsApp vs SMS)
+                "telegram": True,  # All priorities get Telegram (Cloud Function sends via Bot API)
                 "email": True,  # All priorities get email
                 "phone_number": self._phone_number,
                 "email_address": self._email
@@ -870,7 +870,7 @@ class AlertService:
         )
 
     # =========================================================================
-    # MARKET STATUS ALERTS (WhatsApp + Email)
+    # MARKET STATUS ALERTS (Telegram + Email)
     # =========================================================================
 
     def market_opening_soon(
@@ -880,7 +880,7 @@ class AlertService:
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Send market opening countdown alert (LOW - WhatsApp + Email).
+        Send market opening countdown alert (LOW - Telegram + Email).
 
         Called at 1h, 30m, 15m before market open.
         """
@@ -910,7 +910,7 @@ class AlertService:
         spy_price: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market open notification (LOW - WhatsApp + Email)."""
+        """Send market open notification (LOW - Telegram + Email)."""
         extra = details or {}
         if vix_level is not None:
             extra["vix"] = vix_level
@@ -935,7 +935,7 @@ class AlertService:
         day_change_pct: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market closed notification (LOW - WhatsApp + Email)."""
+        """Send market closed notification (LOW - Telegram + Email)."""
         extra = details or {}
         if spy_close is not None:
             extra["spy_close"] = spy_close
@@ -960,7 +960,7 @@ class AlertService:
         next_open_date: str,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market holiday notification (LOW - WhatsApp + Email)."""
+        """Send market holiday notification (LOW - Telegram + Email)."""
         extra = details or {}
 
         return self.send_alert(
@@ -977,7 +977,7 @@ class AlertService:
         close_time: str,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send early close day warning (LOW - WhatsApp + Email)."""
+        """Send early close day warning (LOW - Telegram + Email)."""
         extra = details or {}
 
         return self.send_alert(
@@ -998,7 +998,7 @@ class AlertService:
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Send big pre-market gap alert (HIGH - WhatsApp + Email).
+        Send big pre-market gap alert (HIGH - Telegram + Email).
 
         This is for significant overnight/premarket moves that will affect positions.
         """

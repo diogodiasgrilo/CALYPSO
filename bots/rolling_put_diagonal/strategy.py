@@ -393,7 +393,7 @@ class RollingPutDiagonalStrategy:
             config: Configuration dictionary with strategy parameters
             trade_logger: Optional logger service for trade logging
             dry_run: If True, simulate trades without placing real orders
-            alert_service: Optional AlertService for SMS/email notifications
+            alert_service: Optional AlertService for Telegram/Email notifications
         """
         self.client = client
         self.config = config
@@ -401,7 +401,7 @@ class RollingPutDiagonalStrategy:
         self.trade_logger = trade_logger
         self.dry_run = dry_run or self.strategy_config.get("dry_run", False)
 
-        # Alert service for SMS/email notifications
+        # Alert service for Telegram/Email notifications
         if alert_service:
             self.alert_service = alert_service
         else:
@@ -4900,11 +4900,11 @@ class RollingPutDiagonalStrategy:
             f"Rolls={self.metrics.roll_count}, P&L=${self.metrics.total_pnl:.2f}"
         )
 
-        # Send WhatsApp/Email daily summary alert
+        # Send Telegram/Email daily summary alert
         summary_for_alert = summary.copy()
         summary_for_alert["dry_run"] = self.dry_run
         self.alert_service.daily_summary_rolling_put_diagonal(summary_for_alert)
-        logger.info("Daily summary alert sent to WhatsApp/Email")
+        logger.info("Daily summary alert sent to Telegram/Email")
 
     def log_position_to_sheets(self):
         """

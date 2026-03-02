@@ -90,9 +90,9 @@ calypso/
 │   ├── market_hours.py         # Market hours + holidays
 │   ├── token_coordinator.py    # Multi-bot token sharing
 │   ├── config_loader.py        # Config management
-│   └── alert_service.py        # SMS/Email alerts via Pub/Sub
+│   └── alert_service.py        # Telegram/Email alerts via Pub/Sub
 ├── cloud_functions/             # Google Cloud Functions
-│   └── alert_processor/        # Processes alerts, sends SMS/Email
+│   └── alert_processor/        # Processes alerts, sends Telegram/Email
 ├── scripts/                     # Utility scripts
 ├── logs/                        # Log files (per bot)
 ├── data/                        # Persistent metrics
@@ -212,7 +212,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 
 - **[VM Commands Reference](docs/VM_COMMANDS.md)** - Complete VM command reference
 - **[Google Sheets Setup](docs/GOOGLE_SHEETS.md)** - Trade logging setup
-- **[Alerting Setup](docs/ALERTING_SETUP.md)** - SMS/Email alert system deployment
+- **[Alerting Setup](docs/ALERTING_SETUP.md)** - Telegram/Email alert system deployment
 - **[Deployment Guide](docs/DEPLOYMENT.md)** - GCP deployment instructions
 - **[Delta Neutral Edge Cases](docs/DELTA_NEUTRAL_EDGE_CASES.md)** - Risk analysis (44 edge cases)
 - **[Iron Fly Edge Cases](docs/IRON_FLY_EDGE_CASES.md)** - Risk analysis (63 edge cases)
@@ -237,7 +237,7 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 - Google Sheets logging with strategy-specific dashboards
 - US market holiday detection (all NYSE holidays)
 - Intelligent sleep during market closures
-- **SMS/Email Alerts via Pub/Sub** (CRITICAL: SMS+Email, HIGH/MEDIUM: Email)
+- **Telegram/Email Alerts via Pub/Sub** (ALL priorities: Telegram + Email)
 
 **Safety Features (All Bots):**
 - Circuit breaker (halts trading after consecutive failures)

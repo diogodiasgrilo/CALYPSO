@@ -89,7 +89,7 @@ The Delta Neutral bot (`bots/delta_neutral/`) serves as the reference implementa
 │  Token Coordination │ Auto-Reset Circuit Breaker               │
 ├─────────────────────────────────────────────────────────────────┤
 │                     LAYER 5: VISIBILITY                         │
-│  Comprehensive Logging │ Google Sheets │ SMS/Email Alerts      │
+│  Comprehensive Logging │ Google Sheets │ Telegram/Email Alerts │
 │  Audit Trails │ Performance Metrics │ Daily Summaries          │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -102,7 +102,7 @@ The Delta Neutral bot (`bots/delta_neutral/`) serves as the reference implementa
 | `bots/delta_neutral/main.py` | Main loop with safety orchestration |
 | `shared/saxo_client.py` | API client with circuit breaker |
 | `shared/token_coordinator.py` | Multi-bot token management |
-| `shared/alert_service.py` | SMS/Email alerting |
+| `shared/alert_service.py` | Telegram/Email alerting |
 | `shared/market_hours.py` | Market hours validation |
 | `shared/logger_service.py` | Comprehensive logging |
 
@@ -2305,10 +2305,10 @@ Alerts provide real-time visibility into bot actions. All alerts go through Pub/
 
 ```python
 class AlertPriority(Enum):
-    CRITICAL = "critical"  # WhatsApp + Email - immediate attention
-    HIGH = "high"          # WhatsApp + Email - significant event
-    MEDIUM = "medium"      # WhatsApp + Email - important but not urgent
-    LOW = "low"            # WhatsApp + Email - informational
+    CRITICAL = "critical"  # Telegram + Email - immediate attention
+    HIGH = "high"          # Telegram + Email - significant event
+    MEDIUM = "medium"      # Telegram + Email - important but not urgent
+    LOW = "low"            # Telegram + Email - informational
 ```
 
 ### Alert Types
@@ -3640,21 +3640,21 @@ def cleanup_registry():
 
 | Event | Priority | Channels |
 |-------|----------|----------|
-| Circuit breaker | CRITICAL | WhatsApp + Email |
-| Emergency close failed | CRITICAL | WhatsApp + Email |
-| Naked position detected | CRITICAL | WhatsApp + Email |
-| ITM risk close | CRITICAL | WhatsApp + Email |
-| Critical slippage (>15%) | CRITICAL | WhatsApp + Email |
-| Order size limit exceeded | CRITICAL | WhatsApp + Email |
-| Stop loss | HIGH | WhatsApp + Email |
-| Vigilant mode entered | HIGH | WhatsApp + Email |
-| High slippage (5-15%) | HIGH | WhatsApp + Email |
-| Emergency close retry | HIGH | WhatsApp + Email |
-| Extreme spread delay | HIGH | WhatsApp + Email |
-| Position opened | MEDIUM | WhatsApp + Email |
-| Roll completed | MEDIUM | WhatsApp + Email |
-| Bot started | LOW | WhatsApp + Email |
-| Daily summary | LOW | WhatsApp + Email |
+| Circuit breaker | CRITICAL | Telegram + Email |
+| Emergency close failed | CRITICAL | Telegram + Email |
+| Naked position detected | CRITICAL | Telegram + Email |
+| ITM risk close | CRITICAL | Telegram + Email |
+| Critical slippage (>15%) | CRITICAL | Telegram + Email |
+| Order size limit exceeded | CRITICAL | Telegram + Email |
+| Stop loss | HIGH | Telegram + Email |
+| Vigilant mode entered | HIGH | Telegram + Email |
+| High slippage (5-15%) | HIGH | Telegram + Email |
+| Emergency close retry | HIGH | Telegram + Email |
+| Extreme spread delay | HIGH | Telegram + Email |
+| Position opened | MEDIUM | Telegram + Email |
+| Roll completed | MEDIUM | Telegram + Email |
+| Bot started | LOW | Telegram + Email |
+| Daily summary | LOW | Telegram + Email |
 
 ---
 

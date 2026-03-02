@@ -12,27 +12,27 @@ This package contains common utilities used by all trading strategies:
 - token_coordinator: OAuth token refresh coordination across bots (used by Token Keeper service)
 - event_calendar: FOMC/economic calendar for trading blackouts
 - technical_indicators: Technical analysis calculations
-- alert_service: SMS/Email alerting via Google Cloud Pub/Sub
+- alert_service: Telegram/Email alerting via Google Cloud Pub/Sub
 - position_registry: Multi-bot position ownership tracking (for same underlying)
 
 Last Updated: 2026-02-13 (Timeout protection for all Sheets/API calls, account key validation, fill price accuracy)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
-Architecture: Bot -> AlertService -> Pub/Sub -> Cloud Function -> Twilio/Gmail
+Architecture: Bot -> AlertService -> Pub/Sub -> Cloud Function -> Telegram/Gmail
 
 Key design: Alerts are sent AFTER actions complete with ACTUAL results.
 The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately.
-Cloud Function delivers SMS/email asynchronously in the background.
+Cloud Function delivers Telegram/Email asynchronously in the background.
 
 Timezone: All timestamps use US Eastern Time (ET) - the exchange timezone.
           Handles EST ↔ EDT transitions automatically via pytz.
 
-Alert Priorities (ALL levels get WhatsApp + Email):
-    CRITICAL: WhatsApp + Email (circuit breaker, emergency exit, naked positions, ITM risk close)
-    HIGH: WhatsApp + Email (stop loss, max loss, position issues, vigilant mode entry)
-    MEDIUM: WhatsApp + Email (position opened, profit target, rolls, recenters)
-    LOW: WhatsApp + Email (informational, startup/shutdown, vigilant mode exit)
+Alert Priorities (ALL levels get Telegram + Email):
+    CRITICAL: Telegram + Email (circuit breaker, emergency exit, naked positions, ITM risk close)
+    HIGH: Telegram + Email (stop loss, max loss, position issues, vigilant mode entry)
+    MEDIUM: Telegram + Email (position opened, profit target, rolls, recenters)
+    LOW: Telegram + Email (informational, startup/shutdown, vigilant mode exit)
 
 Alert Responsibilities by Bot:
     Iron Fly:           AlertService only (no market monitor, no gap alerts - 0DTE only)

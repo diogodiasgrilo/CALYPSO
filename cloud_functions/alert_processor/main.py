@@ -3,9 +3,8 @@
 Cloud Function: Alert Processor
 
 Processes trading alerts from Pub/Sub and sends notifications via:
-- WhatsApp (Twilio) - Primary for ALL alerts (rich formatting, works globally)
-- SMS (Twilio) - Fallback if WhatsApp fails (concise formatting)
-- Email (Gmail SMTP) - All alert levels (full HTML formatting)
+- Telegram (Bot API) - Primary for ALL alerts (rich Markdown formatting, free, no expiry)
+- Email (Gmail SMTP) - All alert levels (full HTML formatting, permanent record)
 
 Timezone:
     All timestamps are displayed in US Eastern Time (ET) - the exchange timezone.
@@ -13,36 +12,18 @@ Timezone:
 
 Trigger: Pub/Sub topic "calypso-alerts"
 
-Environment Variables (set in Cloud Function deployment):
-    TWILIO_ACCOUNT_SID: Twilio account SID
-    TWILIO_AUTH_TOKEN: Twilio auth token
-    TWILIO_PHONE_NUMBER: Twilio phone number to send from (for SMS)
-    TWILIO_WHATSAPP_NUMBER: Twilio WhatsApp number (format: whatsapp:+14155238886)
-    GMAIL_ADDRESS: Gmail address to send from
-    GMAIL_APP_PASSWORD: Gmail app password (NOT your regular password)
-    DEFAULT_PHONE_NUMBER: Default recipient phone number (if not in message)
-    DEFAULT_EMAIL: Default recipient email (if not in message)
-
-Secrets (via Secret Manager - preferred):
-    calypso-twilio-credentials: {
-        "account_sid": "...",
-        "auth_token": "...",
-        "phone_number": "...",
-        "whatsapp_number": "whatsapp:+14155238886"  # Twilio sandbox or your approved number
+Secrets (via Secret Manager):
+    calypso-telegram-credentials: {
+        "bot_token": "123456789:ABCdef...",
+        "chat_id": "8016648738"
     }
     calypso-alert-config: {
-        "phone_number": "...",      # Recipient phone (E.164: +971XXXXXXXXX)
-        "whatsapp_number": "...",   # Recipient WhatsApp (same as phone usually)
+        "phone_number": "...",      # Kept for reference
         "email": "...",
         "gmail_address": "...",
         "gmail_app_password": "...",
-        "prefer_whatsapp": true     # Use WhatsApp instead of SMS for CRITICAL/HIGH
+        "telegram_chat_id": "..."   # Override chat_id if needed
     }
-
-WhatsApp Setup:
-    1. Go to Twilio Console > Messaging > Try it out > Send a WhatsApp message
-    2. Join sandbox by sending "join <your-sandbox-code>" to +1 415 523 8886
-    3. For production: Apply for WhatsApp Business API approval
 """
 
 import base64
@@ -57,6 +38,7 @@ from typing import Any, Dict, Optional
 
 import functions_framework
 import pytz
+import requests
 
 # US Eastern timezone (handles EST/EDT automatically)
 US_EASTERN = pytz.timezone('America/New_York')
@@ -74,7 +56,6 @@ def get_secret(secret_name: str) -> Optional[str]:
         project_id = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
         if not project_id:
             # Try metadata server
-            import requests
             response = requests.get(
                 "http://metadata.google.internal/computeMetadata/v1/project/project-id",
                 headers={"Metadata-Flavor": "Google"},
@@ -97,10 +78,10 @@ def get_secret(secret_name: str) -> Optional[str]:
         return None
 
 
-def get_twilio_credentials() -> Dict[str, str]:
-    """Get Twilio credentials from Secret Manager or environment."""
+def get_telegram_credentials() -> Dict[str, str]:
+    """Get Telegram bot credentials from Secret Manager or environment."""
     # Try Secret Manager first
-    secret_value = get_secret("calypso-twilio-credentials")
+    secret_value = get_secret("calypso-telegram-credentials")
     if secret_value:
         try:
             return json.loads(secret_value)
@@ -109,10 +90,8 @@ def get_twilio_credentials() -> Dict[str, str]:
 
     # Fall back to environment variables
     return {
-        "account_sid": os.environ.get("TWILIO_ACCOUNT_SID", ""),
-        "auth_token": os.environ.get("TWILIO_AUTH_TOKEN", ""),
-        "phone_number": os.environ.get("TWILIO_PHONE_NUMBER", ""),
-        "whatsapp_number": os.environ.get("TWILIO_WHATSAPP_NUMBER", "")
+        "bot_token": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        "chat_id": os.environ.get("TELEGRAM_CHAT_ID", "")
     }
 
 
@@ -129,129 +108,67 @@ def get_alert_config() -> Dict[str, str]:
     # Fall back to environment variables
     return {
         "phone_number": os.environ.get("DEFAULT_PHONE_NUMBER", ""),
-        "whatsapp_number": os.environ.get("DEFAULT_WHATSAPP_NUMBER", ""),
         "email": os.environ.get("DEFAULT_EMAIL", ""),
         "gmail_address": os.environ.get("GMAIL_ADDRESS", ""),
         "gmail_app_password": os.environ.get("GMAIL_APP_PASSWORD", ""),
-        "prefer_whatsapp": os.environ.get("PREFER_WHATSAPP", "true").lower() == "true"
+        "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", "")
     }
 
 
-def send_sms(to_number: str, message: str) -> bool:
+def send_telegram(message: str, chat_id: str = None) -> bool:
     """
-    Send SMS via Twilio.
+    Send message via Telegram Bot API.
 
     Args:
-        to_number: Recipient phone number (E.164 format)
-        message: SMS message body
+        message: Message text (supports Markdown formatting)
+        chat_id: Override chat_id (defaults to credentials chat_id)
 
     Returns:
         bool: True if sent successfully
     """
-    creds = get_twilio_credentials()
+    creds = get_telegram_credentials()
+    bot_token = creds.get("bot_token", "")
 
-    if not all([creds.get("account_sid"), creds.get("auth_token"), creds.get("phone_number")]):
-        logger.error("Twilio credentials not configured")
+    if not bot_token:
+        logger.error("Telegram bot token not configured")
         return False
 
-    if not to_number:
-        logger.error("No recipient phone number provided")
+    target_chat_id = chat_id or creds.get("chat_id", "")
+    if not target_chat_id:
+        logger.error("Telegram chat_id not configured")
         return False
+
+    # Telegram message limit is 4096 characters
+    if len(message) > 4096:
+        message = message[:4093] + "..."
 
     try:
-        from twilio.rest import Client
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": target_chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
 
-        client = Client(creds["account_sid"], creds["auth_token"])
+        response = requests.post(url, json=payload, timeout=10)
 
-        # Truncate message if too long (SMS limit is 1600 chars for concatenated)
-        if len(message) > 1500:
-            message = message[:1497] + "..."
+        if response.status_code == 200:
+            logger.info("Telegram message sent successfully")
+            return True
+        else:
+            # If Markdown parsing fails, retry without parse_mode
+            logger.warning(f"Telegram send failed with Markdown (status {response.status_code}), retrying as plain text")
+            payload.pop("parse_mode")
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                logger.info("Telegram message sent successfully (plain text fallback)")
+                return True
+            else:
+                logger.error(f"Telegram send failed: {response.status_code} - {response.text}")
+                return False
 
-        sms = client.messages.create(
-            body=message,
-            from_=creds["phone_number"],
-            to=to_number
-        )
-
-        logger.info(f"SMS sent successfully. SID: {sms.sid}")
-        return True
-
-    except ImportError:
-        logger.error("Twilio library not installed. Run: pip install twilio")
-        return False
     except Exception as e:
-        logger.error(f"Failed to send SMS: {e}")
-        return False
-
-
-def send_whatsapp(to_number: str, message: str) -> bool:
-    """
-    Send WhatsApp message via Twilio.
-
-    Benefits over SMS:
-    - Works globally without carrier issues
-    - Works on WiFi (great for traveling)
-    - No international SMS fees
-    - Rich formatting support
-
-    Args:
-        to_number: Recipient phone number (E.164 format, e.g., +971XXXXXXXXX)
-        message: Message body
-
-    Returns:
-        bool: True if sent successfully
-
-    Note:
-        For sandbox: Recipient must first send "join <sandbox-code>" to Twilio WhatsApp number
-        For production: Requires WhatsApp Business API approval from Meta
-    """
-    creds = get_twilio_credentials()
-
-    whatsapp_from = creds.get("whatsapp_number", "")
-    if not whatsapp_from:
-        logger.warning("WhatsApp number not configured, falling back to SMS")
-        return False
-
-    if not all([creds.get("account_sid"), creds.get("auth_token")]):
-        logger.error("Twilio credentials not configured")
-        return False
-
-    if not to_number:
-        logger.error("No recipient phone number provided")
-        return False
-
-    try:
-        from twilio.rest import Client
-
-        client = Client(creds["account_sid"], creds["auth_token"])
-
-        # Ensure WhatsApp prefix on both numbers
-        if not whatsapp_from.startswith("whatsapp:"):
-            whatsapp_from = f"whatsapp:{whatsapp_from}"
-
-        whatsapp_to = to_number
-        if not whatsapp_to.startswith("whatsapp:"):
-            whatsapp_to = f"whatsapp:{whatsapp_to}"
-
-        # WhatsApp messages can be longer than SMS
-        if len(message) > 4096:
-            message = message[:4093] + "..."
-
-        wa_message = client.messages.create(
-            body=message,
-            from_=whatsapp_from,
-            to=whatsapp_to
-        )
-
-        logger.info(f"WhatsApp sent successfully. SID: {wa_message.sid}")
-        return True
-
-    except ImportError:
-        logger.error("Twilio library not installed. Run: pip install twilio")
-        return False
-    except Exception as e:
-        logger.error(f"Failed to send WhatsApp: {e}")
-        # Don't raise - let caller fall back to SMS
+        logger.error(f"Failed to send Telegram message: {e}")
         return False
 
 
@@ -307,15 +224,15 @@ def send_email(to_email: str, subject: str, body_html: str, body_text: str) -> b
         return False
 
 
-def format_whatsapp_message(alert: Dict[str, Any]) -> str:
+def format_telegram_message(alert: Dict[str, Any]) -> str:
     """
-    Format alert for WhatsApp (rich and detailed).
+    Format alert for Telegram (rich Markdown formatting).
 
-    WhatsApp supports up to 4096 characters and basic formatting:
+    Telegram supports:
     - *bold* for emphasis
     - _italic_ for secondary info
-    - ~strikethrough~
-    - ```monospace``` for code/data
+    - `monospace` for code/data
+    - ```pre``` for code blocks
 
     Design principles:
     - No redundant information (don't repeat what's in the message)
@@ -327,7 +244,7 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
     title = alert.get("title", "Alert")
     message = alert.get("message", "")
     timestamp = alert.get("timestamp", "")
-    details = alert.get("details", {})
+    details = alert.get("details") or {}
 
     # Priority emoji
     priority_emoji = {
@@ -342,15 +259,13 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
     time_str = ""
     try:
         if timestamp:
-            # Parse ISO format timestamp (may already include timezone offset)
             dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            # Convert to US Eastern if not already
             dt_et = dt.astimezone(US_EASTERN)
             time_str = dt_et.strftime("%I:%M %p ET")
-    except:
+    except Exception:
         pass
 
-    # Build clean WhatsApp message
+    # Build Telegram message
     lines = []
 
     # Compact header: emoji + bot name + title
@@ -361,7 +276,6 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
     lines.append(message)
 
     # Add supplementary details (only info NOT already in message)
-    # Filter out keys that are redundant with message content
     message_lower = message.lower()
     filtered_details = {}
 
@@ -370,7 +284,7 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
         if key.startswith("_"):
             continue
 
-        # Skip boolean False values (not useful to show "Is X: No")
+        # Skip boolean False values
         if isinstance(value, bool) and not value:
             continue
 
@@ -378,7 +292,6 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
         key_lower = key.lower()
         skip_keys = ["reason", "pnl", "trigger_price", "cost_or_credit"]
         if key_lower in skip_keys:
-            # Check if the value appears in message
             if isinstance(value, (int, float)):
                 if f"{value:.2f}" in message or str(int(value)) in message:
                     continue
@@ -394,7 +307,7 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
         for key, value in filtered_details.items():
             key_lower = key.lower()
 
-            # Format key nicely - special cases for better wording
+            # Format key nicely
             if key_lower == "is_early_close":
                 display_key = "Early close today"
             else:
@@ -409,7 +322,6 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
                 else:
                     value_str = f"{value:.2f}"
             elif isinstance(value, bool):
-                # Only True values reach here (False filtered above)
                 value_str = "Yes"
             elif isinstance(value, (list, dict)):
                 value_str = str(value)[:80]
@@ -426,41 +338,12 @@ def format_whatsapp_message(alert: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_sms_message(alert: Dict[str, Any]) -> str:
-    """Format alert for SMS (fallback, more concise than WhatsApp)."""
-    bot_name = alert.get("bot_name", "CALYPSO")
-    priority = alert.get("priority", "medium").upper()
-    title = alert.get("title", "Alert")
-    message = alert.get("message", "")
-
-    # Priority emoji
-    emoji_map = {
-        "CRITICAL": "🚨",
-        "HIGH": "⚠️",
-        "MEDIUM": "📊",
-        "LOW": "ℹ️"
-    }
-    emoji = emoji_map.get(priority, "📊")
-
-    # Build SMS (keep it shorter than WhatsApp)
-    sms = f"{emoji} {bot_name}\n{title}\n{message}"
-
-    # Add key details if available
-    details = alert.get("details", {})
-    if "pnl" in details:
-        pnl = details["pnl"]
-        sms += f"\nP&L: ${pnl:.2f}"
-
-    return sms
-
-
 def format_email_subject(alert: Dict[str, Any]) -> str:
     """Format email subject line."""
     bot_name = alert.get("bot_name", "CALYPSO")
     priority = alert.get("priority", "medium").upper()
     title = alert.get("title", "Alert")
 
-    # Priority prefix
     prefix_map = {
         "CRITICAL": "[CRITICAL]",
         "HIGH": "[HIGH]",
@@ -478,37 +361,27 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
     """
     Format alert for email (detailed HTML + plain text).
 
-    Design principles:
-    - Clean, professional appearance
-    - No redundant information
-    - Human-readable timestamps
-    - Mobile-friendly HTML
-
     Returns:
         tuple: (html_body, text_body)
     """
     bot_name = alert.get("bot_name", "CALYPSO")
-    alert_type = alert.get("alert_type", "unknown")
     priority = alert.get("priority", "medium").upper()
     title = alert.get("title", "Alert")
     message = alert.get("message", "")
     timestamp = alert.get("timestamp", "")
-    details = alert.get("details", {})
+    details = alert.get("details") or {}
 
     # Format timestamp to human-readable ET
     time_display = ""
     try:
         if timestamp:
-            # Parse ISO format timestamp (may already include timezone offset)
             dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            # Convert to US Eastern if not already
             dt_et = dt.astimezone(US_EASTERN)
             time_display = dt_et.strftime("%B %d, %Y at %I:%M %p ET")
         else:
-            # No timestamp provided, use current time in ET
             dt_et = datetime.now(US_EASTERN)
             time_display = dt_et.strftime("%B %d, %Y at %I:%M %p ET")
-    except:
+    except Exception:
         time_display = timestamp[:19] if timestamp else ""
 
     # Priority colors
@@ -528,21 +401,17 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
         if key.startswith("_"):
             continue
 
-        # Skip boolean False values (not useful to show "Is X: No")
         if isinstance(value, bool) and not value:
             continue
 
-        # Check if value is already mentioned in message
         key_lower = key.lower()
         value_str = ""
 
         if isinstance(value, float):
             value_str = f"{value:.2f}"
-            # Skip if this exact value appears in message
             if value_str in message or f"${value_str}" in message:
                 continue
         elif isinstance(value, bool):
-            # Only True values reach here
             value_str = "Yes"
         elif isinstance(value, (list, dict)):
             value_str = str(value)[:100]
@@ -551,13 +420,11 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
             if value_str.lower() in message_lower:
                 continue
 
-        # Format display key - special cases for better wording
         if key_lower == "is_early_close":
             display_key = "Early close today"
         else:
             display_key = key.replace("_", " ").title()
 
-        # Format value for display
         if isinstance(value, float):
             if any(word in key_lower for word in ["pnl", "cost", "credit", "price"]):
                 value_str = f"${value:,.2f}"
@@ -574,7 +441,7 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
             details_html += f"<tr><td style='padding: 8px 12px; border-bottom: 1px solid #eee; color: #666;'>{key}</td><td style='padding: 8px 12px; border-bottom: 1px solid #eee; font-weight: 500;'>{value}</td></tr>"
             details_text += f"  {key}: {value}\n"
 
-    # HTML body - clean, modern design
+    # HTML body
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -598,7 +465,7 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
 </body>
 </html>"""
 
-    # Plain text body - clean and scannable
+    # Plain text body
     text = f"""{bot_name} | {priority}
 {'=' * 50}
 {title}
@@ -620,8 +487,8 @@ def process_alert(cloud_event):
     """
     Cloud Function entry point - processes Pub/Sub messages.
 
-    Args:
-        cloud_event: CloudEvent containing Pub/Sub message
+    Sends alerts via Telegram + Email. Supports both legacy "sms" key
+    and new "telegram" key in delivery payload for backwards compatibility.
     """
     try:
         # Decode the Pub/Sub message
@@ -629,7 +496,6 @@ def process_alert(cloud_event):
         message_data = pubsub_message.get("data", "")
 
         if message_data:
-            # Base64 decode the message
             decoded = base64.b64decode(message_data).decode("utf-8")
             alert = json.loads(decoded)
         else:
@@ -642,40 +508,22 @@ def process_alert(cloud_event):
         delivery = alert.get("delivery", {})
         config = get_alert_config()
 
-        phone_number = delivery.get("phone_number") or config.get("phone_number", "")
-        whatsapp_number = delivery.get("whatsapp_number") or config.get("whatsapp_number", "") or phone_number
         email_address = delivery.get("email_address") or config.get("email", "")
 
-        # Check if WhatsApp is preferred (default: True if configured)
-        prefer_whatsapp = config.get("prefer_whatsapp", True)
-
-        send_sms_flag = delivery.get("sms", False)
+        # Support both "telegram" (new) and "sms" (legacy) keys for backwards compatibility
+        send_telegram_flag = delivery.get("telegram", False) or delivery.get("sms", False)
         send_email_flag = delivery.get("email", True)
 
-        results = {"whatsapp": None, "sms": None, "email": None}
+        # Override chat_id from config if available
+        telegram_chat_id = config.get("telegram_chat_id", "")
 
-        # Send WhatsApp/SMS if requested and configured
-        # Priority: WhatsApp first (rich formatting), SMS as fallback (concise)
-        if send_sms_flag and (phone_number or whatsapp_number):
-            # Try WhatsApp first if preferred
-            if prefer_whatsapp and whatsapp_number:
-                # Use rich WhatsApp formatting
-                whatsapp_message = format_whatsapp_message(alert)
-                results["whatsapp"] = send_whatsapp(whatsapp_number, whatsapp_message)
-                if results["whatsapp"]:
-                    logger.info("WhatsApp delivery: success")
-                else:
-                    logger.info("WhatsApp delivery: failed, falling back to SMS")
-                    # Fall back to SMS with concise formatting
-                    if phone_number:
-                        sms_message = format_sms_message(alert)
-                        results["sms"] = send_sms(phone_number, sms_message)
-                        logger.info(f"SMS fallback: {'success' if results['sms'] else 'failed'}")
-            else:
-                # SMS only (WhatsApp not preferred or not configured)
-                sms_message = format_sms_message(alert)
-                results["sms"] = send_sms(phone_number, sms_message)
-                logger.info(f"SMS delivery: {'success' if results['sms'] else 'failed'}")
+        results = {"telegram": None, "email": None}
+
+        # Send Telegram if requested
+        if send_telegram_flag:
+            telegram_message = format_telegram_message(alert)
+            results["telegram"] = send_telegram(telegram_message, chat_id=telegram_chat_id or None)
+            logger.info(f"Telegram delivery: {'success' if results['telegram'] else 'failed'}")
 
         # Send email if requested and configured
         if send_email_flag and email_address:
@@ -696,15 +544,13 @@ def process_alert(cloud_event):
 
 # For local testing
 if __name__ == "__main__":
-    import sys
-
     print("=" * 60)
     print("ALERT PROCESSOR LOCAL TEST")
     print("=" * 60)
 
     # Sample alert message (using ET timestamp)
     test_alert = {
-        "bot_name": "IRON_FLY",
+        "bot_name": "HYDRA",
         "alert_type": "circuit_breaker",
         "priority": "critical",
         "title": "Circuit Breaker Triggered",
@@ -713,22 +559,17 @@ if __name__ == "__main__":
         "details": {
             "consecutive_failures": 5,
             "last_error": "Connection timeout",
-            "spy_price": 6025.50
+            "spx_price": 6025.50
         },
         "delivery": {
-            "sms": True,
+            "telegram": True,
             "email": True
         }
     }
 
-    print("\nFormatted WhatsApp Message (rich):")
+    print("\nFormatted Telegram Message:")
     print("-" * 40)
-    print(format_whatsapp_message(test_alert))
-
-    print("\n" + "-" * 40)
-    print("\nFormatted SMS (fallback, concise):")
-    print("-" * 40)
-    print(format_sms_message(test_alert))
+    print(format_telegram_message(test_alert))
 
     print("\n" + "-" * 40)
     print("\nFormatted Email Subject:")
@@ -742,14 +583,8 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 60)
     print("To test actual sending, set environment variables:")
-    print("  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN")
-    print("  TWILIO_PHONE_NUMBER (for SMS)")
-    print("  TWILIO_WHATSAPP_NUMBER (e.g., whatsapp:+14155238886 for sandbox)")
+    print("  TELEGRAM_BOT_TOKEN: Bot token from @BotFather")
+    print("  TELEGRAM_CHAT_ID: Your Telegram chat ID")
     print("  GMAIL_ADDRESS, GMAIL_APP_PASSWORD")
-    print("  DEFAULT_PHONE_NUMBER, DEFAULT_WHATSAPP_NUMBER, DEFAULT_EMAIL")
-    print("")
-    print("WhatsApp Sandbox Setup:")
-    print("  1. Go to: https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn")
-    print("  2. Send 'join <your-code>' to +1 415 523 8886 from your WhatsApp")
-    print("  3. Set TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886")
+    print("  DEFAULT_EMAIL")
     print("=" * 60)

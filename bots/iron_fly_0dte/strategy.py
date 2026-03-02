@@ -657,14 +657,14 @@ class IronFlyStrategy:
             config: Strategy configuration dictionary
             logger_service: Trade logging service (Google Sheets, etc.)
             dry_run: If True, simulate trades without placing real orders
-            alert_service: Optional AlertService for SMS/email notifications
+            alert_service: Optional AlertService for Telegram/Email notifications
         """
         self.client = saxo_client
         self.config = config
         self.trade_logger = logger_service
         self.dry_run = dry_run
 
-        # Alert service for SMS/email notifications
+        # Alert service for Telegram/Email notifications
         # If not provided, create one from config (will auto-disable if not configured)
         if alert_service:
             self.alert_service = alert_service
@@ -1008,7 +1008,7 @@ class IronFlyStrategy:
             "result": "Trading halted - emergency close attempted if position was open"
         })
 
-        # ALERT: Send SMS/email AFTER action is complete with actual results
+        # ALERT: Send Telegram/Email AFTER action is complete with actual results
         self.alert_service.circuit_breaker(
             reason=reason,
             consecutive_failures=self._consecutive_failures,
@@ -4954,11 +4954,11 @@ class IronFlyStrategy:
             f"Trades={self.trades_today}, Cumulative P&L=${self.cumulative_metrics['cumulative_pnl'] / 100:.2f}"
         )
 
-        # Send WhatsApp/Email daily summary alert
+        # Send Telegram/Email daily summary alert
         summary_for_alert = summary.copy()
         summary_for_alert["dry_run"] = self.dry_run
         self.alert_service.daily_summary_iron_fly(summary_for_alert)
-        logger.info("Daily summary alert sent to WhatsApp/Email")
+        logger.info("Daily summary alert sent to Telegram/Email")
 
     def log_position_to_sheets(self):
         """Log current position to Positions worksheet (iron fly format)."""

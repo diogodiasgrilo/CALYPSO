@@ -597,7 +597,7 @@ Murray experienced catastrophic losses during August 2024 volatility spike. Not 
 |--------|-------|--------------|
 | `SaxoClient` | 4,282 | ALL strategies - orders, positions, quotes, options chain |
 | `TradeLoggerService` | 3,660 | ALL strategies - Google Sheets logging |
-| `AlertService` | 1,008 | ALL strategies - SMS/Email alerts |
+| `AlertService` | 1,008 | ALL strategies - Telegram/Email alerts |
 | `MarketHours` | 797 | ALL strategies - market session detection |
 | `TechnicalIndicators` | ~300 | METF, any EMA/MACD-based strategies |
 | `EventCalendar` | ~200 | ALL 0DTE strategies - FOMC filter |

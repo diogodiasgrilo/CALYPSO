@@ -751,7 +751,7 @@ class MEICStrategy:
             config: Strategy configuration dictionary
             logger_service: Trade logging service
             dry_run: If True, simulate trades without placing real orders
-            alert_service: Optional AlertService for SMS/email notifications
+            alert_service: Optional AlertService for Telegram/Email notifications
         """
         self.client = saxo_client
         self.config = config
@@ -6684,7 +6684,7 @@ class MEICStrategy:
         accurate final P&L figures.
 
         This method:
-        1. Sends WhatsApp/Email alert via alert_service
+        1. Sends Telegram/Email alert via alert_service
         2. Logs to Google Sheets Daily Summary tab
         3. Updates cumulative metrics (winning/losing days, total P&L)
         4. Saves cumulative metrics to disk
@@ -6721,7 +6721,7 @@ class MEICStrategy:
         net_pnl = summary.get("net_pnl", summary["total_pnl"])
         commission = summary.get("total_commission", 0)
 
-        # Send alert (WhatsApp/Email)
+        # Send alert (Telegram/Email)
         self._send_daily_summary()
 
         # Log to Google Sheets Daily Summary tab

@@ -2,7 +2,7 @@
 """
 Market Status Monitor (2026-01-27)
 
-Monitors market status and sends WhatsApp/Email alerts for:
+Monitors market status and sends Telegram/Email alerts for:
 - Market opening countdown (1h, 30m, 15m before open)
 - Market open notification (at exactly 9:30 AM ET, not before)
 - Market close notification (at 4:00 PM ET or 1:00 PM on early close days)

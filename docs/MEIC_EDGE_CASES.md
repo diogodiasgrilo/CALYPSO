@@ -685,7 +685,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 |---|---|
 | **ID** | ALERT-002 |
 | **Trigger** | 5 stop losses trigger in 10 seconds |
-| **Expected Handling** | Rate limit alerts. Don't send 5 separate WhatsApp messages. Batch into one. |
+| **Expected Handling** | Rate limit alerts. Don't send 5 separate Telegram messages. Batch into one. |
 | **Risk Level** | ✅ LOW |
 | **Implementation** | `_should_batch_alert()`, `_queue_stop_alert()`, `_flush_batched_alerts()` implement alert batching. Alerts within ALERT_BATCH_WINDOW_SECONDS=5 are batched after MAX_ALERTS_BEFORE_BATCH=2. See strategy.py:3227-3315. |
 | **Resolution** | FIXED - Alert batching prevents flood. Multiple rapid stops batched into single summary alert. |
