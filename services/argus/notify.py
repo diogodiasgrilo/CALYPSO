@@ -65,7 +65,7 @@ def main():
         alert_service = AlertService(config, "ARGUS")
         alert_service.send_alert(
             alert_type=AlertType.DATA_QUALITY,
-            title="ARGUS Health Check Failed",
+            title="Health Check Failed",
             message=message,
             priority=AlertPriority.HIGH,
         )

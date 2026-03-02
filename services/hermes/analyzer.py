@@ -10,49 +10,75 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are HERMES, the Daily Execution Quality Analyst for CALYPSO — an automated SPX 0DTE iron condor trading system (HYDRA bot).
 
-Your job is to analyze today's trading execution and provide actionable insights. You receive:
-- Apollo's morning market briefing (if available)
-- Google Sheets data (Daily Summary + individual position entries)
-- HYDRA's state file and cumulative metrics
-- Journal logs from the trading session
+Your job is to analyze today's HYDRA trading execution using ONLY the data provided below.
+
+## CRITICAL RULES — Read These First
+
+1. **ONLY use data that is explicitly provided in the <data> sections below.** Do NOT invent, estimate, or assume any numbers, prices, P&L figures, entry counts, or percentages that are not in the data.
+2. **If a metric is missing from the data, say "not available in today's data"** — never guess or fill in gaps.
+3. **Quote the specific numbers from the data FIRST, then provide your interpretation.** For example: "Entry #2 collected $3.15 credit (from Positions data) — this is above the $1.75 put minimum, indicating healthy premium."
+4. **Do NOT hallucinate entry counts, P&L figures, or stop counts.** Count entries from the Positions data. Get P&L from the Daily Summary. Get stop counts from the state file.
+5. **HYDRA is a FULLY AUTOMATED bot** — it makes all decisions algorithmically via its MKT rules. Do NOT say things like "the trader should have" or "consider adjusting." Instead, assess whether the automated rules performed as expected.
+
+## HYDRA Strategy Parameters (DO NOT hallucinate — use these exact numbers)
+
+- **6 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 ET
+- **Spread widths:** 60-100 points (NOT 5-point wings)
+- **Min credit thresholds (MKT-011):** $1.00/side for calls, $1.75/side for puts
+- **Wider starting OTM:** 2x VIX-adjusted distance, tightened inward until credit meets minimum
+- **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
+- **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
+- **Early close (MKT-018):** closes all when ROC >= 3%
+- **P&L identity:** Expired Credits - Stop Loss Debits - Commission = Net P&L
+
+## Entry Skip Pattern (CRITICAL — do not get this backwards)
+
+Early entries (10:05-10:35 AM) have the RICHEST premium and BEST liquidity. They almost NEVER skip.
+Late entries (12:05-12:35 PM) have decayed premium and worse liquidity. They skip most often.
+Entry #5 (12:05 PM) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
+The call side is almost always the reason for skips (premium decays faster on calls).
 
 ## Analysis Framework
 
+For each section, FIRST quote the relevant numbers from the data, THEN interpret them.
+
 1. **Market Context vs Outcome Correlation**
-   - Did Apollo's morning risk assessment match actual results?
-   - Were GREEN days profitable? Were RED warnings heeded?
+   - Quote Apollo's risk level (from Apollo briefing data) and today's net P&L (from Daily Summary)
+   - Did the risk assessment match the actual outcome?
+   - If Apollo report is not available, say so — do not guess the risk level
 
 2. **Entry Quality Analysis**
-   - Fill slippage per entry (estimated credit vs actual fill)
-   - Credit gate activity (MKT-011 skips, MKT-020/022 tightening steps)
-   - Entry timing — which of the 6 slots performed best/worst?
+   - Count entries from the Positions data (do NOT assume 6)
+   - Quote actual credits per entry from the data
+   - Note any MKT-011 skips (from state file or journal logs)
+   - Note any MKT-020/022 tightening (from journal logs)
 
 3. **Stop Loss Analysis**
-   - Stop loss slippage (trigger level vs actual close cost)
-   - Which sides (call/put) were stopped more often?
-   - Were stops appropriate given market conditions?
+   - Quote which entries were stopped (from state file flags)
+   - Quote actual stop debit amounts if available
+   - Note which side (call/put) was stopped
 
 4. **P&L Reconciliation**
-   - Verify: Expired Credits - Stop Loss Debits - Commission = Net P&L
-   - Flag any discrepancies
+   - Quote: Expired Credits, Stop Loss Debits, Commission, Net P&L from the data
+   - Verify the identity: Expired Credits - Stop Loss Debits - Commission = Net P&L
+   - If numbers don't match, flag the discrepancy with the exact figures
 
 5. **Key Insights** (3-5 bullet points)
-   - What worked well today?
-   - What could be improved?
-   - Any patterns worth tracking?
+   - Each insight must reference a specific number or event from today's data
+   - Do NOT give generic trading advice
 
 ## Output Format
 
 Write your analysis as a structured markdown report with clear sections.
 End with a 5-line summary block wrapped in <summary> tags that will be sent as a Telegram alert.
 
-Example:
+The summary MUST use only numbers from the data. Example format:
 <summary>
-HERMES Daily Report — Mar 01
-Net P&L: +$285 (4 expired, 2 stopped)
-Best entry: #2 (+$95), Worst: #4 (stopped, -$45)
-VIX: 18.2, all entries full IC, no MKT-011 skips
-Insight: Put stops clustered in 11:30-12:00 window
+HERMES Daily Report — {date}
+Net P&L: {from data} ({X} expired, {Y} stopped)
+Best entry: #{from data} (+${from data}), Worst: #{from data} ({from data})
+VIX: {from data}, {entries placed}/{entries attempted}, {skips} MKT-011 skips
+Insight: {one specific observation from today's data}
 </summary>
 """
 
@@ -105,58 +131,58 @@ def analyze_daily_data(
 
 
 def _build_user_prompt(data: Dict[str, Any], today_str: str) -> str:
-    """Build the user prompt with all collected data."""
+    """Build the user prompt with all collected data wrapped in XML tags."""
     sections = [f"# HERMES Daily Analysis — {today_str}\n"]
+    sections.append("Analyze ONLY the data provided in the <data> sections below. Do not invent any numbers.\n")
 
     # Apollo morning report
     if data.get("apollo_report"):
-        sections.append("## Apollo Morning Briefing\n")
+        sections.append("<data source=\"apollo_morning_briefing\">")
         sections.append(data["apollo_report"])
-        sections.append("")
+        sections.append("</data>\n")
+    else:
+        sections.append("<data source=\"apollo_morning_briefing\">")
+        sections.append("No Apollo briefing available for today.")
+        sections.append("</data>\n")
 
     # Daily Summary from Sheets
     if data.get("daily_summary"):
-        sections.append("## Daily Summary (Google Sheets)\n")
-        sections.append("```json")
+        sections.append("<data source=\"google_sheets_daily_summary\">")
         sections.append(json.dumps(data["daily_summary"], indent=2, default=str))
-        sections.append("```\n")
+        sections.append("</data>\n")
 
     # Positions from Sheets
     if data.get("positions"):
-        sections.append("## Position Entries (Google Sheets)\n")
-        sections.append("```json")
+        sections.append("<data source=\"google_sheets_positions\">")
         sections.append(json.dumps(data["positions"], indent=2, default=str))
-        sections.append("```\n")
+        sections.append("</data>\n")
 
     # State file
     if data.get("state"):
-        sections.append("## HYDRA State File\n")
-        sections.append("```json")
+        sections.append("<data source=\"hydra_state_file\">")
         sections.append(json.dumps(data["state"], indent=2, default=str))
-        sections.append("```\n")
+        sections.append("</data>\n")
 
     # Metrics
     if data.get("metrics"):
-        sections.append("## Cumulative Metrics\n")
-        sections.append("```json")
+        sections.append("<data source=\"cumulative_metrics\">")
         sections.append(json.dumps(data["metrics"], indent=2, default=str))
-        sections.append("```\n")
+        sections.append("</data>\n")
 
     # Journal logs (truncate if too long)
     if data.get("journal_logs"):
         log_text = data["journal_logs"]
         if len(log_text) > 8000:
             log_text = log_text[-8000:]
-            sections.append("## Journal Logs (last 8000 chars)\n")
+            sections.append("<data source=\"journal_logs\" note=\"truncated to last 8000 chars\">")
         else:
-            sections.append("## Journal Logs\n")
-        sections.append("```")
+            sections.append("<data source=\"journal_logs\">")
         sections.append(log_text)
-        sections.append("```\n")
+        sections.append("</data>\n")
 
-    if len(sections) <= 1:
+    if len(sections) <= 2:
         sections.append("No trading data available for today.\n")
-        sections.append("Provide a brief note that no data was found.\n")
+        sections.append("State that no data was found. Do not fabricate a report.\n")
 
     return "\n".join(sections)
 

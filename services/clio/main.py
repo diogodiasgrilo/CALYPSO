@@ -193,15 +193,20 @@ def main():
         try:
             from shared.alert_service import AlertService, AlertType, AlertPriority
 
-            # Build summary from first ~500 chars of report
-            summary = full_report[:500]
-            if len(full_report) > 500:
-                summary += "\n\n... (full report in intel/clio/)"
+            # Build summary: find first 500 chars at a clean line break
+            if len(full_report) <= 500:
+                summary = full_report
+            else:
+                # Cut at last newline before 500 chars for clean truncation
+                cut_point = full_report.rfind("\n", 0, 500)
+                if cut_point <= 0:
+                    cut_point = 500
+                summary = full_report[:cut_point] + "\n\n... (full report in intel/clio/)"
 
             alert_service = AlertService(config, "CLIO")
             alert_service.send_alert(
                 alert_type=AlertType.DAILY_SUMMARY,
-                title=f"CLIO Weekly Report — {week_label}",
+                title=f"Weekly Report — {week_label}",
                 message=summary,
                 priority=AlertPriority.LOW,
             )

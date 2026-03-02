@@ -7,8 +7,8 @@ memory, then calls Claude for a morning briefing with risk level assessment.
 
 Data Sources:
     - VIX level (Yahoo Finance via ExternalPriceFeed)
-    - SPY pre-market price (Yahoo Finance)
-    - S&P 500 futures ES=F (Yahoo Finance)
+    - SPX last close (Yahoo Finance via ^GSPC)
+    - ES Futures for overnight gap detection (Yahoo Finance)
     - Yesterday's HERMES report (intel/hermes/)
     - Strategy memory (intel/strategy_memory.md)
     - Economic calendar (shared/event_calendar.py)

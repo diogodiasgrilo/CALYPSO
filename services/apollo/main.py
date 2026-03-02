@@ -181,7 +181,7 @@ def main():
             alert_service = AlertService(config, "APOLLO")
             alert_service.send_alert(
                 alert_type=AlertType.DAILY_SUMMARY,
-                title=f"APOLLO Morning Briefing [{risk_level}] — {today_str}",
+                title=f"Morning Briefing [{risk_level}] — {today_str}",
                 message=briefing,
                 priority=priority_map.get(risk_level, AlertPriority.MEDIUM),
             )

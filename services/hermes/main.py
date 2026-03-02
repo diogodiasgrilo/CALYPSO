@@ -114,7 +114,7 @@ def main():
             alert_service = AlertService(config, "HERMES")
             alert_service.send_alert(
                 alert_type=AlertType.DAILY_SUMMARY,
-                title=f"HERMES Daily Report — {today_str}",
+                title=f"Daily Report — {today_str}",
                 message=summary,
                 priority=AlertPriority.LOW,
             )
