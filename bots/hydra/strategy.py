@@ -2489,6 +2489,158 @@ class HydraStrategy(MEICStrategy):
 
         return lines
 
+    def build_telegram_snapshot(self) -> str:
+        """
+        Build a formatted Telegram message showing current HYDRA position snapshot.
+
+        Sent every 30 minutes during market hours after first entry.
+        Uses Telegram legacy Markdown: *bold* only (no _ ` [ in message body).
+
+        Returns:
+            str: Formatted Markdown message for Telegram
+        """
+        lines = []
+
+        # Market data header
+        spx = self.current_price
+        vix = self.current_vix
+        lines.append(f"*SPX* {spx:,.2f}  *VIX* {vix:.2f}")
+
+        # Trend line
+        trend_str = self._current_trend.value.upper() if self._current_trend else "N/A"
+        if self._last_ema_short > 0 and self._last_ema_long > 0:
+            lines.append(f"Trend: {trend_str} (EMA {self._last_ema_short:.0f}/{self._last_ema_long:.0f})")
+        else:
+            lines.append(f"Trend: {trend_str}")
+
+        # Entry count header
+        total_entries = len(self.entry_times)
+        completed = self.daily_state.entries_completed
+        active_count = len(self.daily_state.active_entries)
+        lines.append("")
+        lines.append(f"━━━ Entries {completed}/{total_entries} | Active {active_count} ━━━")
+
+        # Fetch positions once for P&L calculations
+        try:
+            positions = self.client.get_positions()
+        except Exception:
+            positions = []
+
+        # Per-entry details
+        for entry in self.daily_state.entries:
+            # Determine entry status icon
+            call_stopped = entry.call_side_stopped
+            put_stopped = entry.put_side_stopped
+            call_expired = getattr(entry, 'call_side_expired', False)
+            put_expired = getattr(entry, 'put_side_expired', False)
+            call_skipped = getattr(entry, 'call_side_skipped', False)
+            put_skipped = getattr(entry, 'put_side_skipped', False)
+
+            call_done = call_stopped or call_expired or call_skipped
+            put_done = put_stopped or put_expired or put_skipped
+
+            # Check if this was a fully skipped entry (MKT-011)
+            if call_skipped and put_skipped:
+                lines.append("")
+                lines.append(f"⏩ #{entry.entry_number} Skipped (MKT-011)")
+                continue
+
+            # Status icon
+            if call_done and put_done:
+                icon = "🔴"  # Both sides done
+            elif call_done or put_done:
+                icon = "🟡"  # One side done
+            else:
+                icon = "🟢"  # Both active
+
+            # Strikes line
+            lines.append("")
+            lines.append(
+                f"{icon} #{entry.entry_number} "
+                f"C:{entry.short_call_strike}/{entry.long_call_strike} "
+                f"P:{entry.short_put_strike}/{entry.long_put_strike}"
+            )
+
+            # Credit, P&L, cushion line
+            entry_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions)
+            pnl_sign = "+" if entry_pnl >= 0 else ""
+
+            # Cushion percentages (same logic as get_detailed_position_status)
+            call_value = entry.call_spread_value if not call_stopped else 0
+            put_value = entry.put_spread_value if not put_stopped else 0
+
+            if call_skipped:
+                call_str = "SKIP"
+            elif call_stopped:
+                call_str = "STOP"
+            elif call_expired:
+                call_str = "EXP"
+            else:
+                call_pct = ((entry.call_side_stop - call_value) / entry.call_side_stop * 100) if entry.call_side_stop > 0 else 0
+                call_str = f"{call_pct:.0f}%"
+
+            if put_skipped:
+                put_str = "SKIP"
+            elif put_stopped:
+                put_str = "STOP"
+            elif put_expired:
+                put_str = "EXP"
+            else:
+                put_pct = ((entry.put_side_stop - put_value) / entry.put_side_stop * 100) if entry.put_side_stop > 0 else 0
+                put_str = f"{put_pct:.0f}%"
+
+            lines.append(
+                f"   ${entry.total_credit:.0f} cr | "
+                f"{pnl_sign}${entry_pnl:.0f} | "
+                f"C:{call_str} P:{put_str}"
+            )
+
+        # P&L summary (use already-fetched positions to avoid second API call)
+        realized = self.daily_state.total_realized_pnl
+        unrealized = sum(
+            self._get_saxo_pnl_for_entry(e, positions=positions)
+            for e in self.daily_state.active_entries
+        )
+        commission = self.daily_state.total_commission
+        net_pnl = realized + unrealized - commission
+        capital = self._calculate_capital_deployed()
+        roc = (net_pnl / capital * 100) if capital > 0 else 0
+
+        r_sign = "+" if realized >= 0 else ""
+        u_sign = "+" if unrealized >= 0 else ""
+        n_sign = "+" if net_pnl >= 0 else ""
+        roc_sign = "+" if roc >= 0 else ""
+
+        lines.append("")
+        lines.append("━━━ P&L ━━━")
+        lines.append(f"Realized: {r_sign}${realized:.0f} | Unreal: {u_sign}${unrealized:.0f}")
+        lines.append(f"Comm: -${commission:.0f}")
+        lines.append(f"*Net: {n_sign}${net_pnl:.0f}* (ROC {roc_sign}{roc:.1f}%)")
+
+        # Bottom info
+        call_stops = self.daily_state.call_stops_triggered
+        put_stops = self.daily_state.put_stops_triggered
+        lines.append("")
+        lines.append(f"Capital: ${capital:,.0f} | Stops: {call_stops}C/{put_stops}P")
+
+        # Next entry (only if more pending)
+        if self._next_entry_index < len(self.entry_times):
+            next_time = self.entry_times[self._next_entry_index]
+            lines.append(f"Next: #{self._next_entry_index + 1} @ {next_time.strftime('%I:%M %p')}")
+
+        # Early close tracking (only when active)
+        if self.early_close_enabled and self._early_close_triggered:
+            ec_pnl = self._early_close_pnl or 0
+            ec_time = self._early_close_time.strftime('%I:%M %p') if self._early_close_time else 'N/A'
+            lines.append(f"Early Close: TRIGGERED @ {ec_time} (${ec_pnl:.0f})")
+        elif (self.early_close_enabled and
+              self._next_entry_index >= len(self.entry_times) and
+              len(self.daily_state.active_entries) > 0):
+            threshold_pct = self.early_close_roc_threshold * 100
+            lines.append(f"Early Close: {roc_sign}{roc:.1f}% / {threshold_pct:.0f}% target")
+
+        return "\n".join(lines)
+
     def get_dashboard_metrics(self) -> Dict[str, Any]:
         """
         Get dashboard metrics with HYDRA specific fields.

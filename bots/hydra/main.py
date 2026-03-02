@@ -233,6 +233,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
     status_interval = 10
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600
+    last_snapshot_time = None  # Telegram snapshot — starts after first entry
+    snapshot_interval = 1800   # 30 minutes
     last_day = get_us_market_time().date()
     consecutive_errors = 0
     daily_summary_sent_date = None
@@ -246,6 +248,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                     trade_logger.log_event("New trading day detected - resetting strategy")
                     strategy._reset_for_new_day()
                     last_day = today
+                    last_snapshot_time = None
 
                 # Check if market is open
                 if not is_market_open():
@@ -457,6 +460,22 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                         last_bot_log_time = now
                     except Exception as e:
                         trade_logger.log_error(f"Hourly bot log error: {e}")
+
+                # 30-minute Telegram position snapshot
+                if (strategy.daily_state.entries_completed > 0 and
+                    (last_snapshot_time is None or
+                     (now - last_snapshot_time).total_seconds() >= snapshot_interval)):
+                    try:
+                        snapshot_msg = strategy.build_telegram_snapshot()
+                        strategy.alert_service.send_alert(
+                            alert_type=AlertType.POSITION_SNAPSHOT,
+                            title="Position Snapshot",
+                            message=snapshot_msg,
+                            priority=AlertPriority.LOW,
+                        )
+                        last_snapshot_time = now
+                    except Exception as e:
+                        trade_logger.log_error(f"Failed to send Telegram snapshot: {e}")
 
                 # Sleep until next check
                 status = strategy.get_status_summary()

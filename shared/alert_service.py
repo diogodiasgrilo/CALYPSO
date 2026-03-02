@@ -134,6 +134,9 @@ class AlertType(Enum):
     # Daily Summary
     DAILY_SUMMARY = "daily_summary"
 
+    # Position Snapshot (periodic Telegram dashboard)
+    POSITION_SNAPSHOT = "position_snapshot"
+
 
 # Default priority mapping for alert types
 DEFAULT_PRIORITIES = {
@@ -172,6 +175,7 @@ DEFAULT_PRIORITIES = {
     AlertType.BOT_STOPPED: AlertPriority.LOW,
     AlertType.DAILY_SUMMARY: AlertPriority.LOW,
     AlertType.VIGILANT_EXITED: AlertPriority.LOW,  # Back to safe zone
+    AlertType.POSITION_SNAPSHOT: AlertPriority.LOW,  # Periodic Telegram dashboard
 
     # Market status alerts - LOW priority (informational)
     AlertType.MARKET_OPENING_SOON: AlertPriority.LOW,
@@ -379,6 +383,7 @@ class AlertService:
         AlertType.MARKET_CLOSED,       # Transient
         AlertType.MARKET_HOLIDAY,      # Informational
         AlertType.MARKET_EARLY_CLOSE,  # Informational
+        AlertType.POSITION_SNAPSHOT,   # 30-min dashboard — Telegram glance
     }
 
     def _should_send_email(self, alert_type: AlertType, priority: AlertPriority) -> bool:
