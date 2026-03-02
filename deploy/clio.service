@@ -1,0 +1,29 @@
+[Unit]
+Description=Calypso CLIO Weekly Strategy Analyst (oneshot)
+Documentation=https://github.com/calypso-trading/calypso
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+
+ExecStart=/opt/calypso/.venv/bin/python -m services.clio.main
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-clio
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/calypso/intel
+
+# Larger timeout for deep analysis + git operations
+TimeoutStartSec=300

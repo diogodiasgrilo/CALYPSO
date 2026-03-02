@@ -1,0 +1,11 @@
+[Unit]
+Description=Calypso CLIO Weekly Analysis Timer (Saturday 9 AM ET)
+Documentation=https://github.com/calypso-trading/calypso
+
+[Timer]
+OnCalendar=Sat *-*-* 09:00:00 America/New_York
+Persistent=true
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target
