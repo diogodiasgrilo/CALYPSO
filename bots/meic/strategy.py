@@ -333,11 +333,18 @@ class IronCondorEntry:
     call_side_stop: float = 0.0  # Stop loss for call spread
     put_side_stop: float = 0.0   # Stop loss for put spread
 
-    # Current option prices (for P&L calculation)
+    # Current option prices (for P&L / cushion calculation — updated every heartbeat)
     short_call_price: float = 0.0
     long_call_price: float = 0.0
     short_put_price: float = 0.0
     long_put_price: float = 0.0
+
+    # Fill prices at entry (option price points — multiply by 100 for dollars)
+    # Set once in _execute_entry(), corrected by _verify_entry_fill_prices()
+    short_call_fill_price: float = 0.0
+    long_call_fill_price: float = 0.0
+    short_put_fill_price: float = 0.0
+    long_put_fill_price: float = 0.0
 
     # Status tracking
     is_complete: bool = False  # All 4 legs filled
@@ -2598,6 +2605,7 @@ class MEICStrategy:
             entry.long_call_position_id = long_call_result.get("position_id")
             entry.long_call_uic = long_call_result.get("uic")
             long_call_debit = long_call_result.get("debit", 0)  # Track debit for net credit calc
+            entry.long_call_fill_price = long_call_result.get("fill_price", 0)
             filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
             self._register_position(entry, "long_call")
 
@@ -2615,6 +2623,7 @@ class MEICStrategy:
             entry.long_put_position_id = long_put_result.get("position_id")
             entry.long_put_uic = long_put_result.get("uic")
             long_put_debit = long_put_result.get("debit", 0)  # Track debit for net credit calc
+            entry.long_put_fill_price = long_put_result.get("fill_price", 0)
             filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
             self._register_position(entry, "long_put")
 
@@ -2631,6 +2640,7 @@ class MEICStrategy:
                 raise Exception("Short Call order failed")
             entry.short_call_position_id = short_call_result.get("position_id")
             entry.short_call_uic = short_call_result.get("uic")
+            entry.short_call_fill_price = short_call_result.get("fill_price", 0)
             # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
             short_call_credit = short_call_result.get("credit", 0)
             entry.call_spread_credit = short_call_credit - long_call_debit
@@ -2651,6 +2661,7 @@ class MEICStrategy:
                 raise Exception("Short Put order failed")
             entry.short_put_position_id = short_put_result.get("position_id")
             entry.short_put_uic = short_put_result.get("uic")
+            entry.short_put_fill_price = short_put_result.get("fill_price", 0)
             # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
             short_put_credit = short_put_result.get("credit", 0)
             entry.put_spread_credit = short_put_credit - long_put_debit
@@ -2661,6 +2672,14 @@ class MEICStrategy:
             # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
             # Activities endpoint may return limit price instead of actual execution price
             self._verify_entry_fill_prices(entry)
+
+            # Set initial monitoring prices to fill prices so cushion calculation
+            # works immediately (before first _update_entry_prices() heartbeat).
+            # These get overwritten every 10s with current market mid prices.
+            entry.short_call_price = entry.short_call_fill_price
+            entry.long_call_price = entry.long_call_fill_price
+            entry.short_put_price = entry.short_put_fill_price
+            entry.long_put_price = entry.long_put_fill_price
 
             logger.info(
                 f"Entry #{entry.entry_number} complete: "
@@ -3434,6 +3453,9 @@ class MEICStrategy:
                             f"(short={short_call_price:.2f}, long={long_call_price:.2f})"
                         )
                         entry.call_spread_credit = new_call_credit
+                    # Update fill prices with verified values
+                    entry.short_call_fill_price = short_call_price
+                    entry.long_call_fill_price = long_call_price
 
             # Recalculate put spread credit if we have corrections for put legs
             if "short_put" in corrections or "long_put" in corrections:
@@ -3451,6 +3473,9 @@ class MEICStrategy:
                             f"(short={short_put_price:.2f}, long={long_put_price:.2f})"
                         )
                         entry.put_spread_credit = new_put_credit
+                    # Update fill prices with verified values
+                    entry.short_put_fill_price = short_put_price
+                    entry.long_put_fill_price = long_put_price
 
             logger.info(f"FIX-70: Entry #{entry.entry_number} price verification complete")
 

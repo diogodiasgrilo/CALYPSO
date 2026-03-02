@@ -1794,18 +1794,46 @@ class HydraStrategy(MEICStrategy):
                     # Log to Google Sheets
                     self._log_entry(entry)
 
-                    # Send alert — always full IC, include EMA signal for reference
-                    position_summary = f"HYDRA Entry #{entry_num} [{original_trend.value.upper()}]: Full IC"
+                    # Send detailed entry alert with full leg breakdown
+                    sc_fill = entry.short_call_fill_price
+                    lc_fill = entry.long_call_fill_price
+                    sp_fill = entry.short_put_fill_price
+                    lp_fill = entry.long_put_fill_price
+                    mult = 100 * entry.contracts
 
-                    self.alert_service.position_opened(
-                        position_summary=position_summary,
-                        cost_or_credit=entry.total_credit,
-                        details={
-                            "spx_price": self.current_price,
-                            "entry_number": entry_num,
-                            "trend": original_trend.value,
-                            "attempts": attempt + 1
-                        }
+                    trend_label = original_trend.value.upper()
+                    msg_lines = [
+                        f"*Entry #{entry_num}* [{trend_label}] Full IC",
+                        f"SPX {self.current_price:,.2f} | VIX {self.current_vix:.2f}",
+                    ]
+                    if self._last_ema_short > 0 and self._last_ema_long > 0:
+                        msg_lines.append(f"Trend: {trend_label} (EMA {self._last_ema_short:.0f}/{self._last_ema_long:.0f})")
+                    else:
+                        msg_lines.append(f"Trend: {trend_label}")
+                    msg_lines.append("")
+                    # Call side breakdown
+                    msg_lines.append(f"SC {entry.short_call_strike:.0f} @ ${sc_fill:.2f} (${sc_fill * mult:.0f})")
+                    msg_lines.append(f"LC {entry.long_call_strike:.0f} @ ${lc_fill:.2f} (-${lc_fill * mult:.0f})")
+                    msg_lines.append(f"*Call: ${entry.call_spread_credit:.0f}*")
+                    msg_lines.append("")
+                    # Put side breakdown
+                    msg_lines.append(f"SP {entry.short_put_strike:.0f} @ ${sp_fill:.2f} (${sp_fill * mult:.0f})")
+                    msg_lines.append(f"LP {entry.long_put_strike:.0f} @ ${lp_fill:.2f} (-${lp_fill * mult:.0f})")
+                    msg_lines.append(f"*Put: ${entry.put_spread_credit:.0f}*")
+                    msg_lines.append("")
+                    # Summary
+                    width = int(entry.long_call_strike - entry.short_call_strike)
+                    msg_lines.append(f"*Total: ${entry.total_credit:.0f}* (${entry.call_spread_credit:.0f}C + ${entry.put_spread_credit:.0f}P)")
+                    msg_lines.append(f"Comm: ${entry.open_commission:.0f} | Width: {width}pt")
+                    msg_lines.append(f"Stop: ${entry.call_side_stop:.0f}")
+
+                    alert_details = {"attempts": attempt + 1} if attempt > 0 else {}
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.POSITION_OPENED,
+                        title="Position Opened",
+                        message="\n".join(msg_lines),
+                        priority=AlertPriority.MEDIUM,
+                        details=alert_details,
                     )
 
                     self._record_api_result(True)

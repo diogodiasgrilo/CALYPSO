@@ -622,12 +622,13 @@ ODYSSEUS is a 3-pass code audit that catches bugs, dead code, misspellings, and 
 Scan all changed files (`git diff main`) and check each category. Print progress after EACH check:
 
 ```
-ODYSSEUS Pass 1/3 [1/6]: Shared code impact... 2 files in shared/ changed, affects HYDRA only
-ODYSSEUS Pass 1/3 [2/6]: Dead code scan... 1 unused import found in strategy.py:45
-ODYSSEUS Pass 1/3 [3/6]: Misspelling check... clean
-ODYSSEUS Pass 1/3 [4/6]: Bug pattern scan... 1 missing timeout found in new requests.get()
-ODYSSEUS Pass 1/3 [5/6]: Hanging risk... clean
-ODYSSEUS Pass 1/3 [6/6]: Documentation... __init__.py needs version bump
+ODYSSEUS Pass 1/3 [1/7]: Shared code impact... 2 files in shared/ changed, affects HYDRA only
+ODYSSEUS Pass 1/3 [2/7]: Dead code scan... 1 unused import found in strategy.py:45
+ODYSSEUS Pass 1/3 [3/7]: Misspelling check... clean
+ODYSSEUS Pass 1/3 [4/7]: Bug pattern scan... 1 missing timeout found in new requests.get()
+ODYSSEUS Pass 1/3 [5/7]: Hanging risk... clean
+ODYSSEUS Pass 1/3 [6/7]: Documentation... __init__.py needs version bump
+ODYSSEUS Pass 1/3 [7/7]: VM config/state... no config key changes needed, state file compatible
 Pass 1 complete: 3 issues found
 ```
 
@@ -641,10 +642,11 @@ Pass 1 complete: 3 issues found
 | 4 | **Bug patterns** | `if value:` on numerics, missing timeouts, bare `except:`, unsafe threading, `alert.get("key", {})` with possible None |
 | 5 | **Hanging risk** | Blocking calls without timeout: `requests.*`, `thread.join`, `fcntl.flock`, `gspread.*` |
 | 6 | **Documentation** | `__init__.py` exports, docstrings, CLAUDE.md, strategy specs, README.md |
+| 7 | **VM config/state** | New config keys read by code but missing from VM config? New state fields that break deserialization? State file date stale? Metrics file needs new counters? SSH to VM and verify if changes affect running bot config/state. |
 
 ### Pass 2: Fix & Re-Audit
 
-Fix all issues found in Pass 1, then re-run the full 6-category checklist. Loop until clean:
+Fix all issues found in Pass 1, then re-run the full 7-category checklist. Loop until clean:
 
 ```
 ODYSSEUS Pass 2/3: Fixing 3 issues...
