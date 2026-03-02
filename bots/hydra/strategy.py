@@ -233,10 +233,6 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"HYDRA using state file: {self.state_file}")
         logger.info(f"HYDRA using metrics file: {self.metrics_file}")
 
-        # Update alert service name
-        if not alert_service:
-            self.alert_service = AlertService(config, "HYDRA")
-
         logger.info(f"HYDRA Strategy initialized")
         logger.info(f"  Trend filter enabled: {self.trend_enabled}")
         logger.info(f"  EMA periods: {self.ema_short_period}/{self.ema_long_period}")
@@ -1825,7 +1821,7 @@ class HydraStrategy(MEICStrategy):
                     width = int(entry.long_call_strike - entry.short_call_strike)
                     msg_lines.append(f"*Total: ${entry.total_credit:.0f}* (${entry.call_spread_credit:.0f}C + ${entry.put_spread_credit:.0f}P)")
                     msg_lines.append(f"Comm: ${entry.open_commission:.0f} | Width: {width}pt")
-                    msg_lines.append(f"Stop: ${entry.call_side_stop:.0f}")
+                    msg_lines.append(f"Stop: ${entry.call_side_stop:.0f}/side")
 
                     alert_details = {"attempts": attempt + 1} if attempt > 0 else {}
                     self.alert_service.send_alert(
@@ -2585,8 +2581,8 @@ class HydraStrategy(MEICStrategy):
             lines.append("")
             lines.append(
                 f"{icon} #{entry.entry_number} "
-                f"C:{entry.short_call_strike}/{entry.long_call_strike} "
-                f"P:{entry.short_put_strike}/{entry.long_put_strike}"
+                f"C:{entry.short_call_strike:.0f}/{entry.long_call_strike:.0f} "
+                f"P:{entry.short_put_strike:.0f}/{entry.long_put_strike:.0f}"
             )
 
             # Credit, P&L, cushion line
@@ -2641,7 +2637,7 @@ class HydraStrategy(MEICStrategy):
 
         lines.append("")
         lines.append("━━━ P&L ━━━")
-        lines.append(f"Realized: {r_sign}${realized:.0f} | Unreal: {u_sign}${unrealized:.0f}")
+        lines.append(f"Real: {r_sign}${realized:.0f} | Unreal: {u_sign}${unrealized:.0f}")
         lines.append(f"Comm: -${commission:.0f}")
         lines.append(f"*Net: {n_sign}${net_pnl:.0f}* (ROC {roc_sign}{roc:.1f}%)")
 

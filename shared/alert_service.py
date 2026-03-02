@@ -808,12 +808,12 @@ class AlertService:
             details=summary
         )
 
-    def daily_summary_meic(
+    def daily_summary_ic(
         self,
         summary: Dict[str, Any]
     ) -> bool:
         """
-        Send comprehensive daily summary for MEIC bot (LOW).
+        Send comprehensive daily summary for iron condor bots (LOW).
 
         Args:
             summary: Dictionary with daily summary data from get_daily_summary()
@@ -830,6 +830,7 @@ class AlertService:
         spx_close = summary.get("spx_close", 0)
         vix_close = summary.get("vix_close", 0)
         dry_run = summary.get("dry_run", False)
+        total_scheduled = summary.get("total_scheduled", 6)
 
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
         pnl_sign = "+" if total_pnl >= 0 else ""
@@ -842,10 +843,10 @@ class AlertService:
         win_rate = (winning_entries / entries_completed * 100) if entries_completed > 0 else 0
 
         message = (
-            f"{mode}MEIC (Multiple Entry Iron Condors) - End of Day\n\n"
+            f"{mode}{self.bot_name} - End of Day\n\n"
             f"SPX Close: ${spx_close:.2f}\n"
             f"VIX Close: {vix_close:.2f}\n\n"
-            f"Entries: {entries_completed}/6 completed"
+            f"Entries: {entries_completed}/{total_scheduled} completed"
         )
 
         if entries_failed > 0:
@@ -871,7 +872,7 @@ class AlertService:
 
         return self.send_alert(
             alert_type=AlertType.DAILY_SUMMARY,
-            title=f"MEIC Daily {pnl_emoji}",
+            title=f"{self.bot_name} Daily {pnl_emoji}",
             message=message,
             priority=AlertPriority.LOW,
             details=summary

@@ -742,6 +742,8 @@ class MEICStrategy:
     Version: 1.2.8 (2026-02-13)
     """
 
+    BOT_NAME = "MEIC"
+
     def __init__(
         self,
         saxo_client: SaxoClient,
@@ -773,7 +775,7 @@ class MEICStrategy:
         if alert_service:
             self.alert_service = alert_service
         else:
-            self.alert_service = AlertService(config, "MEIC")
+            self.alert_service = AlertService(config, self.BOT_NAME)
 
         # Position Registry for multi-bot isolation
         self.registry = PositionRegistry(REGISTRY_FILE)
@@ -1106,7 +1108,7 @@ class MEICStrategy:
             Error message if inconsistent, None if OK
         """
         active_entries = len(self.daily_state.active_entries)
-        my_positions = self.registry.get_positions("MEIC")
+        my_positions = self.registry.get_positions(self.BOT_NAME)
 
         # Check state vs position count
         if self.state == MEICState.MONITORING and active_entries == 0:
@@ -1234,7 +1236,7 @@ class MEICStrategy:
                 self._handle_missing_positions(missing)
 
             # Check for unexpected positions (assigned, etc.)
-            my_registry_positions = self.registry.get_positions("MEIC")
+            my_registry_positions = self.registry.get_positions(self.BOT_NAME)
             unexpected = (actual_position_ids & my_registry_positions) - expected_position_ids
             if unexpected:
                 logger.warning(f"POS-003: {len(unexpected)} unexpected MEIC positions found")
@@ -1758,7 +1760,7 @@ class MEICStrategy:
 
                     # Send alert
                     self.alert_service.position_opened(
-                        position_summary=f"MEIC Entry #{entry_num}: Call {entry.short_call_strike}/{entry.long_call_strike}, Put {entry.short_put_strike}/{entry.long_put_strike}",
+                        position_summary=f"{self.BOT_NAME} Entry #{entry_num}: Call {entry.short_call_strike}/{entry.long_call_strike}, Put {entry.short_put_strike}/{entry.long_put_strike}",
                         cost_or_credit=entry.total_credit,
                         details={
                             "spx_price": self.current_price,
@@ -3512,7 +3514,7 @@ class MEICStrategy:
         try:
             self.registry.register(
                 position_id=position_id,
-                bot_name="MEIC",
+                bot_name=self.BOT_NAME,
                 strategy_id=entry.strategy_id,
                 metadata={
                     "entry_number": entry.entry_number,
@@ -4917,8 +4919,8 @@ class MEICStrategy:
 
         self.alert_service.send_alert(
             alert_type=AlertType.CRITICAL_INTERVENTION,
-            title="MEIC BOT HALTED",
-            message=f"MEIC HALTED: {reason}. Manual intervention required.",
+            title=f"{self.BOT_NAME} BOT HALTED",
+            message=f"{self.BOT_NAME} HALTED: {reason}. Manual intervention required.",
             priority=AlertPriority.CRITICAL
         )
 
@@ -5003,7 +5005,7 @@ class MEICStrategy:
                 logger.debug("Skipping orphan cleanup in dry-run mode")
 
             # Step 3: Get MEIC positions from registry
-            my_position_ids = self.registry.get_positions("MEIC")
+            my_position_ids = self.registry.get_positions(self.BOT_NAME)
             if not my_position_ids:
                 logger.info("No MEIC positions in registry - starting fresh")
                 # CRITICAL FIX (2026-02-03): Set date even when returning False
@@ -5370,7 +5372,7 @@ class MEICStrategy:
             # Send recovery alert
             self.alert_service.send_alert(
                 alert_type=AlertType.POSITION_OPENED,
-                title="MEIC Position Recovery",
+                title=f"{self.BOT_NAME} Position Recovery",
                 message=f"Recovered {len(recovered_entries)} iron condor(s) from Saxo API",
                 priority=AlertPriority.MEDIUM,
                 details={
@@ -5480,7 +5482,7 @@ class MEICStrategy:
                                     try:
                                         self.registry.register(
                                             position_id=pos_id,
-                                            bot_name="MEIC",
+                                            bot_name=self.BOT_NAME,
                                             strategy_id=strategy_id,
                                             metadata={
                                                 "entry_number": entry_num,
@@ -5836,7 +5838,7 @@ class MEICStrategy:
 
         # STATE-004: Check for overnight 0DTE positions (should NEVER happen)
         try:
-            my_position_ids = self.registry.get_positions("MEIC")
+            my_position_ids = self.registry.get_positions(self.BOT_NAME)
         except Exception as e:
             logger.error(f"Registry error checking for overnight positions: {e}")
             my_position_ids = set()
@@ -5979,8 +5981,8 @@ class MEICStrategy:
         if self._settlement_reconciliation_complete:
             return True
 
-        # Check how many MEIC positions we think we have in registry
-        my_position_ids = self.registry.get_positions("MEIC")
+        # Check how many positions we think we have in registry
+        my_position_ids = self.registry.get_positions(self.BOT_NAME)
 
         if not my_position_ids:
             # FIX #77: Registry empty — but entries may have un-finalized surviving sides
@@ -6071,7 +6073,7 @@ class MEICStrategy:
             )
 
             self.trade_logger.log_trade(
-                action=f"MEIC Entry #{entry.entry_number}",
+                action=f"{self.BOT_NAME} Entry #{entry.entry_number}",
                 strike=strike_str,
                 price=entry.total_credit,
                 delta=0.0,  # Iron condors are delta neutral
@@ -6101,7 +6103,7 @@ class MEICStrategy:
                 strike_str = f"P:{entry.short_put_strike}/{entry.long_put_strike}"
 
             self.trade_logger.log_trade(
-                action=f"MEIC Stop #{entry.entry_number} ({side.upper()})",
+                action=f"{self.BOT_NAME} Stop #{entry.entry_number} ({side.upper()})",
                 strike=strike_str,
                 price=stop_level,
                 delta=0.0,
@@ -6136,7 +6138,7 @@ class MEICStrategy:
             self.trade_logger.log_safety_event({
                 "timestamp": get_us_market_time().strftime("%Y-%m-%d %H:%M:%S"),
                 "event_type": event_type,
-                "bot": "MEIC",
+                "bot": self.BOT_NAME,
                 "state": self.state.value,
                 "spy_price": self.current_price,  # Logger expects 'spy_price' not 'spx_price'
                 "vix": self.current_vix,
@@ -6156,10 +6158,11 @@ class MEICStrategy:
         # Add extra fields for alert formatting
         summary["spx_close"] = self.current_price
         summary["vix_close"] = self.current_vix
-        summary["cumulative_pnl"] = self.cumulative_metrics.get("cumulative_pnl", 0) + summary["total_pnl"]
+        summary["cumulative_pnl"] = self.cumulative_metrics.get("cumulative_pnl", 0) + summary.get("net_pnl", summary["total_pnl"])
         summary["dry_run"] = self.dry_run
+        summary["total_scheduled"] = len(self.entry_times)
 
-        self.alert_service.daily_summary_meic(summary)
+        self.alert_service.daily_summary_ic(summary)
 
     def get_daily_summary(self) -> Dict:
         """Get daily trading summary."""
@@ -7932,16 +7935,39 @@ class MEICStrategy:
         else:
             # Send immediately (also flush any pending)
             self._flush_batched_alerts()
-            # Send this one
-            # FIX (2026-02-04): Use net_loss instead of stop_level for P&L display
-            self.alert_service.stop_loss(
-                trigger_price=self.current_price,
-                pnl=-net_loss,
+            # Send this one with per-leg breakdown (MKT-025: short closed, long held)
+            if side == "call":
+                short_strike = entry.short_call_strike
+                long_strike = entry.long_call_strike
+                credit = entry.call_spread_credit
+                short_label = "SC"
+                long_label = "LC"
+            else:
+                short_strike = entry.short_put_strike
+                long_strike = entry.long_put_strike
+                credit = entry.put_spread_credit
+                short_label = "SP"
+                long_label = "LP"
+
+            stop_msg = (
+                f"*Entry #{entry.entry_number}* {side.upper()} stopped\n\n"
+                f"{short_label} {short_strike:.0f} closed (short only)\n"
+                f"{long_label} {long_strike:.0f} held → settles EOD\n\n"
+                f"Credit: ${credit:.0f} | Stop: ${stop_level:.0f}\n"
+                f"*Side loss: -${net_loss:.0f}*\n"
+                f"SPX: {self.current_price:,.2f}"
+            )
+
+            self.alert_service.send_alert(
+                alert_type=AlertType.STOP_LOSS,
+                title="Stop Loss Hit",
+                message=stop_msg,
+                priority=AlertPriority.HIGH,
                 details={
-                    "description": f"MEIC Entry #{entry.entry_number} {side.upper()} side stopped",
-                    "reason": f"{side} spread value reached stop level (${stop_level:.0f})",
+                    "description": f"{self.BOT_NAME} Entry #{entry.entry_number} {side.upper()} side stopped",
                     "entry_number": entry.entry_number,
-                    "net_loss": net_loss
+                    "net_loss": net_loss,
+                    "stop_level": stop_level
                 }
             )
 
