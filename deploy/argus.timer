@@ -1,0 +1,11 @@
+[Unit]
+Description=Calypso ARGUS Health Check Timer (every 15 min, 24/7)
+Documentation=https://github.com/calypso-trading/calypso
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

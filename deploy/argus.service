@@ -1,0 +1,29 @@
+[Unit]
+Description=Calypso ARGUS Health Check (oneshot)
+Documentation=https://github.com/calypso-trading/calypso
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+
+ExecStart=/bin/bash /opt/calypso/services/argus/health_check.sh
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-argus
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/calypso/intel/argus
+
+# Timeout for the health check (should finish in seconds)
+TimeoutStartSec=60
