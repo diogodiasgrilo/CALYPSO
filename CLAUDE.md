@@ -611,6 +611,71 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 
 ---
 
+## ODYSSEUS — Pre-Push Code Audit Protocol
+
+**Trigger:** Before any `git push` or VM deployment in a Claude Code session.
+
+ODYSSEUS is a 3-pass code audit that catches bugs, dead code, misspellings, and documentation gaps before they reach production. It runs entirely within Claude Code (no external tools needed).
+
+### Pass 1: Discovery
+
+Scan all changed files (`git diff main`) and check each category. Print progress after EACH check:
+
+```
+ODYSSEUS Pass 1/3 [1/6]: Shared code impact... 2 files in shared/ changed, affects HYDRA only
+ODYSSEUS Pass 1/3 [2/6]: Dead code scan... 1 unused import found in strategy.py:45
+ODYSSEUS Pass 1/3 [3/6]: Misspelling check... clean
+ODYSSEUS Pass 1/3 [4/6]: Bug pattern scan... 1 missing timeout found in new requests.get()
+ODYSSEUS Pass 1/3 [5/6]: Hanging risk... clean
+ODYSSEUS Pass 1/3 [6/6]: Documentation... __init__.py needs version bump
+Pass 1 complete: 3 issues found
+```
+
+**Check categories:**
+
+| # | Category | What to look for |
+|---|----------|------------------|
+| 1 | **Shared code impact** | `grep` callers in `bots/`, flag any working bots affected |
+| 2 | **Dead code** | Unused functions, imports, config keys, variables |
+| 3 | **Misspellings** | Identifiers, dict keys, string literals, log messages |
+| 4 | **Bug patterns** | `if value:` on numerics, missing timeouts, bare `except:`, unsafe threading, `alert.get("key", {})` with possible None |
+| 5 | **Hanging risk** | Blocking calls without timeout: `requests.*`, `thread.join`, `fcntl.flock`, `gspread.*` |
+| 6 | **Documentation** | `__init__.py` exports, docstrings, CLAUDE.md, strategy specs, README.md |
+
+### Pass 2: Fix & Re-Audit
+
+Fix all issues found in Pass 1, then re-run the full 6-category checklist. Loop until clean:
+
+```
+ODYSSEUS Pass 2/3: Fixing 3 issues...
+  Fixed: removed unused import (strategy.py:45)
+  Fixed: added timeout=30 to requests.get (scout.py:88)
+  Fixed: bumped __init__.py version
+Re-running all checks... 0 issues found
+Pass 2 complete: all fixes verified
+```
+
+### Pass 3: Final Confirmation
+
+One last full pass + `git diff --stat` review:
+
+```
+ODYSSEUS Pass 3/3: Final confirmation...
+  Files changed: 4 (strategy.py, scout.py, __init__.py, CLAUDE.md)
+  All checks: PASS
+  Unintended changes: NONE
+
+ODYSSEUS: ALL CLEAR — safe to push
+```
+
+### Audit Report
+
+After completing all 3 passes, write:
+- `intel/odysseus/audit_YYYY-MM-DD_vX.Y.Z.md` — full audit findings and fixes
+- `.odysseus_last_audit` — commit hash (detects post-audit changes)
+
+---
+
 ## Deployment Workflow
 
 ### Pre-Commit Checklist
