@@ -1,399 +1,344 @@
 # CALYPSO VM Command Reference
 
-**Last Updated:** 2026-01-29
-**VM Name:** `calypso-bot`
-**Zone:** `us-east1-b`
-**Project:** `calypso-trading-bot`
-**Calypso Path:** `/opt/calypso`
-**Calypso User:** `calypso`
+**Last Updated:** 2026-03-02
+**VM Name:** `calypso-bot` | **Zone:** `us-east1-b` | **Project:** `calypso-trading-bot`
+**Calypso Path:** `/opt/calypso` | **User:** `calypso`
 
 ---
 
-## Quick Reference Table
+## Current Service Status (as of 2026-03-02)
 
-| Bot | Service Name |
-|-----|--------------|
-| Delta Neutral | `delta_neutral.service` |
-| Iron Fly 0DTE | `iron_fly_0dte.service` |
-| Rolling Put Diagonal | `rolling_put_diagonal.service` |
-| MEIC | `meic.service` |
-| Token Keeper | `token_keeper.service` |
+| Service | Type | Status |
+|---------|------|--------|
+| **HYDRA** | Long-running trading bot | **LIVE** (only active bot) |
+| **Token Keeper** | Long-running token refresh | **RUNNING** (24/7) |
+| **ARGUS** | Oneshot timer (every 15 min) | **ACTIVE** |
+| **APOLLO** | Oneshot timer (8:30 AM ET weekdays) | **ACTIVE** |
+| **HERMES** | Oneshot timer (5:00 PM ET weekdays) | **ACTIVE** |
+| **CLIO** | Oneshot timer (Saturday 9:00 AM ET) | **ACTIVE** |
+| Iron Fly | Long-running bot | STOPPED |
+| Delta Neutral | Long-running bot | STOPPED |
+| MEIC | Long-running bot | STOPPED |
+| Rolling Put Diagonal | Long-running bot | STOPPED |
+
+---
+
+## EMERGENCY: Copy-Paste One-Liners (from VS Code terminal)
+
+### Stop HYDRA (graceful)
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+```
+
+### Stop EVERYTHING (HYDRA + Token Keeper — token expires in ~20 min!)
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra token_keeper"
+```
+
+### Check HYDRA status
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra"
+```
+
+### Check ALL services and agent timers
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra token_keeper argus.timer apollo.timer hermes.timer clio.timer"
+```
+
+### HYDRA logs (last 50 lines)
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 50 --no-pager"
+```
+
+### HYDRA logs (live follow — Ctrl+C to exit, does NOT stop bot)
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -f"
+```
 
 ---
 
 ## SSH Access
 
-### From Local Machine
 ```bash
+# Interactive session (stays open for multiple commands — useful for running several things)
 gcloud compute ssh calypso-bot --zone=us-east1-b
-```
 
-### Run Command Remotely (without SSH session)
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="YOUR_COMMAND_HERE"
-```
-
----
-
-## Bot Management (systemd)
-
-### Start Bots
-```bash
-# Start Token Keeper first (ensures fresh tokens)
-sudo systemctl start token_keeper
-
-# Start individual bots
-sudo systemctl start delta_neutral
-sudo systemctl start iron_fly_0dte
-sudo systemctl start rolling_put_diagonal
-sudo systemctl start meic
-
-# Start ALL trading bots at once
-sudo systemctl start delta_neutral iron_fly_0dte rolling_put_diagonal meic
-```
-
-### Stop Bots (Graceful Shutdown)
-```bash
-# Stop individual bots
-sudo systemctl stop delta_neutral
-sudo systemctl stop iron_fly_0dte
-sudo systemctl stop rolling_put_diagonal
-sudo systemctl stop meic
-
-# Stop ALL trading bots (Token Keeper keeps running)
-sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal meic
-
-# Stop EVERYTHING including Token Keeper (token will expire in ~20 min!)
-sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal meic token_keeper
-```
-
-### Restart Bots
-```bash
-# Restart individual bots
-sudo systemctl restart delta_neutral
-sudo systemctl restart iron_fly_0dte
-sudo systemctl restart rolling_put_diagonal
-sudo systemctl restart meic
-
-# Restart ALL trading bots
-sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic
-
-# Restart Token Keeper (rarely needed)
-sudo systemctl restart token_keeper
-```
-
-### Emergency Kill (Immediate Termination)
-```bash
-# Kill individual bots
-sudo systemctl kill -s SIGKILL delta_neutral
-sudo systemctl kill -s SIGKILL iron_fly_0dte
-sudo systemctl kill -s SIGKILL rolling_put_diagonal
-sudo systemctl kill -s SIGKILL meic
-
-# Kill ALL bots at once (emergency)
-sudo systemctl kill -s SIGKILL delta_neutral iron_fly_0dte rolling_put_diagonal meic
-```
-
-**WARNING:** All services have `Restart=always` with `RestartSec=30`. Killing will cause auto-restart in 30 seconds. Use `systemctl stop` for permanent stop.
-
----
-
-## Check Bot Status
-
-### Quick Status Snapshot (All Bots)
-```bash
-/opt/calypso/scripts/bot_status.sh
-```
-
-### Check Individual Bot Status
-```bash
-sudo systemctl status token_keeper
-sudo systemctl status delta_neutral
-sudo systemctl status iron_fly_0dte
-sudo systemctl status rolling_put_diagonal
-sudo systemctl status meic
-```
-
-### Check All Services at Once
-```bash
-sudo systemctl status token_keeper delta_neutral iron_fly_0dte rolling_put_diagonal meic
-```
-
-### List Running Calypso Services
-```bash
-sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling|meic|token_keeper)'
+# Single command (runs and exits — most common usage from VS Code)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="<command>"
 ```
 
 ---
 
-## Live Logging
+## HYDRA Trading Bot
 
-### Combined Monitor Log (All Bots)
+HYDRA is the only active trading bot. It runs continuously during market hours.
+
+### Start / Stop / Restart
 ```bash
-tail -f /opt/calypso/logs/monitor.log
+# Start (token_keeper should already be running)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra"
+
+# Stop (graceful — waits up to 60s for cleanup)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+
+# Restart (e.g., after config change or code deploy)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
 ```
 
-### Individual Bot Logs (Live - Follow Mode)
+### Status and Logs
 ```bash
-sudo journalctl -u token_keeper -f
-sudo journalctl -u delta_neutral -f
-sudo journalctl -u iron_fly_0dte -f
-sudo journalctl -u rolling_put_diagonal -f
-sudo journalctl -u meic -f
+# Status
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra"
+
+# Recent logs (last 50 lines)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 50 --no-pager"
+
+# Today's logs
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra --since today --no-pager"
+
+# Live logs (Ctrl+C to exit — does NOT stop the bot)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -f"
+
+# Search for errors
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra --since today --no-pager | grep -E 'ERROR|WARNING|CRITICAL'"
 ```
 
-### View Recent Logs (Last N Lines)
+### Config (on VM only — gitignored)
 ```bash
-# Last 50 lines
-sudo journalctl -u delta_neutral -n 50 --no-pager
-sudo journalctl -u iron_fly_0dte -n 50 --no-pager
-sudo journalctl -u rolling_put_diagonal -n 50 --no-pager
-sudo journalctl -u meic -n 50 --no-pager
-sudo journalctl -u token_keeper -n 50 --no-pager
+# View HYDRA config
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/hydra/config/config.json"
 
-# Last 100 lines
-sudo journalctl -u delta_neutral -n 100 --no-pager
+# Edit HYDRA config (interactive — opens nano editor)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso nano /opt/calypso/bots/hydra/config/config.json"
+# After editing, restart: sudo systemctl restart hydra
 ```
 
-### View Today's Logs
+### State and Data Files
 ```bash
-sudo journalctl -u delta_neutral --since today --no-pager
-sudo journalctl -u iron_fly_0dte --since today --no-pager
-sudo journalctl -u token_keeper --since today --no-pager
+# HYDRA state (today's entries, positions, P&L)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/data/hydra_state.json"
+
+# Cumulative metrics (all-time stats)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/data/hydra_metrics.json"
+
+# Position registry (what HYDRA currently owns)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/data/position_registry.json"
 ```
 
-### View Logs from Specific Time
-```bash
-# Last hour
-sudo journalctl -u delta_neutral --since "1 hour ago" --no-pager
+**IMPORTANT:** Never use `kill` or `pkill` — HYDRA has `Restart=always` with `RestartSec=30`, so killing it will auto-restart in 30 seconds. Always use `systemctl stop`.
 
-# Specific time range
-sudo journalctl -u delta_neutral --since "2026-01-29 09:30:00" --until "2026-01-29 10:00:00" --no-pager
+---
+
+## Token Keeper
+
+Keeps Saxo OAuth tokens fresh 24/7. Must always be running — tokens expire every 20 minutes.
+
+```bash
+# Status
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper"
+
+# Logs (last 20 lines)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -n 20 --no-pager"
+
+# Restart (rarely needed)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart token_keeper"
+
+# Token cache freshness
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="ls -la /opt/calypso/data/saxo_token_cache.json"
 ```
 
 ---
 
-## Pull Changes & Restart
+## AI Agent Timers (ARGUS, APOLLO, HERMES, CLIO)
 
-### Full Update Procedure (with Cache Clear)
+Agents are **systemd oneshot services** triggered by timers. Each run starts a fresh Python process — no persistent state to manage.
+
+| Agent | Timer Schedule | What It Does |
+|-------|---------------|--------------|
+| **ARGUS** | Every 15 min, 24/7 | Health checks (HYDRA, token, disk, memory) |
+| **APOLLO** | 8:30 AM ET, Mon-Fri | Morning market briefing + risk level |
+| **HERMES** | 5:00 PM ET, Mon-Fri | Daily execution quality report |
+| **CLIO** | Saturday 9:00 AM ET | Weekly strategy analysis + git commit |
+
+### Check Timer Status (when will they fire next?)
 ```bash
-cd /opt/calypso
-sudo -u calypso git pull
-find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
-sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic
+# All agent timers
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-timers argus.timer apollo.timer hermes.timer clio.timer --no-pager"
+
+# Individual timer
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status apollo.timer"
 ```
 
-### One-Liner for Pull + Cache Clear + Restart All
+### View Agent Logs (last run output)
 ```bash
-cd /opt/calypso && sudo -u calypso git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null && sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic
+# ARGUS (health monitor)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u argus -n 30 --no-pager"
+
+# APOLLO (morning scout)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u apollo -n 50 --no-pager"
+
+# HERMES (daily analyst)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hermes -n 50 --no-pager"
+
+# CLIO (weekly analyst)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u clio -n 50 --no-pager"
 ```
 
-### Remote One-Liner (from local machine)
+### View Agent Reports (saved output)
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
+# ARGUS health log (last 5 entries)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="tail -5 /opt/calypso/intel/argus/health_log.jsonl"
+
+# APOLLO morning briefing (today)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/intel/apollo/\$(TZ=America/New_York date +%Y-%m-%d).md"
+
+# HERMES daily report (today)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/intel/hermes/\$(TZ=America/New_York date +%Y-%m-%d).md"
+
+# CLIO weekly reports (list all)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="ls -la /opt/calypso/intel/clio/"
+
+# ARGUS incidents (failures only)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="ls -la /opt/calypso/intel/argus/incidents/"
 ```
 
-### Pull + Restart Specific Bot
+### Manually Trigger an Agent (run it now)
 ```bash
-cd /opt/calypso && sudo -u calypso git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null && sudo systemctl restart delta_neutral
+# Run ARGUS now
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start argus.service && sudo journalctl -u argus -n 30 --no-pager"
+
+# Run APOLLO now
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start apollo.service && sudo journalctl -u apollo -n 50 --no-pager"
+
+# Run HERMES now
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hermes.service && sudo journalctl -u hermes -n 50 --no-pager"
+
+# Run CLIO now
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start clio.service && sudo journalctl -u clio -n 100 --no-pager"
 ```
 
-**IMPORTANT:** Always clear Python cache (`__pycache__`) after pulling changes. Stale bytecode can cause bots to run old code.
+### Enable / Disable Agent Timers
+```bash
+# Disable an agent (stops future runs, doesn't affect current run)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop apollo.timer && sudo systemctl disable apollo.timer"
+
+# Re-enable an agent
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl enable apollo.timer && sudo systemctl start apollo.timer"
+```
 
 ---
 
-## Enable/Disable Auto-Start on Boot
+## Deploy Code Changes
 
-### Enable (Start Automatically on VM Reboot)
+### Standard Deploy (pull + cache clear — agents pick up changes automatically)
 ```bash
-sudo systemctl enable token_keeper
-sudo systemctl enable delta_neutral
-sudo systemctl enable iron_fly_0dte
-sudo systemctl enable rolling_put_diagonal
-sudo systemctl enable meic
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared services -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Done'"
 ```
 
-### Disable (Don't Start on Boot)
+### Deploy + Restart HYDRA (if HYDRA code changed)
 ```bash
-sudo systemctl disable delta_neutral
-sudo systemctl disable iron_fly_0dte
-sudo systemctl disable rolling_put_diagonal
-sudo systemctl disable meic
-# Note: Usually keep token_keeper enabled
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared services -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'" && \
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra && echo 'HYDRA restarted'"
 ```
+
+**Note:** Agent timers (ARGUS, APOLLO, HERMES, CLIO) do NOT need restart after deploy — each run starts a fresh Python process that loads the latest code.
 
 ---
 
-## Log File Locations
+## Other Bots (Currently STOPPED)
 
-| Bot | Log File |
-|-----|----------|
-| Token Keeper | journalctl only (no file log) |
-| Delta Neutral | `/opt/calypso/logs/delta_neutral/bot.log` |
-| Iron Fly 0DTE | `/opt/calypso/logs/iron_fly_0dte/bot.log` |
-| Rolling Put Diagonal | `/opt/calypso/logs/rolling_put_diagonal/bot.log` |
-| MEIC | `/opt/calypso/logs/meic/bot.log` |
-| Combined Monitor | `/opt/calypso/logs/monitor.log` |
+These bots are inactive but their service files remain on the VM.
 
-### View File Logs Directly
 ```bash
-tail -f /opt/calypso/logs/delta_neutral/bot.log
-tail -f /opt/calypso/logs/iron_fly_0dte/bot.log
-tail -100 /opt/calypso/logs/delta_neutral/bot.log
-```
+# Start a stopped bot
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start delta_neutral"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start meic"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start rolling_put_diagonal"
 
----
-
-## Data & Config Files
-
-### Position Data
-```bash
-cat /opt/calypso/data/iron_fly_position.json
-cat /opt/calypso/data/delta_neutral_state.json
-cat /opt/calypso/data/position_registry.json
-```
-
-### Token Cache
-```bash
-cat /opt/calypso/data/saxo_token_cache.json
-```
-
-### View Config Files
-```bash
-cat /opt/calypso/bots/delta_neutral/config/config.json
-cat /opt/calypso/bots/iron_fly_0dte/config/config.json
-cat /opt/calypso/bots/rolling_put_diagonal/config/config.json
-cat /opt/calypso/bots/meic/config/config.json
-```
-
-### Edit Config Files
-```bash
-sudo -u calypso nano /opt/calypso/bots/delta_neutral/config/config.json
-# After editing, restart the bot:
-sudo systemctl restart delta_neutral
+# Check status of all bots
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra token_keeper iron_fly_0dte delta_neutral meic rolling_put_diagonal"
 ```
 
 ---
 
 ## System Diagnostics
 
-### Check Disk Space
 ```bash
-df -h /
+# Disk space
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="df -h /"
+
+# Memory usage
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="free -h"
+
+# Running Python processes
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="ps aux | grep python"
+
+# VM status (if can't SSH)
+gcloud compute instances describe calypso-bot --zone=us-east1-b --format="value(status)"
+
+# Start VM if stopped
+gcloud compute instances start calypso-bot --zone=us-east1-b
 ```
 
-### Check Memory Usage
-```bash
-free -h
-```
+---
 
-### View Running Python Processes
-```bash
-ps aux | grep python
-```
+## Alert System
 
-### Check CPU/Memory per Process
 ```bash
-top -b -n 1 | grep python
+# Cloud Function logs (Telegram/Email delivery)
+gcloud functions logs read process-trading-alert --region=us-east1 --project=calypso-trading-bot --limit=20
+
+# Dead letter queue (failed alerts)
+gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-trading-bot --limit=10 --auto-ack
 ```
 
 ---
 
 ## Run Scripts on VM
 
-### General Pattern
 ```bash
-sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/SCRIPT_NAME.py'
-```
+# General pattern
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/SCRIPT_NAME.py'"
 
-### Common Scripts
-```bash
-# Preview what bot would do (most useful)
-sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/preview_live_entry.py'
+# Preview what HYDRA would do right now
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/preview_live_entry.py'"
 
 # Test API connectivity
-sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/test_rest_api.py'
-
-# Check short strikes
-sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/check_short_strikes.py'
-```
-
-### Run from Local Machine
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/preview_live_entry.py'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/test_rest_api.py'"
 ```
 
 ---
 
-## Alert System (Cloud Functions)
+## Quick Reference Table
 
-### View Alert Logs
-```bash
-gcloud functions logs read process-trading-alert --region=us-east1 --project=calypso-trading-bot --limit=50
-```
-
-### Check Dead Letter Queue
-```bash
-gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-trading-bot --limit=10 --auto-ack
-```
-
----
-
-## Common One-Liners (From Local Machine)
-
-### Emergency Stop All Bots
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop delta_neutral iron_fly_0dte rolling_put_diagonal meic"
-```
-
-### Check All Bot Status
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper delta_neutral iron_fly_0dte rolling_put_diagonal meic"
-```
-
-### Pull + Restart + Verify
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'" && \
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart delta_neutral iron_fly_0dte rolling_put_diagonal meic" && \
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status delta_neutral iron_fly_0dte rolling_put_diagonal meic"
-```
-
-### View Delta Neutral Logs (Last 50)
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u delta_neutral -n 50 --no-pager"
-```
-
-### Follow Delta Neutral Logs Live
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u delta_neutral -f"
-```
+| Action | Command (from VS Code terminal) |
+|--------|---------------------------------|
+| **Stop HYDRA** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"` |
+| **Start HYDRA** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra"` |
+| **Restart HYDRA** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"` |
+| **HYDRA status** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra"` |
+| **HYDRA logs (50 lines)** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 50 --no-pager"` |
+| **HYDRA logs (live)** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -f"` |
+| **Token keeper status** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper"` |
+| **All timer status** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-timers --no-pager"` |
+| **Agent logs (APOLLO)** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u apollo -n 50 --no-pager"` |
+| **Agent logs (HERMES)** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hermes -n 50 --no-pager"` |
+| **Agent logs (ARGUS)** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u argus -n 30 --no-pager"` |
+| **Agent logs (CLIO)** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u clio -n 100 --no-pager"` |
+| **Deploy (pull + cache)** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared services -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Done'"` |
+| **Disk space** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="df -h /"` |
+| **Memory** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="free -h"` |
+| **Stop EVERYTHING** | `gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra token_keeper"` |
 
 ---
 
-## Important Notes
+## Important Reminders
 
-1. **All timestamps are in Eastern Time (ET)** to match NYSE trading hours
-2. **Never use `kill` or `pkill`** - bots auto-restart in 30 seconds due to `Restart=always`
-3. **Always clear cache after git pull** - stale `__pycache__` can cause old code to run
-4. **Token Keeper should run 24/7** - keeps Saxo OAuth tokens fresh even when bots are stopped
-5. **Config files are gitignored** - edit directly on VM, not in local repo
-6. **Run scripts as `calypso` user** - required for Secret Manager access
-
----
-
-## Service File Locations
-
-```bash
-# View service configurations
-cat /etc/systemd/system/token_keeper.service
-cat /etc/systemd/system/delta_neutral.service
-cat /etc/systemd/system/iron_fly_0dte.service
-cat /etc/systemd/system/rolling_put_diagonal.service
-cat /etc/systemd/system/meic.service
-```
-
-### After Modifying Service Files
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart SERVICE_NAME
-```
+1. **Never use `kill` or `pkill`** — services auto-restart in 30 seconds. Always use `systemctl stop`.
+2. **Token Keeper must run 24/7** — without it, Saxo tokens expire in ~20 minutes and require manual re-auth.
+3. **Agents don't need restart** — they're oneshot services triggered by timers. `git pull` is enough.
+4. **HYDRA needs restart** after code changes to `bots/hydra/` or `shared/` — it's a long-running process.
+5. **Config files are gitignored** — edit directly on VM with `nano`, then restart the affected service.
+6. **Always clear `__pycache__`** after `git pull` — stale bytecode can run old code.
+7. **All log timestamps are ET** (Eastern Time) — matching NYSE trading hours.
