@@ -220,6 +220,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
     except Exception as e:
         trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
 
+    # Initialize Telegram command handler for /snapshot
+    from bots.hydra.telegram_commands import TelegramCommandHandler
+    telegram_cmd_handler = TelegramCommandHandler()
+    try:
+        telegram_cmd_handler.start(snapshot_callback=strategy.build_telegram_snapshot)
+    except Exception as e:
+        trade_logger.log_error(f"Failed to start Telegram command handler: {e}")
+
     # REST-only mode
     trade_logger.log_event("REST-only mode: WebSocket streaming disabled")
     trade_logger.log_event("All price fetching will use REST API directly")
@@ -515,6 +523,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
         trade_logger.log_event("=" * 60)
         trade_logger.log_event("INITIATING GRACEFUL SHUTDOWN")
         trade_logger.log_event("=" * 60)
+
+        # Stop Telegram command handler
+        try:
+            telegram_cmd_handler.stop()
+        except Exception:
+            pass
 
         # FIX #75: Wait for async fill corrections before shutdown
         if strategy is not None:

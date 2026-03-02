@@ -250,6 +250,8 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 - **State file:** `data/hydra_state.json` (separate from MEIC's `meic_state.json`)
 - **Why it exists:** On Feb 4, 2026, pure MEIC had all 6 put sides stopped in a sustained downtrend. HYDRA adds credit validation + progressive tightening to improve fill quality and profit management.
 
+- **Telegram /snapshot Command:** On-demand position snapshot via Telegram. Send `/snapshot` during market hours for live data (SPX, VIX, entries, cushions, P&L). Outside market hours returns "market closed" message. Background daemon thread polls Telegram `getUpdates` every 5s. Credentials from Secret Manager (`calypso-telegram-credentials`). Security: only responds to configured chat_id.
+
 **Note:** HYDRA and MEIC can run simultaneously - they use separate state files but share the Position Registry for multi-bot SPX position isolation.
 
 ### Delta Neutral Bot Details

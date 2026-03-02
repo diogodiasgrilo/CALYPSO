@@ -14,6 +14,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both non-viable: Skip entry entirely
 
 Version History:
+- 1.5.1 (2026-03-02): Telegram /snapshot command (on-demand position snapshot)
 - 1.5.0 (2026-02-28): Renamed from MEIC-TF to HYDRA
 - 1.4.5 (2026-02-28): MKT-026 min spread width raised from 25pt to 60pt (longs 10pt further OTM on low-VIX days = cheaper, MKT-025 never closes longs so pure savings)
 - 1.4.4 (2026-02-28): Add 6th entry at 12:35 PM (matching base MEIC schedule — MKT-011 credit gate ensures zero-cost skip when non-viable)
