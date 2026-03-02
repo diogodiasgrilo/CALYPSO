@@ -52,6 +52,7 @@ from shared.market_hours import (
 )
 from shared.config_loader import ConfigLoader
 from shared.secret_manager import is_running_on_gcp
+from shared.alert_service import AlertType, AlertPriority
 
 # Import bot-specific strategy
 from bots.hydra.strategy import HydraStrategy
@@ -205,6 +206,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
         trade_logger.log_event("Dashboard metrics logged to Google Sheets")
     except Exception as e:
         trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
+
+    # Send BOT_STARTED alert
+    try:
+        mode = "DRY-RUN" if dry_run else "LIVE"
+        status = strategy.get_status_summary()
+        strategy.alert_service.send_alert(
+            alert_type=AlertType.BOT_STARTED,
+            title=f"Bot Started ({mode})",
+            message=f"HYDRA started in {mode} mode.\nState: {status.get('state', 'Unknown')}, Entries today: {status.get('entries_completed', 0)}",
+            priority=AlertPriority.LOW,
+        )
+    except Exception as e:
+        trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
 
     # REST-only mode
     trade_logger.log_event("REST-only mode: WebSocket streaming disabled")
@@ -520,6 +534,22 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                         "description": f"Bot shutdown with {active} active positions",
                         "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
                     })
+
+                # Send BOT_STOPPED alert
+                try:
+                    reason = "Signal received" if shutdown_requested else "Unexpected shutdown"
+                    priority = AlertPriority.HIGH if active > 0 else AlertPriority.LOW
+                    msg = f"HYDRA stopped. Reason: {reason}\nState: {state}, Entries: {entries}, P&L: ${realized + unrealized:.2f}"
+                    if active > 0:
+                        msg += f"\n⚠️ {active} ACTIVE positions remaining!"
+                    strategy.alert_service.send_alert(
+                        alert_type=AlertType.BOT_STOPPED,
+                        title="Bot Stopped" if active == 0 else f"Bot Stopped — {active} ACTIVE positions!",
+                        message=msg,
+                        priority=priority,
+                    )
+                except Exception as e:
+                    trade_logger.log_error(f"Failed to send BOT_STOPPED alert: {e}")
             else:
                 trade_logger.log_event("Strategy was not initialized - no final status available")
         except Exception as e:

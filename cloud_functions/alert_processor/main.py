@@ -519,18 +519,26 @@ def process_alert(cloud_event):
 
         results = {"telegram": None, "email": None}
 
-        # Send Telegram if requested
+        # Send Telegram if requested (isolated — failure doesn't block email)
         if send_telegram_flag:
-            telegram_message = format_telegram_message(alert)
-            results["telegram"] = send_telegram(telegram_message, chat_id=telegram_chat_id or None)
-            logger.info(f"Telegram delivery: {'success' if results['telegram'] else 'failed'}")
+            try:
+                telegram_message = format_telegram_message(alert)
+                results["telegram"] = send_telegram(telegram_message, chat_id=telegram_chat_id or None)
+                logger.info(f"Telegram delivery: {'success' if results['telegram'] else 'failed'}")
+            except Exception as e:
+                logger.error(f"Telegram delivery exception: {e}")
+                results["telegram"] = False
 
-        # Send email if requested and configured
+        # Send email if requested and configured (isolated — failure doesn't block Telegram)
         if send_email_flag and email_address:
-            subject = format_email_subject(alert)
-            html_body, text_body = format_email_body(alert)
-            results["email"] = send_email(email_address, subject, html_body, text_body)
-            logger.info(f"Email delivery: {'success' if results['email'] else 'failed'}")
+            try:
+                subject = format_email_subject(alert)
+                html_body, text_body = format_email_body(alert)
+                results["email"] = send_email(email_address, subject, html_body, text_body)
+                logger.info(f"Email delivery: {'success' if results['email'] else 'failed'}")
+            except Exception as e:
+                logger.error(f"Email delivery exception: {e}")
+                results["email"] = False
 
         # Log final result
         logger.info(f"Alert processed: {json.dumps(results)}")
@@ -539,7 +547,6 @@ def process_alert(cloud_event):
         logger.error(f"Failed to parse alert JSON: {e}")
     except Exception as e:
         logger.error(f"Error processing alert: {e}")
-        raise  # Re-raise to trigger Pub/Sub retry
 
 
 # For local testing

@@ -71,10 +71,10 @@ logger = logging.getLogger(__name__)
 
 class AlertPriority(Enum):
     """Alert priority levels determining delivery channels."""
-    CRITICAL = "critical"  # Telegram + Email - requires immediate attention
-    HIGH = "high"          # Telegram + Email - significant event
-    MEDIUM = "medium"      # Telegram + Email - important but not urgent
-    LOW = "low"            # Telegram + Email - informational
+    CRITICAL = "critical"  # Telegram + Email
+    HIGH = "high"          # Telegram + Email
+    MEDIUM = "medium"      # Telegram + Email (except POSITION_OPENED → Telegram only)
+    LOW = "low"            # Telegram only (except DAILY_SUMMARY and agent reports → both)
 
 
 class AlertType(Enum):
@@ -285,6 +285,9 @@ class AlertService:
         if priority is None:
             priority = DEFAULT_PRIORITIES.get(alert_type, AlertPriority.MEDIUM)
 
+        # Determine delivery channels based on priority and alert type
+        send_email = self._should_send_email(alert_type, priority)
+
         # Build alert payload
         payload = {
             "bot_name": self.bot_name,
@@ -295,8 +298,8 @@ class AlertService:
             "timestamp": datetime.now(US_EASTERN).isoformat(),
             "details": details or {},
             "delivery": {
-                "telegram": True,  # All priorities get Telegram (Cloud Function sends via Bot API)
-                "email": True,  # All priorities get email
+                "telegram": True,  # All alerts go to Telegram
+                "email": send_email,
                 "phone_number": self._phone_number,
                 "email_address": self._email
             }
@@ -345,6 +348,63 @@ class AlertService:
             # Still log the alert locally
             logger.warning(f"Alert content (failed to publish): {json.dumps(payload)}")
             return False
+
+    # =========================================================================
+    # DELIVERY CHANNEL ROUTING
+    # =========================================================================
+
+    # Alert types that ALWAYS get email regardless of priority
+    _EMAIL_ALWAYS = {
+        AlertType.DAILY_SUMMARY,       # End-of-day P&L record
+        AlertType.STOP_LOSS,           # Financial record
+        AlertType.EMERGENCY_EXIT,      # Financial record
+        AlertType.CIRCUIT_BREAKER,     # Needs paper trail
+        AlertType.CRITICAL_INTERVENTION,
+        AlertType.NAKED_POSITION,
+        AlertType.DAILY_HALT,
+        AlertType.ITM_RISK_CLOSE,
+        AlertType.SLIPPAGE_ALERT,      # Fill quality record
+        AlertType.DATA_QUALITY,        # Used by ARGUS health failures
+    }
+
+    # Alert types that are Telegram-only (no email needed)
+    _TELEGRAM_ONLY = {
+        AlertType.POSITION_OPENED,     # 6/day — routine, clutters inbox
+        AlertType.BOT_STARTED,         # Informational — glance and move on
+        AlertType.BOT_STOPPED,         # Informational — glance and move on
+        AlertType.CONNECTION_RESTORED, # Transient event
+        AlertType.VIGILANT_EXITED,     # Back to safe zone — transient
+        AlertType.MARKET_OPENING_SOON, # Countdown — transient
+        AlertType.MARKET_OPEN,         # Transient
+        AlertType.MARKET_CLOSED,       # Transient
+        AlertType.MARKET_HOLIDAY,      # Informational
+        AlertType.MARKET_EARLY_CLOSE,  # Informational
+    }
+
+    def _should_send_email(self, alert_type: AlertType, priority: AlertPriority) -> bool:
+        """
+        Determine if an alert should also be sent via email.
+
+        Routing logic:
+        - CRITICAL/HIGH priority: always both channels
+        - Alert types in _EMAIL_ALWAYS: always both channels
+        - Alert types in _TELEGRAM_ONLY: Telegram only
+        - Everything else (MEDIUM/LOW): both channels (safe default)
+        """
+        # CRITICAL and HIGH always get email
+        if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+            return True
+
+        # Explicit email-always types
+        if alert_type in self._EMAIL_ALWAYS:
+            return True
+
+        # Explicit Telegram-only types
+        if alert_type in self._TELEGRAM_ONLY:
+            return False
+
+        # Default: send email (safe fallback for unknown alert types)
+        return True
 
     # =========================================================================
     # CONVENIENCE METHODS FOR COMMON ALERTS
