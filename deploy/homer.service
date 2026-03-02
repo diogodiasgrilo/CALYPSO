@@ -1,0 +1,29 @@
+[Unit]
+Description=Calypso HOMER Trading Journal Writer (oneshot)
+Documentation=https://github.com/calypso-trading/calypso
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+
+ExecStart=/opt/calypso/.venv/bin/python -m services.homer.main
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-homer
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/calypso/intel/homer /opt/calypso/docs /opt/calypso/.git
+
+# Claude API (120s per narrative × 3 calls per day × N days) + Sheets reads (3×15s) + git (60s) + overhead
+TimeoutStartSec=600

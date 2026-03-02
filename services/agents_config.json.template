@@ -45,5 +45,15 @@
             "apollo": 30,
             "argus": 90
         }
+    },
+
+    "homer": {
+        "enabled": true,
+        "journal_path": "docs/HYDRA_TRADING_JOURNAL.md",
+        "backup_dir": "intel/homer",
+        "metrics_file": "data/hydra_metrics.json",
+        "max_catch_up_days": 10,
+        "claude_model": "claude-sonnet-4-6",
+        "telegram_alert": true
     }
 }

@@ -514,6 +514,65 @@ gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-tradin
 
 ---
 
+## Agent Suite (5 Agents)
+
+CALYPSO has 5 autonomous agents that run on schedules via systemd timers. All use `shared/claude_client.py` for Claude API access and `shared/sheets_reader.py` for Google Sheets data.
+
+| Agent | Service Name | Schedule | Purpose |
+|-------|-------------|----------|---------|
+| APOLLO | `apollo.service` | 8:30 AM ET weekdays | Pre-market scout (overnight news, VIX, expected move) |
+| HERMES | `hermes.service` | 5:00 PM ET weekdays | Daily execution quality analyst (post-market) |
+| HOMER | `homer.service` | 5:30 PM ET weekdays | Automated HYDRA Trading Journal writer |
+| CLIO | `clio.service` | Saturday 9:00 AM ET | Weekly strategy analyst (aggregates + deep analysis) |
+| ARGUS | `argus.service` | Every 15 min | Health monitor (bot process, API, token status) |
+
+### Agent Config
+- Template: `services/agents_config.json.template`
+- Production: `services/agents_config.json` (gitignored, on VM only)
+- Shared: `anthropic` API key, `google_sheets` credentials, `alerts` settings
+
+### HOMER — Trading Journal Writer (NEW)
+
+Automatically updates `docs/HYDRA_TRADING_JOURNAL.md` after market close each day.
+
+**What it does:**
+1. Detects missing trading days (compares journal vs Google Sheets)
+2. Collects data from Sheets Daily Summary + Positions tabs + metrics file
+3. Updates Sections 1, 2, 3, 4, 5, 8, 9 of the journal
+4. Uses Claude API for narrative sections (observations, market labels, assessments)
+5. Validates journal structure, commits + pushes to git
+6. Sends Telegram alert to HYDRA chat on completion/failure
+
+**Files:**
+```
+services/homer/
+  main.py               Entry point (orchestration, git, Telegram alerts)
+  data_collector.py     Gathers data from Sheets + files
+  journal_parser.py     Parses journal structure (sections, tables)
+  journal_updater.py    Applies updates section-by-section
+  narrative_generator.py Claude API for observations/assessments
+deploy/homer.service    systemd oneshot service
+deploy/homer.timer      systemd timer (5:30 PM ET weekdays)
+intel/homer/            Backups + logs
+```
+
+**Commands:**
+```bash
+# Run manually
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main'"
+
+# Dry run (parse + collect but don't write)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main --dry-run'"
+
+# Check timer status
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status homer.timer"
+
+# View logs
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u homer -n 50 --no-pager"
+```
+
+---
+
 ## Quick Reference Commands
 
 ### Emergency Stop (All Bots + Token Keeper)
@@ -1063,6 +1122,7 @@ SCRIPT
 11. **HYDRA bot:** Running in LIVE mode (v1.4.5, deployed 2026-02-28) - ONLY active trading bot - 6 entries per day (matching base MEIC) + EMA 20/40 trend signal (informational only, all entries full IC) + wider starting OTM 2× multiplier (MKT-024) + min spread width 60pt floor (MKT-026: cheaper longs on low-VIX days, MKT-025 never closes longs = pure savings) + VIX-scaled spread width continuous formula (MKT-027: VIX×3.5 rounded to 5pt, floor 60pt, cap 120pt — pushes longs further OTM on high-VIX days for more stop cushion) + credit gate with separate thresholds: call $1.00, put $1.75 (MKT-011) + early close on ROC >= 3% (MKT-018) + smart hold check before early close (MKT-023) + pre-entry ROC gate after 3 entries (MKT-021) + stop formula = total_credit - $0.15 (MEIC+ covers commission for true breakeven) + short-only stop close (MKT-025: close short, let long expire at settlement) + progressive OTM tightening for all entries (MKT-020/MKT-022) + no one-sided entries + proper P&L tracking (Fix #46/#47) + accurate log labels (Fix #49) + same-strike overlap prevention (Fix #50/MKT-013) + liquidity re-check after overlap adjustment (MKT-014) + Google Sheets timeout protection (Fix #64) + recovery entry classification fix (Fix #65) + post-MKT-013 strike conflict re-check (Fix #66) + long-long overlap prevention (Fix #67/MKT-015) + comprehensive timeout protection for all blocking calls (Fix #68) + accurate fill price tracking (Fix #70) + duplicate daily summary prevention (Fix #71) + net P&L in daily summary (Fix #72) + active entries property fix (Fix #73) + stop loss fill price deferred lookup fix (Fix #74) + async deferred stop fill lookup (Fix #75) + correct Saxo API field name for fill prices + closedpositions fallback (Fix #76) + post-restart settlement expired credits fix (Fix #77) + stop_loss_debits derived from P&L identity (Fix #78) + entries_skipped counter for MKT-011 skip (Fix #79) + batch quote API 7x rate limit reduction + Fix #80 Sheets Positions resize + min credit raised to $1.00/side (v1.3.1) + skip $0 long legs during early close (Fix #81) + removed MKT-016/017/base loss limit (v1.3.3) + Fix #82 midnight settlement gate lock (v1.3.4) + cumulative ROC columns in Daily Summary (v1.3.10)
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
+14. **HOMER agent:** Runs at 5:30 PM ET weekdays — auto-updates HYDRA Trading Journal with new trading days, commits + pushes, sends Telegram alert
 
 ---
 
