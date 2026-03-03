@@ -106,7 +106,7 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 ### Entry Schedule
 
-6 entries per day, spaced 30 minutes apart:
+5 entries per day, spaced 30 minutes apart (Entry #6 dropped in v1.6.0 to free margin for wider put spreads):
 
 | Entry | Time (ET) | Notes |
 |-------|-----------|-------|
@@ -115,7 +115,6 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 | 3 | 11:05 AM | |
 | 4 | 11:35 AM | MKT-021 ROC gate checks before #4 |
 | 5 | 12:05 PM | MKT-021 ROC gate checks before #5 |
-| 6 | 12:35 PM | MKT-021 ROC gate checks before #6 |
 
 Each entry has a 5-minute window. If the entry time passes and the bot hasn't placed the entry (e.g., pending previous stop), it still attempts within the window.
 
@@ -333,7 +332,11 @@ otm_distance = clamp(otm_distance, 25, 120)  # Never closer than 25, never wider
 | 25-30 | 70 pts |
 | > 30 | 80 pts |
 
-Minimum: 60 pts (MKT-026, config `min_spread_width`). On low-VIX days, longs end up 10pt further OTM = cheaper. Since MKT-025 never closes longs, this is pure savings. SPX options use 5-point strike increments.
+**MKT-028 Asymmetric Floors (v1.6.0):** Put longs cost 7× more than calls due to skew ($0.90 vs $0.15 median). Separate floors: call 60pt (`call_min_spread_width`), put 75pt (`put_min_spread_width`). Since MKT-025 never closes longs, wider = cheaper = pure savings. `margin = max(call, put) × $100`, so wider puts don't require wider calls.
+
+Maximum: 75 pts (`max_spread_width`, margin cap: 5 entries × 75pt × $100 = $37,500 ≤ $39,000).
+
+MKT-008 liquidity fallback uses universal `min_spread_width=60` floor. SPX options use 5-point strike increments.
 
 ### Strike Adjustment Pipeline (Exact Order)
 
@@ -509,7 +512,7 @@ Entry #1 → #2 → #3 placed normally
 
 ## MKT Rules Reference
 
-### Active Rules (as of v1.4.5)
+### Active Rules (as of v1.6.0)
 
 | Rule | Name | Added | What It Does |
 |------|------|-------|-------------|
@@ -524,11 +527,12 @@ Entry #1 → #2 → #3 placed normally
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
 | MKT-018 | Early Close on ROC | v1.3.0 | Close all positions when ROC >= 3% |
 | MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $1.00 |
-| MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5/#6 if ROC already >= 3% (after 3 entries placed) |
+| MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5 if ROC already >= 3% (after 3 entries placed) |
 | MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $1.75 |
 | MKT-023 | Smart Hold Check | v1.3.7 | Compare close-now vs worst-case-hold before MKT-018 fires |
-| MKT-024 | Wider Starting OTM | v1.4.1 | Start both sides at 2× VIX-adjusted distance; MKT-020/022 scan inward |
+| MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
 | MKT-025 | Short-Only Stop Close | v1.4.3 | Close SHORT leg only on stop; long expires at settlement |
+| MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper = pure savings) |
 
 ### Removed Rules
 
@@ -594,8 +598,7 @@ Any → HALTED                         (critical: overnight positions, stale reg
 | 11:05 AM | Entry #3 |
 | 11:35 AM | Entry #4 (MKT-021 ROC gate check first) |
 | 12:05 PM | Entry #5 (MKT-021 ROC gate check first) |
-| 12:35 PM | Entry #6 (MKT-021 ROC gate check first) |
-| 12:35+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s, MKT-018 ROC checks |
+| 12:05+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s, MKT-018 ROC checks |
 | 3:45 PM | MKT-018 stops checking (last 15 min, positions expire naturally) |
 | 4:00 PM | Market close, 0DTE options expire/settle |
 | 4:00-5:00 PM | `check_after_hours_settlement()`: process expired credits |
@@ -704,11 +707,13 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `entry_times` | `["10:05","10:35","11:05","11:35","12:05","12:35"]` | Entry schedule (ET) |
+| `entry_times` | `["10:05","10:35","11:05","11:35","12:05"]` | Entry schedule (ET). 5 entries (v1.6.0) |
 | `entry_window_minutes` | `5` | Window around entry time |
 | `spread_width` | `50` | Default spread width (points) |
-| `min_spread_width` | `60` | Minimum spread width (MKT-026: floor ensures 60pt on low-VIX days) |
-| `max_spread_width` | `100` | Maximum spread width |
+| `min_spread_width` | `60` | MKT-008 liquidity fallback floor (universal) |
+| `call_min_spread_width` | `60` | MKT-028: Call spread floor (points) |
+| `put_min_spread_width` | `75` | MKT-028: Put spread floor (put longs 7× more expensive due to skew) |
+| `max_spread_width` | `75` | Maximum spread width (margin cap: 5 × 75pt × $100 = $37,500) |
 | `target_delta` | `8` | Target delta for short strikes |
 | `min_delta` | `5` | Minimum acceptable delta |
 | `max_delta` | `15` | Maximum acceptable delta |
@@ -716,8 +721,8 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `max_credit_per_side` | `1.75` | Credit warning ceiling ($/side) |
 | `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020 call minimum (HYDRA override; base MEIC uses 0.50) |
 | `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022 put minimum (top of Tammy's $1.00-$1.75 range) |
-| `call_starting_otm_multiplier` | `2.0` | MKT-024: call starting OTM = base × multiplier |
-| `put_starting_otm_multiplier` | `2.0` | MKT-024: put starting OTM = base × multiplier |
+| `call_starting_otm_multiplier` | `3.5` | MKT-024: call starting OTM = base × multiplier (batch API = zero extra cost) |
+| `put_starting_otm_multiplier` | `4.0` | MKT-024: put starting OTM = base × multiplier (put skew = credit viable further OTM) |
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
 | `meic_plus_enabled` | `true` | Enable MEIC+ stop reduction |

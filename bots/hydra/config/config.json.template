@@ -17,14 +17,16 @@
         "_comment_vix": "VIX spot for volatility filtering",
         "vix_spot_uic": 10606,
 
-        "_comment_entry_times": "Entry times in HH:MM format (US Eastern)",
-        "entry_times": ["10:05", "10:35", "11:05", "11:35", "12:05", "12:35"],
+        "_comment_entry_times": "Entry times in HH:MM format (US Eastern). 5 entries (dropped #6 to free margin for wider put spreads)",
+        "entry_times": ["10:05", "10:35", "11:05", "11:35", "12:05"],
         "entry_window_minutes": 5,
 
-        "_comment_spread": "Spread configuration. min_spread_width=60 ensures 60pt floor even on low-VIX days (longs 10pt cheaper, MKT-025 never closes longs so pure savings)",
+        "_comment_spread": "MKT-028: Asymmetric spread widths. Put floor 75pt (put longs 7x more expensive due to skew, MKT-025 never closes longs = pure savings). Call floor 60pt. Max 75pt = margin cap (5 entries x 75pt x $100 = $37,500 <= $39,000). min_spread_width=60 is MKT-008 liquidity fallback floor",
         "spread_width": 50,
         "min_spread_width": 60,
-        "max_spread_width": 100,
+        "call_min_spread_width": 60,
+        "put_min_spread_width": 75,
+        "max_spread_width": 75,
 
         "_comment_credit": "Credit targets per side (call spread OR put spread)",
         "min_credit_per_side": 1.00,
@@ -35,11 +37,11 @@
         "min_viable_credit_per_side": 1.00,
         "min_viable_credit_put_side": 1.75,
 
-        "_comment_tightening": "MKT-020/MKT-022: OTM floors for progressive tightening (points). MKT-024: starting OTM multipliers (2.0 = 2× base distance)",
+        "_comment_tightening": "MKT-020/MKT-022: OTM floors for progressive tightening (points). MKT-024: starting OTM multipliers (3.5x/4.0x = wider scan, batch API so zero extra cost). Put higher because put skew = credit viable further out",
         "min_call_otm_distance": 25,
         "min_put_otm_distance": 25,
-        "call_starting_otm_multiplier": 2.0,
-        "put_starting_otm_multiplier": 2.0,
+        "call_starting_otm_multiplier": 3.5,
+        "put_starting_otm_multiplier": 4.0,
 
         "_comment_delta": "Delta targeting for strike selection",
         "target_delta": 8,
@@ -63,7 +65,7 @@
         "hold_check_enabled": true,
         "hold_check_lean_tolerance": 1.0,
 
-        "_comment_roc_gate": "MKT-021: Min entries placed before pre-entry ROC gate activates (3 = after entries #1-3, gate checks before #4/#5/#6)",
+        "_comment_roc_gate": "MKT-021: Min entries placed before pre-entry ROC gate activates (3 = after entries #1-3, gate checks before #4/#5)",
         "min_entries_before_roc_gate": 3
     },
     "trend_filter": {

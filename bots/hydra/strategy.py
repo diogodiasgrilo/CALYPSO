@@ -297,24 +297,40 @@ class HydraStrategy(MEICStrategy):
         # Pushes long legs further OTM on high-VIX days → cheaper longs → higher net credit → more stop cushion
         self.spread_vix_multiplier = float(strategy_config.get("spread_vix_multiplier", 3.5))
         self.max_spread_width = int(strategy_config.get("max_spread_width", 120))
-        logger.info(f"  Spread width (MKT-027): VIX × {self.spread_vix_multiplier}, floor=60pt, cap={self.max_spread_width}pt")
+
+        # MKT-028: Asymmetric spread widths — put longs cost 7× more than calls due to skew.
+        # Since MKT-025 never closes longs, wider spread = cheaper longs = pure savings.
+        # margin = max(call_width, put_width), so wider puts don't require wider calls.
+        self.call_min_spread_width = int(strategy_config.get("call_min_spread_width", 60))
+        self.put_min_spread_width = int(strategy_config.get("put_min_spread_width", 60))
+        logger.info(f"  Spread width (MKT-027/028): VIX × {self.spread_vix_multiplier}, "
+                    f"call floor={self.call_min_spread_width}pt, put floor={self.put_min_spread_width}pt, "
+                    f"cap={self.max_spread_width}pt")
 
     # =========================================================================
     # OVERRIDE: Spread width with VIX-scaled formula (MKT-027)
     # =========================================================================
 
-    def _get_vix_adjusted_spread_width(self, vix: float) -> int:
+    def _get_vix_adjusted_spread_width(self, vix: float, side: str = "call") -> int:
         """
-        MKT-027: VIX-scaled spread width (overrides MEIC step function).
+        MKT-027/MKT-028: VIX-scaled spread width with asymmetric floors.
 
-        Continuous formula pushes long legs further OTM on high-VIX days,
-        reducing their cost and raising the stop level (= more cushion).
+        MKT-027: Continuous formula pushes long legs further OTM on high-VIX days.
+        MKT-028: Separate floors for calls (60pt) and puts (75pt) — put longs
+        cost 7× more due to skew, so wider put spreads save more.
 
-        Formula: max(60, round(vix * multiplier / 5) * 5), capped at max_spread.
-        Default multiplier 3.5: VIX 22 = 75pt, VIX 25 = 90pt.
+        Since MKT-025 never closes longs, wider spread = cheaper longs = pure savings.
+        margin = max(call_width, put_width), so narrower calls don't affect margin.
+
+        Args:
+            vix: Current VIX level
+            side: "call" or "put" — determines which floor to use
         """
         spread_width = round(vix * self.spread_vix_multiplier / 5) * 5
-        spread_width = max(60, spread_width)           # MKT-026 floor
+        if side == "put":
+            spread_width = max(self.put_min_spread_width, spread_width)
+        else:
+            spread_width = max(self.call_min_spread_width, spread_width)
         spread_width = min(spread_width, self.max_spread_width)  # cap
         return spread_width
 
@@ -368,23 +384,24 @@ class HydraStrategy(MEICStrategy):
         put_otm = round((otm_distance * self.put_starting_otm_multiplier) / 5) * 5
         put_otm = max(25, min(240, put_otm))
 
-        # MKT-009: VIX-adjusted spread width (same as parent)
-        dynamic_spread_width = self._get_vix_adjusted_spread_width(vix)
+        # MKT-027/028: Asymmetric VIX-adjusted spread widths
+        call_spread_width = self._get_vix_adjusted_spread_width(vix, "call")
+        put_spread_width = self._get_vix_adjusted_spread_width(vix, "put")
 
         logger.info(
             f"MKT-024 strike calc: VIX={vix:.1f}, base_otm={otm_distance}pt, "
             f"call_otm={call_otm}pt (×{self.call_starting_otm_multiplier}), "
             f"put_otm={put_otm}pt (×{self.put_starting_otm_multiplier}), "
-            f"spread={dynamic_spread_width}pt"
+            f"call_spread={call_spread_width}pt, put_spread={put_spread_width}pt"
         )
 
         # Call side (above current price) — starts wider than base MEIC
         entry.short_call_strike = rounded_spx + call_otm
-        entry.long_call_strike = entry.short_call_strike + dynamic_spread_width
+        entry.long_call_strike = entry.short_call_strike + call_spread_width
 
         # Put side (below current price) — starts wider than base MEIC
         entry.short_put_strike = rounded_spx - put_otm
-        entry.long_put_strike = entry.short_put_strike - dynamic_spread_width
+        entry.long_put_strike = entry.short_put_strike - put_spread_width
 
         # MKT-007: Check liquidity and adjust strikes if needed
         expiry = self._get_todays_expiry()
@@ -396,7 +413,7 @@ class HydraStrategy(MEICStrategy):
             )
             if adjusted_call and adjusted_call != entry.short_call_strike:
                 entry.short_call_strike = adjusted_call
-                entry.long_call_strike = adjusted_call + dynamic_spread_width
+                entry.long_call_strike = adjusted_call + call_spread_width
                 logger.info(f"MKT-007: {call_msg}")
 
             # Check short put liquidity (move closer to ATM if illiquid)
@@ -406,7 +423,7 @@ class HydraStrategy(MEICStrategy):
             )
             if adjusted_put and adjusted_put != entry.short_put_strike:
                 entry.short_put_strike = adjusted_put
-                entry.long_put_strike = adjusted_put - dynamic_spread_width
+                entry.long_put_strike = adjusted_put - put_spread_width
                 logger.info(f"MKT-007: {put_msg}")
 
             # MKT-008: Check long wing liquidity and reduce spread width if needed
@@ -1265,7 +1282,7 @@ class HydraStrategy(MEICStrategy):
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_call_otm_distance
         min_credit = self.min_viable_credit_per_side  # In dollars (e.g., $100 for $1.00)
-        spread_width = self._get_vix_adjusted_spread_width(self.current_vix)
+        spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
 
         initial_short_call = entry.short_call_strike
         initial_otm = initial_short_call - spx
@@ -1436,7 +1453,7 @@ class HydraStrategy(MEICStrategy):
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_put_otm_distance
         min_credit = self.min_viable_credit_put_side  # Put-specific: $175 for $1.75
-        spread_width = self._get_vix_adjusted_spread_width(self.current_vix)
+        spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
 
         initial_short_put = entry.short_put_strike
         initial_otm = spx - initial_short_put  # Put OTM = SPX - short_put

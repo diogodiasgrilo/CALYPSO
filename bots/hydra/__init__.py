@@ -14,6 +14,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both non-viable: Skip entry entirely
 
 Version History:
+- 1.6.0 (2026-03-02): MKT-028 asymmetric spread widths (put floor 75pt, call floor 60pt — put longs cost 7x more due to skew, wider = cheaper = pure savings since MKT-025 never closes longs). MKT-024 upgraded to 3.5x/4.0x starting OTM (batch API = zero extra cost, catches extra cushion on high-credit days). Drop Entry #6 (5 entries, frees margin for wider spreads: 5 x 75pt x $100 = $37,500 <= $39,000). max_spread_width 75pt margin cap.
 - 1.5.1 (2026-03-02): Telegram /snapshot command (on-demand position snapshot)
 - 1.5.0 (2026-02-28): Renamed from MEIC-TF to HYDRA
 - 1.4.5 (2026-02-28): MKT-026 min spread width raised from 25pt to 60pt (longs 10pt further OTM on low-VIX days = cheaper, MKT-025 never closes longs so pure savings)
