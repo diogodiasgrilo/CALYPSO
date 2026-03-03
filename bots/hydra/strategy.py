@@ -4045,6 +4045,11 @@ class HydraStrategy(MEICStrategy):
                     "trend_signal": getattr(entry, 'trend_signal', None).value if getattr(entry, 'trend_signal', None) else None,
                     # Fix #49: Track override reason for correct logging after recovery
                     "override_reason": getattr(entry, 'override_reason', None),
+                    # Fill prices (for /entry display after restart)
+                    "short_call_fill_price": entry.short_call_fill_price,
+                    "long_call_fill_price": entry.long_call_fill_price,
+                    "short_put_fill_price": entry.short_put_fill_price,
+                    "long_put_fill_price": entry.long_put_fill_price,
                     # Fix #52: Contract count for multi-contract support
                     "contracts": entry.contracts,
                     # Fix #59: EMA values at entry time for Trades tab logging
@@ -5011,6 +5016,11 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)
                 # MKT-018: Restore early_closed marker
                 restored_entry.early_closed = entry_data.get("early_closed", False)
+                # Fill prices (for /entry display after restart)
+                restored_entry.short_call_fill_price = entry_data.get("short_call_fill_price", 0)
+                restored_entry.long_call_fill_price = entry_data.get("long_call_fill_price", 0)
+                restored_entry.short_put_fill_price = entry_data.get("short_put_fill_price", 0)
+                restored_entry.long_put_fill_price = entry_data.get("long_put_fill_price", 0)
 
                 if is_fully_done:
                     restored_entry.is_complete = True
@@ -5238,6 +5248,12 @@ class HydraStrategy(MEICStrategy):
                                         "short_put_uic": entry_data.get("short_put_uic"),
                                         # MKT-018: Early close marker
                                         "early_closed": entry_data.get("early_closed", False),
+                                        # Entry time and fill prices (for /entry display)
+                                        "entry_time": entry_data.get("entry_time"),
+                                        "short_call_fill_price": entry_data.get("short_call_fill_price", 0),
+                                        "long_call_fill_price": entry_data.get("long_call_fill_price", 0),
+                                        "short_put_fill_price": entry_data.get("short_put_fill_price", 0),
+                                        "long_put_fill_price": entry_data.get("long_put_fill_price", 0),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -5315,6 +5331,25 @@ class HydraStrategy(MEICStrategy):
                     # MKT-018: Restore early_closed marker
                     entry.early_closed = saved.get("early_closed", False)
 
+                    # Restore entry_time and fill prices (for /entry display)
+                    entry_time_str = saved.get("entry_time")
+                    if entry_time_str and not entry.entry_time:
+                        if isinstance(entry_time_str, str):
+                            try:
+                                entry.entry_time = datetime.fromisoformat(entry_time_str)
+                            except ValueError:
+                                pass
+                        else:
+                            entry.entry_time = entry_time_str
+                    if saved.get("short_call_fill_price", 0) > 0 and entry.short_call_fill_price == 0:
+                        entry.short_call_fill_price = saved["short_call_fill_price"]
+                    if saved.get("long_call_fill_price", 0) > 0 and entry.long_call_fill_price == 0:
+                        entry.long_call_fill_price = saved["long_call_fill_price"]
+                    if saved.get("short_put_fill_price", 0) > 0 and entry.short_put_fill_price == 0:
+                        entry.short_put_fill_price = saved["short_put_fill_price"]
+                    if saved.get("long_put_fill_price", 0) > 0 and entry.long_put_fill_price == 0:
+                        entry.long_put_fill_price = saved["long_put_fill_price"]
+
                     if entry.call_side_stopped and entry.short_call_strike == 0:
                         entry.short_call_strike = saved.get("short_call_strike", 0)
                         entry.long_call_strike = saved.get("long_call_strike", 0)
@@ -5364,7 +5399,14 @@ class HydraStrategy(MEICStrategy):
                 if entry_num and entry_num not in recovered_entry_nums:
                     # Reconstruct HydraIronCondorEntry from saved state data
                     stopped_entry = HydraIronCondorEntry(entry_number=entry_num)
-                    stopped_entry.entry_time = stopped_entry_data.get("entry_time")
+                    entry_time_str = stopped_entry_data.get("entry_time")
+                    if entry_time_str and isinstance(entry_time_str, str):
+                        try:
+                            stopped_entry.entry_time = datetime.fromisoformat(entry_time_str)
+                        except ValueError:
+                            stopped_entry.entry_time = None
+                    else:
+                        stopped_entry.entry_time = entry_time_str
                     stopped_entry.strategy_id = stopped_entry_data.get("strategy_id", f"hydra_{today.replace('-', '')}_{entry_num:03d}")
 
                     # Strikes
@@ -5413,6 +5455,11 @@ class HydraStrategy(MEICStrategy):
                     stopped_entry.ema_40_at_entry = stopped_entry_data.get("ema_40_at_entry", None)
                     # MKT-018: Restore early_closed marker
                     stopped_entry.early_closed = stopped_entry_data.get("early_closed", False)
+                    # Fill prices (for /entry display after restart)
+                    stopped_entry.short_call_fill_price = stopped_entry_data.get("short_call_fill_price", 0)
+                    stopped_entry.long_call_fill_price = stopped_entry_data.get("long_call_fill_price", 0)
+                    stopped_entry.short_put_fill_price = stopped_entry_data.get("short_put_fill_price", 0)
+                    stopped_entry.long_put_fill_price = stopped_entry_data.get("long_put_fill_price", 0)
 
                     # Position IDs are None (positions closed)
                     stopped_entry.short_call_position_id = None
