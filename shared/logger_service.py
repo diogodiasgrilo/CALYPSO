@@ -2259,23 +2259,7 @@ class GoogleSheetsLogger:
             headers = all_data[0]
             last_row = all_data[-1]  # Get the last row
 
-            # Convert to dictionary
-            result = {}
-            for i, header in enumerate(headers):
-                if i < len(last_row):
-                    value = last_row[i]
-                    # Try to convert numeric values
-                    try:
-                        if '.' in value:
-                            result[header] = float(value)
-                        elif value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
-                            result[header] = int(value)
-                        else:
-                            result[header] = value
-                    except (ValueError, AttributeError):
-                        result[header] = value
-                else:
-                    result[header] = None
+            result = self._row_to_dict(headers, last_row)
 
             logger.debug(f"Retrieved last Daily Summary row: date={result.get('Date')}")
             return result
@@ -2283,6 +2267,62 @@ class GoogleSheetsLogger:
         except Exception as e:
             logger.error(f"Failed to get last Daily Summary: {e}")
             return None
+
+    def get_all_daily_summaries(self) -> Optional[list]:
+        """
+        Get ALL Daily Summary rows as a list of dictionaries.
+
+        Used by /account Telegram command for lifetime performance aggregation.
+        Each row is auto-converted: floats, ints, and strings.
+
+        Returns:
+            list: All Daily Summary rows as dicts, or None if unavailable/timeout
+        """
+        if not self.enabled or "Daily Summary" not in self.worksheets:
+            return None
+
+        try:
+            worksheet = self.worksheets["Daily Summary"]
+            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
+            all_data = self._sheets_call_with_timeout(worksheet.get_all_values)
+            if all_data is None:
+                logger.warning("get_all_daily_summaries skipped due to timeout")
+                return None
+
+            if len(all_data) <= 1:  # Only headers or empty
+                return None
+
+            headers = all_data[0]
+            results = []
+            for row_data in all_data[1:]:
+                results.append(self._row_to_dict(headers, row_data))
+
+            logger.debug(f"Retrieved {len(results)} Daily Summary rows")
+            return results if results else None
+
+        except Exception as e:
+            logger.error(f"Failed to get all daily summaries: {e}")
+            return None
+
+    @staticmethod
+    def _row_to_dict(headers: list, row: list) -> dict:
+        """Convert a Sheets row + headers into a dict with auto-converted numeric values."""
+        result = {}
+        for i, header in enumerate(headers):
+            if i < len(row):
+                value = row[i]
+                try:
+                    if '.' in value:
+                        result[header] = float(value)
+                    elif value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+                        result[header] = int(value)
+                    else:
+                        result[header] = value
+                except (ValueError, AttributeError):
+                    result[header] = value
+            else:
+                result[header] = None
+        return result
 
     def log_safety_event(self, event: Dict[str, Any]) -> bool:
         """
@@ -3975,6 +4015,19 @@ class TradeLoggerService:
         """
         if self.google_logger.enabled:
             return self.google_logger.get_last_daily_summary()
+        return None
+
+    def get_all_daily_summaries(self) -> Optional[list]:
+        """
+        Get ALL Daily Summary rows as a list of dictionaries.
+
+        Used by /account Telegram command for lifetime performance aggregation.
+
+        Returns:
+            list: All rows as dicts, or None if unavailable
+        """
+        if self.google_logger.enabled:
+            return self.google_logger.get_all_daily_summaries()
         return None
 
     def log_opening_range(self, data: Dict[str, Any]):

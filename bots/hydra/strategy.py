@@ -2701,6 +2701,223 @@ class HydraStrategy(MEICStrategy):
 
         return "\n".join(lines)
 
+    # =========================================================================
+    # TELEGRAM HISTORICAL DATA COMMANDS
+    # =========================================================================
+
+    def build_telegram_lastday(self) -> str:
+        """
+        Build a formatted Telegram message showing the most recent complete trading day.
+
+        The Daily Summary tab only gets rows AFTER settlement (post 4 PM ET),
+        so the last row is always the most recent complete day — no special
+        weekend/holiday logic needed.
+
+        Returns:
+            str: Formatted Markdown message for Telegram
+        """
+        try:
+            last_day = self.trade_logger.get_last_daily_summary()
+            if not last_day:
+                return "No trading data available yet."
+
+            date_str = last_day.get("Date", "Unknown")
+
+            # Market context
+            spx_close = last_day.get("SPX Close", 0) or 0
+            vix_close = last_day.get("VIX Close", 0) or 0
+
+            # Activity
+            entries = last_day.get("Entries Completed", 0) or 0
+            skipped = last_day.get("Entries Skipped", 0) or 0
+            full_ics = last_day.get("Full ICs", 0) or 0
+            one_sided = last_day.get("One-Sided Entries", 0) or 0
+
+            # Stops
+            call_stops = last_day.get("Call Stops", 0) or 0
+            put_stops = last_day.get("Put Stops", 0) or 0
+            double_stops = last_day.get("Double Stops", 0) or 0
+
+            # P&L
+            total_credit = last_day.get("Total Credit ($)", 0) or 0
+            expired_credits = last_day.get("Expired Credits ($)", 0) or 0
+            stop_debits = last_day.get("Stop Loss Debits ($)", 0) or 0
+            commission = last_day.get("Commission ($)", 0) or 0
+            daily_pnl = last_day.get("Daily P&L ($)", 0) or 0
+            roc = last_day.get("Return on Capital (%)", 0) or 0
+            capital = last_day.get("Capital Deployed ($)", 0) or 0
+
+            # Cumulative
+            cum_pnl = last_day.get("Cumulative P&L ($)", 0) or 0
+
+            # Early close
+            early_close = last_day.get("Early Close", "No")
+            early_close_time = last_day.get("Early Close Time", "")
+
+            # Format P&L
+            pnl_icon = "\U0001f7e2" if daily_pnl >= 0 else "\U0001f534"
+            pnl_str = f"+${daily_pnl:,.0f}" if daily_pnl >= 0 else f"-${abs(daily_pnl):,.0f}"
+            cum_str = f"+${cum_pnl:,.0f}" if cum_pnl >= 0 else f"-${abs(cum_pnl):,.0f}"
+
+            lines = [
+                f"\U0001f4c5 *HYDRA* | {date_str}",
+                "",
+                f"SPX {spx_close:,.2f}  |  VIX {vix_close:.2f}",
+                "",
+                "\u2501\u2501\u2501 Activity \u2501\u2501\u2501",
+                f"Entries: {entries} placed, {skipped} skipped",
+                f"Full ICs: {full_ics}  |  One-sided: {one_sided}",
+                f"Stops: {call_stops}C / {put_stops}P / {double_stops}D",
+                "",
+                "\u2501\u2501\u2501 P&L Breakdown \u2501\u2501\u2501",
+                f"Credit collected: ${total_credit:,.0f}",
+                f"Expired (profit): ${expired_credits:,.0f}",
+                f"Stop debits: -${abs(stop_debits):,.0f}",
+                f"Commission: -${abs(commission):,.0f}",
+                "",
+                f"{pnl_icon} *Net P&L: {pnl_str}*",
+                f"ROC: {roc:.1f}%  |  Capital: ${capital:,.0f}",
+            ]
+
+            if str(early_close).lower() == "yes" and early_close_time:
+                lines.append(f"Early Close: {early_close_time}")
+
+            lines.append("")
+            lines.append(f"Cumulative: {cum_str}")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.error("Failed to build /lastday message: %s", e)
+            return "Failed to retrieve last day data. Try again shortly."
+
+    def build_telegram_account(self) -> str:
+        """
+        Build a formatted Telegram message showing lifetime HYDRA performance.
+
+        Reads ALL rows from Daily Summary tab and aggregates.
+        Falls back to hydra_metrics.json if Sheets unavailable.
+
+        Returns:
+            str: Formatted Markdown message for Telegram
+        """
+        try:
+            all_days = self.trade_logger.get_all_daily_summaries()
+            metrics = self.cumulative_metrics or {}
+
+            if not all_days and not metrics:
+                return "No trading history available yet."
+
+            if all_days:
+                total_days = len(all_days)
+                first_date = all_days[0].get("Date", "N/A")
+                last_date = all_days[-1].get("Date", "N/A")
+
+                total_entries = sum(
+                    (d.get("Entries Completed", 0) or 0) for d in all_days
+                )
+                total_credit = sum(
+                    (d.get("Total Credit ($)", 0) or 0) for d in all_days
+                )
+                total_commission = sum(
+                    (d.get("Commission ($)", 0) or 0) for d in all_days
+                )
+                total_call_stops = sum(
+                    (d.get("Call Stops", 0) or 0) for d in all_days
+                )
+                total_put_stops = sum(
+                    (d.get("Put Stops", 0) or 0) for d in all_days
+                )
+                total_stops = total_call_stops + total_put_stops
+                total_double_stops = sum(
+                    (d.get("Double Stops", 0) or 0) for d in all_days
+                )
+
+                daily_pnls = [(d.get("Daily P&L ($)", 0) or 0) for d in all_days]
+                winning_days = sum(1 for p in daily_pnls if p > 0)
+                losing_days = sum(1 for p in daily_pnls if p < 0)
+                breakeven_days = total_days - winning_days - losing_days
+
+                cum_pnl = (all_days[-1].get("Cumulative P&L ($)", 0) or 0)
+                avg_daily = cum_pnl / total_days if total_days > 0 else 0
+
+                best_day_pnl = max(daily_pnls) if daily_pnls else 0
+                worst_day_pnl = min(daily_pnls) if daily_pnls else 0
+                best_idx = daily_pnls.index(best_day_pnl)
+                worst_idx = daily_pnls.index(worst_day_pnl)
+                best_date = all_days[best_idx].get("Date", "N/A")
+                worst_date = all_days[worst_idx].get("Date", "N/A")
+
+                win_rate = (winning_days / total_days * 100) if total_days > 0 else 0
+                annualized = (all_days[-1].get("Annualized Return (%)", 0) or 0)
+                cum_roc = (all_days[-1].get("Cumulative ROC (%)", 0) or 0)
+            else:
+                # Fallback to metrics file (less detail)
+                total_days = (metrics.get("winning_days", 0)
+                              + metrics.get("losing_days", 0))
+                first_date = "N/A"
+                last_date = metrics.get("last_updated", "N/A")
+                total_entries = metrics.get("total_entries", 0)
+                total_credit = metrics.get("total_credit_collected", 0)
+                total_commission = 0
+                total_stops = metrics.get("total_stops", 0)
+                total_double_stops = metrics.get("double_stops", 0)
+                winning_days = metrics.get("winning_days", 0)
+                losing_days = metrics.get("losing_days", 0)
+                breakeven_days = 0
+                cum_pnl = metrics.get("cumulative_pnl", 0)
+                avg_daily = cum_pnl / total_days if total_days > 0 else 0
+                best_day_pnl = 0
+                worst_day_pnl = 0
+                best_date = "N/A"
+                worst_date = "N/A"
+                win_rate = (winning_days / total_days * 100) if total_days > 0 else 0
+                annualized = 0
+                cum_roc = 0
+
+            def _fmt(val, prefix=""):
+                """Format a P&L value with sign (e.g. +$280 or -$740)."""
+                if val >= 0:
+                    return f"{prefix}+${val:,.0f}"
+                else:
+                    return f"{prefix}-${abs(val):,.0f}"
+
+            lines = [
+                "\U0001f4ca *HYDRA* | Lifetime Performance",
+                f"{first_date} to {last_date}",
+                "",
+                "\u2501\u2501\u2501 Record \u2501\u2501\u2501",
+                f"Trading days: {total_days}",
+                f"W / L / B: {winning_days} / {losing_days} / {breakeven_days}",
+                f"Win rate: {win_rate:.0f}%",
+                "",
+                "\u2501\u2501\u2501 P&L \u2501\u2501\u2501",
+                f"*Cumulative: {_fmt(cum_pnl)}*",
+                f"Avg daily: {_fmt(avg_daily)}",
+                f"Best day: {_fmt(best_day_pnl)} ({best_date})",
+                f"Worst day: {_fmt(worst_day_pnl)} ({worst_date})",
+                "",
+                "\u2501\u2501\u2501 Activity \u2501\u2501\u2501",
+                f"Total entries: {total_entries}",
+                f"Total stops: {total_stops} ({total_double_stops} double)",
+                f"Credit collected: ${total_credit:,.0f}",
+                f"Commission paid: ${total_commission:,.0f}",
+            ]
+
+            if cum_roc or annualized:
+                lines.append("")
+                lines.append("\u2501\u2501\u2501 Returns \u2501\u2501\u2501")
+                if cum_roc:
+                    lines.append(f"Cumulative ROC: {cum_roc:.1f}%")
+                if annualized:
+                    lines.append(f"Annualized: {annualized:.0f}%")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.error("Failed to build /account message: %s", e)
+            return "Failed to retrieve account data. Try again shortly."
+
     def get_dashboard_metrics(self) -> Dict[str, Any]:
         """
         Get dashboard metrics with HYDRA specific fields.

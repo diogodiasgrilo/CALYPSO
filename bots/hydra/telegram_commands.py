@@ -4,12 +4,14 @@ Telegram Command Handler for HYDRA Bot.
 Polls Telegram's getUpdates API for incoming commands and responds directly.
 Runs as a background daemon thread — independent of the main trading loop.
 
-Currently supports:
-    /snapshot — Returns live position snapshot (market hours) or "market closed" message
+Supported commands:
+    /snapshot — Live position snapshot (market hours only)
+    /lastday  — Most recent complete trading day performance breakdown
+    /account  — Lifetime HYDRA strategy performance summary
 
 Security: Only responds to messages from the configured chat_id.
 
-Version: 1.0.0 (2026-03-02)
+Version: 1.1.0 (2026-03-03)
 """
 
 import json
@@ -47,6 +49,8 @@ class TelegramCommandHandler:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._snapshot_callback: Optional[Callable[[], str]] = None
+        self._lastday_callback: Optional[Callable[[], str]] = None
+        self._account_callback: Optional[Callable[[], str]] = None
         self._consecutive_errors = 0
 
         self._load_credentials()
@@ -70,9 +74,16 @@ class TelegramCommandHandler:
         except Exception as e:
             logger.warning(f"Telegram command handler: failed to load credentials: {e}")
 
-    def start(self, snapshot_callback: Callable[[], str]):
+    def start(
+        self,
+        snapshot_callback: Callable[[], str],
+        lastday_callback: Optional[Callable[[], str]] = None,
+        account_callback: Optional[Callable[[], str]] = None,
+    ):
         """Start the background polling thread."""
         self._snapshot_callback = snapshot_callback
+        self._lastday_callback = lastday_callback
+        self._account_callback = account_callback
 
         if not self._enabled:
             logger.info("Telegram command handler disabled (no credentials)")
@@ -150,6 +161,10 @@ class TelegramCommandHandler:
 
             if text.startswith("/snapshot"):
                 self._handle_snapshot(chat_id)
+            elif text.startswith("/lastday"):
+                self._handle_lastday(chat_id)
+            elif text.startswith("/account"):
+                self._handle_account(chat_id)
 
     # =========================================================================
     # COMMAND HANDLERS
@@ -194,6 +209,32 @@ class TelegramCommandHandler:
         except Exception as e:
             logger.error("Failed to build snapshot for /snapshot command: %s", e)
             self._send_message(chat_id, "Snapshot temporarily unavailable. Try again in a minute.")
+
+    def _handle_lastday(self, chat_id: str):
+        """Handle /lastday command — most recent complete trading day."""
+        if not self._lastday_callback:
+            self._send_message(chat_id, "Last day data not available (bot still initializing).")
+            return
+
+        try:
+            msg = self._lastday_callback()
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /lastday response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve last day data. Try again shortly.")
+
+    def _handle_account(self, chat_id: str):
+        """Handle /account command — lifetime strategy performance."""
+        if not self._account_callback:
+            self._send_message(chat_id, "Account data not available (bot still initializing).")
+            return
+
+        try:
+            msg = self._account_callback()
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /account response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve account data. Try again shortly.")
 
     # =========================================================================
     # TELEGRAM API HELPERS
