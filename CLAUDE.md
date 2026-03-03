@@ -705,7 +705,7 @@ Pass 1 complete: 3 issues found
 | 4 | **Bug patterns** | `if value:` on numerics, missing timeouts, bare `except:`, unsafe threading, `alert.get("key", {})` with possible None |
 | 5 | **Hanging risk** | Blocking calls without timeout: `requests.*`, `thread.join`, `fcntl.flock`, `gspread.*` |
 | 6 | **Documentation** | `__init__.py` exports, docstrings, CLAUDE.md, strategy specs, README.md |
-| 7 | **VM config/state** | New config keys read by code but missing from VM config? New state fields that break deserialization? State file date stale? Metrics file needs new counters? SSH to VM and verify if changes affect running bot config/state. |
+| 7 | **VM config/state** | New config keys read by code but missing from VM config? New state fields that break deserialization? State file date stale? Metrics file needs new counters? **SSH to VM and verify**: (1) `cat` each running bot's `config.json` and confirm all config keys referenced in new code exist with correct values or have safe defaults, (2) check state files (`data/*_state.json`) for compatibility with new code, (3) check metrics files for new counters, (4) if config needs updating, update it and flag that a restart is required. |
 
 ### Pass 2: Fix & Re-Audit
 
@@ -732,12 +732,6 @@ ODYSSEUS Pass 3/3: Final confirmation...
 
 ODYSSEUS: ALL CLEAR — safe to push
 ```
-
-### Audit Report
-
-After completing all 3 passes, write:
-- `intel/odysseus/audit_YYYY-MM-DD_vX.Y.Z.md` — full audit findings and fixes
-- `.odysseus_last_audit` — commit hash (detects post-audit changes)
 
 ---
 
