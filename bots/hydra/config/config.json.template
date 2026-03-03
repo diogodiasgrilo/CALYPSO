@@ -53,7 +53,7 @@
         "meic_plus_reduction": 0.15,
 
         "_comment_risk": "Risk management settings",
-        "max_vix_entry": 25,
+        "max_vix_entry": 30,
         "contracts_per_entry": 1,
 
         "_comment_early_close": "MKT-018: Close ALL positions when ROC >= threshold after all entries placed",

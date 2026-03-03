@@ -585,7 +585,7 @@ def main():
   ├───────────────┼─────────────────┼────────────────────────────────────────────┤
   │  VIX > 25     │    1.5-2.0x     │  High IV = very rich premiums. Go          │
   │  (High Vol)   │  or SKIP        │  very wide OR skip entry entirely          │
-  │               │                 │  (strategy already blocks VIX>25).         │
+  │               │                 │  (HYDRA blocks VIX>30, MEIC blocks >25).   │
   └───────────────┴─────────────────┴────────────────────────────────────────────┘
 """)
 

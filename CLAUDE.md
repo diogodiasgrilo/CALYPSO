@@ -220,7 +220,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 - **Safe entry order:** Longs first (hedges) then shorts - never leave naked position
 - **Per-entry stops:** Each IC has independent stop monitoring
 - **FOMC blackout:** Skips all entries on FOMC announcement days
-- **VIX filter:** Skips remaining entries if VIX > 25
+- **VIX filter:** Skips remaining entries if VIX > 30
 - **Circuit breaker:** 5 consecutive failures or 5-of-10 sliding window triggers halt
 
 #### MEIC Typical P&L (per IC, 50pt spreads, $2.50 credit)

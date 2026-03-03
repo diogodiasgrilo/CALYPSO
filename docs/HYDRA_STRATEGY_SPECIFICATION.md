@@ -727,7 +727,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
 | `meic_plus_enabled` | `true` | Enable MEIC+ stop reduction |
 | `meic_plus_reduction` | `0.15` | MEIC+ reduction (covers $15 commission on one-side-stop) |
-| `max_vix_entry` | `25` | Maximum VIX for new entries |
+| `max_vix_entry` | `30` | Maximum VIX for new entries |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `true` | MKT-018 enable |
 | `early_close_roc_threshold` | `0.03` | MKT-018 ROC threshold (3.0%) |
