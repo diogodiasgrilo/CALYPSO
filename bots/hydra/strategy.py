@@ -296,7 +296,7 @@ class HydraStrategy(MEICStrategy):
         # MKT-027: VIX-scaled spread width (continuous formula replaces step function)
         # Pushes long legs further OTM on high-VIX days → cheaper longs → higher net credit → more stop cushion
         self.spread_vix_multiplier = float(strategy_config.get("spread_vix_multiplier", 3.5))
-        self.max_spread_width = int(strategy_config.get("max_spread_width", 120))
+        self.max_spread_width = int(strategy_config.get("max_spread_width", 75))
 
         # MKT-028: Asymmetric spread widths — put longs cost 7× more than calls due to skew.
         # Since MKT-025 never closes longs, wider spread = cheaper longs = pure savings.

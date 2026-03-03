@@ -17,7 +17,10 @@ bots/
 ├── rolling_put_diagonal/config/
 │   ├── config.json
 │   └── config.example.json
-└── meic/config/
+├── meic/config/                 # Legacy (replaced by HYDRA)
+│   ├── config.json
+│   └── config.example.json
+└── hydra/config/                # LIVE — HYDRA v1.6.0
     ├── config.json
     └── config.example.json
 
@@ -177,7 +180,9 @@ cp config.example.json config.json
 }
 ```
 
-### MEIC (Multiple Entry Iron Condors) Strategy
+### MEIC (Multiple Entry Iron Condors) Strategy — STOPPED
+
+> **Note:** MEIC has been replaced by HYDRA (v1.6.0) as of 2026-02-28. Config remains for reference.
 
 ```json
 {
@@ -193,6 +198,52 @@ cp config.example.json config.json
   }
 }
 ```
+
+### HYDRA (Trend Following MEIC) Strategy — LIVE (v1.6.0)
+
+```json
+{
+  "strategy": {
+    "strategy_type": "hydra",
+    "underlying_symbol": "SPXW",
+    "underlying_uic": 4913,
+    "spx_index_uic": 4913,
+    "entry_times_et": ["10:05", "10:35", "11:05", "11:35", "12:05"],
+    "contracts_per_entry": 1,
+    "max_vix_entry": 25.0,
+    "stop_commission_buffer": 0.15,
+
+    "call_starting_otm_multiplier": 3.5,
+    "put_starting_otm_multiplier": 4.0,
+    "min_spread_width": 60,
+    "put_min_spread_width": 75,
+    "max_spread_width": 75,
+    "spread_vix_multiplier": 3.5,
+
+    "min_viable_credit_per_side": 1.00,
+    "min_viable_credit_put_side": 1.75,
+
+    "early_close_enabled": true,
+    "early_close_roc_threshold": 0.03,
+    "pre_entry_roc_gate_enabled": true,
+    "pre_entry_roc_min_entries": 3
+  }
+}
+```
+
+**Key HYDRA config params:**
+| Key | Default | Description |
+|-----|---------|-------------|
+| `call_starting_otm_multiplier` | 3.5 | MKT-024: Starting OTM distance for calls (× VIX-adjusted delta) |
+| `put_starting_otm_multiplier` | 4.0 | MKT-024: Starting OTM distance for puts (wider due to put skew) |
+| `min_spread_width` | 60 | MKT-026: Call spread floor (points) |
+| `put_min_spread_width` | 75 | MKT-028: Put spread floor (wider = cheaper longs due to skew) |
+| `max_spread_width` | 75 | MKT-027: Spread cap for margin (5 × 75pt × $100 = $37,500) |
+| `spread_vix_multiplier` | 3.5 | MKT-027: VIX-scaled formula: `round(VIX × 3.5 / 5) × 5` |
+| `min_viable_credit_per_side` | 1.00 | MKT-011: Call credit gate ($1.00 minimum) |
+| `min_viable_credit_put_side` | 1.75 | MKT-011: Put credit gate ($1.75 minimum, Tammy's range) |
+| `early_close_roc_threshold` | 0.03 | MKT-018: Close all when ROC >= 3% |
+| `stop_commission_buffer` | 0.15 | MEIC+: Stop = credit - $0.15 (covers commission for true breakeven) |
 
 ---
 
@@ -216,4 +267,4 @@ Bot-specific settings (strategy parameters) still come from each bot's `config.j
 
 ---
 
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-03-03

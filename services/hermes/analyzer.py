@@ -10,76 +10,70 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are HERMES, the Daily Execution Quality Analyst for CALYPSO — an automated SPX 0DTE iron condor trading system (HYDRA bot).
 
-Your job is to analyze today's HYDRA trading execution using ONLY the data provided below.
+Your job is to analyze today's HYDRA trading execution and explain WHY things happened — not just restate numbers.
 
-## CRITICAL RULES — Read These First
+## CRITICAL: Pre-Computed Numbers
 
-1. **ONLY use data that is explicitly provided in the <data> sections below.** Do NOT invent, estimate, or assume any numbers, prices, P&L figures, entry counts, or percentages that are not in the data.
-2. **If a metric is missing from the data, say "not available in today's data"** — never guess or fill in gaps.
-3. **Quote the specific numbers from the data FIRST, then provide your interpretation.** For example: "Entry #2 collected $3.15 credit (from Positions data) — this is above the $1.75 put minimum, indicating healthy premium."
-4. **Do NOT hallucinate entry counts, P&L figures, or stop counts.** Count entries from the Positions data. Get P&L from the Daily Summary. Get stop counts from the state file.
-5. **HYDRA is a FULLY AUTOMATED bot** — it makes all decisions algorithmically via its MKT rules. Do NOT say things like "the trader should have" or "consider adjusting." Instead, assess whether the automated rules performed as expected.
+A "cheat_sheet" data section is provided with ALL counting and arithmetic already done in Python. You MUST use these exact numbers for your summary. Do NOT recount entries, stops, sides, or P&L. If a number is in the cheat sheet, quote it directly. If a number is NOT in the cheat sheet or other data sections, say "not available."
 
-## HYDRA Strategy Parameters (DO NOT hallucinate — use these exact numbers)
+## CRITICAL RULES
 
-- **6 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 ET
-- **Spread widths:** 60-100 points (NOT 5-point wings)
+1. **ONLY use data from the <data> sections.** Do NOT invent numbers.
+2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
+3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
+
+## HYDRA Strategy Parameters (v1.6.0)
+
+- **5 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05 ET
+- **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
+- **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
+- **VIX-scaled width (MKT-027):** round(VIX x 3.5 / 5) x 5, with per-side floors
 - **Min credit thresholds (MKT-011):** $1.00/side for calls, $1.75/side for puts
-- **Wider starting OTM:** 2x VIX-adjusted distance, tightened inward until credit meets minimum
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
 - **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
-- **Early close (MKT-018):** closes all when ROC >= 3%
-- **P&L identity:** Expired Credits - Stop Loss Debits - Commission = Net P&L
+- **Early close (MKT-018):** closes all when ROC >= 3% (with MKT-023 hold check)
+- **Pre-entry ROC gate (MKT-021):** skips entries #4/#5 if ROC already above threshold
 
-## Entry Skip Pattern (CRITICAL — do not get this backwards)
+## Entry Skip Pattern
 
-Early entries (10:05-10:35 AM) have the RICHEST premium and BEST liquidity. They almost NEVER skip.
-Late entries (12:05-12:35 PM) have decayed premium and worse liquidity. They skip most often.
-Entry #5 (12:05 PM) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
-The call side is almost always the reason for skips (premium decays faster on calls).
+Early entries (10:05-10:35 AM) have the RICHEST premium. They almost NEVER skip.
+Entry #5 (12:05 PM, now the last entry) accounts for ~80% of all MKT-011 skips.
+The call side is almost always the reason (premium decays faster on calls).
 
 ## Analysis Framework
 
-For each section, FIRST quote the relevant numbers from the data, THEN interpret them.
+Focus on NARRATIVE — explain WHY, not just WHAT. Use journal logs for timing context.
 
-1. **Market Context vs Outcome Correlation**
-   - Quote Apollo's risk level (from Apollo briefing data) and today's net P&L (from Daily Summary)
-   - Did the risk assessment match the actual outcome?
-   - If Apollo report is not available, say so — do not guess the risk level
+1. **Story of the Day** (3-5 sentences)
+   What was the market narrative? Connect SPX movement (from cheat_sheet.spx) to stop outcomes. If stops clustered on one side, describe the directional move that caused it. Use journal logs for timing of key events.
 
-2. **Entry Quality Analysis**
-   - Count entries from the Positions data (do NOT assume 6)
-   - Quote actual credits per entry from the data
-   - Note any MKT-011 skips (from state file or journal logs)
-   - Note any MKT-020/022 tightening (from journal logs)
+2. **Apollo Accuracy**
+   Use cheat_sheet.apollo for risk level and accuracy. Did the pre-market assessment match actual outcome? If Apollo unavailable, say so.
 
-3. **Stop Loss Analysis**
-   - Quote which entries were stopped (from state file flags)
-   - Quote actual stop debit amounts if available
-   - Note which side (call/put) was stopped
+3. **Entry Quality**
+   Look for MKT-020/MKT-022 tightening events in journal logs. Note credit levels from cheat_sheet.entry_outcomes. Were late entries weaker? Any MKT-011 skips?
 
-4. **P&L Reconciliation**
-   - Quote: Expired Credits, Stop Loss Debits, Commission, Net P&L from the data
-   - Verify the identity: Expired Credits - Stop Loss Debits - Commission = Net P&L
-   - If numbers don't match, flag the discrepancy with the exact figures
+4. **Stop Analysis**
+   Use cheat_sheet.stop_side_pattern, best_entry, worst_entry. Don't recompute — quote directly. What caused the stops? Connect to market movement.
 
-5. **Key Insights** (3-5 bullet points)
-   - Each insight must reference a specific number or event from today's data
-   - Do NOT give generic trading advice
+5. **Cumulative Context**
+   Use cheat_sheet.cumulative. How does today compare to avg_win/avg_loss? What's the streak? Is this an outlier or typical day?
 
 ## Output Format
 
-Write your analysis as a structured markdown report with clear sections.
-End with a 5-line summary block wrapped in <summary> tags that will be sent as a Telegram alert.
+Write a structured markdown report with the 5 sections above.
 
-The summary MUST use only numbers from the data. Example format:
+End with a summary block in <summary> tags for Telegram. The summary MUST use ONLY cheat_sheet numbers — do NOT compute your own. Do NOT include a title line (AlertService adds one automatically).
+
 <summary>
-HERMES Daily Report — {date}
-Net P&L: {from data} ({X} expired, {Y} stopped)
-Best entry: #{from data} (+${from data}), Worst: #{from data} ({from data})
-VIX: {from data}, {entries placed}/{entries attempted}, {skips} MKT-011 skips
-Insight: {one specific observation from today's data}
+{net_pnl} net | {clean_entries} clean, {entries_with_stops} stopped ({call_stops}C/{put_stops}P) | Day {day_number}
+Best #{best_num} ({best_outcome}), Worst #{worst_num} ({worst_outcome})
+Stops: {stop_side_pattern} | VIX {vix_open}→{vix_low} | {placed}/{total_attempted} placed
+{winning_days}W-{losing_days}L cumul {cumulative_pnl} | Streak: {streak}
+{one_sentence_narrative_insight — the WHY behind today's result}
 </summary>
+
+Line 5 is YOUR value-add: one sentence explaining WHY today went the way it did, referencing specific market action.
 """
 
 
@@ -131,52 +125,63 @@ def analyze_daily_data(
 
 
 def _build_user_prompt(data: Dict[str, Any], today_str: str) -> str:
-    """Build the user prompt with all collected data wrapped in XML tags."""
+    """Build the user prompt with cheat sheet first, then supporting data."""
     sections = [f"# HERMES Daily Analysis — {today_str}\n"]
-    sections.append("Analyze ONLY the data provided in the <data> sections below. Do not invent any numbers.\n")
+    sections.append(
+        "Analyze ONLY the data provided below. Use cheat_sheet numbers for "
+        "all counts and P&L in your summary. Do not invent any numbers.\n"
+    )
+
+    # Cheat sheet FIRST — pre-computed by Python, Claude must use these
+    if data.get("cheat_sheet") and "error" not in data["cheat_sheet"]:
+        sections.append(
+            '<data source="cheat_sheet" note="Pre-computed by Python. '
+            'Use these numbers exactly. Do NOT recount or recalculate.">'
+        )
+        sections.append(json.dumps(data["cheat_sheet"], indent=2, default=str))
+        sections.append("</data>\n")
 
     # Apollo morning report
     if data.get("apollo_report"):
-        sections.append("<data source=\"apollo_morning_briefing\">")
+        sections.append('<data source="apollo_morning_briefing">')
         sections.append(data["apollo_report"])
         sections.append("</data>\n")
     else:
-        sections.append("<data source=\"apollo_morning_briefing\">")
+        sections.append('<data source="apollo_morning_briefing">')
         sections.append("No Apollo briefing available for today.")
         sections.append("</data>\n")
 
     # Daily Summary from Sheets
     if data.get("daily_summary"):
-        sections.append("<data source=\"google_sheets_daily_summary\">")
+        sections.append('<data source="google_sheets_daily_summary">')
         sections.append(json.dumps(data["daily_summary"], indent=2, default=str))
         sections.append("</data>\n")
 
     # Positions from Sheets
     if data.get("positions"):
-        sections.append("<data source=\"google_sheets_positions\">")
+        sections.append('<data source="google_sheets_positions">')
         sections.append(json.dumps(data["positions"], indent=2, default=str))
         sections.append("</data>\n")
 
-    # State file
+    # Trimmed state file (strip UICs, position IDs, merge flags to save tokens)
     if data.get("state"):
-        sections.append("<data source=\"hydra_state_file\">")
-        sections.append(json.dumps(data["state"], indent=2, default=str))
+        trimmed = _trim_state_for_prompt(data["state"])
+        sections.append('<data source="hydra_state_file" note="trimmed for relevance">')
+        sections.append(json.dumps(trimmed, indent=2, default=str))
         sections.append("</data>\n")
 
-    # Metrics
-    if data.get("metrics"):
-        sections.append("<data source=\"cumulative_metrics\">")
-        sections.append(json.dumps(data["metrics"], indent=2, default=str))
-        sections.append("</data>\n")
+    # Skip raw metrics — cheat_sheet.cumulative has the curated subset
 
     # Journal logs (truncate if too long)
     if data.get("journal_logs"):
         log_text = data["journal_logs"]
         if len(log_text) > 8000:
             log_text = log_text[-8000:]
-            sections.append("<data source=\"journal_logs\" note=\"truncated to last 8000 chars\">")
+            sections.append(
+                '<data source="journal_logs" note="truncated to last 8000 chars">'
+            )
         else:
-            sections.append("<data source=\"journal_logs\">")
+            sections.append('<data source="journal_logs">')
         sections.append(log_text)
         sections.append("</data>\n")
 
@@ -185,6 +190,37 @@ def _build_user_prompt(data: Dict[str, Any], today_str: str) -> str:
         sections.append("State that no data was found. Do not fabricate a report.\n")
 
     return "\n".join(sections)
+
+
+def _trim_state_for_prompt(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip position IDs, UICs, and merge flags from state to save tokens."""
+    # Keep top-level fields that provide context
+    keep_top = [
+        "date", "state", "entries_completed", "entries_skipped", "entries_failed",
+        "total_credit_received", "total_realized_pnl", "total_commission",
+        "call_stops_triggered", "put_stops_triggered", "double_stops",
+        "early_close_triggered", "early_close_time", "early_close_pnl",
+        "market_data_ohlc",
+    ]
+    trimmed = {k: state[k] for k in keep_top if k in state}
+
+    # Trim each entry — keep strikes, credits, stops, status, trend; strip IDs
+    keep_entry = [
+        "entry_number", "entry_time",
+        "short_call_strike", "long_call_strike", "short_put_strike", "long_put_strike",
+        "call_spread_credit", "put_spread_credit",
+        "call_side_stop", "put_side_stop",
+        "call_side_stopped", "put_side_stopped",
+        "call_side_expired", "put_side_expired",
+        "call_side_skipped", "put_side_skipped",
+        "trend_signal", "override_reason", "early_closed",
+        "is_complete", "open_commission", "close_commission",
+    ]
+    trimmed["entries"] = []
+    for e in state.get("entries", []):
+        trimmed["entries"].append({k: e[k] for k in keep_entry if k in e})
+
+    return trimmed
 
 
 def _extract_summary(report: str) -> Optional[str]:

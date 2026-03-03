@@ -1,10 +1,10 @@
 # HYDRA Early Close Analysis: Profit-Taking Strategies
 
 **Created**: February 18, 2026
-**Updated**: February 18, 2026 (v4 - ROC method added, slippage research, user-selected 2.00% ROC threshold)
+**Updated**: March 3, 2026
 **Author**: Claude Code analysis
-**Data Period**: Feb 10-18, 2026 (6 trading days)
-**Status**: RESEARCH COMPLETE - **2.00% ROC threshold selected, shadow mode logging recommended**
+**Data Period**: Feb 10-18, 2026 (6 trading days, original research)
+**Status**: DEPLOYED — ROC threshold raised from 2.00% to 3.00% on Feb 25 based on 11-day production analysis showing 2% left $1,025 on the table with zero reversals after trigger. See MKT-018 in [HYDRA Strategy Specification](HYDRA_STRATEGY_SPECIFICATION.md).
 
 ---
 

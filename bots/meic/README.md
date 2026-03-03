@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-02-19
 **Strategy Creator:** Tammy Chambless ("Queen of 0DTE")
-**Status:** IMPLEMENTED - Production Ready (v1.3.0)
+**Status:** STOPPED — Replaced by HYDRA (v1.6.0) as of 2026-02-28. Code remains for reference.
 
 ---
 

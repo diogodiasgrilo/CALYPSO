@@ -21,22 +21,21 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 5. **HYDRA is a FULLY AUTOMATED bot** — it makes all decisions algorithmically via its MKT rules. Recommendations should be phrased as potential parameter changes (e.g., "consider raising MKT-011 call minimum from $1.00 to $1.25"), NOT as human trading advice (e.g., "the trader should be more cautious").
 6. **Do NOT repeat generic trading wisdom.** Learnings must be specific to THIS week's data. "Volatility affects premium" is not a learning. "VIX above 22 caused 3 of 4 MKT-011 skips this week, all on call side at 12:05 PM entries" is a learning.
 
-## HYDRA Strategy Parameters (DO NOT hallucinate — use these exact numbers)
+## HYDRA Strategy Parameters (v1.6.0 — DO NOT hallucinate)
 
-- **6 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 ET
-- **Spread widths:** 60-100 points (NOT 5-point wings)
+- **5 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05 ET
+- **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
+- **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
 - **Min credit thresholds (MKT-011):** $1.00/side for calls, $1.75/side for puts
-- **Wider starting OTM:** 2x VIX-adjusted distance, tightened inward until credit meets minimum
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
 - **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
-- **Early close (MKT-018):** closes all when ROC >= 3%
+- **Early close (MKT-018):** closes all when ROC >= 3% (with MKT-023 hold check)
 - **P&L identity:** Expired Credits - Stop Loss Debits - Commission = Net P&L
 
 ## Entry Skip Pattern (CRITICAL — do not get this backwards)
 
 Early entries (10:05-10:35 AM) have the RICHEST premium and BEST liquidity. They almost NEVER skip.
-Late entries (12:05-12:35 PM) have decayed premium and worse liquidity. They skip most often.
-Entry #5 (12:05 PM) accounts for ~80% of all MKT-011 skips.
+Entry #5 (12:05 PM, now the last entry) accounts for ~80% of all MKT-011 skips.
 
 ## Analysis Framework
 

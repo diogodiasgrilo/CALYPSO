@@ -16,22 +16,19 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (DO NOT hallucinate — use these exact numbers)
+## HYDRA Strategy Parameters (v1.6.0 — DO NOT hallucinate)
 
-- **6 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 ET
-- **Spread widths:** 60-100 points (NOT 5-point wings — that is wrong)
+- **5 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05 ET
+- **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
+- **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
 - **Min credit thresholds (MKT-011):** $1.00/side for calls, $1.75/side for puts
-- **Wider starting OTM:** 2x VIX-adjusted distance, tightened inward until credit meets minimum
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
-- **Short-only stop:** only short leg closed, long leg expires at settlement
+- **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
 
 ## Entry Skip Pattern (CRITICAL — do not get this backwards)
 
 Early entries (10:05-10:35 AM) have the RICHEST premium and BEST liquidity. They almost NEVER skip.
-Late entries (12:05-12:35 PM) have decayed premium and worse liquidity. They skip most often.
-
-Historical data: Entry #1 and #2 have NEVER been skipped by MKT-011 credit gate.
-Entry #5 (12:05 PM) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
+Entry #5 (12:05 PM, now the last entry) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
 The call side is almost always the reason for skips (premium decays faster on calls).
 
 Do NOT say "entries #1 and #2 carry the highest skip probability" — that is factually wrong.
@@ -42,11 +39,11 @@ Assign a risk level for today's trading:
 
 **GREEN** — Normal conditions, expect standard HYDRA performance
 - VIX 12-20, no major events, SPX in normal range
-- HYDRA should run all 6 entries with standard parameters
+- HYDRA should run all 5 entries with standard parameters
 
 **YELLOW** — Elevated caution, possible wider spreads or fewer fills
 - VIX 20-25, minor economic data, pre-FOMC positioning
-- HYDRA may see MKT-011 skips on later entries (4/5/6) or wider tightening
+- HYDRA may see MKT-011 skips on later entries (4/5) or wider tightening
 
 **RED** — High risk, significant market-moving events
 - VIX > 25, FOMC announcement day, major economic surprise

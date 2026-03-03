@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-02-28
-**Version:** 1.4.5
+**Last Updated:** 2026-03-03
+**Version:** 1.6.0
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -56,7 +56,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 |--------|-----------|---------|
 | Philosophy | Always market-neutral | Always full IC + EMA signal (informational) |
 | Entry type | Always full iron condor | Always full iron condor (skip if either side non-viable) |
-| Entries per day | 6 | 6 |
+| Entries per day | 6 | 5 (Entry #6 dropped in v1.6.0 to free margin for wider put spreads) |
 | Stop formula (full IC) | total_credit per side | total_credit per side (same as base MEIC) |
 | Stop execution | Close both legs (short + long) | Close SHORT only, long expires (MKT-025) |
 | Credit gate | Skip if both non-viable | Skip if either side non-viable (MKT-011) |
@@ -354,7 +354,7 @@ This pipeline prevents Saxo from rejecting orders or merging positions:
 
 Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
-**MKT-024 (v1.4.1):** Both sides start at 2× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $1.75 (top of Tammy's range), calls use $1.00 (bottom). This gives puts more breathing room on volatile days where put skew means $1.75 is found much further OTM.
+**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $1.75 (top of Tammy's range), calls use $1.00 (bottom). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
 
 ---
 
@@ -393,7 +393,7 @@ When a stop triggers, HYDRA only closes the **SHORT leg** via market order. The 
 - **Saves $2.50 commission** — 1 close leg instead of 2 (1 × $2.50 vs 2 × $2.50)
 - **Matches Tammy's approach** — "set stops on the short only, not on the spread"
 
-**Tradeoff:** We lose the long leg's residual value (it expires worthless instead of being sold). With MKT-024's 2× wider OTM, long wings are further out and less valuable:
+**Tradeoff:** We lose the long leg's residual value (it expires worthless instead of being sold). With MKT-024's 3.5×/4.0× wider OTM, long wings are further out and less valuable:
 - Call long wings: typically $0.05-$0.15 ($5-$15 lost)
 - Put long wings: typically $0.20-$0.65 ($20-$65 lost)
 
@@ -753,7 +753,7 @@ EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at
 ### Volatility Skew
 
 Put premiums are typically 2-7× higher than call premiums at the same delta. This means:
-- MKT-024 starts both sides at 2× base OTM to give MKT-020/022 room to find optimal strikes
+- MKT-024 starts calls at 3.5× and puts at 4.0× base OTM to give MKT-020/022 room to find optimal strikes
 - MKT-011 uses separate thresholds: calls $1.00, puts $1.75 (Tammy's $1.00-$1.75 range)
 - MKT-020 call tightening often can't reach $1.00 even at the 25pt OTM floor → MKT-011 skips
 - MKT-022 with $1.75 put minimum finds the widest viable put strike, reducing unnecessary tightness

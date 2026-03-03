@@ -159,4 +159,4 @@ pytest tests/test_position_registry.py -v
 
 ---
 
-**Last Updated:** 2026-02-08
+**Last Updated:** 2026-03-03

@@ -1,8 +1,18 @@
 """
-HERMES — Daily Execution Quality Analyst for CALYPSO
+HERMES v1.1.0 — Daily Execution Quality Analyst for CALYPSO
 
 Runs at 5:00 PM ET on weekdays via systemd timer. Collects the day's trading data,
-sends it to Claude for analysis, saves a markdown report, and sends a summary alert.
+pre-computes a cheat sheet of all arithmetic (counts, P&L, streaks), sends it to
+Claude for narrative analysis, saves a report, and sends a summary alert.
+
+v1.1.0 Changes:
+    - Pre-computed cheat sheet prevents Claude arithmetic errors
+    - Narrative-focused analysis (story of the day, not just numbers)
+    - Updated strategy params for HYDRA v1.6.0 (5 entries, asymmetric spreads)
+    - Cumulative context (win/lose streak, averages, day number)
+    - Apollo accuracy assessment
+    - Trimmed state file to save tokens (strip UICs, position IDs)
+    - Removed redundant header from summary (AlertService adds it)
 
 Data Sources:
     - Apollo's morning report (intel/apollo/YYYY-MM-DD.md)
@@ -18,10 +28,10 @@ Output:
 
 Files:
     services/hermes/main.py             Entry point
-    services/hermes/data_collector.py   Gathers data from all sources
+    services/hermes/data_collector.py   Gathers data + compute_cheat_sheet()
     services/hermes/analyzer.py         Builds prompt, calls Claude
     deploy/hermes.service               systemd oneshot service
     deploy/hermes.timer                 systemd timer (5 PM ET weekdays)
 
-Last Updated: 2026-03-01
+Last Updated: 2026-03-03
 """

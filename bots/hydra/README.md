@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.4.5 | **Last Updated:** 2026-02-28
+**Version:** 1.6.0 | **Last Updated:** 2026-03-03
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and early close on Return on Capital.
 
@@ -16,7 +16,7 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), wider starting OTM (MKT-024), and early close on profitable days (MKT-018).
 
-### Entry Schedule (6 entries, matching MEIC's 6)
+### Entry Schedule (5 entries — Entry #6 dropped in v1.6.0 to free margin for wider put spreads)
 
 | Entry | Time (ET) |
 |-------|-----------|
@@ -25,7 +25,6 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 | 3 | 11:05 AM |
 | 4 | 11:35 AM |
 | 5 | 12:05 PM |
-| 6 | 12:35 PM |
 
 ### Credit Gate (MKT-011)
 
@@ -42,9 +41,9 @@ Before placing any orders, HYDRA estimates the expected credit by fetching optio
 
 If the credit gate can't get valid quotes (rare), it falls back to wing illiquidity flags set during strike calculation. Any wing illiquid → skip entry.
 
-### Wider Starting OTM (MKT-024) - Added v1.4.1
+### Wider Starting OTM (MKT-024) - Updated v1.6.0
 
-Both call and put sides start at 2× the VIX-adjusted OTM distance. MKT-020/MKT-022 then scan inward from there to find the widest viable strike at or above the minimum credit threshold. This gives puts more breathing room on volatile days where put skew means $1.75 is found much further OTM.
+Calls start at 3.5× and puts at 4.0× the VIX-adjusted OTM distance (asymmetric — put multiplier higher because put skew means credit is viable further OTM). MKT-020/MKT-022 then scan inward from there to find the widest viable strike at or above the minimum credit threshold. Batch API = zero extra cost for wider scan.
 
 ### Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts)
 
@@ -118,7 +117,7 @@ If worst-case hold > close now → **HOLD** (don't close). If worst-case hold <=
 
 ### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
 
-Before placing entries #4, #5, and #6 (after min 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (3%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
+Before placing entries #4 and #5 (after min 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (3%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
 
 Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` — no separate threshold needed. Sets a flag, skips remaining entries, and persists state across restarts.
 
@@ -128,8 +127,8 @@ Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` �
 |---------|---------|-------------|
 | `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020: Call minimum credit (HYDRA override, base is $0.50) |
 | `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022: Put minimum credit (top of Tammy's $1.00-$1.75 range) |
-| `call_starting_otm_multiplier` | `2.0` | MKT-024: Call starting OTM = base × multiplier |
-| `put_starting_otm_multiplier` | `2.0` | MKT-024: Put starting OTM = base × multiplier |
+| `call_starting_otm_multiplier` | `3.5` | MKT-024: Call starting OTM = base × multiplier |
+| `put_starting_otm_multiplier` | `4.0` | MKT-024: Put starting OTM = base × multiplier (higher due to put skew) |
 | `min_call_otm_distance` | `25` | MKT-020: Minimum OTM distance (points) for call tightening floor |
 | `min_put_otm_distance` | `25` | MKT-022: Minimum OTM distance (points) for put tightening floor |
 | `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
@@ -178,8 +177,8 @@ sudo journalctl -u hydra -f
 | Aspect | Pure MEIC | HYDRA |
 |--------|-----------|---------|
 | Entry type | Always full IC | Full IC + credit gate (skip if non-viable) |
-| Starting OTM | VIX-adjusted | 2× VIX-adjusted (MKT-024), then tightened |
-| Min spread width | 25pt | 60pt (MKT-026: cheaper longs on low-VIX days) |
+| Starting OTM | VIX-adjusted | 3.5× calls, 4.0× puts (MKT-024), then tightened |
+| Spread widths | 50pt fixed | Asymmetric: call 60pt, put 75pt floor, 75pt cap (MKT-026/027/028) |
 | Credit minimums | $0.50/side | $1.00 calls, $1.75 puts |
 | Trend signal | None | EMA 20/40 (informational only) |
 | Profit management | Hold to expiration | Early close at 3% ROC (MKT-018/023/021) |
@@ -207,9 +206,9 @@ HYDRA uses **separate state files** from MEIC to allow both bots to run simultan
 
 ```
 bots/hydra/
-├── main.py                 # Entry point
+├── main.py                 # Entry point + Telegram snapshot daemon
 ├── strategy.py             # Trend-following strategy (extends MEIC)
-├── hydra.service         # Systemd service file
+├── telegram_commands.py    # /snapshot command handler
 ├── config/
 │   └── config.json.template
 └── README.md               # This file
@@ -226,8 +225,10 @@ bots/hydra/
 
 ## Version History
 
+- **1.6.0** (2026-03-02): Drop Entry #6 (frees margin for wider puts), MKT-028 asymmetric spreads (call 60pt, put 75pt floor, cap 75pt), MKT-024 updated (3.5× calls, 4.0× puts), MKT-027 VIX-scaled spread width continuous formula
+- **1.5.0** (2026-02-28): Rename MEIC-TF → HYDRA (service, state, metrics, Sheets all renamed), Telegram /snapshot command, 30-min periodic position snapshots, alert system channel routing + BOT_STARTED/STOPPED + error isolation
 - **1.4.5** (2026-02-28): MKT-026 min spread width raised from 25pt to 60pt (longs cheaper on low-VIX days, MKT-025 never closes longs = pure savings)
-- **1.4.4** (2026-02-28): Add 6th entry at 12:35 PM (matching base MEIC schedule — MKT-011 credit gate ensures zero-cost skip when non-viable)
+- **1.4.4** (2026-02-28): Add 6th entry at 12:35 PM (matching base MEIC schedule — MKT-011 credit gate ensures zero-cost skip when non-viable; later dropped in v1.6.0)
 - **1.4.3** (2026-02-28): MKT-025 short-only stop loss close (close short, let long expire — per Tammy/Sandvand best practice)
 - **1.4.2** (2026-02-27): MEIC+ reduction raised from $0.10 to $0.15 to cover commission on one-side-stop (true breakeven)
 - **1.4.1** (2026-02-27): MKT-024 wider starting OTM (2× multiplier both sides), separate put minimum $1.75 (Tammy's $1.00-$1.75 range), enhanced MKT-020/022 scan logging

@@ -33,21 +33,22 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - Roll short put daily for income
 - Roll long put when approaching expiry
 
-### 4. MEIC - Multiple Entry Iron Condors (S&P 500)
-**Tammy Chambless's MEIC** strategy - "Queen of 0DTE":
+### 4. MEIC - Multiple Entry Iron Condors (S&P 500) — STOPPED
+**Tammy Chambless's MEIC** strategy - "Queen of 0DTE" (replaced by HYDRA):
 - 6 scheduled iron condor entries per day (10:00-12:30 PM ET)
 - 5-15 delta OTM, 50-60 point spreads
 - Per-side stop = total credit received (breakeven design)
-- Expected: ~20.7% CAGR, 4.31% max drawdown, ~70% win rate
 
-### 5. HYDRA - Trend Following MEIC (S&P 500)
-**MEIC + EMA 20/40 Trend Filter** - credit validation and profit management on top of MEIC:
-- 6 entries per day (10:05-12:35 PM ET), always full iron condors
+### 5. HYDRA - Trend Following MEIC (S&P 500) — LIVE (v1.6.0)
+**MEIC + EMA 20/40 Trend Filter** - credit validation, asymmetric spreads, and profit management:
+- **5 entries per day** (10:05-12:05 PM ET), always full iron condors
 - EMA 20/40 trend signal is informational only (logged, does NOT drive entry type)
-- **Credit Gate (MKT-011)**: Estimates credit BEFORE placing orders, skips entry if either side non-viable
-- **MKT-025**: Short-only stop close (long expires at settlement, saves commission + slippage)
+- **Asymmetric spreads (MKT-028)**: Call floor 60pt, put floor 75pt, cap 75pt
+- **Starting OTM (MKT-024)**: 3.5× calls, 4.0× puts, scans inward via MKT-020/022
+- **Credit Gate (MKT-011)**: $1.00 calls, $1.75 puts — skips if either side non-viable
+- **MKT-025**: Short-only stop close (long expires at settlement)
 - **MKT-018/023**: Early close at 3% ROC with smart hold check
-- Wider starting OTM (2×), min 60pt spreads, progressive tightening
+- **Telegram /snapshot**: On-demand position snapshot via Telegram command
 
 ---
 
@@ -78,12 +79,18 @@ calypso/
 │   │   ├── main.py
 │   │   ├── strategy.py
 │   │   └── config/config.json
-│   └── hydra/                 # HYDRA (Trend Following MEIC)
+│   └── hydra/                 # HYDRA (Trend Following MEIC) — LIVE
 │       ├── main.py
 │       ├── strategy.py
+│       ├── telegram_commands.py
 │       └── config/config.json
-├── services/                    # Standalone services
-│   └── token_keeper/           # Keeps OAuth tokens fresh 24/7
+├── services/                    # Standalone services + AI agents
+│   ├── token_keeper/           # Keeps OAuth tokens fresh 24/7
+│   ├── apollo/                 # Morning Scout (8:30 AM ET)
+│   ├── hermes/                 # Daily Analyst (5:00 PM ET)
+│   ├── homer/                  # Trading Journal Writer (5:30 PM ET)
+│   ├── clio/                   # Weekly Analyst (Sat 9:00 AM ET)
+│   └── argus/                  # Health Monitor (every 15 min)
 ├── shared/                      # Shared infrastructure
 │   ├── saxo_client.py          # Saxo Bank API client
 │   ├── logger_service.py       # Logging + Google Sheets
@@ -210,16 +217,18 @@ All timestamps are in **Eastern Time (ET)** to match NYSE trading hours.
 
 ## Documentation
 
-- **[VM Commands Reference](docs/VM_COMMANDS.md)** - Complete VM command reference
+- **[HYDRA Strategy Spec](docs/HYDRA_STRATEGY_SPECIFICATION.md)** - Full HYDRA spec: MKT rules, decision flows
+- **[HYDRA Trading Journal](docs/HYDRA_TRADING_JOURNAL.md)** - Daily results and analysis
+- **[HYDRA README](bots/hydra/README.md)** - Trend Following MEIC bot details
+- **[MEIC Strategy Spec](docs/MEIC_STRATEGY_SPECIFICATION.md)** - Full MEIC implementation details
+- **[MEIC Edge Cases](docs/MEIC_EDGE_CASES.md)** - Risk analysis (79 edge cases)
+- **[VM Command Reference](docs/VM_COMMAND_REFERENCE.md)** - Complete VM command reference
 - **[Google Sheets Setup](docs/GOOGLE_SHEETS.md)** - Trade logging setup
 - **[Alerting Setup](docs/ALERTING_SETUP.md)** - Telegram/Email alert system deployment
 - **[Deployment Guide](docs/DEPLOYMENT.md)** - GCP deployment instructions
-- **[Delta Neutral Edge Cases](docs/DELTA_NEUTRAL_EDGE_CASES.md)** - Risk analysis (44 edge cases)
-- **[Iron Fly Edge Cases](docs/IRON_FLY_EDGE_CASES.md)** - Risk analysis (63 edge cases)
+- **[Delta Neutral Edge Cases](docs/DELTA_NEUTRAL_EDGE_CASES.md)** - Risk analysis (55 edge cases)
+- **[Iron Fly Edge Cases](docs/IRON_FLY_EDGE_CASES.md)** - Risk analysis (64 edge cases)
 - **[Iron Fly Code Audit](docs/IRON_FLY_CODE_AUDIT.md)** - Pre-LIVE comprehensive code review
-- **[MEIC Strategy Spec](docs/MEIC_STRATEGY_SPECIFICATION.md)** - Full MEIC implementation details
-- **[MEIC Edge Cases](docs/MEIC_EDGE_CASES.md)** - Risk analysis (79 edge cases)
-- **[HYDRA README](bots/hydra/README.md)** - Trend Following MEIC bot details
 - **[Configuration Reference](config/README.md)** - Config file reference
 - **[Token Keeper Service](services/token_keeper/README.md)** - OAuth token refresh service
 
@@ -309,5 +318,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 3.7.0
-**Last Updated:** 2026-02-08
+**Version:** 3.8.0
+**Last Updated:** 2026-03-03

@@ -24,7 +24,7 @@
 
 **Bot Versions**: v1.2.7 (Feb 10-17), v1.2.8 (Feb 18), v1.2.9 (Feb 18 post-market), v1.3.0 (Feb 19), v1.3.2 (Feb 20-23), v1.3.5-v1.3.8 (Feb 24), v1.3.9-v1.3.11 (Feb 25-26), v1.4.0-v1.4.1 (Feb 27), v1.4.2-v1.5.0 (Feb 28 rename to HYDRA), v1.5.1 (Mar 2)
 **Trading Days**: 14 (Feb 10, 11, 12, 13, 17, 18, 19, 20, 23, 24, 25, 26, 27, Mar 2)
-**Config**: 5 entries per day (Feb 10-27), 6 entries per day (Mar 2+), EMA 20/40 trend filter
+**Config**: 5 entries per day (Feb 10-27), 6 entries (Mar 2 only, v1.4.4), 5 entries (Mar 3+, v1.6.0 dropped Entry #6), EMA 20/40 trend filter
 - Feb 10-17: 0.1% neutral threshold, no cascade breaker (baseline)
 - Feb 18+: 0.2% neutral threshold (Rec 9.3), cascade breaker at 3 stops (MKT-016)
 - Feb 19+: daily loss limit -$500 (MKT-017), early close ROC 2% (MKT-018)

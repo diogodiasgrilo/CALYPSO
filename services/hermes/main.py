@@ -75,9 +75,11 @@ def main():
     today_str = get_us_market_time().strftime("%Y-%m-%d")
 
     # 1. Collect data
-    from services.hermes.data_collector import collect_daily_data
+    from services.hermes.data_collector import collect_daily_data, compute_cheat_sheet
 
     data = collect_daily_data(config, today_str)
+    data["cheat_sheet"] = compute_cheat_sheet(data)
+    logger.info(f"Cheat sheet: {len(data['cheat_sheet'].get('entry_outcomes', []))} entries")
 
     # 2. Get Claude client
     from shared.claude_client import get_anthropic_client

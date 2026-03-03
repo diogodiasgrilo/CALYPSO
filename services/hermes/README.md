@@ -1,10 +1,20 @@
-# HERMES — Daily Execution Quality Analyst
+# HERMES v1.1.0 — Daily Execution Quality Analyst
 
-**Last Updated:** 2026-03-01
+**Last Updated:** 2026-03-03
 
-Runs at 5:00 PM ET on weekdays via systemd timer. Analyzes today's HYDRA trading execution using Claude and sends a summary alert.
+Runs at 5:00 PM ET on weekdays via systemd timer. Pre-computes a cheat sheet of all arithmetic (counts, P&L, streaks), sends it to Claude for narrative analysis, saves a report, and sends a summary alert.
 
 ---
+
+## v1.1.0 Changes
+
+- **Pre-computed cheat sheet** prevents Claude arithmetic errors (e.g., "5 stopped legs: 4C/2P" when 4+2=6)
+- **Narrative-focused analysis** — explains WHY, not just WHAT (story of the day, market context)
+- **Updated strategy params** for HYDRA v1.6.0 (5 entries, asymmetric spreads, 3.5×/4.0× OTM)
+- **Cumulative context** — win/lose streak, avg win/loss, day number
+- **Apollo accuracy assessment** — did pre-market risk level match actual outcome?
+- **Trimmed state file** — strips UICs, position IDs to save tokens
+- **No redundant header** — summary body only (AlertService adds title automatically)
 
 ## Data Sources
 
@@ -17,20 +27,20 @@ Runs at 5:00 PM ET on weekdays via systemd timer. Analyzes today's HYDRA trading
 | Metrics file | Cumulative metrics | `data/hydra_metrics.json` |
 | Journal logs | Last 200 lines from HYDRA | `journalctl -u hydra --since today` |
 
-## Analysis Framework
+## Analysis Framework (v1.1.0)
 
-1. Market context vs outcome correlation (Apollo accuracy)
-2. Entry quality (fill slippage, credit gate activity, timing)
-3. Stop loss analysis (slippage, side distribution)
-4. P&L reconciliation (verify identity: Expired Credits - Stop Debits - Commission = Net)
-5. Key insights (3-5 actionable bullet points)
+1. **Story of the Day** — Connect SPX movement to stop outcomes, explain the market narrative
+2. **Apollo Accuracy** — Did pre-market risk assessment match actual outcome?
+3. **Entry Quality** — MKT-020/022 tightening, credit levels, MKT-011 skips
+4. **Stop Analysis** — Stop side pattern, best/worst entry (from cheat sheet)
+5. **Cumulative Context** — How today compares to avg win/loss, current streak
 
 ## Output
 
 | Path | Description |
 |------|-------------|
 | `intel/hermes/YYYY-MM-DD.md` | Full analysis report (markdown) |
-| Telegram/Email alert | 5-line summary |
+| Telegram/Email alert | 5-line summary (narrative insight on line 5) |
 
 ---
 
@@ -38,9 +48,9 @@ Runs at 5:00 PM ET on weekdays via systemd timer. Analyzes today's HYDRA trading
 
 | File | Purpose |
 |------|---------|
-| `services/hermes/main.py` | Entry point, orchestrates collect → analyze → save → alert |
-| `services/hermes/data_collector.py` | Reads Sheets, state file, metrics, journal logs |
-| `services/hermes/analyzer.py` | Builds prompt, calls Claude, extracts summary |
+| `services/hermes/main.py` | Entry point, orchestrates collect → cheat sheet → analyze → save → alert |
+| `services/hermes/data_collector.py` | Reads data sources + `compute_cheat_sheet()` (pre-computes all arithmetic) |
+| `services/hermes/analyzer.py` | Builds prompt (cheat sheet first), calls Claude, extracts summary |
 | `deploy/hermes.service` | systemd oneshot service |
 | `deploy/hermes.timer` | systemd timer (5 PM ET weekdays) |
 
