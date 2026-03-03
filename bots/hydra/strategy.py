@@ -30,7 +30,7 @@ import logging
 import os
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -74,6 +74,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
+HYDRA_VERSION = "1.7.0"
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -232,6 +233,8 @@ class HydraStrategy(MEICStrategy):
 
         logger.info(f"HYDRA using state file: {self.state_file}")
         logger.info(f"HYDRA using metrics file: {self.metrics_file}")
+
+        self._bot_start_time = datetime.now()
 
         logger.info(f"HYDRA Strategy initialized")
         logger.info(f"  Trend filter enabled: {self.trend_enabled}")
@@ -3003,6 +3006,515 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.error("Failed to build /account message: %s", e)
             return "Failed to retrieve account data. Try again shortly."
+
+    # =========================================================================
+    # TELEGRAM NEW COMMANDS (v1.7.0)
+    # =========================================================================
+
+    def build_telegram_status(self) -> str:
+        """
+        Build a formatted Telegram message showing current HYDRA bot status.
+
+        All data is in-memory — zero I/O, zero API calls.
+
+        Returns:
+            str: Formatted Markdown message for Telegram
+        """
+        # State & mode
+        state_str = self.state.value if self.state else "UNKNOWN"
+        mode_str = "DRY-RUN" if self.dry_run else "LIVE"
+
+        # Uptime
+        uptime = datetime.now() - self._bot_start_time
+        hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+        minutes = remainder // 60
+        uptime_str = f"{hours}h {minutes}m"
+
+        # Market data
+        spx = self.current_price
+        vix = self.current_vix
+
+        # Trend
+        if self._current_trend:
+            trend_str = self._current_trend.value.upper()
+        else:
+            trend_str = "PENDING"
+        if self._last_ema_short > 0 and self._last_ema_long > 0:
+            trend_detail = f"{trend_str} (EMA {self._last_ema_short:.0f}/{self._last_ema_long:.0f})"
+        else:
+            trend_detail = trend_str
+
+        # Entries
+        total_scheduled = len(self.entry_times)
+        completed = self.daily_state.entries_completed
+        skipped = self.daily_state.entries_skipped
+        active_count = len(self.daily_state.active_entries)
+        call_stops = self.daily_state.call_stops_triggered
+        put_stops = self.daily_state.put_stops_triggered
+
+        # P&L
+        realized = self.daily_state.total_realized_pnl
+        commission = self.daily_state.total_commission
+        r_sign = "+" if realized >= 0 else ""
+
+        # Next entry
+        if self._next_entry_index < len(self.entry_times):
+            next_time = self.entry_times[self._next_entry_index]
+            next_str = f"#{self._next_entry_index + 1} @ {next_time.strftime('%I:%M %p')}"
+        else:
+            next_str = "All entries placed"
+
+        # Filters
+        vix_open = "Open" if vix < self.max_vix_entry else "BLOCKED"
+        vix_detail = f"{vix_open} ({vix:.1f} {'<' if vix < self.max_vix_entry else '>='} {self.max_vix_entry:.0f})"
+
+        try:
+            from shared.event_calendar import is_fomc_meeting_day
+            fomc = "Yes" if is_fomc_meeting_day() else "No"
+        except Exception:
+            fomc = "No"
+
+        # Early close status
+        if self._early_close_triggered:
+            ec_time = self._early_close_time.strftime('%I:%M %p') if self._early_close_time else "N/A"
+            ec_str = f"TRIGGERED @ {ec_time}"
+        elif self.early_close_enabled:
+            ec_str = f"Armed ({self.early_close_roc_threshold * 100:.1f}% ROC)"
+        else:
+            ec_str = "Disabled"
+
+        lines = [
+            f"\U0001f916 *HYDRA* | Status",
+            "",
+            f"State: {state_str} ({mode_str})",
+            f"Uptime: {uptime_str}",
+            "",
+            "\u2501\u2501\u2501 Market \u2501\u2501\u2501",
+            f"SPX {spx:,.2f}  |  VIX {vix:.2f}",
+            f"Trend: {trend_detail}",
+            "",
+            "\u2501\u2501\u2501 Today \u2501\u2501\u2501",
+            f"Entries: {completed}/{total_scheduled} completed  |  {skipped} skipped",
+            f"Active: {active_count}  |  Stops: {call_stops}C / {put_stops}P",
+            f"Next: {next_str}",
+            "",
+            "\u2501\u2501\u2501 P&L \u2501\u2501\u2501",
+            f"Realized: {r_sign}${realized:.0f}  |  Commission: -${commission:.0f}",
+            "",
+            "\u2501\u2501\u2501 Filters \u2501\u2501\u2501",
+            f"VIX gate: {vix_detail}",
+            f"FOMC: {fomc}",
+            f"Early close: {ec_str}",
+        ]
+
+        return "\n".join(lines)
+
+    def build_telegram_hermes(self) -> str:
+        """
+        Build a Telegram message with the most recent HERMES daily report.
+
+        Tries today, yesterday, then 2 days back. Returns raw Markdown content
+        — the Telegram handler sanitizes before sending.
+
+        Returns:
+            str: Raw report content with header, or "not available" message
+        """
+        now_et = get_us_market_time()
+
+        for days_back in range(3):
+            check_date = now_et.date() - timedelta(days=days_back)
+            date_str = check_date.strftime("%Y-%m-%d")
+            report_path = os.path.join("intel", "hermes", f"{date_str}.md")
+
+            try:
+                with open(report_path, "r") as f:
+                    content = f.read()
+                if content.strip():
+                    # Truncate to leave room for header within 4096 char Telegram limit
+                    if len(content) > 3800:
+                        content = content[:3800] + "\n\n... (truncated)"
+                    return f"\U0001f4dd *HYDRA* | HERMES \u2014 {date_str}\n\n{content}"
+            except (FileNotFoundError, IOError):
+                continue
+
+        return "No recent HERMES report available."
+
+    def build_telegram_apollo(self) -> str:
+        """
+        Build a Telegram message with the most recent APOLLO morning briefing.
+
+        Tries today, yesterday, then 2 days back. Returns raw Markdown content
+        — the Telegram handler sanitizes before sending.
+
+        Returns:
+            str: Raw briefing content with header, or "not available" message
+        """
+        now_et = get_us_market_time()
+
+        for days_back in range(3):
+            check_date = now_et.date() - timedelta(days=days_back)
+            date_str = check_date.strftime("%Y-%m-%d")
+            report_path = os.path.join("intel", "apollo", f"{date_str}.md")
+
+            try:
+                with open(report_path, "r") as f:
+                    content = f.read()
+                if content.strip():
+                    if len(content) > 3800:
+                        content = content[:3800] + "\n\n... (truncated)"
+                    return f"\U0001f52d *HYDRA* | APOLLO \u2014 {date_str}\n\n{content}"
+            except (FileNotFoundError, IOError):
+                continue
+
+        return "No recent APOLLO briefing available."
+
+    def build_telegram_week(self) -> str:
+        """
+        Build a formatted Telegram message showing current week's trading summary.
+
+        Reads from Google Sheets Daily Summary tab (timeout-protected).
+        Falls back to previous week if current week has no data.
+
+        Returns:
+            str: Formatted Markdown message for Telegram
+        """
+        try:
+            all_days = self.trade_logger.get_all_daily_summaries()
+            if not all_days:
+                return "No trading data available yet."
+
+            now_et = get_us_market_time()
+            today = now_et.date()
+
+            # Find Monday of current week
+            monday = today - timedelta(days=today.weekday())
+
+            # Try current week, then previous week
+            for week_offset in [0, -7]:
+                week_monday = monday + timedelta(days=week_offset)
+                week_friday = week_monday + timedelta(days=4)
+
+                # Filter days to this week
+                week_days = {}
+                for d in all_days:
+                    date_str = d.get("Date", "")
+                    try:
+                        d_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                        if week_monday <= d_date <= week_friday:
+                            week_days[d_date] = d
+                    except (ValueError, TypeError):
+                        continue
+
+                if week_days:
+                    break
+            else:
+                return "No trading data available yet."
+
+            # Build header
+            week_label = week_monday.strftime("%b %-d")
+            lines = [f"\U0001f4c5 *HYDRA* | Week of {week_label}", ""]
+
+            # Per-day lines
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+            total_pnl = 0
+            total_entries = 0
+            total_stops = 0
+            winning = 0
+            losing = 0
+
+            for i, day_name in enumerate(day_names):
+                day_date = week_monday + timedelta(days=i)
+                day_data = week_days.get(day_date)
+
+                if day_data:
+                    pnl = day_data.get("Daily P&L ($)", 0) or 0
+                    entries = (day_data.get("Entries Completed", 0) or 0)
+                    call_s = (day_data.get("Call Stops", 0) or 0)
+                    put_s = (day_data.get("Put Stops", 0) or 0)
+                    stops = call_s + put_s
+
+                    total_pnl += pnl
+                    total_entries += entries
+                    total_stops += stops
+                    if pnl > 0:
+                        winning += 1
+                    elif pnl < 0:
+                        losing += 1
+
+                    if pnl > 0:
+                        icon = "\U0001f7e2"
+                        pnl_str = f"+${pnl:,.0f}"
+                    elif pnl < 0:
+                        icon = "\U0001f534"
+                        pnl_str = f"-${abs(pnl):,.0f}"
+                    else:
+                        icon = "\u26aa"
+                        pnl_str = "$0"
+
+                    lines.append(f"{day_name}: {icon} {pnl_str} ({entries} entries, {stops} stops)")
+                elif day_date <= today:
+                    lines.append(f"{day_name}: \u2014 (no data)")
+                else:
+                    lines.append(f"{day_name}: \u2014")
+
+            # Week totals
+            pnl_sign = "+" if total_pnl >= 0 else ""
+            lines.append("")
+            lines.append("\u2501\u2501\u2501 Week Total \u2501\u2501\u2501")
+            lines.append(f"*Net P&L: {pnl_sign}${total_pnl:,.0f}*")
+            lines.append(f"Entries: {total_entries}  |  Stops: {total_stops}")
+            total_days = winning + losing
+            win_rate = (winning / total_days * 100) if total_days > 0 else 0
+            lines.append(f"Win rate: {win_rate:.0f}% ({winning}W / {losing}L)")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.error("Failed to build /week message: %s", e)
+            return "Failed to retrieve week data. Try again shortly."
+
+    def build_telegram_entry(self, entry_num: int) -> str:
+        """
+        Build a formatted Telegram message showing details for a specific entry.
+
+        Args:
+            entry_num: 1-based entry number
+
+        Returns:
+            str: Formatted Markdown message for Telegram
+        """
+        entries = self.daily_state.entries
+        if not entries:
+            return "No entries placed today."
+
+        if entry_num < 1 or entry_num > len(entries):
+            return f"Entry #{entry_num} not found. Today has {len(entries)} entries so far."
+
+        entry = entries[entry_num - 1]
+
+        # Entry metadata
+        if entry.entry_time:
+            time_str = entry.entry_time.strftime('%I:%M %p ET')
+        else:
+            time_str = "pending"
+
+        # Trend and type
+        trend = entry.trend_signal.value.upper() if hasattr(entry, 'trend_signal') and entry.trend_signal else "N/A"
+        if getattr(entry, 'call_only', False):
+            entry_type = "Call Only"
+        elif getattr(entry, 'put_only', False):
+            entry_type = "Put Only"
+        else:
+            entry_type = "Full IC"
+
+        lines = [
+            f"\U0001f50d *HYDRA* | Entry #{entry_num}",
+            "",
+            f"Placed: {time_str}",
+            f"Trend: {trend}  |  Type: {entry_type}",
+        ]
+
+        # Strikes
+        call_width = abs(entry.call_long_strike - entry.call_short_strike)
+        put_width = abs(entry.put_short_strike - entry.put_long_strike)
+
+        lines.append("")
+        lines.append("\u2501\u2501\u2501 Strikes \u2501\u2501\u2501")
+
+        call_skipped = getattr(entry, 'call_side_skipped', False)
+        put_skipped = getattr(entry, 'put_side_skipped', False)
+
+        if not call_skipped:
+            lines.append(f"Call: Short {entry.call_short_strike:.0f} / Long {entry.call_long_strike:.0f} ({call_width:.0f}pt)")
+        else:
+            lines.append("Call: SKIPPED")
+
+        if not put_skipped:
+            lines.append(f"Put: Short {entry.put_short_strike:.0f} / Long {entry.put_long_strike:.0f} ({put_width:.0f}pt)")
+        else:
+            lines.append("Put: SKIPPED")
+
+        # Credits (stored in cents)
+        lines.append("")
+        lines.append("\u2501\u2501\u2501 Credits \u2501\u2501\u2501")
+        if not call_skipped:
+            lines.append(f"Call: ${entry.call_spread_credit / 100:.2f}")
+        if not put_skipped:
+            lines.append(f"Put: ${entry.put_spread_credit / 100:.2f}")
+        lines.append(f"Total: ${entry.total_credit / 100:.2f}")
+
+        # Fill prices (stored in cents)
+        lines.append("")
+        lines.append("\u2501\u2501\u2501 Fill Prices \u2501\u2501\u2501")
+        if not call_skipped:
+            sc = f"${entry.short_call_fill_price / 100:.2f}" if entry.short_call_fill_price > 0 else "pending"
+            lc = f"${entry.long_call_fill_price / 100:.2f}" if entry.long_call_fill_price > 0 else "pending"
+            lines.append(f"SC: {sc}  LC: {lc}")
+        if not put_skipped:
+            sp = f"${entry.short_put_fill_price / 100:.2f}" if entry.short_put_fill_price > 0 else "pending"
+            lp = f"${entry.long_put_fill_price / 100:.2f}" if entry.long_put_fill_price > 0 else "pending"
+            lines.append(f"SP: {sp}  LP: {lp}")
+
+        # Status per side
+        lines.append("")
+        lines.append("\u2501\u2501\u2501 Status \u2501\u2501\u2501")
+
+        for side, label in [("call", "Call"), ("put", "Put")]:
+            skipped = getattr(entry, f'{side}_side_skipped', False)
+            stopped = getattr(entry, f'{side}_side_stopped', False)
+            expired = getattr(entry, f'{side}_side_expired', False)
+            stop_level = getattr(entry, f'{side}_side_stop', 0)
+            spread_value = getattr(entry, f'{side}_spread_value', 0)
+
+            if skipped:
+                lines.append(f"{label}: SKIPPED")
+            elif stopped:
+                lines.append(f"{label}: STOPPED (stop @ ${stop_level / 100:.0f})")
+            elif expired:
+                lines.append(f"{label}: EXPIRED")
+            elif stop_level > 0:
+                cushion = (stop_level - spread_value) / stop_level * 100 if stop_level > 0 else 0
+                lines.append(f"{label}: {cushion:.0f}% cushion (stop @ ${stop_level / 100:.0f})")
+            else:
+                lines.append(f"{label}: \u2014")
+
+        # P&L
+        pnl = entry.unrealized_pnl / 100 if hasattr(entry, 'unrealized_pnl') else 0
+        pnl_sign = "+" if pnl >= 0 else ""
+        lines.append("")
+        lines.append(f"P&L: {pnl_sign}${pnl:.0f}")
+
+        return "\n".join(lines)
+
+    def build_telegram_stops(self) -> str:
+        """
+        Build a formatted Telegram message showing stop loss analysis.
+
+        Today's data from in-memory daily_state. Historical from Google Sheets.
+
+        Returns:
+            str: Formatted Markdown message for Telegram
+        """
+        lines = ["\U0001f6d1 *HYDRA* | Stop Analysis"]
+
+        # Today's stops
+        call_stops = self.daily_state.call_stops_triggered
+        put_stops = self.daily_state.put_stops_triggered
+        double_stops = self.daily_state.double_stops
+
+        lines.append("")
+        lines.append("\u2501\u2501\u2501 Today \u2501\u2501\u2501")
+        lines.append(f"Stops: {call_stops}C / {put_stops}P / {double_stops}D")
+
+        # Detail per stopped entry
+        has_stops_today = False
+        for entry in self.daily_state.entries:
+            call_stopped = entry.call_side_stopped
+            put_stopped = entry.put_side_stopped
+
+            if call_stopped or put_stopped:
+                has_stops_today = True
+                sides = []
+                if call_stopped:
+                    sides.append("Call")
+                if put_stopped:
+                    sides.append("Put")
+                sides_str = " + ".join(sides)
+                lines.append("")
+                lines.append(f"#{entry.entry_number} {sides_str} STOPPED")
+                if call_stopped:
+                    lines.append(f"  Call credit: ${entry.call_spread_credit / 100:.0f}  |  Stop: ${entry.call_side_stop / 100:.0f}")
+                if put_stopped:
+                    lines.append(f"  Put credit: ${entry.put_spread_credit / 100:.0f}  |  Stop: ${entry.put_side_stop / 100:.0f}")
+
+        if not has_stops_today and (call_stops + put_stops) == 0:
+            lines.append("No stops triggered today.")
+
+        # Historical from Sheets
+        try:
+            all_days = self.trade_logger.get_all_daily_summaries()
+            if all_days:
+                total_days = len(all_days)
+                hist_call = sum((d.get("Call Stops", 0) or 0) for d in all_days)
+                hist_put = sum((d.get("Put Stops", 0) or 0) for d in all_days)
+                hist_double = sum((d.get("Double Stops", 0) or 0) for d in all_days)
+                hist_total = hist_call + hist_put
+
+                lines.append("")
+                lines.append(f"\u2501\u2501\u2501 Lifetime ({total_days} days) \u2501\u2501\u2501")
+                lines.append(f"Total: {hist_call}C / {hist_put}P / {hist_double}D")
+
+                if hist_total > 0:
+                    avg_per_day = hist_total / total_days
+                    call_pct = hist_call / hist_total * 100
+                    put_pct = hist_put / hist_total * 100
+                    lines.append(f"Avg stops/day: {avg_per_day:.1f}")
+                    lines.append(f"Call: {hist_call} ({call_pct:.0f}%)  |  Put: {hist_put} ({put_pct:.0f}%)")
+        except Exception as e:
+            logger.error("Failed to get historical stop data: %s", e)
+            lines.append("")
+            lines.append("Historical data temporarily unavailable.")
+
+        return "\n".join(lines)
+
+    def build_telegram_config(self) -> str:
+        """
+        Build a formatted Telegram message showing current HYDRA configuration.
+
+        All data from in-memory attributes — zero I/O.
+
+        Returns:
+            str: Formatted Markdown message for Telegram
+        """
+        # Entry schedule
+        schedule = ", ".join(t.strftime('%I:%M') for t in self.entry_times)
+        contracts = self.strategy_config.get("contracts_per_entry", 1)
+        mode = "DRY-RUN" if self.dry_run else "LIVE"
+
+        # Credits (convert cents to dollars)
+        min_credit_call = self.min_viable_credit_per_side / 100
+        min_credit_put = self.min_viable_credit_put_side / 100
+
+        # MEIC+
+        meic_plus = self.strategy_config.get("meic_plus_enabled", True)
+        meic_plus_reduction = self.strategy_config.get("meic_plus_reduction", 0.15)
+        meic_plus_str = f"Enabled (-${meic_plus_reduction:.2f})" if meic_plus else "Disabled"
+
+        # Early close
+        if self.early_close_enabled:
+            ec_str = f"{self.early_close_roc_threshold * 100:.1f}% ROC"
+        else:
+            ec_str = "Disabled"
+
+        # Hold check
+        hold_str = "Enabled" if self.hold_check_enabled else "Disabled"
+
+        lines = [
+            f"\u2699\ufe0f *HYDRA* | Config (v{HYDRA_VERSION})",
+            "",
+            "\u2501\u2501\u2501 Entries \u2501\u2501\u2501",
+            f"Schedule: {schedule}",
+            f"Contracts: {contracts}  |  Mode: {mode}",
+            "",
+            "\u2501\u2501\u2501 Strikes \u2501\u2501\u2501",
+            f"Starting OTM: Call {self.call_starting_otm_multiplier}x  |  Put {self.put_starting_otm_multiplier}x",
+            f"Spread floors: Call {self.call_min_spread_width}pt  |  Put {self.put_min_spread_width}pt",
+            f"Spread cap: {self.max_spread_width}pt (VIX x {self.spread_vix_multiplier})",
+            "",
+            "\u2501\u2501\u2501 Credits \u2501\u2501\u2501",
+            f"Min credit: Call ${min_credit_call:.2f}  |  Put ${min_credit_put:.2f}",
+            f"MEIC+: {meic_plus_str}",
+            "",
+            "\u2501\u2501\u2501 Risk \u2501\u2501\u2501",
+            f"Max VIX: {self.max_vix_entry:.0f}",
+            f"Stop: credit - ${meic_plus_reduction:.2f}",
+            "",
+            "\u2501\u2501\u2501 Exits \u2501\u2501\u2501",
+            f"Early close: {ec_str}",
+            f"Hold check: {hold_str}",
+        ]
+
+        return "\n".join(lines)
 
     def get_dashboard_metrics(self) -> Dict[str, Any]:
         """

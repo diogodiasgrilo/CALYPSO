@@ -5,17 +5,26 @@ Polls Telegram's getUpdates API for incoming commands and responds directly.
 Runs as a background daemon thread — independent of the main trading loop.
 
 Supported commands:
+    /status   — Bot state, market data, uptime, filters
     /snapshot — Live position snapshot (market hours only)
+    /entry N  — Details for entry #N
     /lastday  — Most recent complete trading day performance breakdown
+    /week     — Current week summary
     /account  — Lifetime HYDRA strategy performance summary
+    /stops    — Stop loss analysis (today + lifetime)
+    /config   — Current configuration
+    /hermes   — Latest HERMES daily report
+    /apollo   — Latest APOLLO morning briefing
+    /help     — List all commands
 
 Security: Only responds to messages from the configured chat_id.
 
-Version: 1.1.0 (2026-03-03)
+Version: 1.2.0 (2026-03-03)
 """
 
 import json
 import logging
+import re
 import threading
 import time
 from typing import Callable, Optional
@@ -51,6 +60,13 @@ class TelegramCommandHandler:
         self._snapshot_callback: Optional[Callable[[], str]] = None
         self._lastday_callback: Optional[Callable[[], str]] = None
         self._account_callback: Optional[Callable[[], str]] = None
+        self._status_callback: Optional[Callable[[], str]] = None
+        self._hermes_callback: Optional[Callable[[], str]] = None
+        self._apollo_callback: Optional[Callable[[], str]] = None
+        self._week_callback: Optional[Callable[[], str]] = None
+        self._entry_callback: Optional[Callable[[int], str]] = None
+        self._stops_callback: Optional[Callable[[], str]] = None
+        self._config_callback: Optional[Callable[[], str]] = None
         self._consecutive_errors = 0
 
         self._load_credentials()
@@ -79,11 +95,25 @@ class TelegramCommandHandler:
         snapshot_callback: Callable[[], str],
         lastday_callback: Optional[Callable[[], str]] = None,
         account_callback: Optional[Callable[[], str]] = None,
+        status_callback: Optional[Callable[[], str]] = None,
+        hermes_callback: Optional[Callable[[], str]] = None,
+        apollo_callback: Optional[Callable[[], str]] = None,
+        week_callback: Optional[Callable[[], str]] = None,
+        entry_callback: Optional[Callable[[int], str]] = None,
+        stops_callback: Optional[Callable[[], str]] = None,
+        config_callback: Optional[Callable[[], str]] = None,
     ):
         """Start the background polling thread."""
         self._snapshot_callback = snapshot_callback
         self._lastday_callback = lastday_callback
         self._account_callback = account_callback
+        self._status_callback = status_callback
+        self._hermes_callback = hermes_callback
+        self._apollo_callback = apollo_callback
+        self._week_callback = week_callback
+        self._entry_callback = entry_callback
+        self._stops_callback = stops_callback
+        self._config_callback = config_callback
 
         if not self._enabled:
             logger.info("Telegram command handler disabled (no credentials)")
@@ -161,10 +191,26 @@ class TelegramCommandHandler:
 
             if text.startswith("/snapshot"):
                 self._handle_snapshot(chat_id)
+            elif text.startswith("/status"):
+                self._handle_status(chat_id)
+            elif text.startswith("/entry"):
+                self._handle_entry(chat_id, text)
             elif text.startswith("/lastday"):
                 self._handle_lastday(chat_id)
+            elif text.startswith("/week"):
+                self._handle_week(chat_id)
             elif text.startswith("/account"):
                 self._handle_account(chat_id)
+            elif text.startswith("/stops"):
+                self._handle_stops(chat_id)
+            elif text.startswith("/config"):
+                self._handle_config(chat_id)
+            elif text.startswith("/hermes"):
+                self._handle_hermes(chat_id)
+            elif text.startswith("/apollo"):
+                self._handle_apollo(chat_id)
+            elif text.startswith("/help"):
+                self._handle_help(chat_id)
 
     # =========================================================================
     # COMMAND HANDLERS
@@ -186,7 +232,7 @@ class TelegramCommandHandler:
                 reason = "after hours"
 
             msg = (
-                f"📊 *HYDRA* | Market Closed\n"
+                f"\U0001f4ca *HYDRA* | Market Closed\n"
                 f"\n"
                 f"Market is currently closed ({reason}).\n"
                 f"No live positions to display.\n"
@@ -204,11 +250,48 @@ class TelegramCommandHandler:
         try:
             snapshot = self._snapshot_callback()
             time_str = now_et.strftime("%I:%M %p ET")
-            msg = f"📊 *HYDRA* | Snapshot\n\n{snapshot}\n\n_{time_str}_"
+            msg = f"\U0001f4ca *HYDRA* | Snapshot\n\n{snapshot}\n\n_{time_str}_"
             self._send_message(chat_id, msg)
         except Exception as e:
             logger.error("Failed to build snapshot for /snapshot command: %s", e)
             self._send_message(chat_id, "Snapshot temporarily unavailable. Try again in a minute.")
+
+    def _handle_status(self, chat_id: str):
+        """Handle /status command — bot state, market data, filters."""
+        if not self._status_callback:
+            self._send_message(chat_id, "Status not available (bot still initializing).")
+            return
+
+        try:
+            msg = self._status_callback()
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /status response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve status. Try again shortly.")
+
+    def _handle_entry(self, chat_id: str, text: str):
+        """Handle /entry N command — details for a specific entry."""
+        if not self._entry_callback:
+            self._send_message(chat_id, "Entry data not available (bot still initializing).")
+            return
+
+        parts = text.split()
+        if len(parts) < 2:
+            self._send_message(chat_id, "Usage: /entry N (e.g. /entry 1)")
+            return
+
+        try:
+            entry_num = int(parts[1])
+        except ValueError:
+            self._send_message(chat_id, "Usage: /entry N (e.g. /entry 1)")
+            return
+
+        try:
+            msg = self._entry_callback(entry_num)
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /entry %d response: %s", entry_num, e)
+            self._send_message(chat_id, "Failed to retrieve entry data. Try again shortly.")
 
     def _handle_lastday(self, chat_id: str):
         """Handle /lastday command — most recent complete trading day."""
@@ -223,6 +306,19 @@ class TelegramCommandHandler:
             logger.error("Failed to build /lastday response: %s", e)
             self._send_message(chat_id, "Failed to retrieve last day data. Try again shortly.")
 
+    def _handle_week(self, chat_id: str):
+        """Handle /week command — current week summary."""
+        if not self._week_callback:
+            self._send_message(chat_id, "Week data not available (bot still initializing).")
+            return
+
+        try:
+            msg = self._week_callback()
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /week response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve week data. Try again shortly.")
+
     def _handle_account(self, chat_id: str):
         """Handle /account command — lifetime strategy performance."""
         if not self._account_callback:
@@ -235,6 +331,101 @@ class TelegramCommandHandler:
         except Exception as e:
             logger.error("Failed to build /account response: %s", e)
             self._send_message(chat_id, "Failed to retrieve account data. Try again shortly.")
+
+    def _handle_stops(self, chat_id: str):
+        """Handle /stops command — stop loss analysis."""
+        if not self._stops_callback:
+            self._send_message(chat_id, "Stop data not available (bot still initializing).")
+            return
+
+        try:
+            msg = self._stops_callback()
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /stops response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve stop data. Try again shortly.")
+
+    def _handle_config(self, chat_id: str):
+        """Handle /config command — current configuration."""
+        if not self._config_callback:
+            self._send_message(chat_id, "Config not available (bot still initializing).")
+            return
+
+        try:
+            msg = self._config_callback()
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /config response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve config. Try again shortly.")
+
+    def _handle_hermes(self, chat_id: str):
+        """Handle /hermes command — latest HERMES daily report."""
+        if not self._hermes_callback:
+            self._send_message(chat_id, "HERMES report not available.")
+            return
+
+        try:
+            msg = self._hermes_callback()
+            msg = self._sanitize_for_telegram(msg)
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /hermes response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve HERMES report. Try again shortly.")
+
+    def _handle_apollo(self, chat_id: str):
+        """Handle /apollo command — latest APOLLO morning briefing."""
+        if not self._apollo_callback:
+            self._send_message(chat_id, "APOLLO briefing not available.")
+            return
+
+        try:
+            msg = self._apollo_callback()
+            msg = self._sanitize_for_telegram(msg)
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /apollo response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve APOLLO briefing. Try again shortly.")
+
+    def _handle_help(self, chat_id: str):
+        """Handle /help command — list all available commands."""
+        msg = (
+            "\U0001f916 *HYDRA Commands*\n\n"
+            "/status \u2014 Bot state, market data, filters\n"
+            "/snapshot \u2014 Live position snapshot\n"
+            "/entry N \u2014 Details for entry #N\n"
+            "/lastday \u2014 Last complete trading day\n"
+            "/week \u2014 Current week summary\n"
+            "/account \u2014 Lifetime performance\n"
+            "/stops \u2014 Stop loss analysis\n"
+            "/config \u2014 Current configuration\n"
+            "/hermes \u2014 Latest HERMES report\n"
+            "/apollo \u2014 Latest APOLLO briefing\n"
+            "/help \u2014 This message"
+        )
+        self._send_message(chat_id, msg)
+
+    # =========================================================================
+    # TELEGRAM FORMATTING HELPERS
+    # =========================================================================
+
+    def _sanitize_for_telegram(self, text: str) -> str:
+        """Strip Markdown syntax that breaks Telegram's legacy parser.
+
+        Converts: # headers → *bold*, ** → *, [links](url) → text, --- → ━ line.
+        Used for HERMES/APOLLO reports which contain full Markdown.
+        """
+        lines = []
+        for line in text.split("\n"):
+            if line.startswith("#"):
+                cleaned = line.lstrip("#").strip()
+                lines.append(f"*{cleaned}*")
+            else:
+                line = line.replace("**", "*")
+                line = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', line)
+                if line.strip() in ("---", "***", "___"):
+                    line = "\u2501" * 20
+                lines.append(line)
+        return "\n".join(lines)
 
     # =========================================================================
     # TELEGRAM API HELPERS

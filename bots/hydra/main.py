@@ -220,7 +220,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
     except Exception as e:
         trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
 
-    # Initialize Telegram command handler for /snapshot
+    # Initialize Telegram command handler (11 commands)
     from bots.hydra.telegram_commands import TelegramCommandHandler
     telegram_cmd_handler = TelegramCommandHandler()
     try:
@@ -228,6 +228,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
             snapshot_callback=strategy.build_telegram_snapshot,
             lastday_callback=strategy.build_telegram_lastday,
             account_callback=strategy.build_telegram_account,
+            status_callback=strategy.build_telegram_status,
+            hermes_callback=strategy.build_telegram_hermes,
+            apollo_callback=strategy.build_telegram_apollo,
+            week_callback=strategy.build_telegram_week,
+            entry_callback=strategy.build_telegram_entry,
+            stops_callback=strategy.build_telegram_stops,
+            config_callback=strategy.build_telegram_config,
         )
     except Exception as e:
         trade_logger.log_error(f"Failed to start Telegram command handler: {e}")
