@@ -1210,6 +1210,38 @@ class HydraStrategy(MEICStrategy):
         call_viable = estimated_call >= call_min
         put_viable = estimated_put >= put_min
 
+        # MKT-029: Graduated call fallback — try $0.95, then $0.90
+        if not call_viable:
+            for fallback in [call_min - 5, call_min - 10]:
+                if estimated_call >= fallback:
+                    call_viable = True
+                    logger.info(
+                        f"MKT-029: Call credit ${estimated_call:.2f} accepted at "
+                        f"fallback ${fallback:.2f} (primary: ${call_min:.2f})"
+                    )
+                    self._log_safety_event(
+                        "MKT-029_CALL_FALLBACK",
+                        f"Entry #{entry.entry_number}: call ${estimated_call:.2f} "
+                        f"at fallback ${fallback:.2f}"
+                    )
+                    break
+
+        # MKT-029: Graduated put fallback — try $1.70, then $1.65
+        if not put_viable:
+            for fallback in [put_min - 5, put_min - 10]:
+                if estimated_put >= fallback:
+                    put_viable = True
+                    logger.info(
+                        f"MKT-029: Put credit ${estimated_put:.2f} accepted at "
+                        f"fallback ${fallback:.2f} (primary: ${put_min:.2f})"
+                    )
+                    self._log_safety_event(
+                        "MKT-029_PUT_FALLBACK",
+                        f"Entry #{entry.entry_number}: put ${estimated_put:.2f} "
+                        f"at fallback ${fallback:.2f}"
+                    )
+                    break
+
         if call_viable and put_viable:
             logger.info(
                 f"MKT-011: Credit gate PASSED for Entry #{entry.entry_number}: "
@@ -1356,7 +1388,8 @@ class HydraStrategy(MEICStrategy):
             logger.warning(f"MKT-020: Batch quote fetch failed: {e}")
             return False
 
-        # Evaluate candidates from widest OTM to narrowest
+        # Phase 1: Compute credits for all candidates (quotes already batch-fetched)
+        evaluated_candidates = []
         for otm_val, short_s, long_s, short_uic, long_uic in candidate_uics:
             if not short_uic or not long_uic:
                 continue
@@ -1388,38 +1421,64 @@ class HydraStrategy(MEICStrategy):
                 f"MKT-020: {otm_val}pt OTM → credit ${call_credit:.2f} "
                 f"(short ${short_mid:.2f}, long ${long_mid:.2f})"
             )
+            evaluated_candidates.append((otm_val, short_s, long_s, call_credit))
 
-            if call_credit >= min_credit:
-                if otm_val < initial_otm:
-                    # Tightened — update entry strikes
-                    entry.short_call_strike = short_s
-                    entry.long_call_strike = long_s
-                    logger.info(
-                        f"MKT-020: Call tightened {initial_otm}pt → {otm_val}pt OTM "
-                        f"(credit: ${call_credit:.2f}, min: ${min_credit:.2f})"
-                    )
-                    self._log_safety_event(
-                        "MKT-020_CALL_TIGHTENED",
-                        f"Entry #{entry.entry_number}: call OTM {initial_otm}→{otm_val}pt, "
-                        f"credit ${call_credit:.2f}"
-                    )
+        # Phase 2: MKT-029 graduated thresholds — try primary, then fallbacks
+        # Lower thresholds let MKT-020 accept wider (further OTM) strikes with
+        # $95-$99 credit instead of tightening to narrow strikes for $125.
+        # Wider = better cushion = safer.
+        call_thresholds = [min_credit, min_credit - 5, min_credit - 10]
+        for threshold_idx, threshold in enumerate(call_thresholds):
+            for otm_val, short_s, long_s, call_credit in evaluated_candidates:
+                if call_credit >= threshold:
+                    is_fallback = threshold_idx > 0
+                    if otm_val < initial_otm:
+                        # Tightened — update entry strikes
+                        entry.short_call_strike = short_s
+                        entry.long_call_strike = long_s
+                        if is_fallback:
+                            logger.info(
+                                f"MKT-029: Call credit ${call_credit:.2f} accepted at "
+                                f"fallback ${threshold:.2f} (primary: ${min_credit:.2f})"
+                            )
+                            self._log_safety_event(
+                                "MKT-029_CALL_FALLBACK",
+                                f"Entry #{entry.entry_number}: call credit ${call_credit:.2f} "
+                                f"at fallback ${threshold:.2f} (primary ${min_credit:.2f})"
+                            )
+                        logger.info(
+                            f"MKT-020: Call tightened {initial_otm}pt → {otm_val}pt OTM "
+                            f"(credit: ${call_credit:.2f}, min: ${threshold:.2f})"
+                        )
+                        self._log_safety_event(
+                            "MKT-020_CALL_TIGHTENED",
+                            f"Entry #{entry.entry_number}: call OTM {initial_otm}→{otm_val}pt, "
+                            f"credit ${call_credit:.2f}"
+                        )
 
-                    # Re-run all strike conflict checks on tightened strikes
-                    self._adjust_for_strike_conflicts(entry)
-                    self._adjust_for_same_strike_overlap(entry)
-                    self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
-                    self._adjust_for_long_strike_overlap(entry)
-                    return True
-                else:
-                    # Current OTM already viable — no tightening needed
-                    logger.debug(
-                        f"MKT-020: Call credit ${call_credit:.2f} already viable at {otm_val}pt OTM"
-                    )
-                    return False
+                        # Re-run all strike conflict checks on tightened strikes
+                        self._adjust_for_strike_conflicts(entry)
+                        self._adjust_for_same_strike_overlap(entry)
+                        self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
+                        self._adjust_for_long_strike_overlap(entry)
+                        return True
+                    else:
+                        # Current OTM already viable — no tightening needed
+                        if is_fallback:
+                            logger.info(
+                                f"MKT-029: Call credit ${call_credit:.2f} already viable at "
+                                f"fallback ${threshold:.2f} (primary: ${min_credit:.2f})"
+                            )
+                        else:
+                            logger.debug(
+                                f"MKT-020: Call credit ${call_credit:.2f} already viable "
+                                f"at {otm_val}pt OTM"
+                            )
+                        return False
 
-        # Couldn't find viable credit even at OTM floor
+        # All thresholds exhausted — couldn't find viable credit
         logger.info(
-            f"MKT-020: Call credit non-viable even at {min_otm}pt OTM floor. "
+            f"MKT-020: Call credit non-viable even at ${call_thresholds[-1]:.2f} floor. "
             f"MKT-011 will handle (convert to put-only or skip)."
         )
         return False
@@ -1524,7 +1583,8 @@ class HydraStrategy(MEICStrategy):
             logger.warning(f"MKT-022: Batch quote fetch failed: {e}")
             return False
 
-        # Evaluate candidates from widest OTM to narrowest
+        # Phase 1: Compute credits for all candidates (quotes already batch-fetched)
+        evaluated_candidates = []
         for otm_val, short_s, long_s, short_uic, long_uic in candidate_uics:
             if not short_uic or not long_uic:
                 continue
@@ -1556,38 +1616,64 @@ class HydraStrategy(MEICStrategy):
                 f"MKT-022: {otm_val}pt OTM → credit ${put_credit:.2f} "
                 f"(short ${short_mid:.2f}, long ${long_mid:.2f})"
             )
+            evaluated_candidates.append((otm_val, short_s, long_s, put_credit))
 
-            if put_credit >= min_credit:
-                if otm_val < initial_otm:
-                    # Tightened — update entry strikes
-                    entry.short_put_strike = short_s
-                    entry.long_put_strike = long_s
-                    logger.info(
-                        f"MKT-022: Put tightened {initial_otm}pt → {otm_val}pt OTM "
-                        f"(credit: ${put_credit:.2f}, min: ${min_credit:.2f})"
-                    )
-                    self._log_safety_event(
-                        "MKT-022_PUT_TIGHTENED",
-                        f"Entry #{entry.entry_number}: put OTM {initial_otm}→{otm_val}pt, "
-                        f"credit ${put_credit:.2f}"
-                    )
+        # Phase 2: MKT-029 graduated thresholds — try primary, then fallbacks
+        # Lower thresholds let MKT-022 accept wider (further OTM) strikes with
+        # $170-$174 credit instead of tightening to narrow strikes for $200+.
+        # Wider = better cushion = safer.
+        put_thresholds = [min_credit, min_credit - 5, min_credit - 10]
+        for threshold_idx, threshold in enumerate(put_thresholds):
+            for otm_val, short_s, long_s, put_credit in evaluated_candidates:
+                if put_credit >= threshold:
+                    is_fallback = threshold_idx > 0
+                    if otm_val < initial_otm:
+                        # Tightened — update entry strikes
+                        entry.short_put_strike = short_s
+                        entry.long_put_strike = long_s
+                        if is_fallback:
+                            logger.info(
+                                f"MKT-029: Put credit ${put_credit:.2f} accepted at "
+                                f"fallback ${threshold:.2f} (primary: ${min_credit:.2f})"
+                            )
+                            self._log_safety_event(
+                                "MKT-029_PUT_FALLBACK",
+                                f"Entry #{entry.entry_number}: put credit ${put_credit:.2f} "
+                                f"at fallback ${threshold:.2f} (primary ${min_credit:.2f})"
+                            )
+                        logger.info(
+                            f"MKT-022: Put tightened {initial_otm}pt → {otm_val}pt OTM "
+                            f"(credit: ${put_credit:.2f}, min: ${threshold:.2f})"
+                        )
+                        self._log_safety_event(
+                            "MKT-022_PUT_TIGHTENED",
+                            f"Entry #{entry.entry_number}: put OTM {initial_otm}→{otm_val}pt, "
+                            f"credit ${put_credit:.2f}"
+                        )
 
-                    # Re-run all strike conflict checks on tightened strikes
-                    self._adjust_for_strike_conflicts(entry)
-                    self._adjust_for_same_strike_overlap(entry)
-                    self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
-                    self._adjust_for_long_strike_overlap(entry)
-                    return True
-                else:
-                    # Current OTM already viable — no tightening needed
-                    logger.debug(
-                        f"MKT-022: Put credit ${put_credit:.2f} already viable at {otm_val}pt OTM"
-                    )
-                    return False
+                        # Re-run all strike conflict checks on tightened strikes
+                        self._adjust_for_strike_conflicts(entry)
+                        self._adjust_for_same_strike_overlap(entry)
+                        self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
+                        self._adjust_for_long_strike_overlap(entry)
+                        return True
+                    else:
+                        # Current OTM already viable — no tightening needed
+                        if is_fallback:
+                            logger.info(
+                                f"MKT-029: Put credit ${put_credit:.2f} already viable at "
+                                f"fallback ${threshold:.2f} (primary: ${min_credit:.2f})"
+                            )
+                        else:
+                            logger.debug(
+                                f"MKT-022: Put credit ${put_credit:.2f} already viable "
+                                f"at {otm_val}pt OTM"
+                            )
+                        return False
 
-        # Couldn't find viable credit even at OTM floor
+        # All thresholds exhausted — couldn't find viable credit
         logger.info(
-            f"MKT-022: Put credit non-viable even at {min_otm}pt OTM floor. "
+            f"MKT-022: Put credit non-viable even at ${put_thresholds[-1]:.2f} floor. "
             f"MKT-011 will handle (convert to call-only or skip)."
         )
         return False

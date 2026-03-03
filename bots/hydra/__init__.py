@@ -14,6 +14,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both non-viable: Skip entry entirely
 
 Version History:
+- 1.6.2 (2026-03-03): MKT-029 graduated credit fallback thresholds (calls $1.00→$0.95→$0.90, puts $1.75→$1.70→$1.65 — prevents skipping entries barely below minimum)
 - 1.6.1 (2026-03-03): Telegram /lastday and /account commands (historical data lookups from Google Sheets)
 - 1.6.0 (2026-03-02): MKT-028 asymmetric spread widths (put floor 75pt, call floor 60pt — put longs cost 7x more due to skew, wider = cheaper = pure savings since MKT-025 never closes longs). MKT-024 upgraded to 3.5x/4.0x starting OTM (batch API = zero extra cost, catches extra cushion on high-credit days). Drop Entry #6 (5 entries, frees margin for wider spreads: 5 x 75pt x $100 = $37,500 <= $39,000). max_spread_width 75pt margin cap.
 - 1.5.1 (2026-03-02): Telegram /snapshot command (on-demand position snapshot)
