@@ -3315,8 +3315,8 @@ class HydraStrategy(MEICStrategy):
         ]
 
         # Strikes
-        call_width = abs(entry.call_long_strike - entry.call_short_strike)
-        put_width = abs(entry.put_short_strike - entry.put_long_strike)
+        call_width = abs(entry.long_call_strike - entry.short_call_strike)
+        put_width = abs(entry.short_put_strike - entry.long_put_strike)
 
         lines.append("")
         lines.append("\u2501\u2501\u2501 Strikes \u2501\u2501\u2501")
@@ -3325,12 +3325,12 @@ class HydraStrategy(MEICStrategy):
         put_skipped = getattr(entry, 'put_side_skipped', False)
 
         if not call_skipped:
-            lines.append(f"Call: Short {entry.call_short_strike:.0f} / Long {entry.call_long_strike:.0f} ({call_width:.0f}pt)")
+            lines.append(f"Call: Short {entry.short_call_strike:.0f} / Long {entry.long_call_strike:.0f} ({call_width:.0f}pt)")
         else:
             lines.append("Call: SKIPPED")
 
         if not put_skipped:
-            lines.append(f"Put: Short {entry.put_short_strike:.0f} / Long {entry.put_long_strike:.0f} ({put_width:.0f}pt)")
+            lines.append(f"Put: Short {entry.short_put_strike:.0f} / Long {entry.long_put_strike:.0f} ({put_width:.0f}pt)")
         else:
             lines.append("Put: SKIPPED")
 
