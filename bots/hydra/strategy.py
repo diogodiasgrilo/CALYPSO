@@ -3334,25 +3334,25 @@ class HydraStrategy(MEICStrategy):
         else:
             lines.append("Put: SKIPPED")
 
-        # Credits (stored in cents)
+        # Credits
         lines.append("")
         lines.append("\u2501\u2501\u2501 Credits \u2501\u2501\u2501")
         if not call_skipped:
-            lines.append(f"Call: ${entry.call_spread_credit / 100:.2f}")
+            lines.append(f"Call: ${entry.call_spread_credit:.0f}")
         if not put_skipped:
-            lines.append(f"Put: ${entry.put_spread_credit / 100:.2f}")
-        lines.append(f"Total: ${entry.total_credit / 100:.2f}")
+            lines.append(f"Put: ${entry.put_spread_credit:.0f}")
+        lines.append(f"Total: ${entry.total_credit:.0f}")
 
-        # Fill prices (stored in cents)
+        # Fill prices
         lines.append("")
         lines.append("\u2501\u2501\u2501 Fill Prices \u2501\u2501\u2501")
         if not call_skipped:
-            sc = f"${entry.short_call_fill_price / 100:.2f}" if entry.short_call_fill_price > 0 else "pending"
-            lc = f"${entry.long_call_fill_price / 100:.2f}" if entry.long_call_fill_price > 0 else "pending"
+            sc = f"${entry.short_call_fill_price:.2f}" if entry.short_call_fill_price > 0 else "pending"
+            lc = f"${entry.long_call_fill_price:.2f}" if entry.long_call_fill_price > 0 else "pending"
             lines.append(f"SC: {sc}  LC: {lc}")
         if not put_skipped:
-            sp = f"${entry.short_put_fill_price / 100:.2f}" if entry.short_put_fill_price > 0 else "pending"
-            lp = f"${entry.long_put_fill_price / 100:.2f}" if entry.long_put_fill_price > 0 else "pending"
+            sp = f"${entry.short_put_fill_price:.2f}" if entry.short_put_fill_price > 0 else "pending"
+            lp = f"${entry.long_put_fill_price:.2f}" if entry.long_put_fill_price > 0 else "pending"
             lines.append(f"SP: {sp}  LP: {lp}")
 
         # Status per side
@@ -3369,17 +3369,17 @@ class HydraStrategy(MEICStrategy):
             if skipped:
                 lines.append(f"{label}: SKIPPED")
             elif stopped:
-                lines.append(f"{label}: STOPPED (stop @ ${stop_level / 100:.0f})")
+                lines.append(f"{label}: STOPPED (stop @ ${stop_level:.0f})")
             elif expired:
                 lines.append(f"{label}: EXPIRED")
             elif stop_level > 0:
                 cushion = (stop_level - spread_value) / stop_level * 100 if stop_level > 0 else 0
-                lines.append(f"{label}: {cushion:.0f}% cushion (stop @ ${stop_level / 100:.0f})")
+                lines.append(f"{label}: {cushion:.0f}% cushion (stop @ ${stop_level:.0f})")
             else:
                 lines.append(f"{label}: \u2014")
 
         # P&L
-        pnl = entry.unrealized_pnl / 100 if hasattr(entry, 'unrealized_pnl') else 0
+        pnl = entry.unrealized_pnl if hasattr(entry, 'unrealized_pnl') else 0
         pnl_sign = "+" if pnl >= 0 else ""
         lines.append("")
         lines.append(f"P&L: {pnl_sign}${pnl:.0f}")
@@ -3423,9 +3423,9 @@ class HydraStrategy(MEICStrategy):
                 lines.append("")
                 lines.append(f"#{entry.entry_number} {sides_str} STOPPED")
                 if call_stopped:
-                    lines.append(f"  Call credit: ${entry.call_spread_credit / 100:.0f}  |  Stop: ${entry.call_side_stop / 100:.0f}")
+                    lines.append(f"  Call credit: ${entry.call_spread_credit:.0f}  |  Stop: ${entry.call_side_stop:.0f}")
                 if put_stopped:
-                    lines.append(f"  Put credit: ${entry.put_spread_credit / 100:.0f}  |  Stop: ${entry.put_side_stop / 100:.0f}")
+                    lines.append(f"  Put credit: ${entry.put_spread_credit:.0f}  |  Stop: ${entry.put_side_stop:.0f}")
 
         if not has_stops_today and (call_stops + put_stops) == 0:
             lines.append("No stops triggered today.")
