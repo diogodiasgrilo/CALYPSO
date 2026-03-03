@@ -1374,15 +1374,12 @@ class HydraStrategy(MEICStrategy):
             if short_bid <= 0 or short_ask <= 0:
                 continue  # Short illiquid, skip
 
-            short_mid = (short_bid + short_ask) / 2
+            if long_bid <= 0 and long_ask <= 0:
+                logger.debug(f"MKT-020: {otm_val}pt OTM → long call has no quote, skipping")
+                continue  # Long illiquid, skip — don't treat as $0
 
-            # Long leg: use actual quote if available, else 0 (deep OTM longs
-            # at 50-100pt OTM are worth $0-$25, so ignoring is minor).
-            # MKT-011 re-validates with independent fresh quotes after MKT-020.
-            if long_bid > 0 and long_ask > 0:
-                long_mid = (long_bid + long_ask) / 2
-            else:
-                long_mid = 0
+            short_mid = (short_bid + short_ask) / 2
+            long_mid = (long_bid + long_ask) / 2
 
             call_credit = (short_mid - long_mid) * 100
 
@@ -1545,15 +1542,12 @@ class HydraStrategy(MEICStrategy):
             if short_bid <= 0 or short_ask <= 0:
                 continue  # Short illiquid, skip
 
-            short_mid = (short_bid + short_ask) / 2
+            if long_bid <= 0 and long_ask <= 0:
+                logger.debug(f"MKT-022: {otm_val}pt OTM → long put has no quote, skipping")
+                continue  # Long illiquid, skip — don't treat as $0
 
-            # Long leg: use actual quote if available, else 0 (deep OTM longs
-            # at 50-100pt OTM are worth $0-$25, so ignoring is minor).
-            # MKT-011 re-validates with independent fresh quotes after MKT-022.
-            if long_bid > 0 and long_ask > 0:
-                long_mid = (long_bid + long_ask) / 2
-            else:
-                long_mid = 0
+            short_mid = (short_bid + short_ask) / 2
+            long_mid = (long_bid + long_ask) / 2
 
             put_credit = (short_mid - long_mid) * 100
 
