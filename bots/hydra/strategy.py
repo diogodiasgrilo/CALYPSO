@@ -183,7 +183,7 @@ class HydraStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.4.0 (2026-02-27)
+    Version: 1.8.0 (2026-03-04)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -528,7 +528,7 @@ class HydraStrategy(MEICStrategy):
     # ENTRY GATING (MKT-021 + MKT-031)
     # =========================================================================
 
-    def _should_attempt_entry(self, now) -> bool:
+    def _should_attempt_entry(self, now: datetime) -> bool:
         """
         Override: MKT-021 ROC gate + MKT-031 smart entry windows.
 

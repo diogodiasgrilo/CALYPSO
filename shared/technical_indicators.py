@@ -6,7 +6,8 @@ Implements technical indicators for trading strategies:
 - MACD (Moving Average Convergence Divergence)
 - CCI (Commodity Channel Index)
 
-Used by the Rolling Put Diagonal (RPD) strategy for entry/exit filters.
+Used by the Rolling Put Diagonal (RPD) strategy for entry/exit filters
+and by HYDRA for ATR-based smart entry window scoring (MKT-031).
 
 Author: Trading Bot Developer
 Date: 2026-01-19

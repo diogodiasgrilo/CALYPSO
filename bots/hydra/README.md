@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.7.2 | **Last Updated:** 2026-03-03
+**Version:** 1.8.0 | **Last Updated:** 2026-03-04
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -16,15 +16,28 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), and wider starting OTM (MKT-024).
 
-### Entry Schedule (5 entries — Entry #6 dropped in v1.6.0 to free margin for wider put spreads)
+### Entry Schedule (5 entries — shifted +1hr in v1.8.0, Entry #6 dropped in v1.6.0)
 
-| Entry | Time (ET) |
-|-------|-----------|
-| 1 | 10:05 AM |
-| 2 | 10:35 AM |
-| 3 | 11:05 AM |
-| 4 | 11:35 AM |
-| 5 | 12:05 PM |
+| Entry | Time (ET) | Scout Window |
+|-------|-----------|-------------|
+| 1 | 11:05 AM | 10:55-11:05 |
+| 2 | 11:35 AM | 11:25-11:35 |
+| 3 | 12:05 PM | 11:55-12:05 |
+| 4 | 12:35 PM | 12:25-12:35 |
+| 5 | 1:05 PM | 12:55-1:05 |
+
+Schedule shifted +1hr from original (v1.8.0): journal data showed 10:05 lost -$695, 10:35 lost -$510 across 7 full-entry days, while 11:05+ all positive. On early close days, cutoff is 12:00 PM (keeps entries 1-2).
+
+### Smart Entry Windows (MKT-031) — v1.8.0
+
+Before each scheduled entry, a 10-minute scouting window opens. Market conditions are scored every main-loop cycle (~2-5s). If score >= 65, the bot enters early. Otherwise, enters at the scheduled time (zero-risk fallback).
+
+**Scoring (2 parameters, 100 max):**
+
+| Parameter | Points | Data Source |
+|-----------|--------|-------------|
+| Post-spike calm (ATR declining from elevated) | 0-70 | `get_chart_data()` 1-min OHLC, cached |
+| Momentum pause (price calm over 2 min) | 0-30 | `MarketData.price_history` deque (zero API cost) |
 
 ### Credit Gate (MKT-011)
 
@@ -69,6 +82,12 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
         "recheck_each_entry": true,
         "chart_bars_count": 50,
         "chart_horizon_minutes": 1
+    },
+    "smart_entry": {
+        "enabled": true,
+        "window_minutes": 10,
+        "score_threshold": 65,
+        "momentum_threshold_pct": 0.05
     }
 }
 ```
@@ -82,6 +101,15 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `recheck_each_entry` | `true` | Re-check EMAs before each entry |
 | `chart_bars_count` | `50` | Number of 1-min bars to fetch |
 | `chart_horizon_minutes` | `1` | Bar interval (1 = 1 minute) |
+
+### Smart Entry Config (MKT-031)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `true` | Enable/disable smart entry scouting |
+| `window_minutes` | `10` | Scouting window before each entry (minutes) |
+| `score_threshold` | `65` | Score >= this triggers early entry |
+| `momentum_threshold_pct` | `0.05` | Momentum calm threshold (0.05 = 0.05%) |
 
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
@@ -145,8 +173,9 @@ sudo journalctl -u hydra -f
 | Entry type | Always full IC | Full IC + credit gate (skip if non-viable) |
 | Starting OTM | VIX-adjusted | 3.5× calls, 4.0× puts (MKT-024), then tightened |
 | Spread widths | 50pt fixed | Asymmetric: call 60pt, put 75pt floor, 75pt cap (MKT-026/027/028) |
-| Credit minimums | $0.50/side | $1.00 calls, $1.75 puts |
+| Credit minimums | $0.50/side | $0.75 calls, $1.75 puts |
 | Trend signal | None | EMA 20/40 (informational only) |
+| Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | Stop formula | total_credit - $0.10 | total_credit - $0.15 (covers commission) |
 | Stop execution | Close both legs | Close SHORT only, long expires (MKT-025) |
@@ -191,6 +220,12 @@ bots/hydra/
 
 ## Version History
 
+- **1.8.0** (2026-03-04): Entry schedule shifted +1hr (11:05-13:05), MKT-031 smart entry windows (10min scouting, 2-parameter scoring: ATR calm 0-70pts + momentum pause 0-30pts, threshold 65), early close day cutoff raised to 12:00 PM
+- **1.7.2** (2026-03-03): Lower call minimum from $1.00 to $0.75 (credit cushion analysis)
+- **1.7.1** (2026-03-03): Re-enable MKT-011 put-only entries (87.5% WR, +$870 net). Strict $1.00 call min.
+- **1.7.0** (2026-03-03): 8 new Telegram commands (/status, /hermes, /apollo, /week, /entry, /stops, /config, /help)
+- **1.6.2** (2026-03-03): MKT-029 graduated credit fallback thresholds
+- **1.6.1** (2026-03-03): Telegram /lastday and /account commands
 - **1.6.0** (2026-03-02): Drop Entry #6 (frees margin for wider puts), MKT-028 asymmetric spreads (call 60pt, put 75pt floor, cap 75pt), MKT-024 updated (3.5× calls, 4.0× puts), MKT-027 VIX-scaled spread width continuous formula
 - **1.5.0** (2026-02-28): Rename MEIC-TF → HYDRA (service, state, metrics, Sheets all renamed), Telegram /snapshot command, 30-min periodic position snapshots, alert system channel routing + BOT_STARTED/STOPPED + error isolation
 - **1.4.5** (2026-02-28): MKT-026 min spread width raised from 25pt to 60pt (longs cheaper on low-VIX days, MKT-025 never closes longs = pure savings)
