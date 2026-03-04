@@ -759,13 +759,21 @@ class HydraStrategy(MEICStrategy):
         long_atr = calculate_atr(list(vh), list(vl), list(vc), period=min(14, len(valid) - 1))
 
         if current_atr <= 0 or prev_atr <= 0:
+            logger.debug(f"MKT-031 ATR: zero values (current={current_atr:.4f}, prev={prev_atr:.4f})")
             return 0
 
         is_declining = current_atr < prev_atr
         was_elevated = prev_atr > (long_atr * 1.5) if long_atr > 0 else False
+        decline_pct = (prev_atr - current_atr) / prev_atr if is_declining else 0
+
+        logger.debug(
+            f"MKT-031 ATR: current={current_atr:.4f}, prev={prev_atr:.4f}, "
+            f"long={long_atr:.4f}, declining={is_declining}, "
+            f"elevated={was_elevated} (threshold={long_atr * 1.5:.4f}), "
+            f"decline={decline_pct*100:.1f}%"
+        )
 
         if is_declining and was_elevated:
-            decline_pct = (prev_atr - current_atr) / prev_atr
             if decline_pct >= 0.50:
                 return 70
             elif decline_pct >= 0.25:
@@ -800,10 +808,18 @@ class HydraStrategy(MEICStrategy):
                 break
 
         if not oldest or oldest <= 0:
+            logger.debug(f"MKT-031 Momentum: no price found in 2min window (history={len(history)})")
             return 0
 
         pct = abs((self.current_price - oldest) / oldest) * 100
         threshold = self.scout_momentum_threshold
+        delta = self.current_price - oldest
+
+        logger.debug(
+            f"MKT-031 Momentum: price={self.current_price:.2f}, "
+            f"2min_ago={oldest:.2f}, delta={delta:+.2f}, "
+            f"pct={pct:.4f}% (thresholds: {threshold*0.5:.3f}/{threshold:.3f}/{threshold*2:.3f})"
+        )
 
         if pct < threshold * 0.5:
             return 30   # Very calm (< 0.025%)
@@ -1435,6 +1451,10 @@ class HydraStrategy(MEICStrategy):
             self._last_ema_short = ema_short
             self._last_ema_long = ema_long
             self._last_ema_diff_pct = diff_pct
+
+            # MKT-031: Cache raw bars for ATR scoring (zero extra API cost)
+            self._cached_chart_bars = bars
+            self._cached_chart_time = get_us_market_time()
 
             logger.info(
                 f"Trend detection: EMA{self.ema_short_period}={ema_short:.2f}, "
@@ -3052,6 +3072,15 @@ class HydraStrategy(MEICStrategy):
                 status['early_close_status'] = ec_dict
             else:
                 status['early_close_status'] = {}
+
+        # MKT-031: Continuous scout score for backtesting data
+        if self.smart_entry_enabled and self._cached_chart_bars:
+            spike_score = self._score_post_spike_calm()
+            momentum_score = self._score_momentum_pause()
+            total_score = spike_score + momentum_score
+            status['scout_score'] = total_score
+            status['scout_spike'] = spike_score
+            status['scout_momentum'] = momentum_score
 
         return status
 

@@ -389,6 +389,10 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                     mode_prefix = "[DRY RUN] " if dry_run else ""
 
                     total_pnl = status['realized_pnl'] + status['unrealized_pnl']
+                    # MKT-031: Append scout score to heartbeat if available
+                    scout_suffix = ""
+                    if 'scout_score' in status:
+                        scout_suffix = f" | Scout: {status['scout_score']}/{strategy.scout_score_threshold}"
                     heartbeat_msg = (
                         f"{mode_prefix}HEARTBEAT | {status['state']} | "
                         f"SPX: {status['underlying_price']:.2f} | "
@@ -396,8 +400,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                         f"Entries: {status['entries_completed']}/{len(strategy.entry_times)} | "
                         f"Active: {status['active_entries']} | "
                         f"Trend: {status.get('current_trend', 'N/A')}"
+                        f"{scout_suffix}"
                     )
                     trade_logger.log_event(heartbeat_msg)
+
+                    # MKT-031: Detailed scout score breakdown line
+                    if 'scout_score' in status:
+                        trade_logger.log_event(
+                            f"  Scout: {status['scout_score']}/{strategy.scout_score_threshold} "
+                            f"[spike={status['scout_spike']}, momentum={status['scout_momentum']}]"
+                        )
 
                     try:
                         position_lines = strategy.get_detailed_position_status()
