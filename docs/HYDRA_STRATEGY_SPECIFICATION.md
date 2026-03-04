@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-03-03
-**Version:** 1.6.0
+**Last Updated:** 2026-03-04
+**Version:** 1.8.0
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -594,7 +594,7 @@ Entry #1 → #2 → #3 placed normally
 | State | Description |
 |-------|-------------|
 | IDLE | No position, waiting for market open |
-| WAITING_FIRST_ENTRY | Market open, waiting for 10:05 AM |
+| WAITING_FIRST_ENTRY | Market open, waiting for 11:05 AM (or 10:55 with MKT-031 scouting) |
 | ENTRY_IN_PROGRESS | Currently placing an entry |
 | MONITORING | Active entries, watching stops + ROC |
 | STOP_TRIGGERED | Processing a stop loss |
@@ -606,7 +606,7 @@ Entry #1 → #2 → #3 placed normally
 
 ```
 IDLE → WAITING_FIRST_ENTRY           (9:30 AM)
-WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (10:05 AM)
+WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (11:05 AM, or earlier via MKT-031)
 ENTRY_IN_PROGRESS → MONITORING       (entry placed)
 MONITORING → ENTRY_IN_PROGRESS       (next entry time)
 MONITORING → STOP_TRIGGERED          (spread_value >= stop_level)
@@ -622,12 +622,13 @@ Any → HALTED                         (critical: overnight positions, stale reg
 |-----------|-------|
 | Midnight | `_reset_for_new_day()`: clear daily state, verify stale registry (Fix #82) |
 | 9:30 AM | Market opens, transition to WAITING_FIRST_ENTRY |
-| 10:05 AM | Entry #1 (trend detection → strike calc → credit gate → execution) |
-| 10:35 AM | Entry #2 |
-| 11:05 AM | Entry #3 |
-| 11:35 AM | Entry #4 (MKT-021 ROC gate check first) |
-| 12:05 PM | Entry #5 (MKT-021 ROC gate check first) |
-| 12:05+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
+| 10:55 AM | MKT-031 scouting opens for Entry #1 (score market conditions every ~2-5s) |
+| 11:05 AM | Entry #1 (trend detection → strike calc → credit gate → execution). Earlier if MKT-031 score >= 65. |
+| 11:35 AM | Entry #2 (scouting from 11:25) |
+| 12:05 PM | Entry #3 (scouting from 11:55) |
+| 12:35 PM | Entry #4 (scouting from 12:25) |
+| 13:05 PM | Entry #5 (scouting from 12:55) |
+| 13:05+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
 | 3:45 PM | Last 15 min, positions expire naturally at settlement |
 | 4:00 PM | Market close, 0DTE options expire/settle |
 | 4:00-5:00 PM | `check_after_hours_settlement()`: process expired credits |
@@ -777,7 +778,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 ### EMA Lag
 
-EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at 10:05 (correct for the first move) then BULLISH at 11:35 (correct for the reversal). Since v1.4.0, the EMA signal is informational only (all entries are full ICs), so lag only affects the logged signal — not entry type.
+EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at the first entry (correct for the first move) then BULLISH later (correct for the reversal). Since v1.4.0, the EMA signal is informational only (all entries are full ICs), so lag only affects the logged signal — not entry type.
 
 ### Volatility Skew
 

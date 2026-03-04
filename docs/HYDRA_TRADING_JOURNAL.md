@@ -22,7 +22,7 @@
 
 ## 1. Trading Period: Feb 10 - Mar 3, 2026
 
-**Bot Versions**: v1.2.7 (Feb 10-17), v1.2.8 (Feb 18), v1.2.9 (Feb 18 post-market), v1.3.0 (Feb 19), v1.3.2 (Feb 20-23), v1.3.5-v1.3.8 (Feb 24), v1.3.9-v1.3.11 (Feb 25-26), v1.4.0-v1.4.1 (Feb 27), v1.4.2-v1.5.0 (Feb 28 rename to HYDRA), v1.5.1 (Mar 2), v1.6.0-v1.7.2 (Mar 3)
+**Bot Versions**: v1.2.7 (Feb 10-17), v1.2.8 (Feb 18), v1.2.9 (Feb 18 post-market), v1.3.0 (Feb 19), v1.3.2 (Feb 20-23), v1.3.5-v1.3.8 (Feb 24), v1.3.9-v1.3.11 (Feb 25-26), v1.4.0-v1.4.1 (Feb 27), v1.4.2-v1.5.0 (Feb 28 rename to HYDRA), v1.5.1 (Mar 2), v1.6.0-v1.7.2 (Mar 3), v1.8.0 (Mar 4 — shifted +1hr, MKT-031 smart entry windows)
 **Trading Days**: 15 (Feb 10, 11, 12, 13, 17, 18, 19, 20, 23, 24, 25, 26, 27, Mar 2, 3)
 **Config**: 5 entries per day (Feb 10-27), 6 entries (Mar 2 only, v1.4.4), 5 entries (Mar 3+, v1.6.0 dropped Entry #6), EMA 20/40 trend filter
 - Feb 10-17: 0.1% neutral threshold, no cascade breaker (baseline)
@@ -37,6 +37,7 @@
 - Feb 28 (non-trading): v1.4.2 (MEIC+ $0.15), v1.4.3 (MKT-025 short-only stop), v1.4.4 (6th entry at 12:35), v1.4.5 (MKT-026 min spread 60pt), v1.5.0 (rename MEIC-TF → HYDRA)
 - Mar 2: v1.5.1 (Telegram /snapshot command), first day as HYDRA with 6 entries + MKT-025 short-only stops
 - Mar 3: v1.6.0 (drop Entry #6, 5 entries), v1.6.1 (VIX filter 25→30), MKT-024 (wider starting OTM 3.5×/4.0×), MKT-028 (asymmetric spreads call 60pt/put 75pt), v1.7.0 (MKT-027 VIX-scaled spread width), v1.7.1 (put-only re-enable), v1.7.2 (lower call min $1.00→$0.75, per-side credits, HERMES trigger)
+- Mar 4: v1.8.0 — Entry schedule shifted +1hr (11:05-13:05), MKT-031 smart entry windows (10min scouting, score >= 65 = early entry)
 **Capital Deployed**: $10,000-$38,000 per day (varies by entry count and spread width)
 
 ### Period Result
@@ -2639,7 +2640,7 @@ MKT-011 NEUTRAL skip: Yes                         ← (v1.3.6) one side non-viab
 Pre-entry ROC gate: 2.0%                          ← (MKT-021, v1.3.2)
 ```
 
-### Current Config (v1.5.1, deployed Mar 2)
+### Config as of v1.5.1 (deployed Mar 2)
 
 ```
 Entries per day: 6                                 ← RAISED from 5 (v1.4.4)
@@ -2670,16 +2671,41 @@ Pre-entry ROC gate: 3.0% (after 3 entries)         ← Gate=3 (v1.3.9), threshol
 Telegram /snapshot: Yes                            ← (v1.5.1)
 ```
 
+### Current Config (v1.8.0, deployed Mar 4)
+
+```
+Entries per day: 5                                 ← DROPPED from 6 (v1.6.0)
+Entry times: 11:05, 11:35, 12:05, 12:35, 13:05 ET ← SHIFTED +1hr (v1.8.0, journal data: 10:05/10:35 negative)
+Smart entry windows: ENABLED                       ← MKT-031 (v1.8.0) 10min scout, score >= 65 = early entry
+EMA short period: 20
+EMA long period: 40
+EMA neutral threshold: 0.002 (0.2%)               ← Signal informational only (v1.4.0)
+One-sided entries: Put-only when call non-viable   ← Re-enabled (v1.7.1, 87.5% WR)
+Min viable credit - call: $0.75 (MKT-011)         ← LOWERED from $1.00 (v1.7.2, credit cushion analysis)
+Min viable credit - put: $1.75 (MKT-011)
+Starting OTM multiplier: 3.5× call, 4.0× put     ← RAISED from 2× (MKT-024, v1.6.0)
+Call min spread width: 60 pts                      ← MKT-028 asymmetric (v1.6.0)
+Put min spread width: 75 pts                       ← MKT-028 asymmetric (v1.6.0)
+Max spread width: 75 pts                           ← Margin cap (v1.6.0)
+Spread width formula: max(floor, round(VIX×3.5/5)×5) ← MKT-027 VIX-scaled, per-side floors
+Stop level (full IC): total_credit - $0.15         ← MEIC+ (v1.4.2)
+Stop close mechanism: SHORT-ONLY                   ← MKT-025 (v1.4.3)
+Early close enabled: DISABLED                      ← MKT-018 intentionally disabled (v1.6.0)
+Progressive call tightening: Yes                   ← (MKT-020)
+Progressive put tightening: Yes                    ← (MKT-022)
+Early close day cutoff: 12:00 PM                   ← Keeps 11:05/11:35 viable (v1.8.0)
+```
+
 **Config location**: `bots/hydra/config/config.json` on VM at `/opt/calypso/`. Template at `bots/hydra/config/config.json.template` in repo.
 
 ## Appendix G: Formulas
 
 - **Expected Move** = SPX × VIX / sqrt(252) / 100
 - **Stop Level (full IC)** = Total credit - $0.15 (MEIC+ covers commission for true breakeven, v1.4.2)
-- **Stop Level (one-sided)** = N/A (one-sided entries disabled since v1.4.0)
+- **Stop Level (one-sided)** = 2 × credit (put-only re-enabled v1.7.1)
 - **Stop triggers when**: spread_value >= stop_level (cost-to-close exceeds threshold)
 - **Stop close (v1.4.3+)**: MKT-025 short-only — close short leg, long expires at settlement
-- **Spread Width (v1.5.0+)**: max(60, round(VIX × 3.5 / 5) × 5), capped at 120pt (MKT-027)
+- **Spread Width (v1.6.0+)**: max(per-side floor, round(VIX × 3.5 / 5) × 5), capped at 75pt (MKT-027 + MKT-028 asymmetric floors: call 60pt, put 75pt)
 - **Net P&L** = Expired Credits - Stop Loss Debits - Commission
 - **Net Capture Rate** = Net P&L / Total Credit Collected × 100
 - **Win Rate** = Entries with 0 stops / Total entries × 100

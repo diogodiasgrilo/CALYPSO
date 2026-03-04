@@ -8,7 +8,7 @@ EMA-based trend detection (informational) and advanced risk controls.
 
 Strategy Summary:
 -----------------
-1. 6 scheduled iron condor entries per day (10:05 - 12:35 ET)
+1. 5 scheduled iron condor entries per day (11:05 - 13:05 ET)
 2. EMA 20/40 trend signal logged per entry (informational only)
 3. Credit gate validates minimum credit before each entry
 4. Progressive OTM tightening finds optimal strikes
@@ -139,11 +139,11 @@ def print_banner():
     ║         ══════════════════════                                ║
     ║                                                               ║
     ║         Multi-Entry Iron Condors (SPX 0DTE)                   ║
-    ║         6 Entries | Credit Gates | Smart Exits                ║
+    ║         5 Entries | Credit Gates | Smart Entry                 ║
     ║                                                               ║
-    ║         10:05  10:35  11:05  11:35  12:05  12:35              ║
+    ║         11:05  11:35  12:05  12:35  13:05                     ║
     ║                                                               ║
-    ║         Version: 1.4.5                                        ║
+    ║         Version: 1.8.0                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
