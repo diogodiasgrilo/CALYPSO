@@ -284,6 +284,12 @@ class HydraStrategy(MEICStrategy):
         if self.early_close_enabled:
             logger.info(f"  Hold check (MKT-023): {'ENABLED' if self.hold_check_enabled else 'DISABLED'} (lean tolerance {self.hold_check_lean_tolerance}%)")
 
+        # MKT-011 one-sided entry toggle — set false to skip entirely when either side is non-viable
+        # When true (default): call non-viable + put viable → put-only entry (v1.7.1 behavior)
+        # When false: call non-viable → skip entry entirely (pre-v1.7.1 behavior)
+        self.one_sided_entries_enabled = strategy_config.get("one_sided_entries_enabled", True)
+        logger.info(f"  One-sided entries: {'ENABLED' if self.one_sided_entries_enabled else 'DISABLED (skip if either side non-viable)'}")
+
         # Override min credit from base class $0.50 to $0.75 for HYDRA
         # Credit cushion analysis (docs/HYDRA_CREDIT_CUSHION_ANALYSIS.md):
         # $0.75 call min → 68.1% call cushion (above 65% safety threshold)
@@ -1563,19 +1569,33 @@ class HydraStrategy(MEICStrategy):
 
         # One side viable, other not
         if not call_viable:
-            # Call non-viable, put viable → put-only entry (re-enabled v1.7.1)
-            logger.info(
-                f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
-                f"(${estimated_call:.2f} < ${call_min:.2f}) - "
-                f"put ${estimated_put:.2f} viable → converting to put-only"
-            )
-            self._log_safety_event(
-                "MKT-011_PUT_ONLY",
-                f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable, "
-                f"put ${estimated_put:.2f} → put-only",
-                "Put-Only"
-            )
-            return ("put_only", True, estimated_call, estimated_put)
+            if self.one_sided_entries_enabled:
+                # Call non-viable, put viable → put-only entry (v1.7.1)
+                logger.info(
+                    f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
+                    f"(${estimated_call:.2f} < ${call_min:.2f}) - "
+                    f"put ${estimated_put:.2f} viable → converting to put-only"
+                )
+                self._log_safety_event(
+                    "MKT-011_PUT_ONLY",
+                    f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable, "
+                    f"put ${estimated_put:.2f} → put-only",
+                    "Put-Only"
+                )
+                return ("put_only", True, estimated_call, estimated_put)
+            else:
+                # One-sided disabled → skip entirely
+                logger.warning(
+                    f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
+                    f"(${estimated_call:.2f} < ${call_min:.2f}) - "
+                    f"SKIPPING (one-sided entries disabled)"
+                )
+                self._log_safety_event(
+                    "MKT-011_SKIP",
+                    f"Entry #{entry.entry_number} - call non-viable, one-sided disabled",
+                    "Skipped"
+                )
+                return ("skip", True, estimated_call, estimated_put)
         else:
             # Put non-viable, call viable → skip (call-only disabled)
             logger.warning(

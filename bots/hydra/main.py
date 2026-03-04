@@ -3,7 +3,7 @@
 main.py - HYDRA 0DTE Trading Bot Entry Point
 
 HYDRA: Multi-entry iron condor bot with credit gates, progressive OTM tightening,
-and smart exit management. Based on Tammy Chambless's MEIC strategy with
+and smart entry windows (MKT-031). Based on Tammy Chambless's MEIC strategy with
 EMA-based trend detection (informational) and advanced risk controls.
 
 Strategy Summary:

@@ -1,7 +1,7 @@
 # HYDRA 0DTE Trading Bot Systemd Service
 #
 # Multi-Entry Iron Condors (SPX 0DTE) with credit gates, progressive OTM
-# tightening, and smart exits. Based on Tammy Chambless's MEIC strategy.
+# tightening, and smart entry windows (MKT-031). Based on Tammy Chambless's MEIC strategy.
 #
 # Installation:
 #   sudo cp /opt/calypso/bots/hydra/hydra.service /etc/systemd/system/hydra.service
