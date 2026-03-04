@@ -17,8 +17,8 @@
         "_comment_vix": "VIX spot for volatility filtering",
         "vix_spot_uic": 10606,
 
-        "_comment_entry_times": "Entry times in HH:MM format (US Eastern). 5 entries (dropped #6 to free margin for wider put spreads)",
-        "entry_times": ["10:05", "10:35", "11:05", "11:35", "12:05"],
+        "_comment_entry_times": "Entry times in HH:MM format (US Eastern). 5 entries shifted +1hr (10:05/10:35 consistently negative in 15-day journal, 11:05+ all positive). MKT-031 smart entry scouting starts 10min before each time.",
+        "entry_times": ["11:05", "11:35", "12:05", "12:35", "13:05"],
         "entry_window_minutes": 5,
 
         "_comment_spread": "MKT-028: Asymmetric spread widths. Put floor 75pt (put longs 7x more expensive due to skew, MKT-025 never closes longs = pure savings). Call floor 60pt. Max 75pt = margin cap (5 entries x 75pt x $100 = $37,500 <= $39,000). min_spread_width=60 is MKT-008 liquidity fallback floor",
@@ -77,6 +77,13 @@
         "recheck_each_entry": true,
         "chart_bars_count": 50,
         "chart_horizon_minutes": 1
+    },
+    "smart_entry": {
+        "_comment": "MKT-031: Smart entry windows. 2-parameter scoring (post-spike calm + momentum pause) over 10min window before each entry. Score >= 65 triggers early entry, otherwise enters at scheduled time.",
+        "enabled": true,
+        "window_minutes": 10,
+        "score_threshold": 65,
+        "momentum_threshold_pct": 0.05
     },
     "filters": {
         "_comment": "Skip trading on FOMC announcement days due to high volatility",

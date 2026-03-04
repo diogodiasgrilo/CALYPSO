@@ -145,6 +145,40 @@ def calculate_sma(prices: List[float], period: int) -> float:
     return sum(prices[-period:]) / period
 
 
+def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 3) -> float:
+    """
+    Calculate Average True Range (ATR).
+
+    ATR measures volatility using True Range:
+    TR = max(High - Low, |High - PrevClose|, |Low - PrevClose|)
+    ATR = SMA(TR, period)
+
+    Used by HYDRA MKT-031 smart entry windows to detect post-spike calm.
+
+    Args:
+        highs: List of high prices (oldest to newest)
+        lows: List of low prices (oldest to newest)
+        closes: List of close prices (oldest to newest)
+        period: Number of periods for ATR (default 3)
+
+    Returns:
+        ATR value, or 0.0 if insufficient data
+    """
+    if len(highs) < period + 1:
+        return 0.0
+    true_ranges = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        true_ranges.append(tr)
+    if len(true_ranges) < period:
+        return 0.0
+    return sum(true_ranges[-period:]) / period
+
+
 def calculate_ema(prices: List[float], period: int) -> List[float]:
     """
     Calculate Exponential Moving Average.

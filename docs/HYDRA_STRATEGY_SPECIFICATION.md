@@ -106,17 +106,43 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 ### Entry Schedule
 
-5 entries per day, spaced 30 minutes apart (Entry #6 dropped in v1.6.0 to free margin for wider put spreads):
+5 entries per day, spaced 30 minutes apart. Shifted +1 hour in v1.8.0 based on 15-day journal data (10:05 lost -$695, 10:35 lost -$510 across 7 full-entry days; 11:05+ all positive). Aligned with external research: Option Alpha 25k trades (ICs after 11:30 = +37%), Sandvand 9,100 trades (1 PM+ most profitable), U-shaped intraday volatility (trough 11:30-12:30).
 
 | Entry | Time (ET) | Notes |
 |-------|-----------|-------|
-| 1 | 10:05 AM | 35 min after open; opening volatility settled |
-| 2 | 10:35 AM | |
-| 3 | 11:05 AM | |
-| 4 | 11:35 AM | MKT-021 ROC gate before #4 (disabled) |
-| 5 | 12:05 PM | MKT-021 ROC gate before #5 (disabled) |
+| 1 | 11:05 AM | Mid-morning; opening volatility settled |
+| 2 | 11:35 AM | Entering volatility trough |
+| 3 | 12:05 PM | |
+| 4 | 12:35 PM | MKT-021 ROC gate before #4 (disabled) |
+| 5 | 1:05 PM | MKT-021 ROC gate before #5 (disabled) |
 
-Each entry has a 5-minute window. If the entry time passes and the bot hasn't placed the entry (e.g., pending previous stop), it still attempts within the window.
+Each entry has a 5-minute retry window after the scheduled time. MKT-031 smart entry windows add a 10-minute scouting period BEFORE each scheduled time (see Smart Entry Windows section below).
+
+### Smart Entry Windows (MKT-031)
+
+Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scouting window before each entry. Market conditions are scored every main-loop cycle (~2-5s). If the composite score >= 65, the bot enters early. Otherwise, it enters at the scheduled time (identical to previous behavior).
+
+```
+10:55  Scouting opens — start scoring every 2-5s
+10:58  Score = 42 (momentum rough, ATR high)
+11:01  Score = 71 → EARLY ENTRY TRIGGERED (4 min early)
+  -- OR --
+11:05  Window expires → ENTER ANYWAY (same as current behavior)
+11:10  Original 5-min retry window still available if entry fails
+```
+
+**Scoring (2 parameters, 100 max):**
+
+| Parameter | Points | Data Source |
+|-----------|--------|-------------|
+| Post-spike calm (ATR declining from elevated) | 0-70 | 1-min OHLC bars via `get_chart_data()`, cached |
+| Momentum pause (price calm over 2 min) | 0-30 | `MarketData.price_history` deque (zero API cost) |
+
+**Parameter 1 — Post-spike calm:** Compares ATR(3) over recent bars vs previous bars. "Elevated" = previous ATR(3) > 1.5× long-term ATR(14). Declining 50%+ from elevated = 70pts, 25%+ = 55pts, 10%+ = 40pts, declining without spike = 20pts, rising = 0pts.
+
+**Parameter 2 — Momentum pause:** |SPX change| over 2 min. < 0.025% = 30pts, < 0.05% = 25pts, < 0.10% = 10pts, >= 0.10% = 0pts.
+
+**Failsafe:** If both parameters fail (API error + no price history), score = 0 → enters at scheduled time. Smart entry can never prevent an entry — it can only trigger one earlier.
 
 ### Iron Condor Structure
 
@@ -710,7 +736,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `entry_times` | `["10:05","10:35","11:05","11:35","12:05"]` | Entry schedule (ET). 5 entries (v1.6.0) |
+| `entry_times` | `["11:05","11:35","12:05","12:35","13:05"]` | Entry schedule (ET). 5 entries, shifted +1hr (v1.8.0) |
 | `entry_window_minutes` | `5` | Window around entry time |
 | `spread_width` | `50` | Default spread width (points) |
 | `min_spread_width` | `60` | MKT-008 liquidity fallback floor (universal) |

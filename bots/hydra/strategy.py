@@ -30,15 +30,15 @@ import logging
 import os
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell
 from shared.alert_service import AlertService, AlertType, AlertPriority
-from shared.market_hours import get_us_market_time
-from shared.technical_indicators import get_current_ema
+from shared.market_hours import get_us_market_time, is_early_close_day
+from shared.technical_indicators import get_current_ema, calculate_atr
 
 # Import the base MEIC classes we need
 from bots.meic.strategy import (
@@ -51,6 +51,7 @@ from bots.meic.strategy import (
     REGISTRY_FILE,
     ENTRY_MAX_RETRIES,
     ENTRY_RETRY_DELAY_SECONDS,
+    ENTRY_WINDOW_MINUTES,
     is_fomc_meeting_day,
     # P&L sanity check constants (Fix #39 - one-sided entry validation)
     PNL_SANITY_CHECK_ENABLED,
@@ -74,7 +75,11 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.7.2"
+HYDRA_VERSION = "1.8.0"
+
+# MKT-031: Smart Entry Window defaults
+DEFAULT_SCOUT_WINDOW_MINUTES = 10
+DEFAULT_SCOUT_SCORE_THRESHOLD = 65
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -313,6 +318,24 @@ class HydraStrategy(MEICStrategy):
                     f"call floor={self.call_min_spread_width}pt, put floor={self.put_min_spread_width}pt, "
                     f"cap={self.max_spread_width}pt")
 
+        # MKT-031: Smart entry windows (top-level config, same as trend_filter)
+        smart_entry = config.get("smart_entry", {})
+        self.smart_entry_enabled = smart_entry.get("enabled", True)
+        self.scout_window_minutes = smart_entry.get("window_minutes", DEFAULT_SCOUT_WINDOW_MINUTES)
+        self.scout_score_threshold = smart_entry.get("score_threshold", DEFAULT_SCOUT_SCORE_THRESHOLD)
+        self.scout_momentum_threshold = smart_entry.get("momentum_threshold_pct", 0.05)
+        logger.info(f"  Smart entry (MKT-031): {'ENABLED' if self.smart_entry_enabled else 'DISABLED'} "
+                    f"(window={self.scout_window_minutes}min, threshold={self.scout_score_threshold})")
+
+        # MKT-031: Scouting state (in-memory, no persistence needed)
+        self._scouting_active = False
+        self._scouting_window_start = None
+        self._scouting_entry_index = -1
+        self._last_scout_score = 0
+        self._last_scout_details = {}
+        self._cached_chart_bars = None
+        self._cached_chart_time = None
+
     # =========================================================================
     # OVERRIDE: Spread width with VIX-scaled formula (MKT-027)
     # =========================================================================
@@ -470,24 +493,53 @@ class HydraStrategy(MEICStrategy):
         return True
 
     # =========================================================================
-    # ENTRY GATING (MKT-021)
+    # OVERRIDE: Entry time parsing for shifted schedule
+    # =========================================================================
+
+    def _parse_entry_times(self):
+        """
+        Override: early close cutoff at 12:00 PM for shifted schedule.
+
+        Base MEIC filters entries to before 11:00 AM on early close days.
+        With shifted schedule (11:05-13:05), that filter removes ALL entries.
+        HYDRA uses 12:00 PM cutoff — keeps 11:05 and 11:35 (1+ hour before 1 PM close).
+        """
+        # Parse from config (same as base)
+        entry_time_strs = self.strategy_config.get("entry_times", None)
+        if entry_time_strs:
+            self.entry_times = [
+                dt_time(int(p[0]), int(p[1]))
+                for p in (t.split(":") for t in entry_time_strs)
+            ]
+        else:
+            self.entry_times = [
+                dt_time(11, 5), dt_time(11, 35), dt_time(12, 5),
+                dt_time(12, 35), dt_time(13, 5)
+            ]
+
+        if is_early_close_day():
+            early_cutoff = dt_time(12, 0)  # Keep 11:05, 11:35
+            self.entry_times = [t for t in self.entry_times if t < early_cutoff]
+            if not self.entry_times:
+                self.entry_times = [dt_time(11, 5)]
+            logger.info(f"HYDRA early close schedule: {[t.strftime('%H:%M') for t in self.entry_times]}")
+
+    # =========================================================================
+    # ENTRY GATING (MKT-021 + MKT-031)
     # =========================================================================
 
     def _should_attempt_entry(self, now) -> bool:
         """
-        Override parent to add pre-entry ROC gate (MKT-021).
+        Override: MKT-021 ROC gate + MKT-031 smart entry windows.
 
         MKT-021: After min_entries_before_roc_gate entries placed, if ROC on
         existing positions >= early_close_roc_threshold, skip remaining entries.
-        MKT-018 early close fires on same heartbeat cycle at undiluted ROC.
 
-        Existing positions continue to be monitored for stops normally.
+        MKT-031: Opens a scouting window before each entry. Scores market
+        conditions (post-spike calm + momentum pause). If score >= threshold,
+        enter early. Otherwise, enter at scheduled time as usual.
         """
         # MKT-021: Pre-entry ROC gate (only when MKT-018 early close is enabled)
-        # If ROC on existing entries already exceeds early close threshold,
-        # skip remaining entries (counts actual placed entries, not time slots).
-        # Early close will fire on the same heartbeat cycle since the gate
-        # blocks all remaining entry attempts.
         if self._roc_gate_triggered:
             return False
 
@@ -524,12 +576,242 @@ class HydraStrategy(MEICStrategy):
                     self._next_entry_index = len(self.entry_times)
                     return False
 
-        # Delegate to parent for normal time-window checks
-        return super()._should_attempt_entry(now)
+        # MKT-031: Smart entry windows
+        if not self.smart_entry_enabled:
+            return super()._should_attempt_entry(now)
+
+        if self._next_entry_index >= len(self.entry_times):
+            return False
+
+        scheduled_time = self.entry_times[self._next_entry_index]
+        scheduled_dt = now.replace(
+            hour=scheduled_time.hour, minute=scheduled_time.minute,
+            second=0, microsecond=0
+        )
+        scout_start = scheduled_dt - timedelta(minutes=self.scout_window_minutes)
+        window_end = scheduled_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+
+        # Before scouting window → wait
+        if now < scout_start:
+            self._deactivate_scouting()
+            return False
+
+        # Past retry window → base class handles skip
+        if now > window_end:
+            self._deactivate_scouting()
+            return False
+
+        # At or past scheduled time → enter (standard behavior)
+        if now >= scheduled_dt:
+            if self._scouting_active:
+                logger.info(
+                    f"MKT-031: Scout window expired for Entry #{self._next_entry_index + 1} "
+                    f"(best score: {self._last_scout_score}). Default entry."
+                )
+                self._deactivate_scouting()
+            return True
+
+        # Within scouting window → score and decide
+        if not self._scouting_active:
+            self._activate_scouting(now)
+
+        score, details = self._score_entry_conditions(now)
+        self._last_scout_score = max(self._last_scout_score, score)
+        self._last_scout_details = details
+
+        if score >= self.scout_score_threshold:
+            logger.info(
+                f"MKT-031: EARLY ENTRY Entry #{self._next_entry_index + 1} "
+                f"Score={score}/{self.scout_score_threshold} "
+                f"[spike={details['post_spike']}, momentum={details['momentum']}] "
+                f"({(scheduled_dt - now).total_seconds():.0f}s early)"
+            )
+            self._deactivate_scouting()
+            return True
+
+        return False  # Still scouting, not triggered
+
+    def _is_entry_time(self) -> bool:
+        """
+        Override: extend entry window to include MKT-031 scouting period for retries.
+
+        Without this, if early entry triggers at 10:57 for 11:05 slot, the retry
+        loop calls base _is_entry_time() which checks 11:05 <= 10:57 → False →
+        retries abort immediately.
+        """
+        if not self.smart_entry_enabled:
+            return super()._is_entry_time()
+        if self._next_entry_index >= len(self.entry_times):
+            return False
+        now = get_us_market_time()
+        scheduled_time = self.entry_times[self._next_entry_index]
+        scheduled_dt = now.replace(
+            hour=scheduled_time.hour, minute=scheduled_time.minute,
+            second=0, microsecond=0
+        )
+        scout_start = scheduled_dt - timedelta(minutes=self.scout_window_minutes)
+        window_end = scheduled_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+        return scout_start <= now <= window_end
 
     def _is_daily_loss_limit_reached(self) -> bool:
         """Disabled for HYDRA — bot always attempts all entries."""
         return False
+
+    # =========================================================================
+    # MKT-031: SMART ENTRY WINDOWS — Scouting Lifecycle
+    # =========================================================================
+
+    def _activate_scouting(self, now):
+        """MKT-031: Begin scouting for next entry."""
+        self._scouting_active = True
+        self._scouting_window_start = now
+        self._scouting_entry_index = self._next_entry_index
+        self._last_scout_score = 0
+        self._last_scout_details = {}
+        self._refresh_chart_data_for_scouting()
+        logger.info(
+            f"MKT-031: Scouting OPEN for Entry #{self._next_entry_index + 1} "
+            f"(threshold: {self.scout_score_threshold})"
+        )
+
+    def _deactivate_scouting(self):
+        """MKT-031: End scouting."""
+        if self._scouting_active:
+            self._scouting_active = False
+            self._cached_chart_bars = None
+
+    def _refresh_chart_data_for_scouting(self):
+        """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result."""
+        try:
+            chart_data = self.client.get_chart_data(
+                uic=self.underlying_uic, asset_type="CfdOnIndex",
+                horizon=self.chart_horizon_minutes, count=self.chart_bars_count
+            )
+            if chart_data and "Data" in chart_data:
+                self._cached_chart_bars = chart_data["Data"]
+                self._cached_chart_time = get_us_market_time()
+        except Exception as e:
+            logger.warning(f"MKT-031: Chart data fetch failed: {e}")
+
+    # =========================================================================
+    # MKT-031: SMART ENTRY WINDOWS — Scoring Engine
+    # =========================================================================
+
+    def _score_entry_conditions(self, now) -> Tuple[int, Dict[str, int]]:
+        """
+        MKT-031: Score 2 parameters for smart entry timing.
+
+        Parameters:
+          1. Post-spike calm (ATR declining from elevated) — 0-70 pts
+          2. Momentum pause (price calm over 2 min) — 0-30 pts
+
+        Returns:
+            (total_score, {"post_spike": N, "momentum": N})
+        """
+        # Refresh chart data if stale (> 2 min old)
+        if (self._cached_chart_bars and self._cached_chart_time
+                and (now - self._cached_chart_time).total_seconds() > 120):
+            self._refresh_chart_data_for_scouting()
+
+        spike = self._score_post_spike_calm()
+        momentum = self._score_momentum_pause()
+
+        details = {"post_spike": spike, "momentum": momentum}
+        return spike + momentum, details
+
+    def _score_post_spike_calm(self) -> int:
+        """
+        Parameter 1: ATR(3) declining from elevated level (0-70 pts).
+
+        Uses cached 1-min OHLC bars. Compares recent ATR(3) vs prior ATR(3).
+        Full points when ATR is declining from a recently elevated level
+        (market had a spike but is now consolidating — the "Henry Schwartz pattern").
+
+        Scoring:
+          ATR declining 50%+ from elevated peak → 70
+          ATR declining 25%+ from elevated peak → 55
+          ATR declining 10%+ from elevated peak → 40
+          ATR declining but no clear prior spike → 20
+          ATR rising or flat → 0
+
+        "Elevated" = previous ATR(3) > 1.5× long-term ATR(14).
+        """
+        if not self._cached_chart_bars or len(self._cached_chart_bars) < 15:
+            return 0
+
+        bars = self._cached_chart_bars
+
+        # Saxo CFD data uses HighBid/LowBid/CloseBid, fallback to High/Low/Close
+        highs = [b.get("HighBid") or b.get("High", 0) for b in bars]
+        lows = [b.get("LowBid") or b.get("Low", 0) for b in bars]
+        closes = [b.get("CloseBid") or b.get("Close", 0) for b in bars]
+
+        # Filter zero prices
+        valid = [(h, l, c) for h, l, c in zip(highs, lows, closes) if h > 0 and l > 0 and c > 0]
+        if len(valid) < 15:
+            return 0
+
+        vh, vl, vc = zip(*valid)
+
+        # Current ATR(3) from most recent 4 bars, prev ATR(3) from 4 bars before that
+        current_atr = calculate_atr(list(vh[-4:]), list(vl[-4:]), list(vc[-4:]), period=3)
+        prev_atr = calculate_atr(list(vh[-8:-4]), list(vl[-8:-4]), list(vc[-8:-4]), period=3)
+        long_atr = calculate_atr(list(vh), list(vl), list(vc), period=min(14, len(valid) - 1))
+
+        if current_atr <= 0 or prev_atr <= 0:
+            return 0
+
+        is_declining = current_atr < prev_atr
+        was_elevated = prev_atr > (long_atr * 1.5) if long_atr > 0 else False
+
+        if is_declining and was_elevated:
+            decline_pct = (prev_atr - current_atr) / prev_atr
+            if decline_pct >= 0.50:
+                return 70
+            elif decline_pct >= 0.25:
+                return 55
+            else:
+                return 40
+        elif is_declining:
+            return 20
+        return 0
+
+    def _score_momentum_pause(self) -> int:
+        """
+        Parameter 2: |price_change| over 2 min (0-30 pts). In-memory only.
+
+        Uses MarketData.price_history deque. Zero API cost.
+
+        Scoring (default threshold = 0.05%):
+          < 0.025% (~$1.50 at SPX 6000) → 30
+          < 0.05% (~$3) → 25
+          < 0.10% (~$6) → 10
+          >= 0.10% → 0
+        """
+        history = self.market_data.price_history
+        if len(history) < 3 or self.current_price <= 0:
+            return 0
+
+        cutoff = get_us_market_time() - timedelta(minutes=2)
+        oldest = None
+        for ts, price in history:
+            if ts >= cutoff:
+                oldest = price
+                break
+
+        if not oldest or oldest <= 0:
+            return 0
+
+        pct = abs((self.current_price - oldest) / oldest) * 100
+        threshold = self.scout_momentum_threshold
+
+        if pct < threshold * 0.5:
+            return 30   # Very calm (< 0.025%)
+        if pct < threshold:
+            return 25   # Calm (< 0.05%)
+        if pct < threshold * 2:
+            return 10   # Mild (< 0.10%)
+        return 0
 
     # =========================================================================
     # MKT-018: EARLY CLOSE BASED ON RETURN ON CAPITAL (ROC)
@@ -3257,6 +3539,16 @@ class HydraStrategy(MEICStrategy):
             f"Entries: {completed}/{total_scheduled} completed  |  {skipped} skipped",
             f"Active: {active_count}  |  Stops: {call_stops}C / {put_stops}P",
             f"Next: {next_str}",
+        ]
+
+        # MKT-031: Show scouting status when active
+        if self._scouting_active and self.smart_entry_enabled:
+            lines.append(
+                f"Scout: #{self._scouting_entry_index + 1} "
+                f"score {self._last_scout_score}/{self.scout_score_threshold}"
+            )
+
+        lines += [
             "",
             "\u2501\u2501\u2501 P&L \u2501\u2501\u2501",
             f"Realized: {r_sign}${realized:.0f}  |  Commission: -${commission:.0f}",
@@ -3672,7 +3964,13 @@ class HydraStrategy(MEICStrategy):
             "\u2501\u2501\u2501 Exits \u2501\u2501\u2501",
             f"Early close: {ec_str}",
             f"Hold check: {hold_str}",
+            "",
+            "\u2501\u2501\u2501 Smart Entry (MKT-031) \u2501\u2501\u2501",
+            f"Enabled: {'Yes' if self.smart_entry_enabled else 'No'}",
         ]
+
+        if self.smart_entry_enabled:
+            lines.append(f"Window: {self.scout_window_minutes}min | Threshold: {self.scout_score_threshold}")
 
         return "\n".join(lines)
 
