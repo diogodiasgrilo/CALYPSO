@@ -68,7 +68,9 @@ class TradeRecord:
         realized_pnl: Optional[float] = None,
         unrealized_pnl: Optional[float] = None,
         trade_reason: Optional[str] = None,  # "Entry", "Roll", "ITM Risk", "Fed Filter", etc.
-        greeks: Optional[Dict[str, float]] = None  # "delta", "gamma", "theta", "vega"
+        greeks: Optional[Dict[str, float]] = None,  # "delta", "gamma", "theta", "vega"
+        call_credit: Optional[float] = None,  # Per-side credit for call spread
+        put_credit: Optional[float] = None,  # Per-side credit for put spread
     ):
         self.timestamp = timestamp or get_us_market_time()
         self.action = action
@@ -93,11 +95,14 @@ class TradeRecord:
         self.unrealized_pnl = unrealized_pnl
         self.trade_reason = trade_reason
         self.greeks = greeks or {}
+        self.call_credit = call_credit
+        self.put_credit = put_credit
 
     def to_list(self) -> List[Any]:
         """Convert to simplified list format for spreadsheet row.
 
-        Columns: Timestamp, Action, Type, Strike, Expiry, Days to Expiry, SPY Price, VIX, Premium ($), P&L ($), P&L (EUR), Notes
+        Columns: Timestamp, Action, Type, Strike, Expiry, Days to Expiry, SPY Price, VIX,
+                 Premium ($), P&L ($), P&L (EUR), Notes, Call Credit ($), Put Credit ($)
         """
         return [
             self.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
@@ -111,7 +116,9 @@ class TradeRecord:
             f"{self.premium_received:.2f}" if self.premium_received is not None else "N/A",
             f"{self.pnl:.2f}",
             f"{self.converted_pnl:.2f}" if self.converted_pnl is not None else "N/A",
-            self.trade_reason or ""
+            self.trade_reason or "",
+            f"{self.call_credit:.2f}" if self.call_credit is not None else "",
+            f"{self.put_credit:.2f}" if self.put_credit is not None else "",
         ]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -380,15 +387,30 @@ class GoogleSheetsLogger:
             import gspread
             try:
                 worksheet = self.spreadsheet.worksheet("Trades")
+                # Migration: add per-side credit column headers if missing
+                try:
+                    headers = self._sheets_call_with_timeout(worksheet.row_values, 1, timeout=10)
+                    if headers and "Call Credit ($)" not in headers:
+                        next_col = len(headers) + 1
+                        self._sheets_call_with_timeout(
+                            worksheet.update_cell, 1, next_col, "Call Credit ($)", timeout=10
+                        )
+                        self._sheets_call_with_timeout(
+                            worksheet.update_cell, 1, next_col + 1, "Put Credit ($)", timeout=10
+                        )
+                        logger.info(f"Migrated Trades worksheet: added Call/Put Credit columns at col {next_col}")
+                except Exception as e:
+                    logger.warning(f"Failed to migrate Trades headers (non-fatal): {e}")
             except gspread.WorksheetNotFound:
-                worksheet = self.spreadsheet.add_worksheet(title="Trades", rows=10000, cols=13)
+                worksheet = self.spreadsheet.add_worksheet(title="Trades", rows=10000, cols=15)
                 # Essential trade headers - "Underlying Price" works for both SPY and SPX
                 headers = [
                     "Timestamp", "Action", "Type", "Strike", "Expiry", "Days to Expiry",
-                    "Underlying Price", "VIX", "Premium ($)", "P&L ($)", "P&L (EUR)", "Notes"
+                    "Underlying Price", "VIX", "Premium ($)", "P&L ($)", "P&L (EUR)", "Notes",
+                    "Call Credit ($)", "Put Credit ($)"
                 ]
                 worksheet.append_row(headers)
-                worksheet.format("A1:L1", {"textFormat": {"bold": True}})
+                worksheet.format("A1:N1", {"textFormat": {"bold": True}})
                 logger.info("Created Trades worksheet with essential headers")
 
             self.worksheets["Trades"] = worksheet
@@ -3681,7 +3703,9 @@ class TradeLoggerService:
         expiry_date: Optional[str] = None,
         dte: Optional[int] = None,
         premium_received: Optional[float] = None,
-        trade_reason: Optional[str] = None
+        trade_reason: Optional[str] = None,
+        call_credit: Optional[float] = None,
+        put_credit: Optional[float] = None,
     ):
         """
         Log a trade record to all enabled destinations with automatic currency conversion.
@@ -3703,6 +3727,8 @@ class TradeLoggerService:
             dte: Days to expiration
             premium_received: Premium collected (for short positions)
             trade_reason: Reason for trade (e.g., "5-Point Recenter", "Weekly Roll", "Exit")
+            call_credit: Per-side credit for call spread (iron condors)
+            put_credit: Per-side credit for put spread (iron condors)
         """
         # Get exchange rate and convert if enabled
         exchange_rate = None
@@ -3742,7 +3768,9 @@ class TradeLoggerService:
             expiry_date=expiry_date,
             dte=dte,
             premium_received=premium_received,
-            trade_reason=trade_reason
+            trade_reason=trade_reason,
+            call_credit=call_credit,
+            put_credit=put_credit,
         )
 
         # Add to queue for async processing

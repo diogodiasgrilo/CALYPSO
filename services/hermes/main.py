@@ -74,6 +74,13 @@ def main():
 
     today_str = get_us_market_time().strftime("%Y-%m-%d")
 
+    # Idempotency: skip if today's report already exists (e.g., triggered by HYDRA settlement)
+    report_dir = config.get("hermes", {}).get("report_dir", "intel/hermes")
+    report_path = os.path.join(report_dir, f"{today_str}.md")
+    if os.path.exists(report_path):
+        logger.info(f"Report already exists for {today_str} — skipping ({report_path})")
+        return
+
     # 1. Collect data
     from services.hermes.data_collector import collect_daily_data, compute_cheat_sheet
 
@@ -100,9 +107,7 @@ def main():
     full_report, summary = result
 
     # 4. Save report
-    report_dir = config.get("hermes", {}).get("report_dir", "intel/hermes")
     os.makedirs(report_dir, exist_ok=True)
-    report_path = os.path.join(report_dir, f"{today_str}.md")
 
     with open(report_path, "w") as f:
         f.write(full_report)

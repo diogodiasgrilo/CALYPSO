@@ -324,6 +324,18 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
                                     trade_logger.log_error(f"Failed to log daily summary: {e}")
                                 daily_summary_sent_date = today_date
                                 trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
+
+                                # Trigger HERMES post-settlement (data is now final)
+                                try:
+                                    subprocess.Popen(
+                                        [sys.executable, "-m", "services.hermes.main"],
+                                        cwd=_project_root,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL,
+                                    )
+                                    trade_logger.log_event("HERMES triggered post-settlement")
+                                except Exception as e:
+                                    trade_logger.log_error(f"Failed to trigger HERMES: {e}")
                             else:
                                 # FIX #82: Do NOT lock the settlement gate pre-market when there's no activity.
                                 # At midnight ET, _reset_for_new_day() clears the registry, then settlement

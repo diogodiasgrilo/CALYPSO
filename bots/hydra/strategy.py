@@ -3,7 +3,7 @@ strategy.py - HYDRA (Trend Following Hybrid) Strategy Implementation
 
 This module extends the base MEIC strategy with EMA-based trend direction detection
 and credit validation. Before each entry, it checks 20 EMA vs 40 EMA on SPX 1-minute
-bars. The EMA signal is informational only — all entries are full iron condors.
+bars. The EMA signal is informational only — entries are full iron condors or put-only via MKT-011.
 
 Trend Detection (informational only, does NOT drive entry type):
 - BULLISH (20 EMA > 40 EMA by >0.2%): Logged, stored for analysis
@@ -11,7 +11,7 @@ Trend Detection (informational only, does NOT drive entry type):
 - NEUTRAL (within 0.2%): Logged, stored for analysis
 
 Risk Management (beyond base MEIC):
-- MKT-011: Pre-entry credit gate (skip if either side non-viable, no one-sided entries)
+- MKT-011: Pre-entry credit gate (put-only if call non-viable, skip if put non-viable)
 - MKT-018: Early close on ROC >= 3% (close all positions after entries placed)
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
@@ -74,7 +74,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.7.0"
+HYDRA_VERSION = "1.7.2"
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -162,12 +162,12 @@ class HydraStrategy(MEICStrategy):
     Extends MEICStrategy with EMA-based trend detection and credit validation:
     - Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars
     - Signal is informational only — logged and stored but does NOT drive entry type
-    - All entries are full iron condors (one-sided entries removed in v1.4.0)
+    - All entries are full iron condors or put-only (MKT-011 conversion)
 
     Key Features (HYDRA specific, beyond base MEIC):
     - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
-    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $1.00, put min $1.75
-      Always skips entry if either side non-viable (no one-sided entries)
+    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $0.75, put min $1.75
+      Call non-viable → put-only entry (v1.7.1). Put non-viable → skip (call-only disabled).
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
     - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
     - Early Close (MKT-018): Close all positions when ROC >= 3%
@@ -280,12 +280,16 @@ class HydraStrategy(MEICStrategy):
         if self.early_close_enabled:
             logger.info(f"  Hold check (MKT-023): {'ENABLED' if self.hold_check_enabled else 'DISABLED'} (lean tolerance {self.hold_check_lean_tolerance}%)")
 
-        # Override min credit from base class $0.50 to $1.00 for HYDRA
-        self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 1.00) * 100
+        # Override min credit from base class $0.50 to $0.75 for HYDRA
+        # Credit cushion analysis (docs/HYDRA_CREDIT_CUSHION_ANALYSIS.md):
+        # $0.75 call min → 68.1% call cushion (above 65% safety threshold)
+        # $1.00 call min → 61.5% call cushion (below threshold, broke Week 1 asymmetry)
+        # Lower call min = less MKT-020 tightening = calls stay further OTM = safer
+        self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 0.75) * 100
 
-        # Separate put minimum credit — Tammy's range is $1.00-$1.75/side
-        # Calls use $1.00 (bottom of range, MKT-020 tightens to reach it)
-        # Puts use $1.75 (top of range, MKT-022 widens to bring credit down to it)
+        # Separate put minimum credit
+        # Calls use $0.75 (preserves natural put skew asymmetry)
+        # Puts use $1.75 (MKT-029 fallback to $1.65)
         self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 1.75) * 100
         logger.info(f"  Min viable credit - call: ${self.min_viable_credit_per_side / 100:.2f}, put: ${self.min_viable_credit_put_side / 100:.2f}")
 
@@ -1179,21 +1183,23 @@ class HydraStrategy(MEICStrategy):
     # MKT-011: Credit Gate for HYDRA
     # =========================================================================
 
-    def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool]:
+    def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool, float, float]:
         """
         MKT-011: Check if estimated credit is above minimum viable threshold.
 
-        Returns raw viability assessment. The call site in _initiate_entry()
-        always skips when either side is non-viable (no one-sided entries
-        since v1.4.0).
+        Returns viability assessment with estimated credits. When call side
+        is non-viable but put side meets threshold, returns "put_only" so
+        the caller can place a put-only entry (re-enabled in v1.7.1).
 
         Args:
             entry: HydraIronCondorEntry with strikes calculated
 
         Returns:
-            Tuple of (result, estimation_worked):
+            Tuple of (result, estimation_worked, estimated_call, estimated_put):
             - result: "proceed", "call_only", "put_only", or "skip"
             - estimation_worked: True if we got valid quotes, False if estimation failed
+            - estimated_call: estimated call credit in cents (0.0 if failed)
+            - estimated_put: estimated put credit in cents (0.0 if failed)
         """
         estimated_call, estimated_put = self._estimate_entry_credit(entry)
 
@@ -1204,30 +1210,18 @@ class HydraStrategy(MEICStrategy):
                 f"MKT-011: Could not estimate credit for Entry #{entry.entry_number} - "
                 f"falling back to MKT-010 illiquidity check"
             )
-            return ("proceed", False)  # estimation_worked = False
+            return ("proceed", False, 0.0, 0.0)  # estimation_worked = False
 
-        # Separate thresholds: calls use min_viable_credit_per_side ($1.00),
+        # Separate thresholds: calls use min_viable_credit_per_side ($0.75),
         # puts use min_viable_credit_put_side ($1.75 — top of Tammy's range)
         call_min = self.min_viable_credit_per_side
         put_min = self.min_viable_credit_put_side
         call_viable = estimated_call >= call_min
         put_viable = estimated_put >= put_min
 
-        # MKT-029: Graduated call fallback — try $0.95, then $0.90
-        if not call_viable:
-            for fallback in [call_min - 5, call_min - 10]:
-                if estimated_call >= fallback:
-                    call_viable = True
-                    logger.info(
-                        f"MKT-029: Call credit ${estimated_call:.2f} accepted at "
-                        f"fallback ${fallback:.2f} (primary: ${call_min:.2f})"
-                    )
-                    self._log_safety_event(
-                        "MKT-029_CALL_FALLBACK",
-                        f"Entry #{entry.entry_number}: call ${estimated_call:.2f} "
-                        f"at fallback ${fallback:.2f}"
-                    )
-                    break
+        # MKT-029: Call side uses strict $0.75 minimum (no fallbacks)
+        # If call can't reach $0.75, entry converts to put-only instead of
+        # forcing a weak full IC. Data shows put-only at 87.5% win rate.
 
         # MKT-029: Graduated put fallback — try $1.70, then $1.65
         if not put_viable:
@@ -1251,7 +1245,7 @@ class HydraStrategy(MEICStrategy):
                 f"Call ${estimated_call:.2f} (min: ${call_min:.2f}), "
                 f"Put ${estimated_put:.2f} (min: ${put_min:.2f})"
             )
-            return ("proceed", True)  # estimation_worked = True
+            return ("proceed", True, estimated_call, estimated_put)
 
         if not call_viable and not put_viable:
             logger.warning(
@@ -1264,33 +1258,36 @@ class HydraStrategy(MEICStrategy):
                 f"Entry #{entry.entry_number} - call ${estimated_call:.2f}, put ${estimated_put:.2f}",
                 "Skipped"
             )
-            return ("skip", True)  # estimation_worked = True
+            return ("skip", True, estimated_call, estimated_put)
 
-        # One side viable, other not - return assessment (caller will skip in v1.4.0)
+        # One side viable, other not
         if not call_viable:
-            logger.warning(
+            # Call non-viable, put viable → put-only entry (re-enabled v1.7.1)
+            logger.info(
                 f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
                 f"(${estimated_call:.2f} < ${call_min:.2f}) - "
-                f"put ${estimated_put:.2f} is viable but no one-sided entries allowed"
+                f"put ${estimated_put:.2f} viable → converting to put-only"
             )
             self._log_safety_event(
-                "MKT-011_SKIP",
-                f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable",
-                "Skipped (no one-sided)"
+                "MKT-011_PUT_ONLY",
+                f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable, "
+                f"put ${estimated_put:.2f} → put-only",
+                "Put-Only"
             )
-            return ("put_only", True)  # estimation_worked = True
+            return ("put_only", True, estimated_call, estimated_put)
         else:
+            # Put non-viable, call viable → skip (call-only disabled)
             logger.warning(
                 f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
                 f"(${estimated_put:.2f} < ${put_min:.2f}) - "
-                f"call ${estimated_call:.2f} is viable but no one-sided entries allowed"
+                f"call ${estimated_call:.2f} viable but call-only entries disabled"
             )
             self._log_safety_event(
                 "MKT-011_SKIP",
-                f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable",
-                "Skipped (no one-sided)"
+                f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable, call-only disabled",
+                "Skipped"
             )
-            return ("call_only", True)  # estimation_worked = True
+            return ("call_only", True, estimated_call, estimated_put)
 
     def _apply_progressive_call_tightening(self, entry: HydraIronCondorEntry) -> bool:
         """
@@ -1316,7 +1313,7 @@ class HydraStrategy(MEICStrategy):
 
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_call_otm_distance
-        min_credit = self.min_viable_credit_per_side  # In dollars (e.g., $100 for $1.00)
+        min_credit = self.min_viable_credit_per_side  # In cents (e.g., 75 for $0.75)
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
 
         initial_short_call = entry.short_call_strike
@@ -1771,9 +1768,10 @@ class HydraStrategy(MEICStrategy):
 
                 # MKT-011: Check minimum credit gate before placing orders (primary check)
                 credit_gate_handled = False
+                place_put_only = False  # v1.7.1: MKT-011 put-only conversion
                 original_trend = trend  # Save original trend for hybrid logic
                 if not self.dry_run:
-                    gate_result, estimation_worked = self._check_credit_gate(entry)
+                    gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
 
                     if gate_result == "skip":
                         # Both sides non-viable, skip this entry
@@ -1786,15 +1784,15 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         return f"Entry #{entry_num} skipped - both sides below minimum viable credit"
                     elif gate_result == "call_only":
-                        # Put credit too low — no one-sided entries allowed (v1.4.0)
+                        # Put credit too low — call-only entries disabled (insufficient data)
                         logger.warning(
                             f"MKT-011: Entry #{entry_num} put credit non-viable — "
-                            f"SKIPPING (no one-sided entries, trend: {original_trend.value})"
+                            f"SKIPPING (call-only entries disabled)"
                         )
                         self._log_safety_event(
                             "MKT-011_SKIP",
-                            f"Entry #{entry_num} - put non-viable → skip (no one-sided)",
-                            "Skipped - No One-Sided"
+                            f"Entry #{entry_num} - put non-viable → skip (call-only disabled)",
+                            "Skipped"
                         )
                         self.daily_state.entries_skipped += 1
                         self.daily_state.credit_gate_skips += 1
@@ -1802,25 +1800,20 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        return f"Entry #{entry_num} skipped - put non-viable, no one-sided entries"
+                        return f"Entry #{entry_num} skipped - put non-viable, call-only disabled"
                     elif gate_result == "put_only":
-                        # Call credit too low — no one-sided entries allowed (v1.4.0)
-                        logger.warning(
-                            f"MKT-011: Entry #{entry_num} call credit non-viable — "
-                            f"SKIPPING (no one-sided entries, trend: {original_trend.value})"
+                        # v1.7.1: Call credit non-viable → place put-only entry
+                        # Data: 87.5% win rate, +$870 net from 6 qualifying entries
+                        logger.info(
+                            f"MKT-011: Entry #{entry_num} call credit non-viable "
+                            f"(${est_call:.2f}) → converting to put-only "
+                            f"(put ${est_put:.2f})"
                         )
-                        self._log_safety_event(
-                            "MKT-011_SKIP",
-                            f"Entry #{entry_num} - call non-viable → skip (no one-sided)",
-                            "Skipped - No One-Sided"
-                        )
-                        self.daily_state.entries_skipped += 1
-                        self.daily_state.credit_gate_skips += 1
-                        self._entry_in_progress = False
-                        self._current_entry = None
-                        self.state = MEICState.MONITORING
-                        self._next_entry_index += 1
-                        return f"Entry #{entry_num} skipped - call non-viable, no one-sided entries"
+                        entry.put_only = True
+                        entry.call_side_skipped = True
+                        entry.override_reason = "mkt-011"
+                        place_put_only = True
+                        credit_gate_handled = True
                     elif estimation_worked:
                         # MKT-011 worked and said proceed - skip MKT-010
                         credit_gate_handled = True
@@ -1884,16 +1877,25 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         return f"Entry #{entry_num} skipped - both wings illiquid"
 
-                # v1.4.0: Always place full iron condor — EMA signal is informational only
-                if original_trend != TrendSignal.NEUTRAL:
-                    logger.info(f"EMA signal: {original_trend.value} (informational only) → placing full iron condor")
+                # Determine entry type and execute
+                if place_put_only:
+                    logger.info(f"MKT-011: Placing PUT-ONLY entry #{entry_num} (call non-viable)")
                 else:
-                    logger.info(f"NEUTRAL → placing full iron condor")
+                    if original_trend != TrendSignal.NEUTRAL:
+                        logger.info(f"EMA signal: {original_trend.value} (informational only) → placing full iron condor")
+                    else:
+                        logger.info(f"NEUTRAL → placing full iron condor")
 
-                if self.dry_run:
-                    success = self._simulate_entry(entry)
+                if place_put_only:
+                    if self.dry_run:
+                        success = self._simulate_put_spread_only(entry)
+                    else:
+                        success = self._execute_put_spread_only(entry)
                 else:
-                    success = self._execute_entry(entry)
+                    if self.dry_run:
+                        success = self._simulate_entry(entry)
+                    else:
+                        success = self._execute_entry(entry)
 
                 if success:
                     entry.entry_time = get_us_market_time()
@@ -1905,9 +1907,14 @@ class HydraStrategy(MEICStrategy):
                     self.daily_state.entries_completed += 1
                     self.daily_state.total_credit_received += entry.total_credit
 
-                    # Track commission (always 4 legs — full IC only since v1.4.0)
-                    entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
+                    # Track commission: 2 legs for put-only, 4 for full IC
+                    num_legs = 2 if place_put_only else 4
+                    entry.open_commission = num_legs * self.commission_per_leg * self.contracts_per_entry
                     self.daily_state.total_commission += entry.open_commission
+
+                    # Track one-sided entry count
+                    if place_put_only:
+                        self.daily_state.one_sided_entries += 1
 
                     # Calculate stop losses
                     self._calculate_stop_levels_hydra(entry)
@@ -1915,38 +1922,54 @@ class HydraStrategy(MEICStrategy):
                     # Log to Google Sheets
                     self._log_entry(entry)
 
-                    # Send detailed entry alert with full leg breakdown
-                    sc_fill = entry.short_call_fill_price
-                    lc_fill = entry.long_call_fill_price
-                    sp_fill = entry.short_put_fill_price
-                    lp_fill = entry.long_put_fill_price
+                    # Send entry alert
                     mult = 100 * entry.contracts
-
                     trend_label = original_trend.value.upper()
-                    msg_lines = [
-                        f"*Entry #{entry_num}* [{trend_label}] Full IC",
-                        f"SPX {self.current_price:,.2f} | VIX {self.current_vix:.2f}",
-                    ]
-                    if self._last_ema_short > 0 and self._last_ema_long > 0:
-                        msg_lines.append(f"Trend: {trend_label} (EMA {self._last_ema_short:.0f}/{self._last_ema_long:.0f})")
+
+                    if place_put_only:
+                        # Put-only alert
+                        sp_fill = entry.short_put_fill_price
+                        lp_fill = entry.long_put_fill_price
+                        width = int(entry.short_put_strike - entry.long_put_strike)
+                        msg_lines = [
+                            f"*Entry #{entry_num}* [MKT-011] Put-Only",
+                            f"SPX {self.current_price:,.2f} | VIX {self.current_vix:.2f}",
+                            f"Trend: {trend_label} | Call credit non-viable",
+                            "",
+                            f"SP {entry.short_put_strike:.0f} @ ${sp_fill:.2f} (${sp_fill * mult:.0f})",
+                            f"LP {entry.long_put_strike:.0f} @ ${lp_fill:.2f} (-${lp_fill * mult:.0f})",
+                            f"*Put: ${entry.put_spread_credit:.0f}*",
+                            "",
+                            f"Comm: ${entry.open_commission:.0f} | Width: {width}pt",
+                            f"Stop: ${entry.put_side_stop:.0f} (2× credit)",
+                        ]
                     else:
-                        msg_lines.append(f"Trend: {trend_label}")
-                    msg_lines.append("")
-                    # Call side breakdown
-                    msg_lines.append(f"SC {entry.short_call_strike:.0f} @ ${sc_fill:.2f} (${sc_fill * mult:.0f})")
-                    msg_lines.append(f"LC {entry.long_call_strike:.0f} @ ${lc_fill:.2f} (-${lc_fill * mult:.0f})")
-                    msg_lines.append(f"*Call: ${entry.call_spread_credit:.0f}*")
-                    msg_lines.append("")
-                    # Put side breakdown
-                    msg_lines.append(f"SP {entry.short_put_strike:.0f} @ ${sp_fill:.2f} (${sp_fill * mult:.0f})")
-                    msg_lines.append(f"LP {entry.long_put_strike:.0f} @ ${lp_fill:.2f} (-${lp_fill * mult:.0f})")
-                    msg_lines.append(f"*Put: ${entry.put_spread_credit:.0f}*")
-                    msg_lines.append("")
-                    # Summary
-                    width = int(entry.long_call_strike - entry.short_call_strike)
-                    msg_lines.append(f"*Total: ${entry.total_credit:.0f}* (${entry.call_spread_credit:.0f}C + ${entry.put_spread_credit:.0f}P)")
-                    msg_lines.append(f"Comm: ${entry.open_commission:.0f} | Width: {width}pt")
-                    msg_lines.append(f"Stop: ${entry.call_side_stop:.0f}/side")
+                        # Full IC alert
+                        sc_fill = entry.short_call_fill_price
+                        lc_fill = entry.long_call_fill_price
+                        sp_fill = entry.short_put_fill_price
+                        lp_fill = entry.long_put_fill_price
+                        width = int(entry.long_call_strike - entry.short_call_strike)
+                        msg_lines = [
+                            f"*Entry #{entry_num}* [{trend_label}] Full IC",
+                            f"SPX {self.current_price:,.2f} | VIX {self.current_vix:.2f}",
+                        ]
+                        if self._last_ema_short > 0 and self._last_ema_long > 0:
+                            msg_lines.append(f"Trend: {trend_label} (EMA {self._last_ema_short:.0f}/{self._last_ema_long:.0f})")
+                        else:
+                            msg_lines.append(f"Trend: {trend_label}")
+                        msg_lines.append("")
+                        msg_lines.append(f"SC {entry.short_call_strike:.0f} @ ${sc_fill:.2f} (${sc_fill * mult:.0f})")
+                        msg_lines.append(f"LC {entry.long_call_strike:.0f} @ ${lc_fill:.2f} (-${lc_fill * mult:.0f})")
+                        msg_lines.append(f"*Call: ${entry.call_spread_credit:.0f}*")
+                        msg_lines.append("")
+                        msg_lines.append(f"SP {entry.short_put_strike:.0f} @ ${sp_fill:.2f} (${sp_fill * mult:.0f})")
+                        msg_lines.append(f"LP {entry.long_put_strike:.0f} @ ${lp_fill:.2f} (-${lp_fill * mult:.0f})")
+                        msg_lines.append(f"*Put: ${entry.put_spread_credit:.0f}*")
+                        msg_lines.append("")
+                        msg_lines.append(f"*Total: ${entry.total_credit:.0f}* (${entry.call_spread_credit:.0f}C + ${entry.put_spread_credit:.0f}P)")
+                        msg_lines.append(f"Comm: ${entry.open_commission:.0f} | Width: {width}pt")
+                        msg_lines.append(f"Stop: ${entry.call_side_stop:.0f}/side")
 
                     alert_details = {"attempts": attempt + 1} if attempt > 0 else {}
                     self.alert_service.send_alert(
@@ -1961,15 +1984,12 @@ class HydraStrategy(MEICStrategy):
                     self._next_entry_index += 1
                     self._entry_in_progress = False
                     self._current_entry = None
-
-                    if self._next_entry_index < len(self.entry_times):
-                        self.state = MEICState.MONITORING
-                    else:
-                        self.state = MEICState.MONITORING
+                    self.state = MEICState.MONITORING
 
                     self._save_state_to_disk()
 
-                    result_msg = f"Entry #{entry_num} [{original_trend.value.upper()}] complete - Credit: ${entry.total_credit:.2f}"
+                    entry_type = "Put-Only (MKT-011)" if place_put_only else f"[{original_trend.value.upper()}]"
+                    result_msg = f"Entry #{entry_num} {entry_type} complete - Credit: ${entry.total_credit:.2f}"
                     if attempt > 0:
                         result_msg += f" (after {attempt + 1} attempts)"
                     return result_msg
@@ -1998,6 +2018,151 @@ class HydraStrategy(MEICStrategy):
         return f"Entry #{entry_num} failed after {ENTRY_MAX_RETRIES} retries: {last_error}"
 
     # =========================================================================
+    # PUT-ONLY ENTRY EXECUTION (v1.7.1 — MKT-011 re-enablement)
+    # =========================================================================
+    # When call credit is non-viable (< $0.75 strict), place only the put
+    # spread. Data from Feb 10 - Mar 2: 87.5% win rate, +$870 net from
+    # 6 qualifying entries.
+    #
+    # Leg order (safest): Long Put first (buy protection), then Short Put.
+    # Same patterns as _execute_entry(): progressive slippage, rollback,
+    # verify fill prices via PositionBase.OpenPrice.
+    # =========================================================================
+
+    def _execute_put_spread_only(self, entry: HydraIronCondorEntry) -> bool:
+        """
+        Execute a put-only entry (MKT-011 conversion).
+
+        Places only the put spread (2 legs) when call credit is non-viable.
+        Long put first for safety, then short put.
+
+        Args:
+            entry: HydraIronCondorEntry with put_only=True already set
+
+        Returns:
+            True if both put legs filled successfully
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            logger.error("Could not determine today's expiry")
+            return False
+
+        filled_legs = []
+
+        try:
+            # 1. Long Put (buy protection first)
+            logger.info(f"Placing Long Put at {entry.long_put_strike}")
+            long_put_result = self._place_option_order(
+                strike=entry.long_put_strike,
+                put_call="Put",
+                buy_sell=BuySell.BUY,
+                expiry=expiry,
+                external_ref=f"{entry.strategy_id}_LP"
+            )
+            if not long_put_result:
+                raise Exception("Long Put order failed")
+            entry.long_put_position_id = long_put_result.get("position_id")
+            entry.long_put_uic = long_put_result.get("uic")
+            long_put_debit = long_put_result.get("debit", 0)
+            entry.long_put_fill_price = long_put_result.get("fill_price", 0)
+            filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
+            self._register_position(entry, "long_put")
+
+            # 2. Short Put (now we have the hedge)
+            logger.info(f"Placing Short Put at {entry.short_put_strike}")
+            short_put_result = self._place_option_order(
+                strike=entry.short_put_strike,
+                put_call="Put",
+                buy_sell=BuySell.SELL,
+                expiry=expiry,
+                external_ref=f"{entry.strategy_id}_SP"
+            )
+            if not short_put_result:
+                raise Exception("Short Put order failed")
+            entry.short_put_position_id = short_put_result.get("position_id")
+            entry.short_put_uic = short_put_result.get("uic")
+            entry.short_put_fill_price = short_put_result.get("fill_price", 0)
+            short_put_credit = short_put_result.get("credit", 0)
+            entry.put_spread_credit = short_put_credit - long_put_debit
+            logger.debug(
+                f"Put spread: short ${short_put_credit:.2f} - long ${long_put_debit:.2f} "
+                f"= net ${entry.put_spread_credit:.2f}"
+            )
+            filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
+            self._register_position(entry, "short_put")
+
+            # Call side not placed — zero out
+            entry.call_spread_credit = 0
+            entry.short_call_fill_price = 0
+            entry.long_call_fill_price = 0
+
+            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
+            self._verify_entry_fill_prices(entry)
+
+            # Set initial monitoring prices for cushion calculation
+            entry.short_put_price = entry.short_put_fill_price
+            entry.long_put_price = entry.long_put_fill_price
+            entry.short_call_price = 0
+            entry.long_call_price = 0
+
+            logger.info(
+                f"Entry #{entry.entry_number} put-only complete: "
+                f"Put credit ${entry.put_spread_credit:.2f}"
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Put-only entry failed at leg {len(filled_legs) + 1}: {e}")
+
+            # Check for naked shorts (short put without long put hedge)
+            has_naked_short = False
+            naked_short_info = None
+            for leg_name, pos_id, uic in filled_legs:
+                if leg_name.startswith("short_"):
+                    hedge_name = "long_" + leg_name[6:]
+                    hedge_filled = any(l[0] == hedge_name for l in filled_legs)
+                    if not hedge_filled:
+                        has_naked_short = True
+                        naked_short_info = (leg_name, pos_id, uic)
+                        break
+
+            if has_naked_short:
+                logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
+                self._handle_naked_short(naked_short_info)
+
+            # Unwind filled legs
+            self._unwind_partial_entry(filled_legs, entry)
+
+            return False
+
+    def _simulate_put_spread_only(self, entry: HydraIronCondorEntry) -> bool:
+        """
+        Simulate a put-only entry (dry-run mode).
+
+        Args:
+            entry: HydraIronCondorEntry with put_only=True
+
+        Returns:
+            True if simulation successful
+        """
+        spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
+        credit_ratio = 0.025  # 2.5% of spread width
+        entry.put_spread_credit = spread_width * credit_ratio * 100 * self.contracts_per_entry
+        entry.call_spread_credit = 0
+
+        base_id = int(datetime.now().timestamp() * 1000)
+        entry.short_put_position_id = f"DRY_{base_id}_SP"
+        entry.long_put_position_id = f"DRY_{base_id}_LP"
+
+        logger.info(
+            f"[DRY RUN] Simulated Put-Only Entry #{entry.entry_number}: "
+            f"Put credit ${entry.put_spread_credit:.2f}"
+        )
+
+        return True
+
+    # =========================================================================
     # STOP LOSS EXECUTION & CALCULATION
     # =========================================================================
     # MKT-025: Short-only stop loss close. When a stop triggers, only close
@@ -2013,11 +2178,6 @@ class HydraStrategy(MEICStrategy):
     # instead of being sold for $5-$65). For far-OTM long wings (MKT-024 2×
     # wider starting distance), this is typically $5-$15 for calls and $20-$50
     # for puts.
-    #
-    # NOTE: _execute_call_spread_only(), _execute_put_spread_only(), and
-    # _simulate_one_sided_entry() removed in v1.4.0 — all entries are full IC.
-    # One-sided stop calculation blocks kept in _calculate_stop_levels_hydra()
-    # for recovery compatibility with pre-v1.4.0 state files.
     # =========================================================================
 
     def _execute_stop_loss(self, entry, side: str) -> str:
@@ -2202,8 +2362,9 @@ class HydraStrategy(MEICStrategy):
         - Full IC: stop = total_credit (original Tammy Chambless MEIC rule)
         - One-sided (legacy, kept for recovery): stop = 2 × single_side_credit
 
-        MKT-020/MKT-022 progressive tightening + credit minimums ($1.00 calls,
-        $1.75 puts) keep skew at 1-2x, so total_credit gives adequate per-side headroom.
+        MKT-020/MKT-022 progressive tightening + credit minimums ($0.75 calls,
+        $1.75 puts) reduced skew from 3-7x to 1-3x. Lower call min (v1.7.2) preserves
+        natural put skew asymmetry for better call cushion (68% vs 61.5%).
 
         Args:
             entry: HydraIronCondorEntry to calculate stops for
@@ -2261,7 +2422,7 @@ class HydraStrategy(MEICStrategy):
         else:
             # Full IC — original Tammy Chambless MEIC rule: stop = total_credit
             # MKT-019 (2× max credit) removed in v1.4.0: MKT-020/MKT-022 tightening
-            # + credit minimums ($1.00 calls, $1.75 puts) reduced skew from 3-7x to 1-2x.
+            # + credit minimums ($0.75 calls, $1.75 puts) keep skew manageable.
             total_credit = entry.total_credit
 
             if total_credit < MIN_STOP_LEVEL:
@@ -3928,6 +4089,10 @@ class HydraStrategy(MEICStrategy):
             if ema_20 is not None and ema_40 is not None:
                 ema_info = f" | EMA20: {ema_20:.2f}, EMA40: {ema_40:.2f}"
 
+            # Per-side credits: only include credit for sides that were actually placed
+            log_call_credit = entry.call_spread_credit if not getattr(entry, 'call_side_skipped', False) else None
+            log_put_credit = entry.put_spread_credit if not getattr(entry, 'put_side_skipped', False) else None
+
             self.trade_logger.log_trade(
                 action=f"HYDRA Entry #{entry.entry_number} {trend_tag}",
                 strike=strike_str,
@@ -3941,7 +4106,9 @@ class HydraStrategy(MEICStrategy):
                 expiry_date=today_str,  # Fix #54: 0DTE expiry is today
                 dte=0,  # Fix #54: 0DTE
                 premium_received=entry.total_credit,
-                trade_reason=f"Entry | Trend: {trend_tag} | Credit: ${entry.total_credit:.2f}{ema_info}"
+                trade_reason=f"Entry | Trend: {trend_tag} | Credit: ${entry.total_credit:.2f}{ema_info}",
+                call_credit=log_call_credit,
+                put_credit=log_put_credit,
             )
 
             logger.info(

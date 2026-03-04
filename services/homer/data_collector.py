@@ -16,13 +16,14 @@ def collect_all_data(config: Dict[str, Any]) -> Dict[str, Any]:
     Collect all data HOMER needs for journal updates.
 
     Returns:
-        Dict with keys: daily_summary_rows, positions_rows, metrics,
-        version_history, hermes_reports.
+        Dict with keys: daily_summary_rows, positions_rows, trades_rows,
+        metrics, version_history.
     """
     data = {}
 
     data["daily_summary_rows"] = _read_sheets_daily_summary_all(config)
     data["positions_rows"] = _read_sheets_positions_all(config)
+    data["trades_rows"] = _read_sheets_trades_all(config)
     data["metrics"] = _read_metrics_file(config)
     data["version_history"] = _read_version_history()
 
@@ -36,7 +37,7 @@ def collect_all_data(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def collect_day_data(
-    all_data: Dict[str, Any], date_str: str
+    all_data: Dict[str, Any], date_str: str, config: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Extract data for a specific trading day from the full dataset.
@@ -44,6 +45,7 @@ def collect_day_data(
     Args:
         all_data: Full dataset from collect_all_data().
         date_str: Date string "YYYY-MM-DD".
+        config: Agent config (needed for HERMES report lookup).
 
     Returns:
         Dict with day-specific data, or None if date not found.
@@ -64,13 +66,12 @@ def collect_day_data(
         logger.warning("No Daily Summary data available")
         return None
 
-    # Find this day's entries in Positions tab
-    day["entries"] = []
-    if all_data.get("positions_rows"):
-        for row in all_data["positions_rows"]:
-            row_date = str(row.get("Date", "")).strip()
-            if row_date == date_str:
-                day["entries"].append(row)
+    # Build per-entry data from Trades tab (primary, historical) + Positions tab (supplementary)
+    day["entries"] = _build_entries_for_day(
+        all_data.get("trades_rows"),
+        all_data.get("positions_rows"),
+        date_str,
+    )
 
     # Include cumulative metrics
     day["metrics"] = all_data.get("metrics", {})
@@ -79,13 +80,192 @@ def collect_day_data(
     day["version_history"] = all_data.get("version_history", [])
 
     # Context chaining: include HERMES daily report if available
-    day["hermes_report"] = _read_hermes_report(config, date_str)
+    day["hermes_report"] = _read_hermes_report(config or {}, date_str)
 
     logger.info(
         f"Day {date_str}: summary found, {len(day['entries'])} entries"
         f"{', HERMES report found' if day['hermes_report'] else ''}"
     )
     return day
+
+
+def _build_entries_for_day(
+    trades_rows: Optional[List[Dict]],
+    positions_rows: Optional[List[Dict]],
+    date_str: str,
+) -> List[Dict[str, Any]]:
+    """
+    Build per-entry data by merging Trades tab (per-entry rows) and
+    Positions tab (per-side rows).
+
+    Trades tab is the primary source (historical, has per-side credits).
+    Positions tab supplements with outcome/stop data (today only, overwritten daily).
+    """
+    entries_by_num: Dict[str, Dict[str, Any]] = {}
+
+    # 1. Parse Trades tab for per-entry data
+    if trades_rows:
+        for row in trades_rows:
+            action = str(row.get("Action", "")).strip()
+            if not action.startswith("HYDRA Entry"):
+                continue
+
+            # Filter by date: check Expiry (0DTE) or Timestamp
+            row_date = str(row.get("Expiry", "")).strip()
+            if row_date != date_str:
+                ts = str(row.get("Timestamp", "")).strip()
+                if not ts.startswith(date_str):
+                    continue
+
+            # Parse entry number: "HYDRA Entry #1 [NEUTRAL]"
+            match = re.match(r"HYDRA Entry #(\d+)\s*\[(\w+(?:-\d+)?)\]", action)
+            if not match:
+                continue
+            entry_num = match.group(1)
+            signal = match.group(2)
+
+            # Parse entry time from Timestamp
+            entry_time = ""
+            ts = str(row.get("Timestamp", "")).strip()
+            if ts:
+                try:
+                    from datetime import datetime
+                    dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                    entry_time = dt.strftime("%I:%M %p ET")
+                except ValueError:
+                    entry_time = ts
+
+            entry_type = str(row.get("Type", "Iron Condor")).strip()
+
+            # Parse short strikes from Strike field: "C:6850/6925 P:6630/6555"
+            strike_str = str(row.get("Strike", "")).strip()
+            short_call = ""
+            short_put = ""
+            call_match = re.search(r"C:(\d+)", strike_str)
+            put_match = re.search(r"P:(\d+)", strike_str)
+            if call_match:
+                short_call = call_match.group(1)
+            if put_match:
+                short_put = put_match.group(1)
+
+            entries_by_num[entry_num] = {
+                "Entry #": entry_num,
+                "Entry Time": entry_time,
+                "Trend Signal": signal,
+                "Entry Type": entry_type,
+                "Short Call Strike": short_call,
+                "Short Put Strike": short_put,
+                "Total Credit": str(row.get("Premium ($)", "0")).strip(),
+                "Call Credit": str(row.get("Call Credit ($)", "")).strip(),
+                "Put Credit": str(row.get("Put Credit ($)", "")).strip(),
+                "Outcome": "",
+                "P&L Impact": "",
+            }
+
+    # 2. Merge Positions tab data (per-side rows → outcome/stop/spread width data)
+    if positions_rows:
+        for row in positions_rows:
+            # Positions tab uses "Expiry" for date (no "Date" column)
+            row_date = str(row.get("Expiry", row.get("Date", ""))).strip()
+            if row_date != date_str:
+                continue
+
+            entry_num = str(row.get("Entry #", "")).strip()
+            if not entry_num:
+                continue
+
+            side = str(row.get("Side", "")).strip().lower()
+            if side not in ("call", "put"):
+                continue
+
+            # Create entry if not from Trades tab
+            if entry_num not in entries_by_num:
+                entries_by_num[entry_num] = {
+                    "Entry #": entry_num,
+                    "Entry Time": "",
+                    "Trend Signal": str(row.get("Trend Signal", "NEUTRAL")).strip(),
+                    "Entry Type": "",
+                    "Short Call Strike": "",
+                    "Short Put Strike": "",
+                    "Total Credit": "0",
+                    "Call Credit": "",
+                    "Put Credit": "",
+                    "Outcome": "",
+                    "P&L Impact": "",
+                }
+
+            entry = entries_by_num[entry_num]
+
+            if side == "call":
+                if not entry.get("Short Call Strike"):
+                    entry["Short Call Strike"] = str(row.get("Strike", "")).strip()
+                if not entry.get("Call Credit"):
+                    entry["Call Credit"] = str(row.get("Entry Credit", "")).strip()
+                entry["Call Status"] = str(row.get("Status", "")).strip().upper()
+                entry["Call Stop Triggered"] = str(row.get("Stop Triggered", "No")).strip()
+                entry["Call Spread Width"] = str(row.get("Spread Width", "")).strip()
+            elif side == "put":
+                if not entry.get("Short Put Strike"):
+                    entry["Short Put Strike"] = str(row.get("Strike", "")).strip()
+                if not entry.get("Put Credit"):
+                    entry["Put Credit"] = str(row.get("Entry Credit", "")).strip()
+                entry["Put Status"] = str(row.get("Status", "")).strip().upper()
+                entry["Put Stop Triggered"] = str(row.get("Stop Triggered", "No")).strip()
+                entry["Put Spread Width"] = str(row.get("Spread Width", "")).strip()
+
+    # 3. Post-process: determine entry type, outcome, total credit
+    for entry in entries_by_num.values():
+        has_call = bool(entry.get("Short Call Strike"))
+        has_put = bool(entry.get("Short Put Strike"))
+
+        # Set entry type if not from Trades tab
+        if not entry.get("Entry Type"):
+            if has_call and has_put:
+                entry["Entry Type"] = "Full IC"
+            elif has_call:
+                entry["Entry Type"] = "Call Only"
+            elif has_put:
+                entry["Entry Type"] = "Put Only"
+
+        # Calculate total credit from per-side if needed
+        if not _safe_float(entry.get("Total Credit", 0)):
+            call_credit = _safe_float(entry.get("Call Credit", 0))
+            put_credit = _safe_float(entry.get("Put Credit", 0))
+            if call_credit or put_credit:
+                entry["Total Credit"] = str(call_credit + put_credit)
+
+        # Determine outcome from Positions status
+        if not entry.get("Outcome"):
+            call_stopped = str(entry.get("Call Stop Triggered", "No")).strip().lower() == "yes"
+            put_stopped = str(entry.get("Put Stop Triggered", "No")).strip().lower() == "yes"
+            call_status = entry.get("Call Status", "")
+            put_status = entry.get("Put Status", "")
+
+            if call_stopped and put_stopped:
+                entry["Outcome"] = "Double Stop"
+            elif call_stopped:
+                entry["Outcome"] = "Call Stopped"
+            elif put_stopped:
+                entry["Outcome"] = "Put Stopped"
+            elif "EARLY_CLOSED" in call_status or "EARLY_CLOSED" in put_status:
+                entry["Outcome"] = "Early Closed"
+            elif "EXPIRED" in call_status or "EXPIRED" in put_status:
+                entry["Outcome"] = "Expired"
+
+    # Sort by entry number
+    result = sorted(
+        entries_by_num.values(),
+        key=lambda e: int(e.get("Entry #", 0) or 0),
+    )
+    return result
+
+
+def _safe_float(value) -> float:
+    """Convert value to float, returning 0.0 on failure."""
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def get_all_trading_dates(all_data: Dict[str, Any]) -> List[str]:
@@ -141,6 +321,24 @@ def _read_sheets_positions_all(config: Dict[str, Any]) -> Optional[List[Dict[str
         return rows
     except Exception as e:
         logger.warning(f"Failed to read Positions from Sheets: {e}")
+        return None
+
+
+def _read_sheets_trades_all(config: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
+    """Read ALL trades from Google Sheets Trades tab."""
+    try:
+        from shared.sheets_reader import SheetsReader
+
+        spreadsheet = config.get("google_sheets", {}).get(
+            "spreadsheet_name", "Calypso_HYDRA_Live_Data"
+        )
+        reader = SheetsReader(config)
+        rows = reader.read_tab_as_dicts(spreadsheet, "Trades")
+        if rows:
+            logger.info(f"Read {len(rows)} Trades rows from Sheets")
+        return rows
+    except Exception as e:
+        logger.warning(f"Failed to read Trades from Sheets: {e}")
         return None
 
 

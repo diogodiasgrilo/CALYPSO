@@ -76,6 +76,41 @@ def format_signed_currency(value: float) -> str:
     return f"{sign}${abs(value):,.0f}"
 
 
+def _format_credit_with_breakdown(entry: dict) -> str:
+    """
+    Format credit column with per-side breakdown.
+
+    Examples:
+        Full IC:   "$310 ($108C+$202P)"
+        Put only:  "$205 (P)"
+        Call only: "$108 (C)"
+        No data:   "$310"
+    """
+    call_credit = safe_float(entry.get("Call Credit", 0))
+    put_credit = safe_float(entry.get("Put Credit", 0))
+    total = safe_float(entry.get("Total Credit", 0))
+
+    # Use per-side sum if no total but per-side data exists
+    if not total and (call_credit or put_credit):
+        total = call_credit + put_credit
+
+    if not total:
+        return "--"
+
+    # Both sides have credits → full breakdown
+    if call_credit > 0 and put_credit > 0:
+        return f"${total:.0f} (${call_credit:.0f}C+${put_credit:.0f}P)"
+
+    # One-sided entries
+    if call_credit > 0 and not put_credit:
+        return f"${call_credit:.0f} (C)"
+    if put_credit > 0 and not call_credit:
+        return f"${put_credit:.0f} (P)"
+
+    # No per-side data available — show total only
+    return format_currency(total)
+
+
 # =============================================================================
 # SECTION 2: DAILY SUMMARY TABLE
 # =============================================================================
@@ -336,7 +371,6 @@ def build_section3_day_block(
             entry_type = entry.get("Entry Type", entry.get("Type", "Full IC"))
             short_call = entry.get("Short Call Strike", entry.get("Short Call", ""))
             short_put = entry.get("Short Put Strike", entry.get("Short Put", ""))
-            credit = entry.get("Total Credit", entry.get("Credit", "0"))
             outcome = entry.get("Outcome", "")
             pnl_impact = entry.get("P&L Impact", entry.get("PnL Impact", ""))
 
@@ -348,9 +382,8 @@ def build_section3_day_block(
                 strikes.append(f"P:{short_put}")
             strikes_str = " ".join(strikes) if strikes else "--"
 
-            # Format credit
-            credit_val = safe_float(credit)
-            credit_str = format_currency(credit_val) if credit_val else "--"
+            # Format credit with per-side breakdown
+            credit_str = _format_credit_with_breakdown(entry)
 
             lines.append(
                 f"| #{entry_num} | {time_val} | {signal} | {entry_type} | "

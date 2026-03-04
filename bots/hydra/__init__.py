@@ -6,14 +6,17 @@ tightening, and smart exits. Based on Tammy Chambless's MEIC strategy.
 
 Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars.
 The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
-but is informational only — all entries are full iron condors.
+but is informational only — entries are full iron condors or put-only via MKT-011.
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both sides viable: Proceed with full iron condor
-- Either side non-viable: Skip entry (no one-sided entries)
+- Call non-viable, put viable: Place put-only entry (v1.7.1 re-enablement)
+- Put non-viable: Skip entry (call-only disabled — insufficient data)
 - Both non-viable: Skip entry entirely
 
 Version History:
+- 1.7.2 (2026-03-03): Lower call minimum from $1.00 to $0.75 (credit cushion analysis: 68.1% call cushion vs 61.5% — crosses 65% safety threshold from Week 1 data). Less MKT-020 tightening = calls stay further OTM = safer.
+- 1.7.1 (2026-03-03): Re-enable MKT-011 put-only entries (data: 87.5% WR, +$870 net from 6 entries). Strict $1.00 call min (remove MKT-029 call fallbacks). Call-only remains disabled.
 - 1.7.0 (2026-03-03): 8 new Telegram commands (/status, /hermes, /apollo, /week, /entry, /stops, /config, /help)
 - 1.6.2 (2026-03-03): MKT-029 graduated credit fallback thresholds (calls $1.00→$0.95→$0.90, puts $1.75→$1.70→$1.65 — prevents skipping entries barely below minimum)
 - 1.6.1 (2026-03-03): Telegram /lastday and /account commands (historical data lookups from Google Sheets)

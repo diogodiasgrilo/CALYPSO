@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.6.0 | **Last Updated:** 2026-03-03
+**Version:** 1.7.2 | **Last Updated:** 2026-03-03
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and early close on Return on Capital.
 
@@ -10,7 +10,7 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 - **Before each entry**, check 20 EMA vs 40 EMA on SPX 1-minute bars
 - **EMA signal is informational only** — logged and stored but does NOT drive entry type
-- **All entries are full iron condors** — skip entry if either side's credit is below minimum (no one-sided entries)
+- **Entries are full iron condors or put-only** — call credit non-viable → put-only (v1.7.1), put credit non-viable → skip (call-only disabled)
 
 ### Why This Works
 
@@ -28,14 +28,14 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 
 ### Credit Gate (MKT-011)
 
-Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($1.00) and puts ($1.75), matching Tammy's $1.00-$1.75 per-side credit range.
+Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($0.75) and puts ($1.75). Call minimum lowered from $1.00 to $0.75 in v1.7.2 (credit cushion analysis: 68% call cushion vs 61.5% — see `docs/HYDRA_CREDIT_CUSHION_ANALYSIS.md`).
 
 | Call Credit | Put Credit | Action |
 |-------------|------------|--------|
-| >= $1.00 | >= $1.75 | Proceed with full iron condor |
-| < $1.00 | Any | Skip entry (no one-sided entries) |
-| Any | < $1.75 | Skip entry (no one-sided entries) |
-| < $1.00 | < $1.75 | Skip entry |
+| >= $0.75 | >= $1.75 | Proceed with full iron condor |
+| < $0.75 | >= $1.75 | Place put-only entry (v1.7.1) |
+| >= $0.75 | < $1.75 | Skip entry (call-only disabled) |
+| < $0.75 | < $1.75 | Skip entry |
 
 ### Illiquidity Fallback (MKT-010)
 
@@ -125,7 +125,7 @@ Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` �
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020: Call minimum credit (HYDRA override, base is $0.50) |
+| `min_viable_credit_per_side` | `0.75` | MKT-011/MKT-020: Call minimum credit (lowered from $1.00 for 68% call cushion, see HYDRA_CREDIT_CUSHION_ANALYSIS.md) |
 | `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022: Put minimum credit (top of Tammy's $1.00-$1.75 range) |
 | `call_starting_otm_multiplier` | `3.5` | MKT-024: Call starting OTM = base × multiplier |
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: Put starting OTM = base × multiplier (higher due to put skew) |

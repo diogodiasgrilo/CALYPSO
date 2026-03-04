@@ -37,7 +37,7 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 - Progressive tightening: MKT-020 (calls) and MKT-022 (puts) scan from 2× OTM inward
 - Early close: MKT-018 triggers at ROC >= 3%, checked by MKT-023 smart hold
 - Pre-entry ROC gate: MKT-021 skips entries #4-#6 if ROC already above threshold
-- All entries are full iron condors or skip — no one-sided entries since v1.4.0
+- Entries are full iron condors or put-only (MKT-011: call non-viable → put-only since v1.7.1, call-only disabled)
 - EMA 20/40 trend signal is informational only (logged but doesn't drive entry type)
 
 ## Tone

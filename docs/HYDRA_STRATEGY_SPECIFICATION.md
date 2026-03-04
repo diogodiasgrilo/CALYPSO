@@ -32,7 +32,7 @@
 
 ### What is HYDRA?
 
-HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — all entries are full iron condors.
+HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — entries are full iron condors or put-only (when call credit is non-viable, via MKT-011).
 
 Key MKT rules include: pre-entry credit validation, progressive OTM tightening, early close on ROC, smart hold checks, and pre-entry ROC gating — developed iteratively from 12 days of live trading data (Feb 10-26, 2026).
 
@@ -81,7 +81,7 @@ MEIC's breakeven design means a full IC with one side stopped nets $0 after comm
 - **One-sided entry in a trending market:** Risky if wrong. But if the trend is correctly identified, the spread is far OTM on the safe side and has a high probability of expiring worthless.
 - **Full IC in a trending market:** The stressed side gets stopped, but the surviving side's credit offsets the loss. Still safe (~$5 loss), but you tie up capital for a near-zero return.
 
-HYDRA's philosophy: **Always use full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds either side non-viable, skip the entry entirely (no one-sided entries).**
+HYDRA's philosophy: **Default to full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds call credit non-viable but put credit viable, place a put-only entry (v1.7.1: 87.5% WR from 6 qualifying entries). When put credit non-viable, skip entirely (call-only entries disabled due to insufficient data).**
 
 ### Evolution Through Live Trading
 
@@ -148,15 +148,15 @@ Each entry has a 5-minute window. If the entry time passes and the bot hasn't pl
 
 ### Trend Signal (Informational Only — v1.4.0)
 
-The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. All entries are full iron condors.
+The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. Entry type is determined by MKT-011 credit gate: full IC when both sides viable, put-only when call non-viable (v1.7.1).
 
 | Trend Signal | What Gets Placed | Note |
 |--------------|------------------|------|
-| BULLISH (EMA20 > EMA40 by >= 0.2%) | Full iron condor | Signal logged, not acted on |
-| BEARISH (EMA20 < EMA40 by >= 0.2%) | Full iron condor | Signal logged, not acted on |
-| NEUTRAL (within 0.2%) | Full iron condor | Standard behavior |
+| BULLISH (EMA20 > EMA40 by >= 0.2%) | Full IC or put-only (MKT-011) | Signal logged, not acted on |
+| BEARISH (EMA20 < EMA40 by >= 0.2%) | Full IC or put-only (MKT-011) | Signal logged, not acted on |
+| NEUTRAL (within 0.2%) | Full IC or put-only (MKT-011) | Standard behavior |
 
-**Why one-sided entries were removed (v1.4.0):** 12-day analysis (Feb 10-26) showed combined one-sided P&L was -$175 across 23 entries. V-shape reversal days (Feb 17, Feb 26) amplified losses. EMA correctly identifies current direction but cannot predict reversals.
+**Why trend-driven one-sided entries were removed (v1.4.0):** 12-day analysis (Feb 10-26) showed trend-driven one-sided P&L was -$175 across 23 entries. V-shape reversal days (Feb 17, Feb 26) amplified losses. EMA correctly identifies current direction but cannot predict reversals. **MKT-011 credit-driven put-only entries re-enabled (v1.7.1):** 87.5% WR, +$870 net from 6 qualifying entries — these are credit-driven (call side too cheap) not trend-driven.
 
 ### Leg Placement Order (Safety-First)
 
@@ -265,7 +265,7 @@ Each entry goes through these phases in order:
 
 ```
 17. MKT-020: Call tightening — move short call closer in 5pt steps
-    └── Until credit >= $1.00 (call minimum) or 25pt OTM floor
+    └── Until credit >= $0.75 (call minimum) or 25pt OTM floor
     └── If tightened, re-runs steps 13-16
 18. MKT-022: Put tightening — mirror of MKT-020 for put side
     └── Same 5pt steps, $1.75 target (put minimum), 25pt floor
@@ -275,12 +275,13 @@ Each entry goes through these phases in order:
 ### Phase 7: Credit Gate
 
 ```
-19. MKT-011: Estimate credit from live quotes (call >= $1.00, put >= $1.75)
+19. MKT-011: Estimate credit from live quotes (call >= $0.75 strict, put >= $1.75 with MKT-029 fallback to $1.65)
     ├── Both sides viable → PROCEED with full iron condor
-    ├── Either side below minimum → SKIP entry (no one-sided entries since v1.4.0)
+    ├── Call non-viable, put viable → PUT-ONLY entry (v1.7.1)
+    ├── Put non-viable, call viable → SKIP entry (call-only disabled)
     └── Both sides below minimum → SKIP entry
 20. MKT-010 fallback: If MKT-011 can't get quotes, use illiquidity flags
-    └── Any wing illiquid → SKIP entry (no one-sided entries since v1.4.0)
+    └── Any wing illiquid → SKIP entry
 ```
 
 ### Phase 8: Entry Execution
@@ -349,12 +350,12 @@ This pipeline prevents Saxo from rejecting orders or merging positions:
 | 3 | MKT-014 | Warn if MKT-013 landed on illiquid strike | MKT-013 can undo MKT-007's liquidity optimization |
 | 4 | Fix #66 | Re-run Fix #44 after MKT-013 | MKT-013 shifts longs too, potentially creating new conflicts |
 | 5 | MKT-015 | Move new long strikes 5pt further OTM if they overlap existing long strikes | Saxo merges same-strike longs, deleting older position ID |
-| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $1.00 minimum |
+| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $0.75 minimum |
 | 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $1.75 minimum |
 
 Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
-**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $1.75 (top of Tammy's range), calls use $1.00 (bottom). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
+**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $1.75 (top of Tammy's range), calls use $0.75 (lowered from $1.00 in v1.7.2 for 68% call cushion — see HYDRA_CREDIT_CUSHION_ANALYSIS.md). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
 
 ---
 
@@ -378,7 +379,7 @@ stop_level = entry.total_credit          (both sides get the SAME level)
 |-----------|-------------|--------------------------|
 | Full IC | total_credit | $125 + $185 = $310 per side |
 
-**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($1.00 calls, $1.75 puts) reduced credit skew from 3-7x to 1-2x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
+**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($0.75 calls, $1.75 puts) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
 
 **MEIC+ applies after:** If `meic_plus_enabled` and credit exceeds threshold, subtract $0.15 (× 100 = $15) from the stop level. MKT-025 closes only the short leg on stop, so commission is 4 entry + 1 close = 5 legs × $2.50 = $12.50. The $15 reduction provides a $2.50 buffer for slippage.
 
@@ -521,12 +522,12 @@ Entry #1 → #2 → #3 placed normally
 | MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | 40-80pt spreads based on VIX level |
 | MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days, pure savings with MKT-025) |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
-| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; skip if either side non-viable (no one-sided) |
+| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call non-viable → put-only (v1.7.1); put non-viable → skip |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
 | MKT-018 | Early Close on ROC | v1.3.0 | Close all positions when ROC >= 3% |
-| MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $1.00 |
+| MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $0.75 |
 | MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5 if ROC already >= 3% (after 3 entries placed) |
 | MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $1.75 |
 | MKT-023 | Smart Hold Check | v1.3.7 | Compare close-now vs worst-case-hold before MKT-018 fires |
@@ -551,7 +552,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-007 | MKT-013 | MKT-007 moves strikes closer (liquid); MKT-013 moves them further (overlap). Can undo each other. |
 | MKT-013 | Fix #44/66 | MKT-013 shifts longs; Fix #66 re-checks for new long-vs-short conflicts. |
 | MKT-024 | MKT-020/022 | MKT-024 sets wider starting OTM; MKT-020/022 scan inward from there. |
-| MKT-020/022 | MKT-011 | Tightening runs first; MKT-011 re-validates with fresh quotes (call $1.00, put $1.75). |
+| MKT-020/022 | MKT-011 | Tightening runs first; MKT-011 re-validates with fresh quotes (call $0.75, put $1.75). |
 | MKT-021 | MKT-018 | MKT-021 skips entries → satisfies MKT-018 gate → early close fires same cycle. |
 | MKT-018 | MKT-023 | MKT-023 is a sub-check within MKT-018; can override close decision with HOLD. |
 | MKT-025 | Settlement | Short-only close leaves long leg open; settlement auto-cleans orphaned positions. |
@@ -719,7 +720,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `max_delta` | `15` | Maximum acceptable delta |
 | `min_credit_per_side` | `1.00` | Credit warning threshold ($/side) |
 | `max_credit_per_side` | `1.75` | Credit warning ceiling ($/side) |
-| `min_viable_credit_per_side` | `1.00` | MKT-011/MKT-020 call minimum (HYDRA override; base MEIC uses 0.50) |
+| `min_viable_credit_per_side` | `0.75` | MKT-011/MKT-020 call minimum (v1.7.2: lowered from $1.00 for 68% call cushion — see HYDRA_CREDIT_CUSHION_ANALYSIS.md) |
 | `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022 put minimum (top of Tammy's $1.00-$1.75 range) |
 | `call_starting_otm_multiplier` | `3.5` | MKT-024: call starting OTM = base × multiplier (batch API = zero extra cost) |
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: put starting OTM = base × multiplier (put skew = credit viable further OTM) |
@@ -754,8 +755,8 @@ EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at
 
 Put premiums are typically 2-7× higher than call premiums at the same delta. This means:
 - MKT-024 starts calls at 3.5× and puts at 4.0× base OTM to give MKT-020/022 room to find optimal strikes
-- MKT-011 uses separate thresholds: calls $1.00, puts $1.75 (Tammy's $1.00-$1.75 range)
-- MKT-020 call tightening often can't reach $1.00 even at the 25pt OTM floor → MKT-011 skips
+- MKT-011 uses separate thresholds: calls $0.75 (v1.7.2, lowered from $1.00), puts $1.75
+- MKT-020 call tightening now reaches $0.75 more easily → fewer MKT-011 skips/conversions
 - MKT-022 with $1.75 put minimum finds the widest viable put strike, reducing unnecessary tightness
 - Total_credit stop (shared by both sides) is adequate because MKT-020/022 keeps skew at 1-2x
 

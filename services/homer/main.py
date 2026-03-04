@@ -336,7 +336,7 @@ def main():
     if args.dry_run:
         logger.info("DRY RUN — would add these days but not writing")
         for d in missing_days:
-            day = collect_day_data(all_data, d)
+            day = collect_day_data(all_data, d, config)
             if day:
                 logger.info(f"  {d}: {day['summary'].get('Daily P&L ($)', '?')} P&L, {len(day['entries'])} entries")
         return
@@ -372,7 +372,7 @@ def main():
 
     try:
         for date_str in missing_days:
-            day_data = collect_day_data(all_data, date_str)
+            day_data = collect_day_data(all_data, date_str, config)
             if not day_data:
                 logger.warning(f"Skipping {date_str} — no data available")
                 continue

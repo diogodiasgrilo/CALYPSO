@@ -135,11 +135,11 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Put-only (MKT-011) | P:6935 | $210 | EXPIRED | +$210 |
-| #2 | 10:35 | NEUTRAL | Put-only (MKT-011) | P:6935 | $150 | EXPIRED | +$150 |
-| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6930 | $120 | PUT STOPPED | -$120+credit |
-| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6920 | $95 | EXPIRED | +$95 |
-| #5 | 12:05 | NEUTRAL | Put-only (MKT-011) | P:6915 | $65 | EXPIRED | +$65 |
+| #1 | 10:05 | NEUTRAL | Put-only (MKT-011) | P:6935 | $210 (P) | EXPIRED | +$210 |
+| #2 | 10:35 | NEUTRAL | Put-only (MKT-011) | P:6935 | $150 (P) | EXPIRED | +$150 |
+| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6930 | $120 (P) | PUT STOPPED | -$120+credit |
+| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6920 | $95 (P) | EXPIRED | +$95 |
+| #5 | 12:05 | NEUTRAL | Put-only (MKT-011) | P:6915 | $65 (P) | EXPIRED | +$65 |
 | #6 | -- | -- | SKIPPED | -- | -- | Both sides non-viable | -- |
 
 **Key observations**:
@@ -153,12 +153,12 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC | C:7000 P:6910 | $435 | Put STOPPED, Call EXPIRED | -$155 + $125 |
-| #2 | 10:35 | BEARISH | Call-only | C:6980 | $140 | EXPIRED | +$140 |
-| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6890 | $200 | EXPIRED | +$200 |
-| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6900 | $170 | EXPIRED | +$170 |
-| #5 | 12:05 | NEUTRAL | Put-only (MKT-011) | P:6885 | $125 | EXPIRED | +$125 |
-| #6 | 12:35 | NEUTRAL | Put-only (MKT-011) | P:6910 | $100 | PUT STOPPED | -$135 |
+| #1 | 10:05 | NEUTRAL | Full IC | C:7000 P:6910 | $435 ($125C+$310P) | Put STOPPED, Call EXPIRED | -$155 + $125 |
+| #2 | 10:35 | BEARISH | Call-only | C:6980 | $140 (C) | EXPIRED | +$140 |
+| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6890 | $200 (P) | EXPIRED | +$200 |
+| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6900 | $170 (P) | EXPIRED | +$170 |
+| #5 | 12:05 | NEUTRAL | Put-only (MKT-011) | P:6885 | $125 (P) | EXPIRED | +$125 |
+| #6 | 12:35 | NEUTRAL | Put-only (MKT-011) | P:6910 | $100 (P) | PUT STOPPED | -$135 |
 
 **Key observations**:
 - 1 IC, 1 call-only (BEARISH signal), 4 put-only (MKT-011 conversions)
@@ -171,12 +171,12 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC | C:6990 P:6900 | $320 | Put STOPPED, Call EXPIRED | -$95 + $80 |
-| #2 | 10:35 | NEUTRAL | Full IC | C:6985 P:6895 | $290 | Put STOPPED, Call EXPIRED | -$75 + $65 |
-| #3 | 11:05 | BEARISH | Call-only | C:6950 | $185 | EXPIRED | +$185 |
-| #4 | 11:35 | BEARISH | Call-only | C:6920 | $250 | EXPIRED | +$250 |
-| #5 | 12:05 | NEUTRAL | Full IC | C:6915 P:6805 | $310 | Put STOPPED, Call EXPIRED | -$215 + $165 |
-| #6 | 12:35 | NEUTRAL | Full IC | C:6925 P:6810 | $255 | Put STOPPED, Call EXPIRED | -$80 + $95 |
+| #1 | 10:05 | NEUTRAL | Full IC | C:6990 P:6900 | $320 ($80C+$240P) | Put STOPPED, Call EXPIRED | -$95 + $80 |
+| #2 | 10:35 | NEUTRAL | Full IC | C:6985 P:6895 | $290 ($65C+$225P) | Put STOPPED, Call EXPIRED | -$75 + $65 |
+| #3 | 11:05 | BEARISH | Call-only | C:6950 | $185 (C) | EXPIRED | +$185 |
+| #4 | 11:35 | BEARISH | Call-only | C:6920 | $250 (C) | EXPIRED | +$250 |
+| #5 | 12:05 | NEUTRAL | Full IC | C:6915 P:6805 | $310 ($165C+$145P) | Put STOPPED, Call EXPIRED | -$215 + $165 |
+| #6 | 12:35 | NEUTRAL | Full IC | C:6925 P:6810 | $255 ($95C+$160P) | Put STOPPED, Call EXPIRED | -$80 + $95 |
 
 **Key observations**:
 - **Trend filter's best day**: 2 BEARISH signals placed call-only spreads that survived the sell-off
@@ -191,11 +191,11 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC | C:6885 P:6765 | $1,150 | Call STOPPED, Put EXPIRED | -$650 + $620 |
-| #2 | 10:35 | BULLISH | Put-only | P:6805 | $430 | PUT STOPPED | -$440 |
-| #3 | 11:05 | NEUTRAL | Full IC | C:6905 P:6795 | $675 | Both EXPIRED | +$675 |
-| #4 | 11:35 | NEUTRAL | Full IC | C:6910 P:6800 | $475 | Both EXPIRED | +$475 |
-| #5 | 12:05 | NEUTRAL | Full IC | C:6920 P:6820 | $315 | Put STOPPED, Call EXPIRED | -$130 + $110 |
+| #1 | 10:05 | NEUTRAL | Full IC | C:6885 P:6765 | $1,150 ($530C+$620P) | Call STOPPED, Put EXPIRED | -$650 + $620 |
+| #2 | 10:35 | BULLISH | Put-only | P:6805 | $430 (P) | PUT STOPPED | -$440 |
+| #3 | 11:05 | NEUTRAL | Full IC | C:6905 P:6795 | $675 ($315C+$360P) | Both EXPIRED | +$675 |
+| #4 | 11:35 | NEUTRAL | Full IC | C:6910 P:6800 | $475 ($185C+$290P) | Both EXPIRED | +$475 |
+| #5 | 12:05 | NEUTRAL | Full IC | C:6920 P:6820 | $315 ($110C+$205P) | Put STOPPED, Call EXPIRED | -$130 + $110 |
 
 **Key observations**:
 - Highest credit day ($3,045 total) due to elevated VIX
@@ -211,11 +211,11 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | BEARISH | Call-only | C:6860 | $305 | CALL STOPPED at 11:11 | -$295 |
-| #2 | 10:35 | NEUTRAL | Full IC | C:6840 P:6720 | $695 | CALL STOPPED at 11:02 | -$335 |
-| #3 | 11:05 | NEUTRAL | Full IC | C:6875 P:6755 | $400 | CALL STOPPED at 11:13 | -$265 |
-| #4 | 11:35 | BULLISH | Put-only | P:6780 | $235 | PUT STOPPED at 12:53 | -$225 |
-| #5 | 12:05 | NEUTRAL | Full IC | C:6895 P:6785 | $250 | PUT STOPPED at 12:11 | -$30 |
+| #1 | 10:05 | BEARISH | Call-only | C:6860 | $305 (C) | CALL STOPPED at 11:11 | -$295 |
+| #2 | 10:35 | NEUTRAL | Full IC | C:6840 P:6720 | $695 ($350C+$345P) | CALL STOPPED at 11:02 | -$335 |
+| #3 | 11:05 | NEUTRAL | Full IC | C:6875 P:6755 | $400 ($125C+$275P) | CALL STOPPED at 11:13 | -$265 |
+| #4 | 11:35 | BULLISH | Put-only | P:6780 | $235 (P) | PUT STOPPED at 12:53 | -$225 |
+| #5 | 12:05 | NEUTRAL | Full IC | C:6895 P:6785 | $250 ($40C+$210P) | PUT STOPPED at 12:11 | -$30 |
 
 **Key observations**:
 - **ALL 5 entries stopped. 0 winners. 100% loss rate.**
@@ -246,10 +246,10 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC | C:6945 P:6845 | $390 | Both EXPIRED | +$390 |
-| #2 | 10:35 | NEUTRAL | Put-only (MKT-011) | P:6840 | $220 | PUT EXPIRED | +$220 |
-| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6855 | $115 | PUT STOPPED at 13:53 | -$125 |
-| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6850 | $85 | PUT STOPPED at 13:53 | -$135 |
+| #1 | 10:05 | NEUTRAL | Full IC | C:6945 P:6845 | $390 ($55C+$335P) | Both EXPIRED | +$390 |
+| #2 | 10:35 | NEUTRAL | Put-only (MKT-011) | P:6840 | $220 (P) | PUT EXPIRED | +$220 |
+| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6855 | $115 (P) | PUT STOPPED at 13:53 | -$125 |
+| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6850 | $85 (P) | PUT STOPPED at 13:53 | -$135 |
 | #5 | 12:05 | -- | SKIPPED (MKT-011) | -- | -- | Both sides non-viable ($12.50/$42.50) | -- |
 
 **Key observations**:
@@ -298,10 +298,10 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC | C:6925 P:6815 | $475 (C:$105, P:$370) | Put STOPPED at 10:07, Call EXPIRED | -$265 + $105 |
-| #2 | 10:35 | NEUTRAL | Full IC | C:6930 P:6820 | $370 (C:$45, P:$325) | Put STOPPED at 10:51, Call EXPIRED | -$280 + $45 |
-| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6810 | $245 | PUT EXPIRED | +$245 |
-| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6815 | $175 | PUT STOPPED at 11:45 | -$175 |
+| #1 | 10:05 | NEUTRAL | Full IC | C:6925 P:6815 | $475 ($105C+$370P) | Put STOPPED at 10:07, Call EXPIRED | -$265 + $105 |
+| #2 | 10:35 | NEUTRAL | Full IC | C:6930 P:6820 | $370 ($45C+$325P) | Put STOPPED at 10:51, Call EXPIRED | -$280 + $45 |
+| #3 | 11:05 | NEUTRAL | Put-only (MKT-011) | P:6810 | $245 (P) | PUT EXPIRED | +$245 |
+| #4 | 11:35 | NEUTRAL | Put-only (MKT-011) | P:6815 | $175 (P) | PUT STOPPED at 11:45 | -$175 |
 | #5 | 12:05 | -- | SKIPPED (MKT-016) | -- | -- | Cascade breaker (3 stops) | -- |
 
 **Key observations**:
@@ -350,9 +350,9 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC | C:6940/6990 P:6830/6780 | $975 (C:$180, P:$795) | All EARLY-CLOSED at 11:31 | +$680 |
-| #2 | 10:35 | NEUTRAL | Full IC | C:6935/6985 P:6825/6775 | $480 (C:$135, P:$345) | All EARLY-CLOSED at 11:31 | +$225 |
-| #3 | 11:05 | NEUTRAL | Full IC (MKT-020 tightened call) | C:6945/6995 P:6855/6805 | $320 (C:$95, P:$225) | Put STOPPED, Call EARLY-CLOSED | -$155 |
+| #1 | 10:05 | NEUTRAL | Full IC | C:6940/6990 P:6830/6780 | $975 ($180C+$795P) | All EARLY-CLOSED at 11:31 | +$680 |
+| #2 | 10:35 | NEUTRAL | Full IC | C:6935/6985 P:6825/6775 | $480 ($135C+$345P) | All EARLY-CLOSED at 11:31 | +$225 |
+| #3 | 11:05 | NEUTRAL | Full IC (MKT-020 tightened call) | C:6945/6995 P:6855/6805 | $320 ($95C+$225P) | Put STOPPED, Call EARLY-CLOSED | -$155 |
 | #4 | 11:35 | -- | SKIPPED (MKT-021) | -- | -- | ROC >= 2% gate | -- |
 | #5 | 12:05 | -- | SKIPPED (MKT-021) | -- | -- | ROC >= 2% gate | -- |
 
@@ -431,8 +431,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC | C:6925/6980 P:6815/6755 | $525 (C:$145, P:$380) | Put STOPPED at 11:02, Call EXPIRED | -$250 gross, -$265 net |
-| #2 | 10:35 | NEUTRAL | Full IC | C:6910/6970 P:6800/6740 | $390 (C:$135, P:$255) | Put STOPPED at 11:03, Call EXPIRED | -$125 gross, -$140 net |
+| #1 | 10:05 | NEUTRAL | Full IC | C:6925/6980 P:6815/6755 | $525 ($145C+$380P) | Put STOPPED at 11:02, Call EXPIRED | -$250 gross, -$265 net |
+| #2 | 10:35 | NEUTRAL | Full IC | C:6910/6970 P:6800/6740 | $390 ($135C+$255P) | Put STOPPED at 11:03, Call EXPIRED | -$125 gross, -$140 net |
 | #3 | 11:05 | -- | SKIPPED (MKT-017) | -- | -- | Daily loss limit (-$655 < -$500) | -- |
 | #4 | 11:35 | -- | SKIPPED (MKT-017) | -- | -- | Daily loss limit | -- |
 | #5 | 12:05 | -- | SKIPPED (MKT-017) | -- | -- | Daily loss limit | -- |
@@ -514,10 +514,10 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:06 | NEUTRAL | Full IC | C:6900/6950 P:6790/6730 | $465 (C:$125, P:$340) | All EARLY CLOSED at 14:17 | +$355 gross |
-| #2 | 10:45 | NEUTRAL | Full IC (MKT-020 tightened calls 55→30pt) | C:6910/6960 P:6825/6775 | $265 (C:$130, P:$135) | All EARLY CLOSED at 14:17 | +$180 gross |
-| #3 | 11:05 | NEUTRAL | Call-only (MKT-011: put $90<$100) | C:6905/6955 (MKT-020 55→30pt) | $145 (C only) | CALL STOPPED at 12:11:49 | -$145 gross |
-| #4 | 11:35 | NEUTRAL | Put-only (MKT-011: call $32.50<$100) | P:6815/6755 (MKT-013/015 overlap adj) | $100 (P only) | EARLY CLOSED at 14:17 | +$100 gross |
+| #1 | 10:06 | NEUTRAL | Full IC | C:6900/6950 P:6790/6730 | $465 ($125C+$340P) | All EARLY CLOSED at 14:17 | +$355 gross |
+| #2 | 10:45 | NEUTRAL | Full IC (MKT-020 tightened calls 55→30pt) | C:6910/6960 P:6825/6775 | $265 ($130C+$135P) | All EARLY CLOSED at 14:17 | +$180 gross |
+| #3 | 11:05 | NEUTRAL | Call-only (MKT-011: put $90<$100) | C:6905/6955 (MKT-020 55→30pt) | $145 (C) | CALL STOPPED at 12:11:49 | -$145 gross |
+| #4 | 11:35 | NEUTRAL | Put-only (MKT-011: call $32.50<$100) | P:6815/6755 (MKT-013/015 overlap adj) | $100 (P) | EARLY CLOSED at 14:17 | +$100 gross |
 | #5 | 12:05 | NEUTRAL | SKIPPED (MKT-011 v1.3.6: call non-viable + neutral) | -- | -- | MKT-022 tightened put 55→45pt, still skipped | -- |
 
 **Key observations**:
@@ -618,8 +618,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC (MKT-020 tightened) | C:6955 P:6875 | $250 | EARLY CLOSED at 11:15 | +$160 |
-| #2 | 10:35 | NEUTRAL | Full IC (MKT-020 tightened) | C:6945 P:6870 | $240 | EARLY CLOSED at 11:15 | +$80 |
+| #1 | 10:05 | NEUTRAL | Full IC (MKT-020 tightened) | C:6955 P:6875 | $250 ($100C+$150P) | EARLY CLOSED at 11:15 | +$160 |
+| #2 | 10:35 | NEUTRAL | Full IC (MKT-020 tightened) | C:6945 P:6870 | $240 ($130C+$110P) | EARLY CLOSED at 11:15 | +$80 |
 | #3 | 11:05 | NEUTRAL | SKIPPED (MKT-011) | -- | -- | Call $5 non-viable + NEUTRAL = skip | -- |
 | #4 | 11:35 | -- | SKIPPED (MKT-021) | -- | -- | ROC 2.0% >= 2.0% with 3 entries | -- |
 | #5 | 12:05 | -- | SKIPPED (MKT-021) | -- | -- | ROC 2.0% >= 2.0% with 3 entries | -- |
@@ -698,11 +698,11 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 10:05 | NEUTRAL | Full IC (MKT-020 tightened) | C:6970 P:6870 | $450 | Call expired, PUT STOPPED 10:15 | -$220 |
-| #2 | 10:35 | BEARISH | Call-only | C:6920 | $305 | CALL STOPPED 11:15 | -$345 |
-| #3 | 11:05 | NEUTRAL | Full IC (MKT-020 tightened) | C:6940 P:6845 | $340 | Call expired, PUT STOPPED 12:49 | -$115 |
+| #1 | 10:05 | NEUTRAL | Full IC (MKT-020 tightened) | C:6970 P:6870 | $450 ($120C+$330P) | Call expired, PUT STOPPED 10:15 | -$220 |
+| #2 | 10:35 | BEARISH | Call-only | C:6920 | $305 (C) | CALL STOPPED 11:15 | -$345 |
+| #3 | 11:05 | NEUTRAL | Full IC (MKT-020 tightened) | C:6940 P:6845 | $340 ($130C+$210P) | Call expired, PUT STOPPED 12:49 | -$115 |
 | #4 | 11:35 | NEUTRAL | SKIPPED (MKT-011) | -- | -- | Call $72.50 non-viable + NEUTRAL = skip | -- |
-| #5 | 12:05 | NEUTRAL | Full IC (MKT-020 tightened) | C:6920 P:6825 | $250 | CALL STOPPED 14:16, Put expired | -$30 |
+| #5 | 12:05 | NEUTRAL | Full IC (MKT-020 tightened) | C:6920 P:6825 | $250 ($130C+$120P) | CALL STOPPED 14:16, Put expired | -$30 |
 
 **Key observations**:
 - **Worst loss day since Feb 17 (-$740)** — all 4 placed entries had at least one side stopped (0% win rate)
