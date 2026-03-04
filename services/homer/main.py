@@ -150,8 +150,8 @@ def validate_journal(content: str) -> bool:
     return True
 
 
-def git_commit_and_push(journal_path: str, date_labels: list):
-    """Commit the journal update and push to remote."""
+def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
+    """Commit the journal update and push to remote. Returns True on success."""
     try:
         # Stage the journal file
         subprocess.run(
@@ -177,10 +177,10 @@ def git_commit_and_push(journal_path: str, date_labels: list):
         else:
             if "nothing to commit" in result.stdout or "nothing to commit" in result.stderr:
                 logger.info("Nothing to commit — journal unchanged")
-                return
+                return True  # Not an error
             else:
                 logger.error(f"git commit failed: {result.stderr}")
-                return
+                return False
 
         # Push
         result = subprocess.run(
@@ -192,13 +192,17 @@ def git_commit_and_push(journal_path: str, date_labels: list):
         )
         if result.returncode == 0:
             logger.info("Pushed to remote")
+            return True
         else:
             logger.warning(f"git push failed: {result.stderr}")
+            return False
 
     except subprocess.CalledProcessError as e:
         logger.error(f"Git operation failed: {e}")
+        return False
     except subprocess.TimeoutExpired:
         logger.error("Git operation timed out")
+        return False
 
 
 def send_telegram_alert(config: dict, message: str):
@@ -237,10 +241,21 @@ def send_telegram_alert(config: dict, message: str):
         logger.error(f"Failed to send Telegram alert: {e}")
 
 
-def build_success_message(date_labels: list, days_added: int, net_pnl: float, cum_pnl: float, total_days: int) -> str:
+def _format_money_msg(value: float) -> str:
+    """Format money for Telegram: show cents when fractional, integer when whole."""
+    if value == int(value):
+        return f"{int(value)}"
+    return f"{value:.2f}"
+
+
+def build_success_message(date_labels: list, days_added: int, net_pnl: float, cum_pnl: float, total_days: int, git_ok: bool = True) -> str:
     """Build the Telegram success message."""
     dates_str = ", ".join(date_labels)
     sections = "1, 2, 3, 4, 5, 8, 9"
+
+    pnl_str = f"{'+' if net_pnl >= 0 else '-'}{_format_money_msg(abs(net_pnl))}"
+    cum_str = _format_money_msg(cum_pnl)
+    git_line = "_Committed and pushed to main_" if git_ok else "⚠️ _Git commit/push failed — manual push required_"
 
     return (
         f"📝 *HOMER* | Journal Updated\n"
@@ -249,10 +264,10 @@ def build_success_message(date_labels: list, days_added: int, net_pnl: float, cu
         f"Days added: {days_added}\n"
         f"Sections updated: {sections}\n"
         f"\n"
-        f"Net P&L today: {'+' if net_pnl >= 0 else ''}{net_pnl:.0f}\n"
-        f"Cumulative P&L: ${cum_pnl:,.0f} ({total_days} days)\n"
+        f"Net P&L today: {pnl_str}\n"
+        f"Cumulative P&L: ${cum_str} ({total_days} days)\n"
         f"\n"
-        f"_Committed and pushed to main_"
+        f"{git_line}"
     )
 
 
@@ -471,12 +486,12 @@ def main():
         logger.info(f"Journal updated: {journal_path} ({len(new_content)} chars)")
 
         # 11. Git commit + push
-        git_commit_and_push(journal_path, date_labels)
+        git_ok = git_commit_and_push(journal_path, date_labels)
 
-        # 12. Telegram alert
+        # 12. Telegram alert (reflects git status)
         if homer_config.get("telegram_alert", True):
             msg = build_success_message(
-                date_labels, len(missing_days), last_pnl, last_cum_pnl, len(sheets_dates)
+                date_labels, len(missing_days), last_pnl, last_cum_pnl, len(sheets_dates), git_ok
             )
             send_telegram_alert(config, msg)
 

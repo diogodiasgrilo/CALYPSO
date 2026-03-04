@@ -22,23 +22,23 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.6.0)
+## HYDRA Strategy Parameters (v1.8.0)
 
-- **5 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05 ET
+- **5 iron condor entries per day** at 11:05, 11:35, 12:05, 12:35, 13:05 ET (shifted +1hr from original schedule — MKT-031)
+- **Smart entry windows (MKT-031):** 10-minute scouting window before each scheduled entry. Scores market conditions (post-spike ATR calm + momentum pause). Score >= 65 triggers early entry. Otherwise enters at scheduled time.
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
 - **VIX-scaled width (MKT-027):** round(VIX x 3.5 / 5) x 5, with per-side floors
-- **Min credit thresholds (MKT-011):** $1.00/side for calls, $1.75/side for puts
+- **Min credit thresholds (MKT-011):** $0.75/side for calls (lowered v1.7.2), $1.75/side for puts (fallback $1.65 MKT-029)
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
 - **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
-- **Early close (MKT-018):** closes all when ROC >= 3% (with MKT-023 hold check)
-- **Pre-entry ROC gate (MKT-021):** skips entries #4/#5 if ROC already above threshold
+- **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
 
 ## Entry Skip Pattern
 
-Early entries (10:05-10:35 AM) have the RICHEST premium. They almost NEVER skip.
-Entry #5 (12:05 PM, now the last entry) accounts for ~80% of all MKT-011 skips.
-The call side is almost always the reason (premium decays faster on calls).
+Entry #1 (11:05) typically has the RICHEST premium. Earlier entries almost NEVER skip.
+Entry #5 (13:05 / 1:05 PM, the last entry) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
+The call side is almost always the reason for skips (premium decays faster on calls).
 
 ## Analysis Framework
 

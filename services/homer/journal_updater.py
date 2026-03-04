@@ -65,15 +65,25 @@ def safe_int(value, default=0) -> int:
     return int(safe_float(value, default))
 
 
+def format_money(value: float) -> str:
+    """Format money: show cents when fractional, integer when whole.
+
+    Examples: 305 → '305', 47.5 → '47.50', 1592.5 → '1592.50'
+    """
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.2f}"
+
+
 def format_currency(value: float) -> str:
-    """Format a float as currency: $1,234 (no cents)."""
-    return f"${abs(value):,.0f}"
+    """Format a float as currency: $1,234 or $1,234.50."""
+    return f"${format_money(abs(value))}"
 
 
 def format_signed_currency(value: float) -> str:
-    """Format as +$1,234 or -$1,234."""
+    """Format as +$1,234 or -$1,234 (with cents when fractional)."""
     sign = "+" if value >= 0 else "-"
-    return f"{sign}${abs(value):,.0f}"
+    return f"{sign}${format_money(abs(value))}"
 
 
 def _format_credit_with_breakdown(entry: dict) -> str:
@@ -99,13 +109,13 @@ def _format_credit_with_breakdown(entry: dict) -> str:
 
     # Both sides have credits → full breakdown
     if call_credit > 0 and put_credit > 0:
-        return f"${total:.0f} (${call_credit:.0f}C+${put_credit:.0f}P)"
+        return f"${format_money(total)} (${format_money(call_credit)}C+${format_money(put_credit)}P)"
 
     # One-sided entries
     if call_credit > 0 and not put_credit:
-        return f"${call_credit:.0f} (C)"
+        return f"${format_money(call_credit)} (C)"
     if put_credit > 0 and not call_credit:
-        return f"${put_credit:.0f} (P)"
+        return f"${format_money(put_credit)} (P)"
 
     # No per-side data available — show total only
     return format_currency(total)
@@ -134,23 +144,23 @@ SECTION2_ROWS = [
     ("Bullish Signals", "Bullish Signals", lambda v: f"**{safe_int(v)}**"),
     ("Bearish Signals", "Bearish Signals", lambda v: f"**{safe_int(v)}**"),
     ("Neutral Signals", "Neutral Signals", lambda v: f"**{safe_int(v)}**"),
-    ("Total Credit ($)", "Total Credit ($)", lambda v: f"**{safe_int(v)}**"),
+    ("Total Credit ($)", "Total Credit ($)", lambda v: f"**{format_money(safe_float(v))}**"),
     ("Call Stops", "Call Stops", lambda v: f"**{safe_int(v)}**"),
     ("Put Stops", "Put Stops", lambda v: f"**{safe_int(v)}**"),
     ("Double Stops", "Double Stops", lambda v: f"**{safe_int(v)}**"),
-    ("Stop Loss Debits ($)", "Stop Loss Debits ($)", lambda v: f"**{safe_int(v)}**"),
-    ("Commission ($)", "Commission ($)", lambda v: f"**{safe_int(v)}**"),
-    ("Expired Credits ($)", "Expired Credits ($)", lambda v: f"**{safe_int(v)}**"),
-    ("Daily P&L ($)", "Daily P&L ($)", lambda v: f"**{safe_int(v)}**"),
-    ("Daily P&L (EUR)", "Daily P&L (EUR)", lambda v: f"**~{safe_int(v)}**"),
-    ("Cumulative P&L ($)", "Cumulative P&L ($)", lambda v: f"**{safe_int(v)}**"),
-    ("Cumulative P&L (EUR)", "Cumulative P&L (EUR)", lambda v: f"**~{safe_int(v)}**"),
+    ("Stop Loss Debits ($)", "Stop Loss Debits ($)", lambda v: f"**{format_money(safe_float(v))}**"),
+    ("Commission ($)", "Commission ($)", lambda v: f"**{format_money(safe_float(v))}**"),
+    ("Expired Credits ($)", "Expired Credits ($)", lambda v: f"**{format_money(safe_float(v))}**"),
+    ("Daily P&L ($)", "Daily P&L ($)", lambda v: f"**{format_money(safe_float(v))}**"),
+    ("Daily P&L (EUR)", "Daily P&L (EUR)", lambda v: f"**~{format_money(safe_float(v))}**"),
+    ("Cumulative P&L ($)", "Cumulative P&L ($)", lambda v: f"**{format_money(safe_float(v))}**"),
+    ("Cumulative P&L (EUR)", "Cumulative P&L (EUR)", lambda v: f"**~{format_money(safe_float(v))}**"),
     ("Win Rate (%)", "Win Rate (%)", lambda v: f"**{safe_float(v):.1f}**"),
-    ("Capital Deployed ($)", "Capital Deployed ($)", lambda v: f"**{safe_int(v)}**"),
+    ("Capital Deployed ($)", "Capital Deployed ($)", lambda v: f"**{format_money(safe_float(v))}**"),
     ("Return on Capital (%)", "Return on Capital (%)", lambda v: f"**{safe_float(v):.2f}**"),
     ("Sortino Ratio", "Sortino Ratio", lambda v: f"**~{safe_float(v):.1f}**"),
-    ("Max Loss Stops ($)", "Max Loss Stops ($)", lambda v: f"**{safe_int(v)}**"),
-    ("Max Loss Catastrophic ($)", "Max Loss Catastrophic ($)", lambda v: f"**{safe_int(v)}**"),
+    ("Max Loss Stops ($)", "Max Loss Stops ($)", lambda v: f"**{format_money(safe_float(v))}**"),
+    ("Max Loss Catastrophic ($)", "Max Loss Catastrophic ($)", lambda v: f"**{format_money(safe_float(v))}**"),
     ("Early Close", "Early Close", lambda v: f"**{v if v else 'No'}**"),
     ("Notes", "Notes", lambda v: f"**{v}**" if v else "**Post-settlement**"),
 ]
@@ -235,13 +245,14 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
     date_str = str(summary.get("Date", "")).strip()
     date_label = format_date_label(date_str)
 
-    expired = safe_int(summary.get("Expired Credits ($)", 0))
-    stops = safe_int(summary.get("Stop Loss Debits ($)", 0))
-    commission = safe_int(summary.get("Commission ($)", 0))
-    pnl = safe_int(summary.get("Daily P&L ($)", 0))
+    expired = safe_float(summary.get("Expired Credits ($)", 0))
+    stops = safe_float(summary.get("Stop Loss Debits ($)", 0))
+    commission = safe_float(summary.get("Commission ($)", 0))
+    pnl = safe_float(summary.get("Daily P&L ($)", 0))
 
     computed = expired - stops - commission
-    check = "checkmark" if computed == pnl else "MISMATCH"
+    # Allow small floating point tolerance
+    check = "✓" if abs(computed - pnl) < 0.01 else "MISMATCH"
 
     # Build note about the day
     notes = summary.get("Notes", "")
@@ -250,7 +261,10 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
         note_parts.append(notes)
     note_str = f" ({', '.join(note_parts)})" if note_parts else ""
 
-    formula_line = f"- {date_label}: {expired} - {stops} - {commission} = {pnl} ✓{note_str}"
+    formula_line = (
+        f"- {date_label}: {format_money(expired)} - {format_money(stops)} "
+        f"- {format_money(commission)} = {format_money(pnl)} ✓{note_str}"
+    )
 
     # Insert after last formula line
     _, last_line = pnl_range
@@ -337,7 +351,7 @@ def build_section3_day_block(
     date_str = str(summary.get("Date", "")).strip()
     date_label = format_date_label(date_str)
     day_name = format_day_of_week(date_str)
-    pnl = safe_int(summary.get("Daily P&L ($)", 0))
+    pnl = safe_float(summary.get("Daily P&L ($)", 0))
 
     spx_open = safe_float(summary.get("SPX Open", 0))
     spx_close = safe_float(summary.get("SPX Close", 0))
@@ -427,16 +441,16 @@ def build_section3_day_block(
             lines.append("")
 
     # P&L reconciliation
-    expired = safe_int(summary.get("Expired Credits ($)", 0))
-    stop_debits = safe_int(summary.get("Stop Loss Debits ($)", 0))
-    commission = safe_int(summary.get("Commission ($)", 0))
+    expired = safe_float(summary.get("Expired Credits ($)", 0))
+    stop_debits = safe_float(summary.get("Stop Loss Debits ($)", 0))
+    commission = safe_float(summary.get("Commission ($)", 0))
 
     lines.append("### P&L Reconciliation")
     lines.append("")
-    lines.append(f"- Expired Credits: ${expired}")
-    lines.append(f"- Stop Loss Debits: ${stop_debits}")
-    lines.append(f"- Commission: ${commission}")
-    lines.append(f"- **Net P&L: {format_signed_currency(pnl)}** ({expired} - {stop_debits} - {commission} = {pnl})")
+    lines.append(f"- Expired Credits: ${format_money(expired)}")
+    lines.append(f"- Stop Loss Debits: ${format_money(stop_debits)}")
+    lines.append(f"- Commission: ${format_money(commission)}")
+    lines.append(f"- **Net P&L: {format_signed_currency(pnl)}** ({format_money(expired)} - {format_money(stop_debits)} - {format_money(commission)} = {format_money(pnl)})")
     lines.append("")
 
     return lines
@@ -629,22 +643,48 @@ def recompute_section5(
         put_stops_day = safe_int(r.get("Put Stops", 0))
         double_stops_day = safe_int(r.get("Double Stops", 0))
         full_ics_day = safe_int(r.get("Full ICs", 0))
+        one_sided_day = safe_int(r.get("One-Sided Entries", 0))
 
         clean_wins += day_clean
-        # Partial wins = full ICs with exactly 1 side stopped
-        # Full losses = one-sided entries that were stopped + double stops
+
+        # Full losses = double stops + one-sided entries that were stopped
         day_full_losses = double_stops_day
-        one_sided_day = safe_int(r.get("One-Sided Entries", 0))
-        # One-sided entries that were stopped
-        day_one_sided_stops = min(call_stops_day + put_stops_day - double_stops_day, one_sided_day)
+
+        # Estimate one-sided stops: total stop SIDES (not counting double stop sides
+        # which are already accounted for) minus full IC partial wins (1 side stopped).
+        # The number of entries with at least 1 stop = entries - clean.
+        # Of those, full IC entries with 1 stop = partial wins.
+        # One-sided entries that were stopped = entries_with_stops - partial_ic - double_stops.
+        entries_with_stops = entries_completed - day_clean
+        # Total stop sides from full ICs: each partial has 1 side, each double has 2
+        # One-sided stops: each stopped one-sided has 1 stop side
+        # total_stop_sides = partial_ic * 1 + double * 2 + one_sided_stops * 1
+        total_stop_sides = call_stops_day + put_stops_day
+        # One-sided can have at most one_sided_day stops, and at most
+        # entries_with_stops - double_stops_day entries
+        remaining_stopped_entries = entries_with_stops - double_stops_day
+        # Stop sides from double stops = 2 * double_stops_day
+        remaining_stop_sides = total_stop_sides - (2 * double_stops_day)
+        if remaining_stop_sides < 0:
+            remaining_stop_sides = 0
+
+        # Full ICs with 1 stop contribute 1 side each.
+        # One-sided entries with 1 stop contribute 1 side each.
+        # remaining_stopped_entries = partial_ic + one_sided_stops
+        # remaining_stop_sides = partial_ic * 1 + one_sided_stops * 1
+        # So remaining_stop_sides = remaining_stopped_entries (each has exactly 1 stop side)
+        # Therefore one_sided_stops = min(one_sided_day, remaining_stopped_entries)
+        # But we can also bound it: one-sided stops <= one-sided entries
+        day_one_sided_stops = min(one_sided_day, remaining_stopped_entries)
         if day_one_sided_stops < 0:
             day_one_sided_stops = 0
         day_full_losses += day_one_sided_stops
-        full_losses += day_full_losses
-        partial_wins += entries_completed - day_clean - day_full_losses
 
-    if partial_wins < 0:
-        partial_wins = 0
+        full_losses += day_full_losses
+        day_partial = entries_completed - day_clean - day_full_losses
+        if day_partial < 0:
+            day_partial = 0
+        partial_wins += day_partial
 
     # Net capture rate
     net_capture_rate = (net_pnl / total_credit * 100) if total_credit else 0
@@ -663,17 +703,17 @@ def recompute_section5(
         "",
         "| Metric | Value |",
         "|--------|-------|",
-        f"| Total Credit Collected | ${total_credit:,.0f} |",
-        f"| Total Expired Credits | ${total_expired:,.0f} ({expired_pct:.1f}% of credit) |",
-        f"| Total Stop Loss Debits | ${total_stops_debits:,.0f} ({stops_pct:.1f}% of credit) |",
-        f"| Total Commission | ${total_commission:,.0f} ({commission_pct:.1f}% of credit) |",
+        f"| Total Credit Collected | ${format_money(total_credit)} |",
+        f"| Total Expired Credits | ${format_money(total_expired)} ({expired_pct:.1f}% of credit) |",
+        f"| Total Stop Loss Debits | ${format_money(total_stops_debits)} ({stops_pct:.1f}% of credit) |",
+        f"| Total Commission | ${format_money(total_commission)} ({commission_pct:.1f}% of credit) |",
         f"| Net P&L | {format_signed_currency(net_pnl)} ({net_capture_rate:.1f}% net capture rate) |",
-        f"| Average Daily Credit | ${avg_daily_credit:,.0f} |",
-        f"| Average Daily P&L | {format_signed_currency(avg_daily_pnl)} |",
+        f"| Average Daily Credit | ${format_money(round(avg_daily_credit))} |",
+        f"| Average Daily P&L | {format_signed_currency(round(avg_daily_pnl))} |",
         f"| Best Day | {format_signed_currency(best_day_pnl)} ({best_day_date}) |",
         f"| Worst Day | {format_signed_currency(worst_day_pnl)} ({worst_day_date}) |",
         f"| Win/Loss Day Ratio | {winning_days}:{losing_days} |",
-        f"| Win/Loss Dollar Ratio | {dollar_ratio:.2f}:1 (${winning_total:,.0f} / ${losing_total:,.0f}) |",
+        f"| Win/Loss Dollar Ratio | {dollar_ratio:.2f}:1 (${format_money(winning_total)} / ${format_money(losing_total)}) |",
         "",
         "### Entry Performance",
         "",
@@ -705,7 +745,7 @@ def recompute_section5(
         ) / total_full_ics if total_full_ics else 0
         new_lines.append(
             f"| Full IC | {total_full_ics} | {full_ic_stop_sides} sides stopped* | "
-            f"~{full_ic_stop_rate:.0f}% per side | ${full_ic_credit:.0f} |"
+            f"~{full_ic_stop_rate:.0f}% per side | ${format_money(full_ic_credit)} |"
         )
 
     if total_one_sided > 0:
@@ -864,14 +904,14 @@ def build_section9_day_block(
     skipped = safe_int(summary.get("Entries Skipped", 0))
     full_ics = safe_int(summary.get("Full ICs", 0))
     one_sided = safe_int(summary.get("One-Sided Entries", 0))
-    total_credit = safe_int(summary.get("Total Credit ($)", 0))
+    total_credit = safe_float(summary.get("Total Credit ($)", 0))
     call_stops = safe_int(summary.get("Call Stops", 0))
     put_stops = safe_int(summary.get("Put Stops", 0))
-    stop_debits = safe_int(summary.get("Stop Loss Debits ($)", 0))
-    commission = safe_int(summary.get("Commission ($)", 0))
-    expired = safe_int(summary.get("Expired Credits ($)", 0))
-    pnl = safe_int(summary.get("Daily P&L ($)", 0))
-    cum_pnl = safe_int(summary.get("Cumulative P&L ($)", 0))
+    stop_debits = safe_float(summary.get("Stop Loss Debits ($)", 0))
+    commission = safe_float(summary.get("Commission ($)", 0))
+    expired = safe_float(summary.get("Expired Credits ($)", 0))
+    pnl = safe_float(summary.get("Daily P&L ($)", 0))
+    cum_pnl = safe_float(summary.get("Cumulative P&L ($)", 0))
     early_close = summary.get("Early Close", "No")
 
     lines = [
@@ -888,14 +928,14 @@ def build_section9_day_block(
         f"| Entries | {entries} (+{skipped} skipped) |",
         f"| Full ICs | {full_ics} |",
         f"| One-Sided | {one_sided} |",
-        f"| Total Credit | ${total_credit} |",
+        f"| Total Credit | ${format_money(total_credit)} |",
         f"| Call Stops | {call_stops} |",
         f"| Put Stops | {put_stops} |",
-        f"| Stop Debits | ${stop_debits} |",
-        f"| Commission | ${commission} |",
-        f"| Expired Credits | ${expired} |",
+        f"| Stop Debits | ${format_money(stop_debits)} |",
+        f"| Commission | ${format_money(commission)} |",
+        f"| Expired Credits | ${format_money(expired)} |",
         f"| Daily P&L | {format_signed_currency(pnl)} |",
-        f"| Cumulative P&L | ${cum_pnl} |",
+        f"| Cumulative P&L | ${format_money(cum_pnl)} |",
         f"| Early Close | {early_close if early_close else 'No'} |",
         "",
     ]
@@ -950,9 +990,9 @@ def update_section1(
         for r in all_summary_rows
     )
     total_entries = sum(safe_int(r.get("Entries Completed", 0)) for r in all_summary_rows)
+    # Total stop sides = call_stops + put_stops (double stops are already counted in both)
     total_stops = sum(
         safe_int(r.get("Call Stops", 0)) + safe_int(r.get("Put Stops", 0))
-        + safe_int(r.get("Double Stops", 0))
         for r in all_summary_rows
     )
     total_double_stops = sum(safe_int(r.get("Double Stops", 0)) for r in all_summary_rows)
@@ -1018,6 +1058,29 @@ def update_section1(
                 f"[Trading Period: {first_label} - {last_label}, {datetime.strptime(last_date, '%Y-%m-%d').year}]",
                 parser.lines[i],
             )
+            break
+
+    # Update Section 1 heading date range
+    year = datetime.strptime(last_date, "%Y-%m-%d").year
+    for i in range(start, min(start + 5, end)):
+        if parser.lines[i].startswith("## 1. Trading Period:"):
+            parser.lines[i] = f"## 1. Trading Period: {first_label} - {last_label}, {year}"
+            break
+
+    # Update trading days list to include all dates
+    last_dt = datetime.strptime(last_date, "%Y-%m-%d")
+    last_day_str = f"{MONTH_ABBREV[last_dt.month]} {last_dt.day}"
+    for i in range(start, end):
+        line = parser.lines[i]
+        if line.startswith("**Trading Days**") and "(" in line:
+            # Check if the last date is already in the list
+            if last_day_str not in line:
+                # Insert the new date before the closing parenthesis
+                parser.lines[i] = re.sub(
+                    r"\)$",
+                    f", {last_day_str})",
+                    line,
+                )
             break
 
     logger.info(f"Updated Section 1 executive summary ({total_days} days)")
