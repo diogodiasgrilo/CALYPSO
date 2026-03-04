@@ -47,7 +47,7 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - **Starting OTM (MKT-024)**: 3.5× calls, 4.0× puts, scans inward via MKT-020/022
 - **Credit Gate (MKT-011)**: $1.00 calls, $1.75 puts — skips if either side non-viable
 - **MKT-025**: Short-only stop close (long expires at settlement)
-- **MKT-018/023**: Early close at 3% ROC with smart hold check
+- **Hold-to-expiry**: MKT-018 early close intentionally disabled (backtest shows hold outperforms)
 - **Telegram /snapshot**: On-demand position snapshot via Telegram command
 
 ---

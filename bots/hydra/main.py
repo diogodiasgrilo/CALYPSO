@@ -12,7 +12,7 @@ Strategy Summary:
 2. EMA 20/40 trend signal logged per entry (informational only)
 3. Credit gate validates minimum credit before each entry
 4. Progressive OTM tightening finds optimal strikes
-5. Smart early close on ROC threshold with hold check
+5. Hold-to-expiry (MKT-018 early close intentionally disabled)
 6. Short-only stop loss (longs expire at settlement)
 
 Usage:

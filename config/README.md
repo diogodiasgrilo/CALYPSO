@@ -220,10 +220,10 @@ cp config.example.json config.json
     "max_spread_width": 75,
     "spread_vix_multiplier": 3.5,
 
-    "min_viable_credit_per_side": 1.00,
+    "min_viable_credit_per_side": 0.75,
     "min_viable_credit_put_side": 1.75,
 
-    "early_close_enabled": true,
+    "early_close_enabled": false,
     "early_close_roc_threshold": 0.03,
     "pre_entry_roc_gate_enabled": true,
     "pre_entry_roc_min_entries": 3
@@ -240,9 +240,10 @@ cp config.example.json config.json
 | `put_min_spread_width` | 75 | MKT-028: Put spread floor (wider = cheaper longs due to skew) |
 | `max_spread_width` | 75 | MKT-027: Spread cap for margin (5 × 75pt × $100 = $37,500) |
 | `spread_vix_multiplier` | 3.5 | MKT-027: VIX-scaled formula: `round(VIX × 3.5 / 5) × 5` |
-| `min_viable_credit_per_side` | 1.00 | MKT-011: Call credit gate ($1.00 minimum) |
+| `min_viable_credit_per_side` | 0.75 | MKT-011: Call credit gate ($0.75 minimum, see HYDRA_CREDIT_CUSHION_ANALYSIS.md) |
 | `min_viable_credit_put_side` | 1.75 | MKT-011: Put credit gate ($1.75 minimum, Tammy's range) |
-| `early_close_roc_threshold` | 0.03 | MKT-018: Close all when ROC >= 3% |
+| `early_close_enabled` | false | MKT-018: Intentionally disabled (hold-to-expiry outperforms) |
+| `early_close_roc_threshold` | 0.03 | MKT-018: ROC threshold (only used when early_close_enabled=true) |
 | `stop_commission_buffer` | 0.15 | MEIC+: Stop = credit - $0.15 (covers commission for true breakeven) |
 
 ---

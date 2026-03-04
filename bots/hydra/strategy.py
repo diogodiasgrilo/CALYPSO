@@ -170,9 +170,9 @@ class HydraStrategy(MEICStrategy):
       Call non-viable → put-only entry (v1.7.1). Put non-viable → skip (call-only disabled).
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
     - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
-    - Early Close (MKT-018): Close all positions when ROC >= 3%
-    - Smart Hold Check (MKT-023): Before early close, compare close-now vs worst-case-hold
-    - Pre-Entry ROC Gate (MKT-021): Skip dilutive entries when ROC already high
+    - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms. Code preserved but dormant.
+    - Smart Hold Check (MKT-023): Only active when MKT-018 enabled (currently disabled)
+    - Pre-Entry ROC Gate (MKT-021): Only active when MKT-018 enabled (currently disabled)
     - Stop formula: total_credit (original Tammy Chambless MEIC rule)
 
     All other functionality (stop losses, position management, reconciliation)
@@ -243,11 +243,11 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"  Recheck each entry: {self.recheck_each_entry}")
 
         # MKT-018: Early close based on Return on Capital (ROC)
+        # INTENTIONALLY DISABLED: Backtest showed no ROC configuration beats hold-to-expiry.
+        # Code preserved but dormant — set early_close_enabled=true in config to re-enable.
+        # See docs/HYDRA_EARLY_CLOSE_ANALYSIS.md for full analysis.
         strategy_config = config.get("strategy", {})
-        # Closes ALL positions when day's ROC reaches threshold after all entries placed.
-        # ROC = (net_pnl - close_cost) / capital_deployed
-        # close_cost = active_legs × cost_per_position ($2.50 commission + $2.50 slippage)
-        self.early_close_enabled = bool(strategy_config.get("early_close_enabled", True))
+        self.early_close_enabled = bool(strategy_config.get("early_close_enabled", False))
         self.early_close_roc_threshold = float(strategy_config.get("early_close_roc_threshold", 0.02))
         self.early_close_cost_per_position = float(strategy_config.get("early_close_cost_per_position", 5.00))
         self._early_close_triggered = False
@@ -256,9 +256,8 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"  Early close (MKT-018): {'ENABLED' if self.early_close_enabled else 'DISABLED'} at {self.early_close_roc_threshold*100:.1f}% ROC")
 
         # MKT-021: Pre-entry ROC gate - skip remaining entries if ROC already
-        # exceeds early close threshold. Prevents diluting profitable positions
-        # with new entries that add capital + close costs but ~$0 P&L.
-        # Only active when MKT-018 early close is enabled.
+        # exceeds early close threshold. Only active when MKT-018 is enabled.
+        # Currently disabled (MKT-018 intentionally off).
         self.min_entries_before_roc_gate = int(strategy_config.get("min_entries_before_roc_gate", 3))
         self._roc_gate_triggered = False
         if self.early_close_enabled:
@@ -274,7 +273,7 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"  Progressive put tightening (MKT-022): min OTM {self.min_put_otm_distance}pt")
 
         # MKT-023: Smart hold check before early close
-        # Compares close-now P&L vs worst-case-hold P&L (stressed side stopped, safe side expires)
+        # Only active when MKT-018 is enabled (currently disabled).
         self.hold_check_enabled = bool(strategy_config.get("hold_check_enabled", True))
         self.hold_check_lean_tolerance = float(strategy_config.get("hold_check_lean_tolerance", 1.0))
         if self.early_close_enabled:

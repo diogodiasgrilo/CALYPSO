@@ -2,7 +2,7 @@
 HYDRA 0DTE Trading Bot
 
 Multi-Entry Iron Condors (SPX 0DTE) with credit gates, progressive OTM
-tightening, and smart exits. Based on Tammy Chambless's MEIC strategy.
+tightening, and hold-to-expiry. Based on Tammy Chambless's MEIC strategy.
 
 Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars.
 The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis

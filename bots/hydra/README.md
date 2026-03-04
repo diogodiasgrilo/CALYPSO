@@ -2,7 +2,7 @@
 
 **Version:** 1.7.2 | **Last Updated:** 2026-03-03
 
-A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and early close on Return on Capital.
+A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
 ## Strategy Overview
 
@@ -14,7 +14,7 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 ### Why This Works
 
-On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), wider starting OTM (MKT-024), and early close on profitable days (MKT-018).
+On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), and wider starting OTM (MKT-024).
 
 ### Entry Schedule (5 entries — Entry #6 dropped in v1.6.0 to free margin for wider put spreads)
 
@@ -47,7 +47,7 @@ Calls start at 3.5× and puts at 4.0× the VIX-adjusted OTM distance (asymmetric
 
 ### Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts)
 
-From the MKT-024 starting distance, progressively moves the short strike closer to ATM in 5pt steps until credit meets the minimum ($1.00 for calls, $1.75 for puts) or a 25pt OTM floor is reached.
+From the MKT-024 starting distance, progressively moves the short strike closer to ATM in 5pt steps until credit meets the minimum ($0.75 for calls, $1.75 for puts) or a 25pt OTM floor is reached.
 
 ```
 Flow: MKT-024 (wider start) → MKT-020 (calls) → MKT-022 (puts) → MKT-011 credit gate
@@ -83,43 +83,9 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `chart_bars_count` | `50` | Number of 1-min bars to fetch |
 | `chart_horizon_minutes` | `1` | Bar interval (1 = 1 minute) |
 
-### Early Close on ROC (MKT-018) - Added v1.3.0
+### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
-After all entries are placed, monitors Return on Capital (ROC) every heartbeat. When ROC reaches the threshold, closes ALL active positions via market orders to lock in profit. Prevents late-day reversals from erasing gains built early in the session.
-
-**ROC formula:** `(net_pnl - close_cost) / capital_deployed`
-- `net_pnl`: realized + unrealized - commission
-- `close_cost`: active_legs × $5.00 ($2.50 commission + $2.50 slippage estimate)
-- `capital_deployed`: from existing `_calculate_capital_deployed()`
-
-| Condition | Action |
-|-----------|--------|
-| All entries placed, ROC >= 3.0% | MKT-023 hold check → close if hold check agrees, else hold |
-| All entries placed, ROC < 3.0% | Continue monitoring (shadow-log ROC when > 1%) |
-| Not all entries placed yet | Skip ROC check |
-| Last 15 minutes before close (3:45+ PM) | Skip ROC check (positions expire naturally) |
-| Early close already triggered | Skip (idempotent) |
-
-**After early close:**
-- All positions closed via market orders (deferred fill lookup for accurate P&L)
-- Daily summary, account summary, performance metrics logged immediately
-- Bot transitions to DAILY_COMPLETE state (no settlement needed)
-- Alert sent with locked-in P&L and ROC
-
-### Smart Hold Check (MKT-023) - Added v1.3.7
-
-When MKT-018's ROC threshold is met, MKT-023 checks whether holding to expiration is mathematically better than closing now — even in the worst case. It determines market lean from average cushion per side, then calculates:
-
-- **Close now P&L**: current net P&L minus close costs (same as ROC numerator)
-- **Worst-case hold P&L**: assume all stressed sides get stopped, all safe sides expire worthless
-
-If worst-case hold > close now → **HOLD** (don't close). If worst-case hold <= close now → **CLOSE** (proceed with MKT-018).
-
-### Pre-Entry ROC Gate (MKT-021) - Added v1.3.2
-
-Before placing entries #4 and #5 (after min 3 entries placed), checks if ROC on existing positions already exceeds the early close threshold (3%). If so, skips remaining entries and allows MKT-018 early close to fire immediately at the higher (undiluted) ROC.
-
-Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` — no separate threshold needed. Sets a flag, skips remaining entries, and persists state across restarts.
+Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-021) are **intentionally disabled**. Backtest analysis showed no ROC-based early close configuration beats hold-to-expiry for this strategy. The code is preserved but dormant — set `early_close_enabled: true` in config to re-enable. See `docs/HYDRA_EARLY_CLOSE_ANALYSIS.md` for the full analysis.
 
 ### Credit Gate & Tightening Config (strategy section)
 
@@ -131,12 +97,12 @@ Only active when MKT-018 is enabled. Uses the same `early_close_roc_threshold` �
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: Put starting OTM = base × multiplier (higher due to put skew) |
 | `min_call_otm_distance` | `25` | MKT-020: Minimum OTM distance (points) for call tightening floor |
 | `min_put_otm_distance` | `25` | MKT-022: Minimum OTM distance (points) for put tightening floor |
-| `early_close_enabled` | `true` | MKT-018: Enable/disable early close on ROC threshold |
-| `early_close_roc_threshold` | `0.03` | MKT-018: ROC threshold for early close (3.0%) |
-| `early_close_cost_per_position` | `5.00` | MKT-018: Estimated cost per leg to close ($2.50 commission + $2.50 slippage) |
-| `hold_check_enabled` | `true` | MKT-023: Enable/disable smart hold check before early close |
-| `hold_check_lean_tolerance` | `1.0` | MKT-023: Min cushion difference (%) to determine market lean |
-| `min_entries_before_roc_gate` | `3` | MKT-021: Minimum entries placed before pre-entry ROC gate activates |
+| `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |
+| `early_close_roc_threshold` | `0.03` | MKT-018: ROC threshold (3.0%). Only used when early_close_enabled=true. |
+| `early_close_cost_per_position` | `5.00` | MKT-018: Close cost estimate per leg. Only used when early_close_enabled=true. |
+| `hold_check_enabled` | `true` | MKT-023: Smart hold check. Only used when early_close_enabled=true. |
+| `hold_check_lean_tolerance` | `1.0` | MKT-023: Lean threshold (%). Only used when early_close_enabled=true. |
+| `min_entries_before_roc_gate` | `3` | MKT-021: Pre-entry ROC gate. Only active when early_close_enabled=true. |
 
 ## Usage
 
@@ -181,7 +147,7 @@ sudo journalctl -u hydra -f
 | Spread widths | 50pt fixed | Asymmetric: call 60pt, put 75pt floor, 75pt cap (MKT-026/027/028) |
 | Credit minimums | $0.50/side | $1.00 calls, $1.75 puts |
 | Trend signal | None | EMA 20/40 (informational only) |
-| Profit management | Hold to expiration | Early close at 3% ROC (MKT-018/023/021) |
+| Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | Stop formula | total_credit - $0.10 | total_credit - $0.15 (covers commission) |
 | Stop execution | Close both legs | Close SHORT only, long expires (MKT-025) |
 
@@ -189,7 +155,7 @@ sudo journalctl -u hydra -f
 
 1. **Skip rate**: Stricter credit gates (especially $1.75 put minimum) may skip more entries
 2. **Trend reversal risk**: EMA is a lagging indicator; sudden reversals may not be detected immediately
-3. **Early close opportunity cost**: Closing at 3% ROC may leave additional profit on the table on strong days
+3. **Hold-to-expiry**: All positions held until settlement (MKT-018 early close intentionally disabled — backtest showed hold outperforms)
 
 ## State Files
 

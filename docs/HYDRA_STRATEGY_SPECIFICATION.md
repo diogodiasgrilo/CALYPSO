@@ -34,7 +34,7 @@
 
 HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — entries are full iron condors or put-only (when call credit is non-viable, via MKT-011).
 
-Key MKT rules include: pre-entry credit validation, progressive OTM tightening, early close on ROC, smart hold checks, and pre-entry ROC gating — developed iteratively from 12 days of live trading data (Feb 10-26, 2026).
+Key MKT rules include: pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management — developed iteratively from 12 days of live trading data (Feb 10-26, 2026). Early close (MKT-018/023/021) was tested but intentionally disabled — backtest showed hold-to-expiry outperforms.
 
 ### Key Numbers (10 Trading Days: Feb 10-24, 2026)
 
@@ -60,7 +60,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 | Stop formula (full IC) | total_credit per side | total_credit per side (same as base MEIC) |
 | Stop execution | Close both legs (short + long) | Close SHORT only, long expires (MKT-025) |
 | Credit gate | Skip if both non-viable | Skip if either side non-viable (MKT-011) |
-| Profit management | Hold to expiration | Early close at 3% ROC (MKT-018/023/021) |
+| Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | OTM tightening | None | Progressive 5pt steps (MKT-020/022) |
 
 ---
@@ -94,11 +94,11 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 | Feb 10 | Same strikes merged by Saxo | MKT-013 (overlap prevention) |
 | Feb 13 | High VIX → huge premium, stops late | MKT-019 (removed v1.4.0) |
 | Feb 17 | Wrong trend signals amplify losses | EMA threshold 0.1% → 0.2% |
-| Feb 18 | Late stops erased morning gains | MKT-018 (early close on ROC) |
+| Feb 18 | Late stops erased morning gains | MKT-018 (early close on ROC, now disabled) |
 | Feb 19 | Cascade breaker blocked winner | MKT-016/017 removed (v1.3.3) |
-| Feb 20 | Late entries diluted high ROC | MKT-021 (pre-entry ROC gate) |
+| Feb 20 | Late entries diluted high ROC | MKT-021 (pre-entry ROC gate, now disabled) |
 | Feb 24 | NEUTRAL entry went one-sided | MKT-011 v1.3.6 (NEUTRAL = IC or skip) |
-| Feb 24 | MKT-018 could leave money on table | MKT-023 (smart hold check) |
+| Feb 24 | MKT-018 could leave money on table | MKT-023 (smart hold check, now disabled) |
 
 ---
 
@@ -113,8 +113,8 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 | 1 | 10:05 AM | 35 min after open; opening volatility settled |
 | 2 | 10:35 AM | |
 | 3 | 11:05 AM | |
-| 4 | 11:35 AM | MKT-021 ROC gate checks before #4 |
-| 5 | 12:05 PM | MKT-021 ROC gate checks before #5 |
+| 4 | 11:35 AM | MKT-021 ROC gate before #4 (disabled) |
+| 5 | 12:05 PM | MKT-021 ROC gate before #5 (disabled) |
 
 Each entry has a 5-minute window. If the entry time passes and the bot hasn't placed the entry (e.g., pending previous stop), it still attempts within the window.
 
@@ -426,7 +426,9 @@ The main loop checks stops every ~1-2 seconds:
 
 ## Profit Management System
 
-Three rules work together to manage profits after entries are placed:
+> **STATUS: INTENTIONALLY DISABLED.** MKT-018, MKT-021, and MKT-023 are disabled in production (`early_close_enabled: false`). Backtest showed no ROC-based early close configuration beats hold-to-expiry. All positions are held until 4:00 PM settlement. Code preserved but dormant — set `early_close_enabled: true` in config to re-enable. See `HYDRA_EARLY_CLOSE_ANALYSIS.md` for full analysis.
+
+The following three rules work together when enabled:
 
 ### MKT-021: Pre-Entry ROC Gate
 
@@ -526,11 +528,11 @@ Entry #1 → #2 → #3 placed normally
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
-| MKT-018 | Early Close on ROC | v1.3.0 | Close all positions when ROC >= 3% |
+| MKT-018 | Early Close on ROC | v1.3.0 | **DISABLED** — Hold-to-expiry outperforms. Close all when ROC >= 3% (if re-enabled) |
 | MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $0.75 |
-| MKT-021 | Pre-Entry ROC Gate | v1.3.2 | Skip entries #4/#5 if ROC already >= 3% (after 3 entries placed) |
+| MKT-021 | Pre-Entry ROC Gate | v1.3.2 | **DISABLED** — Only active when MKT-018 enabled. Skip entries #4/#5 if ROC >= 3% |
 | MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $1.75 |
-| MKT-023 | Smart Hold Check | v1.3.7 | Compare close-now vs worst-case-hold before MKT-018 fires |
+| MKT-023 | Smart Hold Check | v1.3.7 | **DISABLED** — Only active when MKT-018 enabled. Compare close-now vs hold |
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
 | MKT-025 | Short-Only Stop Close | v1.4.3 | Close SHORT leg only on stop; long expires at settlement |
 | MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper = pure savings) |
@@ -582,7 +584,7 @@ WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (10:05 AM)
 ENTRY_IN_PROGRESS → MONITORING       (entry placed)
 MONITORING → ENTRY_IN_PROGRESS       (next entry time)
 MONITORING → STOP_TRIGGERED          (spread_value >= stop_level)
-MONITORING → DAILY_COMPLETE          (MKT-018 early close OR 4:00 PM settlement)
+MONITORING → DAILY_COMPLETE          (4:00 PM settlement; MKT-018 early close if re-enabled)
 STOP_TRIGGERED → MONITORING          (stop processed)
 Any → CIRCUIT_BREAKER                (5 consecutive failures)
 Any → HALTED                         (critical: overnight positions, stale registry)
@@ -599,8 +601,8 @@ Any → HALTED                         (critical: overnight positions, stale reg
 | 11:05 AM | Entry #3 |
 | 11:35 AM | Entry #4 (MKT-021 ROC gate check first) |
 | 12:05 PM | Entry #5 (MKT-021 ROC gate check first) |
-| 12:05+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s, MKT-018 ROC checks |
-| 3:45 PM | MKT-018 stops checking (last 15 min, positions expire naturally) |
+| 12:05+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
+| 3:45 PM | Last 15 min, positions expire naturally at settlement |
 | 4:00 PM | Market close, 0DTE options expire/settle |
 | 4:00-5:00 PM | `check_after_hours_settlement()`: process expired credits |
 | Post-settlement | `log_daily_summary()`, `log_account_summary()`, `log_performance_metrics()` |
@@ -678,7 +680,7 @@ HEARTBEAT | Monitoring | SPX: 6012.45 | VIX: 19.5 | Entries: 6/6 | Active: 3 | T
 2. **MKT-011 conversions were frequent (pre-v1.4.0):** 36.4% of entries converted from NEUTRAL IC to put-only due to low call credit. One-sided entries were removed in v1.4.0; MKT-011 now skips instead of converting.
 3. **Most signals are NEUTRAL:** 86.4% at 0.2% threshold. Trend filter rarely activates.
 4. **No double stops:** In 44 entries, both sides were never stopped on the same entry.
-5. **Early close is strongly positive:** Both MKT-018 triggers (Feb 20: +$690, Feb 24: +$435) are top P&L days.
+5. **Early close was tested but disabled:** MKT-018 triggered twice (Feb 20: +$690, Feb 24: +$435) but backtest showed hold-to-expiry outperforms overall.
 
 ### Commission Formula
 
@@ -730,12 +732,12 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `meic_plus_reduction` | `0.15` | MEIC+ reduction (covers $15 commission on one-side-stop) |
 | `max_vix_entry` | `30` | Maximum VIX for new entries |
 | `contracts_per_entry` | `1` | Contracts per entry |
-| `early_close_enabled` | `true` | MKT-018 enable |
-| `early_close_roc_threshold` | `0.03` | MKT-018 ROC threshold (3.0%) |
-| `early_close_cost_per_position` | `5.00` | Close cost estimate per leg |
-| `hold_check_enabled` | `true` | MKT-023 enable |
-| `hold_check_lean_tolerance` | `1.0` | MKT-023 lean threshold (%) |
-| `min_entries_before_roc_gate` | `3` | MKT-021 gate (entries before ROC check) |
+| `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |
+| `early_close_roc_threshold` | `0.03` | MKT-018 ROC threshold (3.0%). Only used when enabled. |
+| `early_close_cost_per_position` | `5.00` | Close cost estimate per leg. Only used when enabled. |
+| `hold_check_enabled` | `true` | MKT-023: Only used when MKT-018 enabled. |
+| `hold_check_lean_tolerance` | `1.0` | MKT-023 lean threshold (%). Only used when enabled. |
+| `min_entries_before_roc_gate` | `3` | MKT-021: Only active when MKT-018 enabled. |
 
 ### Filters (`config.filters`)
 
