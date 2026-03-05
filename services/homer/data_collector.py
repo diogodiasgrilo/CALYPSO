@@ -368,31 +368,15 @@ def _read_hydra_logs_for_stops(date_str: str) -> Dict[str, Dict[str, Any]]:
     """
     Read HYDRA service logs for MKT-025 stop events on a given date.
 
-    Parses journalctl output (same approach as HERMES data_collector).
+    Tries log file first (readable by calypso user), then journalctl as fallback.
     Returns dict keyed by entry number: {"3": {"stop_time": "12:22 PM ET", "pnl": -150.0}}
     """
-    try:
-        result = subprocess.run(
-            [
-                "journalctl", "-u", "hydra",
-                "--since", date_str, "--until", f"{date_str} 23:59:59",
-                "--no-pager", "--grep", "MKT-025",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return {}
-    except subprocess.TimeoutExpired:
-        logger.warning("journalctl timed out reading HYDRA logs")
-        return {}
-    except FileNotFoundError:
-        logger.info("journalctl not available (running locally?)")
+    lines = _read_log_lines_for_date(date_str)
+    if not lines:
         return {}
 
     stops: Dict[str, Dict[str, Any]] = {}
-    for line in result.stdout.splitlines():
+    for line in lines:
         # "2026-03-04 12:22:39 | WARNING | ... | MKT-025 STOP TRIGGERED: Entry #3 put side"
         trigger = re.search(
             r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*"
@@ -426,6 +410,52 @@ def _read_hydra_logs_for_stops(date_str: str) -> Dict[str, Dict[str, Any]]:
             f"Parsed {len(stops)} MKT-025 stop events from HYDRA logs for {date_str}"
         )
     return stops
+
+
+def _read_log_lines_for_date(date_str: str) -> List[str]:
+    """
+    Read MKT-025 log lines for a date. Tries log file first, journalctl second.
+
+    Log file at logs/hydra/bot.log is readable by calypso user.
+    journalctl requires systemd-journal group membership.
+    """
+    # Try 1: Log file (calypso-readable, most reliable)
+    log_path = os.path.join("logs", "hydra", "bot.log")
+    if os.path.exists(log_path):
+        try:
+            matching = []
+            with open(log_path) as f:
+                for line in f:
+                    if date_str in line and "MKT-025" in line:
+                        matching.append(line)
+            if matching:
+                logger.info(f"Read {len(matching)} MKT-025 lines from {log_path}")
+                return matching
+        except IOError as e:
+            logger.warning(f"Failed to read {log_path}: {e}")
+
+    # Try 2: journalctl (needs systemd-journal group)
+    try:
+        result = subprocess.run(
+            [
+                "journalctl", "-u", "hydra",
+                "--since", date_str, "--until", f"{date_str} 23:59:59",
+                "--no-pager", "--grep", "MKT-025",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            lines = result.stdout.splitlines()
+            logger.info(f"Read {len(lines)} MKT-025 lines from journalctl")
+            return lines
+    except subprocess.TimeoutExpired:
+        logger.warning("journalctl timed out reading HYDRA logs")
+    except FileNotFoundError:
+        logger.info("journalctl not available (running locally?)")
+
+    return []
 
 
 def _derive_missing_stop_pnl(entries: List[Dict], summary: Dict) -> None:
