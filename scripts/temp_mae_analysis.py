@@ -1,22 +1,41 @@
 #!/usr/bin/env python3
 """
 SPX Minute-of-Hour Volatility & MAE Analysis
-Uses ALL trading days of heartbeat data (19 days, 28K+ data points)
+Uses ALL trading days from backtesting SQLite database.
 """
+import os
+import sqlite3
 import sys
 from collections import defaultdict
 import statistics
 
-def load_data(filepath):
-    """Load SPX price data from CSV."""
+DB_PATH = os.environ.get("BACKTESTING_DB", "data/backtesting.db")
+
+def load_data(filepath=None):
+    """Load SPX price data from SQLite backtesting database."""
+    db_path = filepath or DB_PATH
     data = []  # list of (date, hour, minute, second, price)
-    with open(filepath) as f:
-        header = f.readline()
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) == 5:
-                date, h, m, s, price = parts
-                data.append((date, int(h), int(m), int(s), float(price)))
+
+    if db_path.endswith(".db"):
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT timestamp, spx_price FROM market_ticks ORDER BY timestamp"
+        ).fetchall()
+        conn.close()
+        for ts, price in rows:
+            # timestamp format: "YYYY-MM-DD HH:MM:SS"
+            date = ts[:10]
+            h, m, s = int(ts[11:13]), int(ts[14:16]), int(ts[17:19])
+            data.append((date, h, m, s, price))
+    else:
+        # Fallback: CSV format
+        with open(db_path) as f:
+            header = f.readline()
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) == 5:
+                    date, h, m, s, price = parts
+                    data.append((date, int(h), int(m), int(s), float(price)))
     return data
 
 def build_minute_series(data):
@@ -169,11 +188,11 @@ def analyze_directional_bias(minute_prices):
     return bias_by_minute
 
 def main():
-    filepath = "/tmp/spx_all_data.csv"
+    filepath = sys.argv[1] if len(sys.argv) > 1 else DB_PATH
     print("=" * 80)
     print("SPX MINUTE-OF-HOUR ANALYSIS — ALL TRADING DAYS")
     print("=" * 80)
-    
+
     data = load_data(filepath)
     print(f"\nLoaded {len(data)} data points")
     

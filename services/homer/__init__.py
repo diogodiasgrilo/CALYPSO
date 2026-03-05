@@ -19,6 +19,7 @@ Data Sources:
 
 Output:
     - docs/HYDRA_TRADING_JOURNAL.md — updated with new trading day(s)
+    - data/backtesting.db — SQLite database with market ticks, OHLC, trades
     - intel/homer/journal_backup_YYYY-MM-DD.md — pre-edit backup
     - git commit + push of journal changes
     - Telegram alert with completion summary
@@ -34,12 +35,13 @@ Sections Updated:
 
 Files:
     services/homer/main.py               Entry point (orchestration, git, alerts)
-    services/homer/data_collector.py     Gathers data from Sheets + files
+    services/homer/data_collector.py     Gathers data from Sheets + files + heartbeat logs
+    services/homer/db_manager.py         SQLite backtesting database (schema, inserts, queries)
     services/homer/journal_parser.py     Parses journal structure (sections, tables)
     services/homer/journal_updater.py    Applies updates section-by-section
     services/homer/narrative_generator.py Claude API for observations/assessments
     deploy/homer.service                 systemd oneshot service
     deploy/homer.timer                   systemd timer (5:30 PM ET weekdays)
 
-Last Updated: 2026-03-04
+Last Updated: 2026-03-05
 """

@@ -54,6 +54,7 @@
         "metrics_file": "data/hydra_metrics.json",
         "max_catch_up_days": 10,
         "claude_model": "claude-sonnet-4-6",
-        "telegram_alert": true
+        "telegram_alert": true,
+        "backtesting_db": "data/backtesting.db"
     }
 }

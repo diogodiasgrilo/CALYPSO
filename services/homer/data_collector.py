@@ -1,12 +1,19 @@
 """
 HOMER data collector — gathers trading data from Google Sheets and local files.
+
+Also provides functions for populating the backtesting SQLite database:
+  - parse_heartbeat_logs(): Extract SPX/VIX ticks from bot log files
+  - compute_ohlc_from_ticks(): Compute 1-minute OHLC bars from tick data
+  - build_db_records(): Transform Sheets data into DB-ready dicts
 """
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -659,3 +666,511 @@ def _read_version_history() -> List[Dict[str, str]]:
     except IOError as e:
         logger.warning(f"Failed to read {init_path}: {e}")
         return []
+
+
+# =========================================================================
+# BACKTESTING DATABASE — Data extraction and transformation
+# =========================================================================
+
+# Regex for parsing heartbeat log lines (handles both meic_tf and hydra format)
+# Example: "2026-02-10 09:30:24 | INFO | shared.logger_service | HEARTBEAT | WaitingFirstEntry | SPX: 6970.55 | VIX: 17.35 | Entries: 0/6 | Active: 0 | Trend: neutral"
+_HEARTBEAT_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*"
+    r"HEARTBEAT \| (\w+) \| "
+    r"SPX: ([\d.]+) \| "
+    r"VIX: ([\d.]+) \| "
+    r"Entries: (\d+)/\d+ \| "
+    r"Active: (\d+) \| "
+    r"Trend: (\w+)"
+)
+
+# Default log file paths (relative to project root)
+DEFAULT_LOG_PATHS = [
+    os.path.join("logs", "meic_tf", "bot.log"),  # Feb 5-27 (pre-rename)
+    os.path.join("logs", "hydra", "bot.log"),     # Feb 28+ (post-rename)
+]
+
+
+def parse_heartbeat_logs(
+    date_str: str,
+    log_paths: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Parse heartbeat log lines for a specific date from bot log files.
+
+    Reads line-by-line to avoid loading 37MB+ files into memory.
+
+    Args:
+        date_str: Date to extract ("YYYY-MM-DD").
+        log_paths: List of log file paths to search. Defaults to both
+                   meic_tf and hydra log files.
+
+    Returns:
+        List of dicts matching market_ticks schema, sorted by timestamp.
+    """
+    if log_paths is None:
+        log_paths = DEFAULT_LOG_PATHS
+
+    ticks = {}  # timestamp -> tick dict (dedup by timestamp)
+
+    for path in log_paths:
+        if not os.path.exists(path):
+            continue
+
+        try:
+            with open(path) as f:
+                for line in f:
+                    # Quick filter before regex (performance)
+                    if date_str not in line or "HEARTBEAT" not in line or "SPX:" not in line:
+                        continue
+
+                    match = _HEARTBEAT_RE.search(line)
+                    if not match:
+                        continue
+
+                    ts = match.group(1)
+                    # Verify date matches (line might contain date_str elsewhere)
+                    if not ts.startswith(date_str):
+                        continue
+
+                    ticks[ts] = {
+                        "timestamp": ts,
+                        "spx_price": float(match.group(3)),
+                        "vix_level": float(match.group(4)),
+                        "bot_state": match.group(2),
+                        "entry_count": int(match.group(5)),
+                        "active_count": int(match.group(6)),
+                        "trend_signal": match.group(7),
+                    }
+        except IOError as e:
+            logger.warning(f"Failed to read {path}: {e}")
+
+    result = sorted(ticks.values(), key=lambda t: t["timestamp"])
+    if result:
+        logger.info(f"Parsed {len(result)} heartbeat ticks for {date_str} from log files")
+    return result
+
+
+def parse_all_heartbeat_logs(
+    log_paths: Optional[List[str]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Parse ALL heartbeat log lines from log files, grouped by date.
+
+    Used for backfill mode — reads entire log files once instead of
+    per-date scanning.
+
+    Returns:
+        Dict mapping date string -> list of tick dicts.
+    """
+    if log_paths is None:
+        log_paths = DEFAULT_LOG_PATHS
+
+    ticks_by_date: Dict[str, Dict[str, Dict]] = defaultdict(dict)
+
+    for path in log_paths:
+        if not os.path.exists(path):
+            logger.info(f"Log file not found (skipping): {path}")
+            continue
+
+        count = 0
+        try:
+            with open(path) as f:
+                for line in f:
+                    if "HEARTBEAT" not in line or "SPX:" not in line:
+                        continue
+
+                    match = _HEARTBEAT_RE.search(line)
+                    if not match:
+                        continue
+
+                    ts = match.group(1)
+                    date = ts[:10]
+                    ticks_by_date[date][ts] = {
+                        "timestamp": ts,
+                        "spx_price": float(match.group(3)),
+                        "vix_level": float(match.group(4)),
+                        "bot_state": match.group(2),
+                        "entry_count": int(match.group(5)),
+                        "active_count": int(match.group(6)),
+                        "trend_signal": match.group(7),
+                    }
+                    count += 1
+        except IOError as e:
+            logger.warning(f"Failed to read {path}: {e}")
+
+        logger.info(f"Parsed {count} heartbeat ticks from {path}")
+
+    # Convert to sorted lists
+    result = {}
+    for date, tick_dict in sorted(ticks_by_date.items()):
+        result[date] = sorted(tick_dict.values(), key=lambda t: t["timestamp"])
+
+    logger.info(
+        f"Total: {sum(len(v) for v in result.values())} ticks across {len(result)} dates"
+    )
+    return result
+
+
+def compute_ohlc_from_ticks(ticks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Compute 1-minute OHLC bars from heartbeat ticks.
+
+    Groups ticks by minute, computes Open (first), High (max), Low (min),
+    Close (last) from spx_price. VIX uses last reading in the minute.
+
+    Note: Heartbeats fire ~every 11 seconds, giving ~5 samples/minute.
+    During order placement or stop processing, gaps may occur — those
+    minutes will simply have no OHLC bar.
+
+    Args:
+        ticks: List of tick dicts with 'timestamp' and 'spx_price' fields.
+
+    Returns:
+        List of OHLC bar dicts matching market_ohlc_1min schema.
+    """
+    if not ticks:
+        return []
+
+    minutes: Dict[str, List[Dict]] = defaultdict(list)
+    for tick in ticks:
+        # Truncate to minute: "2026-02-10 09:30:24" -> "2026-02-10 09:30:00"
+        minute_key = tick["timestamp"][:16] + ":00"
+        minutes[minute_key].append(tick)
+
+    bars = []
+    for minute_ts in sorted(minutes.keys()):
+        group = minutes[minute_ts]
+        prices = [t["spx_price"] for t in group if t.get("spx_price")]
+        if not prices:
+            continue
+        bars.append({
+            "timestamp": minute_ts,
+            "open": prices[0],
+            "high": max(prices),
+            "low": min(prices),
+            "close": prices[-1],
+            "vix": group[-1].get("vix_level"),
+        })
+
+    return bars
+
+
+def build_db_records(
+    day_data: Optional[Dict[str, Any]],
+    date_str: str,
+    ticks: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Transform HOMER's existing day_data (from Sheets) into DB-ready dicts.
+
+    Args:
+        day_data: Day data from collect_day_data(), or None if no Sheets data.
+        date_str: Date string "YYYY-MM-DD".
+        ticks: Heartbeat ticks for the day (for SPX lookups).
+
+    Returns:
+        Dict with keys: 'trade_entries', 'trade_stops', 'daily_summary'.
+        Each value is a list of dicts (or a single dict for daily_summary).
+        Any key may be empty/None if source data is unavailable.
+    """
+    result: Dict[str, Any] = {
+        "trade_entries": [],
+        "trade_stops": [],
+        "daily_summary": None,
+    }
+
+    if not day_data:
+        return result
+
+    entries = day_data.get("entries", [])
+    summary = day_data.get("summary", {})
+
+    # Build trade_entries records
+    result["trade_entries"] = _build_entry_records(entries, date_str, ticks)
+
+    # Build trade_stops records
+    result["trade_stops"] = _build_stop_records(entries, date_str, ticks)
+
+    # Build daily_summary record
+    if summary:
+        result["daily_summary"] = _build_summary_record(summary, date_str, ticks)
+
+    return result
+
+
+def _find_nearest_tick(ticks: List[Dict], target_time: str) -> Optional[Dict]:
+    """Find the tick with timestamp closest to target_time (HH:MM:SS or HH:MM format)."""
+    if not ticks or not target_time:
+        return None
+
+    # Normalize target to "HH:MM:SS" for comparison
+    # Input might be "11:05 AM ET", "11:05:24", "2026-02-10 11:05:24", etc.
+    time_match = re.search(r"(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?", target_time, re.IGNORECASE)
+    if not time_match:
+        return None
+
+    hour = int(time_match.group(1))
+    minute = int(time_match.group(2))
+    second = int(time_match.group(3) or 0)
+    ampm = time_match.group(4)
+
+    # Convert 12-hour to 24-hour if AM/PM present
+    if ampm:
+        if ampm.upper() == "PM" and hour != 12:
+            hour += 12
+        elif ampm.upper() == "AM" and hour == 12:
+            hour = 0
+
+    target_seconds = hour * 3600 + minute * 60 + second
+
+    best = None
+    best_diff = float("inf")
+    for tick in ticks:
+        ts = tick["timestamp"]
+        # Extract HH:MM:SS from "YYYY-MM-DD HH:MM:SS"
+        try:
+            h, m, s = int(ts[11:13]), int(ts[14:16]), int(ts[17:19])
+            tick_seconds = h * 3600 + m * 60 + s
+            diff = abs(tick_seconds - target_seconds)
+            if diff < best_diff:
+                best_diff = diff
+                best = tick
+        except (ValueError, IndexError):
+            continue
+
+    return best
+
+
+def _build_entry_records(
+    entries: List[Dict], date_str: str, ticks: List[Dict]
+) -> List[Dict[str, Any]]:
+    """Transform Sheets entry data into trade_entries DB records."""
+    records = []
+    for entry in entries:
+        entry_num = int(entry.get("Entry #", 0) or 0)
+        if entry_num <= 0:
+            continue
+
+        entry_time = entry.get("Entry Time", "")
+
+        # Look up SPX/VIX at entry time from ticks
+        nearest = _find_nearest_tick(ticks, entry_time)
+        spx_at_entry = nearest["spx_price"] if nearest else None
+        vix_at_entry = nearest["vix_level"] if nearest else None
+
+        # Compute expected move from VIX (0DTE: 1 day)
+        expected_move = None
+        if spx_at_entry and vix_at_entry:
+            expected_move = round(spx_at_entry * (vix_at_entry / 100) * math.sqrt(1 / 365), 2)
+
+        # Parse strikes
+        short_call = _safe_float(entry.get("Short Call Strike"))
+        short_put = _safe_float(entry.get("Short Put Strike"))
+        call_spread_width = _safe_float(entry.get("Call Spread Width"))
+        put_spread_width = _safe_float(entry.get("Put Spread Width"))
+
+        # Compute long strikes from short + spread width
+        long_call = (short_call + call_spread_width) if short_call and call_spread_width else None
+        long_put = (short_put - put_spread_width) if short_put and put_spread_width else None
+
+        # OTM distances
+        otm_call = abs(spx_at_entry - short_call) if spx_at_entry and short_call else None
+        otm_put = abs(spx_at_entry - short_put) if spx_at_entry and short_put else None
+
+        # Entry type
+        entry_type = entry.get("Entry Type", "")
+        if not entry_type:
+            if short_call and short_put:
+                entry_type = "Full IC"
+            elif short_call:
+                entry_type = "Call Only"
+            elif short_put:
+                entry_type = "Put Only"
+
+        # Credits
+        call_credit = _safe_float(entry.get("Call Credit")) or None
+        put_credit = _safe_float(entry.get("Put Credit")) or None
+        total_credit = _safe_float(entry.get("Total Credit")) or None
+
+        records.append({
+            "date": date_str,
+            "entry_number": entry_num,
+            "entry_time": entry_time or None,
+            "spx_at_entry": spx_at_entry,
+            "vix_at_entry": vix_at_entry,
+            "expected_move": expected_move,
+            "trend_signal": entry.get("Trend Signal"),
+            "entry_type": entry_type or None,
+            "override_reason": entry.get("Override Reason"),
+            "short_call_strike": short_call or None,
+            "long_call_strike": long_call,
+            "short_put_strike": short_put or None,
+            "long_put_strike": long_put,
+            "call_credit": call_credit,
+            "put_credit": put_credit,
+            "total_credit": total_credit,
+            "call_spread_width": call_spread_width or None,
+            "put_spread_width": put_spread_width or None,
+            "mkt031_score": None,  # Only available from v1.8.0+ (Mar 4)
+            "mkt031_early": None,
+            "otm_distance_call": otm_call,
+            "otm_distance_put": otm_put,
+        })
+
+    return records
+
+
+def _build_stop_records(
+    entries: List[Dict], date_str: str, ticks: List[Dict]
+) -> List[Dict[str, Any]]:
+    """Transform Sheets entry data into trade_stops DB records."""
+    records = []
+    for entry in entries:
+        entry_num = int(entry.get("Entry #", 0) or 0)
+        if entry_num <= 0:
+            continue
+
+        outcome = str(entry.get("Outcome", "")).upper()
+        if "STOP" not in outcome:
+            continue
+
+        # Determine which sides were stopped
+        sides_stopped = []
+        if "CALL" in outcome or "DOUBLE" in outcome:
+            sides_stopped.append("call")
+        if "PUT" in outcome or "DOUBLE" in outcome:
+            sides_stopped.append("put")
+        # If just "Stop" without side, check status flags
+        if not sides_stopped:
+            if str(entry.get("Call Stop Triggered", "")).lower() == "yes":
+                sides_stopped.append("call")
+            if str(entry.get("Put Stop Triggered", "")).lower() == "yes":
+                sides_stopped.append("put")
+
+        pnl_impact = _safe_float(entry.get("P&L Impact", 0))
+
+        for side in sides_stopped:
+            stop_time_key = f"{side.title()} Stop Time"
+            stop_time = entry.get(stop_time_key) or entry.get("Stop Time", "")
+
+            # SPX at stop time
+            nearest = _find_nearest_tick(ticks, stop_time)
+            spx_at_stop = nearest["spx_price"] if nearest else None
+
+            # Per-side P&L: if double stop, split evenly (approximation)
+            side_pnl = pnl_impact / len(sides_stopped) if pnl_impact and sides_stopped else None
+
+            records.append({
+                "date": date_str,
+                "entry_number": entry_num,
+                "side": side,
+                "stop_time": stop_time or None,
+                "spx_at_stop": spx_at_stop,
+                "trigger_level": None,  # Not available from Sheets
+                "actual_debit": None,   # Not available from Sheets
+                "net_pnl": side_pnl,
+            })
+
+    return records
+
+
+def _build_summary_record(
+    summary: Dict, date_str: str, ticks: List[Dict]
+) -> Dict[str, Any]:
+    """Transform Sheets Daily Summary row into daily_summaries DB record."""
+    # Try Sheets SPX OHLC first, fall back to computing from ticks
+    spx_open = _safe_float(summary.get("SPX Open")) or None
+    spx_close = _safe_float(summary.get("SPX Close")) or None
+    spx_high = _safe_float(summary.get("SPX High")) or None
+    spx_low = _safe_float(summary.get("SPX Low")) or None
+
+    # If Sheets doesn't have SPX OHLC, derive from ticks
+    if not spx_open and ticks:
+        # Filter to market hours only (9:30 - 16:00 ET)
+        market_ticks = [
+            t for t in ticks
+            if "09:30" <= t["timestamp"][11:16] <= "16:00"
+        ]
+        if market_ticks:
+            spx_open = market_ticks[0]["spx_price"]
+            spx_close = market_ticks[-1]["spx_price"]
+            prices = [t["spx_price"] for t in market_ticks]
+            spx_high = max(prices)
+            spx_low = min(prices)
+
+    # VIX OHLC
+    vix_open = _safe_float(summary.get("VIX Open")) or None
+    vix_close = _safe_float(summary.get("VIX Close")) or None
+    if not vix_open and ticks:
+        market_ticks = [
+            t for t in ticks
+            if "09:30" <= t["timestamp"][11:16] <= "16:00"
+        ]
+        if market_ticks:
+            vix_open = market_ticks[0].get("vix_level")
+            vix_close = market_ticks[-1].get("vix_level")
+
+    # P&L
+    gross_pnl = _safe_float(summary.get("Daily P&L ($)")) or None
+    commission = _safe_float(summary.get("Commission ($)")) or None
+    net_pnl = None
+    if gross_pnl is not None:
+        net_pnl = gross_pnl - (commission or 0)
+
+    # Entry/stop counts
+    entries_placed = None
+    entries_completed = summary.get("Entries Completed")
+    if entries_completed:
+        entries_placed = int(_safe_float(entries_completed))
+
+    entries_stopped = None
+    call_stops = _safe_float(summary.get("Call Stops", 0))
+    put_stops = _safe_float(summary.get("Put Stops", 0))
+    if call_stops or put_stops:
+        entries_stopped = int(call_stops + put_stops)
+
+    entries_expired = None
+    if entries_placed is not None and entries_stopped is not None:
+        entries_expired = max(0, entries_placed - entries_stopped)
+
+    # Day range
+    day_range = None
+    if spx_high and spx_low:
+        day_range = round(spx_high - spx_low, 2)
+
+    # Day of week
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        day_of_week = dt.strftime("%A")
+    except ValueError:
+        day_of_week = None
+
+    # Day type
+    notes = str(summary.get("Notes", "")).strip().lower()
+    day_type = "normal"
+    if "fomc" in notes:
+        day_type = "fomc"
+    elif "opex" in notes or "expir" in notes:
+        day_type = "opex"
+    elif "early close" in notes or "early_close" in notes:
+        day_type = "early_close"
+
+    return {
+        "date": date_str,
+        "spx_open": spx_open,
+        "spx_close": spx_close,
+        "spx_high": spx_high,
+        "spx_low": spx_low,
+        "day_range": day_range,
+        "vix_open": vix_open,
+        "vix_close": vix_close,
+        "entries_placed": entries_placed,
+        "entries_stopped": entries_stopped,
+        "entries_expired": entries_expired,
+        "gross_pnl": gross_pnl,
+        "net_pnl": net_pnl,
+        "commission": commission,
+        "day_type": day_type,
+        "day_of_week": day_of_week,
+    }

@@ -5,9 +5,13 @@ HOMER — Automated HYDRA Trading Journal Writer
 Runs at 5:30 PM ET on weekdays. Detects missing trading days in the journal,
 gathers data, and updates all sections automatically.
 
+Also populates the backtesting SQLite database with market ticks, OHLC bars,
+trade entries, stops, and daily summaries.
+
 Usage:
     python -m services.homer.main
     python -m services.homer.main --dry-run
+    python -m services.homer.main --backfill    # One-time historical data load
     sudo systemctl start homer.service
 """
 
@@ -284,11 +288,156 @@ def build_failure_message(date_str: str, error: str) -> str:
     )
 
 
+def _get_db(config: dict) -> "BacktestingDB":
+    """Create BacktestingDB instance from config."""
+    from services.homer.db_manager import BacktestingDB
+
+    homer_config = config.get("homer", {})
+    db_path = homer_config.get("backtesting_db", "data/backtesting.db")
+    db_path = os.path.join(_project_root, db_path)
+    return BacktestingDB(db_path)
+
+
+def _populate_db_for_date(
+    db: "BacktestingDB",
+    all_data: dict,
+    date_str: str,
+    config: dict,
+    ticks: list = None,
+) -> dict:
+    """
+    Populate backtesting DB for a single trading date.
+
+    Args:
+        db: BacktestingDB instance.
+        all_data: Full dataset from collect_all_data().
+        date_str: Date string "YYYY-MM-DD".
+        config: Agent config.
+        ticks: Pre-parsed heartbeat ticks (for backfill efficiency).
+               If None, parses from log files.
+
+    Returns:
+        Dict with row counts per table.
+    """
+    from services.homer.data_collector import (
+        collect_day_data,
+        parse_heartbeat_logs,
+        compute_ohlc_from_ticks,
+        build_db_records,
+    )
+
+    counts = {"ticks": 0, "ohlc": 0, "entries": 0, "stops": 0, "summary": 0}
+
+    # 1. Market ticks (from heartbeat logs)
+    if ticks is None:
+        ticks = parse_heartbeat_logs(date_str)
+
+    if ticks:
+        counts["ticks"] = db.insert_market_ticks(ticks)
+
+        # 2. OHLC bars (computed from ticks)
+        ohlc_bars = compute_ohlc_from_ticks(ticks)
+        if ohlc_bars:
+            counts["ohlc"] = db.insert_ohlc_1min(ohlc_bars)
+
+    # 3-5. Trade entries, stops, daily summary (from Sheets data)
+    day_data = collect_day_data(all_data, date_str, config)
+    if day_data:
+        records = build_db_records(day_data, date_str, ticks or [])
+
+        if records["trade_entries"]:
+            counts["entries"] = db.insert_trade_entries(records["trade_entries"])
+
+        if records["trade_stops"]:
+            counts["stops"] = db.insert_trade_stops(records["trade_stops"])
+
+        if records["daily_summary"]:
+            counts["summary"] = db.insert_daily_summary(records["daily_summary"])
+    else:
+        logger.info(f"No Sheets data for {date_str} — ticks/OHLC only")
+
+    total = sum(counts.values())
+    if total > 0:
+        logger.info(
+            f"DB {date_str}: {counts['ticks']} ticks, {counts['ohlc']} ohlc, "
+            f"{counts['entries']} entries, {counts['stops']} stops, {counts['summary']} summary"
+        )
+
+    return counts
+
+
+def _run_backfill():
+    """One-time backfill of all historical data into backtesting DB."""
+    logger.info("=" * 60)
+    logger.info("HOMER BACKFILL — Populating backtesting database")
+    logger.info("=" * 60)
+
+    config = load_config()
+    if not config:
+        logger.error("No config loaded — aborting backfill")
+        sys.exit(1)
+
+    db = _get_db(config)
+
+    # Show existing data
+    existing = db.get_table_counts()
+    logger.info(f"Existing DB: {existing}")
+
+    # 1. Parse ALL heartbeat logs at once (efficient: reads each file once)
+    from services.homer.data_collector import (
+        parse_all_heartbeat_logs,
+        collect_all_data,
+        get_all_trading_dates,
+    )
+
+    logger.info("Phase 1: Parsing all heartbeat logs...")
+    all_ticks = parse_all_heartbeat_logs()
+
+    # 2. Collect all Sheets data
+    logger.info("Phase 2: Reading Google Sheets data...")
+    all_data = collect_all_data(config)
+    sheets_dates = get_all_trading_dates(all_data)
+
+    # 3. Combine all dates (from logs + Sheets)
+    all_dates = sorted(set(list(all_ticks.keys()) + sheets_dates))
+    logger.info(f"Phase 3: Processing {len(all_dates)} dates ({all_dates[0]} to {all_dates[-1]})")
+
+    # 4. Populate DB for each date
+    total_counts = {"ticks": 0, "ohlc": 0, "entries": 0, "stops": 0, "summary": 0}
+    for date_str in all_dates:
+        ticks = all_ticks.get(date_str, [])
+        try:
+            counts = _populate_db_for_date(db, all_data, date_str, config, ticks=ticks)
+            for k, v in counts.items():
+                total_counts[k] += v
+        except Exception as e:
+            logger.error(f"Failed to populate {date_str}: {e}")
+
+    # 5. Report
+    logger.info("=" * 60)
+    logger.info("BACKFILL COMPLETE")
+    logger.info(f"  Dates processed: {len(all_dates)}")
+    for table, count in total_counts.items():
+        logger.info(f"  {table}: {count} rows inserted")
+    final = db.get_table_counts()
+    logger.info(f"  Final DB totals: {final}")
+    date_range = db.get_date_range()
+    if date_range:
+        logger.info(f"  Date range: {date_range[0]} to {date_range[1]}")
+    logger.info("=" * 60)
+
+
 def main():
     """Entry point for HOMER journal writer."""
     parser = argparse.ArgumentParser(description="HOMER — HYDRA Trading Journal Writer")
     parser.add_argument("--dry-run", action="store_true", help="Parse and collect data but don't write")
+    parser.add_argument("--backfill", action="store_true", help="Backfill all historical data into backtesting DB")
     args = parser.parse_args()
+
+    # Backfill mode runs independently of trading day check
+    if args.backfill:
+        _run_backfill()
+        return
 
     logger.info("HOMER starting journal update")
 
@@ -489,7 +638,15 @@ def main():
         # 11. Git commit + push
         git_ok = git_commit_and_push(journal_path, date_labels)
 
-        # 12. Telegram alert (reflects git status)
+        # 12. Populate backtesting database (non-blocking — errors don't abort)
+        try:
+            db = _get_db(config)
+            for date_str in missing_days:
+                _populate_db_for_date(db, all_data, date_str, config)
+        except Exception as e:
+            logger.warning(f"Backtesting DB population failed (non-critical): {e}")
+
+        # 13. Telegram alert (reflects git status)
         if homer_config.get("telegram_alert", True):
             msg = build_success_message(
                 date_labels, len(missing_days), last_pnl, last_cum_pnl, len(sheets_dates), git_ok
