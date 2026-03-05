@@ -386,7 +386,8 @@ def build_section3_day_block(
             short_call = entry.get("Short Call Strike", entry.get("Short Call", ""))
             short_put = entry.get("Short Put Strike", entry.get("Short Put", ""))
             outcome = entry.get("Outcome", "")
-            pnl_impact = entry.get("P&L Impact", entry.get("PnL Impact", ""))
+            pnl_raw = safe_float(entry.get("P&L Impact", entry.get("PnL Impact", 0)))
+            pnl_impact = format_signed_currency(pnl_raw) if pnl_raw else ""
 
             # Build strikes column
             strikes = []
@@ -1048,12 +1049,17 @@ def update_section1(
             parser.lines[i] = f"**Last Updated**: {MONTH_ABBREV[dt.month]} {dt.day}, {dt.year}"
             break
 
-    # Update ToC date range
+    # Update ToC date range (both display text and anchor)
+    year = datetime.strptime(last_date, "%Y-%m-%d").year
     for i in range(min(20, len(parser.lines))):
         if "Trading Period:" in parser.lines[i] and "[" in parser.lines[i]:
+            # Build anchor: "feb-10---mar-4-2026" (GitHub markdown anchor format)
+            anchor_first = first_label.lower().replace(" ", "-")
+            anchor_last = last_label.lower().replace(" ", "-")
+            anchor = f"#1-trading-period-{anchor_first}---{anchor_last}-{year}"
             parser.lines[i] = re.sub(
-                r"\[Trading Period:.*?\]",
-                f"[Trading Period: {first_label} - {last_label}, {datetime.strptime(last_date, '%Y-%m-%d').year}]",
+                r"\[Trading Period:.*?\]\(.*?\)",
+                f"[Trading Period: {first_label} - {last_label}, {year}]({anchor})",
                 parser.lines[i],
             )
             break
