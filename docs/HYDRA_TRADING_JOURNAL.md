@@ -1,14 +1,14 @@
 # HYDRA Trading Journal
 
 **Created**: February 17, 2026
-**Last Updated**: Mar 4, 2026
+**Last Updated**: Mar 5, 2026
 **Purpose**: Day-by-day trading record with entry-level detail, P&L tracking, and improvement impact analysis. Future Claude Code sessions should reference this file instead of re-pulling all logs and sheets data.
 
 ---
 
 ## Table of Contents
 
-1. [Trading Period: Feb 10 - Mar 4, 2026](#1-trading-period-feb-10---mar-4-2026)
+1. [Trading Period: Feb 10 - Mar 5, 2026](#1-trading-period-feb-10---mar-5-2026)
 2. [Daily Summary Data (Raw)](#2-daily-summary-data-raw)
 3. [Entry-Level Detail by Day](#3-entry-level-detail-by-day)
 4. [Market Conditions](#4-market-conditions)
@@ -20,10 +20,10 @@
 
 ---
 
-## 1. Trading Period: Feb 10 - Mar 4, 2026
+## 1. Trading Period: Feb 10 - Mar 5, 2026
 
 **Bot Versions**: v1.2.7 (Feb 10-17), v1.2.8 (Feb 18), v1.2.9 (Feb 18 post-market), v1.3.0 (Feb 19), v1.3.2 (Feb 20-23), v1.3.5-v1.3.8 (Feb 24), v1.3.9-v1.3.11 (Feb 25-26), v1.4.0-v1.4.1 (Feb 27), v1.4.2-v1.5.0 (Feb 28 rename to HYDRA), v1.5.1 (Mar 2), v1.6.0-v1.7.2 (Mar 3), v1.8.0 (Mar 4 — shifted +1hr, MKT-031 smart entry windows)
-**Trading Days**: 16 (Feb 10, 11, 12, 13, 17, 18, 19, 20, 23, 24, 25, 26, 27, Mar 2, 3, Mar 4)
+**Trading Days**: 17 (Feb 10, 11, 12, 13, 17, 18, 19, 20, 23, 24, 25, 26, 27, Mar 2, 3, Mar 4, Mar 5)
 **Config**: 5 entries per day (Feb 10-27), 6 entries (Mar 2 only, v1.4.4), 5 entries (Mar 3+, v1.6.0 dropped Entry #6), EMA 20/40 trend filter
 - Feb 10-17: 0.1% neutral threshold, no cascade breaker (baseline)
 - Feb 18+: 0.2% neutral threshold (Rec 9.3), cascade breaker at 3 stops (MKT-016)
@@ -41,13 +41,13 @@
 **Capital Deployed**: $10,000-$38,000 per day (varies by entry count and spread width)
 
 ### Period Result
-- **Net P&L**: +$1592.50
-- **Winning Days**: 10 (62.5%)
-- **Losing Days**: 6 (37.5%)
-- **Total Entries**: 68
-- **Total Stops**: 44 (64.7% stop rate)
+- **Net P&L**: +$1682.50
+- **Winning Days**: 11 (64.7%)
+- **Losing Days**: 6 (35.3%)
+- **Total Entries**: 73
+- **Total Stops**: 49 (67.1% stop rate)
 - **Double Stops**: 2
-- **Win Rate (entries with 0 stops)**: 38.2% (26/68)
+- **Win Rate (entries with 0 stops)**: 35.6% (26/73)
 
 ---
 
@@ -55,43 +55,43 @@
 
 Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500 to $30,500 (Fix #77 bug dropped entries with surviving sides from daily_state).
 
-| Column | Feb 10 | Feb 11 | Feb 12 | Feb 13 | Feb 17 | Feb 18 | Feb 19 | Feb 20 | Feb 23 | Feb 24 | Feb 25 | Feb 26 | Feb 27 | Mar 2 | **Mar 3** | **Mar 4** |
-|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
-| Date | 2026-02-10 | 2026-02-11 | 2026-02-12 | 2026-02-13 | 2026-02-17 | 2026-02-18 | 2026-02-19 | 2026-02-20 | 2026-02-23 | 2026-02-24 | 2026-02-25 | 2026-02-26 | 2026-02-27 | 2026-03-02 | **2026-03-03** | **2026-03-04** |
-| SPX Open | 6970.55 | 6988.93 | 6961.62 | 6832.04 | 6814.71 | 6848.12 | 6858.05 | 6857.52 | 6877.47 | 6861.77 | 6906.56 | 6937.98 | 6849.40 | 6800.35 | **~6759** | **6,835.73** |
-| SPX Close | 6943.87 | 6939.96 | 6834.14 | 6834.38 | 6845.81 | 6878.07 | 6861.00 | 6878.72 | 6836.90 | 6890.34 | 6926.54 | 6907.46 | 6879.14 | 6878.58 | **~6812** | **6,867.81** |
-| SPX High | 6985.81 | 6990.65 | 6973.34 | 6881.57 | 6866.63 | 6909.21 | 6877.89 | 6908.53 | 6914.87 | 6897.34 | 6935.67 | 6943.23 | 6879.14 | 6901.22 | **~6840** | **6,885.60** |
-| SPX Low | 6937.67 | 6913.86 | 6824.12 | 6791.34 | 6775.17 | 6848.12 | 6836.88 | 6833.05 | 6820.71 | 6836.15 | 6906.56 | 6860.69 | 6829.27 | 6795.38 | **~6711** | **6,810.08** |
-| VIX Open | 17.35 | 16.95 | 17.36 | 20.97 | 21.86 | 19.73 | 20.42 | 20.46 | 20.56 | 20.64 | 19.39 | 17.60 | 21.39 | 23.40 | **26.03** | **22.52** |
-| VIX Close | 17.81 | 17.65 | 20.74 | 20.62 | 20.29 | 19.56 | 20.28 | 19.54 | 21.35 | 19.50 | 18.64 | 18.63 | 19.80 | 21.32 | **22.18** | **21.23** |
-| VIX High | 17.97 | 18.96 | 21.21 | 22.40 | 22.96 | 20.21 | 21.06 | 21.21 | 22.04 | 21.28 | 19.39 | 20.54 | 21.74 | 23.40 | **28.15** | **23.15** |
-| VIX Low | 17.14 | 16.75 | 17.08 | 18.93 | 19.76 | 18.48 | 19.82 | 18.77 | 19.50 | 19.28 | 18.54 | 17.60 | 19.71 | 20.37 | **22.18** | **20.40** |
-| Entries Completed | 5 | 6 | 6 | 5 | 5 | 4 | 4 | 3 | 2 | 4 | 2 | 4 | 3 | 6 | **5** | **4** |
-| Entries Skipped | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 2 | 3 | 1 | 3 | 1 | 2 | 0 | **0** | **1** |
-| Full ICs | 0 | 1 | 4 | 4 | 3 | 1 | 2 | 3 | 2 | 2 | 2 | 3 | 3 | 6 | **5** | **4** |
-| One-Sided Entries | 5 | 5 | 2 | 1 | 2 | 3 | 2 | 0 | 0 | 2 | 0 | 1 | 0 | 0 | **0** | **0** |
-| Bullish Signals | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **0** | **0** |
-| Bearish Signals | 0 | 1 | 2 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | **0** | **0** |
-| Neutral Signals | 5 | 5 | 4 | 4 | 3 | 4 | 4 | 3 | 2 | 4 | 2 | 3 | 3 | 6 | **5** | **4** |
-| Total Credit ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | 1265 | 1775 | 915 | 975 | 490 | 1345 | 905 | 1855 | **1395** | **1115** |
-| Call Stops | 0 | 0 | 0 | 1 | 3 | 0 | 0 | 0 | 0 | 1 | 0 | 2 | 0 | 4 | **5** | **0** |
-| Put Stops | 1 | 2 | 4 | 2 | 2 | 2 | 3 | 1 | 2 | 0 | 0 | 2 | 1 | 2 | **1** | **3** |
-| Double Stops | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | **1** | **0** |
-| Stop Loss Debits ($) | 140 | 290 | 410 | 1145 | 1335 | 260 | 380 | 800 | 655 | 340 | 250 | 1025 | 135 | 1180 | **1060** | **305**  |
-| Commission ($) | 30 | 45 | 70 | 60 | 65 | 35 | 45 | 60 | 30 | 55 | 40 | 55 | 35 | 75 | **65** | **47.50** |
-| Expired Credits ($) | 520 | 760 | 840 | 1880 | 660 | 610 | 395 | 1550 | 280 | 830 | 490 | 370 | 715 | 1000 | **675** | **540** |
-| Daily P&L ($) | 350 | 425 | 360 | 675 | -740 | 315 | -30 | 690 | -405 | 435 | 200 | -710 | 545 | -255 | **-450** | **187.50** |
-| Daily P&L (EUR) | 294.27 | 357.99 | 303.31 | 568.71 | -624.26 | 267.32 | -25.47 | 585.74 | -344.10 | ~369.75 | 169.42 | -601.81 | ~462 | ~-216 | **~-382** | **~161.15** |
-| Cumulative P&L ($) | 350 | 775 | 1135 | 1810 | 1070 | 1385 | 1355 | 2045 | 1640 | 2075 | 2275 | 1565 | 2110 | 1855 | **1405** | **1592.50** |
-| Cumulative P&L (EUR) | 294.27 | 652.81 | 956.27 | 1524.98 | 902.64 | 1175.35 | 1150.55 | 1736.03 | 1393.38 | ~1763 | 1927.17 | 1326.53 | ~1789 | ~1573 | **~1191** | **~1368.67** |
-| Win Rate (%) | 80.0 | 66.7 | 33.3 | 40.0 | 0.0 | 50.0 | 25.0 | 66.7 | 0.0 | 75.0 | 100.0 | 0.0 | 66.7 | 16.7 | **0.0** | **25.0** |
-| Capital Deployed ($) | 25000 | 30000 | 32000 | 28000 | 30500 | 20000 | 23000 | 15000 | 12000 | 22000 | 10000 | 21500 | 17500 | 38000 | **37500** | **31000** |
-| Return on Capital (%) | 1.40 | 1.42 | 1.13 | 2.41 | -2.43 | 1.57 | -0.13 | 4.60 | -3.38 | 1.98 | 2.00 | -3.30 | 3.11 | -0.67 | **-1.20** | **0.60**  |
-| Sortino Ratio | 0.00 | 99.99 | 99.99 | 99.99 | 11.49 | 14.70 | 1.90 | 6.09 | 2.41 | ~3.2 | 4.97 | 2.29 | ~3.5 | ~2.8 | **~2.3** | **~2.9** |
-| Max Loss Stops ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | 1265 | 1775 | 915 | 975 | 490 | 1345 | 905 | 1855 | **1395** | **1115** |
-| Max Loss Catastrophic ($) | 24360 | 28830 | 30390 | 24955 | 28615 | 19190 | 21735 | 13225 | 11085 | 21025 | 9510 | 20155 | 16595 | 36145 | **35105** | **29885** |
-| Early Close | -- | -- | -- | -- | -- | -- | No | Yes, 11:31 ET | No | Yes, 14:17 ET | Yes, 11:15 ET | No | No | No | **No** | **No** |
-| Notes | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement (v1.2.8) | Post-settlement (v1.3.0) | Post-settlement (v1.3.2) | Fix #82 corrected (v1.3.2) | MKT-018 early close (v1.3.5→v1.3.8) | MKT-018 early close (v1.3.9→v1.3.11) | Post-settlement (v1.3.11), 4 stops, first BEARISH since Feb 17 | Post-settlement (v1.4.0/v1.4.1), last day as MEIC-TF | Post-settlement (v1.5.1), first day as HYDRA, 6 stops + 1 double stop, MKT-025 | **Post-settlement (v1.6.0→v1.7.2), 13 commits, gap-down + V-shape, 6 stops + 1 double stop, MKT-024/028 first live** | **Post-settlement**                                                                                                  |
+| Column | Feb 10 | Feb 11 | Feb 12 | Feb 13 | Feb 17 | Feb 18 | Feb 19 | Feb 20 | Feb 23 | Feb 24 | Feb 25 | Feb 26 | Feb 27 | Mar 2 | **Mar 3** | **Mar 4** | **Mar 5** |
+|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+| Date | 2026-02-10 | 2026-02-11 | 2026-02-12 | 2026-02-13 | 2026-02-17 | 2026-02-18 | 2026-02-19 | 2026-02-20 | 2026-02-23 | 2026-02-24 | 2026-02-25 | 2026-02-26 | 2026-02-27 | 2026-03-02 | **2026-03-03** | **2026-03-04** | **2026-03-05** |
+| SPX Open | 6970.55 | 6988.93 | 6961.62 | 6832.04 | 6814.71 | 6848.12 | 6858.05 | 6857.52 | 6877.47 | 6861.77 | 6906.56 | 6937.98 | 6849.40 | 6800.35 | **~6759** | **6,835.73** | **6,846.18** |
+| SPX Close | 6943.87 | 6939.96 | 6834.14 | 6834.38 | 6845.81 | 6878.07 | 6861.00 | 6878.72 | 6836.90 | 6890.34 | 6926.54 | 6907.46 | 6879.14 | 6878.58 | **~6812** | **6,867.81** | **6,828.74** |
+| SPX High | 6985.81 | 6990.65 | 6973.34 | 6881.57 | 6866.63 | 6909.21 | 6877.89 | 6908.53 | 6914.87 | 6897.34 | 6935.67 | 6943.23 | 6879.14 | 6901.22 | **~6840** | **6,885.60** | **6,869.02** |
+| SPX Low | 6937.67 | 6913.86 | 6824.12 | 6791.34 | 6775.17 | 6848.12 | 6836.88 | 6833.05 | 6820.71 | 6836.15 | 6906.56 | 6860.69 | 6829.27 | 6795.38 | **~6711** | **6,810.08** | **6,770.69** |
+| VIX Open | 17.35 | 16.95 | 17.36 | 20.97 | 21.86 | 19.73 | 20.42 | 20.46 | 20.56 | 20.64 | 19.39 | 17.60 | 21.39 | 23.40 | **26.03** | **22.52** | **22.04** |
+| VIX Close | 17.81 | 17.65 | 20.74 | 20.62 | 20.29 | 19.56 | 20.28 | 19.54 | 21.35 | 19.50 | 18.64 | 18.63 | 19.80 | 21.32 | **22.18** | **21.23** | **23.37** |
+| VIX High | 17.97 | 18.96 | 21.21 | 22.40 | 22.96 | 20.21 | 21.06 | 21.21 | 22.04 | 21.28 | 19.39 | 20.54 | 21.74 | 23.40 | **28.15** | **23.15** | **25.84** |
+| VIX Low | 17.14 | 16.75 | 17.08 | 18.93 | 19.76 | 18.48 | 19.82 | 18.77 | 19.50 | 19.28 | 18.54 | 17.60 | 19.71 | 20.37 | **22.18** | **20.40** | **21.18** |
+| Entries Completed | 5 | 6 | 6 | 5 | 5 | 4 | 4 | 3 | 2 | 4 | 2 | 4 | 3 | 6 | **5** | **4** | **5** |
+| Entries Skipped | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 2 | 3 | 1 | 3 | 1 | 2 | 0 | **0** | **1** | **0** |
+| Full ICs | 0 | 1 | 4 | 4 | 3 | 1 | 2 | 3 | 2 | 2 | 2 | 3 | 3 | 6 | **5** | **4** | **5** |
+| One-Sided Entries | 5 | 5 | 2 | 1 | 2 | 3 | 2 | 0 | 0 | 2 | 0 | 1 | 0 | 0 | **0** | **0** | **0** |
+| Bullish Signals | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **0** | **0** | **0** |
+| Bearish Signals | 0 | 1 | 2 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | **0** | **0** | **0** |
+| Neutral Signals | 5 | 5 | 4 | 4 | 3 | 4 | 4 | 3 | 2 | 4 | 2 | 3 | 3 | 6 | **5** | **4** | **5** |
+| Total Credit ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | 1265 | 1775 | 915 | 975 | 490 | 1345 | 905 | 1855 | **1395** | **1115** | **1345** |
+| Call Stops | 0 | 0 | 0 | 1 | 3 | 0 | 0 | 0 | 0 | 1 | 0 | 2 | 0 | 4 | **5** | **0** | **0** |
+| Put Stops | 1 | 2 | 4 | 2 | 2 | 2 | 3 | 1 | 2 | 0 | 0 | 2 | 1 | 2 | **1** | **3** | **5** |
+| Double Stops | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | **1** | **0** | **0** |
+| Stop Loss Debits ($) | 140 | 290 | 410 | 1145 | 1335 | 260 | 380 | 800 | 655 | 340 | 250 | 1025 | 135 | 1180 | **1060** | **305**  | **240**  |
+| Commission ($) | 30 | 45 | 70 | 60 | 65 | 35 | 45 | 60 | 30 | 55 | 40 | 55 | 35 | 75 | **65** | **47.50** | **75**    |
+| Expired Credits ($) | 520 | 760 | 840 | 1880 | 660 | 610 | 395 | 1550 | 280 | 830 | 490 | 370 | 715 | 1000 | **675** | **540** | **405** |
+| Daily P&L ($) | 350 | 425 | 360 | 675 | -740 | 315 | -30 | 690 | -405 | 435 | 200 | -710 | 545 | -255 | **-450** | **187.50** | **90**     |
+| Daily P&L (EUR) | 294.27 | 357.99 | 303.31 | 568.71 | -624.26 | 267.32 | -25.47 | 585.74 | -344.10 | ~369.75 | 169.42 | -601.81 | ~462 | ~-216 | **~-382** | **~161.15** | **~77.53**  |
+| Cumulative P&L ($) | 350 | 775 | 1135 | 1810 | 1070 | 1385 | 1355 | 2045 | 1640 | 2075 | 2275 | 1565 | 2110 | 1855 | **1405** | **1592.50** | **1682.50** |
+| Cumulative P&L (EUR) | 294.27 | 652.81 | 956.27 | 1524.98 | 902.64 | 1175.35 | 1150.55 | 1736.03 | 1393.38 | ~1763 | 1927.17 | 1326.53 | ~1789 | ~1573 | **~1191** | **~1368.67** | **~1449.39** |
+| Win Rate (%) | 80.0 | 66.7 | 33.3 | 40.0 | 0.0 | 50.0 | 25.0 | 66.7 | 0.0 | 75.0 | 100.0 | 0.0 | 66.7 | 16.7 | **0.0** | **25.0** | **0.0**  |
+| Capital Deployed ($) | 25000 | 30000 | 32000 | 28000 | 30500 | 20000 | 23000 | 15000 | 12000 | 22000 | 10000 | 21500 | 17500 | 38000 | **37500** | **31000** | **37500** |
+| Return on Capital (%) | 1.40 | 1.42 | 1.13 | 2.41 | -2.43 | 1.57 | -0.13 | 4.60 | -3.38 | 1.98 | 2.00 | -3.30 | 3.11 | -0.67 | **-1.20** | **0.60**  | **0.24**  |
+| Sortino Ratio | 0.00 | 99.99 | 99.99 | 99.99 | 11.49 | 14.70 | 1.90 | 6.09 | 2.41 | ~3.2 | 4.97 | 2.29 | ~3.5 | ~2.8 | **~2.3** | **~2.9** | **~2.9** |
+| Max Loss Stops ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | 1265 | 1775 | 915 | 975 | 490 | 1345 | 905 | 1855 | **1395** | **1115** | **1345** |
+| Max Loss Catastrophic ($) | 24360 | 28830 | 30390 | 24955 | 28615 | 19190 | 21735 | 13225 | 11085 | 21025 | 9510 | 20155 | 16595 | 36145 | **35105** | **29885** | **36155** |
+| Early Close | -- | -- | -- | -- | -- | -- | No | Yes, 11:31 ET | No | Yes, 14:17 ET | Yes, 11:15 ET | No | No | No | **No** | **No** | **No** |
+| Notes | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement | Post-settlement (v1.2.8) | Post-settlement (v1.3.0) | Post-settlement (v1.3.2) | Fix #82 corrected (v1.3.2) | MKT-018 early close (v1.3.5→v1.3.8) | MKT-018 early close (v1.3.9→v1.3.11) | Post-settlement (v1.3.11), 4 stops, first BEARISH since Feb 17 | Post-settlement (v1.4.0/v1.4.1), last day as MEIC-TF | Post-settlement (v1.5.1), first day as HYDRA, 6 stops + 1 double stop, MKT-025 | **Post-settlement (v1.6.0→v1.7.2), 13 commits, gap-down + V-shape, 6 stops + 1 double stop, MKT-024/028 first live** | **Post-settlement**                                                                                                  | **Post-settlement**                                                                                                  |
 
 **Note**: All values verified against Google Sheets Daily Summary tab and Saxo closed positions data.
 
@@ -114,20 +114,21 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - Mar 3: 675 - 1060 - 65 = -450 ✓ (v1.6.0→v1.7.2, 13 commits, gap-down + V-shape, 6 stops + 1 double stop, MKT-024/028 first live)
 
 - Mar 4: 540 - 305 - 47.50 = 187.50 ✓ (Post-settlement)
-### Cumulative Metrics (hydra_metrics.json as of Mar 4 EOD)
+- Mar 5: 405 - 240 - 75 = 90 ✓ (Post-settlement)
+### Cumulative Metrics (hydra_metrics.json as of Mar 5 EOD)
 ```json
 {
-  "cumulative_pnl": 1592.5,
-  "total_entries": 68,
-  "winning_days": 10,
+  "cumulative_pnl": 1682.5,
+  "total_entries": 73,
+  "winning_days": 11,
   "losing_days": 6,
-  "total_credit_collected": 21195.0,
-  "total_stops": 44,
+  "total_credit_collected": 22540.0,
+  "total_stops": 49,
   "double_stops": 2,
-  "last_updated": "2026-03-04",
+  "last_updated": "2026-03-05",
   "total_trades": 0,
   "reset_reason": "Fix #46/#47 P&L tracking corrections - starting fresh",
-  "daily_returns": [{'date': '2026-02-10', 'net_pnl': 350.0, 'capital_deployed': 25000, 'return_pct': 0.014}, {'date': '2026-02-11', 'net_pnl': 425.0, 'capital_deployed': 30000, 'return_pct': 0.01417}, {'date': '2026-02-12', 'net_pnl': 360.0, 'capital_deployed': 32000, 'return_pct': 0.01125}, {'date': '2026-02-13', 'net_pnl': 675.0, 'capital_deployed': 28000.0, 'return_pct': 0.024107142857142858}, {'date': '2026-02-17', 'net_pnl': -740.0, 'capital_deployed': 12500.0, 'return_pct': -0.0592}, {'date': '2026-02-18', 'net_pnl': 315.0, 'capital_deployed': 20000.0, 'return_pct': 0.01575}, {'date': '2026-02-19', 'net_pnl': -30.0, 'capital_deployed': 23000.0, 'return_pct': -0.0013043478260869566}, {'date': '2026-02-20', 'net_pnl': 690.0, 'capital_deployed': 15000.0, 'return_pct': 0.046}, {'date': '2026-02-23', 'net_pnl': -405.0, 'capital_deployed': 12000.0, 'return_pct': -0.03375}, {'date': '2026-02-24', 'net_pnl': 435.0, 'capital_deployed': 22000.0, 'return_pct': 0.01977272727272727}, {'date': '2026-02-25', 'net_pnl': 200.0, 'capital_deployed': 10000.0, 'return_pct': 0.02}, {'date': '2026-02-26', 'net_pnl': -710.0, 'capital_deployed': 21500.0, 'return_pct': -0.03302325581395349}, {'date': '2026-02-27', 'net_pnl': 545.0, 'capital_deployed': 17500.0, 'return_pct': 0.031142857142857142}, {'date': '2026-03-02', 'net_pnl': -255.0, 'capital_deployed': 38000.0, 'return_pct': -0.006710526315789474}, {'date': '2026-03-03', 'net_pnl': -450.0, 'capital_deployed': 37500.0, 'return_pct': -0.012}, {'date': '2026-03-04', 'net_pnl': 187.5, 'capital_deployed': 31000.0, 'return_pct': 0.006048387096774193}]
+  "daily_returns": [{'date': '2026-02-10', 'net_pnl': 350.0, 'capital_deployed': 25000, 'return_pct': 0.014}, {'date': '2026-02-11', 'net_pnl': 425.0, 'capital_deployed': 30000, 'return_pct': 0.01417}, {'date': '2026-02-12', 'net_pnl': 360.0, 'capital_deployed': 32000, 'return_pct': 0.01125}, {'date': '2026-02-13', 'net_pnl': 675.0, 'capital_deployed': 28000.0, 'return_pct': 0.024107142857142858}, {'date': '2026-02-17', 'net_pnl': -740.0, 'capital_deployed': 12500.0, 'return_pct': -0.0592}, {'date': '2026-02-18', 'net_pnl': 315.0, 'capital_deployed': 20000.0, 'return_pct': 0.01575}, {'date': '2026-02-19', 'net_pnl': -30.0, 'capital_deployed': 23000.0, 'return_pct': -0.0013043478260869566}, {'date': '2026-02-20', 'net_pnl': 690.0, 'capital_deployed': 15000.0, 'return_pct': 0.046}, {'date': '2026-02-23', 'net_pnl': -405.0, 'capital_deployed': 12000.0, 'return_pct': -0.03375}, {'date': '2026-02-24', 'net_pnl': 435.0, 'capital_deployed': 22000.0, 'return_pct': 0.01977272727272727}, {'date': '2026-02-25', 'net_pnl': 200.0, 'capital_deployed': 10000.0, 'return_pct': 0.02}, {'date': '2026-02-26', 'net_pnl': -710.0, 'capital_deployed': 21500.0, 'return_pct': -0.03302325581395349}, {'date': '2026-02-27', 'net_pnl': 545.0, 'capital_deployed': 17500.0, 'return_pct': 0.031142857142857142}, {'date': '2026-03-02', 'net_pnl': -255.0, 'capital_deployed': 38000.0, 'return_pct': -0.006710526315789474}, {'date': '2026-03-03', 'net_pnl': -450.0, 'capital_deployed': 37500.0, 'return_pct': -0.012}, {'date': '2026-03-04', 'net_pnl': 187.5, 'capital_deployed': 31000.0, 'return_pct': 0.006048387096774193}, {'date': '2026-03-05', 'net_pnl': 90.0, 'capital_deployed': 37500.0, 'return_pct': 0.0024}]
 }
 ```
 **Note**: Mar 3 was a major development day (v1.6.0→v1.7.2, 13 commits). Gap-down ~91pts overnight, VIX peaked at 28.15 (highest of the period), then V-shape rally to 6,840. Entry #1 double stop (put stopped on sell-off, call stopped on rally). VIX filter initially blocked entries #2-5 (threshold 25, raised to 30 mid-day). All 5 call sides stopped during V-shape rally. MKT-024 (wider starting OTM 3.5×/4.0×) and MKT-028 (asymmetric spreads) first live day.
@@ -1047,6 +1048,43 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - Commission: $47.50
 - **Net P&L: +$187.50** (540 - 305 - 47.50 = 187.50)
 
+### Mar 5 (Thursday) - NET P&L: +$90
+
+**Market**: SPX range 98 pts (1.4%). VIX 22.0→23.4.
+
+| Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact | Salvage |
+|-------|------|--------|------|---------------|--------|---------|------------|---------|
+| #1 | 11:15 AM ET | NEUTRAL | Iron Condor | C:6885 P:6740 | $245 ($80C+$165P) | Put Stopped | -$125 |  |
+| #2 | 11:45 AM ET | NEUTRAL | Iron Condor | C:6880 P:6755 | $255 ($95C+$160P) | Put Stopped | -$110 |  |
+| #3 | 12:15 PM ET | NEUTRAL | Iron Condor | C:6870 P:6760 | $280 ($90C+$190P) | Put Stopped | -$120 |  |
+| #4 | 12:43 PM ET | NEUTRAL | Iron Condor | C:6865 P:6725 | $265 ($65C+$200P) | Put Stopped | -$80 |  |
+| #5 | 01:15 PM ET | NEUTRAL | Iron Condor | C:6860 P:6750 | $300 ($75C+$225P) | Put Stopped | -$95 |  |
+
+**Key observations**:
+- All 5 entries posted put-side stops with zero call stops, the most concentrated directional sweep possible; SPX's session low of 6,770.69 breached short put strikes ranging from 6,725 to 6,760, while call strikes (6,860–6,885) were never threatened as the market moved entirely away from them.
+- Entries #2 and #3 share an identical stop time of 12:16 PM ET, and Entry #4 stopped at 12:45 PM ET just two minutes after its 12:43 PM entry, indicating a sharp, sustained mid-session sell-off rather than a gradual drift — three of five stops clustered within a 29-minute window.
+- MKT-033 long salvage recovered $290 across all five stopped put spreads, a contribution that was decisive: without it, the $90 net positive would have inverted to a loss day, underscoring that the day's outcome depended more on salvage mechanics than on premium collection.
+- Put credits escalated across the session from $165 (Entry #1) to $225 (Entry #5) as VIX spiked from 22.04 to a high of 25.84, with all five entries clearing the $1.75 MKT-011 minimum — yet the rising put premium was itself a symptom of the directional pressure that triggered every stop.
+- All 5 spreads used 75-point widths throughout the session despite VIX ranging up to 25.84, and the MKT-021 pre-entry ROC gate did not skip any of Entries #4–#6, consistent with no early-close event and a day-end ROC of only 0.24% — well below threshold.
+
+### Stop Timing Log
+
+```
+11:17 AM ET - Entry #1 Put Stopped ($125 loss)
+12:16 PM ET - Entry #2 Put Stopped ($110 loss)
+12:16 PM ET - Entry #3 Put Stopped ($120 loss)
+12:45 PM ET - Entry #4 Put Stopped ($80 loss)
+01:17 PM ET - Entry #5 Put Stopped ($95 loss)
+```
+
+### P&L Reconciliation
+
+- Expired Credits: $405
+- Stop Loss Debits: $240
+- Long Salvage Revenue: +$290
+- Commission: $75
+- **Net P&L: +$90** (405 - 240 + 290 - 75 = 90)
+
 ---
 
 ## 4. Market Conditions
@@ -1072,6 +1110,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Mar 2 | Mon | Wide-range whipsaw | +1.2% | 106 pts (1.6%) | 23→21 (compressing) | First HYDRA day, 6 stops + 1 double stop |
 | **Mar 3** | **Tue** | **Gap-down + V-shape rally** | **+0.8%** | **~130 pts (1.9%)** | **26→22 (compressing)** | **Widest range of period, ES -91pt gap, VIX peaked 28.15, 13 commits** |
 | Mar 4 | Wed | Dip, recovery, net gain | +0.5% | 76 pts (1.1%) | 23→21 | Post-settlement |
+| Mar 5 | Thu | Intraday selloff, partial recovery | -0.3% | 98 pts (1.4%) | 22→23 | Post-settlement |
 
 ### Expected Move vs Actual Range
 
@@ -1093,6 +1132,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Mar 2 | 22.4 | ~97 pts | 106 pts | 1.09x | At expected (normal) |
 | **Mar 3** | **24.1** | **~103 pts** | **~130 pts** | **~1.26x** | **Above expected (elevated)** |
 | Mar 4 | 21.9 | ~94 pts | 76 pts | 0.80x | At expected (normal) |
+| Mar 5 | 22.7 | ~98 pts | 98 pts | 1.00x | At expected (normal) |
 
 **Key insight**: Feb 17 was NOT an abnormal range day. The 92-point range was exactly at its expected move. The damage came from the SHAPE (V-reversal), not the MAGNITUDE.
 
@@ -1108,39 +1148,39 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 ## 5. Key Performance Metrics
 
-### Financial Metrics (16 days: Feb 10 - Mar 4)
+### Financial Metrics (17 days: Feb 10 - Mar 5)
 
 | Metric | Value |
 |--------|-------|
-| Total Credit Collected | $21195 |
-| Total Expired Credits | $12115 (57.2% of credit) |
-| Total Stop Loss Debits | $9710 (45.8% of credit) |
-| Total Commission | $812.50 (3.8% of credit) |
-| Net P&L | +$1592.50 (7.5% net capture rate) |
-| Average Daily Credit | $1325 |
-| Average Daily P&L | +$100 |
+| Total Credit Collected | $22540 |
+| Total Expired Credits | $12520 (55.5% of credit) |
+| Total Stop Loss Debits | $9950 (44.1% of credit) |
+| Total Commission | $887.50 (3.9% of credit) |
+| Net P&L | +$1682.50 (7.5% net capture rate) |
+| Average Daily Credit | $1326 |
+| Average Daily P&L | +$99 |
 | Best Day | +$690 (Feb 20) |
 | Worst Day | -$740 (Feb 17) |
-| Win/Loss Day Ratio | 10:6 |
-| Win/Loss Dollar Ratio | 1.61:1 ($4182.50 / $2590) |
+| Win/Loss Day Ratio | 11:6 |
+| Win/Loss Dollar Ratio | 1.65:1 ($4272.50 / $2590) |
 
 ### Entry Performance
 
 | Metric | Value |
 |--------|-------|
-| Total Entries | 68 |
-| Clean Wins (0 stops) | 26 (38.2%) |
-| Partial Wins (1 side stopped, IC) | 26 (38.2%) |
-| Full Losses (stopped, 1-sided or double stop) | 16 (23.5%) |
-| Entries with Call Stop | 16 (23.5%) |
-| Entries with Put Stop | 28 (41.2%) |
-| Double Stops | 2 (2.9%) |
+| Total Entries | 73 |
+| Clean Wins (0 stops) | 26 (35.6%) |
+| Partial Wins (1 side stopped, IC) | 31 (42.5%) |
+| Full Losses (stopped, 1-sided or double stop) | 16 (21.9%) |
+| Entries with Call Stop | 16 (21.9%) |
+| Entries with Put Stop | 33 (45.2%) |
+| Double Stops | 2 (2.7%) |
 
 ### Entry Type Distribution
 
 | Entry Type | Count | Stops | Stop Rate | Avg Credit |
 |------------|-------|-------|-----------|------------|
-| Full IC | 45 | 44 sides stopped* | ~49% per side | $471 |
+| Full IC | 50 | 49 sides stopped* | ~49% per side | $450.80 |
 | One-Sided (various) | 23 | -- | -- | -- |
 
 *Full ICs can have 0, 1, or 2 sides stopped. v1.4.0+ (Feb 27 onward) disabled one-sided entries — all new entries are Full ICs.
@@ -1165,6 +1205,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | **Mar 2** | **5** | See entry detail | See entry detail | See entry detail |
 | **Mar 3** | **5** | See entry detail | See entry detail | See entry detail |
 | Mar 4 | 3 | See entry detail | See entry detail | See entry detail |
+| **Mar 5** | **5** | See entry detail | See entry detail | See entry detail |
 
 ### Trend Filter Accuracy
 
@@ -1186,6 +1227,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Mar 2 | 6 NEUTRAL | Yes (all neutral) | Neutral |
 | Mar 3 | 5 NEUTRAL | Yes (all neutral) | Neutral |
 | Mar 4 | 4 NEUTRAL | Yes (all neutral) | Neutral |
+| Mar 5 | 5 NEUTRAL | Yes (all neutral) | Neutral |
 
 ---
 
@@ -1372,6 +1414,10 @@ Track when each improvement was implemented, deployed, and verified.
 | 2026-02-28 | -- | v1.5.0: Renamed from MEIC-TF to HYDRA | v1.5.0 commits | 2026-02-28 (non-trading) | Service, class, state/metrics files all renamed |
 | 2026-03-02 | -- | v1.5.1: Telegram /snapshot command | v1.5.1 commits | 2026-03-02 pre-market | On-demand position snapshot via Telegram bot |
 | 2026-03-04 | -- | v1.8.0: Entry schedule shifted +1hr (11:05-13:05 — journal data: 10:05 -$695, 10:35 -$510 vs 11:05+ all positive). MKT-031 smart entry windows (10min pre-entry scouting, 2-parameter scoring: post-spike ATR calm 0-70pts + momentum pause 0-30pts, threshold 65 triggers early entry). Early close day cutoff raised to 12:00 PM (keeps 11:05/11:35 viable). | v1.8.0 commits | 2026-03-04 | Auto-detected by HOMER |
+| 2026-03-05 | -- | v1.9.2: MKT-033 long leg salvage after short stop. After MKT-025 closes short, sells surviving long if appreciated >= $10 (covers $5 commission + $5 max slippage). Two trigger points: immediate post-stop + periodic heartbeat check during market hours. Market order with bid-price pre-check. Tracked in state, Sheets, heartbeat display. | v1.9.2 commits | 2026-03-05 | Auto-detected by HOMER |
+| 2026-03-05 | -- | v1.9.1: MKT-032 VIX gate for put-only entries. Put-only only allowed when VIX < 18 (80% WR in calm markets). At VIX >= 18, skip instead of put-only (2× stop with no hedge = 50% WR, unacceptable risk). Configurable via put_only_max_vix. Telegram /set support. | v1.9.1 commits | 2026-03-05 | Auto-detected by HOMER |
+| 2026-03-05 | -- | v1.9.0: Telegram commands expanded to 14: /set (edit config), /restart, /stop (with position warning). Message splitting replaces truncation for HERMES/APOLLO reports. Atomic config writes with file locking. | v1.9.0 commits | 2026-03-05 | Auto-detected by HOMER |
+| 2026-03-05 | -- | v1.8.1: Entry times shifted to :15/:45 offset (11:15-13:15). 19-day MAE analysis: :15/:45 has 10% lower 30-min adverse excursion vs :05/:35 (12.39pt vs 13.76pt) with better tail risk (P90: 21.71pt vs 23.84pt). Early close day keeps 11:15/11:45. | v1.8.1 commits | 2026-03-05 | Auto-detected by HOMER |
 
 ---
 
@@ -1913,6 +1959,31 @@ When reviewing performance after implementing improvements, fill in this section
 | Early Close | No |
 
 **Mar 4 Assessment**: MKT-025 (short-only stop) drove the day's outcome across three put stops — HYDRA closed only the short put legs on Entries #1–3, collecting $305 in total stop debits against $1,115 in total credits, while the long put legs expired worthless at settlement as SPX recovered to 6,867.81, well above all short put strikes (6,825–6,840). MKT-020/022 progressive tightening was visible across the four entries, with short call strikes stepping down from 6,915 to 6,900 and short put strikes stepping up from 6,825 to 6,840 as intraday price action developed, though this tightening moved put strikes closer to the 6,810 intraday low on Entries #2 and #3 rather than away from it. MKT-021 did not gate Entries #4–6 (cumulative ROC remained below threshold), and the single skip logged was not attributed to MKT-011 on any placed entry — Entry #4's $305 total credit with clean expiration was the day's decisive result, producing a net $187.50 on $31,000 capital deployed (0.6% ROC), a structurally sound but thin outcome given three stops absorbed before the market found its
+
+#### Post-Improvement Day 12: Mar 5 (current)
+
+| Column | Mar 5 |
+|--------|-------|
+| Date | 2026-03-05 |
+| SPX Open | 6,846.18 |
+| SPX Close | 6,828.74 |
+| SPX Range | 98 pts (1.4%) |
+| VIX Open | 22.04 |
+| VIX Close | 23.37 |
+| Entries | 5 (+0 skipped) |
+| Full ICs | 5 |
+| One-Sided | 0 |
+| Total Credit | $1345 |
+| Call Stops | 0 |
+| Put Stops | 5 |
+| Stop Debits | $240 |
+| Commission | $75 |
+| Expired Credits | $405 |
+| Daily P&L | +$90 |
+| Cumulative P&L | $1682.50 |
+| Early Close | No |
+
+**Mar 5 Assessment**: MKT-025 (short-only stop) triggered on all five put stops, with the long legs subsequently salvaged via MKT-033 for $290, which was the decisive factor in converting a five-stop sweep into a slim +$90 net — without that recovery, the day ends negative. MKT-011 generated zero skips across all five entries, with call credits holding between $65 and $95 and put credits inflating from $165 to $225 as VIX spiked to 25.84, confirming the credit gate was not the binding constraint on a day driven entirely by directional risk. MKT-021 did not gate entries #4 or #5, as early-close (MKT-018) never triggered — ROC never reached the 3% threshold, consistent with a sustained loss regime where no entry reached profitability before being stopped — making this a structurally marginal day: mechanically sound execution against an adverse directional move, rescued by salvage rather than strategy edge.
 
 ---
 
