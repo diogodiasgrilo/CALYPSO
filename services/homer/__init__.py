@@ -10,8 +10,12 @@ journal sections automatically. Commits and pushes changes to git.
 Data Sources:
     - Google Sheets: Daily Summary tab (all rows)
     - Google Sheets: Positions tab (entry-level detail)
+    - Google Sheets: Trades tab (per-entry + per-stop records)
+    - HYDRA log file (logs/hydra/bot.log) — fallback for missing Trades data
+    - P&L identity derivation — fallback for missing individual stop P&L
     - Cumulative metrics (data/hydra_metrics.json)
     - HYDRA version history (bots/hydra/__init__.py)
+    - HERMES daily report (intel/hermes/) — context for Claude narratives
 
 Output:
     - docs/HYDRA_TRADING_JOURNAL.md — updated with new trading day(s)

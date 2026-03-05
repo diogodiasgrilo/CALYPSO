@@ -539,11 +539,17 @@ Automatically updates `docs/HYDRA_TRADING_JOURNAL.md` after market close each da
 
 **What it does:**
 1. Detects missing trading days (compares journal vs Google Sheets)
-2. Collects data from Sheets Daily Summary + Positions tabs + metrics file
-3. Updates Sections 1, 2, 3, 4, 5, 8, 9 of the journal
-4. Uses Claude API for narrative sections (observations, market labels, assessments)
-5. Validates journal structure, commits + pushes to git
-6. Sends Telegram alert to HYDRA chat on completion/failure
+2. Collects data from Sheets Daily Summary + Positions + Trades tabs + metrics file
+3. Fills missing stop data from fallback sources (HYDRA log file for stop times/P&L, P&L identity derivation for missing individual stop losses)
+4. Updates Sections 1, 2, 3, 4, 5, 8, 9 of the journal
+5. Uses Claude API for narrative sections (observations, market labels, assessments)
+6. Validates journal structure, commits + pushes to git
+7. Sends Telegram alert to HYDRA chat on completion/failure
+
+**Data fallback chain (for missing Trades tab records):**
+1. Google Sheets Trades tab (primary — per-entry + per-stop rows)
+2. HYDRA log file (`logs/hydra/bot.log`) — parses MKT-025 stop events for times and P&L
+3. P&L identity derivation — `missing_debit = total_stop_debits - sum(known_debits)`
 
 **Files:**
 ```
