@@ -8,7 +8,7 @@
 
 ## Table of Contents
 
-1. [Trading Period: Feb 10 - Mar 4, 2026](#1-trading-period-feb-10---mar-3-2026)
+1. [Trading Period: Feb 10 - Mar 4, 2026](#1-trading-period-feb-10---mar-4-2026)
 2. [Daily Summary Data (Raw)](#2-daily-summary-data-raw)
 3. [Entry-Level Detail by Day](#3-entry-level-detail-by-day)
 4. [Market Conditions](#4-market-conditions)
@@ -1020,24 +1020,24 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |
 |-------|------|--------|------|---------------|--------|---------|------------|
-| #1 | 11:06 AM ET | NEUTRAL | Iron Condor | C:6915 P:6825 | $250 ($75C+$175P) | Put Stopped | -105.0 |
-| #2 | 11:36 AM ET | NEUTRAL | Iron Condor | C:6910 P:6830 | $285 ($65C+$220P) | Put Stopped | -50.0 |
+| #1 | 11:06 AM ET | NEUTRAL | Iron Condor | C:6915 P:6825 | $250 ($75C+$175P) | Put Stopped | -$105 |
+| #2 | 11:36 AM ET | NEUTRAL | Iron Condor | C:6910 P:6830 | $285 ($65C+$220P) | Put Stopped | -$50 |
 | #3 | 12:05 PM ET | NEUTRAL | Iron Condor | C:6905 P:6840 | $275 ($95C+$180P) | Put Stopped |  |
 | #4 | 12:35 PM ET | NEUTRAL | Iron Condor | C:6900 P:6835 | $305 ($105C+$200P) | Expired |  |
 
 **Key observations**:
-- All three put stops on 2026-03-04 were triggered within the same 11:06–12:05 ET window, with short put strikes clustered at 6,825–6,840 swept by SPX's intraday decline to 6,810.08 before the index recovered to close at 6,867.81.
-- Entry #4 (12:35 ET, $305 total credit) was the only fully clean iron condor, entering after SPX had already found its low; both legs expired worthless and it contributed the largest single-entry credit of the day.
-- Call credits on Entries #1 and #2 were notably thin at $75 and $65 respectively, approaching but not breaching the MKT-011 $1.00-per-contract minimum threshold against a VIX open of 22.52 in a gap-up environment; no MKT-011 call-side skips were triggered on placed entries.
-- MKT-025 short-only stop closure functioned as designed on all three put stops: only the short put legs were bought to close at stop levels, while the long put legs at 6,750–6,765 expired at zero settlement, avoiding additional closing commissions on the long side.
-- The day produced $187.50 net on $1,115.00 total credit collected across four entries — a 16.8% credit retention rate — reflecting how the MEIC+ near-breakeven stop formula contained losses on three consecutive put stops to a combined $305.00 in stop debits.
+- All three put stops (Entries #1–3) triggered within the 11:06–12:05 ET window as SPX dropped to its intraday low of 6,810.08, sweeping short put strikes clustered at 6,825, 6,830, and 6,840; Entry #4's short put at 6,835 was placed after the low was established and expired clean.
+- Put stops were rapid: Entry #1 stopped at 11:09 ET (3 minutes post-entry) and Entry #2 at 11:38 ET (2 minutes post-entry), indicating the downside move was already in progress at each entry time, not a delayed deterioration.
+- Call credits on Entries #1 and #2 were notably weak at $75 and $65 respectively, the latter approaching the MKT-011 $100-per-spread floor; all four call spreads expired worthless as SPX's high of 6,885.60 never threatened strikes placed at 6,900–6,915.
+- Entry #3's P&L impact is not available in the data, leaving the individual stop debit for that position unquantifiable; total stop loss debits across all three put stops are reported as $305 against $1,115 total credits collected, producing a net day of $187.50.
+- One entry was skipped (4 completed of 5 attempted), and no early close triggered (MKT-018 ROC threshold not reached), consistent with a day where losses on three entries suppressed cumulative ROC well below the early-close gate.
 
 ### Stop Timing Log
 
 ```
 11:09 AM ET - Entry #1 Put Stopped ($105 loss)
 11:38 AM ET - Entry #2 Put Stopped ($50 loss)
-??:?? ET - Entry #3 Put Stopped
+N/A - Entry #3 Put Stopped
 ```
 
 ### P&L Reconciliation
@@ -1071,7 +1071,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Feb 27 | Fri | Morning dip, recovery | +0.4% | 50 pts (0.7%) | 21→20 (compressing) | v1.4.0→v1.4.1 mid-day, last MEIC-TF day, 2 MKT-011 skips |
 | Mar 2 | Mon | Wide-range whipsaw | +1.2% | 106 pts (1.6%) | 23→21 (compressing) | First HYDRA day, 6 stops + 1 double stop |
 | **Mar 3** | **Tue** | **Gap-down + V-shape rally** | **+0.8%** | **~130 pts (1.9%)** | **26→22 (compressing)** | **Widest range of period, ES -91pt gap, VIX peaked 28.15, 13 commits** |
-| Mar 4 | Wed | Dip, recover, close higher | +0.5% | 76 pts (1.1%) | 23→21 | Post-settlement |
+| Mar 4 | Wed | Dip, strong recovery | +0.5% | 76 pts (1.1%) | 23→21 | Post-settlement |
 
 ### Expected Move vs Actual Range
 
@@ -1912,7 +1912,7 @@ When reviewing performance after implementing improvements, fill in this section
 | Cumulative P&L | $1592.50 |
 | Early Close | No |
 
-**Mar 4 Assessment**: MKT-020/022 progressive tightening was visible across the four entries, with short call strikes stepping down from 6,915 to 6,900 and short put strikes stepping up from 6,825 to 6,835 as SPX moved through its intraday range, yet all three put stops in Entries #1–3 were triggered within minutes of entry (11:09, 11:38, and intraday on #3) as SPX's early decline to 6,810.08 swept through clustered short put strikes at 6,825–6,840. MKT-025 short-only stop closure preserved commission savings on three separate stops, with the long put legs on each spread expiring worthless at settlement as SPX recovered to close at 6,867.81 — MKT-021's pre-entry ROC gate did not trigger given the 0.6% daily ROC, and one entry was skipped per the daily summary without MKT-011 flagging a credit-gate rejection on any placed entry, as all four recorded credits cleared minimum thresholds ($65–$105 call side, $175–$220 put side). The $187.50 net profit on $1,115 total credit collected represents a 0.6% ROC against $31,000 capital deployed —
+**Mar 4 Assessment**: MKT-025 (short-only stop) drove the day's outcome across all three put stops — short put legs on Entries #1, #2, and #3 were closed at stop triggers while long put legs (struck at 6,750–6,765) were left to expire worthless at settlement as SPX recovered to 6,867.81, avoiding additional closing debits on those legs entirely. MKT-020/022 progressive tightening is visible across the four placed entries, with short call strikes stepping down from 6,915 to 6,900 and short put strikes stepping up from 6,825 to 6,840 as the session progressed. The daily $187.50 net profit on $1,115 total credit — with three put stops producing only $305 in stop debits — confirms that the near-breakeven stop formula is containing downside per design, though a 25% win rate across four entries on a 0.60% ROC day represents a structurally weak result for the current configuration.
 
 ---
 
