@@ -1022,22 +1022,22 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 |-------|------|--------|------|---------------|--------|---------|------------|
 | #1 | 11:06 AM ET | NEUTRAL | Iron Condor | C:6915 P:6825 | $250 ($75C+$175P) | Put Stopped | -$105 |
 | #2 | 11:36 AM ET | NEUTRAL | Iron Condor | C:6910 P:6830 | $285 ($65C+$220P) | Put Stopped | -$50 |
-| #3 | 12:05 PM ET | NEUTRAL | Iron Condor | C:6905 P:6840 | $275 ($95C+$180P) | Put Stopped |  |
+| #3 | 12:05 PM ET | NEUTRAL | Iron Condor | C:6905 P:6840 | $275 ($95C+$180P) | Put Stopped | -$150 |
 | #4 | 12:35 PM ET | NEUTRAL | Iron Condor | C:6900 P:6835 | $305 ($105C+$200P) | Expired |  |
 
 **Key observations**:
-- All three put stops (Entries #1–3) triggered within the 11:06–12:05 ET window as SPX dropped to its intraday low of 6,810.08, sweeping short put strikes clustered at 6,825, 6,830, and 6,840; Entry #4's short put at 6,835 was placed after the low was established and expired clean.
-- Put stops were rapid: Entry #1 stopped at 11:09 ET (3 minutes post-entry) and Entry #2 at 11:38 ET (2 minutes post-entry), indicating the downside move was already in progress at each entry time, not a delayed deterioration.
-- Call credits on Entries #1 and #2 were notably weak at $75 and $65 respectively, the latter approaching the MKT-011 $100-per-spread floor; all four call spreads expired worthless as SPX's high of 6,885.60 never threatened strikes placed at 6,900–6,915.
-- Entry #3's P&L impact is not available in the data, leaving the individual stop debit for that position unquantifiable; total stop loss debits across all three put stops are reported as $305 against $1,115 total credits collected, producing a net day of $187.50.
-- One entry was skipped (4 completed of 5 attempted), and no early close triggered (MKT-018 ROC threshold not reached), consistent with a day where losses on three entries suppressed cumulative ROC well below the early-close gate.
+- All three put stops (Entries #1–3) were triggered by SPX's drop to the 6,810.08 intraday low, with short put strikes clustered at 6,825, 6,830, and 6,840 — all within 30 points of that low — while zero call stops occurred despite the index rallying to 6,885.60.
+- Entry #4 at 12:35 ET was the sole clean exit, collecting its full $305 credit as SPX had already bottomed by that entry time; its short put at 6,835 was never threatened during the afternoon recovery to 6,867.81.
+- MKT-025 short-only stop closure functioned as designed on all three stopped entries: only the short put legs were bought back for a total of $305 in stop debits, while the long put legs expired worthless at settlement, avoiding additional closing commissions.
+- Call credit quality was notably compressed on Entries #1 and #2 at $75 and $65 respectively — Entry #2's $65 call credit approaches the MKT-011 minimum threshold of $100 per spread and warrants audit review — consistent with gap-up suppression of upside premium at VIX 22.52.
+- The day produced $187.50 net profit on $1,115.00 total credit collected, a 0.6% ROC against $31,000 capital deployed — a marginal win structurally explained by the MEIC+ stop calibration keeping three losing trades to a combined $305 in stop debits rather than runaway losses.
 
 ### Stop Timing Log
 
 ```
 11:09 AM ET - Entry #1 Put Stopped ($105 loss)
 11:38 AM ET - Entry #2 Put Stopped ($50 loss)
-N/A - Entry #3 Put Stopped
+N/A - Entry #3 Put Stopped ($150 loss)
 ```
 
 ### P&L Reconciliation
@@ -1071,7 +1071,7 @@ N/A - Entry #3 Put Stopped
 | Feb 27 | Fri | Morning dip, recovery | +0.4% | 50 pts (0.7%) | 21→20 (compressing) | v1.4.0→v1.4.1 mid-day, last MEIC-TF day, 2 MKT-011 skips |
 | Mar 2 | Mon | Wide-range whipsaw | +1.2% | 106 pts (1.6%) | 23→21 (compressing) | First HYDRA day, 6 stops + 1 double stop |
 | **Mar 3** | **Tue** | **Gap-down + V-shape rally** | **+0.8%** | **~130 pts (1.9%)** | **26→22 (compressing)** | **Widest range of period, ES -91pt gap, VIX peaked 28.15, 13 commits** |
-| Mar 4 | Wed | Dip, strong recovery | +0.5% | 76 pts (1.1%) | 23→21 | Post-settlement |
+| Mar 4 | Wed | Dip, then recovery | +0.5% | 76 pts (1.1%) | 23→21 | Post-settlement |
 
 ### Expected Move vs Actual Range
 
@@ -1912,7 +1912,7 @@ When reviewing performance after implementing improvements, fill in this section
 | Cumulative P&L | $1592.50 |
 | Early Close | No |
 
-**Mar 4 Assessment**: MKT-025 (short-only stop) drove the day's outcome across all three put stops — short put legs on Entries #1, #2, and #3 were closed at stop triggers while long put legs (struck at 6,750–6,765) were left to expire worthless at settlement as SPX recovered to 6,867.81, avoiding additional closing debits on those legs entirely. MKT-020/022 progressive tightening is visible across the four placed entries, with short call strikes stepping down from 6,915 to 6,900 and short put strikes stepping up from 6,825 to 6,840 as the session progressed. The daily $187.50 net profit on $1,115 total credit — with three put stops producing only $305 in stop debits — confirms that the near-breakeven stop formula is containing downside per design, though a 25% win rate across four entries on a 0.60% ROC day represents a structurally weak result for the current configuration.
+**Mar 4 Assessment**: MKT-020/022 progressive tightening pushed short put strikes progressively closer across entries #1–#3 (6,825 → 6,830 → 6,840), which concentrated exposure exactly at SPX's intraday low of 6,810.08 and triggered three consecutive put-side stops under MKT-025, with only the short legs closed at $305 total stop debits while the long puts expired worthless at settlement — preserving premium that would otherwise have cost additional commission. MKT-021's pre-entry ROC gate did not trigger to block entries #4–#6, as the day's ROC had not cleared threshold by 12:35 ET, and that single remaining entry proved to be the day's best at $305 total credit, expiring fully clean as SPX recovered to 6,867.81 and never threatened the 6,900 short call or 6,835 short put. At $187.50 net P&L on $31,000 capital deployed (0.6% ROC), this was a marginal win structurally — three of four entries stopped on the same directional move indicates the stop calibration held near breakeven as designed, but the configuration offered no mechanism to reduce put-side exposure once the first two stops confirmed a sustained downside move.
 
 ---
 
