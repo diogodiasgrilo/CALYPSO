@@ -2737,6 +2737,14 @@ class HydraStrategy(MEICStrategy):
             if not bid or bid <= 0:
                 return False
 
+            # Guard: invalid open price (recovery/fill lookup failure) — skip to avoid false profit
+            if not long_open_price or long_open_price <= 0:
+                logger.warning(
+                    f"MKT-033: Skipping Entry #{entry.entry_number} long {side} — "
+                    f"invalid open price ${long_open_price}"
+                )
+                return False
+
             # Check profitability: appreciation must cover round-trip commission + slippage
             appreciation = (bid - long_open_price) * 100 * entry.contracts
             if appreciation < self.long_salvage_min_profit:

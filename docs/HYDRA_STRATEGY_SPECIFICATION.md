@@ -433,7 +433,7 @@ This is offset by saved slippage ($5-$15) and saved commission ($2.50). Net impa
 
 ### MKT-033: Long Leg Salvage After Short Stop (v1.9.2)
 
-After MKT-025 closes the short leg, the surviving long leg normally expires worthless at settlement. But on directional days, the long leg can appreciate significantly (e.g., +$125 across 4 entries on Mar 5, 2026). MKT-033 automates selling the long if it's profitable enough to cover round-trip costs.
+After MKT-025 closes the short leg, the surviving long leg normally expires worthless at settlement. But on directional days, the long leg can appreciate significantly (e.g., +$120 net across 5 entries on Mar 5, 2026). MKT-033 automates selling the long if it's profitable enough to cover round-trip costs.
 
 **Condition:** `(current_bid - open_price) × 100 × contracts >= $10.0`
 - $5 round-trip commission ($2.50 open + $2.50 close)
