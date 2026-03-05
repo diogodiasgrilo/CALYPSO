@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,10 @@ def collect_day_data(
     # Include version history
     day["version_history"] = all_data.get("version_history", [])
 
+    # Fill missing stop data from fallback sources (logs, P&L identity)
+    if day["entries"] and day.get("summary"):
+        _fill_missing_stop_data(day["entries"], day["summary"], date_str)
+
     # Context chaining: include HERMES daily report if available
     day["hermes_report"] = _read_hermes_report(config or {}, date_str)
 
@@ -129,7 +135,6 @@ def _build_entries_for_day(
             ts = str(row.get("Timestamp", "")).strip()
             if ts:
                 try:
-                    from datetime import datetime
                     dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
                     entry_time = dt.strftime("%I:%M %p ET")
                 except ValueError:
@@ -188,7 +193,6 @@ def _build_entries_for_day(
                 ts = str(row.get("Timestamp", "")).strip()
                 if ts:
                     try:
-                        from datetime import datetime
                         dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
                         stop_time = dt.strftime("%I:%M %p ET")
                     except ValueError:
@@ -302,6 +306,166 @@ def _build_entries_for_day(
         key=lambda e: int(e.get("Entry #", 0) or 0),
     )
     return result
+
+
+def _fill_missing_stop_data(
+    entries: List[Dict], summary: Dict, date_str: str
+) -> None:
+    """
+    Fill missing stop data from fallback sources when Trades tab has gaps.
+
+    Fallback 1: HYDRA service logs (journalctl) for stop time and P&L.
+    Fallback 2: P&L identity derivation from Daily Summary totals.
+    """
+    stopped_entries = [
+        e for e in entries if "STOP" in str(e.get("Outcome", "")).upper()
+    ]
+    if not stopped_entries:
+        return
+
+    missing_time = [e for e in stopped_entries if not e.get("Stop Time")]
+    missing_pnl = [
+        e for e in stopped_entries if not _safe_float(e.get("P&L Impact", 0))
+    ]
+
+    if not missing_time and not missing_pnl:
+        return
+
+    logger.info(
+        f"Missing stop data for {date_str}: "
+        f"{len(missing_time)} missing times, {len(missing_pnl)} missing P&L"
+    )
+
+    # Fallback 1: Parse HYDRA logs for MKT-025 stop events
+    log_stops = _read_hydra_logs_for_stops(date_str)
+    if log_stops:
+        for entry in stopped_entries:
+            entry_num = str(entry.get("Entry #", ""))
+            if entry_num not in log_stops:
+                continue
+            stop_data = log_stops[entry_num]
+            if not entry.get("Stop Time") and stop_data.get("stop_time"):
+                entry["Stop Time"] = stop_data["stop_time"]
+                logger.info(
+                    f"Entry #{entry_num}: stop time from logs: {stop_data['stop_time']}"
+                )
+            if not _safe_float(entry.get("P&L Impact", 0)) and stop_data.get("pnl"):
+                entry["P&L Impact"] = str(stop_data["pnl"])
+                logger.info(
+                    f"Entry #{entry_num}: stop P&L from logs: "
+                    f"${stop_data['pnl']:.2f}"
+                )
+
+    # Fallback 2: Derive missing P&L from Daily Summary identity
+    still_missing = [
+        e for e in stopped_entries if not _safe_float(e.get("P&L Impact", 0))
+    ]
+    if still_missing:
+        _derive_missing_stop_pnl(entries, summary)
+
+
+def _read_hydra_logs_for_stops(date_str: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Read HYDRA service logs for MKT-025 stop events on a given date.
+
+    Parses journalctl output (same approach as HERMES data_collector).
+    Returns dict keyed by entry number: {"3": {"stop_time": "12:22 PM ET", "pnl": -150.0}}
+    """
+    try:
+        result = subprocess.run(
+            [
+                "journalctl", "-u", "hydra",
+                "--since", date_str, "--until", f"{date_str} 23:59:59",
+                "--no-pager", "--grep", "MKT-025",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return {}
+    except subprocess.TimeoutExpired:
+        logger.warning("journalctl timed out reading HYDRA logs")
+        return {}
+    except FileNotFoundError:
+        logger.info("journalctl not available (running locally?)")
+        return {}
+
+    stops: Dict[str, Dict[str, Any]] = {}
+    for line in result.stdout.splitlines():
+        # "2026-03-04 12:22:39 | WARNING | ... | MKT-025 STOP TRIGGERED: Entry #3 put side"
+        trigger = re.search(
+            r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*"
+            r"MKT-025 STOP TRIGGERED: Entry #(\d+) (\w+) side",
+            line,
+        )
+        if trigger:
+            ts_str, entry_num, side = trigger.group(1), trigger.group(2), trigger.group(3)
+            try:
+                dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                stop_time = dt.strftime("%I:%M %p ET")
+            except ValueError:
+                stop_time = ts_str
+            stops.setdefault(entry_num, {})
+            stops[entry_num]["stop_time"] = stop_time
+            stops[entry_num]["side"] = side.lower()
+
+        # "MKT-025: Actual P&L for Entry #3 put: ... net_loss=$150.00"
+        # "MKT-025: Using theoretical P&L ... net_loss=$50.00"
+        pnl_match = re.search(
+            r"MKT-025.*Entry #(\d+).*net_loss=\$(\d+\.?\d*)", line
+        )
+        if pnl_match:
+            entry_num = pnl_match.group(1)
+            loss = float(pnl_match.group(2))
+            stops.setdefault(entry_num, {})
+            stops[entry_num]["pnl"] = -loss
+
+    if stops:
+        logger.info(
+            f"Parsed {len(stops)} MKT-025 stop events from HYDRA logs for {date_str}"
+        )
+    return stops
+
+
+def _derive_missing_stop_pnl(entries: List[Dict], summary: Dict) -> None:
+    """
+    Derive missing individual stop P&L from Daily Summary total.
+
+    P&L identity: Expired Credits - Stop Loss Debits - Commission = Net P&L
+    If exactly one stopped entry is missing P&L, derive it from the total.
+    """
+    total_debits = _safe_float(summary.get("Stop Loss Debits ($)", 0))
+    if total_debits <= 0:
+        return
+
+    stopped = [e for e in entries if "STOP" in str(e.get("Outcome", "")).upper()]
+    if not stopped:
+        return
+
+    known_debits = 0.0
+    missing = []
+    for entry in stopped:
+        pnl = _safe_float(entry.get("P&L Impact", 0))
+        if pnl:
+            known_debits += abs(pnl)
+        else:
+            missing.append(entry)
+
+    if len(missing) == 1:
+        derived_debit = total_debits - known_debits
+        if derived_debit > 0:
+            missing[0]["P&L Impact"] = str(-derived_debit)
+            entry_num = missing[0].get("Entry #", "?")
+            logger.info(
+                f"Derived Entry #{entry_num} stop P&L: -${derived_debit:.2f} "
+                f"(total debits ${total_debits:.2f} - known ${known_debits:.2f})"
+            )
+    elif len(missing) > 1:
+        logger.warning(
+            f"{len(missing)} entries missing stop P&L — cannot derive individually "
+            f"(total debits: ${total_debits:.2f}, known: ${known_debits:.2f})"
+        )
 
 
 def _safe_float(value) -> float:
