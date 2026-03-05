@@ -8,7 +8,7 @@ EMA-based trend detection (informational) and advanced risk controls.
 
 Strategy Summary:
 -----------------
-1. 5 scheduled iron condor entries per day (11:05 - 13:05 ET)
+1. 5 scheduled iron condor entries per day (11:15 - 13:15 ET)
 2. EMA 20/40 trend signal logged per entry (informational only)
 3. Credit gate validates minimum credit before each entry
 4. Progressive OTM tightening finds optimal strikes

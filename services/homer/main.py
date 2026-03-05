@@ -400,6 +400,9 @@ def _run_backfill():
 
     # 3. Combine all dates (from logs + Sheets)
     all_dates = sorted(set(list(all_ticks.keys()) + sheets_dates))
+    if not all_dates:
+        logger.warning("No dates found in logs or Sheets — nothing to backfill")
+        return
     logger.info(f"Phase 3: Processing {len(all_dates)} dates ({all_dates[0]} to {all_dates[-1]})")
 
     # 4. Populate DB for each date

@@ -328,7 +328,7 @@ class BacktestingDB:
         return result is not None
 
     def get_date_range(self) -> Optional[tuple]:
-        """Get (min_date, max_date) across all tables."""
+        """Get (min_date, max_date) from market_ticks table."""
         with self._connect() as conn:
             result = conn.execute(
                 "SELECT MIN(substr(timestamp, 1, 10)), MAX(substr(timestamp, 1, 10)) "

@@ -641,8 +641,8 @@ class HydraStrategy(MEICStrategy):
         """
         Override: extend entry window to include MKT-031 scouting period for retries.
 
-        Without this, if early entry triggers at 10:57 for 11:05 slot, the retry
-        loop calls base _is_entry_time() which checks 11:05 <= 10:57 → False →
+        Without this, if early entry triggers at 11:07 for 11:15 slot, the retry
+        loop calls base _is_entry_time() which checks 11:15 <= 11:07 → False →
         retries abort immediately.
         """
         if not self.smart_entry_enabled:
