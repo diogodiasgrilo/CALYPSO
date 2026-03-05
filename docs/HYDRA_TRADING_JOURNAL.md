@@ -1026,18 +1026,18 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | #4 | 12:35 PM ET | NEUTRAL | Iron Condor | C:6900 P:6835 | $305 ($105C+$200P) | Expired |  |
 
 **Key observations**:
-- All three put stops (Entries #1–3) were triggered by SPX's drop to the 6,810.08 intraday low, with short put strikes clustered at 6,825, 6,830, and 6,840 — all within 30 points of that low — while zero call stops occurred despite the index rallying to 6,885.60.
-- Entry #4 at 12:35 ET was the sole clean exit, collecting its full $305 credit as SPX had already bottomed by that entry time; its short put at 6,835 was never threatened during the afternoon recovery to 6,867.81.
-- MKT-025 short-only stop closure functioned as designed on all three stopped entries: only the short put legs were bought back for a total of $305 in stop debits, while the long put legs expired worthless at settlement, avoiding additional closing commissions.
-- Call credit quality was notably compressed on Entries #1 and #2 at $75 and $65 respectively — Entry #2's $65 call credit approaches the MKT-011 minimum threshold of $100 per spread and warrants audit review — consistent with gap-up suppression of upside premium at VIX 22.52.
-- The day produced $187.50 net profit on $1,115.00 total credit collected, a 0.6% ROC against $31,000 capital deployed — a marginal win structurally explained by the MEIC+ stop calibration keeping three losing trades to a combined $305 in stop debits rather than runaway losses.
+- All three put stops (Entries #1–3) were triggered by SPX's decline to the intraday low of 6,810.08, sweeping short put strikes clustered at 6,825, 6,830, and 6,840 within a 16-minute window between 11:09 and 12:22 ET; Entry #4's short put at 6,835 was placed after the low had formed and expired clean.
+- Under MKT-025, only the short put legs were closed at each stop, with total stop loss debits of $305 against $575 in put credits collected across the three stopped entries — the long legs expired worthless at settlement, confirming the commission-saving design functioned as intended.
+- Entry #2's call credit of $65 sits below the MKT-011 minimum threshold of $100 per spread ($1.00 × 100 multiplier), which warrants audit review; no MKT-011 skip was recorded for this entry despite the sub-threshold credit.
+- Call credits across Entries #1–3 ranged from $65 to $95, reflecting compressed upside premium consistent with VIX declining from 22.52 to a low of 20.40 intraday, while put credits remained elevated at $175–$220 across all four entries, carrying forward residual downside fear from the prior session.
+- The day closed at $187.50 net profit — positive only because Entry #4's $305 full credit expired clean and all four call spreads expired worthless, offsetting $305 in stop debits and $47.50 in commissions against $1,115 in total credits collected.
 
 ### Stop Timing Log
 
 ```
 11:09 AM ET - Entry #1 Put Stopped ($105 loss)
 11:38 AM ET - Entry #2 Put Stopped ($50 loss)
-N/A - Entry #3 Put Stopped ($150 loss)
+12:22 PM ET - Entry #3 Put Stopped ($150 loss)
 ```
 
 ### P&L Reconciliation
@@ -1071,7 +1071,7 @@ N/A - Entry #3 Put Stopped ($150 loss)
 | Feb 27 | Fri | Morning dip, recovery | +0.4% | 50 pts (0.7%) | 21→20 (compressing) | v1.4.0→v1.4.1 mid-day, last MEIC-TF day, 2 MKT-011 skips |
 | Mar 2 | Mon | Wide-range whipsaw | +1.2% | 106 pts (1.6%) | 23→21 (compressing) | First HYDRA day, 6 stops + 1 double stop |
 | **Mar 3** | **Tue** | **Gap-down + V-shape rally** | **+0.8%** | **~130 pts (1.9%)** | **26→22 (compressing)** | **Widest range of period, ES -91pt gap, VIX peaked 28.15, 13 commits** |
-| Mar 4 | Wed | Dip, then recovery | +0.5% | 76 pts (1.1%) | 23→21 | Post-settlement |
+| Mar 4 | Wed | Dip, recovery, net gain | +0.5% | 76 pts (1.1%) | 23→21 | Post-settlement |
 
 ### Expected Move vs Actual Range
 
@@ -1912,7 +1912,7 @@ When reviewing performance after implementing improvements, fill in this section
 | Cumulative P&L | $1592.50 |
 | Early Close | No |
 
-**Mar 4 Assessment**: MKT-020/022 progressive tightening pushed short put strikes progressively closer across entries #1–#3 (6,825 → 6,830 → 6,840), which concentrated exposure exactly at SPX's intraday low of 6,810.08 and triggered three consecutive put-side stops under MKT-025, with only the short legs closed at $305 total stop debits while the long puts expired worthless at settlement — preserving premium that would otherwise have cost additional commission. MKT-021's pre-entry ROC gate did not trigger to block entries #4–#6, as the day's ROC had not cleared threshold by 12:35 ET, and that single remaining entry proved to be the day's best at $305 total credit, expiring fully clean as SPX recovered to 6,867.81 and never threatened the 6,900 short call or 6,835 short put. At $187.50 net P&L on $31,000 capital deployed (0.6% ROC), this was a marginal win structurally — three of four entries stopped on the same directional move indicates the stop calibration held near breakeven as designed, but the configuration offered no mechanism to reduce put-side exposure once the first two stops confirmed a sustained downside move.
+**Mar 4 Assessment**: MKT-025 (short-only stop) drove the day's outcome across three put stops — HYDRA closed only the short put legs on Entries #1–3, collecting $305 in total stop debits against $1,115 in total credits, while the long put legs expired worthless at settlement as SPX recovered to 6,867.81, well above all short put strikes (6,825–6,840). MKT-020/022 progressive tightening was visible across the four entries, with short call strikes stepping down from 6,915 to 6,900 and short put strikes stepping up from 6,825 to 6,840 as intraday price action developed, though this tightening moved put strikes closer to the 6,810 intraday low on Entries #2 and #3 rather than away from it. MKT-021 did not gate Entries #4–6 (cumulative ROC remained below threshold), and the single skip logged was not attributed to MKT-011 on any placed entry — Entry #4's $305 total credit with clean expiration was the day's decisive result, producing a net $187.50 on $31,000 capital deployed (0.6% ROC), a structurally sound but thin outcome given three stops absorbed before the market found its
 
 ---
 
