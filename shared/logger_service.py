@@ -732,6 +732,27 @@ class GoogleSheetsLogger:
                 worksheet.format("A1:AE1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Performance Metrics worksheet ({self.strategy_type} format, {len(headers)} cols)")
 
+            # Extend existing HYDRA Performance Metrics headers if needed (MKT-033)
+            if self.strategy_type == "hydra":
+                try:
+                    header_row = self._sheets_call_with_timeout(worksheet.row_values, 1)
+                    if header_row:
+                        existing_set = set(header_row)
+                        new_cols = ["Long Salvage Revenue ($)"]
+                        missing = [h for h in new_cols if h not in existing_set]
+                        if missing:
+                            start_col = len(header_row) + 1
+                            target_cols = max(32, start_col + len(missing) - 1)
+                            if worksheet.col_count < target_cols:
+                                self._sheets_call_with_timeout(worksheet.resize, cols=target_cols)
+                            for i, h in enumerate(missing):
+                                self._sheets_call_with_timeout(
+                                    worksheet.update_cell, 1, start_col + i, h
+                                )
+                            logger.info(f"Extended Performance Metrics headers: appended {missing}")
+                except Exception as e:
+                    logger.warning(f"Failed to extend Performance Metrics headers: {e}")
+
             self.worksheets["Performance Metrics"] = worksheet
         except Exception as e:
             logger.error(f"Failed to setup Performance Metrics worksheet: {e}")
@@ -831,6 +852,34 @@ class GoogleSheetsLogger:
                 worksheet.append_row(headers)
                 worksheet.format("A1:R1", {"textFormat": {"bold": True}})
                 logger.info(f"Created Account Summary worksheet ({self.strategy_type} format)")
+
+            # Extend existing HYDRA Account Summary headers if needed (MKT-033)
+            if self.strategy_type == "hydra":
+                try:
+                    header_row = self._sheets_call_with_timeout(worksheet.row_values, 1)
+                    if header_row and "Long Salvage Count" not in header_row:
+                        # Expected 20-column header order with salvage before State/Environment
+                        expected_headers = [
+                            "Timestamp", "SPX Price", "VIX",
+                            "Entries Completed", "Active ICs", "Entries Skipped",
+                            "Total Credit ($)", "Unrealized P&L ($)", "Realized P&L ($)",
+                            "Call Stops", "Put Stops",
+                            "Current Trend", "EMA 20", "EMA 40",
+                            "Circuit Breaker", "Early Close",
+                            "Long Salvage Count", "Long Salvage Revenue ($)",
+                            "State", "Environment"
+                        ]
+                        target_cols = len(expected_headers)
+                        if worksheet.col_count < target_cols:
+                            self._sheets_call_with_timeout(worksheet.resize, cols=target_cols)
+                        # Overwrite entire header row with correct ordering
+                        for i, h in enumerate(expected_headers):
+                            self._sheets_call_with_timeout(
+                                worksheet.update_cell, 1, i + 1, h
+                            )
+                        logger.info("Extended Account Summary headers: added Long Salvage columns (20 cols)")
+                except Exception as e:
+                    logger.warning(f"Failed to extend Account Summary headers: {e}")
 
             self.worksheets["Account Summary"] = worksheet
         except Exception as e:
