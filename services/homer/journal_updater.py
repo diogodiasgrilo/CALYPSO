@@ -433,7 +433,7 @@ def build_section3_day_block(
             lines.append("```")
             for se in stop_entries:
                 entry_num = se.get("Entry #", se.get("Entry", "?"))
-                stop_time = se.get("Stop Time", se.get("Close Time", "??:?? ET"))
+                stop_time = se.get("Stop Time", se.get("Close Time", "N/A"))
                 outcome = se.get("Outcome", "STOPPED")
                 pnl_val = safe_float(se.get("P&L Impact", 0))
                 pnl_str = f"${format_money(abs(pnl_val))} loss" if pnl_val else ""
