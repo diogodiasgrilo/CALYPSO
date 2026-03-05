@@ -10,7 +10,7 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 - **Before each entry**, check 20 EMA vs 40 EMA on SPX 1-minute bars
 - **EMA signal is informational only** — logged and stored but does NOT drive entry type
-- **Entries are full iron condors or put-only** — call credit non-viable → put-only (v1.7.1), put credit non-viable → skip (call-only disabled)
+- **Entries are full iron condors or put-only** — call credit non-viable → put-only if VIX < 18 (MKT-032), skip if VIX >= 18; put credit non-viable → skip (call-only disabled)
 
 ### Why This Works
 
@@ -43,12 +43,13 @@ Before each scheduled entry, a 10-minute scouting window opens. Market condition
 
 Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($0.75) and puts ($1.75). Call minimum lowered from $1.00 to $0.75 in v1.7.2 (credit cushion analysis: 68% call cushion vs 61.5% — see `docs/HYDRA_CREDIT_CUSHION_ANALYSIS.md`).
 
-| Call Credit | Put Credit | Action |
-|-------------|------------|--------|
-| >= $0.75 | >= $1.75 | Proceed with full iron condor |
-| < $0.75 | >= $1.75 | Place put-only entry (v1.7.1) |
-| >= $0.75 | < $1.75 | Skip entry (call-only disabled) |
-| < $0.75 | < $1.75 | Skip entry |
+| Call Credit | Put Credit | VIX | Action |
+|-------------|------------|-----|--------|
+| >= $0.75 | >= $1.75 | Any | Proceed with full iron condor |
+| < $0.75 | >= $1.75 | < 18 | Place put-only entry (MKT-032 allows) |
+| < $0.75 | >= $1.75 | >= 18 | Skip entry (MKT-032: 2× stop too risky) |
+| >= $0.75 | < $1.75 | Any | Skip entry (call-only disabled) |
+| < $0.75 | < $1.75 | Any | Skip entry |
 
 ### Illiquidity Fallback (MKT-010)
 
@@ -121,6 +122,7 @@ Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-0
 |---------|---------|-------------|
 | `min_viable_credit_per_side` | `0.75` | MKT-011/MKT-020: Call minimum credit (lowered from $1.00 for 68% call cushion, see HYDRA_CREDIT_CUSHION_ANALYSIS.md) |
 | `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022: Put minimum credit (top of Tammy's $1.00-$1.75 range) |
+| `put_only_max_vix` | `18.0` | MKT-032: Max VIX for put-only entries (skip instead when VIX >= threshold) |
 | `call_starting_otm_multiplier` | `3.5` | MKT-024: Call starting OTM = base × multiplier |
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: Put starting OTM = base × multiplier (higher due to put skew) |
 | `min_call_otm_distance` | `25` | MKT-020: Minimum OTM distance (points) for call tightening floor |
@@ -220,6 +222,7 @@ bots/hydra/
 
 ## Version History
 
+- **1.9.1** (2026-03-05): MKT-032 VIX gate for put-only entries. Put-only only when VIX < 18 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky). Configurable via `put_only_max_vix`.
 - **1.8.0** (2026-03-04): Entry schedule shifted +1hr (11:05-13:05), MKT-031 smart entry windows (10min scouting, 2-parameter scoring: ATR calm 0-70pts + momentum pause 0-30pts, threshold 65), early close day cutoff raised to 12:00 PM
 - **1.7.2** (2026-03-03): Lower call minimum from $1.00 to $0.75 (credit cushion analysis)
 - **1.7.1** (2026-03-03): Re-enable MKT-011 put-only entries (87.5% WR, +$870 net). Strict $1.00 call min.

@@ -32,7 +32,7 @@
 
 ### What is HYDRA?
 
-HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — entries are full iron condors or put-only (when call credit is non-viable, via MKT-011).
+HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — entries are full iron condors or put-only (when call credit is non-viable AND VIX < 18, via MKT-011 + MKT-032).
 
 Key MKT rules include: pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management — developed iteratively from 12 days of live trading data (Feb 10-26, 2026). Early close (MKT-018/023/021) was tested but intentionally disabled — backtest showed hold-to-expiry outperforms.
 
@@ -81,7 +81,7 @@ MEIC's breakeven design means a full IC with one side stopped nets $0 after comm
 - **One-sided entry in a trending market:** Risky if wrong. But if the trend is correctly identified, the spread is far OTM on the safe side and has a high probability of expiring worthless.
 - **Full IC in a trending market:** The stressed side gets stopped, but the surviving side's credit offsets the loss. Still safe (~$5 loss), but you tie up capital for a near-zero return.
 
-HYDRA's philosophy: **Default to full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds call credit non-viable but put credit viable, place a put-only entry (v1.7.1: 87.5% WR from 6 qualifying entries). When put credit non-viable, skip entirely (call-only entries disabled due to insufficient data).**
+HYDRA's philosophy: **Default to full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds call credit non-viable but put credit viable, place a put-only entry only if VIX < 18.0 (MKT-032: 80% WR in calm markets). At VIX >= 18.0, skip instead (2× stop with no hedge is too risky in volatile conditions — 50% WR). When put credit non-viable, skip entirely (call-only entries disabled due to insufficient data).**
 
 ### Evolution Through Live Trading
 
@@ -174,13 +174,13 @@ Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scout
 
 ### Trend Signal (Informational Only — v1.4.0)
 
-The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. Entry type is determined by MKT-011 credit gate: full IC when both sides viable, put-only when call non-viable (v1.7.1).
+The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. Entry type is determined by MKT-011 credit gate: full IC when both sides viable, put-only when call non-viable AND VIX < 18.0 (MKT-032), skip when VIX >= 18.0.
 
 | Trend Signal | What Gets Placed | Note |
 |--------------|------------------|------|
-| BULLISH (EMA20 > EMA40 by >= 0.2%) | Full IC or put-only (MKT-011) | Signal logged, not acted on |
-| BEARISH (EMA20 < EMA40 by >= 0.2%) | Full IC or put-only (MKT-011) | Signal logged, not acted on |
-| NEUTRAL (within 0.2%) | Full IC or put-only (MKT-011) | Standard behavior |
+| BULLISH (EMA20 > EMA40 by >= 0.2%) | Full IC, put-only (MKT-011 + MKT-032), or skip | Signal logged, not acted on |
+| BEARISH (EMA20 < EMA40 by >= 0.2%) | Full IC, put-only (MKT-011 + MKT-032), or skip | Signal logged, not acted on |
+| NEUTRAL (within 0.2%) | Full IC, put-only (MKT-011 + MKT-032), or skip | Standard behavior |
 
 **Why trend-driven one-sided entries were removed (v1.4.0):** 12-day analysis (Feb 10-26) showed trend-driven one-sided P&L was -$175 across 23 entries. V-shape reversal days (Feb 17, Feb 26) amplified losses. EMA correctly identifies current direction but cannot predict reversals. **MKT-011 credit-driven put-only entries re-enabled (v1.7.1):** 87.5% WR, +$870 net from 6 qualifying entries — these are credit-driven (call side too cheap) not trend-driven.
 
@@ -303,7 +303,8 @@ Each entry goes through these phases in order:
 ```
 19. MKT-011: Estimate credit from live quotes (call >= $0.75 strict, put >= $1.75 with MKT-029 fallback to $1.65)
     ├── Both sides viable → PROCEED with full iron condor
-    ├── Call non-viable, put viable → PUT-ONLY entry (v1.7.1)
+    ├── Call non-viable, put viable, VIX < 18 → PUT-ONLY entry (MKT-032 allows)
+    ├── Call non-viable, put viable, VIX >= 18 → SKIP entry (MKT-032: 2× stop too risky)
     ├── Put non-viable, call viable → SKIP entry (call-only disabled)
     └── Both sides below minimum → SKIP entry
 20. MKT-010 fallback: If MKT-011 can't get quotes, use illiquidity flags
@@ -550,7 +551,8 @@ Entry #1 → #2 → #3 placed normally
 | MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | 40-80pt spreads based on VIX level |
 | MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days, pure savings with MKT-025) |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
-| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call non-viable → put-only (v1.7.1); put non-viable → skip |
+| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call non-viable → put-only if VIX < 18 (MKT-032), else skip; put non-viable → skip |
+| MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 18.0 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky) |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |

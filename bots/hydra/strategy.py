@@ -1500,11 +1500,12 @@ class HydraStrategy(MEICStrategy):
 
     def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool, float, float]:
         """
-        MKT-011: Check if estimated credit is above minimum viable threshold.
+        MKT-011 + MKT-032: Check if estimated credit is above minimum viable threshold.
 
         Returns viability assessment with estimated credits. When call side
-        is non-viable but put side meets threshold, returns "put_only" so
-        the caller can place a put-only entry (re-enabled in v1.7.1).
+        is non-viable but put side meets threshold, returns "put_only" only
+        if VIX < put_only_max_vix (MKT-032). At elevated VIX, returns "skip"
+        instead (2× stop too risky without call hedge).
 
         Args:
             entry: HydraIronCondorEntry with strikes calculated
@@ -2123,7 +2124,7 @@ class HydraStrategy(MEICStrategy):
                     gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
 
                     if gate_result == "skip":
-                        # Both sides non-viable, skip this entry
+                        # Skip: both non-viable, or MKT-032 VIX too high for put-only
                         # Fix #79: Increment skip counters (was missing - all other skip paths have this)
                         self.daily_state.entries_skipped += 1
                         self.daily_state.credit_gate_skips += 1
@@ -2131,7 +2132,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        return f"Entry #{entry_num} skipped - both sides below minimum viable credit"
+                        return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
                     elif gate_result == "call_only":
                         # Put credit too low — call-only entries disabled (insufficient data)
                         logger.warning(
