@@ -10,11 +10,13 @@ but is informational only — entries are full iron condors or put-only via MKT-
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both sides viable: Proceed with full iron condor
-- Call non-viable, put viable: Place put-only entry (v1.7.1 re-enablement)
+- Call non-viable, put viable, VIX < 18: Place put-only entry (MKT-032 VIX gate)
+- Call non-viable, put viable, VIX >= 18: Skip entry (2× stop too risky without hedge)
 - Put non-viable: Skip entry (call-only disabled — insufficient data)
 - Both non-viable: Skip entry entirely
 
 Version History:
+- 1.9.1 (2026-03-05): MKT-032 VIX gate for put-only entries. Put-only only allowed when VIX < 18 (80% WR in calm markets). At VIX >= 18, skip instead of put-only (2× stop with no hedge = 50% WR, unacceptable risk). Configurable via put_only_max_vix. Telegram /set support.
 - 1.9.0 (2026-03-05): Telegram commands expanded to 14: /set (edit config), /restart, /stop (with position warning). Message splitting replaces truncation for HERMES/APOLLO reports. Atomic config writes with file locking.
 - 1.8.1 (2026-03-05): Entry times shifted to :15/:45 offset (11:15-13:15). 19-day MAE analysis: :15/:45 has 10% lower 30-min adverse excursion vs :05/:35 (12.39pt vs 13.76pt) with better tail risk (P90: 21.71pt vs 23.84pt). Early close day keeps 11:15/11:45.
 - 1.8.0 (2026-03-04): Entry schedule shifted +1hr (11:05-13:05 — journal data: 10:05 -$695, 10:35 -$510 vs 11:05+ all positive). MKT-031 smart entry windows (10min pre-entry scouting, 2-parameter scoring: post-spike ATR calm 0-70pts + momentum pause 0-30pts, threshold 65 triggers early entry). Early close day cutoff raised to 12:00 PM (keeps 11:05/11:35 viable).

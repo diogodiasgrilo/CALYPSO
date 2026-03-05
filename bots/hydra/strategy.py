@@ -288,7 +288,15 @@ class HydraStrategy(MEICStrategy):
         # When true (default): call non-viable + put viable → put-only entry (v1.7.1 behavior)
         # When false: call non-viable → skip entry entirely (pre-v1.7.1 behavior)
         self.one_sided_entries_enabled = strategy_config.get("one_sided_entries_enabled", True)
-        logger.info(f"  One-sided entries: {'ENABLED' if self.one_sided_entries_enabled else 'DISABLED (skip if either side non-viable)'}")
+
+        # MKT-032: VIX cutoff for put-only entries — at VIX >= threshold, put-only entries
+        # are too risky (2× stop with no hedge in volatile conditions, 50% WR at VIX 18-21).
+        # Below threshold (calm markets), put-only has 80% WR and 2× stop is rarely hit.
+        self.put_only_max_vix = float(strategy_config.get("put_only_max_vix", 18.0))
+        if self.one_sided_entries_enabled:
+            logger.info(f"  One-sided entries: ENABLED (put-only allowed when VIX < {self.put_only_max_vix})")
+        else:
+            logger.info(f"  One-sided entries: DISABLED (skip if either side non-viable)")
 
         # Override min credit from base class $0.50 to $0.75 for HYDRA
         # Credit cushion analysis (docs/HYDRA_CREDIT_CUSHION_ANALYSIS.md):
@@ -1569,20 +1577,40 @@ class HydraStrategy(MEICStrategy):
 
         # One side viable, other not
         if not call_viable:
-            if self.one_sided_entries_enabled:
-                # Call non-viable, put viable → put-only entry (v1.7.1)
+            # MKT-032: VIX gate for put-only entries
+            # At VIX >= threshold, put-only is too risky (2× stop, no hedge, 50% WR).
+            # At VIX < threshold (calm markets), put-only has 80% WR.
+            vix_allows_put_only = self.current_vix < self.put_only_max_vix
+            if self.one_sided_entries_enabled and vix_allows_put_only:
+                # Call non-viable, put viable, VIX calm → put-only entry (v1.7.1)
                 logger.info(
                     f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
                     f"(${estimated_call:.2f} < ${call_min:.2f}) - "
-                    f"put ${estimated_put:.2f} viable → converting to put-only"
+                    f"put ${estimated_put:.2f} viable, VIX {self.current_vix:.1f} < "
+                    f"{self.put_only_max_vix} → converting to put-only"
                 )
                 self._log_safety_event(
                     "MKT-011_PUT_ONLY",
                     f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable, "
-                    f"put ${estimated_put:.2f} → put-only",
+                    f"put ${estimated_put:.2f} → put-only (VIX {self.current_vix:.1f})",
                     "Put-Only"
                 )
                 return ("put_only", True, estimated_call, estimated_put)
+            elif self.one_sided_entries_enabled and not vix_allows_put_only:
+                # MKT-032: VIX too high for put-only → skip
+                logger.warning(
+                    f"MKT-032: Entry #{entry.entry_number} call credit non-viable "
+                    f"(${estimated_call:.2f} < ${call_min:.2f}) - "
+                    f"VIX {self.current_vix:.1f} >= {self.put_only_max_vix} → "
+                    f"SKIPPING (put-only too risky at elevated VIX)"
+                )
+                self._log_safety_event(
+                    "MKT-032_VIX_SKIP",
+                    f"Entry #{entry.entry_number} - call non-viable, VIX {self.current_vix:.1f} "
+                    f">= {self.put_only_max_vix} → skip (no unhedged put-only)",
+                    "Skipped"
+                )
+                return ("skip", True, estimated_call, estimated_put)
             else:
                 # One-sided disabled → skip entirely
                 logger.warning(

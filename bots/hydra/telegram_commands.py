@@ -74,6 +74,12 @@ EDITABLE_PARAMS = {
         "min": 15, "max": 50,
         "description": "Max VIX for entry",
     },
+    "put_only_max_vix": {
+        "path": "strategy.put_only_max_vix",
+        "type": "float",
+        "min": 14, "max": 30,
+        "description": "Max VIX for put-only entries (MKT-032)",
+    },
     "contracts": {
         "path": "strategy.contracts_per_entry",
         "type": "int",
