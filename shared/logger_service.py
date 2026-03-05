@@ -680,8 +680,8 @@ class GoogleSheetsLogger:
                         "Max Drawdown ($)", "Max Drawdown (%)", "Avg Daily P&L ($)"
                     ]
                 elif self.strategy_type == "hydra":
-                    # HYDRA: MEIC with trend following - track trend signals and one-sided entries (31 columns)
-                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=31)
+                    # HYDRA: MEIC with trend following - track trend signals and one-sided entries (32 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Performance Metrics", rows=1000, cols=32)
                     headers = [
                         # Meta
                         "Timestamp", "Period",
@@ -705,7 +705,9 @@ class GoogleSheetsLogger:
                         "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
                         "Capital Deployed ($)", "Return on Capital (%)",
                         # MKT-018 Early Close (2 cols)
-                        "Early Close Triggered", "Early Close Time"
+                        "Early Close Triggered", "Early Close Time",
+                        # MKT-033 Long Salvage
+                        "Long Salvage Revenue ($)"
                     ]
                 else:
                     # Delta Neutral: Weekly theta strategy - track theta, rolls
@@ -789,8 +791,8 @@ class GoogleSheetsLogger:
                         "State", "Environment"
                     ]
                 elif self.strategy_type == "hydra":
-                    # HYDRA: MEIC with trend following snapshot (18 columns)
-                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=18)
+                    # HYDRA: MEIC with trend following snapshot (20 columns)
+                    worksheet = self.spreadsheet.add_worksheet(title="Account Summary", rows=1000, cols=20)
                     headers = [
                         # Market Data
                         "Timestamp", "SPX Price", "VIX",
@@ -806,6 +808,8 @@ class GoogleSheetsLogger:
                         "Circuit Breaker",
                         # MKT-018 Early Close
                         "Early Close",
+                        # MKT-033 Long Salvage
+                        "Long Salvage Count", "Long Salvage Revenue ($)",
                         # Meta
                         "State", "Environment"
                     ]
@@ -2684,9 +2688,11 @@ class GoogleSheetsLogger:
                     f"{metrics.get('return_on_capital', 0):.2f}",
                     # MKT-018 Early Close (2 cols)
                     "Yes" if metrics.get("early_close_triggered", False) else "No",
-                    metrics.get("early_close_time", "")
+                    metrics.get("early_close_time", ""),
+                    # MKT-033 Long Salvage
+                    f"{metrics.get('long_salvage_revenue', 0):.2f}"
                 ]
-                col_range = "A2:AE2"  # 31 columns
+                col_range = "A2:AF2"  # 32 columns
             else:
                 # Delta Neutral: Weekly theta strategy - track theta, rolls
                 row = [
@@ -2940,11 +2946,14 @@ class GoogleSheetsLogger:
                     "YES" if circuit_breaker else "NO",
                     # MKT-018 Early Close
                     strategy_data.get("early_close", ""),
+                    # MKT-033 Long Salvage
+                    str(strategy_data.get("long_salvage_count", 0)),
+                    f"{strategy_data.get('long_salvage_revenue', 0):.2f}",
                     # Meta
                     state,
                     environment
                 ]
-                col_range = "A2:R2"  # 18 columns
+                col_range = "A2:T2"  # 20 columns
             else:
                 # Delta Neutral: Straddle + Strangle position snapshot
                 spy_price = strategy_data.get("spy_price", 0)

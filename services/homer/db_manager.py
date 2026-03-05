@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS market_ticks (
@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS trade_stops (
     trigger_level REAL,
     actual_debit REAL,
     net_pnl REAL,
+    salvage_sold INTEGER DEFAULT 0,
+    salvage_revenue REAL DEFAULT 0.0,
     PRIMARY KEY (date, entry_number, side)
 );
 
@@ -95,6 +97,7 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
     gross_pnl REAL,
     net_pnl REAL,
     commission REAL,
+    long_salvage_revenue REAL DEFAULT 0.0,
     day_type TEXT,
     day_of_week TEXT
 );
@@ -126,14 +129,49 @@ class BacktestingDB:
             os.makedirs(parent, exist_ok=True)
 
     def _init_db(self):
-        """Create tables and set pragmas."""
+        """Create tables, run migrations, and set pragmas."""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(CREATE_TABLES_SQL)
+            self._run_migrations(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO schema_info (key, value) VALUES (?, ?)",
                 ("version", str(SCHEMA_VERSION)),
             )
+
+    def _run_migrations(self, conn: sqlite3.Connection):
+        """Apply schema migrations for existing databases."""
+        # Check current version
+        try:
+            row = conn.execute(
+                "SELECT value FROM schema_info WHERE key = 'version'"
+            ).fetchone()
+            current = int(row[0]) if row else 0
+        except Exception:
+            current = 0
+
+        if current < 2:
+            # v2: MKT-033 long leg salvage columns
+            for col, default in [
+                ("salvage_sold", "0"),
+                ("salvage_revenue", "0.0"),
+            ]:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE trade_stops ADD COLUMN {col} "
+                        f"{'INTEGER' if col == 'salvage_sold' else 'REAL'} "
+                        f"DEFAULT {default}"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+            try:
+                conn.execute(
+                    "ALTER TABLE daily_summaries ADD COLUMN "
+                    "long_salvage_revenue REAL DEFAULT 0.0"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            logger.info("DB migrated to schema v2 (MKT-033 salvage columns)")
 
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode."""
@@ -248,8 +286,9 @@ class BacktestingDB:
         sql = """
             INSERT OR IGNORE INTO trade_stops
             (date, entry_number, side, stop_time, spx_at_stop,
-             trigger_level, actual_debit, net_pnl)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             trigger_level, actual_debit, net_pnl,
+             salvage_sold, salvage_revenue)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         rows = [
             (
@@ -261,6 +300,8 @@ class BacktestingDB:
                 s.get("trigger_level"),
                 s.get("actual_debit"),
                 s.get("net_pnl"),
+                1 if s.get("salvage_sold") else 0,
+                s.get("salvage_revenue", 0.0),
             )
             for s in stops
         ]
@@ -276,9 +317,9 @@ class BacktestingDB:
             (date, spx_open, spx_close, spx_high, spx_low, day_range,
              vix_open, vix_close,
              entries_placed, entries_stopped, entries_expired,
-             gross_pnl, net_pnl, commission,
+             gross_pnl, net_pnl, commission, long_salvage_revenue,
              day_type, day_of_week)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         row = (
             summary["date"],
@@ -295,6 +336,7 @@ class BacktestingDB:
             summary.get("gross_pnl"),
             summary.get("net_pnl"),
             summary.get("commission"),
+            summary.get("long_salvage_revenue", 0.0),
             summary.get("day_type"),
             summary.get("day_of_week"),
         )

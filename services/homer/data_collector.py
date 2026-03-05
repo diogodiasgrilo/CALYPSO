@@ -268,6 +268,36 @@ def _build_entries_for_day(
                 entry["Put Stop Triggered"] = str(row.get("Stop Triggered", "No")).strip()
                 entry["Put Spread Width"] = str(row.get("Spread Width", "")).strip()
 
+    # 2b. Parse Trades tab for MKT-033 salvage data ("HYDRA Salvage #N (CALL/PUT)")
+    if trades_rows:
+        for row in trades_rows:
+            action = str(row.get("Action", "")).strip()
+            if "Salvage #" not in action:
+                continue
+
+            # Filter by date
+            row_date = str(row.get("Expiry", "")).strip()
+            if row_date != date_str:
+                ts = str(row.get("Timestamp", "")).strip()
+                if not ts.startswith(date_str):
+                    continue
+
+            # Parse: "HYDRA Salvage #1 (PUT)"
+            salvage_match = re.match(r".*Salvage\s*#(\d+)\s*\((\w+)\)", action)
+            if not salvage_match:
+                continue
+            entry_num = salvage_match.group(1)
+            side = salvage_match.group(2).lower()
+
+            if entry_num in entries_by_num:
+                # Extract revenue from trade_reason: "Long Salvage | Open=$0.35 Close=$0.50 Rev=$50.0"
+                reason = str(row.get("Reason", row.get("Trade Reason", ""))).strip()
+                rev_match = re.search(r"Rev=\$?([\d.]+)", reason)
+                revenue = float(rev_match.group(1)) if rev_match else _safe_float(row.get("P&L ($)", 0))
+
+                key = f"{side.title()} Long Salvage Proceeds"
+                entries_by_num[entry_num][key] = revenue
+
     # 3. Post-process: determine entry type, outcome, total credit
     for entry in entries_by_num.values():
         has_call = bool(entry.get("Short Call Strike"))
@@ -1061,6 +1091,11 @@ def _build_stop_records(
             # Per-side P&L: if double stop, split evenly (approximation)
             side_pnl = pnl_impact / len(sides_stopped) if pnl_impact and sides_stopped else None
 
+            # MKT-033: Check for long leg salvage
+            salvage_key = f"{side.title()} Long Salvage Proceeds"
+            salvage_revenue = _safe_float(entry.get(salvage_key, 0))
+            salvage_sold = salvage_revenue > 0
+
             records.append({
                 "date": date_str,
                 "entry_number": entry_num,
@@ -1070,6 +1105,8 @@ def _build_stop_records(
                 "trigger_level": None,  # Not available from Sheets
                 "actual_debit": None,   # Not available from Sheets
                 "net_pnl": side_pnl,
+                "salvage_sold": salvage_sold,
+                "salvage_revenue": salvage_revenue,
             })
 
     return records
@@ -1171,6 +1208,7 @@ def _build_summary_record(
         "gross_pnl": gross_pnl,
         "net_pnl": net_pnl,
         "commission": commission,
+        "long_salvage_revenue": _safe_float(summary.get("Long Salvage ($)", 0)) or 0.0,
         "day_type": day_type,
         "day_of_week": day_of_week,
     }

@@ -907,8 +907,11 @@ class TelegramCommandHandler:
         """Strip Markdown syntax that breaks Telegram's legacy parser.
 
         Converts: # headers → *bold*, ** → *, [links](url) → text, --- → ━ line.
+        Strips XML-style tags (e.g. <summary>, </summary>) from Claude output.
         Used for HERMES/APOLLO reports which contain full Markdown.
         """
+        # Strip XML-style tags that Claude sometimes includes in output
+        text = re.sub(r'</?[a-zA-Z_][a-zA-Z0-9_-]*>', '', text)
         lines = []
         for line in text.split("\n"):
             if line.startswith("#"):

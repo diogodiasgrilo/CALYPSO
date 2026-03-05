@@ -374,8 +374,8 @@ def build_section3_day_block(
     lines.append("")
 
     # Entry table
-    lines.append("| Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact |")
-    lines.append("|-------|------|--------|------|---------------|--------|---------|------------|")
+    lines.append("| Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact | Salvage |")
+    lines.append("|-------|------|--------|------|---------------|--------|---------|------------|---------|")
 
     if entries:
         for entry in entries:
@@ -400,12 +400,18 @@ def build_section3_day_block(
             # Format credit with per-side breakdown
             credit_str = _format_credit_with_breakdown(entry)
 
+            # MKT-033: Long salvage revenue
+            call_salvage = safe_float(entry.get("Call Long Salvage Proceeds", 0))
+            put_salvage = safe_float(entry.get("Put Long Salvage Proceeds", 0))
+            total_salvage = call_salvage + put_salvage
+            salvage_str = format_signed_currency(total_salvage) if total_salvage > 0 else ""
+
             lines.append(
                 f"| #{entry_num} | {time_val} | {signal} | {entry_type} | "
-                f"{strikes_str} | {credit_str} | {outcome} | {pnl_impact} |"
+                f"{strikes_str} | {credit_str} | {outcome} | {pnl_impact} | {salvage_str} |"
             )
     else:
-        lines.append("| -- | -- | -- | -- | -- | -- | No entry data available | -- |")
+        lines.append("| -- | -- | -- | -- | -- | -- | No entry data available | -- | -- |")
 
     lines.append("")
 
@@ -438,7 +444,12 @@ def build_section3_day_block(
                 outcome = se.get("Outcome", "STOPPED")
                 pnl_val = safe_float(se.get("P&L Impact", 0))
                 pnl_str = f"${format_money(abs(pnl_val))} loss" if pnl_val else ""
-                lines.append(f"{stop_time} - Entry #{entry_num} {outcome}" + (f" ({pnl_str})" if pnl_str else ""))
+                # MKT-033: Show salvage if any
+                call_salv = safe_float(se.get("Call Long Salvage Proceeds", 0))
+                put_salv = safe_float(se.get("Put Long Salvage Proceeds", 0))
+                salvage_total = call_salv + put_salv
+                salvage_str = f" + Long Salvage +${format_money(salvage_total)}" if salvage_total > 0 else ""
+                lines.append(f"{stop_time} - Entry #{entry_num} {outcome}" + (f" ({pnl_str})" if pnl_str else "") + salvage_str)
             lines.append("```")
             lines.append("")
 
@@ -446,13 +457,19 @@ def build_section3_day_block(
     expired = safe_float(summary.get("Expired Credits ($)", 0))
     stop_debits = safe_float(summary.get("Stop Loss Debits ($)", 0))
     commission = safe_float(summary.get("Commission ($)", 0))
+    salvage_revenue = safe_float(summary.get("Long Salvage ($)", 0))
 
     lines.append("### P&L Reconciliation")
     lines.append("")
     lines.append(f"- Expired Credits: ${format_money(expired)}")
     lines.append(f"- Stop Loss Debits: ${format_money(stop_debits)}")
+    if salvage_revenue > 0:
+        lines.append(f"- Long Salvage Revenue: +${format_money(salvage_revenue)}")
     lines.append(f"- Commission: ${format_money(commission)}")
-    lines.append(f"- **Net P&L: {format_signed_currency(pnl)}** ({format_money(expired)} - {format_money(stop_debits)} - {format_money(commission)} = {format_money(pnl)})")
+    if salvage_revenue > 0:
+        lines.append(f"- **Net P&L: {format_signed_currency(pnl)}** ({format_money(expired)} - {format_money(stop_debits)} + {format_money(salvage_revenue)} - {format_money(commission)} = {format_money(pnl)})")
+    else:
+        lines.append(f"- **Net P&L: {format_signed_currency(pnl)}** ({format_money(expired)} - {format_money(stop_debits)} - {format_money(commission)} = {format_money(pnl)})")
     lines.append("")
 
     return lines

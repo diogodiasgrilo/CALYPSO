@@ -32,6 +32,7 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 - **Min credit thresholds (MKT-011):** $0.75/side for calls (lowered v1.7.2), $1.75/side for puts (fallback $1.65 MKT-029)
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
 - **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
+- **Long leg salvage (MKT-033):** after short stop, sells surviving long if appreciated >= $10 (covers commission + slippage). Revenue included in total_realized_pnl.
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
 
 ## Entry Skip Pattern
@@ -70,6 +71,7 @@ End with a summary block in <summary> tags for Telegram. The summary MUST use ON
 Best #{best_num} ({best_outcome}), Worst #{worst_num} ({worst_outcome})
 Stops: {stop_side_pattern} | VIX {vix_open}→{vix_low} | {placed}/{total_attempted} placed
 {winning_days}W-{losing_days}L cumul {cumulative_pnl} | Streak: {streak}
+Salvage: {long_salvage_count} longs sold for +${long_salvage_revenue} (omit line if 0)
 {one_sentence_narrative_insight — the WHY behind today's result}
 </summary>
 
@@ -213,6 +215,8 @@ def _trim_state_for_prompt(state: Dict[str, Any]) -> Dict[str, Any]:
         "call_side_stopped", "put_side_stopped",
         "call_side_expired", "put_side_expired",
         "call_side_skipped", "put_side_skipped",
+        "call_long_sold", "put_long_sold",
+        "call_long_sold_revenue", "put_long_sold_revenue",
         "trend_signal", "override_reason", "early_closed",
         "is_complete", "open_commission", "close_commission",
     ]

@@ -4501,6 +4501,17 @@ class HydraStrategy(MEICStrategy):
                 "early_close": "TRIGGERED" if self._early_close_triggered else (
                     "Tracking" if (self._next_entry_index >= len(self.entry_times) and len(self.daily_state.active_entries) > 0) else "Waiting"
                 ),
+                # MKT-033: Long salvage
+                "long_salvage_count": sum(
+                    (1 if getattr(e, 'call_long_sold', False) else 0) +
+                    (1 if getattr(e, 'put_long_sold', False) else 0)
+                    for e in self.daily_state.entries
+                ),
+                "long_salvage_revenue": sum(
+                    getattr(e, 'call_long_sold_revenue', 0.0) +
+                    getattr(e, 'put_long_sold_revenue', 0.0)
+                    for e in self.daily_state.entries
+                ),
             })
         except Exception as e:
             logger.error(f"Failed to log HYDRA account summary: {e}")
@@ -4575,6 +4586,12 @@ class HydraStrategy(MEICStrategy):
                     # MKT-018: Early close tracking
                     "early_close_triggered": self._early_close_triggered,
                     "early_close_time": self._early_close_time.strftime('%H:%M') if self._early_close_time else "",
+                    # MKT-033: Long salvage
+                    "long_salvage_revenue": sum(
+                        getattr(e, 'call_long_sold_revenue', 0.0) +
+                        getattr(e, 'put_long_sold_revenue', 0.0)
+                        for e in self.daily_state.entries
+                    ),
                 },
                 saxo_client=self.client
             )

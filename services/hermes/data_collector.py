@@ -186,6 +186,9 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             entry_type = "full_ic"
 
+        # MKT-033: Per-entry salvage revenue
+        entry_salvage = (e.get("call_long_sold_revenue", 0) or 0) + (e.get("put_long_sold_revenue", 0) or 0)
+
         entry_outcomes.append({
             "entry_number": e.get("entry_number"),
             "trend_signal": e.get("trend_signal", "neutral"),
@@ -199,6 +202,7 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
             "outcome": outcome,
             "commission": (e.get("open_commission", 0) or 0)
             + (e.get("close_commission", 0) or 0),
+            "salvage_revenue": entry_salvage,
         })
 
     # --- Aggregate counts (from state file counters) ---
@@ -260,6 +264,20 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
 
     # Stop loss debits derived from P&L identity (Fix #78)
     stop_loss_debits = expired_credits - total_realized_pnl
+
+    # --- MKT-033: Long leg salvage ---
+    long_salvage_revenue = 0.0
+    call_salvage_count = 0
+    put_salvage_count = 0
+    for e in entries:
+        call_rev = e.get("call_long_sold_revenue", 0) or 0
+        put_rev = e.get("put_long_sold_revenue", 0) or 0
+        long_salvage_revenue += call_rev + put_rev
+        if e.get("call_long_sold"):
+            call_salvage_count += 1
+        if e.get("put_long_sold"):
+            put_salvage_count += 1
+    total_salvage_count = call_salvage_count + put_salvage_count
 
     # --- Market data from state OHLC ---
     ohlc = state.get("market_data_ohlc", {})
@@ -324,6 +342,8 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
         "total_credit": total_credit_received,
         "expired_credits": expired_credits,
         "stop_loss_debits": stop_loss_debits,
+        "long_salvage_revenue": long_salvage_revenue,
+        "long_salvage_count": total_salvage_count,
         "spx": spx,
         "vix": vix,
         "cumulative": cumulative,
