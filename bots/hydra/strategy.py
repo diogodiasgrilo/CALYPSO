@@ -141,6 +141,12 @@ class HydraIronCondorEntry(IronCondorEntry):
     # MKT-018: True if closed early by ROC threshold (display only)
     early_closed: bool = False
 
+    # MKT-033: Long leg salvage tracking (sell long after short stopped if profitable)
+    call_long_sold: bool = False
+    put_long_sold: bool = False
+    call_long_sold_revenue: float = 0.0  # Gross revenue (fill_price × 100 × contracts)
+    put_long_sold_revenue: float = 0.0   # Gross revenue (fill_price × 100 × contracts)
+
     @property
     def is_one_sided(self) -> bool:
         """True if only one side was placed (not a full IC)."""
@@ -340,6 +346,13 @@ class HydraStrategy(MEICStrategy):
         self.scout_momentum_threshold = smart_entry.get("momentum_threshold_pct", 0.05)
         logger.info(f"  Smart entry (MKT-031): {'ENABLED' if self.smart_entry_enabled else 'DISABLED'} "
                     f"(window={self.scout_window_minutes}min, threshold={self.scout_score_threshold})")
+
+        # MKT-033: Long leg salvage (sell long after short stopped if profitable)
+        long_salvage = config.get("long_salvage", {})
+        self.long_salvage_enabled = long_salvage.get("enabled", True)
+        self.long_salvage_min_profit = float(long_salvage.get("min_profit", 10.0))
+        logger.info(f"  Long salvage (MKT-033): {'ENABLED' if self.long_salvage_enabled else 'DISABLED'} "
+                    f"(min_profit=${self.long_salvage_min_profit:.0f})")
 
         # MKT-031: Scouting state (in-memory, no persistence needed)
         self._scouting_active = False
@@ -856,6 +869,9 @@ class HydraStrategy(MEICStrategy):
         """
         # Run parent monitoring (stop checks, entry scheduling, etc.)
         result = super()._handle_monitoring()
+
+        # MKT-033: Check if any surviving long legs can be sold for profit
+        self._check_long_salvage()
 
         # MKT-018: Check early close AFTER parent monitoring completes
         # Only check if:
@@ -2661,10 +2677,222 @@ class HydraStrategy(MEICStrategy):
         time.sleep(0.1)
         self._flush_batched_alerts()
 
+        # MKT-033: Immediately try to sell the long leg if profitable
+        if self.long_salvage_enabled and not self.dry_run:
+            self._try_sell_long_leg(entry, side)
+
         return (
             f"MKT-025 Stop loss: Entry #{entry.entry_number} {side} "
             f"SHORT closed at ${stop_level:.2f} (long expires at settlement)"
         )
+
+    # =========================================================================
+    # MKT-033: LONG LEG SALVAGE (SELL PROFITABLE LONGS AFTER SHORT STOP)
+    # =========================================================================
+
+    def _try_sell_long_leg(self, entry, side: str) -> bool:
+        """
+        MKT-033: Sell the surviving long leg if profitable after short stop.
+
+        After MKT-025 stops only the short, the long leg normally expires worthless.
+        On directional days, the long can appreciate. This method sells it if the
+        gain covers round-trip commission ($5) plus max market order slippage ($5).
+
+        Condition: (current_bid - open_price) × 100 × contracts >= min_profit
+
+        P&L accounting: The long's original cost is already deducted from spread
+        credit (and thus from the stop loss P&L). Selling the long is pure recovery
+        revenue — added directly to total_realized_pnl.
+
+        Args:
+            entry: HydraIronCondorEntry with stopped side
+            side: "call" or "put" — the side whose short was stopped
+
+        Returns:
+            bool: True if long was sold successfully
+        """
+        if side == "call":
+            long_uic = entry.long_call_uic
+            long_pos_id = entry.long_call_position_id
+            long_open_price = entry.long_call_fill_price
+            already_sold = getattr(entry, 'call_long_sold', False)
+        else:
+            long_uic = entry.long_put_uic
+            long_pos_id = entry.long_put_position_id
+            long_open_price = entry.long_put_fill_price
+            already_sold = getattr(entry, 'put_long_sold', False)
+
+        # Guard: already sold, no position, or no UIC
+        if already_sold or not long_pos_id or not long_uic:
+            return False
+
+        try:
+            # Fetch quote for bid price
+            quote = self.client.get_quote(long_uic, asset_type="StockIndexOption")
+            if not quote:
+                logger.debug(f"MKT-033: No quote for Entry #{entry.entry_number} long {side} UIC {long_uic}")
+                return False
+
+            bid = quote.get("Quote", {}).get("Bid", 0)
+            if not bid or bid <= 0:
+                return False
+
+            # Check profitability: appreciation must cover round-trip commission + slippage
+            appreciation = (bid - long_open_price) * 100 * entry.contracts
+            if appreciation < self.long_salvage_min_profit:
+                logger.debug(
+                    f"MKT-033: Entry #{entry.entry_number} long {side} below threshold: "
+                    f"bid=${bid:.2f} - open=${long_open_price:.2f} = ${appreciation:.2f} "
+                    f"< ${self.long_salvage_min_profit:.2f} min"
+                )
+                return False
+
+            logger.info(
+                f"MKT-033 LONG SALVAGE: Entry #{entry.entry_number} long {side} "
+                f"bid=${bid:.2f} (open=${long_open_price:.2f}), appreciation=${appreciation:.2f} "
+                f">= ${self.long_salvage_min_profit:.2f} threshold — selling via market order"
+            )
+
+            # Sell the long via market order
+            success, fill_price, order_id = self._close_position_with_retry(
+                long_pos_id, f"long_{side}", uic=long_uic, entry_number=entry.entry_number
+            )
+
+            if not success:
+                logger.warning(f"MKT-033: Failed to sell Entry #{entry.entry_number} long {side}")
+                return False
+
+            # Calculate revenue from actual fill (or bid as fallback)
+            actual_fill = fill_price if fill_price and fill_price > 0 else bid
+            revenue = actual_fill * 100 * entry.contracts
+
+            # Update P&L (revenue is pure recovery — long cost already in spread credit)
+            self.daily_state.total_realized_pnl += revenue
+
+            # Commission for closing 1 leg
+            close_commission = self.commission_per_leg * self.contracts_per_entry
+            entry.close_commission += close_commission
+            self.daily_state.total_commission += close_commission
+
+            # Mark entry as long sold
+            if side == "call":
+                entry.call_long_sold = True
+                entry.call_long_sold_revenue = revenue
+                entry.long_call_position_id = None
+                entry.long_call_uic = None
+            else:
+                entry.put_long_sold = True
+                entry.put_long_sold_revenue = revenue
+                entry.long_put_position_id = None
+                entry.long_put_uic = None
+
+            # Unregister from position registry
+            try:
+                self.registry.unregister(long_pos_id)
+            except Exception as e:
+                logger.debug(f"MKT-033: Registry unregister for {long_pos_id}: {e}")
+
+            net_profit = revenue - close_commission
+            logger.info(
+                f"MKT-033 SOLD: Entry #{entry.entry_number} long {side} @ ${actual_fill:.2f} "
+                f"(revenue=${revenue:.2f}, commission=${close_commission:.2f}, net=+${net_profit:.2f})"
+            )
+
+            # Log to Trades tab in Google Sheets
+            try:
+                if side == "call":
+                    long_strike = entry.long_call_strike
+                    strike_str = f"C:{long_strike} (long)"
+                else:
+                    long_strike = entry.long_put_strike
+                    strike_str = f"P:{long_strike} (long)"
+
+                self.trade_logger.log_trade(
+                    action=f"{self.BOT_NAME} Salvage #{entry.entry_number} ({side.upper()})",
+                    strike=strike_str,
+                    price=actual_fill,
+                    delta=0.0,
+                    pnl=net_profit,  # Positive: revenue minus commission
+                    saxo_client=self.client,
+                    underlying_price=self.current_price,
+                    vix=self.current_vix,
+                    option_type=f"MKT-033 Long {side.title()}",
+                    trade_reason=f"Long Salvage | Open=${long_open_price:.2f} Close=${actual_fill:.2f} Rev=${revenue:.2f}"
+                )
+            except Exception as e:
+                logger.debug(f"MKT-033: Failed to log salvage to Sheets: {e}")
+
+            # Send Telegram alert (MEDIUM priority — same as position closed)
+            try:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.POSITION_CLOSED,
+                    title=f"MKT-033 Long Salvage — Entry #{entry.entry_number}",
+                    message=(
+                        f"Long {side} sold @ ${actual_fill:.2f} "
+                        f"(open ${long_open_price:.2f}, +${bid - long_open_price:.2f} appreciation)\n"
+                        f"Revenue: ${revenue:.0f} | Commission: ${close_commission:.0f} | "
+                        f"Net: +${net_profit:.0f}"
+                    ),
+                    priority=AlertPriority.MEDIUM,
+                    details={
+                        "entry_number": entry.entry_number,
+                        "side": side,
+                        "fill_price": actual_fill,
+                        "open_price": long_open_price,
+                        "revenue": revenue,
+                        "net_profit": net_profit,
+                    }
+                )
+            except Exception:
+                pass  # Alert failure shouldn't block trading
+
+            # Log safety event for audit trail
+            try:
+                self._log_safety_event(
+                    "MKT-033_LONG_SALVAGE",
+                    f"Entry #{entry.entry_number} long {side} sold @ ${actual_fill:.2f} "
+                    f"(open=${long_open_price:.2f}, revenue=${revenue:.2f}, net=+${net_profit:.2f})",
+                    f"Salvaged +${net_profit:.2f}"
+                )
+            except Exception:
+                pass  # Logging failure shouldn't block trading
+
+            # Save state
+            self._save_state_to_disk()
+            return True
+
+        except Exception as e:
+            logger.warning(f"MKT-033: Error checking Entry #{entry.entry_number} long {side}: {e}")
+            return False
+
+    def _check_long_salvage(self):
+        """
+        MKT-033: Periodic check for profitable long legs to sell.
+
+        Called from _handle_monitoring() after stop loss checks. Iterates all
+        entries with stopped sides and unsold long legs, attempting to sell
+        if the appreciation threshold is met.
+
+        Only runs during regular market hours (9:30 AM - 4:00 PM ET).
+        """
+        if not self.long_salvage_enabled or self.dry_run:
+            return
+
+        # Only during regular market hours
+        now = get_us_market_time()
+        if now.hour < 9 or (now.hour == 9 and now.minute < 30) or now.hour >= 16:
+            return
+
+        for entry in self.daily_state.entries:
+            # Check call side: short stopped, long still open and unsold
+            if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False):
+                if entry.long_call_position_id and entry.long_call_uic:
+                    self._try_sell_long_leg(entry, "call")
+
+            # Check put side: short stopped, long still open and unsold
+            if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False):
+                if entry.long_put_position_id and entry.long_put_uic:
+                    self._try_sell_long_leg(entry, "put")
 
     def _get_saxo_pnl_for_entry(self, entry, positions=None):
         """MKT-025: Exclude stopped sides' positions from Saxo P&L lookup.
@@ -3241,7 +3469,11 @@ class HydraStrategy(MEICStrategy):
             if call_skipped:
                 call_str = "SKIP"
             elif call_stopped:
-                call_str = "STOP"
+                # MKT-033: Show salvage revenue if long was sold
+                if getattr(entry, 'call_long_sold', False):
+                    call_str = f"SAL+${getattr(entry, 'call_long_sold_revenue', 0):.0f}"
+                else:
+                    call_str = "STOP"
             elif call_expired:
                 call_str = "EXP"
             else:
@@ -3251,7 +3483,11 @@ class HydraStrategy(MEICStrategy):
             if put_skipped:
                 put_str = "SKIP"
             elif put_stopped:
-                put_str = "STOP"
+                # MKT-033: Show salvage revenue if long was sold
+                if getattr(entry, 'put_long_sold', False):
+                    put_str = f"SAL+${getattr(entry, 'put_long_sold_revenue', 0):.0f}"
+                else:
+                    put_str = "STOP"
             elif put_expired:
                 put_str = "EXP"
             else:
@@ -3351,6 +3587,7 @@ class HydraStrategy(MEICStrategy):
             total_credit = last_day.get("Total Credit ($)", 0) or 0
             expired_credits = last_day.get("Expired Credits ($)", 0) or 0
             stop_debits = last_day.get("Stop Loss Debits ($)", 0) or 0
+            long_salvage = last_day.get("Long Salvage ($)", 0) or 0
             commission = last_day.get("Commission ($)", 0) or 0
             daily_pnl = last_day.get("Daily P&L ($)", 0) or 0
             roc = last_day.get("Return on Capital (%)", 0) or 0
@@ -3382,6 +3619,11 @@ class HydraStrategy(MEICStrategy):
                 f"Credit collected: ${total_credit:,.0f}",
                 f"Expired (profit): ${expired_credits:,.0f}",
                 f"Stop debits: -${abs(stop_debits):,.0f}",
+            ]
+            # MKT-033: Show long salvage revenue if any
+            if long_salvage > 0:
+                lines.append(f"Long salvage: +${long_salvage:,.0f}")
+            lines += [
                 f"Commission: -${abs(commission):,.0f}",
                 "",
                 f"{pnl_icon} *Net P&L: {pnl_str}*",
@@ -3626,10 +3868,23 @@ class HydraStrategy(MEICStrategy):
                 f"score {self._last_scout_score}/{self.scout_score_threshold}"
             )
 
+        # MKT-033: Calculate salvage stats for display
+        salvage_count = 0
+        salvage_total = 0.0
+        for entry in self.daily_state.entries:
+            for s in ("call", "put"):
+                if getattr(entry, f'{s}_long_sold', False):
+                    salvage_count += 1
+                    salvage_total += getattr(entry, f'{s}_long_sold_revenue', 0.0)
+
         lines += [
             "",
             "\u2501\u2501\u2501 P&L \u2501\u2501\u2501",
             f"Realized: {r_sign}${realized:.0f}  |  Commission: -${commission:.0f}",
+        ]
+        if salvage_count > 0:
+            lines.append(f"Salvages: {salvage_count} longs for +${salvage_total:.0f}")
+        lines += [
             "",
             "\u2501\u2501\u2501 Filters \u2501\u2501\u2501",
             f"VIX gate: {vix_detail}",
@@ -3894,7 +4149,13 @@ class HydraStrategy(MEICStrategy):
             if skipped:
                 lines.append(f"{label}: SKIPPED")
             elif stopped:
-                lines.append(f"{label}: STOPPED (stop @ ${stop_level:.0f})")
+                # MKT-033: Show salvage info if long was sold
+                long_sold = getattr(entry, f'{side}_long_sold', False)
+                if long_sold:
+                    salvage_rev = getattr(entry, f'{side}_long_sold_revenue', 0)
+                    lines.append(f"{label}: STOPPED + LONG SALVAGED +${salvage_rev:.0f}")
+                else:
+                    lines.append(f"{label}: STOPPED (stop @ ${stop_level:.0f})")
             elif expired:
                 lines.append(f"{label}: EXPIRED")
             elif stop_level > 0:
@@ -3948,12 +4209,30 @@ class HydraStrategy(MEICStrategy):
                 lines.append("")
                 lines.append(f"#{entry.entry_number} {sides_str} STOPPED")
                 if call_stopped:
-                    lines.append(f"  Call credit: ${entry.call_spread_credit:.0f}  |  Stop: ${entry.call_side_stop:.0f}")
+                    salvage_str = ""
+                    if getattr(entry, 'call_long_sold', False):
+                        salvage_str = f"  SALVAGED +${getattr(entry, 'call_long_sold_revenue', 0):.0f}"
+                    lines.append(f"  Call credit: ${entry.call_spread_credit:.0f}  |  Stop: ${entry.call_side_stop:.0f}{salvage_str}")
                 if put_stopped:
-                    lines.append(f"  Put credit: ${entry.put_spread_credit:.0f}  |  Stop: ${entry.put_side_stop:.0f}")
+                    salvage_str = ""
+                    if getattr(entry, 'put_long_sold', False):
+                        salvage_str = f"  SALVAGED +${getattr(entry, 'put_long_sold_revenue', 0):.0f}"
+                    lines.append(f"  Put credit: ${entry.put_spread_credit:.0f}  |  Stop: ${entry.put_side_stop:.0f}{salvage_str}")
 
         if not has_stops_today and (call_stops + put_stops) == 0:
             lines.append("No stops triggered today.")
+
+        # MKT-033: Salvage summary
+        salvage_count = 0
+        salvage_total = 0.0
+        for entry in self.daily_state.entries:
+            for s in ("call", "put"):
+                if getattr(entry, f'{s}_long_sold', False):
+                    salvage_count += 1
+                    salvage_total += getattr(entry, f'{s}_long_sold_revenue', 0.0)
+        if salvage_count > 0:
+            lines.append("")
+            lines.append(f"Salvages: {salvage_count} longs sold for +${salvage_total:.0f}")
 
         # Historical from Sheets
         try:
@@ -4161,6 +4440,14 @@ class HydraStrategy(MEICStrategy):
         summary['bullish_signals'] = bullish_count
         summary['bearish_signals'] = bearish_count
         summary['neutral_signals'] = neutral_count
+
+        # MKT-033: Long leg salvage revenue
+        long_salvage_revenue = 0.0
+        for entry in self.daily_state.entries:
+            if isinstance(entry, HydraIronCondorEntry):
+                long_salvage_revenue += getattr(entry, 'call_long_sold_revenue', 0.0)
+                long_salvage_revenue += getattr(entry, 'put_long_sold_revenue', 0.0)
+        summary['long_salvage_revenue'] = long_salvage_revenue
 
         return summary
 
@@ -4594,6 +4881,11 @@ class HydraStrategy(MEICStrategy):
                     "ema_40_at_entry": getattr(entry, 'ema_40_at_entry', None),
                     # MKT-018: Early close marker
                     "early_closed": getattr(entry, 'early_closed', False),
+                    # MKT-033: Long leg salvage tracking
+                    "call_long_sold": getattr(entry, 'call_long_sold', False),
+                    "put_long_sold": getattr(entry, 'put_long_sold', False),
+                    "call_long_sold_revenue": getattr(entry, 'call_long_sold_revenue', 0.0),
+                    "put_long_sold_revenue": getattr(entry, 'put_long_sold_revenue', 0.0),
                 }
                 state_data["entries"].append(entry_data)
 
@@ -5553,6 +5845,11 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)
                 # MKT-018: Restore early_closed marker
                 restored_entry.early_closed = entry_data.get("early_closed", False)
+                # MKT-033: Restore long salvage flags
+                restored_entry.call_long_sold = entry_data.get("call_long_sold", False)
+                restored_entry.put_long_sold = entry_data.get("put_long_sold", False)
+                restored_entry.call_long_sold_revenue = entry_data.get("call_long_sold_revenue", 0.0)
+                restored_entry.put_long_sold_revenue = entry_data.get("put_long_sold_revenue", 0.0)
                 # Fill prices (for /entry display after restart)
                 restored_entry.short_call_fill_price = entry_data.get("short_call_fill_price", 0)
                 restored_entry.long_call_fill_price = entry_data.get("long_call_fill_price", 0)
@@ -5791,6 +6088,11 @@ class HydraStrategy(MEICStrategy):
                                         "long_call_fill_price": entry_data.get("long_call_fill_price", 0),
                                         "short_put_fill_price": entry_data.get("short_put_fill_price", 0),
                                         "long_put_fill_price": entry_data.get("long_put_fill_price", 0),
+                                        # MKT-033: Long salvage flags
+                                        "call_long_sold": entry_data.get("call_long_sold", False),
+                                        "put_long_sold": entry_data.get("put_long_sold", False),
+                                        "call_long_sold_revenue": entry_data.get("call_long_sold_revenue", 0.0),
+                                        "put_long_sold_revenue": entry_data.get("put_long_sold_revenue", 0.0),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -5867,6 +6169,11 @@ class HydraStrategy(MEICStrategy):
                     entry.override_reason = saved.get("override_reason", None)
                     # MKT-018: Restore early_closed marker
                     entry.early_closed = saved.get("early_closed", False)
+                    # MKT-033: Restore long salvage flags
+                    entry.call_long_sold = saved.get("call_long_sold", False)
+                    entry.put_long_sold = saved.get("put_long_sold", False)
+                    entry.call_long_sold_revenue = saved.get("call_long_sold_revenue", 0.0)
+                    entry.put_long_sold_revenue = saved.get("put_long_sold_revenue", 0.0)
 
                     # Restore entry_time and fill prices (for /entry display)
                     entry_time_str = saved.get("entry_time")

@@ -502,7 +502,7 @@ class GoogleSheetsLogger:
                     ]
                 elif self.strategy_type == "hydra":
                     # HYDRA: MEIC with trend following - full OHLC, P&L breakdown, trend signals
-                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=40)
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=41)
                     headers = [
                         # Market Context (9 cols)
                         "Date", "SPX Open", "SPX Close", "SPX High", "SPX Low",
@@ -527,7 +527,9 @@ class GoogleSheetsLogger:
                         "Notes",
                         # Cumulative ROC metrics (4 cols)
                         "Avg Capital Deployed ($)", "Cumulative ROC (%)",
-                        "Avg Daily ROC (%)", "Annualized Return (%)"
+                        "Avg Daily ROC (%)", "Annualized Return (%)",
+                        # MKT-033: Long salvage (1 col)
+                        "Long Salvage ($)",
                     ]
                 else:
                     # Delta Neutral: Theta tracking for weekly strategy
@@ -546,19 +548,26 @@ class GoogleSheetsLogger:
             if self.strategy_type == "hydra":
                 try:
                     header_row = self._sheets_call_with_timeout(worksheet.row_values, 1)
-                    if header_row and len(header_row) < 40:
-                        new_headers = [
+                    if header_row and len(header_row) < 41:
+                        # Build list of missing headers to append
+                        all_expected = [
                             "Avg Capital Deployed ($)", "Cumulative ROC (%)",
-                            "Avg Daily ROC (%)", "Annualized Return (%)"
+                            "Avg Daily ROC (%)", "Annualized Return (%)",
+                            "Long Salvage ($)",  # MKT-033
                         ]
-                        start_col = len(header_row) + 1
-                        for i, h in enumerate(new_headers):
-                            self._sheets_call_with_timeout(
-                                worksheet.update_cell, 1, start_col + i, h
-                            )
-                        if worksheet.col_count < 40:
-                            self._sheets_call_with_timeout(worksheet.resize, cols=40)
-                        logger.info(f"Extended Daily Summary headers: added {len(new_headers)} new columns (total now 40)")
+                        # Only add headers that don't already exist
+                        existing_set = set(header_row)
+                        new_headers = [h for h in all_expected if h not in existing_set]
+                        if new_headers:
+                            start_col = len(header_row) + 1
+                            for i, h in enumerate(new_headers):
+                                self._sheets_call_with_timeout(
+                                    worksheet.update_cell, 1, start_col + i, h
+                                )
+                            target_cols = max(41, len(header_row) + len(new_headers))
+                            if worksheet.col_count < target_cols:
+                                self._sheets_call_with_timeout(worksheet.resize, cols=target_cols)
+                            logger.info(f"Extended Daily Summary headers: added {len(new_headers)} new columns (total now {target_cols})")
                 except Exception as e:
                     logger.warning(f"Failed to extend Daily Summary headers: {e}")
 
@@ -2105,6 +2114,8 @@ class GoogleSheetsLogger:
                     f"{summary.get('cumulative_roc', 0):.2f}",
                     f"{summary.get('avg_daily_roc', 0):.4f}",
                     f"{summary.get('annualized_return', 0):.1f}",
+                    # MKT-033: Long salvage revenue (appended at end to avoid column shift)
+                    f"{summary.get('long_salvage_revenue', 0):.2f}",
                 ]
                 logger.debug(f"HYDRA daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
             else:

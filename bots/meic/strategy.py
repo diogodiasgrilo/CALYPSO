@@ -6287,14 +6287,24 @@ class MEICStrategy:
             if getattr(entry, 'call_side_skipped', False):
                 call_status = "SKIPPED"
             elif entry.call_side_stopped:
-                call_status = "STOPPED"
+                # MKT-033: Show salvage revenue if long was sold
+                if getattr(entry, 'call_long_sold', False):
+                    salvage_rev = getattr(entry, 'call_long_sold_revenue', 0)
+                    call_status = f"SALVAGED +${salvage_rev:.0f}"
+                else:
+                    call_status = "STOPPED"
             else:
                 call_status = f"{call_pct:.0f}% cushion"
 
             if getattr(entry, 'put_side_skipped', False):
                 put_status = "SKIPPED"
             elif entry.put_side_stopped:
-                put_status = "STOPPED"
+                # MKT-033: Show salvage revenue if long was sold
+                if getattr(entry, 'put_long_sold', False):
+                    salvage_rev = getattr(entry, 'put_long_sold_revenue', 0)
+                    put_status = f"SALVAGED +${salvage_rev:.0f}"
+                else:
+                    put_status = "STOPPED"
             else:
                 put_status = f"{put_pct:.0f}% cushion"
 

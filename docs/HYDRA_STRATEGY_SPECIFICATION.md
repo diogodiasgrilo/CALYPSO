@@ -431,6 +431,43 @@ This is offset by saved slippage ($5-$15) and saved commission ($2.50). Net impa
 
 **Stop trigger is unchanged:** `spread_value >= stop_level` still uses BOTH leg mid prices (short - long) for the trigger condition. Only the close execution changes.
 
+### MKT-033: Long Leg Salvage After Short Stop (v1.9.2)
+
+After MKT-025 closes the short leg, the surviving long leg normally expires worthless at settlement. But on directional days, the long leg can appreciate significantly (e.g., +$125 across 4 entries on Mar 5, 2026). MKT-033 automates selling the long if it's profitable enough to cover round-trip costs.
+
+**Condition:** `(current_bid - open_price) × 100 × contracts >= $10.0`
+- $5 round-trip commission ($2.50 open + $2.50 close)
+- $5 max market order slippage (1 SPX tick = $0.05 × 100)
+- Minimum $0.10 price appreciation (2 SPX ticks)
+
+**Execution:** Market order (guaranteed fill). The bid-price pre-check ensures profitability even with 1-tick slippage.
+
+**Two integration points:**
+1. **Immediate:** Right after `_execute_stop_loss()` closes the short, attempt salvage on the long
+2. **Periodic:** `_check_long_salvage()` runs every heartbeat cycle during market hours (9:30 AM - 4:00 PM ET), checking all surviving longs with stopped shorts
+
+**On successful sale:**
+- `total_realized_pnl += fill_price × 100 × contracts` (revenue from sale)
+- `total_commission += $2.50 × contracts` (close commission only; open already counted)
+- Entry fields updated: `{side}_long_sold = True`, `{side}_long_sold_revenue = revenue`
+- Position ID and UIC cleared (position is gone)
+- Unregistered from position registry
+- MEDIUM alert sent, logged to Trades tab and safety events
+
+**P&L identity preserved:** `stop_loss_debits = expired_credits - total_realized_pnl` (Fix #78). Since salvage revenue increases `total_realized_pnl`, `stop_loss_debits` automatically decreases — no formula changes needed.
+
+**Market hours guard:** Only attempts during regular market hours. After 4 PM, 0DTE options settle at official settlement price — market orders would fail or get bad fills.
+
+**Config:**
+```json
+"long_salvage": {
+    "enabled": true,
+    "min_profit": 10.0
+}
+```
+
+**Heartbeat display:** Stopped sides with sold longs show "SALVAGED +$X" instead of "STOPPED".
+
 ### Stop Monitoring
 
 The main loop checks stops every ~1-2 seconds:
@@ -564,6 +601,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
 | MKT-025 | Short-Only Stop Close | v1.4.3 | Close SHORT leg only on stop; long expires at settlement |
 | MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper = pure savings) |
+| MKT-033 | Long Leg Salvage | v1.9.2 | After short stop, sell long if appreciated >= $10 (covers $5 commission + $5 max slippage) |
 
 ### Removed Rules
 
