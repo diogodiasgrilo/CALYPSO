@@ -39,16 +39,17 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - 5-15 delta OTM, 50-60 point spreads
 - Per-side stop = total credit received (breakeven design)
 
-### 5. HYDRA - Trend Following MEIC (S&P 500) — LIVE (v1.6.0)
+### 5. HYDRA - Trend Following MEIC (S&P 500) — LIVE (v1.8.1)
 **MEIC + EMA 20/40 Trend Filter** - credit validation, asymmetric spreads, and profit management:
-- **5 entries per day** (10:05-12:05 PM ET), always full iron condors
+- **5 entries per day** (11:15-13:15 ET, :15/:45 offset), full iron condors or put-only (MKT-011)
 - EMA 20/40 trend signal is informational only (logged, does NOT drive entry type)
 - **Asymmetric spreads (MKT-028)**: Call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024)**: 3.5× calls, 4.0× puts, scans inward via MKT-020/022
-- **Credit Gate (MKT-011)**: $1.00 calls, $1.75 puts — skips if either side non-viable
+- **Credit Gate (MKT-011)**: $0.75 calls, $1.75 puts — call non-viable → put-only entry (v1.7.1, 87.5% WR), call-only disabled
 - **MKT-025**: Short-only stop close (long expires at settlement)
 - **Hold-to-expiry**: MKT-018 early close intentionally disabled (backtest shows hold outperforms)
-- **Telegram /snapshot**: On-demand position snapshot via Telegram command
+- **Smart Entry Windows (MKT-031)**: 10-min scouting before each entry, score >= 65 triggers early entry
+- **Telegram commands** (14): /status, /snapshot, /entry, /lastday, /week, /account, /stops, /config, /set, /hermes, /apollo, /restart, /stop, /help
 
 ---
 

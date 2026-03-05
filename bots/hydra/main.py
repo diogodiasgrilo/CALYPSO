@@ -143,7 +143,7 @@ def print_banner():
     ║                                                               ║
     ║         11:15  11:45  12:15  12:45  13:15                     ║
     ║                                                               ║
-    ║         Version: 1.8.1                                        ║
+    ║         Version: 1.9.0                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
@@ -151,7 +151,7 @@ def print_banner():
     print(banner)
 
 
-def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
+def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config_path: str = "bots/hydra/config/config.json"):
     """Run the main trading bot loop."""
     global shutdown_requested
 
@@ -220,7 +220,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
     except Exception as e:
         trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
 
-    # Initialize Telegram command handler (11 commands)
+    # Initialize Telegram command handler (14 commands)
     from bots.hydra.telegram_commands import TelegramCommandHandler
     telegram_cmd_handler = TelegramCommandHandler()
     try:
@@ -235,6 +235,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1):
             entry_callback=strategy.build_telegram_entry,
             stops_callback=strategy.build_telegram_stops,
             config_callback=strategy.build_telegram_config,
+            config_path=config_path,
+            active_positions_callback=lambda: len(strategy.daily_state.active_entries),
         )
     except Exception as e:
         trade_logger.log_error(f"Failed to start Telegram command handler: {e}")
@@ -779,7 +781,8 @@ Examples:
             run_bot(
                 config=config,
                 dry_run=dry_run,
-                check_interval=args.interval
+                check_interval=args.interval,
+                config_path=args.config,
             )
 
     except FileNotFoundError as e:

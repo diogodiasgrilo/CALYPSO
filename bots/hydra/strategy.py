@@ -3631,9 +3631,6 @@ class HydraStrategy(MEICStrategy):
                 with open(report_path, "r") as f:
                     content = f.read()
                 if content.strip():
-                    # Truncate to leave room for header within 4096 char Telegram limit
-                    if len(content) > 3800:
-                        content = content[:3800] + "\n\n... (truncated)"
                     return f"\U0001f4dd *HYDRA* | HERMES \u2014 {date_str}\n\n{content}"
             except (FileNotFoundError, IOError):
                 continue
@@ -3661,8 +3658,6 @@ class HydraStrategy(MEICStrategy):
                 with open(report_path, "r") as f:
                     content = f.read()
                 if content.strip():
-                    if len(content) > 3800:
-                        content = content[:3800] + "\n\n... (truncated)"
                     return f"\U0001f52d *HYDRA* | APOLLO \u2014 {date_str}\n\n{content}"
             except (FileNotFoundError, IOError):
                 continue

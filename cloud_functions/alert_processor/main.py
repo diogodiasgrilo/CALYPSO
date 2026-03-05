@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import smtplib
+import time
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -115,6 +116,51 @@ def get_alert_config() -> Dict[str, str]:
     }
 
 
+def _split_telegram_message(text, max_length=4096):
+    """Split a long message into chunks that fit Telegram's 4096 char limit.
+
+    Splits at paragraph boundaries (double newline), then line boundaries,
+    then hard char split as last resort. Adds (1/N) headers for multi-part.
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    parts = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= max_length:
+            parts.append(remaining)
+            break
+
+        effective_max = max_length - 10  # Reserve space for part header
+        chunk = remaining[:effective_max]
+
+        # Try double newline (paragraph boundary)
+        split_pos = chunk.rfind("\n\n")
+        if split_pos > effective_max // 3:
+            parts.append(remaining[:split_pos])
+            remaining = remaining[split_pos + 2:]
+            continue
+
+        # Try single newline
+        split_pos = chunk.rfind("\n")
+        if split_pos > effective_max // 3:
+            parts.append(remaining[:split_pos])
+            remaining = remaining[split_pos + 1:]
+            continue
+
+        # Hard split
+        parts.append(remaining[:effective_max])
+        remaining = remaining[effective_max:]
+
+    if len(parts) > 1:
+        total = len(parts)
+        parts = [f"({i + 1}/{total})\n{part}" for i, part in enumerate(parts)]
+
+    return parts
+
+
 def send_telegram(message: str, chat_id: str = None) -> bool:
     """
     Send message via Telegram Bot API.
@@ -138,38 +184,42 @@ def send_telegram(message: str, chat_id: str = None) -> bool:
         logger.error("Telegram chat_id not configured")
         return False
 
-    # Telegram message limit is 4096 characters
-    if len(message) > 4096:
-        message = message[:4093] + "..."
+    # Split long messages instead of truncating
+    parts = _split_telegram_message(message)
 
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = {
-            "chat_id": target_chat_id,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
+    all_sent = True
+    for part in parts:
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload = {
+                "chat_id": target_chat_id,
+                "text": part,
+                "parse_mode": "Markdown"
+            }
 
-        response = requests.post(url, json=payload, timeout=10)
-
-        if response.status_code == 200:
-            logger.info("Telegram message sent successfully")
-            return True
-        else:
-            # If Markdown parsing fails, retry without parse_mode
-            logger.warning(f"Telegram send failed with Markdown (status {response.status_code}), retrying as plain text")
-            payload.pop("parse_mode")
             response = requests.post(url, json=payload, timeout=10)
-            if response.status_code == 200:
-                logger.info("Telegram message sent successfully (plain text fallback)")
-                return True
-            else:
-                logger.error(f"Telegram send failed: {response.status_code} - {response.text}")
-                return False
 
-    except Exception as e:
-        logger.error(f"Failed to send Telegram message: {e}")
-        return False
+            if response.status_code == 200:
+                logger.info("Telegram message sent successfully")
+            else:
+                # If Markdown parsing fails, retry without parse_mode
+                logger.warning(f"Telegram send failed with Markdown (status {response.status_code}), retrying as plain text")
+                payload.pop("parse_mode")
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code == 200:
+                    logger.info("Telegram message sent successfully (plain text fallback)")
+                else:
+                    logger.error(f"Telegram send failed: {response.status_code} - {response.text}")
+                    all_sent = False
+
+            if len(parts) > 1:
+                time.sleep(0.3)
+
+        except Exception as e:
+            logger.error(f"Failed to send Telegram message: {e}")
+            all_sent = False
+
+    return all_sent
 
 
 def send_email(to_email: str, subject: str, body_html: str, body_text: str) -> bool:

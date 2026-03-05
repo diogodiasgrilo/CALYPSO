@@ -12,22 +12,28 @@ Supported commands:
     /week     — Current week summary
     /account  — Lifetime HYDRA strategy performance summary
     /stops    — Stop loss analysis (today + lifetime)
-    /config   — Current configuration
+    /config   — Current configuration (read-only view)
+    /set      — Edit config parameter (requires /restart to apply)
     /hermes   — Latest HERMES daily report
     /apollo   — Latest APOLLO morning briefing
+    /restart  — Restart the HYDRA service
+    /stop     — Stop the HYDRA service (warns if active positions)
     /help     — List all commands
 
 Security: Only responds to messages from the configured chat_id.
 
-Version: 1.2.0 (2026-03-03)
+Version: 2.0.0 (2026-03-05)
 """
 
+import fcntl
 import json
 import logging
+import os
 import re
+import subprocess
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import requests
 
@@ -41,6 +47,91 @@ REQUEST_TIMEOUT = 10    # HTTP timeout for Telegram API calls
 MAX_MESSAGE_LENGTH = 4096  # Telegram message limit
 # Only log persistent Telegram failures every 60th attempt (every 5 min)
 ERROR_LOG_INTERVAL = 60
+
+# =========================================================================
+# EDITABLE CONFIG PARAMETERS
+# friendly_name → {path, type, min, max, unit, description}
+# path uses dot-notation for nested keys: "strategy.key" → config["strategy"]["key"]
+# =========================================================================
+EDITABLE_PARAMS = {
+    "min_credit_call": {
+        "path": "strategy.min_viable_credit_per_side",
+        "type": "float",
+        "min": 0.25, "max": 3.00,
+        "unit": "$",
+        "description": "Min call credit per side",
+    },
+    "min_credit_put": {
+        "path": "strategy.min_viable_credit_put_side",
+        "type": "float",
+        "min": 0.50, "max": 5.00,
+        "unit": "$",
+        "description": "Min put credit per side",
+    },
+    "max_vix": {
+        "path": "strategy.max_vix_entry",
+        "type": "float",
+        "min": 15, "max": 50,
+        "description": "Max VIX for entry",
+    },
+    "contracts": {
+        "path": "strategy.contracts_per_entry",
+        "type": "int",
+        "min": 1, "max": 5,
+        "description": "Contracts per entry",
+    },
+    "meic_plus": {
+        "path": "strategy.meic_plus_reduction",
+        "type": "float",
+        "min": 0.00, "max": 1.00,
+        "unit": "$",
+        "description": "MEIC+ commission buffer",
+    },
+    "smart_entry": {
+        "path": "smart_entry.enabled",
+        "type": "bool",
+        "description": "Smart entry windows (MKT-031)",
+    },
+    "smart_threshold": {
+        "path": "smart_entry.score_threshold",
+        "type": "int",
+        "min": 30, "max": 100,
+        "description": "Smart entry score threshold",
+    },
+    "trend_filter": {
+        "path": "trend_filter.enabled",
+        "type": "bool",
+        "description": "EMA trend filter",
+    },
+    "trend_threshold": {
+        "path": "trend_filter.ema_neutral_threshold",
+        "type": "float",
+        "min": 0.0005, "max": 0.01,
+        "description": "Trend neutral threshold",
+    },
+    "early_close": {
+        "path": "strategy.early_close_enabled",
+        "type": "bool",
+        "description": "Early close (MKT-018)",
+    },
+    "early_close_pct": {
+        "path": "strategy.early_close_roc_threshold",
+        "type": "float",
+        "min": 0.01, "max": 0.10,
+        "unit": "%",
+        "description": "Early close ROC threshold",
+    },
+    "hold_check": {
+        "path": "strategy.hold_check_enabled",
+        "type": "bool",
+        "description": "Hold check (MKT-023)",
+    },
+    "entry_times": {
+        "path": "strategy.entry_times",
+        "type": "times",
+        "description": "Entry schedule (HH:MM,...)",
+    },
+}
 
 
 class TelegramCommandHandler:
@@ -67,7 +158,12 @@ class TelegramCommandHandler:
         self._entry_callback: Optional[Callable[[int], str]] = None
         self._stops_callback: Optional[Callable[[], str]] = None
         self._config_callback: Optional[Callable[[], str]] = None
+        self._active_positions_callback: Optional[Callable[[], int]] = None
+        self._config_path: Optional[str] = None
         self._consecutive_errors = 0
+        # /stop confirmation state
+        self._pending_stop_confirm = False
+        self._pending_stop_time: Optional[float] = None
 
         self._load_credentials()
 
@@ -102,6 +198,8 @@ class TelegramCommandHandler:
         entry_callback: Optional[Callable[[int], str]] = None,
         stops_callback: Optional[Callable[[], str]] = None,
         config_callback: Optional[Callable[[], str]] = None,
+        config_path: Optional[str] = None,
+        active_positions_callback: Optional[Callable[[], int]] = None,
     ):
         """Start the background polling thread."""
         self._snapshot_callback = snapshot_callback
@@ -114,6 +212,8 @@ class TelegramCommandHandler:
         self._entry_callback = entry_callback
         self._stops_callback = stops_callback
         self._config_callback = config_callback
+        self._config_path = config_path
+        self._active_positions_callback = active_positions_callback
 
         if not self._enabled:
             logger.info("Telegram command handler disabled (no credentials)")
@@ -203,12 +303,18 @@ class TelegramCommandHandler:
                 self._handle_account(chat_id)
             elif text.startswith("/stops"):
                 self._handle_stops(chat_id)
+            elif text.startswith("/stop"):
+                self._handle_stop(chat_id, text)
+            elif text.startswith("/set"):
+                self._handle_set(chat_id, text)
             elif text.startswith("/config"):
                 self._handle_config(chat_id)
             elif text.startswith("/hermes"):
                 self._handle_hermes(chat_id)
             elif text.startswith("/apollo"):
                 self._handle_apollo(chat_id)
+            elif text.startswith("/restart"):
+                self._handle_restart(chat_id)
             elif text.startswith("/help"):
                 self._handle_help(chat_id)
 
@@ -386,10 +492,387 @@ class TelegramCommandHandler:
             logger.error("Failed to build /apollo response: %s", e)
             self._send_message(chat_id, "Failed to retrieve APOLLO briefing. Try again shortly.")
 
+    # =========================================================================
+    # /set — CONFIG EDITING
+    # =========================================================================
+
+    def _handle_set(self, chat_id: str, text: str):
+        """Handle /set command — view or edit config parameters.
+
+        Usage:
+            /set                    — List all editable params with current values
+            /set param_name         — Show current value + valid range
+            /set param_name value   — Update config (requires /restart to apply)
+        """
+        parts = text.split(maxsplit=2)
+
+        # /set with no args → show all editable params
+        if len(parts) == 1:
+            self._show_all_params(chat_id)
+            return
+
+        param_name = parts[1].lower()
+
+        if param_name not in EDITABLE_PARAMS:
+            self._send_message(
+                chat_id,
+                f"Unknown parameter: {param_name}\n\nSend /set to see all parameters."
+            )
+            return
+
+        # /set param_name → show current value
+        if len(parts) < 3:
+            self._show_single_param(chat_id, param_name)
+            return
+
+        # /set param_name value → update
+        value_str = parts[2].strip()
+        param_def = EDITABLE_PARAMS[param_name]
+
+        try:
+            validated = self._validate_param_value(param_def, value_str)
+        except ValueError as e:
+            self._send_message(chat_id, f"Invalid value: {e}")
+            return
+
+        if not self._config_path:
+            self._send_message(chat_id, "Config path not available.")
+            return
+
+        try:
+            self._write_config_value(param_def["path"], validated)
+            # Format display value
+            if param_def["type"] == "bool":
+                display = "on" if validated else "off"
+            elif param_def["type"] == "times":
+                display = ", ".join(validated)
+            elif param_def.get("unit") == "$":
+                display = f"${validated}"
+            elif param_def.get("unit") == "%":
+                display = f"{validated * 100:.1f}%"
+            else:
+                display = str(validated)
+
+            self._send_message(
+                chat_id,
+                f"\u2705 *Saved:* {param_name} = {display}\n\n"
+                f"Restart required to apply.\nSend /restart"
+            )
+            logger.info("Telegram /set: %s = %s (path: %s)", param_name, validated, param_def["path"])
+        except Exception as e:
+            logger.error("Failed to write config via /set: %s", e)
+            self._send_message(chat_id, f"Failed to save: {e}")
+
+    def _show_all_params(self, chat_id: str):
+        """Show all editable parameters with current values from config file."""
+        config = self._read_config_file()
+        if config is None:
+            self._send_message(chat_id, "Cannot read config file.")
+            return
+
+        lines = ["\u2699\ufe0f *HYDRA* | Editable Config", ""]
+        for name, param_def in EDITABLE_PARAMS.items():
+            current = self._get_config_value(config, param_def["path"])
+            display = self._format_display_value(current, param_def)
+            lines.append(f"`{name}` = {display}")
+
+        lines.append("")
+        lines.append("Usage: /set name value")
+        lines.append("Example: /set max\\_vix 25")
+
+        self._send_message(chat_id, "\n".join(lines))
+
+    def _show_single_param(self, chat_id: str, param_name: str):
+        """Show a single parameter's current value and valid range."""
+        param_def = EDITABLE_PARAMS[param_name]
+        config = self._read_config_file()
+
+        if config is None:
+            self._send_message(chat_id, "Cannot read config file.")
+            return
+
+        current = self._get_config_value(config, param_def["path"])
+        display = self._format_display_value(current, param_def)
+
+        lines = [
+            f"*{param_name}*: {param_def['description']}",
+            f"Current: {display}",
+        ]
+
+        if param_def["type"] == "bool":
+            lines.append("Valid: on / off")
+        elif param_def["type"] == "times":
+            lines.append("Format: HH:MM,HH:MM,... (09:30-15:30)")
+        elif "min" in param_def and "max" in param_def:
+            lines.append(f"Range: {param_def['min']} - {param_def['max']}")
+
+        lines.append(f"\nSet: /set {param_name} <value>")
+
+        self._send_message(chat_id, "\n".join(lines))
+
+    def _format_display_value(self, value, param_def: dict) -> str:
+        """Format a config value for display."""
+        if value is None:
+            return "(not set)"
+        if param_def["type"] == "bool":
+            return "on" if value else "off"
+        if param_def["type"] == "times":
+            if isinstance(value, list):
+                return ", ".join(value)
+            return str(value)
+        if param_def.get("unit") == "$":
+            return f"${value}"
+        if param_def.get("unit") == "%":
+            if isinstance(value, (int, float)):
+                return f"{value * 100:.1f}%"
+        return str(value)
+
+    def _validate_param_value(self, param_def: dict, value_str: str):
+        """Validate and convert a user-provided parameter value.
+
+        Returns the validated/converted value.
+        Raises ValueError if invalid.
+        """
+        ptype = param_def["type"]
+
+        if ptype == "bool":
+            lower = value_str.lower()
+            if lower in ("on", "true", "yes", "1"):
+                return True
+            if lower in ("off", "false", "no", "0"):
+                return False
+            raise ValueError("Use on/off, true/false, or yes/no")
+
+        if ptype == "int":
+            try:
+                val = int(value_str)
+            except (ValueError, TypeError):
+                raise ValueError(f"Must be an integer")
+            if "min" in param_def and val < param_def["min"]:
+                raise ValueError(f"Minimum is {param_def['min']}")
+            if "max" in param_def and val > param_def["max"]:
+                raise ValueError(f"Maximum is {param_def['max']}")
+            return val
+
+        if ptype == "float":
+            try:
+                val = float(value_str)
+            except (ValueError, TypeError):
+                raise ValueError(f"Must be a number")
+            if "min" in param_def and val < param_def["min"]:
+                raise ValueError(f"Minimum is {param_def['min']}")
+            if "max" in param_def and val > param_def["max"]:
+                raise ValueError(f"Maximum is {param_def['max']}")
+            return val
+
+        if ptype == "times":
+            # Parse comma-separated HH:MM values
+            raw_times = [t.strip() for t in value_str.split(",") if t.strip()]
+            if not raw_times:
+                raise ValueError("Provide at least one time in HH:MM format")
+            validated = []
+            for t in raw_times:
+                if not re.match(r'^\d{1,2}:\d{2}$', t):
+                    raise ValueError(f"Invalid time format: {t} (use HH:MM)")
+                parts = t.split(":")
+                hour, minute = int(parts[0]), int(parts[1])
+                if hour < 9 or hour > 15 or (hour == 9 and minute < 30):
+                    raise ValueError(f"Time {t} outside market hours (09:30-15:30)")
+                if hour == 15 and minute > 30:
+                    raise ValueError(f"Time {t} outside market hours (09:30-15:30)")
+                if minute < 0 or minute > 59:
+                    raise ValueError(f"Invalid minutes in {t}")
+                validated.append(f"{hour:02d}:{minute:02d}")
+            validated.sort()
+            return validated
+
+        raise ValueError(f"Unknown parameter type: {ptype}")
+
+    def _read_config_file(self) -> Optional[dict]:
+        """Read the config JSON file."""
+        if not self._config_path:
+            return None
+        try:
+            with open(self._config_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error("Failed to read config file %s: %s", self._config_path, e)
+            return None
+
+    def _get_config_value(self, config: dict, dot_path: str):
+        """Get a value from config using dot-notation path."""
+        keys = dot_path.split(".")
+        node = config
+        for key in keys:
+            if not isinstance(node, dict) or key not in node:
+                return None
+            node = node[key]
+        return node
+
+    def _write_config_value(self, dot_path: str, value):
+        """Write a single config value to the JSON file atomically.
+
+        Uses file locking for the entire read-modify-write cycle.
+        Auto-creates intermediate dicts if missing.
+        """
+        lock_path = self._config_path + ".lock"
+        keys = dot_path.split(".")
+
+        lock_fd = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+            # Read current config
+            with open(self._config_path, "r") as f:
+                config = json.load(f)
+
+            # Navigate to parent, auto-create intermediate dicts
+            node = config
+            for key in keys[:-1]:
+                node = node.setdefault(key, {})
+            node[keys[-1]] = value
+
+            # Atomic write: temp file → os.replace
+            tmp_path = self._config_path + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(config, f, indent=2)
+                f.write("\n")
+            try:
+                os.replace(tmp_path, self._config_path)
+            except Exception:
+                # Clean up orphaned tmp file on failure
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+
+    # =========================================================================
+    # /restart — BOT RESTART
+    # =========================================================================
+
+    def _handle_restart(self, chat_id: str):
+        """Handle /restart command — restart the HYDRA systemd service.
+
+        Feedback flow:
+        1. This handler sends "Restarting HYDRA..."
+        2. systemctl sends SIGTERM → main.py shutdown sends BOT_STOPPED alert
+        3. Service restarts → main.py startup sends BOT_STARTED alert
+        """
+        if not self._check_sudo(chat_id):
+            return
+
+        self._send_message(chat_id, "\u23f3 Restarting HYDRA...")
+        logger.info("Telegram /restart command received")
+        time.sleep(1)  # Let Telegram deliver the message
+
+        try:
+            subprocess.Popen(
+                ["sudo", "systemctl", "restart", "hydra"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logger.error("Failed to execute restart: %s", e)
+
+    # =========================================================================
+    # /stop — BOT SHUTDOWN
+    # =========================================================================
+
+    def _handle_stop(self, chat_id: str, text: str):
+        """Handle /stop command — stop the HYDRA service with position check.
+
+        If active positions exist, requires /stop confirm within 60 seconds.
+
+        Feedback flow:
+        1. This handler sends "Stopping HYDRA..."
+        2. systemctl sends SIGTERM → main.py shutdown sends BOT_STOPPED alert
+        """
+        parts = text.split()
+        is_confirm = len(parts) > 1 and parts[1].lower() == "confirm"
+
+        # Check for active positions
+        active_count = 0
+        if self._active_positions_callback:
+            try:
+                active_count = self._active_positions_callback()
+            except Exception:
+                pass
+
+        if active_count > 0 and not is_confirm:
+            self._pending_stop_confirm = True
+            self._pending_stop_time = time.time()
+            self._send_message(
+                chat_id,
+                f"\u26a0\ufe0f *WARNING:* {active_count} active position(s)!\n"
+                f"Stopping will leave positions unmanaged.\n\n"
+                f"Send /stop confirm within 60s to proceed."
+            )
+            return
+
+        # Check confirmation validity and expiry
+        if is_confirm:
+            if not self._pending_stop_time:
+                self._send_message(chat_id, "No pending /stop. Send /stop first.")
+                return
+            if time.time() - self._pending_stop_time > 60:
+                self._pending_stop_confirm = False
+                self._pending_stop_time = None
+                self._send_message(chat_id, "Confirmation expired. Send /stop again.")
+                return
+
+        self._pending_stop_confirm = False
+        self._pending_stop_time = None
+
+        if not self._check_sudo(chat_id):
+            return
+
+        self._send_message(chat_id, "\u23f3 Stopping HYDRA...")
+        logger.info("Telegram /stop command received (active_positions=%d)", active_count)
+        time.sleep(1)  # Let Telegram deliver the message
+
+        try:
+            subprocess.Popen(
+                ["sudo", "systemctl", "stop", "hydra"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logger.error("Failed to execute stop: %s", e)
+
+    def _check_sudo(self, chat_id: str) -> bool:
+        """Verify passwordless sudo is available. Returns True if OK."""
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "true"],
+                timeout=2,
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                self._send_message(
+                    chat_id,
+                    "\u274c Failed: sudo not configured for calypso user.\n"
+                    "Run sudoers setup on VM first."
+                )
+                return False
+            return True
+        except Exception as e:
+            self._send_message(chat_id, f"\u274c Failed to verify sudo: {e}")
+            return False
+
+    # =========================================================================
+    # /help
+    # =========================================================================
+
     def _handle_help(self, chat_id: str):
         """Handle /help command — list all available commands."""
         msg = (
             "\U0001f916 *HYDRA Commands*\n\n"
+            "*Monitoring*\n"
             "/status \u2014 Bot state, market data, filters\n"
             "/snapshot \u2014 Live position snapshot\n"
             "/entry N \u2014 Details for entry #N\n"
@@ -397,10 +880,16 @@ class TelegramCommandHandler:
             "/week \u2014 Current week summary\n"
             "/account \u2014 Lifetime performance\n"
             "/stops \u2014 Stop loss analysis\n"
-            "/config \u2014 Current configuration\n"
+            "\n*Configuration*\n"
+            "/config \u2014 View current config\n"
+            "/set \u2014 Edit config parameter\n"
+            "\n*Reports*\n"
             "/hermes \u2014 Latest HERMES report\n"
             "/apollo \u2014 Latest APOLLO briefing\n"
-            "/help \u2014 This message"
+            "\n*Control*\n"
+            "/restart \u2014 Restart HYDRA\n"
+            "/stop \u2014 Stop HYDRA (warns if positions)\n"
+            "\n/help \u2014 This message"
         )
         self._send_message(chat_id, msg)
 
@@ -431,11 +920,66 @@ class TelegramCommandHandler:
     # TELEGRAM API HELPERS
     # =========================================================================
 
-    def _send_message(self, chat_id: str, text: str):
-        """Send a message via Telegram Bot API with Markdown fallback."""
-        if len(text) > MAX_MESSAGE_LENGTH:
-            text = text[:MAX_MESSAGE_LENGTH - 3] + "..."
+    def _split_message(self, text: str, max_length: int = MAX_MESSAGE_LENGTH) -> List[str]:
+        """Split a long message into chunks that fit Telegram's 4096 char limit.
 
+        Splitting priority:
+        1. Double newline (paragraph/section boundary)
+        2. Single newline
+        3. Hard character split (last resort)
+
+        Each part gets a "(1/N)" header when there are multiple parts.
+        """
+        if len(text) <= max_length:
+            return [text]
+
+        parts = []
+        remaining = text
+
+        while remaining:
+            if len(remaining) <= max_length:
+                parts.append(remaining)
+                break
+
+            # Reserve space for part header like "(1/10)\n"
+            effective_max = max_length - 10
+            chunk = remaining[:effective_max]
+
+            # Try to split at double newline (paragraph boundary)
+            split_pos = chunk.rfind("\n\n")
+            if split_pos > effective_max // 3:
+                parts.append(remaining[:split_pos])
+                remaining = remaining[split_pos + 2:]
+                continue
+
+            # Try to split at single newline
+            split_pos = chunk.rfind("\n")
+            if split_pos > effective_max // 3:
+                parts.append(remaining[:split_pos])
+                remaining = remaining[split_pos + 1:]
+                continue
+
+            # Hard split at character boundary (last resort)
+            parts.append(remaining[:effective_max])
+            remaining = remaining[effective_max:]
+
+        # Add part headers when multiple parts
+        if len(parts) > 1:
+            total = len(parts)
+            parts = [f"({i + 1}/{total})\n{part}" for i, part in enumerate(parts)]
+
+        return parts
+
+    def _send_message(self, chat_id: str, text: str):
+        """Send a message via Telegram Bot API, splitting if it exceeds 4096 chars."""
+        parts = self._split_message(text)
+        for part in parts:
+            self._send_single_message(chat_id, part)
+            if len(parts) > 1:
+                time.sleep(0.3)  # Rate-limit between parts
+
+    def _send_single_message(self, chat_id: str, text: str):
+        """Send a single message via Telegram Bot API with Markdown fallback."""
         url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
 
