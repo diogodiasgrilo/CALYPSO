@@ -162,6 +162,50 @@ def _build_entries_for_day(
                 "P&L Impact": "",
             }
 
+    # 1b. Parse Trades tab for stop timing data ("HYDRA Stop #N (CALL/PUT)")
+    if trades_rows:
+        for row in trades_rows:
+            action = str(row.get("Action", "")).strip()
+            if "Stop #" not in action:
+                continue
+
+            # Filter by date
+            row_date = str(row.get("Expiry", "")).strip()
+            if row_date != date_str:
+                ts = str(row.get("Timestamp", "")).strip()
+                if not ts.startswith(date_str):
+                    continue
+
+            # Parse: "HYDRA Stop #1 (PUT)" or "HYDRA Stop #3 (CALL)"
+            stop_match = re.match(r".*Stop\s*#(\d+)\s*\((\w+)\)", action)
+            if not stop_match:
+                continue
+            entry_num = stop_match.group(1)
+            side = stop_match.group(2).lower()
+
+            if entry_num in entries_by_num:
+                # Extract stop time from Timestamp
+                ts = str(row.get("Timestamp", "")).strip()
+                if ts:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                        stop_time = dt.strftime("%I:%M %p ET")
+                    except ValueError:
+                        stop_time = ts
+
+                    # Store per-side stop time; use first stop time as entry's Stop Time
+                    key = f"{side.title()} Stop Time"
+                    entries_by_num[entry_num][key] = stop_time
+                    if "Stop Time" not in entries_by_num[entry_num]:
+                        entries_by_num[entry_num]["Stop Time"] = stop_time
+
+                # Extract stop P&L (negative = loss)
+                stop_pnl = _safe_float(row.get("P&L ($)", 0))
+                if stop_pnl:
+                    existing = _safe_float(entries_by_num[entry_num].get("P&L Impact", 0))
+                    entries_by_num[entry_num]["P&L Impact"] = str(existing + stop_pnl)
+
     # 2. Merge Positions tab data (per-side rows → outcome/stop/spread width data)
     if positions_rows:
         for row in positions_rows:

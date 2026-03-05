@@ -22,6 +22,7 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - **Smart entry windows (MKT-031):** 10-minute scouting window before each scheduled entry. Scores market conditions (post-spike ATR calm + momentum pause). Score >= 65 triggers early entry. Otherwise enters at scheduled time.
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
+- **VIX-scaled width (MKT-027):** round(VIX x 3.5 / 5) x 5, with per-side floors
 - **Min credit thresholds (MKT-011):** $0.75/side for calls (lowered v1.7.2), $1.75/side for puts (fallback $1.65 MKT-029)
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
 - **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement

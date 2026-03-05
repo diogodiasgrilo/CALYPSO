@@ -76,7 +76,7 @@ def format_money(value: float) -> str:
 
 
 def format_currency(value: float) -> str:
-    """Format a float as currency: $1,234 or $1,234.50."""
+    """Format a float as currency: $305 or $47.50."""
     return f"${format_money(abs(value))}"
 
 
@@ -263,7 +263,7 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
 
     formula_line = (
         f"- {date_label}: {format_money(expired)} - {format_money(stops)} "
-        f"- {format_money(commission)} = {format_money(pnl)} ✓{note_str}"
+        f"- {format_money(commission)} = {format_money(pnl)} {check}{note_str}"
     )
 
     # Insert after last formula line
@@ -435,8 +435,9 @@ def build_section3_day_block(
                 entry_num = se.get("Entry #", se.get("Entry", "?"))
                 stop_time = se.get("Stop Time", se.get("Close Time", "??:?? ET"))
                 outcome = se.get("Outcome", "STOPPED")
-                pnl_val = se.get("P&L Impact", se.get("PnL Impact", ""))
-                lines.append(f"{stop_time} - Entry #{entry_num} {outcome} ({pnl_val})")
+                pnl_val = safe_float(se.get("P&L Impact", 0))
+                pnl_str = f"${format_money(abs(pnl_val))} loss" if pnl_val else ""
+                lines.append(f"{stop_time} - Entry #{entry_num} {outcome}" + (f" ({pnl_str})" if pnl_str else ""))
             lines.append("```")
             lines.append("")
 
@@ -600,8 +601,6 @@ def recompute_section5(
     total_double_stops = sum(safe_int(r.get("Double Stops", 0)) for r in all_summary_rows)
     total_full_ics = sum(safe_int(r.get("Full ICs", 0)) for r in all_summary_rows)
     total_one_sided = sum(safe_int(r.get("One-Sided Entries", 0)) for r in all_summary_rows)
-    total_skipped = sum(safe_int(r.get("Entries Skipped", 0)) for r in all_summary_rows)
-
     daily_pnls = [safe_float(r.get("Daily P&L ($)", 0)) for r in all_summary_rows]
     winning_days = sum(1 for p in daily_pnls if p > 0)
     losing_days = sum(1 for p in daily_pnls if p < 0)
@@ -642,7 +641,6 @@ def recompute_section5(
         call_stops_day = safe_int(r.get("Call Stops", 0))
         put_stops_day = safe_int(r.get("Put Stops", 0))
         double_stops_day = safe_int(r.get("Double Stops", 0))
-        full_ics_day = safe_int(r.get("Full ICs", 0))
         one_sided_day = safe_int(r.get("One-Sided Entries", 0))
 
         clean_wins += day_clean
@@ -658,13 +656,13 @@ def recompute_section5(
         entries_with_stops = entries_completed - day_clean
         # Total stop sides from full ICs: each partial has 1 side, each double has 2
         # One-sided stops: each stopped one-sided has 1 stop side
-        # total_stop_sides = partial_ic * 1 + double * 2 + one_sided_stops * 1
-        total_stop_sides = call_stops_day + put_stops_day
+        # day_stop_sides = partial_ic * 1 + double * 2 + one_sided_stops * 1
+        day_stop_sides = call_stops_day + put_stops_day
         # One-sided can have at most one_sided_day stops, and at most
         # entries_with_stops - double_stops_day entries
         remaining_stopped_entries = entries_with_stops - double_stops_day
         # Stop sides from double stops = 2 * double_stops_day
-        remaining_stop_sides = total_stop_sides - (2 * double_stops_day)
+        remaining_stop_sides = day_stop_sides - (2 * double_stops_day)
         if remaining_stop_sides < 0:
             remaining_stop_sides = 0
 
@@ -735,8 +733,8 @@ def recompute_section5(
 
     # Entry type distribution
     if total_full_ics > 0:
-        # Full IC stops = total stop sides minus one-sided stops
-        full_ic_stop_sides = total_call_stops + total_put_stops - total_double_stops
+        # Total stop sides = call stops + put stops (double stops already counted in both)
+        full_ic_stop_sides = total_call_stops + total_put_stops
         # Approximate per-side rate
         full_ic_total_sides = total_full_ics * 2
         full_ic_stop_rate = (full_ic_stop_sides / full_ic_total_sides * 100) if full_ic_total_sides else 0
@@ -775,7 +773,7 @@ def recompute_section5(
         cs = safe_int(r.get("Call Stops", 0))
         ps = safe_int(r.get("Put Stops", 0))
         ds = safe_int(r.get("Double Stops", 0))
-        total = cs + ps + ds
+        total = cs + ps - ds  # Stopped entries (double stops counted once in cs and once in ps)
 
         if total == 0:
             new_lines.append(f"| {dlabel} | 0 | N/A | N/A | N/A |")
@@ -1077,7 +1075,7 @@ def update_section1(
             if last_day_str not in line:
                 # Insert the new date before the closing parenthesis
                 parser.lines[i] = re.sub(
-                    r"\)$",
+                    r"\)\s*$",
                     f", {last_day_str})",
                     line,
                 )

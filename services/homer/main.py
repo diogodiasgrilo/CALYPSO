@@ -254,7 +254,8 @@ def build_success_message(date_labels: list, days_added: int, net_pnl: float, cu
     sections = "1, 2, 3, 4, 5, 8, 9"
 
     pnl_str = f"{'+' if net_pnl >= 0 else '-'}{_format_money_msg(abs(net_pnl))}"
-    cum_str = _format_money_msg(cum_pnl)
+    cum_sign = "-" if cum_pnl < 0 else ""
+    cum_str = _format_money_msg(abs(cum_pnl))
     git_line = "_Committed and pushed to main_" if git_ok else "⚠️ _Git commit/push failed — manual push required_"
 
     return (
@@ -265,7 +266,7 @@ def build_success_message(date_labels: list, days_added: int, net_pnl: float, cu
         f"Sections updated: {sections}\n"
         f"\n"
         f"Net P&L today: {pnl_str}\n"
-        f"Cumulative P&L: ${cum_str} ({total_days} days)\n"
+        f"Cumulative P&L: {cum_sign}${cum_str} ({total_days} days)\n"
         f"\n"
         f"{git_line}"
     )
