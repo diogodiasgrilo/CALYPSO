@@ -507,8 +507,8 @@ class HydraStrategy(MEICStrategy):
         Override: early close cutoff at 12:00 PM for shifted schedule.
 
         Base MEIC filters entries to before 11:00 AM on early close days.
-        With shifted schedule (11:05-13:05), that filter removes ALL entries.
-        HYDRA uses 12:00 PM cutoff — keeps 11:05 and 11:35 (1+ hour before 1 PM close).
+        With shifted schedule (11:15-13:15), that filter removes ALL entries.
+        HYDRA uses 12:00 PM cutoff — keeps 11:15 and 11:45 (1+ hour before 1 PM close).
         """
         # Parse from config (same as base)
         entry_time_strs = self.strategy_config.get("entry_times", None)
@@ -519,15 +519,15 @@ class HydraStrategy(MEICStrategy):
             ]
         else:
             self.entry_times = [
-                dt_time(11, 5), dt_time(11, 35), dt_time(12, 5),
-                dt_time(12, 35), dt_time(13, 5)
+                dt_time(11, 15), dt_time(11, 45), dt_time(12, 15),
+                dt_time(12, 45), dt_time(13, 15)
             ]
 
         if is_early_close_day():
-            early_cutoff = dt_time(12, 0)  # Keep 11:05, 11:35
+            early_cutoff = dt_time(12, 0)  # Keep 11:15, 11:45
             self.entry_times = [t for t in self.entry_times if t < early_cutoff]
             if not self.entry_times:
-                self.entry_times = [dt_time(11, 5)]
+                self.entry_times = [dt_time(11, 15)]
             logger.info(f"HYDRA early close schedule: {[t.strftime('%H:%M') for t in self.entry_times]}")
 
     # =========================================================================

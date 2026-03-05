@@ -106,15 +106,15 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 ### Entry Schedule
 
-5 entries per day, spaced 30 minutes apart. Shifted +1 hour in v1.8.0 based on 15-day journal data (10:05 lost -$695, 10:35 lost -$510 across 7 full-entry days; 11:05+ all positive). Aligned with external research: Option Alpha 25k trades (ICs after 11:30 = +37%), Sandvand 9,100 trades (1 PM+ most profitable), U-shaped intraday volatility (trough 11:30-12:30).
+5 entries per day, spaced 30 minutes apart at :15/:45 offset (v1.8.1). 19-day MAE analysis showed :15/:45 has 10% lower 30-min adverse excursion vs :05/:35 (12.39pt vs 13.76pt MAE), with better tail risk (P90: 21.71pt vs 23.84pt). Aligned with external research: Option Alpha 25k trades (ICs after 11:30 = +37%), Sandvand 9,100 trades (1 PM+ most profitable), U-shaped intraday volatility (trough 11:30-12:30).
 
 | Entry | Time (ET) | Notes |
 |-------|-----------|-------|
-| 1 | 11:05 AM | Mid-morning; opening volatility settled |
-| 2 | 11:35 AM | Entering volatility trough |
-| 3 | 12:05 PM | |
-| 4 | 12:35 PM | MKT-021 ROC gate before #4 (disabled) |
-| 5 | 1:05 PM | MKT-021 ROC gate before #5 (disabled) |
+| 1 | 11:15 AM | Mid-morning; opening volatility settled |
+| 2 | 11:45 AM | Entering volatility trough |
+| 3 | 12:15 PM | |
+| 4 | 12:45 PM | MKT-021 ROC gate before #4 (disabled) |
+| 5 | 1:15 PM | MKT-021 ROC gate before #5 (disabled) |
 
 Each entry has a 5-minute retry window after the scheduled time. MKT-031 smart entry windows add a 10-minute scouting period BEFORE each scheduled time (see Smart Entry Windows section below).
 
@@ -123,12 +123,12 @@ Each entry has a 5-minute retry window after the scheduled time. MKT-031 smart e
 Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scouting window before each entry. Market conditions are scored every main-loop cycle (~2-5s). If the composite score >= 65, the bot enters early. Otherwise, it enters at the scheduled time (identical to previous behavior).
 
 ```
-10:55  Scouting opens — start scoring every 2-5s
-10:58  Score = 42 (momentum rough, ATR high)
-11:01  Score = 71 → EARLY ENTRY TRIGGERED (4 min early)
+11:05  Scouting opens — start scoring every 2-5s
+11:08  Score = 42 (momentum rough, ATR high)
+11:11  Score = 71 → EARLY ENTRY TRIGGERED (4 min early)
   -- OR --
-11:05  Window expires → ENTER ANYWAY (same as current behavior)
-11:10  Original 5-min retry window still available if entry fails
+11:15  Window expires → ENTER ANYWAY (same as current behavior)
+11:20  Original 5-min retry window still available if entry fails
 ```
 
 **Scoring (2 parameters, 100 max):**
@@ -594,7 +594,7 @@ Entry #1 → #2 → #3 placed normally
 | State | Description |
 |-------|-------------|
 | IDLE | No position, waiting for market open |
-| WAITING_FIRST_ENTRY | Market open, waiting for 11:05 AM (or 10:55 with MKT-031 scouting) |
+| WAITING_FIRST_ENTRY | Market open, waiting for 11:15 AM (or 11:05 with MKT-031 scouting) |
 | ENTRY_IN_PROGRESS | Currently placing an entry |
 | MONITORING | Active entries, watching stops + ROC |
 | STOP_TRIGGERED | Processing a stop loss |
@@ -606,7 +606,7 @@ Entry #1 → #2 → #3 placed normally
 
 ```
 IDLE → WAITING_FIRST_ENTRY           (9:30 AM)
-WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (11:05 AM, or earlier via MKT-031)
+WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (11:15 AM, or earlier via MKT-031)
 ENTRY_IN_PROGRESS → MONITORING       (entry placed)
 MONITORING → ENTRY_IN_PROGRESS       (next entry time)
 MONITORING → STOP_TRIGGERED          (spread_value >= stop_level)
@@ -622,13 +622,13 @@ Any → HALTED                         (critical: overnight positions, stale reg
 |-----------|-------|
 | Midnight | `_reset_for_new_day()`: clear daily state, verify stale registry (Fix #82) |
 | 9:30 AM | Market opens, transition to WAITING_FIRST_ENTRY |
-| 10:55 AM | MKT-031 scouting opens for Entry #1 (score market conditions every ~2-5s) |
-| 11:05 AM | Entry #1 (trend detection → strike calc → credit gate → execution). Earlier if MKT-031 score >= 65. |
-| 11:35 AM | Entry #2 (scouting from 11:25) |
-| 12:05 PM | Entry #3 (scouting from 11:55) |
-| 12:35 PM | Entry #4 (scouting from 12:25) |
-| 13:05 PM | Entry #5 (scouting from 12:55) |
-| 13:05+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
+| 11:05 AM | MKT-031 scouting opens for Entry #1 (score market conditions every ~2-5s) |
+| 11:15 AM | Entry #1 (trend detection → strike calc → credit gate → execution). Earlier if MKT-031 score >= 65. |
+| 11:45 AM | Entry #2 (scouting from 11:35) |
+| 12:15 PM | Entry #3 (scouting from 12:05) |
+| 12:45 PM | Entry #4 (scouting from 12:35) |
+| 13:15 PM | Entry #5 (scouting from 13:05) |
+| 13:15+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
 | 3:45 PM | Last 15 min, positions expire naturally at settlement |
 | 4:00 PM | Market close, 0DTE options expire/settle |
 | 4:00-5:00 PM | `check_after_hours_settlement()`: process expired credits |
@@ -737,7 +737,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `entry_times` | `["11:05","11:35","12:05","12:35","13:05"]` | Entry schedule (ET). 5 entries, shifted +1hr (v1.8.0) |
+| `entry_times` | `["11:15","11:45","12:15","12:45","13:15"]` | Entry schedule (ET). 5 entries at :15/:45 offset (v1.8.1) |
 | `entry_window_minutes` | `5` | Window around entry time |
 | `spread_width` | `50` | Default spread width (points) |
 | `min_spread_width` | `60` | MKT-008 liquidity fallback floor (universal) |

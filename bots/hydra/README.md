@@ -16,17 +16,17 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), and wider starting OTM (MKT-024).
 
-### Entry Schedule (5 entries — shifted +1hr in v1.8.0, Entry #6 dropped in v1.6.0)
+### Entry Schedule (5 entries — :15/:45 offset in v1.8.1, Entry #6 dropped in v1.6.0)
 
 | Entry | Time (ET) | Scout Window |
 |-------|-----------|-------------|
-| 1 | 11:05 AM | 10:55-11:05 |
-| 2 | 11:35 AM | 11:25-11:35 |
-| 3 | 12:05 PM | 11:55-12:05 |
-| 4 | 12:35 PM | 12:25-12:35 |
-| 5 | 1:05 PM | 12:55-1:05 |
+| 1 | 11:15 AM | 11:05-11:15 |
+| 2 | 11:45 AM | 11:35-11:45 |
+| 3 | 12:15 PM | 12:05-12:15 |
+| 4 | 12:45 PM | 12:35-12:45 |
+| 5 | 1:15 PM | 1:05-1:15 |
 
-Schedule shifted +1hr from original (v1.8.0): journal data showed 10:05 lost -$695, 10:35 lost -$510 across 7 full-entry days, while 11:05+ all positive. On early close days, cutoff is 12:00 PM (keeps entries 1-2).
+Entry times at :15/:45 offset (v1.8.1): 19-day MAE analysis showed :15/:45 has 10% lower 30-min adverse excursion vs :05/:35 (12.39pt vs 13.76pt MAE), with better tail risk (P90: 21.71pt vs 23.84pt). On early close days, cutoff is 12:00 PM (keeps entries 1-2).
 
 ### Smart Entry Windows (MKT-031) — v1.8.0
 

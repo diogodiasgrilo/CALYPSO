@@ -141,9 +141,9 @@ def print_banner():
     ║         Multi-Entry Iron Condors (SPX 0DTE)                   ║
     ║         5 Entries | Credit Gates | Smart Entry                 ║
     ║                                                               ║
-    ║         11:05  11:35  12:05  12:35  13:05                     ║
+    ║         11:15  11:45  12:15  12:45  13:15                     ║
     ║                                                               ║
-    ║         Version: 1.8.0                                        ║
+    ║         Version: 1.8.1                                        ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝

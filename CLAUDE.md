@@ -232,9 +232,9 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
-### HYDRA Bot Details (v1.8.0 - Updated 2026-03-04)
+### HYDRA Bot Details (v1.8.1 - Updated 2026-03-05)
 - **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
-- **Structure:** 5 entries per day (11:05, 11:35, 12:05, 12:35, 13:05) — shifted +1hr from original schedule (journal data: 10:05 -$695, 10:35 -$510 vs 11:05+ all positive). Full iron condors or put-only (MKT-011) + credit gate.
+- **Structure:** 5 entries per day (11:15, 11:45, 12:15, 12:45, 13:15) — :15/:45 offset (19-day MAE analysis: 10% lower adverse excursion vs :05/:35, better P90 tail risk). Full iron condors or put-only (MKT-011) + credit gate.
 - **Smart Entry Windows (MKT-031):** 10-minute scouting window before each scheduled entry. Scores market conditions every main-loop cycle using 2 parameters: post-spike ATR calm (0-70pts) + momentum pause (0-30pts). Score >= 65 triggers early entry. Otherwise enters at scheduled time (default behavior preserved). Zero-risk fallback: if scoring fails, enters at scheduled time.
 - **EMA Trend Signal:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars. Signal (BULLISH/BEARISH/NEUTRAL) is informational only — logged and stored but does NOT drive entry type.
 - **Wider Starting OTM (MKT-024):** Calls start at 3.5× and puts at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike. Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
@@ -555,13 +555,45 @@ Automatically updates `docs/HYDRA_TRADING_JOURNAL.md` after market close each da
 ```
 services/homer/
   main.py               Entry point (orchestration, git, Telegram alerts)
-  data_collector.py     Gathers data from Sheets + files
+  data_collector.py     Gathers data from Sheets + files + heartbeat logs
+  db_manager.py         SQLite backtesting database (schema, inserts, queries)
   journal_parser.py     Parses journal structure (sections, tables)
   journal_updater.py    Applies updates section-by-section
   narrative_generator.py Claude API for observations/assessments
 deploy/homer.service    systemd oneshot service
 deploy/homer.timer      systemd timer (5:30 PM ET weekdays)
 intel/homer/            Backups + logs
+data/backtesting.db     SQLite database with market ticks, OHLC, trades
+```
+
+**Backtesting Database** (`data/backtesting.db`):
+SQLite database populated daily by HOMER after journal update. Stores heartbeat snapshots, 1-minute OHLC bars, trade entries, stop events, and daily summaries. Used for backtesting analysis (e.g., entry timing optimization).
+
+| Table | Content | ~Rows/Day |
+|-------|---------|-----------|
+| `market_ticks` | Heartbeat snapshots (~11s intervals: SPX, VIX, trend, state) | ~1,500 |
+| `market_ohlc_1min` | 1-min OHLC bars computed from ticks | ~390 |
+| `trade_entries` | Iron condor entries (strikes, credits, signals, OTM distances) | ~5 |
+| `trade_stops` | Stop loss events (debit, P&L, trigger level) | 0-5 |
+| `daily_summaries` | End-of-day totals (SPX OHLC, VIX, P&L, entry/stop counts) | 1 |
+| `schema_info` | Schema version tracking for migrations | — |
+
+```sql
+-- Example queries
+-- SPX price at specific time
+SELECT timestamp, spx_price, vix_level FROM market_ticks
+WHERE timestamp LIKE '2026-03-04 11:15%';
+
+-- Daily P&L summary
+SELECT date, net_pnl, entries_placed, entries_stopped FROM daily_summaries ORDER BY date;
+
+-- 1-minute OHLC for a date
+SELECT * FROM market_ohlc_1min WHERE timestamp LIKE '2026-03-04%' ORDER BY timestamp;
+
+-- Entry details with OTM distances
+SELECT date, entry_number, entry_time, spx_at_entry, short_call_strike, short_put_strike,
+       otm_distance_call, otm_distance_put, total_credit
+FROM trade_entries WHERE date = '2026-03-04' ORDER BY entry_number;
 ```
 
 **Commands:**
@@ -572,11 +604,17 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 # Dry run (parse + collect but don't write)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main --dry-run'"
 
+# Backfill all historical data into SQLite
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main --backfill 2>&1'"
+
 # Check timer status
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status homer.timer"
 
 # View logs
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u homer -n 50 --no-pager"
+
+# Verify DB contents
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sqlite3 /opt/calypso/data/backtesting.db \"SELECT 'ticks', COUNT(*) FROM market_ticks UNION ALL SELECT 'ohlc', COUNT(*) FROM market_ohlc_1min UNION ALL SELECT 'entries', COUNT(*) FROM trade_entries UNION ALL SELECT 'stops', COUNT(*) FROM trade_stops UNION ALL SELECT 'summaries', COUNT(*) FROM daily_summaries;\""
 ```
 
 ---
@@ -1123,7 +1161,7 @@ SCRIPT
 8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
 9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
 10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by HYDRA for trend filtering
-11. **HYDRA bot:** Running in LIVE mode (v1.8.0, deployed 2026-03-04) - ONLY active trading bot - 5 entries per day (11:05-13:05, shifted +1hr from original — journal data: early entries lose, late entries profit) + MKT-031 smart entry windows (10min pre-entry scouting, 2-parameter scoring: post-spike ATR calm + momentum pause, threshold 65 triggers early entry, otherwise enters at scheduled time) + EMA 20/40 trend signal (informational only, all entries full IC) + wider starting OTM 3.5×/4.0× multiplier (MKT-024) + asymmetric spread widths (MKT-028: put floor 75pt, call floor 60pt) + VIX-scaled spread width (MKT-027: VIX×3.5, per-side floors, cap 75pt) + credit gate: call $0.75, put $1.75 with MKT-029 fallback (MKT-011) + put-only entries when call non-viable (v1.7.1) + early close DISABLED (MKT-018) + stop = total_credit - $0.15 (MEIC+) + short-only stop close (MKT-025) + progressive OTM tightening (MKT-020/MKT-022) + early close day cutoff 12:00 PM (keeps 11:05/11:35 viable)
+11. **HYDRA bot:** Running in LIVE mode (v1.8.1, deployed 2026-03-05) - ONLY active trading bot - 5 entries per day (11:15-13:15, :15/:45 offset — 19-day MAE analysis: 10% lower adverse excursion vs :05/:35) + MKT-031 smart entry windows (10min pre-entry scouting, 2-parameter scoring: post-spike ATR calm + momentum pause, threshold 65 triggers early entry, otherwise enters at scheduled time) + EMA 20/40 trend signal (informational only, all entries full IC) + wider starting OTM 3.5×/4.0× multiplier (MKT-024) + asymmetric spread widths (MKT-028: put floor 75pt, call floor 60pt) + VIX-scaled spread width (MKT-027: VIX×3.5, per-side floors, cap 75pt) + credit gate: call $0.75, put $1.75 with MKT-029 fallback (MKT-011) + put-only entries when call non-viable (v1.7.1) + early close DISABLED (MKT-018) + stop = total_credit - $0.15 (MEIC+) + short-only stop close (MKT-025) + progressive OTM tightening (MKT-020/MKT-022) + early close day cutoff 12:00 PM (keeps 11:15/11:45 viable)
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 14. **HOMER agent:** Runs at 5:30 PM ET weekdays — auto-updates HYDRA Trading Journal with new trading days, commits + pushes, sends Telegram alert
