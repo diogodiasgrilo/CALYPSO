@@ -87,22 +87,17 @@ export function SPXChart() {
   useEffect(() => {
     if (!candleSeriesRef.current || todayOHLC.length === 0) return;
 
-    // Parse timestamp as ET (database stores ET timestamps without timezone suffix).
-    // Determine EDT vs EST from the date (DST: second Sunday Mar – first Sunday Nov).
+    // Parse timestamp and return epoch seconds that Lightweight Charts will display as ET.
+    // Handles two formats:
+    //   OHLC: "2026-03-06 12:15:00" (bare ET, no timezone suffix)
+    //   Entry: "2026-03-06T11:15:32.014246-05:00" (ISO with timezone offset)
+    // In BOTH cases the date+time digits ARE the ET wall clock time, so we extract
+    // them and return epoch-as-if-UTC so the chart axis shows ET labels.
     function parseET(ts: string): number {
-      const d = new Date(ts);
-      if (isNaN(d.getTime())) return 0;
-      // Get local offset in minutes, compute ET offset
-      const localOffsetMin = d.getTimezoneOffset(); // positive = west of UTC
-      const month = d.getMonth(); // 0-indexed
-      // Rough DST check: Mar-Nov = EDT (UTC-4), otherwise EST (UTC-5)
-      const etOffsetMin = (month >= 2 && month <= 10) ? 240 : 300; // EDT=240, EST=300
-      // new Date() parsed as local; convert to UTC, then to ET epoch
-      const utcMs = d.getTime() + localOffsetMin * 60000;
-      const etMs = utcMs - etOffsetMin * 60000;
-      // We want the chart to show ET times, so return ET epoch as if it were UTC
-      // (Lightweight Charts displays the raw timestamp)
-      return etMs / 1000;
+      const m = ts.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+      if (!m) return 0;
+      const utcDate = new Date(`${m[1]}T${m[2]}Z`);
+      return isNaN(utcDate.getTime()) ? 0 : utcDate.getTime() / 1000;
     }
 
     const data = todayOHLC.map((bar) => ({
@@ -121,12 +116,12 @@ export function SPXChart() {
       .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()))
       .map((e) => ({
         time: parseET(e.entry_time!) as Time,
-        position: "belowBar" as const,
+        position: "aboveBar" as const,
         color:
           e.call_side_stopped || e.put_side_stopped
             ? colors.loss
             : colors.info,
-        shape: "arrowUp" as const,
+        shape: "arrowDown" as const,
         text: `E${e.entry_number}`,
       }));
 

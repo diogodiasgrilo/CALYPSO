@@ -20,40 +20,70 @@ function getEntryStatus(e: HydraEntry) {
   return "placing" as const;
 }
 
-function computeCushion(
-  shortStrike: number,
-  spxPrice: number,
-  side: "call" | "put"
-): number {
-  if (!shortStrike || !spxPrice) return 100;
-  // Distance = how far SPX is from the short strike (positive = safe OTM)
-  const distance =
-    side === "call"
-      ? shortStrike - spxPrice
-      : spxPrice - shortStrike;
-  if (distance <= 0) return 0; // Breached
-  // Current distance IS the cushion. Normalize: 100% when distance >= $60 OTM,
-  // scales linearly to 0% as SPX approaches the short strike.
-  return Math.min(100, (distance / 60) * 100);
+// Matches bot's cushion formula: (stop_level - spread_value) / stop_level * 100
+function computeCushion(spreadValue: number, stopLevel: number): number {
+  if (!stopLevel || stopLevel <= 0) return 100;
+  const cushion = ((stopLevel - spreadValue) / stopLevel) * 100;
+  return Math.max(0, Math.min(100, cushion));
 }
 
-export function EntryCard({ entry, spxPrice = 0 }: EntryCardProps) {
+// Compute current + max P&L for an entry
+function computeEntryPnl(e: HydraEntry) {
+  const callActive = !e.call_side_stopped && !e.call_side_skipped && !e.call_side_expired;
+  const putActive = !e.put_side_stopped && !e.put_side_skipped && !e.put_side_expired;
+  const callStopped = e.call_side_stopped;
+  const putStopped = e.put_side_stopped;
+
+  // Max profit = credit from sides that can still expire worthless
+  let maxProfit = 0;
+  if (callActive) maxProfit += e.call_spread_credit;
+  if (putActive) maxProfit += e.put_spread_credit;
+  // Expired sides already earned their credit
+  if (e.call_side_expired) maxProfit += e.call_spread_credit;
+  if (e.put_side_expired) maxProfit += e.put_spread_credit;
+
+  // Subtract losses from stopped sides (theoretical: stop_level - credit for that side)
+  if (callStopped) maxProfit -= Math.max(0, e.call_side_stop - e.call_spread_credit);
+  if (putStopped) maxProfit -= Math.max(0, e.put_side_stop - e.put_spread_credit);
+
+  // Current P&L = credit earned so far minus cost-to-close active sides
+  let currentPnl = 0;
+  // Active sides: credit minus current spread value
+  if (callActive) currentPnl += e.call_spread_credit - (e.call_spread_value ?? 0);
+  if (putActive) currentPnl += e.put_spread_credit - (e.put_spread_value ?? 0);
+  // Expired sides: full credit kept
+  if (e.call_side_expired) currentPnl += e.call_spread_credit;
+  if (e.put_side_expired) currentPnl += e.put_spread_credit;
+  // Stopped sides: theoretical loss
+  if (callStopped) currentPnl -= Math.max(0, e.call_side_stop - e.call_spread_credit);
+  if (putStopped) currentPnl -= Math.max(0, e.put_side_stop - e.put_spread_credit);
+
+  return { currentPnl, maxProfit };
+}
+
+export function EntryCard({ entry }: EntryCardProps) {
   const status = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
 
-  // Per-entry P&L: for active entries show credit (profit if expires OTM);
-  // live option prices aren't available from the state file.
-  const entryPnl = status === "active" ? totalCredit : 0;
-  const animatedPnl = useAnimatedNumber(entryPnl);
+  const { currentPnl, maxProfit } = computeEntryPnl(entry);
+  const animatedPnl = useAnimatedNumber(currentPnl);
+  const animatedMax = useAnimatedNumber(maxProfit);
 
-  const callCushion = computeCushion(entry.short_call_strike, spxPrice, "call");
-  const putCushion = computeCushion(entry.short_put_strike, spxPrice, "put");
+  // Progress toward max profit (0-100%, can exceed if options decay faster)
+  const progressPct =
+    maxProfit > 0 ? Math.max(0, Math.min(100, (currentPnl / maxProfit) * 100)) : 0;
+
+  // Use bot's actual cushion: (stop_level - spread_value) / stop_level
+  const callCushion = computeCushion(entry.call_spread_value ?? 0, entry.call_side_stop);
+  const putCushion = computeCushion(entry.put_spread_value ?? 0, entry.put_side_stop);
 
   // Trend signal badge
   const trendLabel =
     entry.override_reason === "mkt-011"
       ? "MKT-011"
       : entry.trend_signal ?? "";
+
+  const showLiveData = status === "active" || status === "stopped";
 
   return (
     <div
@@ -97,15 +127,30 @@ export function EntryCard({ entry, spxPrice = 0 }: EntryCardProps) {
         )}
       </div>
 
-      {/* P&L */}
-      {status === "active" && (
-        <div className="text-center mb-2">
-          <span
-            className="text-lg font-bold font-mono"
-            style={{ color: pnlColor(animatedPnl) }}
-          >
-            {formatPnL(animatedPnl)}
-          </span>
+      {/* P&L: current vs max + progress bar */}
+      {showLiveData && (
+        <div className="mb-2">
+          <div className="flex items-baseline justify-between mb-1">
+            <span
+              className="text-base font-bold font-mono"
+              style={{ color: pnlColor(animatedPnl) }}
+            >
+              {formatPnL(animatedPnl)}
+            </span>
+            <span className="text-[10px] text-text-dim">
+              / {formatPnL(animatedMax)}
+            </span>
+          </div>
+          {/* P&L progress bar */}
+          <div className="h-1.5 rounded-full bg-bg-elevated overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-500 ease-out"
+              style={{
+                width: `${progressPct}%`,
+                backgroundColor: currentPnl >= 0 ? colors.profit : colors.loss,
+              }}
+            />
+          </div>
         </div>
       )}
 
@@ -125,7 +170,7 @@ export function EntryCard({ entry, spxPrice = 0 }: EntryCardProps) {
         </div>
       )}
 
-      {/* Strikes (collapsed for completed entries) */}
+      {/* Strikes */}
       {entry.short_call_strike > 0 && (
         <div className="mt-2 text-[10px] text-text-dim flex justify-between">
           <span>

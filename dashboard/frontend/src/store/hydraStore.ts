@@ -38,6 +38,8 @@ export interface HydraEntry {
   put_long_sold: boolean;
   call_long_sold_revenue: number;
   put_long_sold_revenue: number;
+  call_spread_value: number;
+  put_spread_value: number;
   [key: string]: unknown;
 }
 

@@ -4911,6 +4911,9 @@ class HydraStrategy(MEICStrategy):
                     "put_long_sold": getattr(entry, 'put_long_sold', False),
                     "call_long_sold_revenue": getattr(entry, 'call_long_sold_revenue', 0.0),
                     "put_long_sold_revenue": getattr(entry, 'put_long_sold_revenue', 0.0),
+                    # Dashboard: live spread values for cushion display
+                    "call_spread_value": entry.call_spread_value if not entry.call_side_stopped else 0,
+                    "put_spread_value": entry.put_spread_value if not entry.put_side_stopped else 0,
                 }
                 state_data["entries"].append(entry_data)
 
