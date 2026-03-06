@@ -4914,6 +4914,14 @@ class HydraStrategy(MEICStrategy):
                     # Dashboard: live spread values for cushion display
                     "call_spread_value": entry.call_spread_value if not entry.call_side_stopped else 0,
                     "put_spread_value": entry.put_spread_value if not entry.put_side_stopped else 0,
+                    # Dashboard: surviving long leg value after MKT-025 stop (long stays open)
+                    # Value = long_price * 100 * contracts (what we'd get if sold now)
+                    "call_long_value": (entry.long_call_price * 100 * entry.contracts
+                                        if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False) and entry.long_call_uic
+                                        else 0),
+                    "put_long_value": (entry.long_put_price * 100 * entry.contracts
+                                       if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False) and entry.long_put_uic
+                                       else 0),
                 }
                 state_data["entries"].append(entry_data)
 
