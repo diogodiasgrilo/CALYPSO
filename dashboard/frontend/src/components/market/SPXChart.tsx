@@ -87,8 +87,26 @@ export function SPXChart() {
   useEffect(() => {
     if (!candleSeriesRef.current || todayOHLC.length === 0) return;
 
+    // Parse timestamp as ET (database stores ET timestamps without timezone suffix).
+    // Determine EDT vs EST from the date (DST: second Sunday Mar – first Sunday Nov).
+    function parseET(ts: string): number {
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return 0;
+      // Get local offset in minutes, compute ET offset
+      const localOffsetMin = d.getTimezoneOffset(); // positive = west of UTC
+      const month = d.getMonth(); // 0-indexed
+      // Rough DST check: Mar-Nov = EDT (UTC-4), otherwise EST (UTC-5)
+      const etOffsetMin = (month >= 2 && month <= 10) ? 240 : 300; // EDT=240, EST=300
+      // new Date() parsed as local; convert to UTC, then to ET epoch
+      const utcMs = d.getTime() + localOffsetMin * 60000;
+      const etMs = utcMs - etOffsetMin * 60000;
+      // We want the chart to show ET times, so return ET epoch as if it were UTC
+      // (Lightweight Charts displays the raw timestamp)
+      return etMs / 1000;
+    }
+
     const data = todayOHLC.map((bar) => ({
-      time: (new Date(bar.timestamp).getTime() / 1000) as Time,
+      time: parseET(bar.timestamp) as Time,
       open: bar.open,
       high: bar.high,
       low: bar.low,
@@ -102,7 +120,7 @@ export function SPXChart() {
     const markers = entries
       .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()))
       .map((e) => ({
-        time: (new Date(e.entry_time!).getTime() / 1000) as Time,
+        time: parseET(e.entry_time!) as Time,
         position: "belowBar" as const,
         color:
           e.call_side_stopped || e.put_side_stopped
@@ -125,7 +143,8 @@ export function SPXChart() {
 
     // Add price lines for active entries
     entries.forEach((e) => {
-      if (!e.is_complete && e.short_call_strike > 0) {
+      const isActive = e.is_complete && !e.call_side_stopped && !e.put_side_stopped && !e.call_side_expired && !e.put_side_expired;
+      if (isActive && e.short_call_strike > 0) {
         const line = series.createPriceLine({
           price: e.short_call_strike,
           color: colors.loss + "80",
@@ -136,7 +155,7 @@ export function SPXChart() {
         });
         priceLinesRef.current.push(line);
       }
-      if (!e.is_complete && e.short_put_strike > 0) {
+      if (isActive && e.short_put_strike > 0) {
         const line = series.createPriceLine({
           price: e.short_put_strike,
           color: colors.loss + "80",

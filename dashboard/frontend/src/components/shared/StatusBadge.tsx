@@ -1,6 +1,6 @@
 import { statusColor } from "../../lib/tradingColors";
 
-type EntryStatus = "active" | "expired" | "stopped" | "skipped" | "pending";
+type EntryStatus = "active" | "expired" | "stopped" | "skipped" | "pending" | "placing";
 
 interface StatusBadgeProps {
   status: EntryStatus;

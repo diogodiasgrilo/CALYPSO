@@ -12,11 +12,12 @@ interface EntryCardProps {
 
 function getEntryStatus(e: HydraEntry) {
   if (!e.entry_time) return "pending" as const;
-  if (!e.is_complete) return "active" as const;
   if (e.call_side_stopped || e.put_side_stopped) return "stopped" as const;
   if (e.call_side_expired || e.put_side_expired) return "expired" as const;
   if (e.call_side_skipped && e.put_side_skipped) return "skipped" as const;
-  return "expired" as const;
+  // is_complete means "entry placement finished" — if no terminal flags, it's LIVE
+  if (e.is_complete) return "active" as const;
+  return "placing" as const;
 }
 
 function computeCushion(
