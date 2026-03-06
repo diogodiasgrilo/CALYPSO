@@ -7730,14 +7730,15 @@ class MEICStrategy:
         # This prevents false stops when API returns $0.00 for option prices
         # FIX (2026-02-03): Added per user request to match Delta Neutral's DATA-004 pattern
         if not entry.call_side_stopped:
-            if entry.short_call_price == 0 and entry.long_call_price == 0:
+            call_long_sold = getattr(entry, 'call_long_sold', False)
+            if entry.short_call_price == 0 and entry.long_call_price == 0 and not call_long_sold:
                 logger.warning(
                     f"DATA-004: Entry #{entry.entry_number} call side has zero prices "
                     f"(SC=${entry.short_call_price:.2f}, LC=${entry.long_call_price:.2f}) - skipping stop check"
                 )
                 return False, "Call side prices are zero"
-            # If only one leg is zero, that's suspicious too
-            if entry.short_call_price == 0 or entry.long_call_price == 0:
+            # If only one leg is zero, that's suspicious — UNLESS the long was sold (LP=$0 is legitimate)
+            if not call_long_sold and (entry.short_call_price == 0 or entry.long_call_price == 0):
                 logger.warning(
                     f"DATA-004: Entry #{entry.entry_number} call side has partial zero prices "
                     f"(SC=${entry.short_call_price:.2f}, LC=${entry.long_call_price:.2f}) - skipping stop check"
@@ -7745,14 +7746,15 @@ class MEICStrategy:
                 return False, "Call side has partial zero price"
 
         if not entry.put_side_stopped:
-            if entry.short_put_price == 0 and entry.long_put_price == 0:
+            put_long_sold = getattr(entry, 'put_long_sold', False)
+            if entry.short_put_price == 0 and entry.long_put_price == 0 and not put_long_sold:
                 logger.warning(
                     f"DATA-004: Entry #{entry.entry_number} put side has zero prices "
                     f"(SP=${entry.short_put_price:.2f}, LP=${entry.long_put_price:.2f}) - skipping stop check"
                 )
                 return False, "Put side prices are zero"
-            # If only one leg is zero, that's suspicious too
-            if entry.short_put_price == 0 or entry.long_put_price == 0:
+            # If only one leg is zero, that's suspicious — UNLESS the long was sold (LP=$0 is legitimate)
+            if not put_long_sold and (entry.short_put_price == 0 or entry.long_put_price == 0):
                 logger.warning(
                     f"DATA-004: Entry #{entry.entry_number} put side has partial zero prices "
                     f"(SP=${entry.short_put_price:.2f}, LP=${entry.long_put_price:.2f}) - skipping stop check"
