@@ -484,6 +484,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     strategy.log_account_summary()
                     strategy.log_performance_metrics()
                     strategy.log_position_snapshot()
+                    strategy._save_state_to_disk()
                     last_status_time = now
 
                 # Hourly Bot Logs
