@@ -8,6 +8,8 @@ import type { EntryStatus } from "../shared/StatusBadge";
 
 interface EntryCardProps {
   entry: HydraEntry;
+  /** Slippage correction from aggregate total_realized_pnl vs theoretical. */
+  slippageCorrection?: number;
 }
 
 function getEntryStatus(e: HydraEntry): {
@@ -39,8 +41,8 @@ function computeCushion(spreadValue: number, stopLevel: number): number {
   return Math.max(0, Math.min(100, cushion));
 }
 
-// Compute current + max P&L for an entry
-function computeEntryPnl(e: HydraEntry) {
+// Compute current + max P&L for an entry (slippageCorrection adjusts stopped side losses to match actual execution)
+function computeEntryPnl(e: HydraEntry, slippageCorrection: number = 0) {
   const callActive = !e.call_side_stopped && !e.call_side_skipped && !e.call_side_expired;
   const putActive = !e.put_side_stopped && !e.put_side_skipped && !e.put_side_expired;
   const callStopped = e.call_side_stopped;
@@ -54,9 +56,17 @@ function computeEntryPnl(e: HydraEntry) {
   if (e.call_side_expired) maxProfit += e.call_spread_credit;
   if (e.put_side_expired) maxProfit += e.put_spread_credit;
 
-  // Subtract losses from stopped sides (theoretical: stop_level - credit for that side)
-  if (callStopped) maxProfit -= Math.max(0, e.call_side_stop - e.call_spread_credit);
-  if (putStopped) maxProfit -= Math.max(0, e.put_side_stop - e.put_spread_credit);
+  // Stopped sides: theoretical loss + surviving long value + salvage revenue
+  if (callStopped) {
+    const loss = Math.max(0, e.call_side_stop - e.call_spread_credit);
+    maxProfit -= loss;
+    maxProfit += (e.call_long_value ?? 0) + (e.call_long_sold_revenue ?? 0);
+  }
+  if (putStopped) {
+    const loss = Math.max(0, e.put_side_stop - e.put_spread_credit);
+    maxProfit -= loss;
+    maxProfit += (e.put_long_value ?? 0) + (e.put_long_sold_revenue ?? 0);
+  }
 
   // Current P&L = credit earned so far minus cost-to-close active sides
   let currentPnl = 0;
@@ -66,9 +76,22 @@ function computeEntryPnl(e: HydraEntry) {
   // Expired sides: full credit kept
   if (e.call_side_expired) currentPnl += e.call_spread_credit;
   if (e.put_side_expired) currentPnl += e.put_spread_credit;
-  // Stopped sides: theoretical loss
-  if (callStopped) currentPnl -= Math.max(0, e.call_side_stop - e.call_spread_credit);
-  if (putStopped) currentPnl -= Math.max(0, e.put_side_stop - e.put_spread_credit);
+  // Stopped sides: theoretical loss + long leg recovery
+  if (callStopped) {
+    currentPnl -= Math.max(0, e.call_side_stop - e.call_spread_credit);
+    currentPnl += (e.call_long_value ?? 0);
+    currentPnl += (e.call_long_sold_revenue ?? 0);
+  }
+  if (putStopped) {
+    currentPnl -= Math.max(0, e.put_side_stop - e.put_spread_credit);
+    currentPnl += (e.put_long_value ?? 0);
+    currentPnl += (e.put_long_sold_revenue ?? 0);
+  }
+
+  // Apply slippage correction (actual execution vs theoretical stop level)
+  // This makes per-entry P&L consistent with the aggregate total_realized_pnl
+  currentPnl += slippageCorrection;
+  maxProfit += slippageCorrection;
 
   // Subtract commission for NET P&L (consistent with TODAY card)
   const commission = (e.open_commission ?? 0) + (e.close_commission ?? 0);
@@ -78,11 +101,11 @@ function computeEntryPnl(e: HydraEntry) {
   return { currentPnl, maxProfit };
 }
 
-export function EntryCard({ entry }: EntryCardProps) {
+export function EntryCard({ entry, slippageCorrection = 0 }: EntryCardProps) {
   const { status, stoppedSide } = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
 
-  const { currentPnl, maxProfit } = computeEntryPnl(entry);
+  const { currentPnl, maxProfit } = computeEntryPnl(entry, slippageCorrection);
   const animatedPnl = useAnimatedNumber(currentPnl);
   const animatedMax = useAnimatedNumber(maxProfit);
 

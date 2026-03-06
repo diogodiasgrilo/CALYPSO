@@ -247,6 +247,11 @@ class HydraStrategy(MEICStrategy):
 
         self._bot_start_time = datetime.now()
 
+        # Dashboard: server-side P&L history (persists across page refreshes / clients)
+        # Each element: {"time": "HH:MM", "pnl": float}
+        # Accumulated each heartbeat, one point per minute, reset daily
+        self._pnl_history: list = []
+
         logger.info(f"HYDRA Strategy initialized")
         logger.info(f"  Trend filter enabled: {self.trend_enabled}")
         logger.info(f"  EMA periods: {self.ema_short_period}/{self.ema_long_period}")
@@ -4925,6 +4930,37 @@ class HydraStrategy(MEICStrategy):
                 }
                 state_data["entries"].append(entry_data)
 
+            # Dashboard: accumulate P&L history (one point per minute)
+            # Only record when there are placed entries (skip pre-market zeros)
+            active_entries = [e for e in self.daily_state.entries if e.entry_time]
+            if active_entries or self._pnl_history:
+                now = get_us_market_time()
+                time_key = now.strftime("%H:%M")
+                # Compute net P&L: realized + unrealized (active sides) + surviving longs - commission
+                net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
+                for entry in active_entries:
+                    call_active = (not entry.call_side_stopped and not entry.call_side_skipped
+                                   and not entry.call_side_expired)
+                    put_active = (not entry.put_side_stopped and not entry.put_side_skipped
+                                  and not entry.put_side_expired)
+                    if call_active:
+                        net_pnl += entry.call_spread_credit - (entry.call_spread_value or 0)
+                    if put_active:
+                        net_pnl += entry.put_spread_credit - (entry.put_spread_value or 0)
+                    # Surviving long legs after MKT-025 stop
+                    if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False) and entry.long_call_uic:
+                        net_pnl += entry.long_call_price * 100 * entry.contracts
+                    if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False) and entry.long_put_uic:
+                        net_pnl += entry.long_put_price * 100 * entry.contracts
+
+                # Append or update current minute
+                if self._pnl_history and self._pnl_history[-1]["time"] == time_key:
+                    self._pnl_history[-1]["pnl"] = round(net_pnl, 2)
+                else:
+                    self._pnl_history.append({"time": time_key, "pnl": round(net_pnl, 2)})
+
+            state_data["pnl_history"] = self._pnl_history
+
             # Persist intraday OHLC so it survives mid-day restarts
             state_data["market_data_ohlc"] = {
                 "spx_open": self.market_data.spx_open,
@@ -5783,6 +5819,10 @@ class HydraStrategy(MEICStrategy):
             # MKT-021: Restore ROC gate state
             self._roc_gate_triggered = saved_state.get("roc_gate_triggered", False)
 
+            # Restore P&L history for dashboard persistence
+            self._pnl_history = saved_state.get("pnl_history", [])
+            logger.info(f"Restored {len(self._pnl_history)} P&L history points from state file")
+
             # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
             ohlc = saved_state.get("market_data_ohlc", {})
             if ohlc:
@@ -6048,6 +6088,7 @@ class HydraStrategy(MEICStrategy):
             preserved_entry_credits = {}
             preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
             preserved_market_ohlc = {}
+            preserved_pnl_history = []  # Dashboard P&L curve
             preserved_early_close_triggered = False  # MKT-018
             preserved_early_close_time = None  # MKT-018
             preserved_early_close_pnl = None  # MKT-018
@@ -6072,6 +6113,7 @@ class HydraStrategy(MEICStrategy):
                             preserved_trend_overrides = saved_state.get("trend_overrides", 0)
                             preserved_credit_gate_skips = saved_state.get("credit_gate_skips", 0)
                             preserved_market_ohlc = saved_state.get("market_data_ohlc", {})
+                            preserved_pnl_history = saved_state.get("pnl_history", [])
                             # MKT-018: Preserve early close state
                             preserved_early_close_triggered = saved_state.get("early_close_triggered", False)
                             ec_time_str = saved_state.get("early_close_time")
@@ -6391,6 +6433,9 @@ class HydraStrategy(MEICStrategy):
                 vix_low = preserved_market_ohlc.get("vix_low", 0.0)
                 if vix_low > 0:
                     self.market_data.vix_low = vix_low
+
+            # Restore P&L history for dashboard persistence
+            self._pnl_history = preserved_pnl_history
 
             # Determine next entry index
             if recovered_entries:

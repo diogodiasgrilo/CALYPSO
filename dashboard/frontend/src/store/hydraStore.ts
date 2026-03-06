@@ -40,6 +40,8 @@ export interface HydraEntry {
   put_long_sold_revenue: number;
   call_spread_value: number;
   put_spread_value: number;
+  call_long_value: number;
+  put_long_value: number;
   [key: string]: unknown;
 }
 
@@ -104,6 +106,11 @@ export interface LogEntry {
   message: string;
 }
 
+export interface PnLDataPoint {
+  time: string; // HH:MM format
+  pnl: number;
+}
+
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
 // ── Store ──
@@ -124,6 +131,9 @@ interface DashboardStore {
 
   // Chart data
   todayOHLC: OHLCBar[];
+
+  // P&L history (server-side, from hydra_state.json pnl_history)
+  pnlHistory: PnLDataPoint[];
 
   // Live log feed
   logLines: LogEntry[];
@@ -147,6 +157,7 @@ export const useHydraStore = create<DashboardStore>()(
     metrics: null,
     market: null,
     todayOHLC: [],
+    pnlHistory: [],
     logLines: [],
 
     setConnectionStatus: (status) =>
@@ -156,7 +167,15 @@ export const useHydraStore = create<DashboardStore>()(
 
     applySnapshot: (data) =>
       set((s) => {
-        if (data.state) s.hydraState = data.state as HydraState;
+        if (data.state) {
+          const state = data.state as HydraState;
+          s.hydraState = state;
+          // Use server-provided P&L history (persisted in hydra_state.json)
+          const serverHistory = (state as Record<string, unknown>).pnl_history as PnLDataPoint[] | undefined;
+          if (serverHistory && serverHistory.length > 0) {
+            s.pnlHistory = serverHistory;
+          }
+        }
         if (data.metrics) s.metrics = data.metrics as CumulativeMetrics;
         if (data.market) s.market = data.market as MarketStatus;
         if (data.today_ohlc) s.todayOHLC = data.today_ohlc as OHLCBar[];
@@ -166,6 +185,11 @@ export const useHydraStore = create<DashboardStore>()(
     applyStateUpdate: (data) =>
       set((s) => {
         s.hydraState = data;
+        // Use server-provided P&L history (persisted in hydra_state.json by bot)
+        const serverHistory = (data as Record<string, unknown>).pnl_history as PnLDataPoint[] | undefined;
+        if (serverHistory && serverHistory.length > 0) {
+          s.pnlHistory = serverHistory;
+        }
       }),
 
     applyMetricsUpdate: (data) =>
