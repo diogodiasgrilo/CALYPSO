@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+/* ── HYDRA Brand Theme (CSS custom properties) ── */
+@theme {
+  --color-bg: #37424f;
+  --color-bg-deep: #2d353f;
+  --color-bg-elevated: #434e5c;
+  --color-border: #4a5568;
+  --color-border-dim: #3d4754;
+
+  --color-profit: #7ee8c7;
+  --color-profit-muted: #5a9e8a;
+  --color-loss: #f85149;
+  --color-loss-muted: #c9413a;
+  --color-warning: #d29922;
+  --color-warning-muted: #a67b1a;
+  --color-info: #58a6ff;
+
+  --color-text-primary: #e8edf3;
+  --color-text-secondary: #8b9bb0;
+  --color-text-dim: #5e6e82;
+
+  --color-card: #2d353f;
+  --color-card-hover: #333d49;
+}
+
+/* ── Base styles ── */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family:
+    "SF Mono", "Fira Code", "JetBrains Mono", ui-monospace, monospace;
+  background-color: var(--color-bg-deep);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Scrollbar (WebKit) ── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-bg-deep);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-dim);
+}
+
+/* ── Flash animations ── */
+@keyframes flash-green {
+  0% { background-color: rgba(126, 232, 199, 0.25); }
+  100% { background-color: transparent; }
+}
+@keyframes flash-red {
+  0% { background-color: rgba(248, 81, 73, 0.25); }
+  100% { background-color: transparent; }
+}
+@keyframes pulse-green {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.flash-up { animation: flash-green 0.6s ease-out; }
+.flash-down { animation: flash-red 0.6s ease-out; }
+.pulse-live { animation: pulse-green 2s ease-in-out infinite; }

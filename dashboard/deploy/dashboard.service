@@ -1,0 +1,31 @@
+[Unit]
+Description=CALYPSO Dashboard API
+After=network.target hydra.service
+Wants=hydra.service
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+ExecStart=/opt/calypso/.venv/bin/uvicorn dashboard.backend.main:app --host 127.0.0.1 --port 8001 --workers 1
+Restart=always
+RestartSec=10
+StartLimitInterval=600
+StartLimitBurst=5
+
+# Environment
+Environment=PYTHONPATH=/opt/calypso
+Environment=DASHBOARD_CALYPSO_ROOT=/opt/calypso
+Environment=DASHBOARD_HYDRA_STATE_FILE=/opt/calypso/data/hydra_state.json
+Environment=DASHBOARD_HYDRA_METRICS_FILE=/opt/calypso/data/hydra_metrics.json
+Environment=DASHBOARD_BACKTESTING_DB=/opt/calypso/data/backtesting.db
+Environment=DASHBOARD_HYDRA_LOG_FILE=/opt/calypso/logs/hydra/bot.log
+Environment=DASHBOARD_AGENT_INTEL_DIR=/opt/calypso/intel
+
+# Resource limits
+MemoryMax=256M
+CPUQuota=25%
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,52 @@
+import { Routes, Route, NavLink } from "react-router-dom";
+import { LayoutDashboard, CalendarDays, BarChart3 } from "lucide-react";
+import { DashboardLayout } from "./components/layout/DashboardLayout";
+import { Dashboard } from "./pages/Dashboard";
+import { History } from "./pages/History";
+import { Analytics } from "./pages/Analytics";
+import { useWebSocket } from "./hooks/useWebSocket";
+
+function NavTabs() {
+  const linkClass = ({ isActive }: { isActive: boolean }) =>
+    `flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+      isActive
+        ? "bg-bg-elevated text-text-primary"
+        : "text-text-secondary hover:text-text-primary"
+    }`;
+
+  return (
+    <nav className="flex gap-1 px-3 py-1.5 bg-bg border-b border-border-dim">
+      <NavLink to="/" end className={linkClass}>
+        <LayoutDashboard size={14} />
+        Dashboard
+      </NavLink>
+      <NavLink to="/history" className={linkClass}>
+        <CalendarDays size={14} />
+        History
+      </NavLink>
+      <NavLink to="/analytics" className={linkClass}>
+        <BarChart3 size={14} />
+        Analytics
+      </NavLink>
+    </nav>
+  );
+}
+
+function App() {
+  useWebSocket();
+
+  return (
+    <DashboardLayout>
+      <NavTabs />
+      <div className="mt-3">
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/history" element={<History />} />
+          <Route path="/analytics" element={<Analytics />} />
+        </Routes>
+      </div>
+    </DashboardLayout>
+  );
+}
+
+export default App;
