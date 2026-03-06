@@ -2,7 +2,7 @@
 
 /** Format a dollar P&L value with sign and color class. */
 export function formatPnL(value: number, decimals = 2): string {
-  const sign = value >= 0 ? "+" : "";
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
   return `${sign}$${Math.abs(value).toFixed(decimals)}`;
 }
 

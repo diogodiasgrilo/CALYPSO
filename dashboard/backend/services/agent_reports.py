@@ -1,7 +1,7 @@
 """Read agent reports (HERMES, APOLLO, CLIO, HOMER, ARGUS)."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +37,7 @@ class AgentReportReader:
                 "filename": latest.name,
                 "date": latest.stem,  # Filename without extension (usually YYYY-MM-DD)
                 "content": content,
-                "modified": datetime.fromtimestamp(latest.stat().st_mtime).isoformat(),
+                "modified": datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc).isoformat(),
             }
         except OSError as e:
             logger.warning(f"Error reading {agent_name} report: {e}")
@@ -59,7 +59,7 @@ class AgentReportReader:
                         "filename": f.name,
                         "date": date_str,
                         "content": f.read_text(encoding="utf-8"),
-                        "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+                        "modified": datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).isoformat(),
                     }
                 except OSError:
                     pass
@@ -84,7 +84,7 @@ class AgentReportReader:
             if md_files:
                 latest = md_files[0]
                 try:
-                    mtime = datetime.fromtimestamp(latest.stat().st_mtime)
+                    mtime = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc)
                     statuses.append({
                         "agent": agent,
                         "last_run": mtime.isoformat(),

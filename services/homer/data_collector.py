@@ -1148,12 +1148,12 @@ def _build_summary_record(
             vix_open = market_ticks[0].get("vix_level")
             vix_close = market_ticks[-1].get("vix_level")
 
-    # P&L
-    gross_pnl = _safe_float(summary.get("Daily P&L ($)")) or None
+    # P&L — Sheets "Daily P&L ($)" is already NET (after commission)
+    net_pnl = _safe_float(summary.get("Daily P&L ($)")) or None
     commission = _safe_float(summary.get("Commission ($)")) or None
-    net_pnl = None
-    if gross_pnl is not None:
-        net_pnl = gross_pnl - (commission or 0)
+    gross_pnl = None
+    if net_pnl is not None:
+        gross_pnl = net_pnl + (commission or 0)
 
     # Entry/stop counts
     entries_placed = None
