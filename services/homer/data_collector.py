@@ -123,7 +123,7 @@ def _build_entries_for_day(
     if trades_rows:
         for row in trades_rows:
             action = str(row.get("Action", "")).strip()
-            if not action.startswith("HYDRA Entry"):
+            if not (action.startswith("HYDRA Entry") or action.startswith("MEIC-TF Entry") or action.startswith("MEIC Entry")):
                 continue
 
             # Filter by date: check Expiry (0DTE) or Timestamp
@@ -133,8 +133,8 @@ def _build_entries_for_day(
                 if not ts.startswith(date_str):
                     continue
 
-            # Parse entry number: "HYDRA Entry #1 [NEUTRAL]"
-            match = re.match(r"HYDRA Entry #(\d+)\s*\[(\w+(?:-\d+)?)\]", action)
+            # Parse entry number: "HYDRA Entry #1 [NEUTRAL]" or "MEIC-TF Entry #1 [NEUTRAL]"
+            match = re.match(r"(?:HYDRA|MEIC(?:-TF)?) Entry #(\d+)\s*\[(\w+(?:-\d+)?)\]", action)
             if not match:
                 continue
             entry_num = match.group(1)
