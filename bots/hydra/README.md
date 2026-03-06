@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.8.0 | **Last Updated:** 2026-03-04
+**Version:** 1.9.2 | **Last Updated:** 2026-03-06
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -89,6 +89,10 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
         "window_minutes": 10,
         "score_threshold": 65,
         "momentum_threshold_pct": 0.05
+    },
+    "long_salvage": {
+        "enabled": true,
+        "min_profit": 10.0
     }
 }
 ```
@@ -111,6 +115,13 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `window_minutes` | `10` | Scouting window before each entry (minutes) |
 | `score_threshold` | `65` | Score >= this triggers early entry |
 | `momentum_threshold_pct` | `0.05` | Momentum calm threshold (0.05 = 0.05%) |
+
+### Long Leg Salvage Config (MKT-033)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `true` | Enable/disable long leg salvage after short stop |
+| `min_profit` | `10.0` | Minimum profit ($) to sell long (covers $5 commission + $5 slippage) |
 
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
@@ -180,7 +191,7 @@ sudo journalctl -u hydra -f
 | Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | Stop formula | total_credit - $0.10 | total_credit - $0.15 (covers commission) |
-| Stop execution | Close both legs | Close SHORT only, long expires (MKT-025) |
+| Stop execution | Close both legs | Close SHORT only; long expires or sold if >= $10 profit (MKT-025 + MKT-033) |
 
 ## Risk Considerations
 
@@ -222,8 +233,9 @@ bots/hydra/
 
 ## Version History
 
+- **1.9.2** (2026-03-05): MKT-033 long leg salvage after short stop. Sells surviving long if appreciated >= $10 (covers $5 commission + $5 slippage). Two triggers: immediately after stop + periodic heartbeat. Revenue added to `total_realized_pnl`. Config: `long_salvage.enabled`, `long_salvage.min_profit`.
 - **1.9.1** (2026-03-05): MKT-032 VIX gate for put-only entries. Put-only only when VIX < 18 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky). Configurable via `put_only_max_vix`.
-- **1.8.0** (2026-03-04): Entry schedule shifted +1hr (11:05-13:05), MKT-031 smart entry windows (10min scouting, 2-parameter scoring: ATR calm 0-70pts + momentum pause 0-30pts, threshold 65), early close day cutoff raised to 12:00 PM
+- **1.8.0** (2026-03-04): Entry schedule shifted to :15/:45 offset (11:15-13:15), MKT-031 smart entry windows (10min scouting, 2-parameter scoring: ATR calm 0-70pts + momentum pause 0-30pts, threshold 65), early close day cutoff raised to 12:00 PM
 - **1.7.2** (2026-03-03): Lower call minimum from $1.00 to $0.75 (credit cushion analysis)
 - **1.7.1** (2026-03-03): Re-enable MKT-011 put-only entries (87.5% WR, +$870 net). Strict $1.00 call min.
 - **1.7.0** (2026-03-03): 8 new Telegram commands (/status, /hermes, /apollo, /week, /entry, /stops, /config, /help)

@@ -22,9 +22,9 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.8.0)
+## HYDRA Strategy Parameters (v1.9.2)
 
-- **5 iron condor entries per day** at 11:05, 11:35, 12:05, 12:35, 13:05 ET (shifted +1hr from original schedule — MKT-031)
+- **5 iron condor entries per day** at 11:15, 11:45, 12:15, 12:45, 13:15 ET (:15/:45 offset — MKT-031)
 - **Smart entry windows (MKT-031):** 10-minute scouting window before each scheduled entry. Scores market conditions (post-spike ATR calm + momentum pause). Score >= 65 triggers early entry. Otherwise enters at scheduled time.
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
@@ -37,8 +37,8 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 
 ## Entry Skip Pattern
 
-Entry #1 (11:05) typically has the RICHEST premium. Earlier entries almost NEVER skip.
-Entry #5 (13:05 / 1:05 PM, the last entry) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
+Entry #1 (11:15) typically has the RICHEST premium. Earlier entries almost NEVER skip.
+Entry #5 (13:15 / 1:15 PM, the last entry) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
 The call side is almost always the reason for skips (premium decays faster on calls).
 
 ## Analysis Framework

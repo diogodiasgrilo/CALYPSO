@@ -247,10 +247,11 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
 
     expired = safe_float(summary.get("Expired Credits ($)", 0))
     stops = safe_float(summary.get("Stop Loss Debits ($)", 0))
+    salvage = safe_float(summary.get("Long Salvage ($)", 0))
     commission = safe_float(summary.get("Commission ($)", 0))
     pnl = safe_float(summary.get("Daily P&L ($)", 0))
 
-    computed = expired - stops - commission
+    computed = expired - stops + salvage - commission
     # Allow small floating point tolerance
     check = "✓" if abs(computed - pnl) < 0.01 else "MISMATCH"
 
@@ -261,9 +262,10 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
         note_parts.append(notes)
     note_str = f" ({', '.join(note_parts)})" if note_parts else ""
 
+    salvage_part = f" + {format_money(salvage)}" if salvage > 0 else ""
     formula_line = (
-        f"- {date_label}: {format_money(expired)} - {format_money(stops)} "
-        f"- {format_money(commission)} = {format_money(pnl)} {check}{note_str}"
+        f"- {date_label}: {format_money(expired)} - {format_money(stops)}"
+        f"{salvage_part} - {format_money(commission)} = {format_money(pnl)} {check}{note_str}"
     )
 
     # Insert after last formula line
