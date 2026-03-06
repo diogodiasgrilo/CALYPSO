@@ -23,7 +23,8 @@ function getStatus(entry: HydraEntry | undefined): EntryStatus {
   if (callStopped || putStopped) return "stopped_single"; // single = amber
 
   if (entry.call_side_expired || entry.put_side_expired) return "expired";
-  if (entry.is_complete) return "active";
+  // Entry has entry_time → it was placed and is active (is_complete may be null in state file)
+  if (entry.entry_time) return "active";
   return "placing";
 }
 
