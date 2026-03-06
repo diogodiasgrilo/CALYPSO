@@ -66,6 +66,12 @@ shared/               # Shared modules used by all bots
 services/             # Standalone services (independent of trading bots)
   token_keeper/       # Keeps Saxo OAuth tokens fresh 24/7
 
+dashboard/            # HYDRA Dashboard (read-only monitoring, v0.1.0)
+  backend/            # FastAPI + WebSocket (port 8001)
+  frontend/           # React 19 + TypeScript + Vite (built → dist/)
+  deploy/             # systemd service + nginx config
+  scriptable/         # iOS Scriptable widget
+
 cloud_functions/      # Google Cloud Functions
   alert_processor/    # Processes alerts from Pub/Sub, sends Telegram/Email
 
@@ -617,6 +623,92 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 # Verify DB contents
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sqlite3 /opt/calypso/data/backtesting.db \"SELECT 'ticks', COUNT(*) FROM market_ticks UNION ALL SELECT 'ohlc', COUNT(*) FROM market_ohlc_1min UNION ALL SELECT 'entries', COUNT(*) FROM trade_entries UNION ALL SELECT 'stops', COUNT(*) FROM trade_stops UNION ALL SELECT 'summaries', COUNT(*) FROM daily_summaries;\""
 ```
+
+---
+
+## HYDRA Dashboard (v0.1.0 — Deployed 2026-03-06)
+
+Real-time read-only monitoring dashboard for the HYDRA trading bot. **100% read-only — zero changes to the bot.** HYDRA has no idea the dashboard exists.
+
+### Architecture
+```
+Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
+                                                      ↓ reads
+                                              hydra_state.json (1s poll)
+                                              hydra_metrics.json (10s poll)
+                                              backtesting.db (30s poll, WAL mode)
+                                              bot.log (2s tail)
+                                              intel/*/*.md (agent reports)
+```
+
+### Services
+| Service | Port | Description |
+|---------|------|-------------|
+| `dashboard.service` | 8001 (localhost) | FastAPI backend (uvicorn, 1 worker) |
+| nginx | 8080 (public) | Reverse proxy + static file server |
+
+### Tech Stack
+- **Backend:** FastAPI + uvicorn, SQLite (query_only=TRUE), WebSocket broadcaster
+- **Frontend:** React 19 + TypeScript + Vite, Tailwind CSS v4, Zustand, Recharts, TradingView Lightweight Charts
+- **PWA:** vite-plugin-pwa (installable on iOS/Android)
+- **Widget:** iOS Scriptable widget (`scriptable/HYDRA_Widget.js`)
+
+### Pages
+| Page | Route | Content |
+|------|-------|---------|
+| Dashboard | `/` | Live entries, SPX chart, cushion bars, P&L, agents, log feed |
+| History | `/history` | Calendar heat map, day drill-down with OHLC charts |
+| Analytics | `/analytics` | Entry time performance, VIX correlation, stop analysis, day-of-week P&L |
+
+### Key API Endpoints
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/health` | Health check |
+| `GET /api/hydra/state` | Current HYDRA state |
+| `GET /api/hydra/entries?date=YYYY-MM-DD` | Entries for a date |
+| `GET /api/hydra/summary` | Daily summary (P&L, entries, stops) |
+| `GET /api/metrics/cumulative` | Lifetime metrics |
+| `GET /api/metrics/daily?days=30` | Daily summaries for calendar |
+| `GET /api/market/ohlc?date=YYYY-MM-DD` | 1-min OHLC for SPX chart |
+| `GET /api/agents/status` | Agent last-run times |
+| `GET /api/widget` | Flat JSON for iOS Scriptable |
+| `WS /ws/dashboard` | WebSocket for real-time updates |
+
+### Safety Guarantees
+- Dashboard is **100% read-only** — never writes to state files, metrics, DB, or logs
+- SQLite opened with `PRAGMA query_only=TRUE`
+- Does NOT import `saxo_client.py`, `token_coordinator.py`, or any trading code
+- Separate systemd service — `systemctl stop dashboard` has zero effect on HYDRA
+- Resource capped: 256MB RAM, 25% CPU
+
+### Commands
+```bash
+# Start/stop/restart dashboard
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start dashboard"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop dashboard"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart dashboard"
+
+# Check status
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status dashboard"
+
+# View logs
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u dashboard -n 50 --no-pager"
+
+# Deploy frontend update (build locally first)
+cd dashboard/frontend && npm run build
+gcloud compute scp --recurse dist/ calypso-bot:/tmp/dashboard-dist --zone=us-east1-b
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo cp -r /tmp/dashboard-dist/* /opt/calypso/dashboard/frontend/dist/ && sudo chown -R calypso:calypso /opt/calypso/dashboard/frontend/dist/ && rm -rf /tmp/dashboard-dist"
+
+# Deploy backend update (pull code, restart service)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find dashboard -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart dashboard"
+```
+
+### Color System (HYDRA Brand)
+All colors derived from the HYDRA logo (dark teal background):
+- Background: `#2a3a42` / Deep: `#1e2c33` / Elevated: `#344a52`
+- Profit: `#7ee8c7` (mint) / Loss: `#f85149` (coral) / Warning: `#d29922` (amber)
+- Defined in `dashboard/frontend/src/lib/tradingColors.ts` and `src/index.css`
 
 ---
 

@@ -1,73 +1,59 @@
-# React + TypeScript + Vite
+# HYDRA Dashboard — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Real-time monitoring dashboard for the HYDRA trading bot. Built with React 19 + TypeScript + Vite.
 
-Currently, two official plugins are available:
+## Tech Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+| Layer | Technology |
+|-------|-----------|
+| Framework | React 19 + TypeScript |
+| Build | Vite 6 |
+| Styling | Tailwind CSS v4 (HYDRA brand color system) |
+| State | Zustand 5 |
+| Charts | Recharts (bar/scatter/area) + TradingView Lightweight Charts (candlestick) |
+| Icons | lucide-react |
+| PWA | vite-plugin-pwa |
 
-## React Compiler
+## Pages
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+| Page | Route | Purpose |
+|------|-------|---------|
+| Dashboard | `/` | Live entries, P&L, SPX chart, cushion bars, agent status, log feed |
+| History | `/history` | Calendar heat map of daily P&L, day drill-down |
+| Analytics | `/analytics` | Entry time performance, VIX correlation, stop analysis, day-of-week P&L |
 
-## Expanding the ESLint configuration
+## Color System
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+All colors derived from the HYDRA logo (dark teal background):
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+- Background: `#2a3a42` / Deep: `#1e2c33` / Elevated: `#344a52`
+- Profit: `#7ee8c7` (mint) / Loss: `#f85149` (coral) / Warning: `#d29922` (amber)
+- Text: Primary `#e8edf3` / Secondary `#8b9bb0` / Dim `#5e6e82`
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+Defined in both `src/lib/tradingColors.ts` (JS) and `src/index.css` (CSS custom properties).
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## Development
+
+```bash
+npm install
+npm run dev          # Dev server at http://localhost:5173
+npm run build        # Production build → dist/
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Dev server proxies `/api/*` and `/ws/*` to the backend (see `vite.config.ts`).
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Deployment
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+Build locally, then copy `dist/` to the VM:
+
+```bash
+npm run build
+gcloud compute scp --recurse dist/ calypso-bot:/tmp/dashboard-dist --zone=us-east1-b
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo cp -r /tmp/dashboard-dist/* /opt/calypso/dashboard/frontend/dist/ && sudo chown -R calypso:calypso /opt/calypso/dashboard/frontend/dist/"
 ```
+
+nginx serves static files from `/opt/calypso/dashboard/frontend/dist/` on port 8080.
+
+## Safety
+
+The dashboard is 100% read-only. It reads HYDRA's existing data files — zero changes to the bot. The bot has no idea the dashboard exists. `systemctl stop dashboard` has zero effect on HYDRA.

@@ -153,7 +153,7 @@ export function Analytics() {
     fontSize: 11,
   };
 
-  const chartCursor = { fill: "rgba(126, 232, 199, 0.08)" };
+  const chartCursor = { fill: "rgba(126, 232, 199, 0.06)", stroke: colors.borderDim };
 
   return (
     <div className="space-y-4">
@@ -177,8 +177,14 @@ export function Analytics() {
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
-              <Tooltip contentStyle={chartTooltipStyle} labelStyle={chartTooltipLabelStyle} itemStyle={chartTooltipItemStyle} cursor={chartCursor} />
-              <Bar dataKey="avgCredit" fill={colors.profit} radius={[3, 3, 0, 0]} />
+              <Tooltip
+                contentStyle={chartTooltipStyle}
+                labelStyle={chartTooltipLabelStyle}
+                itemStyle={chartTooltipItemStyle}
+                cursor={chartCursor}
+                formatter={(value: unknown) => [`$${Number(value ?? 0).toFixed(2)}`, "Avg Credit"]}
+              />
+              <Bar dataKey="avgCredit" name="Avg Credit" fill={colors.profit} radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -273,8 +279,8 @@ export function Analytics() {
                 axisLine={false}
               />
               <Tooltip contentStyle={chartTooltipStyle} labelStyle={chartTooltipLabelStyle} itemStyle={chartTooltipItemStyle} cursor={chartCursor} />
-              <Bar dataKey="total" fill={colors.profitMuted} radius={[3, 3, 0, 0]} />
-              <Bar dataKey="stopped" fill={colors.loss} radius={[3, 3, 0, 0]} />
+              <Bar dataKey="total" name="Total" fill={colors.profitMuted} radius={[3, 3, 0, 0]} />
+              <Bar dataKey="stopped" name="Stopped" fill={colors.loss} radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>

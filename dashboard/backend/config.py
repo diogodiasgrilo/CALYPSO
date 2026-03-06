@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Base path for CALYPSO installation
+    # Base path for CALYPSO installation (dashboard reads HYDRA's data from here)
     calypso_root: Path = Path("/opt/calypso")
 
     # Data files (HYDRA writes these, dashboard reads)

@@ -1,5 +1,5 @@
 [Unit]
-Description=CALYPSO Dashboard API
+Description=HYDRA Dashboard API
 After=network.target hydra.service
 Wants=hydra.service
 

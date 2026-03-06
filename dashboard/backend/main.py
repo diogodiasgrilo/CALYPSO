@@ -1,4 +1,4 @@
-"""CALYPSO Dashboard — FastAPI application."""
+"""HYDRA Dashboard — FastAPI application."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -27,16 +27,16 @@ broadcaster = Broadcaster(manager)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start broadcaster on startup, stop on shutdown."""
-    logger.info("CALYPSO Dashboard starting")
+    logger.info("HYDRA Dashboard starting")
     ws_router_module.set_dependencies(manager, broadcaster)
     await broadcaster.start()
     yield
-    logger.info("CALYPSO Dashboard shutting down")
+    logger.info("HYDRA Dashboard shutting down")
     await broadcaster.stop()
 
 
 app = FastAPI(
-    title="CALYPSO Dashboard",
+    title="HYDRA Dashboard",
     description="Real-time monitoring dashboard for HYDRA trading bot",
     version="0.1.0",
     lifespan=lifespan,
