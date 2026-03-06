@@ -71,27 +71,18 @@ export function Analytics() {
     );
   }
 
-  // ── Entry Time Performance ──
-  const entryTimeMap = new Map<string, { total: number; count: number }>();
-  entries.forEach((e) => {
-    if (!e.entry_time) return;
-    const time = e.entry_time.includes("T")
-      ? e.entry_time.split("T")[1]?.slice(0, 5)
-      : e.entry_time.slice(11, 16);
-    // Round to nearest scheduled time
-    const slot = time ?? "??:??";
-    const prev = entryTimeMap.get(slot) ?? { total: 0, count: 0 };
-    prev.total += e.total_credit || 0;
-    prev.count += 1;
-    entryTimeMap.set(slot, prev);
+  // ── Avg Credit by Entry Slot (E1–E5) ──
+  const ENTRY_TIMES = ["11:15", "11:45", "12:15", "12:45", "13:15"];
+  const creditBySlot = Array.from({ length: 5 }, (_, i) => {
+    const entryNum = i + 1;
+    const matching = entries.filter((e) => e.entry_number === entryNum);
+    const totalCredit = matching.reduce((sum, e) => sum + (e.total_credit || 0), 0);
+    return {
+      slot: `E${entryNum} (${ENTRY_TIMES[i]})`,
+      avgCredit: matching.length > 0 ? totalCredit / matching.length : 0,
+      count: matching.length,
+    };
   });
-  const entryTimeData = Array.from(entryTimeMap.entries())
-    .map(([time, { total, count }]) => ({
-      time,
-      avgCredit: count > 0 ? total / count : 0,
-      count,
-    }))
-    .sort((a, b) => a.time.localeCompare(b.time));
 
   // ── Day of Week Performance ──
   const dowMap = new Map<string, { total: number; count: number }>();
@@ -119,15 +110,21 @@ export function Analytics() {
       pnl: s.net_pnl,
     }));
 
-  // ── Stop Analysis by Entry ──
-  const stopsByEntry = Array.from({ length: 5 }, (_, i) => {
+  // ── Stop Rate by Entry Slot ──
+  const stopRateByEntry = Array.from({ length: 5 }, (_, i) => {
     const entryNum = i + 1;
     const matching = entries.filter((e) => e.entry_number === entryNum);
     const entryStops = stops.filter((s) => s.entry_number === entryNum);
+    const callStops = entryStops.filter((s) => s.side === "call").length;
+    const putStops = entryStops.filter((s) => s.side === "put").length;
+    const total = matching.length;
     return {
       entry: `E${entryNum}`,
-      total: matching.length,
-      stopped: entryStops.length,
+      callStopPct: total > 0 ? (callStops / total) * 100 : 0,
+      putStopPct: total > 0 ? (putStops / total) * 100 : 0,
+      total,
+      callStops,
+      putStops,
     };
   });
 
@@ -160,16 +157,16 @@ export function Analytics() {
       <h2 className="text-sm font-semibold text-text-primary">Analytics</h2>
 
       <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-        {/* Entry Time Performance */}
+        {/* Avg Credit by Entry Slot */}
         <div className="bg-card rounded-lg border border-border-dim p-4">
           <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3">
-            Avg Credit by Entry Time
+            Avg Credit by Entry Slot
           </h3>
           <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={entryTimeData}>
+            <BarChart data={creditBySlot}>
               <XAxis
-                dataKey="time"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                dataKey="slot"
+                tick={{ fontSize: 9, fill: colors.textDim }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
@@ -182,7 +179,11 @@ export function Analytics() {
                 labelStyle={chartTooltipLabelStyle}
                 itemStyle={chartTooltipItemStyle}
                 cursor={chartCursor}
-                formatter={(value: unknown) => [`$${Number(value ?? 0).toFixed(2)}`, "Avg Credit"]}
+                formatter={(value: unknown, _name: unknown, props: { payload?: { count?: number } }) => {
+                  const v = Number(value ?? 0);
+                  const n = props?.payload?.count ?? 0;
+                  return [`$${v.toFixed(2)} (${n} entries)`, "Avg Credit"];
+                }}
               />
               <Bar dataKey="avgCredit" name="Avg Credit" fill={colors.profit} radius={[3, 3, 0, 0]} />
             </BarChart>
@@ -262,13 +263,13 @@ export function Analytics() {
           </ResponsiveContainer>
         </div>
 
-        {/* Entry Count Distribution */}
+        {/* Stop Rate by Entry Slot */}
         <div className="bg-card rounded-lg border border-border-dim p-4">
           <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3">
-            Entries per Slot
+            Stop Rate by Entry Slot
           </h3>
           <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={stopsByEntry}>
+            <BarChart data={stopRateByEntry}>
               <XAxis
                 dataKey="entry"
                 tick={{ fontSize: 10, fill: colors.textDim }}
@@ -277,10 +278,23 @@ export function Analytics() {
               <YAxis
                 tick={{ fontSize: 10, fill: colors.textDim }}
                 axisLine={false}
+                tickFormatter={(v) => `${v}%`}
+                domain={[0, 100]}
               />
-              <Tooltip contentStyle={chartTooltipStyle} labelStyle={chartTooltipLabelStyle} itemStyle={chartTooltipItemStyle} cursor={chartCursor} />
-              <Bar dataKey="total" name="Total" fill={colors.profitMuted} radius={[3, 3, 0, 0]} />
-              <Bar dataKey="stopped" name="Stopped" fill={colors.loss} radius={[3, 3, 0, 0]} />
+              <Tooltip
+                contentStyle={chartTooltipStyle}
+                labelStyle={chartTooltipLabelStyle}
+                itemStyle={chartTooltipItemStyle}
+                cursor={chartCursor}
+                formatter={(value: unknown, name: unknown, props: { payload?: { total?: number; callStops?: number; putStops?: number } }) => {
+                  const v = Number(value ?? 0);
+                  const p = props?.payload;
+                  const label = String(name ?? "");
+                  return [`${v.toFixed(0)}% (${label === "Call Stops" ? p?.callStops : p?.putStops}/${p?.total})`, label];
+                }}
+              />
+              <Bar dataKey="callStopPct" name="Call Stops" fill={colors.warning} radius={[3, 3, 0, 0]} stackId="stops" />
+              <Bar dataKey="putStopPct" name="Put Stops" fill={colors.loss} radius={[3, 3, 0, 0]} stackId="stops" />
             </BarChart>
           </ResponsiveContainer>
         </div>
