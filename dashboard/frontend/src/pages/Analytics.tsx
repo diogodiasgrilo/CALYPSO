@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   BarChart,
   Bar,
+  Cell,
   XAxis,
   YAxis,
   Tooltip,
@@ -136,6 +137,13 @@ export function Analytics() {
     borderRadius: 6,
     fontSize: 11,
     color: colors.textPrimary,
+    boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+  };
+
+  const chartTooltipLabelStyle = {
+    color: colors.textSecondary,
+    fontSize: 10,
+    fontWeight: 600,
   };
 
   return (
@@ -160,7 +168,7 @@ export function Analytics() {
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
-              <Tooltip contentStyle={chartTooltipStyle} />
+              <Tooltip contentStyle={chartTooltipStyle} labelStyle={chartTooltipLabelStyle} />
               <Bar dataKey="avgCredit" fill={colors.profit} radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -185,13 +193,14 @@ export function Analytics() {
               />
               <Tooltip
                 contentStyle={chartTooltipStyle}
+                labelStyle={chartTooltipLabelStyle}
                 formatter={(value: unknown) => [formatPnL(Number(value ?? 0)), "Avg P&L"]}
               />
-              <Bar
-                dataKey="avgPnl"
-                radius={[3, 3, 0, 0]}
-                fill={colors.profit}
-              />
+              <Bar dataKey="avgPnl" radius={[3, 3, 0, 0]}>
+                {dowData.map((d, i) => (
+                  <Cell key={i} fill={d.avgPnl >= 0 ? colors.profit : colors.loss} />
+                ))}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -222,6 +231,7 @@ export function Analytics() {
               />
               <Tooltip
                 contentStyle={chartTooltipStyle}
+                labelStyle={chartTooltipLabelStyle}
                 formatter={(value: unknown, name: unknown) => {
                   const v = Number(value ?? 0);
                   const n = String(name ?? "");
@@ -249,7 +259,7 @@ export function Analytics() {
                 tick={{ fontSize: 10, fill: colors.textDim }}
                 axisLine={false}
               />
-              <Tooltip contentStyle={chartTooltipStyle} />
+              <Tooltip contentStyle={chartTooltipStyle} labelStyle={chartTooltipLabelStyle} />
               <Bar dataKey="total" fill={colors.profitMuted} radius={[3, 3, 0, 0]} />
               <Bar dataKey="stopped" fill={colors.loss} radius={[3, 3, 0, 0]} />
             </BarChart>

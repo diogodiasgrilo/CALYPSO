@@ -1,12 +1,12 @@
 /** HYDRA brand color system — extracted from the HYDRA logo. */
 
 export const colors = {
-  // Backgrounds
-  bg: "#37424f",
-  bgDeep: "#2d353f",
-  bgElevated: "#434e5c",
-  border: "#4a5568",
-  borderDim: "#3d4754",
+  // Backgrounds (matched to HYDRA logo)
+  bg: "#2a3a42",
+  bgDeep: "#1e2c33",
+  bgElevated: "#344a52",
+  border: "#3d5058",
+  borderDim: "#2f424a",
 
   // P&L
   profit: "#7ee8c7",
@@ -23,8 +23,8 @@ export const colors = {
   textDim: "#5e6e82",
 
   // Cards
-  card: "#2d353f",
-  cardHover: "#333d49",
+  card: "#1e2c33",
+  cardHover: "#253540",
 } as const;
 
 /** Color for a P&L value. */

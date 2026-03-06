@@ -39,9 +39,12 @@ export function AgentStatusPanel() {
           {agents.map((a) => {
             const hasRun = a.last_run != null;
             const lastRunDate = hasRun ? new Date(a.last_run!) : null;
-            const isRecent =
-              lastRunDate &&
-              Date.now() - lastRunDate.getTime() < 24 * 60 * 60 * 1000;
+            // "Recent" = ran today (same ET calendar date)
+            const nowET = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
+            const runET = lastRunDate
+              ? lastRunDate.toLocaleDateString("en-US", { timeZone: "America/New_York" })
+              : null;
+            const isRecent = runET === nowET;
 
             return (
               <div

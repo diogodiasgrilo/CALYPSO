@@ -2,11 +2,11 @@
 
 /* ── HYDRA Brand Theme (CSS custom properties) ── */
 @theme {
-  --color-bg: #37424f;
-  --color-bg-deep: #2d353f;
-  --color-bg-elevated: #434e5c;
-  --color-border: #4a5568;
-  --color-border-dim: #3d4754;
+  --color-bg: #2a3a42;
+  --color-bg-deep: #1e2c33;
+  --color-bg-elevated: #344a52;
+  --color-border: #3d5058;
+  --color-border-dim: #2f424a;
 
   --color-profit: #7ee8c7;
   --color-profit-muted: #5a9e8a;
@@ -20,8 +20,8 @@
   --color-text-secondary: #8b9bb0;
   --color-text-dim: #5e6e82;
 
-  --color-card: #2d353f;
-  --color-card-hover: #333d49;
+  --color-card: #1e2c33;
+  --color-card-hover: #253540;
 }
 
 /* ── Base styles ── */
