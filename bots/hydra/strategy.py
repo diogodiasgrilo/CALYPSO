@@ -2695,7 +2695,7 @@ class HydraStrategy(MEICStrategy):
     # MKT-033: LONG LEG SALVAGE (SELL PROFITABLE LONGS AFTER SHORT STOP)
     # =========================================================================
 
-    def _try_sell_long_leg(self, entry, side: str) -> bool:
+    def _try_sell_long_leg(self, entry, side: str, valid_pos_ids: set = None) -> bool:
         """
         MKT-033: Sell the surviving long leg if profitable after short stop.
 
@@ -2732,6 +2732,83 @@ class HydraStrategy(MEICStrategy):
             return False
 
         try:
+            # Verify position still exists in Saxo (may have been manually closed)
+            if valid_pos_ids is not None:
+                pos_exists = str(long_pos_id) in valid_pos_ids
+            else:
+                positions = self.client.get_positions()
+                pos_exists = any(
+                    str(p.get("PositionId", "")) == str(long_pos_id)
+                    for p in positions
+                )
+            if not pos_exists:
+                logger.info(
+                    f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} "
+                    f"(pos {long_pos_id}) no longer in Saxo — detecting external close"
+                )
+                # Look up actual sale price from closedpositions
+                closed = self.client.get_closed_position_price(
+                    long_uic, buy_or_sell="Sell"
+                )
+                if closed and closed.get("closing_price", 0) > 0:
+                    fill_price = closed["closing_price"]
+                    revenue = fill_price * 100 * entry.contracts
+                    close_commission = self.commission_per_leg * self.contracts_per_entry
+
+                    self.daily_state.total_realized_pnl += revenue
+                    self.daily_state.total_commission += close_commission
+                    entry.close_commission += close_commission
+
+                    if side == "call":
+                        entry.call_long_sold = True
+                        entry.call_long_sold_revenue = revenue
+                        entry.long_call_position_id = None
+                        entry.long_call_uic = None
+                    else:
+                        entry.put_long_sold = True
+                        entry.put_long_sold_revenue = revenue
+                        entry.long_put_position_id = None
+                        entry.long_put_uic = None
+
+                    try:
+                        self.registry.unregister(long_pos_id)
+                    except Exception:
+                        pass
+
+                    net_profit = revenue - close_commission
+                    logger.info(
+                        f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} sold externally "
+                        f"@ ${fill_price:.2f} (revenue=${revenue:.2f}, "
+                        f"commission=${close_commission:.2f}, net=+${net_profit:.2f})"
+                    )
+                    self._log_safety_event(
+                        "LONG_SOLD_EXTERNAL",
+                        f"Entry #{entry.entry_number} long {side} sold externally "
+                        f"@ ${fill_price:.2f}, revenue=${revenue:.2f}"
+                    )
+                else:
+                    logger.warning(
+                        f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} missing, "
+                        f"no closing price found — marking as sold with $0"
+                    )
+                    if side == "call":
+                        entry.call_long_sold = True
+                        entry.call_long_sold_revenue = 0.0
+                        entry.long_call_position_id = None
+                        entry.long_call_uic = None
+                    else:
+                        entry.put_long_sold = True
+                        entry.put_long_sold_revenue = 0.0
+                        entry.long_put_position_id = None
+                        entry.long_put_uic = None
+                    try:
+                        self.registry.unregister(long_pos_id)
+                    except Exception:
+                        pass
+
+                self._save_state_to_disk()
+                return False  # Not sold by us, but accounted for
+
             # Fetch quote for bid price
             quote = self.client.get_quote(long_uic, asset_type="StockIndexOption")
             if not quote:
@@ -2896,16 +2973,24 @@ class HydraStrategy(MEICStrategy):
         if now.hour < 9 or (now.hour == 9 and now.minute < 30) or now.hour >= 16:
             return
 
+        # Fetch positions once for all long salvage checks (avoid N API calls)
+        try:
+            all_positions = self.client.get_positions()
+            valid_pos_ids = {str(p.get("PositionId", "")) for p in all_positions}
+        except Exception as e:
+            logger.warning(f"MKT-033: Could not fetch positions: {e}")
+            return
+
         for entry in self.daily_state.entries:
             # Check call side: short stopped, long still open and unsold
             if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False):
                 if entry.long_call_position_id and entry.long_call_uic:
-                    self._try_sell_long_leg(entry, "call")
+                    self._try_sell_long_leg(entry, "call", valid_pos_ids)
 
             # Check put side: short stopped, long still open and unsold
             if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False):
                 if entry.long_put_position_id and entry.long_put_uic:
-                    self._try_sell_long_leg(entry, "put")
+                    self._try_sell_long_leg(entry, "put", valid_pos_ids)
 
     def _get_saxo_pnl_for_entry(self, entry, positions=None):
         """MKT-025: Exclude stopped sides' positions from Saxo P&L lookup.
@@ -5298,6 +5383,101 @@ class HydraStrategy(MEICStrategy):
             )
 
         return total_expired_credit
+
+    def _reconcile_positions(self):
+        """Override: After base reconciliation, detect manually closed longs.
+
+        When a long leg disappears from Saxo (manually sold by the user),
+        the base class clears position_id and UIC. This override checks
+        Saxo's closedpositions API to capture the actual sale revenue,
+        replicating what MKT-033 would have recorded.
+        """
+        # Snapshot which long legs have UICs BEFORE base reconciliation clears them
+        pre_longs = {}
+        for entry in self.daily_state.entries:
+            if not entry.entry_time:
+                continue
+            for side in ("call", "put"):
+                sold = getattr(entry, f"{side}_long_sold", False)
+                uic = getattr(entry, f"long_{side}_uic", None)
+                pos_id = getattr(entry, f"long_{side}_position_id", None)
+                if uic and pos_id and not sold:
+                    pre_longs[(entry.entry_number, side)] = {
+                        "uic": uic,
+                        "pos_id": pos_id,
+                    }
+
+        # Run base reconciliation (clears position_id + UIC for missing legs)
+        super()._reconcile_positions()
+
+        # Check which long legs just disappeared
+        for (entry_num, side), info in pre_longs.items():
+            entry = next(
+                (e for e in self.daily_state.entries if e.entry_number == entry_num),
+                None,
+            )
+            if entry is None:
+                continue
+
+            uic_now = getattr(entry, f"long_{side}_uic", None)
+            if uic_now is not None:
+                continue  # Still present, not missing
+
+            # Long leg was just cleared by base reconciliation — look up close price
+            already_sold = getattr(entry, f"{side}_long_sold", False)
+            if already_sold:
+                continue  # Already accounted for
+
+            logger.info(
+                f"MKT-033 AUTO: Entry #{entry_num} long {side} (UIC {info['uic']}) "
+                f"missing from Saxo — checking closedpositions for sale revenue"
+            )
+
+            try:
+                # Long positions are "Buy" direction; selling them is recorded as "Sell"
+                closed = self.client.get_closed_position_price(
+                    info["uic"], buy_or_sell="Sell"
+                )
+                if closed and closed.get("closing_price", 0) > 0:
+                    fill_price = closed["closing_price"]
+                    revenue = fill_price * 100 * self.contracts_per_entry
+                    close_commission = self.commission_per_leg * self.contracts_per_entry
+
+                    # Record exactly as MKT-033 does
+                    self.daily_state.total_realized_pnl += revenue
+                    self.daily_state.total_commission += close_commission
+                    entry.close_commission += close_commission
+
+                    setattr(entry, f"{side}_long_sold", True)
+                    setattr(entry, f"{side}_long_sold_revenue", revenue)
+
+                    net_profit = revenue - close_commission
+                    logger.info(
+                        f"MKT-033 AUTO: Entry #{entry_num} long {side} sold externally "
+                        f"@ ${fill_price:.2f} (revenue=${revenue:.2f}, "
+                        f"commission=${close_commission:.2f}, net=+${net_profit:.2f})"
+                    )
+                    self._log_safety_event(
+                        "LONG_SOLD_EXTERNAL",
+                        f"Entry #{entry_num} long {side} sold externally @ ${fill_price:.2f}, "
+                        f"revenue=${revenue:.2f}"
+                    )
+                else:
+                    logger.warning(
+                        f"MKT-033 AUTO: Entry #{entry_num} long {side} missing but "
+                        f"no closing price found — may have expired worthless"
+                    )
+                    # Mark as sold with $0 revenue to prevent repeated lookups
+                    setattr(entry, f"{side}_long_sold", True)
+                    setattr(entry, f"{side}_long_sold_revenue", 0.0)
+            except Exception as e:
+                logger.error(
+                    f"MKT-033 AUTO: Error looking up close price for Entry #{entry_num} "
+                    f"long {side}: {e}"
+                )
+
+        # Save state with any new salvage data
+        self._save_state_to_disk()
 
     def check_after_hours_settlement(self) -> bool:
         """
