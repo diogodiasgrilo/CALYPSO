@@ -4,20 +4,32 @@ import { pnlColor, colors } from "../../lib/tradingColors";
 import { useAnimatedNumber } from "../../hooks/useAnimatedNumber";
 import { CushionBar } from "./CushionBar";
 import { StatusBadge } from "../shared/StatusBadge";
+import type { EntryStatus } from "../shared/StatusBadge";
 
 interface EntryCardProps {
   entry: HydraEntry;
-  spxPrice?: number;
 }
 
-function getEntryStatus(e: HydraEntry) {
-  if (!e.entry_time) return "pending" as const;
-  if (e.call_side_stopped || e.put_side_stopped) return "stopped" as const;
-  if (e.call_side_expired || e.put_side_expired) return "expired" as const;
-  if (e.call_side_skipped && e.put_side_skipped) return "skipped" as const;
+function getEntryStatus(e: HydraEntry): {
+  status: EntryStatus;
+  stoppedSide?: "call" | "put";
+} {
+  if (!e.entry_time) return { status: "pending" };
+  if (e.call_side_skipped && e.put_side_skipped) return { status: "skipped" };
+
+  const callStopped = e.call_side_stopped;
+  const putStopped = e.put_side_stopped;
+  const bothStopped = callStopped && putStopped;
+
+  if (bothStopped) return { status: "stopped" }; // double stop = red
+  if (callStopped) return { status: "stopped_single", stoppedSide: "call" };
+  if (putStopped) return { status: "stopped_single", stoppedSide: "put" };
+
+  if (e.call_side_expired || e.put_side_expired) return { status: "expired" };
+
   // is_complete means "entry placement finished" — if no terminal flags, it's LIVE
-  if (e.is_complete) return "active" as const;
-  return "placing" as const;
+  if (e.is_complete) return { status: "active" };
+  return { status: "placing" };
 }
 
 // Matches bot's cushion formula: (stop_level - spread_value) / stop_level * 100
@@ -62,7 +74,7 @@ function computeEntryPnl(e: HydraEntry) {
 }
 
 export function EntryCard({ entry }: EntryCardProps) {
-  const status = getEntryStatus(entry);
+  const { status, stoppedSide } = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
 
   const { currentPnl, maxProfit } = computeEntryPnl(entry);
@@ -83,20 +95,32 @@ export function EntryCard({ entry }: EntryCardProps) {
       ? "MKT-011"
       : entry.trend_signal ?? "";
 
-  const showLiveData = status === "active" || status === "stopped";
+  // Show live data for active entries AND single-stopped entries (surviving side still live)
+  const showLiveData =
+    status === "active" || status === "stopped_single" || status === "stopped";
+
+  // Determine border color
+  const borderColor =
+    status === "active"
+      ? colors.info
+      : status === "stopped"
+        ? colors.loss
+        : status === "stopped_single"
+          ? colors.warning
+          : status === "expired"
+            ? colors.profit
+            : colors.textDim;
+
+  // Determine which sides are still active (for cushion display on stopped entries)
+  const callStillActive = !entry.call_side_stopped && !entry.call_side_skipped && !entry.call_side_expired;
+  const putStillActive = !entry.put_side_stopped && !entry.put_side_skipped && !entry.put_side_expired;
+  const showCushion = status === "active" || status === "stopped_single";
 
   return (
     <div
       className="bg-card rounded-lg border border-border-dim p-3 hover:bg-card-hover transition-colors"
       style={{
-        borderLeftColor:
-          status === "active"
-            ? colors.info
-            : status === "stopped"
-            ? colors.loss
-            : status === "expired"
-            ? colors.profit
-            : colors.textDim,
+        borderLeftColor: borderColor,
         borderLeftWidth: 3,
       }}
     >
@@ -112,7 +136,7 @@ export function EntryCard({ entry }: EntryCardProps) {
             </span>
           )}
         </div>
-        <StatusBadge status={status} />
+        <StatusBadge status={status} stoppedSide={stoppedSide} />
       </div>
 
       {/* Time + Credit */}
@@ -154,18 +178,22 @@ export function EntryCard({ entry }: EntryCardProps) {
         </div>
       )}
 
-      {/* Cushion bars */}
-      {status === "active" && (
+      {/* Cushion bars — show for active entries AND single-stopped (surviving side) */}
+      {showCushion && (
         <div className="space-y-1">
           <CushionBar
             label="C"
             percentage={callCushion}
             skipped={entry.call_side_skipped || entry.put_only}
+            stopped={entry.call_side_stopped}
+            active={callStillActive}
           />
           <CushionBar
             label="P"
             percentage={putCushion}
             skipped={entry.put_side_skipped || entry.call_only}
+            stopped={entry.put_side_stopped}
+            active={putStillActive}
           />
         </div>
       )}

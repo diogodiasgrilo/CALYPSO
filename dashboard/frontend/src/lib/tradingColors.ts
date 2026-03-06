@@ -53,7 +53,7 @@ export function cushionColor(pct: number): string {
 
 /** Entry status badge colors. */
 export function statusColor(
-  status: "active" | "expired" | "stopped" | "skipped" | "pending" | "placing"
+  status: "active" | "expired" | "stopped" | "stopped_single" | "skipped" | "pending" | "placing"
 ): string {
   switch (status) {
     case "active":
@@ -63,7 +63,9 @@ export function statusColor(
     case "expired":
       return colors.profit;
     case "stopped":
-      return colors.loss;
+      return colors.loss; // double stop = red
+    case "stopped_single":
+      return colors.warning; // single stop = amber/yellow
     case "skipped":
       return colors.textDim;
     case "pending":

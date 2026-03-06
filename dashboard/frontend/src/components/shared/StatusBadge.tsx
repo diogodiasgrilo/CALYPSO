@@ -1,13 +1,31 @@
 import { statusColor } from "../../lib/tradingColors";
 
-type EntryStatus = "active" | "expired" | "stopped" | "skipped" | "pending" | "placing";
+export type EntryStatus =
+  | "active"
+  | "expired"
+  | "stopped"
+  | "stopped_single"
+  | "skipped"
+  | "pending"
+  | "placing";
 
 interface StatusBadgeProps {
   status: EntryStatus;
+  /** For single stops, which side was stopped ("call" | "put") */
+  stoppedSide?: "call" | "put";
 }
 
-export function StatusBadge({ status }: StatusBadgeProps) {
+function getLabel(status: EntryStatus, stoppedSide?: "call" | "put"): string {
+  if (status === "stopped_single" && stoppedSide) {
+    return stoppedSide === "call" ? "Call Stopped" : "Put Stopped";
+  }
+  if (status === "stopped") return "Double Stop";
+  return status;
+}
+
+export function StatusBadge({ status, stoppedSide }: StatusBadgeProps) {
   const color = statusColor(status);
+  const label = getLabel(status, stoppedSide);
 
   return (
     <span
@@ -25,7 +43,7 @@ export function StatusBadge({ status }: StatusBadgeProps) {
           style={{ backgroundColor: color }}
         />
       )}
-      {status}
+      {label}
     </span>
   );
 }

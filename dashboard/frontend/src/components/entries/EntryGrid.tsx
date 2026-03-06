@@ -2,13 +2,8 @@ import { useHydraStore } from "../../store/hydraStore";
 import { EntryCard } from "./EntryCard";
 
 export function EntryGrid() {
-  const { hydraState, todayOHLC } = useHydraStore();
+  const { hydraState } = useHydraStore();
   const entries = hydraState?.entries ?? [];
-
-  // Current SPX price: last OHLC bar close, fall back to state file midrange
-  const lastBar = todayOHLC.length > 0 ? todayOHLC[todayOHLC.length - 1] : null;
-  const ohlc = hydraState?.market_data_ohlc;
-  const spxPrice = lastBar?.close ?? (ohlc?.spx_high ? (ohlc.spx_high + ohlc.spx_low) / 2 : 0);
 
   // Pad to 5 slots
   const slots = Array.from({ length: 5 }, (_, i) =>
@@ -23,7 +18,7 @@ export function EntryGrid() {
       <div className="grid grid-cols-5 gap-2 max-lg:grid-cols-3 max-sm:grid-cols-1">
         {slots.map((entry, i) =>
           entry ? (
-            <EntryCard key={i} entry={entry} spxPrice={spxPrice} />
+            <EntryCard key={i} entry={entry} />
           ) : (
             <div
               key={i}

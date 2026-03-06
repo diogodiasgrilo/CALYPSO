@@ -1,17 +1,37 @@
-import { cushionColor } from "../../lib/tradingColors";
+import { cushionColor, colors } from "../../lib/tradingColors";
 
 interface CushionBarProps {
   label: string;
   percentage: number;
   skipped?: boolean;
+  stopped?: boolean;
+  active?: boolean;
 }
 
-export function CushionBar({ label, percentage, skipped }: CushionBarProps) {
+export function CushionBar({ label, percentage, skipped, stopped, active }: CushionBarProps) {
   if (skipped) {
     return (
       <div className="flex items-center gap-2 text-xs">
         <span className="text-text-dim w-6">{label}</span>
         <span className="text-text-dim">SKIPPED</span>
+      </div>
+    );
+  }
+
+  if (stopped) {
+    return (
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-text-dim w-6">{label}</span>
+        <span style={{ color: colors.loss }} className="font-semibold">STOPPED</span>
+      </div>
+    );
+  }
+
+  if (!active) {
+    return (
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-text-dim w-6">{label}</span>
+        <span className="text-text-dim">--</span>
       </div>
     );
   }

@@ -1,6 +1,7 @@
 import { useHydraStore } from "../../store/hydraStore";
 import type { HydraEntry } from "../../store/hydraStore";
 import { statusColor } from "../../lib/tradingColors";
+import type { EntryStatus } from "../shared/StatusBadge";
 
 const ENTRY_TIMES = ["11:15", "11:45", "12:15", "12:45", "13:15"];
 const TIMELINE_START = 9.5 * 60; // 9:30 in minutes
@@ -12,12 +13,18 @@ function timeToMinutes(timeStr: string): number {
   return h * 60 + m;
 }
 
-function getStatus(entry: HydraEntry | undefined) {
-  if (!entry || !entry.entry_time) return "pending" as const;
-  if (!entry.is_complete) return "active" as const;
-  if (entry.call_side_stopped || entry.put_side_stopped) return "stopped" as const;
-  if (entry.call_side_skipped && entry.put_side_skipped) return "skipped" as const;
-  return "expired" as const;
+function getStatus(entry: HydraEntry | undefined): EntryStatus {
+  if (!entry || !entry.entry_time) return "pending";
+  if (entry.call_side_skipped && entry.put_side_skipped) return "skipped";
+
+  const callStopped = entry.call_side_stopped;
+  const putStopped = entry.put_side_stopped;
+  if (callStopped && putStopped) return "stopped"; // double = red
+  if (callStopped || putStopped) return "stopped_single"; // single = amber
+
+  if (entry.call_side_expired || entry.put_side_expired) return "expired";
+  if (entry.is_complete) return "active";
+  return "placing";
 }
 
 export function EntryTimeline() {
