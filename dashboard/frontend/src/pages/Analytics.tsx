@@ -268,35 +268,41 @@ export function Analytics() {
           <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3">
             Stop Rate by Entry Slot
           </h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={stopRateByEntry}>
-              <XAxis
-                dataKey="entry"
-                tick={{ fontSize: 10, fill: colors.textDim }}
-                axisLine={{ stroke: colors.borderDim }}
-              />
-              <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
-                axisLine={false}
-                tickFormatter={(v) => `${v}%`}
-                domain={[0, 100]}
-              />
-              <Tooltip
-                contentStyle={chartTooltipStyle}
-                labelStyle={chartTooltipLabelStyle}
-                itemStyle={chartTooltipItemStyle}
-                cursor={chartCursor}
-                formatter={(value: unknown, name: unknown, props: { payload?: { total?: number; callStops?: number; putStops?: number } }) => {
-                  const v = Number(value ?? 0);
-                  const p = props?.payload;
-                  const label = String(name ?? "");
-                  return [`${v.toFixed(0)}% (${label === "Call Stops" ? p?.callStops : p?.putStops}/${p?.total})`, label];
-                }}
-              />
-              <Bar dataKey="callStopPct" name="Call Stops" fill={colors.warning} radius={[3, 3, 0, 0]} stackId="stops" />
-              <Bar dataKey="putStopPct" name="Put Stops" fill={colors.loss} radius={[3, 3, 0, 0]} stackId="stops" />
-            </BarChart>
-          </ResponsiveContainer>
+          {stops.length === 0 ? (
+            <div className="flex items-center justify-center h-[200px] text-text-dim text-xs">
+              No stops recorded yet — data will appear after stop events occur
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={stopRateByEntry}>
+                <XAxis
+                  dataKey="entry"
+                  tick={{ fontSize: 10, fill: colors.textDim }}
+                  axisLine={{ stroke: colors.borderDim }}
+                />
+                <YAxis
+                  tick={{ fontSize: 10, fill: colors.textDim }}
+                  axisLine={false}
+                  tickFormatter={(v) => `${v}%`}
+                  domain={[0, 100]}
+                />
+                <Tooltip
+                  contentStyle={chartTooltipStyle}
+                  labelStyle={chartTooltipLabelStyle}
+                  itemStyle={chartTooltipItemStyle}
+                  cursor={chartCursor}
+                  formatter={(value: unknown, name: unknown, props: { payload?: { total?: number; callStops?: number; putStops?: number } }) => {
+                    const v = Number(value ?? 0);
+                    const p = props?.payload;
+                    const label = String(name ?? "");
+                    return [`${v.toFixed(0)}% (${label === "Call Stops" ? p?.callStops : p?.putStops}/${p?.total})`, label];
+                  }}
+                />
+                <Bar dataKey="callStopPct" name="Call Stops" fill={colors.warning} radius={[3, 3, 0, 0]} stackId="stops" />
+                <Bar dataKey="putStopPct" name="Put Stops" fill={colors.loss} radius={[3, 3, 0, 0]} stackId="stops" />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
     </div>

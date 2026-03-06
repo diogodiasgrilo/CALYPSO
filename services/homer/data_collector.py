@@ -82,6 +82,9 @@ def collect_day_data(
         date_str,
     )
 
+    # Pass trades_rows through for stop record building (Positions tab is cleared daily)
+    day["trades_rows"] = all_data.get("trades_rows")
+
     # Include cumulative metrics
     day["metrics"] = all_data.get("metrics", {})
 
@@ -915,12 +918,13 @@ def build_db_records(
 
     entries = day_data.get("entries", [])
     summary = day_data.get("summary", {})
+    trades_rows = day_data.get("trades_rows")
 
     # Build trade_entries records
     result["trade_entries"] = _build_entry_records(entries, date_str, ticks)
 
-    # Build trade_stops records
-    result["trade_stops"] = _build_stop_records(entries, date_str, ticks)
+    # Build trade_stops records from Trades tab (not Positions — it's cleared daily)
+    result["trade_stops"] = _build_stop_records(trades_rows, date_str, ticks)
 
     # Build daily_summary record
     if summary:
@@ -1052,62 +1056,71 @@ def _build_entry_records(
 
 
 def _build_stop_records(
-    entries: List[Dict], date_str: str, ticks: List[Dict]
+    trades_rows: Optional[List[Dict]], date_str: str, ticks: List[Dict]
 ) -> List[Dict[str, Any]]:
-    """Transform Sheets entry data into trade_stops DB records."""
+    """Build trade_stops records from Trades tab stop rows.
+
+    The Trades tab contains rows with Action like "HYDRA Stop #3 (PUT)"
+    or "MEIC Stop #1 (CALL)". We parse entry_number and side from Action,
+    and get P&L and SPX price from the row columns.
+
+    Note: The old approach used the Positions tab Outcome column, but
+    the Positions tab is cleared after each trading day, so it's always
+    empty by the time HOMER runs.
+    """
+    if not trades_rows:
+        return []
+
     records = []
-    for entry in entries:
-        entry_num = int(entry.get("Entry #", 0) or 0)
-        if entry_num <= 0:
+    for row in trades_rows:
+        timestamp = str(row.get("Timestamp", ""))
+        # Only process rows for this date
+        if not timestamp.startswith(date_str):
             continue
 
-        outcome = str(entry.get("Outcome", "")).upper()
-        if "STOP" not in outcome:
+        action = str(row.get("Action", ""))
+        if "Stop" not in action:
             continue
 
-        # Determine which sides were stopped
-        sides_stopped = []
-        if "CALL" in outcome or "DOUBLE" in outcome:
-            sides_stopped.append("call")
-        if "PUT" in outcome or "DOUBLE" in outcome:
-            sides_stopped.append("put")
-        # If just "Stop" without side, check status flags
-        if not sides_stopped:
-            if str(entry.get("Call Stop Triggered", "")).lower() == "yes":
-                sides_stopped.append("call")
-            if str(entry.get("Put Stop Triggered", "")).lower() == "yes":
-                sides_stopped.append("put")
+        # Parse entry number and side from Action
+        # Format: "HYDRA Stop #3 (PUT)" or "MEIC Stop #1 (CALL)"
+        import re
+        match = re.match(r"(?:HYDRA|MEIC(?:-TF)?) Stop #(\d+) \((CALL|PUT)\)", action)
+        if not match:
+            logger.warning(f"Could not parse stop action: {action}")
+            continue
 
-        pnl_impact = _safe_float(entry.get("P&L Impact", 0))
+        entry_num = int(match.group(1))
+        side = match.group(2).lower()
 
-        for side in sides_stopped:
-            stop_time_key = f"{side.title()} Stop Time"
-            stop_time = entry.get(stop_time_key) or entry.get("Stop Time", "")
+        # P&L from the row
+        pnl = _safe_float(row.get("P&L ($)", 0))
 
-            # SPX at stop time
-            nearest = _find_nearest_tick(ticks, stop_time)
+        # SPX at stop from Underlying Price column or tick lookup
+        spx_at_stop = _safe_float(row.get("Underlying Price", 0)) or None
+        if not spx_at_stop:
+            nearest = _find_nearest_tick(ticks, timestamp)
             spx_at_stop = nearest["spx_price"] if nearest else None
 
-            # Per-side P&L: if double stop, split evenly (approximation)
-            side_pnl = pnl_impact / len(sides_stopped) if pnl_impact and sides_stopped else None
+        # Trigger level from Notes (format: "Stop Loss | Level: $240.00")
+        notes = str(row.get("Notes", ""))
+        trigger_level = None
+        level_match = re.search(r"Level: \$([0-9.]+)", notes)
+        if level_match:
+            trigger_level = _safe_float(level_match.group(1))
 
-            # MKT-033: Check for long leg salvage
-            salvage_key = f"{side.title()} Long Salvage Proceeds"
-            salvage_revenue = _safe_float(entry.get(salvage_key, 0))
-            salvage_sold = salvage_revenue > 0
-
-            records.append({
-                "date": date_str,
-                "entry_number": entry_num,
-                "side": side,
-                "stop_time": stop_time or None,
-                "spx_at_stop": spx_at_stop,
-                "trigger_level": None,  # Not available from Sheets
-                "actual_debit": None,   # Not available from Sheets
-                "net_pnl": side_pnl,
-                "salvage_sold": salvage_sold,
-                "salvage_revenue": salvage_revenue,
-            })
+        records.append({
+            "date": date_str,
+            "entry_number": entry_num,
+            "side": side,
+            "stop_time": timestamp or None,
+            "spx_at_stop": spx_at_stop,
+            "trigger_level": trigger_level,
+            "actual_debit": None,
+            "net_pnl": pnl,
+            "salvage_sold": False,
+            "salvage_revenue": 0.0,
+        })
 
     return records
 
