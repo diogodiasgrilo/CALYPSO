@@ -30,6 +30,35 @@ class LogTailer:
         except OSError as e:
             logger.warning(f"Error seeking log file: {e}")
 
+    def read_today_history(self, today_str: str) -> list[dict]:
+        """Read all lines from today in the log file (for bootstrapping OHLC).
+
+        Args:
+            today_str: Date string "YYYY-MM-DD" to filter for.
+
+        Returns lines from today only, without advancing the tail offset.
+        """
+        try:
+            if not self.file_path.exists():
+                return []
+
+            entries = []
+            with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    stripped = line.rstrip("\n")
+                    if not stripped.startswith(today_str):
+                        continue
+                    parsed = self._parse_line(stripped)
+                    if parsed:
+                        entries.append(parsed)
+
+            logger.info(f"Read {len(entries)} historical log lines for {today_str}")
+            return entries
+
+        except OSError as e:
+            logger.warning(f"Error reading log history: {e}")
+            return []
+
     def read_new_lines(self) -> list[dict]:
         """Read new lines since last read. Returns parsed log entries."""
         if not self._initialized:

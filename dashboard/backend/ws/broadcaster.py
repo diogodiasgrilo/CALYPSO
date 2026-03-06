@@ -32,6 +32,15 @@ class Broadcaster:
     async def start(self) -> None:
         """Start all polling tasks."""
         logger.info("Starting broadcaster tasks")
+
+        # Bootstrap live OHLC from today's log history (fills gap after restart)
+        today = get_today_et()
+        history = self.log_tailer.read_today_history(today)
+        if history:
+            changed = self.live_ohlc.process_log_lines(history)
+            bars = self.live_ohlc.get_ohlc_bars()
+            logger.info(f"Bootstrapped {len(bars)} live OHLC bars from log history")
+
         self.log_tailer.seek_to_end()
 
         self._tasks = [
