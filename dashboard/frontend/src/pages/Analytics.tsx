@@ -71,18 +71,53 @@ export function Analytics() {
     );
   }
 
-  // ── Avg Credit by Entry Slot (E1–E5) ──
-  const ENTRY_TIMES = ["11:15", "11:45", "12:15", "12:45", "13:15"];
-  const creditBySlot = Array.from({ length: 5 }, (_, i) => {
-    const entryNum = i + 1;
-    const matching = entries.filter((e) => e.entry_number === entryNum);
-    const totalCredit = matching.reduce((sum, e) => sum + (e.total_credit || 0), 0);
-    return {
-      slot: `E${entryNum} (${ENTRY_TIMES[i]})`,
-      avgCredit: matching.length > 0 ? totalCredit / matching.length : 0,
-      count: matching.length,
-    };
+  // ── Helper: parse "HH:MM AM/PM ET" to minutes since midnight ──
+  const SCHEDULED_SLOTS = [
+    605, 635, 665, 675, 695, 705, 725, 735, 755, 765, 795,
+  ]; // 10:05,10:35,11:05,11:15,11:35,11:45,12:05,12:15,12:35,12:45,13:15
+  const SLOT_LABELS: Record<number, string> = {
+    605: "10:05", 635: "10:35", 665: "11:05", 675: "11:15",
+    695: "11:35", 705: "11:45", 725: "12:05", 735: "12:15",
+    755: "12:35", 765: "12:45", 795: "13:15",
+  };
+
+  function parseEntryTimeToSlot(timeStr: string): number | null {
+    if (!timeStr) return null;
+    const m = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (!m) return null;
+    let h = parseInt(m[1], 10);
+    const min = parseInt(m[2], 10);
+    const ampm = m[3].toUpperCase();
+    if (ampm === "PM" && h !== 12) h += 12;
+    if (ampm === "AM" && h === 12) h = 0;
+    const totalMin = h * 60 + min;
+    // Find nearest scheduled slot
+    let best = SCHEDULED_SLOTS[0];
+    let bestDist = Math.abs(totalMin - best);
+    for (const s of SCHEDULED_SLOTS) {
+      const d = Math.abs(totalMin - s);
+      if (d < bestDist) { best = s; bestDist = d; }
+    }
+    return bestDist <= 10 ? best : null; // within 10 min of a known slot
+  }
+
+  // ── Avg Credit by Time Slot ──
+  const creditMap = new Map<number, { total: number; count: number }>();
+  entries.forEach((e) => {
+    const slot = parseEntryTimeToSlot(e.entry_time);
+    if (slot == null) return;
+    const prev = creditMap.get(slot) ?? { total: 0, count: 0 };
+    prev.total += e.total_credit || 0;
+    prev.count += 1;
+    creditMap.set(slot, prev);
   });
+  const creditBySlot = [...creditMap.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([slot, data]) => ({
+      slot: SLOT_LABELS[slot] ?? `${Math.floor(slot / 60)}:${String(slot % 60).padStart(2, "0")}`,
+      avgCredit: data.count > 0 ? data.total / data.count : 0,
+      count: data.count,
+    }));
 
   // ── Day of Week Performance ──
   const dowMap = new Map<string, { total: number; count: number }>();
@@ -110,23 +145,43 @@ export function Analytics() {
       pnl: s.net_pnl,
     }));
 
-  // ── Stop Rate by Entry Slot ──
-  const stopRateByEntry = Array.from({ length: 5 }, (_, i) => {
-    const entryNum = i + 1;
-    const matching = entries.filter((e) => e.entry_number === entryNum);
-    const entryStops = stops.filter((s) => s.entry_number === entryNum);
-    const callStops = entryStops.filter((s) => s.side === "call").length;
-    const putStops = entryStops.filter((s) => s.side === "put").length;
-    const total = matching.length;
-    return {
-      entry: `E${entryNum}`,
-      callStopPct: total > 0 ? (callStops / total) * 100 : 0,
-      putStopPct: total > 0 ? (putStops / total) * 100 : 0,
-      total,
-      callStops,
-      putStops,
-    };
+  // ── Stop Rate by Time Slot ──
+  // Build a lookup: date+entry_number → time slot
+  const entrySlotLookup = new Map<string, number>();
+  entries.forEach((e) => {
+    const slot = parseEntryTimeToSlot(e.entry_time);
+    if (slot != null) entrySlotLookup.set(`${e.date}_${e.entry_number}`, slot);
   });
+
+  const stopRateMap = new Map<number, { total: number; callStops: number; putStops: number }>();
+  // Count entries per slot
+  entries.forEach((e) => {
+    const slot = parseEntryTimeToSlot(e.entry_time);
+    if (slot == null) return;
+    const prev = stopRateMap.get(slot) ?? { total: 0, callStops: 0, putStops: 0 };
+    prev.total += 1;
+    stopRateMap.set(slot, prev);
+  });
+  // Count stops per slot (via entry lookup)
+  stops.forEach((s) => {
+    const slot = entrySlotLookup.get(`${s.date}_${s.entry_number}`);
+    if (slot == null) return;
+    const prev = stopRateMap.get(slot) ?? { total: 0, callStops: 0, putStops: 0 };
+    if (s.side === "call") prev.callStops += 1;
+    else prev.putStops += 1;
+    stopRateMap.set(slot, prev);
+  });
+
+  const stopRateByEntry = [...stopRateMap.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([slot, data]) => ({
+      entry: SLOT_LABELS[slot] ?? `${Math.floor(slot / 60)}:${String(slot % 60).padStart(2, "0")}`,
+      callStopPct: data.total > 0 ? (data.callStops / data.total) * 100 : 0,
+      putStopPct: data.total > 0 ? (data.putStops / data.total) * 100 : 0,
+      total: data.total,
+      callStops: data.callStops,
+      putStops: data.putStops,
+    }));
 
   const chartTooltipStyle = {
     backgroundColor: colors.bgElevated,
@@ -157,10 +212,10 @@ export function Analytics() {
       <h2 className="text-sm font-semibold text-text-primary">Analytics</h2>
 
       <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-        {/* Avg Credit by Entry Slot */}
+        {/* Avg Credit by Time Slot */}
         <div className="bg-card rounded-lg border border-border-dim p-4">
           <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3">
-            Avg Credit by Entry Slot
+            Avg Credit by Time Slot
           </h3>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={creditBySlot}>
@@ -263,10 +318,10 @@ export function Analytics() {
           </ResponsiveContainer>
         </div>
 
-        {/* Stop Rate by Entry Slot */}
+        {/* Stop Rate by Time Slot */}
         <div className="bg-card rounded-lg border border-border-dim p-4">
           <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3">
-            Stop Rate by Entry Slot
+            Stop Rate by Time Slot
           </h3>
           {stops.length === 0 ? (
             <div className="flex items-center justify-center h-[200px] text-text-dim text-xs">
