@@ -124,15 +124,10 @@ export function PnLCurve() {
   const { hydraState, todayOHLC } = useHydraStore();
   const entries = hydraState?.entries ?? [];
 
-  // Compute current total P&L from live spread values
-  const currentPnl = useMemo(() => computeTotalPnl(entries), [entries]);
-
-  // Use authoritative realized P&L if available and has stops
-  const realizedPnl = hydraState?.total_realized_pnl ?? 0;
+  // Compute live total P&L from spread values (matches VM heartbeat), minus commission
   const commission = hydraState?.total_commission ?? 0;
-  const netPnl = realizedPnl - commission;
-  const hasStops = entries.some((e) => e.call_side_stopped || e.put_side_stopped);
-  const displayPnl = hasStops ? netPnl : currentPnl;
+  const grossPnl = useMemo(() => computeTotalPnl(entries), [entries]);
+  const displayPnl = grossPnl - commission;
 
   const dataPoints = useMemo(
     () => buildPnlTimeline(entries, todayOHLC, displayPnl),

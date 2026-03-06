@@ -1,6 +1,6 @@
 import type { HydraEntry } from "../../store/hydraStore";
 import { formatPnL, formatTime, formatCurrency } from "../../lib/formatters";
-import { pnlColor, colors } from "../../lib/tradingColors";
+import { pnlColor, colors, statusColor } from "../../lib/tradingColors";
 import { useAnimatedNumber } from "../../hooks/useAnimatedNumber";
 import { CushionBar } from "./CushionBar";
 import { StatusBadge } from "../shared/StatusBadge";
@@ -157,7 +157,11 @@ export function EntryCard({ entry }: EntryCardProps) {
           <div className="flex items-baseline justify-between mb-1">
             <span
               className="text-base font-bold font-mono"
-              style={{ color: pnlColor(animatedPnl) }}
+              style={{
+                color: status === "stopped_single" && currentPnl < 0
+                  ? statusColor("stopped_single") // amber for single stop loss
+                  : pnlColor(animatedPnl),
+              }}
             >
               {formatPnL(animatedPnl)}
             </span>
@@ -171,7 +175,12 @@ export function EntryCard({ entry }: EntryCardProps) {
               className="h-full rounded-full transition-all duration-500 ease-out"
               style={{
                 width: `${progressPct}%`,
-                backgroundColor: currentPnl >= 0 ? colors.profit : colors.loss,
+                backgroundColor:
+                  currentPnl >= 0
+                    ? colors.profit
+                    : status === "stopped_single"
+                      ? colors.warning
+                      : colors.loss,
               }}
             />
           </div>

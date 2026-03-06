@@ -22,7 +22,7 @@ export function CushionBar({ label, percentage, skipped, stopped, active }: Cush
     return (
       <div className="flex items-center gap-2 text-xs">
         <span className="text-text-dim w-6">{label}</span>
-        <span style={{ color: colors.loss }} className="font-semibold">STOPPED</span>
+        <span style={{ color: colors.warning }} className="font-semibold">STOPPED</span>
       </div>
     );
   }

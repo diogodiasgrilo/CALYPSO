@@ -118,9 +118,11 @@ export function SPXChart() {
         time: parseET(e.entry_time!) as Time,
         position: "aboveBar" as const,
         color:
-          e.call_side_stopped || e.put_side_stopped
-            ? colors.loss
-            : colors.info,
+          e.call_side_stopped && e.put_side_stopped
+            ? colors.loss // double stop = red
+            : e.call_side_stopped || e.put_side_stopped
+              ? colors.warning // single stop = amber
+              : colors.info, // active = blue
         shape: "arrowDown" as const,
         text: `E${e.entry_number}`,
       }));
