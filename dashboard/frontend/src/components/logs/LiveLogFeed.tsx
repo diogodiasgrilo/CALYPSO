@@ -28,7 +28,7 @@ export function LiveLogFeed() {
       </h3>
       <div
         ref={scrollRef}
-        className="bg-card rounded-lg border border-border-dim p-2 max-h-[4.5rem] overflow-y-auto font-mono text-[11px] leading-relaxed"
+        className="bg-card rounded-lg border border-border-dim p-2 max-h-[10rem] overflow-y-auto font-mono text-[11px] leading-relaxed"
       >
         {reversed.map((line, i) => (
           <div key={i} className="flex gap-2 hover:bg-bg-elevated/50 px-1">
