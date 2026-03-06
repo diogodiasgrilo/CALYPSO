@@ -29,8 +29,9 @@ function getEntryStatus(e: HydraEntry): {
 
   if (e.call_side_expired || e.put_side_expired) return { status: "expired" };
 
-  // is_complete means "entry placement finished" — if no terminal flags, it's LIVE
-  if (e.is_complete) return { status: "active" };
+  // Entry has entry_time and no terminal flags — it's LIVE
+  // (is_complete may be null/undefined in state file for active entries)
+  if (e.entry_time) return { status: "active" };
   return { status: "placing" };
 }
 
