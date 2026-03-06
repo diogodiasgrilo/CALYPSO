@@ -70,6 +70,11 @@ function computeEntryPnl(e: HydraEntry) {
   if (callStopped) currentPnl -= Math.max(0, e.call_side_stop - e.call_spread_credit);
   if (putStopped) currentPnl -= Math.max(0, e.put_side_stop - e.put_spread_credit);
 
+  // Subtract commission for NET P&L (consistent with TODAY card)
+  const commission = (e.open_commission ?? 0) + (e.close_commission ?? 0);
+  currentPnl -= commission;
+  maxProfit -= commission;
+
   return { currentPnl, maxProfit };
 }
 
