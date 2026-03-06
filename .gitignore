@@ -140,6 +140,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.git-credentials
 
 # Dashboard frontend — override Python/data rules for source files
 !dashboard/frontend/src/lib/
