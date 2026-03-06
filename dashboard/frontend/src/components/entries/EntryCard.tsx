@@ -8,8 +8,6 @@ import type { EntryStatus } from "../shared/StatusBadge";
 
 interface EntryCardProps {
   entry: HydraEntry;
-  /** Slippage correction from aggregate total_realized_pnl vs theoretical. */
-  slippageCorrection?: number;
 }
 
 function getEntryStatus(e: HydraEntry): {
@@ -42,8 +40,8 @@ function computeCushion(spreadValue: number, stopLevel: number): number {
   return Math.max(0, Math.min(100, cushion));
 }
 
-// Compute current + max P&L for an entry (slippageCorrection adjusts stopped side losses to match actual execution)
-function computeEntryPnl(e: HydraEntry, slippageCorrection: number = 0) {
+// Compute current + max P&L for an entry using theoretical values
+function computeEntryPnl(e: HydraEntry) {
   const callActive = !e.call_side_stopped && !e.call_side_skipped && !e.call_side_expired;
   const putActive = !e.put_side_stopped && !e.put_side_skipped && !e.put_side_expired;
   const callStopped = e.call_side_stopped;
@@ -89,11 +87,6 @@ function computeEntryPnl(e: HydraEntry, slippageCorrection: number = 0) {
     currentPnl += (e.put_long_sold_revenue ?? 0);
   }
 
-  // Apply slippage correction (actual execution vs theoretical stop level)
-  // This makes per-entry P&L consistent with the aggregate total_realized_pnl
-  currentPnl += slippageCorrection;
-  maxProfit += slippageCorrection;
-
   // Subtract commission for NET P&L (consistent with TODAY card)
   const commission = (e.open_commission ?? 0) + (e.close_commission ?? 0);
   currentPnl -= commission;
@@ -102,11 +95,11 @@ function computeEntryPnl(e: HydraEntry, slippageCorrection: number = 0) {
   return { currentPnl, maxProfit };
 }
 
-export function EntryCard({ entry, slippageCorrection = 0 }: EntryCardProps) {
+export function EntryCard({ entry }: EntryCardProps) {
   const { status, stoppedSide } = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
 
-  const { currentPnl, maxProfit } = computeEntryPnl(entry, slippageCorrection);
+  const { currentPnl, maxProfit } = computeEntryPnl(entry);
   const animatedPnl = useAnimatedNumber(currentPnl);
   const animatedMax = useAnimatedNumber(maxProfit);
 
