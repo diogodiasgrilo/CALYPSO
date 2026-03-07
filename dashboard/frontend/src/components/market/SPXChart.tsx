@@ -140,7 +140,7 @@ export function SPXChart() {
 
     // Add price lines for active entries
     entries.forEach((e) => {
-      const isActive = e.is_complete && !e.call_side_stopped && !e.put_side_stopped && !e.call_side_expired && !e.put_side_expired;
+      const isActive = !!e.entry_time && !e.call_side_stopped && !e.put_side_stopped && !e.call_side_expired && !e.put_side_expired;
       if (isActive && e.short_call_strike > 0) {
         const line = series.createPriceLine({
           price: e.short_call_strike,

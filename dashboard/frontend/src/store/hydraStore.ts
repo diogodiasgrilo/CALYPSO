@@ -16,6 +16,8 @@ export interface HydraEntry {
   put_spread_credit: number;
   call_side_stop: number;
   put_side_stop: number;
+  actual_call_stop_debit: number;
+  actual_put_stop_debit: number;
   short_call_fill_price: number;
   long_call_fill_price: number;
   short_put_fill_price: number;

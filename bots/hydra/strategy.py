@@ -75,7 +75,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.8.0"
+HYDRA_VERSION = "1.9.3"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -2642,6 +2642,11 @@ class HydraStrategy(MEICStrategy):
 
         if fill_prices_captured and not self.dry_run:
             net_loss = actual_close_cost - credit_received
+            # Record actual debit for dashboard per-entry P&L
+            if side == "call":
+                entry.actual_call_stop_debit = actual_close_cost
+            else:
+                entry.actual_put_stop_debit = actual_close_cost
             logger.info(
                 f"MKT-025: Actual P&L for Entry #{entry.entry_number} {side}: "
                 f"short_close=${actual_close_cost:.2f} - credit=${credit_received:.2f} = "
@@ -4964,6 +4969,9 @@ class HydraStrategy(MEICStrategy):
                     # Stops
                     "call_side_stop": entry.call_side_stop,
                     "put_side_stop": entry.put_side_stop,
+                    # Actual stop debit (for dashboard per-entry P&L accuracy)
+                    "actual_call_stop_debit": entry.actual_call_stop_debit,
+                    "actual_put_stop_debit": entry.actual_put_stop_debit,
                     # Status
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,
@@ -6113,6 +6121,9 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.long_call_fill_price = entry_data.get("long_call_fill_price", 0)
                 restored_entry.short_put_fill_price = entry_data.get("short_put_fill_price", 0)
                 restored_entry.long_put_fill_price = entry_data.get("long_put_fill_price", 0)
+                # Actual stop debit (for dashboard per-entry P&L accuracy)
+                restored_entry.actual_call_stop_debit = entry_data.get("actual_call_stop_debit", 0.0)
+                restored_entry.actual_put_stop_debit = entry_data.get("actual_put_stop_debit", 0.0)
 
                 if is_fully_done:
                     restored_entry.is_complete = True
@@ -6353,6 +6364,9 @@ class HydraStrategy(MEICStrategy):
                                         "put_long_sold": entry_data.get("put_long_sold", False),
                                         "call_long_sold_revenue": entry_data.get("call_long_sold_revenue", 0.0),
                                         "put_long_sold_revenue": entry_data.get("put_long_sold_revenue", 0.0),
+                                        # Actual stop debit (for dashboard per-entry P&L accuracy)
+                                        "actual_call_stop_debit": entry_data.get("actual_call_stop_debit", 0.0),
+                                        "actual_put_stop_debit": entry_data.get("actual_put_stop_debit", 0.0),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -6434,6 +6448,9 @@ class HydraStrategy(MEICStrategy):
                     entry.put_long_sold = saved.get("put_long_sold", False)
                     entry.call_long_sold_revenue = saved.get("call_long_sold_revenue", 0.0)
                     entry.put_long_sold_revenue = saved.get("put_long_sold_revenue", 0.0)
+                    # Actual stop debit (for dashboard per-entry P&L accuracy)
+                    entry.actual_call_stop_debit = saved.get("actual_call_stop_debit", 0.0)
+                    entry.actual_put_stop_debit = saved.get("actual_put_stop_debit", 0.0)
 
                     # Restore entry_time and fill prices (for /entry display)
                     entry_time_str = saved.get("entry_time")
@@ -6559,11 +6576,19 @@ class HydraStrategy(MEICStrategy):
                     stopped_entry.ema_40_at_entry = stopped_entry_data.get("ema_40_at_entry", None)
                     # MKT-018: Restore early_closed marker
                     stopped_entry.early_closed = stopped_entry_data.get("early_closed", False)
+                    # MKT-033: Long salvage flags (PRE-EXISTING BUG FIX — missing from this path)
+                    stopped_entry.call_long_sold = stopped_entry_data.get("call_long_sold", False)
+                    stopped_entry.put_long_sold = stopped_entry_data.get("put_long_sold", False)
+                    stopped_entry.call_long_sold_revenue = stopped_entry_data.get("call_long_sold_revenue", 0.0)
+                    stopped_entry.put_long_sold_revenue = stopped_entry_data.get("put_long_sold_revenue", 0.0)
                     # Fill prices (for /entry display after restart)
                     stopped_entry.short_call_fill_price = stopped_entry_data.get("short_call_fill_price", 0)
                     stopped_entry.long_call_fill_price = stopped_entry_data.get("long_call_fill_price", 0)
                     stopped_entry.short_put_fill_price = stopped_entry_data.get("short_put_fill_price", 0)
                     stopped_entry.long_put_fill_price = stopped_entry_data.get("long_put_fill_price", 0)
+                    # Actual stop debit (for dashboard per-entry P&L accuracy)
+                    stopped_entry.actual_call_stop_debit = stopped_entry_data.get("actual_call_stop_debit", 0.0)
+                    stopped_entry.actual_put_stop_debit = stopped_entry_data.get("actual_put_stop_debit", 0.0)
 
                     # Position IDs are None (positions closed)
                     stopped_entry.short_call_position_id = None

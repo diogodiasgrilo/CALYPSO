@@ -333,6 +333,11 @@ class IronCondorEntry:
     call_side_stop: float = 0.0  # Stop loss for call spread
     put_side_stop: float = 0.0   # Stop loss for put spread
 
+    # Actual cost-to-close from market order (dollar amount, 0 = not stopped or not yet known)
+    # Set by _apply_stop_loss_meic (immediate fill) or _spawn_async_fill_correction (deferred)
+    actual_call_stop_debit: float = 0.0
+    actual_put_stop_debit: float = 0.0
+
     # Current option prices (for P&L / cushion calculation — updated every heartbeat)
     short_call_price: float = 0.0
     long_call_price: float = 0.0
@@ -4629,6 +4634,11 @@ class MEICStrategy:
                     deferred_legs, partial_close_cost, entry
                 )
                 if all_found:
+                    # Record actual debit for dashboard per-entry P&L
+                    if side == "call":
+                        entry.actual_call_stop_debit = updated_cost
+                    else:
+                        entry.actual_put_stop_debit = updated_cost
                     actual_net_loss = updated_cost - credit_received
                     correction = actual_net_loss - theoretical_net_loss
                     if abs(correction) > 0.01:
@@ -5251,6 +5261,10 @@ class MEICStrategy:
                     # Commission
                     stopped_entry.open_commission = stopped_entry_data.get("open_commission", 0)
                     stopped_entry.close_commission = stopped_entry_data.get("close_commission", 0)
+
+                    # Actual stop debit (for dashboard per-entry P&L accuracy)
+                    stopped_entry.actual_call_stop_debit = stopped_entry_data.get("actual_call_stop_debit", 0.0)
+                    stopped_entry.actual_put_stop_debit = stopped_entry_data.get("actual_put_stop_debit", 0.0)
 
                     # One-sided entry flags (HYDRA uses HydraIronCondorEntry which has these)
                     # For base MEIC, these attributes don't exist in the dataclass, so we add them dynamically
@@ -6931,6 +6945,9 @@ class MEICStrategy:
                     "close_commission": entry.close_commission,
                     # Fix #52: Contract count for multi-contract support
                     "contracts": entry.contracts,
+                    # Actual stop debit (for dashboard per-entry P&L accuracy)
+                    "actual_call_stop_debit": entry.actual_call_stop_debit,
+                    "actual_put_stop_debit": entry.actual_put_stop_debit,
                 }
                 state_data["entries"].append(entry_data)
 

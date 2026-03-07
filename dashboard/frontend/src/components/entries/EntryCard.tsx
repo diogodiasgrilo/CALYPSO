@@ -55,14 +55,20 @@ function computeEntryPnl(e: HydraEntry) {
   if (e.call_side_expired) maxProfit += e.call_spread_credit;
   if (e.put_side_expired) maxProfit += e.put_spread_credit;
 
-  // Stopped sides: theoretical loss + surviving long value + salvage revenue
+  // Stopped sides: actual loss (or theoretical fallback) + surviving long value + salvage revenue
   if (callStopped) {
-    const loss = Math.max(0, e.call_side_stop - e.call_spread_credit);
+    const actualDebit = e.actual_call_stop_debit ?? 0;
+    const loss = actualDebit > 0
+      ? Math.max(0, actualDebit - e.call_spread_credit)
+      : Math.max(0, e.call_side_stop - e.call_spread_credit);
     maxProfit -= loss;
     maxProfit += (e.call_long_value ?? 0) + (e.call_long_sold_revenue ?? 0);
   }
   if (putStopped) {
-    const loss = Math.max(0, e.put_side_stop - e.put_spread_credit);
+    const actualDebit = e.actual_put_stop_debit ?? 0;
+    const loss = actualDebit > 0
+      ? Math.max(0, actualDebit - e.put_spread_credit)
+      : Math.max(0, e.put_side_stop - e.put_spread_credit);
     maxProfit -= loss;
     maxProfit += (e.put_long_value ?? 0) + (e.put_long_sold_revenue ?? 0);
   }
@@ -75,14 +81,20 @@ function computeEntryPnl(e: HydraEntry) {
   // Expired sides: full credit kept
   if (e.call_side_expired) currentPnl += e.call_spread_credit;
   if (e.put_side_expired) currentPnl += e.put_spread_credit;
-  // Stopped sides: theoretical loss + long leg recovery
+  // Stopped sides: actual loss (or theoretical fallback) + long leg recovery
   if (callStopped) {
-    currentPnl -= Math.max(0, e.call_side_stop - e.call_spread_credit);
+    const actualDebit = e.actual_call_stop_debit ?? 0;
+    currentPnl -= actualDebit > 0
+      ? Math.max(0, actualDebit - e.call_spread_credit)
+      : Math.max(0, e.call_side_stop - e.call_spread_credit);
     currentPnl += (e.call_long_value ?? 0);
     currentPnl += (e.call_long_sold_revenue ?? 0);
   }
   if (putStopped) {
-    currentPnl -= Math.max(0, e.put_side_stop - e.put_spread_credit);
+    const actualDebit = e.actual_put_stop_debit ?? 0;
+    currentPnl -= actualDebit > 0
+      ? Math.max(0, actualDebit - e.put_spread_credit)
+      : Math.max(0, e.put_side_stop - e.put_spread_credit);
     currentPnl += (e.put_long_value ?? 0);
     currentPnl += (e.put_long_sold_revenue ?? 0);
   }
