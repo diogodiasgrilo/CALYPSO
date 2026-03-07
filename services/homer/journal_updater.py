@@ -247,11 +247,13 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
 
     expired = safe_float(summary.get("Expired Credits ($)", 0))
     stops = safe_float(summary.get("Stop Loss Debits ($)", 0))
-    salvage = safe_float(summary.get("Long Salvage ($)", 0))
     commission = safe_float(summary.get("Commission ($)", 0))
     pnl = safe_float(summary.get("Daily P&L ($)", 0))
 
-    computed = expired - stops + salvage - commission
+    # Fix #78 identity: stop_loss_debits = expired_credits - total_realized_pnl
+    # total_realized_pnl already includes long salvage revenue (MKT-033),
+    # so stop_debits is NET of salvage. Do NOT add salvage separately — double-counts.
+    computed = expired - stops - commission
     # Allow small floating point tolerance
     check = "✓" if abs(computed - pnl) < 0.01 else "MISMATCH"
 
@@ -262,10 +264,9 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
         note_parts.append(notes)
     note_str = f" ({', '.join(note_parts)})" if note_parts else ""
 
-    salvage_part = f" + {format_money(salvage)}" if salvage > 0 else ""
     formula_line = (
         f"- {date_label}: {format_money(expired)} - {format_money(stops)}"
-        f"{salvage_part} - {format_money(commission)} = {format_money(pnl)} {check}{note_str}"
+        f" - {format_money(commission)} = {format_money(pnl)} {check}{note_str}"
     )
 
     # Insert after last formula line
@@ -456,22 +457,19 @@ def build_section3_day_block(
             lines.append("")
 
     # P&L reconciliation
+    # Fix #78 identity: stop_loss_debits = expired_credits - total_realized_pnl
+    # total_realized_pnl already includes long salvage revenue (MKT-033),
+    # so stop_debits is NET of salvage. Identity: expired - stops - commission = net_pnl
     expired = safe_float(summary.get("Expired Credits ($)", 0))
     stop_debits = safe_float(summary.get("Stop Loss Debits ($)", 0))
     commission = safe_float(summary.get("Commission ($)", 0))
-    salvage_revenue = safe_float(summary.get("Long Salvage ($)", 0))
 
     lines.append("### P&L Reconciliation")
     lines.append("")
     lines.append(f"- Expired Credits: ${format_money(expired)}")
     lines.append(f"- Stop Loss Debits: ${format_money(stop_debits)}")
-    if salvage_revenue > 0:
-        lines.append(f"- Long Salvage Revenue: +${format_money(salvage_revenue)}")
     lines.append(f"- Commission: ${format_money(commission)}")
-    if salvage_revenue > 0:
-        lines.append(f"- **Net P&L: {format_signed_currency(pnl)}** ({format_money(expired)} - {format_money(stop_debits)} + {format_money(salvage_revenue)} - {format_money(commission)} = {format_money(pnl)})")
-    else:
-        lines.append(f"- **Net P&L: {format_signed_currency(pnl)}** ({format_money(expired)} - {format_money(stop_debits)} - {format_money(commission)} = {format_money(pnl)})")
+    lines.append(f"- **Net P&L: {format_signed_currency(pnl)}** ({format_money(expired)} - {format_money(stop_debits)} - {format_money(commission)} = {format_money(pnl)})")
     lines.append("")
 
     return lines

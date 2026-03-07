@@ -115,7 +115,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 - Mar 4: 540 - 305 - 47.50 = 187.50 ✓ (Post-settlement)
 - Mar 5: 405 - 240 - 75 = 90 ✓ (Post-settlement)
-- Mar 6: 590 - 345 + 125 - 70 = 175 MISMATCH (Post-settlement)
+- Mar 6: 590 - 345 - 70 = 175 ✓ (Post-settlement)
 ### Cumulative Metrics (hydra_metrics.json as of Mar 6 EOD)
 ```json
 {
@@ -1118,9 +1118,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 - Expired Credits: $590
 - Stop Loss Debits: $345
-- Long Salvage Revenue: +$125
 - Commission: $70
-- **Net P&L: +$175** (590 - 345 + 125 - 70 = 175)
+- **Net P&L: +$175** (590 - 345 - 70 = 175)
 
 ---
 
