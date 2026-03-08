@@ -767,6 +767,22 @@ class HydraStrategy(MEICStrategy):
         if not self.entry_times:
             return "resolved"
 
+        # Trim any entry_times slots whose windows have already ended
+        # (handles desync when _skip_missed_entries advances _next_entry_index
+        # but doesn't pop from entry_times — e.g., bot restart after slot 0 window)
+        while len(self.entry_times) > 1:
+            slot = self.entry_times[0]
+            slot_dt = now.replace(
+                hour=slot.hour, minute=slot.minute,
+                second=slot.second, microsecond=0
+            )
+            window_end = slot_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+            if now > window_end:
+                self.entry_times.pop(0)
+                logger.info(f"MKT-034: Trimming passed slot {slot.strftime('%H:%M:%S')}")
+            else:
+                break
+
         current_slot_time = self.entry_times[0]
         # Check time is VIX_GATE_CHECK_SECONDS_BEFORE (30s) before entry
         # :14:30 → check at :14:00, :44:30 → check at :44:00

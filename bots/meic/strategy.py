@@ -1599,7 +1599,7 @@ class MEICStrategy:
                 skipped += 1
                 logger.info(
                     f"TIME-002: Skipping missed Entry #{self._next_entry_index + 1} "
-                    f"at {scheduled_time.strftime('%H:%M')} (window ended at {window_end.strftime('%H:%M:%S')})"
+                    f"at {scheduled_time.strftime('%H:%M:%S')} (window ended at {window_end.strftime('%H:%M:%S')})"
                 )
                 self.daily_state.entries_skipped += 1
                 self._next_entry_index += 1

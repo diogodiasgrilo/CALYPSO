@@ -601,17 +601,15 @@ Entry #1 → #2 → #3 placed normally
 
 ## MKT Rules Reference
 
-### Active Rules (as of v1.6.0)
+### Active Rules (as of v1.10.0)
 
 | Rule | Name | Added | What It Does |
 |------|------|-------|-------------|
 | MKT-007 | Short Strike Liquidity | v1.0.0 | Move short strikes closer to ATM if illiquid |
 | MKT-008 | Long Wing Liquidity | v1.0.0 | Reduce spread width if long wing illiquid; sets illiquidity flags |
 | MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | 40-80pt spreads based on VIX level |
-| MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days) |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
 | MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call non-viable → put-only if VIX < 18 (MKT-032), else skip; put non-viable → skip |
-| MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 18.0 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky) |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
@@ -622,8 +620,14 @@ Entry #1 → #2 → #3 placed normally
 | MKT-023 | Smart Hold Check | v1.3.7 | **DISABLED** — Only active when MKT-018 enabled. Compare close-now vs hold |
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
 | MKT-025 | Short-Only Stop Close | v1.4.3 | **Configurable** (`short_only_stop`, default: false). When true: close SHORT only, long expires. When false: close both legs (default since v1.9.4) |
+| MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days) |
+| MKT-027 | VIX-Scaled Spread Width | v1.6.0 | Continuous formula `VIX × 3.5` with per-side floors (MKT-028), cap 75pt |
 | MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper) |
+| MKT-029 | Graduated Credit Fallback | v1.6.2 | Calls $1.00→$0.95→$0.90, puts $1.75→$1.70→$1.65 (prevents skipping entries barely below minimum) |
+| MKT-031 | Smart Entry Windows | v1.8.0 | 10-min scouting before each entry; 2-parameter scoring (ATR calm + momentum pause); score >= 65 triggers early entry |
+| MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 18.0 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky) |
 | MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
+| MKT-034 | VIX-Scaled Entry Time Shifting | v1.10.0 | Shifts 5-entry schedule later on high-VIX days. VIX gate checks E#1 at :14:00/:44:00; floor at 12:14:30 |
 
 ### Removed Rules
 
@@ -646,6 +650,8 @@ Entry #1 → #2 → #3 placed normally
 | MKT-021 | MKT-018 | MKT-021 skips entries → satisfies MKT-018 gate → early close fires same cycle. |
 | MKT-018 | MKT-023 | MKT-023 is a sub-check within MKT-018; can override close decision with HOLD. |
 | MKT-025 | Settlement | Short-only close leaves long leg open; settlement auto-cleans orphaned positions. |
+| MKT-034 | MKT-031 | MKT-031 early entry checks VIX gate first for E#1; if VIX blocks, no early entry. |
+| MKT-034 | Entry schedule | VIX gate shifts E#1 later; `_resolve_vix_gate` rebuilds 5 consecutive slots from resolved position. |
 
 ---
 
@@ -656,7 +662,7 @@ Entry #1 → #2 → #3 placed normally
 | State | Description |
 |-------|-------------|
 | IDLE | No position, waiting for market open |
-| WAITING_FIRST_ENTRY | Market open, waiting for 11:15 AM (or 11:05 with MKT-031 scouting) |
+| WAITING_FIRST_ENTRY | Market open, waiting for first entry (VIX-scaled via MKT-034, default 11:14:30; scouting from 11:04:30 via MKT-031) |
 | ENTRY_IN_PROGRESS | Currently placing an entry |
 | MONITORING | Active entries, watching stops + ROC |
 | STOP_TRIGGERED | Processing a stop loss |
@@ -668,7 +674,7 @@ Entry #1 → #2 → #3 placed normally
 
 ```
 IDLE → WAITING_FIRST_ENTRY           (9:30 AM)
-WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (11:15 AM, or earlier via MKT-031)
+WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (VIX-scaled via MKT-034, or earlier via MKT-031)
 ENTRY_IN_PROGRESS → MONITORING       (entry placed)
 MONITORING → ENTRY_IN_PROGRESS       (next entry time)
 MONITORING → STOP_TRIGGERED          (spread_value >= stop_level)
@@ -684,13 +690,11 @@ Any → HALTED                         (critical: overnight positions, stale reg
 |-----------|-------|
 | Midnight | `_reset_for_new_day()`: clear daily state, verify stale registry (Fix #82) |
 | 9:30 AM | Market opens, transition to WAITING_FIRST_ENTRY |
-| 11:05 AM | MKT-031 scouting opens for Entry #1 (score market conditions every ~2-5s) |
-| 11:15 AM | Entry #1 (trend detection → strike calc → credit gate → execution). Earlier if MKT-031 score >= 65. |
-| 11:45 AM | Entry #2 (scouting from 11:35) |
-| 12:15 PM | Entry #3 (scouting from 12:05) |
-| 12:45 PM | Entry #4 (scouting from 12:35) |
-| 13:15 PM | Entry #5 (scouting from 13:05) |
-| 13:15+ PM | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
+| 11:04:30 | MKT-031 scouting opens for Entry #1 (default schedule; VIX-scaled via MKT-034) |
+| 11:14:00 | MKT-034 VIX gate check for E#1 (VIX < 20 → allow, VIX >= 20 → shift to next slot) |
+| 11:14:30 | Entry #1 (default; VIX 20-23 → 11:44:30, VIX >= 23 → 12:14:30). Earlier if MKT-031 score >= 65. |
+| +30 min | Entry #2-#5 at successive :14:30/:44:30 slots (no further VIX gating) |
+| Last entry + | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
 | 3:45 PM | Last 15 min, positions expire naturally at settlement |
 | 4:00 PM | Market close, 0DTE options expire/settle |
 | 4:00-5:00 PM | `check_after_hours_settlement()`: process expired credits |
