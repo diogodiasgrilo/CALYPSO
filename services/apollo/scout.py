@@ -16,22 +16,22 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (v1.8.0 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.9.3 — DO NOT hallucinate)
 
-- **5 iron condor entries per day** at 11:05, 11:35, 12:05, 12:35, 13:05 ET (shifted +1hr from original schedule — MKT-031)
+- **5 iron condor entries per day** at 11:15, 11:45, 12:15, 12:45, 13:15 ET (:15/:45 offset from MAE analysis)
 - **Smart entry windows (MKT-031):** 10-minute scouting window before each scheduled entry. Scores market conditions (post-spike ATR calm + momentum pause). Score >= 65 triggers early entry. Otherwise enters at scheduled time.
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
 - **VIX-scaled width (MKT-027):** round(VIX x 3.5 / 5) x 5, with per-side floors
 - **Min credit thresholds (MKT-011):** $0.75/side for calls (lowered v1.7.2), $1.75/side for puts (fallback $1.65 MKT-029)
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
-- **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
+- **Stop close:** both legs closed via market order (default; configurable short_only_stop for MKT-025 mode)
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
 
 ## Entry Skip Pattern (CRITICAL — do not get this backwards)
 
-Entry #1 (11:05) has the RICHEST premium and BEST liquidity. It almost NEVER skips.
-Entry #5 (13:05 / 1:05 PM, the last entry) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
+Entry #1 (11:15) has the RICHEST premium and BEST liquidity. It almost NEVER skips.
+Entry #5 (13:15 / 1:15 PM, the last entry) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
 The call side is almost always the reason for skips (premium decays faster on calls).
 
 Do NOT say "entries #1 and #2 carry the highest skip probability" — that is factually wrong.

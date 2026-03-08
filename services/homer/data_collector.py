@@ -152,16 +152,26 @@ def _build_entries_for_day(
 
             entry_type = str(row.get("Type", "Iron Condor")).strip()
 
-            # Parse short strikes from Strike field: "C:6850/6925 P:6630/6555"
+            # Parse strikes from Strike field: "C:6850/6925 P:6630/6555"
+            # Format: C:short/long P:short/long
             strike_str = str(row.get("Strike", "")).strip()
             short_call = ""
             short_put = ""
-            call_match = re.search(r"C:(\d+)", strike_str)
-            put_match = re.search(r"P:(\d+)", strike_str)
+            long_call_parsed = ""
+            long_put_parsed = ""
+            call_match = re.search(r"C:(\d+)(?:/(\d+))?", strike_str)
+            put_match = re.search(r"P:(\d+)(?:/(\d+))?", strike_str)
             if call_match:
                 short_call = call_match.group(1)
+                long_call_parsed = call_match.group(2) or ""
             if put_match:
                 short_put = put_match.group(1)
+                long_put_parsed = put_match.group(2) or ""
+
+            # Put credit fallback: header may be "" instead of "Put Credit ($)"
+            put_credit_val = str(row.get("Put Credit ($)", "")).strip()
+            if not put_credit_val:
+                put_credit_val = str(row.get("", "")).strip()
 
             entries_by_num[entry_num] = {
                 "Entry #": entry_num,
@@ -170,9 +180,11 @@ def _build_entries_for_day(
                 "Entry Type": entry_type,
                 "Short Call Strike": short_call,
                 "Short Put Strike": short_put,
+                "Long Call Strike": long_call_parsed,
+                "Long Put Strike": long_put_parsed,
                 "Total Credit": str(row.get("Premium ($)", "0")).strip(),
                 "Call Credit": str(row.get("Call Credit ($)", "")).strip(),
-                "Put Credit": str(row.get("Put Credit ($)", "")).strip(),
+                "Put Credit": put_credit_val,
                 "Outcome": "",
                 "P&L Impact": "",
             }
@@ -923,12 +935,14 @@ def build_db_records(
     # Build trade_entries records
     result["trade_entries"] = _build_entry_records(entries, date_str, ticks)
 
-    # Build trade_stops records from Trades tab (not Positions — it's cleared daily)
-    result["trade_stops"] = _build_stop_records(trades_rows, date_str, ticks)
+    # Build trade_stops records — pass entries for actual_debit computation
+    result["trade_stops"] = _build_stop_records(trades_rows, date_str, ticks, entries_data=entries)
 
-    # Build daily_summary record
+    # Build daily_summary — pass stop_records for accurate entries_stopped count
     if summary:
-        result["daily_summary"] = _build_summary_record(summary, date_str, ticks)
+        result["daily_summary"] = _build_summary_record(
+            summary, date_str, ticks, stop_records=result["trade_stops"]
+        )
 
     return result
 
@@ -1004,9 +1018,21 @@ def _build_entry_records(
         call_spread_width = _safe_float(entry.get("Call Spread Width"))
         put_spread_width = _safe_float(entry.get("Put Spread Width"))
 
-        # Compute long strikes from short + spread width
-        long_call = (short_call + call_spread_width) if short_call and call_spread_width else None
-        long_put = (short_put - put_spread_width) if short_put and put_spread_width else None
+        # Prefer directly parsed long strikes from Trades tab Action string
+        long_call = _safe_float(entry.get("Long Call Strike")) or None
+        long_put = _safe_float(entry.get("Long Put Strike")) or None
+
+        # Fallback: compute from spread width (Positions tab data, may be empty)
+        if not long_call and short_call and call_spread_width:
+            long_call = short_call + call_spread_width
+        if not long_put and short_put and put_spread_width:
+            long_put = short_put - put_spread_width
+
+        # Derive spread widths from parsed long strikes (Positions tab may be empty)
+        if not call_spread_width and long_call and short_call:
+            call_spread_width = abs(long_call - short_call)
+        if not put_spread_width and long_put and short_put:
+            put_spread_width = abs(short_put - long_put)
 
         # OTM distances
         otm_call = abs(spx_at_entry - short_call) if spx_at_entry and short_call else None
@@ -1022,9 +1048,11 @@ def _build_entry_records(
             elif short_put:
                 entry_type = "Put Only"
 
-        # Credits
-        call_credit = _safe_float(entry.get("Call Credit")) or None
-        put_credit = _safe_float(entry.get("Put Credit")) or None
+        # Credits — avoid `or None` which turns 0.0 into None
+        call_credit_raw = entry.get("Call Credit", "")
+        call_credit = _safe_float(call_credit_raw) if call_credit_raw not in ("", None) else None
+        put_credit_raw = entry.get("Put Credit", "")
+        put_credit = _safe_float(put_credit_raw) if put_credit_raw not in ("", None) else None
         total_credit = _safe_float(entry.get("Total Credit")) or None
 
         records.append({
@@ -1056,7 +1084,8 @@ def _build_entry_records(
 
 
 def _build_stop_records(
-    trades_rows: Optional[List[Dict]], date_str: str, ticks: List[Dict]
+    trades_rows: Optional[List[Dict]], date_str: str, ticks: List[Dict],
+    entries_data: Optional[List[Dict]] = None,
 ) -> List[Dict[str, Any]]:
     """Build trade_stops records from Trades tab stop rows.
 
@@ -1064,12 +1093,18 @@ def _build_stop_records(
     or "MEIC Stop #1 (CALL)". We parse entry_number and side from Action,
     and get P&L and SPX price from the row columns.
 
-    Note: The old approach used the Positions tab Outcome column, but
-    the Positions tab is cleared after each trading day, so it's always
-    empty by the time HOMER runs.
+    Args:
+        entries_data: Entry dicts from _build_entries_for_day() for actual_debit
+            computation. actual_debit = side_credit + abs(pnl).
     """
     if not trades_rows:
         return []
+
+    # Build entry lookup for actual_debit computation
+    entry_lookup: Dict[str, Dict] = {}
+    if entries_data:
+        for e in entries_data:
+            entry_lookup[str(e.get("Entry #", ""))] = e
 
     records = []
     for row in trades_rows:
@@ -1084,7 +1119,6 @@ def _build_stop_records(
 
         # Parse entry number and side from Action
         # Format: "HYDRA Stop #3 (PUT)" or "MEIC Stop #1 (CALL)"
-        import re
         match = re.match(r"(?:HYDRA|MEIC(?:-TF)?) Stop #(\d+) \((CALL|PUT)\)", action)
         if not match:
             logger.warning(f"Could not parse stop action: {action}")
@@ -1109,6 +1143,17 @@ def _build_stop_records(
         if level_match:
             trigger_level = _safe_float(level_match.group(1))
 
+        # Compute actual_debit from P&L + per-side credit
+        # pnl = -net_loss, net_loss = actual_debit - side_credit
+        # So actual_debit = side_credit + abs(pnl)
+        actual_debit = None
+        if pnl and entry_lookup:
+            entry_data = entry_lookup.get(str(entry_num), {})
+            credit_key = "Call Credit" if side == "call" else "Put Credit"
+            side_credit = _safe_float(entry_data.get(credit_key, 0))
+            if side_credit and pnl < 0:
+                actual_debit = round(side_credit + abs(pnl), 2)
+
         records.append({
             "date": date_str,
             "entry_number": entry_num,
@@ -1116,7 +1161,7 @@ def _build_stop_records(
             "stop_time": timestamp or None,
             "spx_at_stop": spx_at_stop,
             "trigger_level": trigger_level,
-            "actual_debit": None,
+            "actual_debit": actual_debit,
             "net_pnl": pnl,
             "salvage_sold": False,
             "salvage_revenue": 0.0,
@@ -1126,7 +1171,8 @@ def _build_stop_records(
 
 
 def _build_summary_record(
-    summary: Dict, date_str: str, ticks: List[Dict]
+    summary: Dict, date_str: str, ticks: List[Dict],
+    stop_records: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """Transform Sheets Daily Summary row into daily_summaries DB record."""
     # Try Sheets SPX OHLC first, fall back to computing from ticks
@@ -1174,15 +1220,26 @@ def _build_summary_record(
     if entries_completed:
         entries_placed = int(_safe_float(entries_completed))
 
+    # Count entries stopped (not side-stop events)
     entries_stopped = None
     call_stops = _safe_float(summary.get("Call Stops", 0))
     put_stops = _safe_float(summary.get("Put Stops", 0))
-    if call_stops or put_stops:
-        entries_stopped = int(call_stops + put_stops)
+    if stop_records:
+        # Use stop records to count distinct entries with at least one stop
+        stopped_entries = set(r["entry_number"] for r in stop_records)
+        entries_stopped = len(stopped_entries)
+    elif call_stops or put_stops:
+        # Fallback: cap at entries_placed (can't stop more entries than placed)
+        raw = int(call_stops + put_stops)
+        entries_stopped = min(raw, entries_placed) if entries_placed else raw
+
+    # 0 stops is valid data, not NULL
+    if entries_stopped is None and entries_placed is not None:
+        entries_stopped = 0
 
     entries_expired = None
-    if entries_placed is not None and entries_stopped is not None:
-        entries_expired = max(0, entries_placed - entries_stopped)
+    if entries_placed is not None:
+        entries_expired = entries_placed - (entries_stopped or 0)
 
     # Day range
     day_range = None

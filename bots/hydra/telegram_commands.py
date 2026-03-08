@@ -16,13 +16,14 @@ Supported commands:
     /set      — Edit config parameter (requires /restart to apply)
     /hermes   — Latest HERMES daily report
     /apollo   — Latest APOLLO morning briefing
+    /clio     — Latest CLIO weekly analysis
     /restart  — Restart the HYDRA service
     /stop     — Stop the HYDRA service (warns if active positions)
     /help     — List all commands
 
 Security: Only responds to messages from the configured chat_id.
 
-Version: 2.0.0 (2026-03-05)
+Version: 2.1.0 (2026-03-08)
 """
 
 import fcntl
@@ -160,6 +161,7 @@ class TelegramCommandHandler:
         self._status_callback: Optional[Callable[[], str]] = None
         self._hermes_callback: Optional[Callable[[], str]] = None
         self._apollo_callback: Optional[Callable[[], str]] = None
+        self._clio_callback: Optional[Callable[[], str]] = None
         self._week_callback: Optional[Callable[[], str]] = None
         self._entry_callback: Optional[Callable[[int], str]] = None
         self._stops_callback: Optional[Callable[[], str]] = None
@@ -200,6 +202,7 @@ class TelegramCommandHandler:
         status_callback: Optional[Callable[[], str]] = None,
         hermes_callback: Optional[Callable[[], str]] = None,
         apollo_callback: Optional[Callable[[], str]] = None,
+        clio_callback: Optional[Callable[[], str]] = None,
         week_callback: Optional[Callable[[], str]] = None,
         entry_callback: Optional[Callable[[int], str]] = None,
         stops_callback: Optional[Callable[[], str]] = None,
@@ -214,6 +217,7 @@ class TelegramCommandHandler:
         self._status_callback = status_callback
         self._hermes_callback = hermes_callback
         self._apollo_callback = apollo_callback
+        self._clio_callback = clio_callback
         self._week_callback = week_callback
         self._entry_callback = entry_callback
         self._stops_callback = stops_callback
@@ -319,6 +323,8 @@ class TelegramCommandHandler:
                 self._handle_hermes(chat_id)
             elif text.startswith("/apollo"):
                 self._handle_apollo(chat_id)
+            elif text.startswith("/clio"):
+                self._handle_clio(chat_id)
             elif text.startswith("/restart"):
                 self._handle_restart(chat_id)
             elif text.startswith("/help"):
@@ -497,6 +503,20 @@ class TelegramCommandHandler:
         except Exception as e:
             logger.error("Failed to build /apollo response: %s", e)
             self._send_message(chat_id, "Failed to retrieve APOLLO briefing. Try again shortly.")
+
+    def _handle_clio(self, chat_id: str):
+        """Handle /clio command — latest CLIO weekly analysis."""
+        if not self._clio_callback:
+            self._send_message(chat_id, "CLIO report not available.")
+            return
+
+        try:
+            msg = self._clio_callback()
+            msg = self._sanitize_for_telegram(msg)
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /clio response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve CLIO report. Try again shortly.")
 
     # =========================================================================
     # /set — CONFIG EDITING
@@ -892,6 +912,7 @@ class TelegramCommandHandler:
             "\n*Reports*\n"
             "/hermes \u2014 Latest HERMES report\n"
             "/apollo \u2014 Latest APOLLO briefing\n"
+            "/clio \u2014 Latest CLIO weekly analysis\n"
             "\n*Control*\n"
             "/restart \u2014 Restart HYDRA\n"
             "/stop \u2014 Stop HYDRA (warns if positions)\n"

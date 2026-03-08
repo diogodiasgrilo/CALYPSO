@@ -22,7 +22,7 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.9.2)
+## HYDRA Strategy Parameters (v1.9.3)
 
 - **5 iron condor entries per day** at 11:15, 11:45, 12:15, 12:45, 13:15 ET (:15/:45 offset — MKT-031)
 - **Smart entry windows (MKT-031):** 10-minute scouting window before each scheduled entry. Scores market conditions (post-spike ATR calm + momentum pause). Score >= 65 triggers early entry. Otherwise enters at scheduled time.
@@ -31,8 +31,7 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 - **VIX-scaled width (MKT-027):** round(VIX x 3.5 / 5) x 5, with per-side floors
 - **Min credit thresholds (MKT-011):** $0.75/side for calls (lowered v1.7.2), $1.75/side for puts (fallback $1.65 MKT-029)
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
-- **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
-- **Long leg salvage (MKT-033):** after short stop, sells surviving long if appreciated >= $10 (covers commission + slippage). Revenue included in total_realized_pnl.
+- **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
 
 ## Entry Skip Pattern

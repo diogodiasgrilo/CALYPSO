@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-03-06
-**Version:** 1.9.2
+**Last Updated:** 2026-03-08
+**Version:** 1.9.4
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -58,7 +58,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 | Entry type | Always full iron condor | Always full iron condor (skip if either side non-viable) |
 | Entries per day | 6 | 5 (Entry #6 dropped in v1.6.0 to free margin for wider put spreads) |
 | Stop formula (full IC) | total_credit per side | total_credit per side (same as base MEIC) |
-| Stop execution | Close both legs (short + long) | Close SHORT only, long expires (MKT-025) |
+| Stop execution | Close both legs (short + long) | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025) |
 | Credit gate | Skip if both non-viable | Skip if either side non-viable (MKT-011) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | OTM tightening | None | Progressive 5pt steps (MKT-020/022) |
@@ -360,7 +360,7 @@ otm_distance = clamp(otm_distance, 25, 120)  # Never closer than 25, never wider
 | 25-30 | 70 pts |
 | > 30 | 80 pts |
 
-**MKT-028 Asymmetric Floors (v1.6.0):** Put longs cost 7× more than calls due to skew ($0.90 vs $0.15 median). Separate floors: call 60pt (`call_min_spread_width`), put 75pt (`put_min_spread_width`). Since MKT-025 never closes longs, wider = cheaper = pure savings. `margin = max(call, put) × $100`, so wider puts don't require wider calls.
+**MKT-028 Asymmetric Floors (v1.6.0):** Put longs cost 7× more than calls due to skew ($0.90 vs $0.15 median). Separate floors: call 60pt (`call_min_spread_width`), put 75pt (`put_min_spread_width`). Wider put spreads push longs further OTM = cheaper. `margin = max(call, put) × $100`, so wider puts don't require wider calls.
 
 Maximum: 75 pts (`max_spread_width`, margin cap: 5 entries × 75pt × $100 = $37,500 ≤ $39,000).
 
@@ -412,9 +412,9 @@ stop_level = entry.total_credit          (both sides get the SAME level)
 
 **Safety floor:** MIN_STOP_LEVEL = $50. If stop_level is below $50 (e.g., due to zero fill price from API sync issues), skip stop monitoring for that side.
 
-### MKT-025: Short-Only Stop Close (v1.4.3)
+### MKT-025: Short-Only Stop Close (v1.4.3, configurable since v1.9.4)
 
-When a stop triggers, HYDRA only closes the **SHORT leg** via market order. The long leg stays open and expires at end-of-day settlement (0DTE = same-day expiry, zero overnight risk).
+**Configurable via `long_salvage.short_only_stop` (default: `false` = close both legs).** When `short_only_stop: true`, HYDRA only closes the **SHORT leg** via market order. The long leg stays open and expires at end-of-day settlement (0DTE = same-day expiry, zero overnight risk). When `false` (default), delegates to base MEIC behavior which closes both short and long legs. Analysis of 19+ trading days showed closing both legs has better expected value per stop (~$15-30 better).
 
 **Why:** Research from the 0DTE iron condor community (Tammy Chambless, John Einar Sandvand with 1,344+ trades) shows that long wings (far OTM, illiquid) are where most slippage occurs on stop closes. Closing only the short leg:
 - **Reduces slippage** — one market order instead of two; the short leg (closer to ATM) has tighter markets
@@ -431,9 +431,9 @@ This is offset by saved slippage ($5-$15) and saved commission ($2.50). Net impa
 
 **Stop trigger is unchanged:** `spread_value >= stop_level` still uses BOTH leg mid prices (short - long) for the trigger condition. Only the close execution changes.
 
-### MKT-033: Long Leg Salvage After Short Stop (v1.9.2)
+### MKT-033: Long Leg Salvage After Short Stop (v1.9.2, requires `short_only_stop: true`)
 
-After MKT-025 closes the short leg, the surviving long leg normally expires worthless at settlement. But on directional days, the long leg can appreciate significantly (e.g., +$120 net across 5 entries on Mar 5, 2026). MKT-033 automates selling the long if it's profitable enough to cover round-trip costs.
+**Only active when `long_salvage.short_only_stop: true`.** After MKT-025 closes the short leg, the surviving long leg normally expires worthless at settlement. But on directional days, the long leg can appreciate significantly. MKT-033 automates selling the long if it's profitable enough to cover round-trip costs.
 
 **Condition:** `(current_bid - open_price) × 100 × contracts >= $10.0`
 - $5 round-trip commission ($2.50 open + $2.50 close)
@@ -475,8 +475,8 @@ The main loop checks stops every ~1-2 seconds:
 1. Batch-fetch current spread values for all active entries
 2. For each active side of each entry:
    - If `spread_value >= stop_level`: trigger stop
-   - Close SHORT leg only via emergency market order (MKT-025)
-   - Long leg stays open, expires at settlement
+   - Close both legs via market order (default) or SHORT only if `short_only_stop: true` (MKT-025)
+   - If short-only: long leg stays open, expires at settlement; MKT-033 may salvage
    - Record fill prices (deferred async lookup for accurate P&L)
    - Update realized P&L
 
@@ -586,7 +586,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-007 | Short Strike Liquidity | v1.0.0 | Move short strikes closer to ATM if illiquid |
 | MKT-008 | Long Wing Liquidity | v1.0.0 | Reduce spread width if long wing illiquid; sets illiquidity flags |
 | MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | 40-80pt spreads based on VIX level |
-| MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days, pure savings with MKT-025) |
+| MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days) |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
 | MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call non-viable → put-only if VIX < 18 (MKT-032), else skip; put non-viable → skip |
 | MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 18.0 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky) |
@@ -599,9 +599,9 @@ Entry #1 → #2 → #3 placed normally
 | MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $1.75 |
 | MKT-023 | Smart Hold Check | v1.3.7 | **DISABLED** — Only active when MKT-018 enabled. Compare close-now vs hold |
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
-| MKT-025 | Short-Only Stop Close | v1.4.3 | Close SHORT leg only on stop; long expires at settlement |
-| MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper = pure savings) |
-| MKT-033 | Long Leg Salvage | v1.9.2 | After short stop, sell long if appreciated >= $10 (covers $5 commission + $5 max slippage) |
+| MKT-025 | Short-Only Stop Close | v1.4.3 | **Configurable** (`short_only_stop`, default: false). When true: close SHORT only, long expires. When false: close both legs (default since v1.9.4) |
+| MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper) |
+| MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
 
 ### Removed Rules
 

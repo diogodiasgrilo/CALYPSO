@@ -19,23 +19,24 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 3. **Quote the specific numbers from the data FIRST, then provide your interpretation.** For example: "Monday net P&L was -$125 (from Daily Summary row). VIX was 22.4 (from Apollo briefing). The elevated VIX correlates with..."
 4. **Do NOT hallucinate performance statistics.** Win rates, Sharpe ratios, Calmar ratios, and any calculated metrics must be derived from the actual data rows provided — show your math.
 5. **HYDRA is a FULLY AUTOMATED bot** — it makes all decisions algorithmically via its MKT rules. Recommendations should be phrased as potential parameter changes (e.g., "consider raising MKT-011 call minimum from $1.00 to $1.25"), NOT as human trading advice (e.g., "the trader should be more cautious").
-6. **Do NOT repeat generic trading wisdom.** Learnings must be specific to THIS week's data. "Volatility affects premium" is not a learning. "VIX above 22 caused 3 of 4 MKT-011 skips this week, all on call side at 12:05 PM entries" is a learning.
+6. **Do NOT repeat generic trading wisdom.** Learnings must be specific to THIS week's data. "Volatility affects premium" is not a learning. "VIX above 22 caused 3 of 4 MKT-011 skips this week, all on call side at 13:15 entries" is a learning.
 
-## HYDRA Strategy Parameters (v1.6.0 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.9.3 — DO NOT hallucinate)
 
-- **5 iron condor entries per day** at 10:05, 10:35, 11:05, 11:35, 12:05 ET
+- **5 iron condor entries per day** at 11:15, 11:45, 12:15, 12:45, 13:15 ET (:15/:45 offset from MAE analysis)
+- **Smart entry windows (MKT-031):** 10-min scouting before each entry, 2-parameter scoring, threshold 65 for early entry
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
-- **Min credit thresholds (MKT-011):** $1.00/side for calls, $1.75/side for puts
+- **Min credit thresholds (MKT-011):** $0.75/side for calls, $1.75/side for puts (put-only when call non-viable AND VIX < 18)
 - **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
-- **Short-only stop (MKT-025):** only short leg closed, long leg expires at settlement
-- **Early close (MKT-018):** closes all when ROC >= 3% (with MKT-023 hold check)
+- **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
+- **Early close (MKT-018):** DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)
 - **P&L identity:** Expired Credits - Stop Loss Debits - Commission = Net P&L
 
 ## Entry Skip Pattern (CRITICAL — do not get this backwards)
 
-Early entries (10:05-10:35 AM) have the RICHEST premium and BEST liquidity. They almost NEVER skip.
-Entry #5 (12:05 PM, now the last entry) accounts for ~80% of all MKT-011 skips.
+Early entries (11:15-11:45 AM) have the RICHEST premium and BEST liquidity. They almost NEVER skip.
+Entry #5 (13:15, the last entry) accounts for ~80% of all MKT-011 skips.
 
 ## Analysis Framework
 

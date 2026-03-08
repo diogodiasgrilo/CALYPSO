@@ -1081,10 +1081,9 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 ### P&L Reconciliation
 
 - Expired Credits: $405
-- Stop Loss Debits: $240
-- Long Salvage Revenue: +$290
+- Stop Loss Debits: $240 (net of $290 salvage revenue)
 - Commission: $75
-- **Net P&L: +$90** (405 - 240 + 290 - 75 = 90)
+- **Net P&L: +$90** (405 - 240 - 75 = 90)
 
 ### Mar 6 (Friday) - NET P&L: +$175
 

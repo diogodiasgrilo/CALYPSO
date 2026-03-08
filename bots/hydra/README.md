@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.9.2 | **Last Updated:** 2026-03-06
+**Version:** 1.9.4 | **Last Updated:** 2026-03-08
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -91,6 +91,7 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
         "momentum_threshold_pct": 0.05
     },
     "long_salvage": {
+        "short_only_stop": false,
         "enabled": true,
         "min_profit": 10.0
     }
@@ -116,11 +117,12 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `score_threshold` | `65` | Score >= this triggers early entry |
 | `momentum_threshold_pct` | `0.05` | Momentum calm threshold (0.05 = 0.05%) |
 
-### Long Leg Salvage Config (MKT-033)
+### Stop Close Mode & Long Leg Salvage Config (MKT-025/MKT-033)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `true` | Enable/disable long leg salvage after short stop |
+| `short_only_stop` | `false` | `false` = close both legs on stop (default). `true` = MKT-025 short-only + MKT-033 salvage |
+| `enabled` | `true` | Enable/disable long leg salvage after short stop (only when `short_only_stop: true`) |
 | `min_profit` | `10.0` | Minimum profit ($) to sell long (covers $5 commission + $5 slippage) |
 
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
@@ -191,7 +193,7 @@ sudo journalctl -u hydra -f
 | Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | Stop formula | total_credit - $0.10 | total_credit - $0.15 (covers commission) |
-| Stop execution | Close both legs | Close SHORT only; long expires or sold if >= $10 profit (MKT-025 + MKT-033) |
+| Stop execution | Close both legs | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025 + MKT-033) |
 
 ## Risk Considerations
 
@@ -233,7 +235,7 @@ bots/hydra/
 
 ## Version History
 
-- **1.9.2** (2026-03-05): MKT-033 long leg salvage after short stop. Sells surviving long if appreciated >= $10 (covers $5 commission + $5 slippage). Two triggers: immediately after stop + periodic heartbeat. Revenue added to `total_realized_pnl`. Config: `long_salvage.enabled`, `long_salvage.min_profit`.
+- **1.9.2** (2026-03-05): MKT-033 long leg salvage after short stop (requires `short_only_stop: true`). Sells surviving long if appreciated >= $10. Config: `long_salvage.enabled`, `long_salvage.min_profit`.
 - **1.9.1** (2026-03-05): MKT-032 VIX gate for put-only entries. Put-only only when VIX < 18 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky). Configurable via `put_only_max_vix`.
 - **1.8.0** (2026-03-04): Entry schedule shifted to :15/:45 offset (11:15-13:15), MKT-031 smart entry windows (10min scouting, 2-parameter scoring: ATR calm 0-70pts + momentum pause 0-30pts, threshold 65), early close day cutoff raised to 12:00 PM
 - **1.7.2** (2026-03-03): Lower call minimum from $1.00 to $0.75 (credit cushion analysis)
@@ -243,9 +245,9 @@ bots/hydra/
 - **1.6.1** (2026-03-03): Telegram /lastday and /account commands
 - **1.6.0** (2026-03-02): Drop Entry #6 (frees margin for wider puts), MKT-028 asymmetric spreads (call 60pt, put 75pt floor, cap 75pt), MKT-024 updated (3.5× calls, 4.0× puts), MKT-027 VIX-scaled spread width continuous formula
 - **1.5.0** (2026-02-28): Rename MEIC-TF → HYDRA (service, state, metrics, Sheets all renamed), Telegram /snapshot command, 30-min periodic position snapshots, alert system channel routing + BOT_STARTED/STOPPED + error isolation
-- **1.4.5** (2026-02-28): MKT-026 min spread width raised from 25pt to 60pt (longs cheaper on low-VIX days, MKT-025 never closes longs = pure savings)
+- **1.4.5** (2026-02-28): MKT-026 min spread width raised from 25pt to 60pt (longs cheaper on low-VIX days)
 - **1.4.4** (2026-02-28): Add 6th entry at 12:35 PM (matching base MEIC schedule — MKT-011 credit gate ensures zero-cost skip when non-viable; later dropped in v1.6.0)
-- **1.4.3** (2026-02-28): MKT-025 short-only stop loss close (close short, let long expire — per Tammy/Sandvand best practice)
+- **1.4.3** (2026-02-28): MKT-025 short-only stop loss close (configurable since v1.9.4; default: close both legs)
 - **1.4.2** (2026-02-27): MEIC+ reduction raised from $0.10 to $0.15 to cover commission on one-side-stop (true breakeven)
 - **1.4.1** (2026-02-27): MKT-024 wider starting OTM (2× multiplier both sides), separate put minimum $1.75 (Tammy's $1.00-$1.75 range), enhanced MKT-020/022 scan logging
 - **1.4.0** (2026-02-27): Remove MKT-019 (revert to total_credit stop), disable all one-sided entries (EMA signal informational only, always full IC or skip)

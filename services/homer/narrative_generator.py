@@ -29,14 +29,14 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 
 ## HYDRA Domain Knowledge (use these exact parameters)
 
-- Entry times: 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 ET (6 entries per day)
+- Entry times: 11:15, 11:45, 12:15, 12:45, 13:15 ET (5 entries per day, :15/:45 offset from MAE analysis)
+- Smart entry windows (MKT-031): 10-min scouting before each entry, 2-parameter scoring, threshold 65
 - Spread widths: 60-120 points (VIX-scaled), NOT 5-point wings
-- Min credit thresholds: $1.00 calls, $1.75 puts (MKT-011)
+- Min credit thresholds: $0.75 calls, $1.75 puts (MKT-011)
 - Stop formula: total_credit - $0.15 (MEIC+ for true breakeven)
-- Stop close: SHORT-ONLY (MKT-025) — long leg expires at settlement, saves commission
-- Progressive tightening: MKT-020 (calls) and MKT-022 (puts) scan from 2× OTM inward
-- Early close: MKT-018 triggers at ROC >= 3%, checked by MKT-023 smart hold
-- Pre-entry ROC gate: MKT-021 skips entries #4-#6 if ROC already above threshold
+- Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
+- Progressive tightening: MKT-020 (calls) and MKT-022 (puts) scan from wide OTM inward
+- Early close (MKT-018): DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)
 - Entries are full iron condors or put-only (MKT-011: call non-viable → put-only since v1.7.1, call-only disabled)
 - EMA 20/40 trend signal is informational only (logged but doesn't drive entry type)
 
@@ -201,9 +201,8 @@ Focus on:
 - Which active MKT rules triggered and their impact:
   - MKT-011 (credit gate): Did it skip any entries? Were skips justified?
   - MKT-020/022 (progressive tightening): How far did strikes tighten?
-  - MKT-018 (early close at ROC>=3%): Did it trigger? Was it the right call?
-  - MKT-025 (short-only stop): How much commission was saved vs closing both legs?
-  - MKT-021 (pre-entry ROC gate): Did it gate entries #4-6?
+  - MKT-031 (smart entry windows): Did any entries trigger early? Score details?
+  - Stop close mode: Both legs closed (default). Were stops efficient?
 - Was this a good or bad day for the current strategy configuration?
 
 Rules:

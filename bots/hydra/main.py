@@ -231,6 +231,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
             status_callback=strategy.build_telegram_status,
             hermes_callback=strategy.build_telegram_hermes,
             apollo_callback=strategy.build_telegram_apollo,
+            clio_callback=strategy.build_telegram_clio,
             week_callback=strategy.build_telegram_week,
             entry_callback=strategy.build_telegram_entry,
             stops_callback=strategy.build_telegram_stops,

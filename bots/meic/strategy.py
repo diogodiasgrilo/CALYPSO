@@ -449,13 +449,16 @@ class IronCondorEntry:
 
         if call_stopped and put_stopped:
             # Both stopped - return realized loss
-            # Net loss per side = stop_level - credit_for_that_side
-            call_loss = self.call_side_stop - self.call_spread_credit
-            put_loss = self.put_side_stop - self.put_spread_credit
+            # Use actual stop debit when available (includes slippage), fall back to theoretical
+            call_debit = self.actual_call_stop_debit if self.actual_call_stop_debit > 0 else self.call_side_stop
+            put_debit = self.actual_put_stop_debit if self.actual_put_stop_debit > 0 else self.put_side_stop
+            call_loss = call_debit - self.call_spread_credit
+            put_loss = put_debit - self.put_spread_credit
             return -(call_loss + put_loss)
         elif call_stopped:
             # Call stopped (loss), put still open or merged
-            loss_on_call = self.call_side_stop - self.call_spread_credit
+            call_debit = self.actual_call_stop_debit if self.actual_call_stop_debit > 0 else self.call_side_stop
+            loss_on_call = call_debit - self.call_spread_credit
             if put_merged:
                 # Put merged - credit preserved (profit = credit)
                 return self.put_spread_credit - loss_on_call
@@ -464,7 +467,9 @@ class IronCondorEntry:
                 return (self.put_spread_credit - self.put_spread_value) - loss_on_call
         elif put_stopped:
             # Put stopped (loss), call still open or merged
-            loss_on_put = self.put_side_stop - self.put_spread_credit
+            # Use actual stop debit when available (includes slippage), fall back to theoretical
+            put_debit = self.actual_put_stop_debit if self.actual_put_stop_debit > 0 else self.put_side_stop
+            loss_on_put = put_debit - self.put_spread_credit
             if call_merged:
                 # Call merged - credit preserved (profit = credit)
                 return self.call_spread_credit - loss_on_put
@@ -3874,6 +3879,11 @@ class MEICStrategy:
         if fill_prices_captured and not self.dry_run:
             # Use actual close cost
             net_loss = actual_close_cost - credit_received
+            # Record actual debit for dashboard per-entry P&L
+            if side == "call":
+                entry.actual_call_stop_debit = actual_close_cost
+            else:
+                entry.actual_put_stop_debit = actual_close_cost
             logger.info(
                 f"FIX-42: Actual P&L for Entry #{entry.entry_number} {side}: "
                 f"close_cost=${actual_close_cost:.2f} - credit=${credit_received:.2f} = "
@@ -7978,10 +7988,18 @@ class MEICStrategy:
                 short_label = "SP"
                 long_label = "LP"
 
+            # Format depends on stop mode (MKT-025 short-only vs both legs)
+            if getattr(self, 'short_only_stop', False):
+                short_line = f"{short_label} {short_strike:.0f} closed (short only)"
+                long_line = f"{long_label} {long_strike:.0f} held → settles EOD"
+            else:
+                short_line = f"{short_label} {short_strike:.0f} closed"
+                long_line = f"{long_label} {long_strike:.0f} closed"
+
             stop_msg = (
                 f"*Entry #{entry.entry_number}* {side.upper()} stopped\n\n"
-                f"{short_label} {short_strike:.0f} closed (short only)\n"
-                f"{long_label} {long_strike:.0f} held → settles EOD\n\n"
+                f"{short_line}\n"
+                f"{long_line}\n\n"
                 f"Credit: ${credit:.0f} | Stop: ${stop_level:.0f}\n"
                 f"*Side loss: -${net_loss:.0f}*\n"
                 f"SPX: {self.current_price:,.2f}"

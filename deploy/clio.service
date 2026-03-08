@@ -25,5 +25,5 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/calypso/intel /opt/calypso/.git
 
-# Larger timeout for deep analysis + git operations
-TimeoutStartSec=300
+# Larger timeout for deep analysis + git operations + API retries
+TimeoutStartSec=600

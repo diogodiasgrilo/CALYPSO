@@ -335,7 +335,7 @@ class HydraStrategy(MEICStrategy):
         self.max_spread_width = int(strategy_config.get("max_spread_width", 75))
 
         # MKT-028: Asymmetric spread widths — put longs cost 7× more than calls due to skew.
-        # Since MKT-025 never closes longs, wider spread = cheaper longs = pure savings.
+        # Wider put spreads push longs further OTM = cheaper.
         # margin = max(call_width, put_width), so wider puts don't require wider calls.
         self.call_min_spread_width = int(strategy_config.get("call_min_spread_width", 60))
         self.put_min_spread_width = int(strategy_config.get("put_min_spread_width", 60))
@@ -352,12 +352,15 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"  Smart entry (MKT-031): {'ENABLED' if self.smart_entry_enabled else 'DISABLED'} "
                     f"(window={self.scout_window_minutes}min, threshold={self.scout_score_threshold})")
 
-        # MKT-033: Long leg salvage (sell long after short stopped if profitable)
+        # MKT-025/MKT-033: Short-only stop + long leg salvage (configurable)
         long_salvage = config.get("long_salvage", {})
+        self.short_only_stop = long_salvage.get("short_only_stop", False)
         self.long_salvage_enabled = long_salvage.get("enabled", True)
         self.long_salvage_min_profit = float(long_salvage.get("min_profit", 10.0))
-        logger.info(f"  Long salvage (MKT-033): {'ENABLED' if self.long_salvage_enabled else 'DISABLED'} "
-                    f"(min_profit=${self.long_salvage_min_profit:.0f})")
+        logger.info(f"  Stop mode: {'SHORT-ONLY + salvage (MKT-025/033)' if self.short_only_stop else 'BOTH LEGS closed'}")
+        if self.short_only_stop:
+            logger.info(f"  Long salvage (MKT-033): {'ENABLED' if self.long_salvage_enabled else 'DISABLED'} "
+                        f"(min_profit=${self.long_salvage_min_profit:.0f})")
 
         # MKT-031: Scouting state (in-memory, no persistence needed)
         self._scouting_active = False
@@ -380,7 +383,7 @@ class HydraStrategy(MEICStrategy):
         MKT-028: Separate floors for calls (60pt) and puts (75pt) — put longs
         cost 7× more due to skew, so wider put spreads save more.
 
-        Since MKT-025 never closes longs, wider spread = cheaper longs = pure savings.
+        Wider put spreads push longs further OTM = cheaper.
         margin = max(call_width, put_width), so narrower calls don't affect margin.
 
         Args:
@@ -876,7 +879,9 @@ class HydraStrategy(MEICStrategy):
         result = super()._handle_monitoring()
 
         # MKT-033: Check if any surviving long legs can be sold for profit
-        self._check_long_salvage()
+        # Only relevant when short_only_stop is enabled (longs stay open after stop)
+        if self.short_only_stop:
+            self._check_long_salvage()
 
         # MKT-018: Check early close AFTER parent monitoring completes
         # Only check if:
@@ -2553,11 +2558,14 @@ class HydraStrategy(MEICStrategy):
 
     def _execute_stop_loss(self, entry, side: str) -> str:
         """
-        MKT-025: Execute a stop loss closing only the SHORT leg.
+        Execute a stop loss — mode depends on short_only_stop config.
 
-        Override of base MEIC's _execute_stop_loss() that closes both legs.
-        Only the short leg is closed via market order. The long leg stays open
-        and expires worthless at end-of-day settlement (0DTE options).
+        When short_only_stop=False (default): delegates to base MEIC which
+        closes BOTH short and long legs via market order.
+
+        When short_only_stop=True (MKT-025): closes only the SHORT leg.
+        The long leg stays open and expires at end-of-day settlement (0DTE).
+        MKT-033 salvage may sell the long if it appreciates >= $10.
 
         Why: Tammy Chambless and Sandvand (1,344+ trades) both recommend
         "stop on short only, not on the spread" to reduce slippage on the
@@ -2576,6 +2584,10 @@ class HydraStrategy(MEICStrategy):
         Returns:
             str describing action taken
         """
+        # When short_only_stop is disabled, use base MEIC logic (closes both legs)
+        if not self.short_only_stop:
+            return super()._execute_stop_loss(entry, side)
+
         logger.warning(
             f"MKT-025 STOP TRIGGERED: Entry #{entry.entry_number} {side} side "
             f"(closing SHORT only, long expires at settlement)"
@@ -4053,6 +4065,34 @@ class HydraStrategy(MEICStrategy):
 
         return "No recent APOLLO briefing available."
 
+    def build_telegram_clio(self) -> str:
+        """Build a Telegram message with the most recent CLIO weekly analysis.
+
+        Searches intel/clio/ for the latest week_*.md report file.
+        Returns raw Markdown content — the Telegram handler sanitizes before sending.
+        """
+        clio_dir = os.path.join("intel", "clio")
+        try:
+            files = sorted(
+                [f for f in os.listdir(clio_dir) if f.startswith("week_") and f.endswith(".md")],
+                reverse=True,
+            )
+        except (FileNotFoundError, IOError):
+            return "No CLIO reports available."
+
+        for filename in files[:3]:
+            report_path = os.path.join(clio_dir, filename)
+            try:
+                with open(report_path, "r") as f:
+                    content = f.read()
+                if content.strip():
+                    week_label = filename.replace("week_", "").replace(".md", "").replace("_", "-")
+                    return f"\U0001f4dc *HYDRA* | CLIO \u2014 {week_label}\n\n{content}"
+            except (FileNotFoundError, IOError):
+                continue
+
+        return "No CLIO weekly analysis available."
+
     def build_telegram_week(self) -> str:
         """
         Build a formatted Telegram message showing current week's trading summary.
@@ -5302,6 +5342,7 @@ class HydraStrategy(MEICStrategy):
         self._roc_gate_triggered = False  # MKT-021: Reset ROC gate
         self._early_close_time = None
         self._early_close_pnl = None
+        self._pnl_history = []  # Reset dashboard P&L curve for new day
 
         # P3: Reset intraday market data tracking
         self.market_data.reset_daily_tracking()

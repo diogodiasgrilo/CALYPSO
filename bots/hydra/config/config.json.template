@@ -21,7 +21,7 @@
         "entry_times": ["11:15", "11:45", "12:15", "12:45", "13:15"],
         "entry_window_minutes": 5,
 
-        "_comment_spread": "MKT-028: Asymmetric spread widths. Put floor 75pt (put longs 7x more expensive due to skew, MKT-025 never closes longs = pure savings). Call floor 60pt. Max 75pt = margin cap (5 entries x 75pt x $100 = $37,500 <= $39,000). min_spread_width=60 is MKT-008 liquidity fallback floor",
+        "_comment_spread": "MKT-028: Asymmetric spread widths. Put floor 75pt (put longs 7x more expensive due to skew, wider = cheaper). Call floor 60pt. Max 75pt = margin cap (5 entries x 75pt x $100 = $37,500 <= $39,000). min_spread_width=60 is MKT-008 liquidity fallback floor",
         "spread_width": 50,
         "min_spread_width": 60,
         "call_min_spread_width": 60,
@@ -86,6 +86,12 @@
         "window_minutes": 10,
         "score_threshold": 65,
         "momentum_threshold_pct": 0.05
+    },
+    "long_salvage": {
+        "_comment": "MKT-025/033: short_only_stop=false closes both legs on stop (default). true enables short-only stop + long salvage.",
+        "short_only_stop": false,
+        "enabled": true,
+        "min_profit": 10.0
     },
     "filters": {
         "_comment": "Skip trading on FOMC announcement days due to high volatility",
