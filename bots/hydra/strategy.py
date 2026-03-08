@@ -364,6 +364,13 @@ class HydraStrategy(MEICStrategy):
         self.scout_momentum_threshold = smart_entry.get("momentum_threshold_pct", 0.05)
         logger.info(f"  Smart entry (MKT-031): {'ENABLED' if self.smart_entry_enabled else 'DISABLED'} "
                     f"(window={self.scout_window_minutes}min, threshold={self.scout_score_threshold})")
+        if self.vix_gate_enabled:
+            schedule_str = ", ".join(t.strftime('%H:%M:%S') for t in self.entry_times)
+            logger.info(f"  VIX time shift (MKT-034): ENABLED "
+                        f"(medium={self.vix_medium_threshold}, high={self.vix_high_threshold})")
+            logger.info(f"  Default schedule: [{schedule_str}]")
+        else:
+            logger.info(f"  VIX time shift (MKT-034): DISABLED")
 
         # MKT-025/MKT-033: Short-only stop + long leg salvage (configurable)
         long_salvage = config.get("long_salvage", {})
