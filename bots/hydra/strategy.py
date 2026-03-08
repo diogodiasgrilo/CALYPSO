@@ -829,6 +829,12 @@ class HydraStrategy(MEICStrategy):
     def _resolve_vix_gate(self, start_slot_index: int):
         """MKT-034: Lock entry schedule to 5 consecutive slots from start_slot_index."""
         self.entry_times = list(ALL_ENTRY_SLOTS[start_slot_index : start_slot_index + 5])
+        # Re-apply early close filter if applicable (don't override _parse_entry_times cutoff)
+        if is_early_close_day():
+            early_cutoff = dt_time(12, 30)
+            self.entry_times = [t for t in self.entry_times if t < early_cutoff]
+            if not self.entry_times:
+                self.entry_times = [ALL_ENTRY_SLOTS[start_slot_index]]
         self._next_entry_index = 0
         self._vix_gate_resolved = True
         self._vix_gate_start_slot = start_slot_index
@@ -5515,6 +5521,13 @@ class HydraStrategy(MEICStrategy):
         self._vix_gate_start_slot = 0
         if self.vix_gate_enabled:
             self.entry_times = list(ALL_ENTRY_SLOTS[:5])  # MKT-034: Reset to default schedule
+            # Re-apply early close filter for new day
+            if is_early_close_day():
+                early_cutoff = dt_time(12, 30)
+                self.entry_times = [t for t in self.entry_times if t < early_cutoff]
+                if not self.entry_times:
+                    self.entry_times = [ALL_ENTRY_SLOTS[0]]
+                logger.info(f"MKT-034: Early close day schedule: {[t.strftime('%H:%M:%S') for t in self.entry_times]}")
         self._early_close_time = None
         self._early_close_pnl = None
         self._pnl_history = []  # Reset dashboard P&L curve for new day
