@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
 **Last Updated:** 2026-03-08
-**Version:** 1.9.4
+**Version:** 1.10.0
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -116,13 +116,13 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 | 2 | 11:44:30 | |
 | 3 | 12:14:30 | |
 | 4 | 12:44:30 | |
-| 5 | 1:14:30 | |
+| 5 | 13:14:30 | |
 
 Each entry has a 5-minute retry window after the scheduled time. MKT-031 smart entry windows add a 10-minute scouting period BEFORE each scheduled time (see Smart Entry Windows section below).
 
 ### VIX-Scaled Entry Time Shifting (MKT-034)
 
-At high VIX (>21), early entries (11:15-11:45) have 86-100% stop rates while later entries (12:15-12:45) have only 50-67% stop rates with nearly double the P&L per entry. MKT-034 shifts the 5-entry schedule later on high-VIX days.
+At high VIX (>= 20), early entries (11:15-11:45) have 86-100% stop rates while later entries (12:15-12:45) have only 50-67% stop rates with nearly double the P&L per entry. MKT-034 shifts the 5-entry schedule later on high-VIX days.
 
 **VIX gate check** runs at :14:00/:44:00 (30s before entry execution, 1 min before :15/:45 marks). Only applies to E#1 — after E#1 is placed, E#2-E#5 use standard scheduling.
 

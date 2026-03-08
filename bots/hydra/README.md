@@ -26,7 +26,7 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 | 2 | 11:44:30 | 11:34:30-11:44:30 |
 | 3 | 12:14:30 | 12:04:30-12:14:30 |
 | 4 | 12:44:30 | 12:34:30-12:44:30 |
-| 5 | 1:14:30 | 1:04:30-1:14:30 |
+| 5 | 13:14:30 | 13:04:30-13:14:30 |
 
 **VIX-scaled entry time shifting (MKT-034, v1.10.0):** Entry execution at :14:30/:44:30 (30s before :15/:45 marks — fills land at :15:00 instead of :16:00). VIX gate checks at :14:00/:44:00 for E#1 only:
 
@@ -100,6 +100,11 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
         "score_threshold": 65,
         "momentum_threshold_pct": 0.05
     },
+    "vix_time_shift": {
+        "enabled": true,
+        "medium_vix_threshold": 20.0,
+        "high_vix_threshold": 23.0
+    },
     "long_salvage": {
         "short_only_stop": false,
         "enabled": true,
@@ -126,6 +131,14 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `window_minutes` | `10` | Scouting window before each entry (minutes) |
 | `score_threshold` | `65` | Score >= this triggers early entry |
 | `momentum_threshold_pct` | `0.05` | Momentum calm threshold (0.05 = 0.05%) |
+
+### VIX-Scaled Entry Time Shifting Config (MKT-034)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `true` | Enable/disable VIX-scaled entry time shifting |
+| `medium_vix_threshold` | `20.0` | VIX >= this skips slot 0 (11:14:30), shifts to 11:44:30 |
+| `high_vix_threshold` | `23.0` | VIX >= this skips slot 1 (11:44:30), shifts to 12:14:30 (floor) |
 
 ### Stop Close Mode & Long Leg Salvage Config (MKT-025/MKT-033)
 
@@ -245,6 +258,9 @@ bots/hydra/
 
 ## Version History
 
+- **1.10.0** (2026-03-08): MKT-034 VIX-scaled entry time shifting. Entry execution at :14:30/:44:30 (30s before :15/:45 marks). VIX gate checks at :14:00/:44:00 — blocks E#1 if VIX >= threshold (20/23), shifts schedule to later slots. Floor at 12:14:30. Early close cutoff raised to 12:30 PM. Configurable via `vix_time_shift` config section.
+- **1.9.4** (2026-03-08): Configurable stop close mode via `long_salvage.short_only_stop` (default: false = close both legs). Added /clio Telegram command (15 total). Updated all agent prompts to v1.9.3 parameters.
+- **1.9.3** (2026-03-07): Actual stop debit tracking for per-entry P&L accuracy. Added actual_call_stop_debit/actual_put_stop_debit fields. Dashboard uses actual when available.
 - **1.9.2** (2026-03-05): MKT-033 long leg salvage after short stop (requires `short_only_stop: true`). Sells surviving long if appreciated >= $10. Config: `long_salvage.enabled`, `long_salvage.min_profit`.
 - **1.9.1** (2026-03-05): MKT-032 VIX gate for put-only entries. Put-only only when VIX < 18 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky). Configurable via `put_only_max_vix`.
 - **1.8.0** (2026-03-04): Entry schedule shifted to :15/:45 offset (11:15-13:15), MKT-031 smart entry windows (10min scouting, 2-parameter scoring: ATR calm 0-70pts + momentum pause 0-30pts, threshold 65), early close day cutoff raised to 12:00 PM
