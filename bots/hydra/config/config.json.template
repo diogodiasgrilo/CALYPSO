@@ -87,6 +87,12 @@
         "score_threshold": 65,
         "momentum_threshold_pct": 0.05
     },
+    "vix_time_shift": {
+        "_comment": "MKT-034: VIX-scaled entry time shifting. Shifts 5-entry schedule later on high-VIX days. E#1 blocked if VIX >= medium threshold (20), shifted to next slot. Floor at 12:14:30 (always enters). Entry execution at :14:30/:44:30 (30s before :15/:45 for fill precision).",
+        "enabled": true,
+        "medium_vix_threshold": 20.0,
+        "high_vix_threshold": 23.0
+    },
     "long_salvage": {
         "_comment": "MKT-025/033: short_only_stop=false closes both legs on stop (default). true enables short-only stop + long salvage.",
         "short_only_stop": false,

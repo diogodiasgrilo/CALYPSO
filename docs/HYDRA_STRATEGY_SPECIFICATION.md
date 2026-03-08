@@ -106,29 +106,51 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 ### Entry Schedule
 
-5 entries per day, spaced 30 minutes apart at :15/:45 offset (v1.8.1). 19-day MAE analysis showed :15/:45 has 10% lower 30-min adverse excursion vs :05/:35 (12.39pt vs 13.76pt MAE), with better tail risk (P90: 21.71pt vs 23.84pt). Aligned with external research: Option Alpha 25k trades (ICs after 11:30 = +37%), Sandvand 9,100 trades (1 PM+ most profitable), U-shaped intraday volatility (trough 11:30-12:30).
+5 entries per day, spaced 30 minutes apart. Entry execution at :14:30/:44:30 (30s before :15/:45 marks — fills land at :15:00 instead of :16:00). VIX-scaled start time via MKT-034 (v1.10.0).
+
+**Default schedule (VIX < 20):**
 
 | Entry | Time (ET) | Notes |
 |-------|-----------|-------|
-| 1 | 11:15 AM | Mid-morning; opening volatility settled |
-| 2 | 11:45 AM | Entering volatility trough |
-| 3 | 12:15 PM | |
-| 4 | 12:45 PM | MKT-021 ROC gate before #4 (disabled) |
-| 5 | 1:15 PM | MKT-021 ROC gate before #5 (disabled) |
+| 1 | 11:14:30 | VIX gate check at 11:14:00 |
+| 2 | 11:44:30 | |
+| 3 | 12:14:30 | |
+| 4 | 12:44:30 | |
+| 5 | 1:14:30 | |
 
 Each entry has a 5-minute retry window after the scheduled time. MKT-031 smart entry windows add a 10-minute scouting period BEFORE each scheduled time (see Smart Entry Windows section below).
+
+### VIX-Scaled Entry Time Shifting (MKT-034)
+
+At high VIX (>21), early entries (11:15-11:45) have 86-100% stop rates while later entries (12:15-12:45) have only 50-67% stop rates with nearly double the P&L per entry. MKT-034 shifts the 5-entry schedule later on high-VIX days.
+
+**VIX gate check** runs at :14:00/:44:00 (30s before entry execution, 1 min before :15/:45 marks). Only applies to E#1 — after E#1 is placed, E#2-E#5 use standard scheduling.
+
+| VIX at Check | E#1 Start | Entry Schedule |
+|--|--|--|
+| < 20 | 11:14:30 | 11:14:30, 11:44:30, 12:14:30, 12:44:30, 13:14:30 |
+| 20-23 | 11:44:30 | 11:44:30, 12:14:30, 12:44:30, 13:14:30, 13:44:30 |
+| >= 23 | 12:14:30 | 12:14:30, 12:44:30, 13:14:30, 13:44:30, 14:14:30 |
+
+**Floor:** 12:14:30 — E#1 always enters by this slot regardless of VIX.
+
+**MKT-031 interaction:** If MKT-031 wants early entry during scouting, VIX gate is checked first. If VIX allows → resolve + enter early. If VIX blocks → skip early entry, wait for scheduled time.
+
+**Early close days:** Cutoff raised to 12:30 PM (from 12:00) to allow 12:14:30 entry on high-VIX early close days.
+
+**Config:** `vix_time_shift.enabled`, `medium_vix_threshold` (20.0), `high_vix_threshold` (23.0).
 
 ### Smart Entry Windows (MKT-031)
 
 Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scouting window before each entry. Market conditions are scored every main-loop cycle (~2-5s). If the composite score >= 65, the bot enters early. Otherwise, it enters at the scheduled time (identical to previous behavior).
 
 ```
-11:05  Scouting opens — start scoring every 2-5s
-11:08  Score = 42 (momentum rough, ATR high)
-11:11  Score = 71 → EARLY ENTRY TRIGGERED (4 min early)
+11:04:30  Scouting opens — start scoring every 2-5s
+11:08     Score = 42 (momentum rough, ATR high)
+11:10     Score = 71 → check VIX gate (MKT-034) → VIX OK → EARLY ENTRY
   -- OR --
-11:15  Window expires → ENTER ANYWAY (same as current behavior)
-11:20  Original 5-min retry window still available if entry fails
+11:14:30  Window expires → check VIX gate → VIX OK → ENTER ANYWAY
+11:19:30  Original 5-min retry window still available if entry fails
 ```
 
 **Scoring (2 parameters, 100 max):**
@@ -777,7 +799,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `entry_times` | `["11:15","11:45","12:15","12:45","13:15"]` | Entry schedule (ET). 5 entries at :15/:45 offset (v1.8.1) |
+| `entry_times` | `["11:15","11:45","12:15","12:45","13:15"]` | Entry schedule (ET). Ignored when `vix_time_shift.enabled` (uses ALL_ENTRY_SLOTS instead) |
 | `entry_window_minutes` | `5` | Window around entry time |
 | `spread_width` | `50` | Default spread width (points) |
 | `min_spread_width` | `60` | MKT-008 liquidity fallback floor (universal) |

@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.9.4 | **Last Updated:** 2026-03-08
+**Version:** 1.10.0 | **Last Updated:** 2026-03-08
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -16,17 +16,27 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), and wider starting OTM (MKT-024).
 
-### Entry Schedule (5 entries — :15/:45 offset in v1.8.1, Entry #6 dropped in v1.6.0)
+### Entry Schedule (5 entries — VIX-scaled in v1.10.0, Entry #6 dropped in v1.6.0)
+
+**Default schedule (VIX < 20):**
 
 | Entry | Time (ET) | Scout Window |
 |-------|-----------|-------------|
-| 1 | 11:15 AM | 11:05-11:15 |
-| 2 | 11:45 AM | 11:35-11:45 |
-| 3 | 12:15 PM | 12:05-12:15 |
-| 4 | 12:45 PM | 12:35-12:45 |
-| 5 | 1:15 PM | 1:05-1:15 |
+| 1 | 11:14:30 | 11:04:30-11:14:30 |
+| 2 | 11:44:30 | 11:34:30-11:44:30 |
+| 3 | 12:14:30 | 12:04:30-12:14:30 |
+| 4 | 12:44:30 | 12:34:30-12:44:30 |
+| 5 | 1:14:30 | 1:04:30-1:14:30 |
 
-Entry times at :15/:45 offset (v1.8.1): 19-day MAE analysis showed :15/:45 has 10% lower 30-min adverse excursion vs :05/:35 (12.39pt vs 13.76pt MAE), with better tail risk (P90: 21.71pt vs 23.84pt). On early close days, cutoff is 12:00 PM (keeps entries 1-2).
+**VIX-scaled entry time shifting (MKT-034, v1.10.0):** Entry execution at :14:30/:44:30 (30s before :15/:45 marks — fills land at :15:00 instead of :16:00). VIX gate checks at :14:00/:44:00 for E#1 only:
+
+| VIX at Check | E#1 Start | Schedule |
+|--|--|--|
+| < 20 | 11:14:30 | 11:14:30, 11:44:30, 12:14:30, 12:44:30, 13:14:30 |
+| 20-23 | 11:44:30 | 11:44:30, 12:14:30, 12:44:30, 13:14:30, 13:44:30 |
+| >= 23 | 12:14:30 | 12:14:30, 12:44:30, 13:14:30, 13:44:30, 14:14:30 |
+
+On early close days, cutoff is 12:30 PM (allows 12:14:30 entry on high-VIX days).
 
 ### Smart Entry Windows (MKT-031) — v1.8.0
 

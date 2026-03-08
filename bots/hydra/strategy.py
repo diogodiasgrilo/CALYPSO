@@ -75,11 +75,24 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.9.3"
+HYDRA_VERSION = "1.10.0"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
 DEFAULT_SCOUT_SCORE_THRESHOLD = 65
+
+# MKT-034: VIX-scaled entry time shifting
+ALL_ENTRY_SLOTS = [
+    dt_time(11, 14, 30),  # Slot 0: VIX < 20 start
+    dt_time(11, 44, 30),  # Slot 1: VIX 20-23 start
+    dt_time(12, 14, 30),  # Slot 2: VIX >= 23 start (floor)
+    dt_time(12, 44, 30),  # Slot 3
+    dt_time(13, 14, 30),  # Slot 4
+    dt_time(13, 44, 30),  # Slot 5
+    dt_time(14, 14, 30),  # Slot 6
+]
+VIX_GATE_CHECK_SECONDS_BEFORE = 30  # Check VIX 30s before entry (:14:00 for :14:30 entry)
+VIX_GATE_FLOOR_SLOT = 2  # Index into ALL_ENTRY_SLOTS that always enters (12:14:30)
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -533,31 +546,49 @@ class HydraStrategy(MEICStrategy):
 
     def _parse_entry_times(self):
         """
-        Override: early close cutoff at 12:00 PM for shifted schedule.
+        Override: MKT-034 VIX-scaled entry time shifting + early close cutoff.
 
-        Base MEIC filters entries to before 11:00 AM on early close days.
-        With shifted schedule (11:15-13:15), that filter removes ALL entries.
-        HYDRA uses 12:00 PM cutoff — keeps 11:15 and 11:45 (1+ hour before 1 PM close).
+        When vix_time_shift is enabled, uses ALL_ENTRY_SLOTS[:5] as default entry
+        times (:14:30/:44:30 offset for execution precision). VIX gate checks at
+        :14:00/:44:00 determine E#1 start slot based on VIX level.
+
+        Early close cutoff at 12:30 PM (allows 12:14:30 entry on high VIX days).
         """
-        # Parse from config (same as base)
-        entry_time_strs = self.strategy_config.get("entry_times", None)
-        if entry_time_strs:
-            self.entry_times = [
-                dt_time(int(p[0]), int(p[1]))
-                for p in (t.split(":") for t in entry_time_strs)
-            ]
+        # MKT-034: Read VIX gate config
+        vts = self.config.get("vix_time_shift", {})
+        self.vix_gate_enabled = vts.get("enabled", False)
+        self.vix_medium_threshold = vts.get("medium_vix_threshold", 20.0)
+        self.vix_high_threshold = vts.get("high_vix_threshold", 23.0)
+        self._vix_gate_resolved = False
+        self._vix_gate_start_slot = 0
+
+        if self.vix_gate_enabled:
+            # MKT-034: Use pre-defined slots with 30s offset for execution precision
+            self.entry_times = list(ALL_ENTRY_SLOTS[:5])
+            logger.info(
+                f"MKT-034: VIX gate enabled (thresholds: {self.vix_medium_threshold}/{self.vix_high_threshold}), "
+                f"default schedule: [{', '.join(t.strftime('%H:%M:%S') for t in self.entry_times)}]"
+            )
         else:
-            self.entry_times = [
-                dt_time(11, 15), dt_time(11, 45), dt_time(12, 15),
-                dt_time(12, 45), dt_time(13, 15)
-            ]
+            # Legacy: parse from config (same as base)
+            entry_time_strs = self.strategy_config.get("entry_times", None)
+            if entry_time_strs:
+                self.entry_times = [
+                    dt_time(int(p[0]), int(p[1]))
+                    for p in (t.split(":") for t in entry_time_strs)
+                ]
+            else:
+                self.entry_times = [
+                    dt_time(11, 15), dt_time(11, 45), dt_time(12, 15),
+                    dt_time(12, 45), dt_time(13, 15)
+                ]
 
         if is_early_close_day():
-            early_cutoff = dt_time(12, 0)  # Keep 11:15, 11:45
+            early_cutoff = dt_time(12, 30)  # MKT-034: raised from 12:00 to allow 12:14:30 on high VIX days
             self.entry_times = [t for t in self.entry_times if t < early_cutoff]
             if not self.entry_times:
-                self.entry_times = [dt_time(11, 15)]
-            logger.info(f"HYDRA early close schedule: {[t.strftime('%H:%M') for t in self.entry_times]}")
+                self.entry_times = [ALL_ENTRY_SLOTS[0]] if self.vix_gate_enabled else [dt_time(11, 15)]
+            logger.info(f"HYDRA early close schedule: {[t.strftime('%H:%M:%S') for t in self.entry_times]}")
 
     # =========================================================================
     # ENTRY GATING (MKT-021 + MKT-031)
@@ -611,7 +642,7 @@ class HydraStrategy(MEICStrategy):
                     self._next_entry_index = len(self.entry_times)
                     return False
 
-        # MKT-031: Smart entry windows
+        # MKT-031: Smart entry windows (+ MKT-034 VIX gate integration)
         if not self.smart_entry_enabled:
             return super()._should_attempt_entry(now)
 
@@ -621,7 +652,7 @@ class HydraStrategy(MEICStrategy):
         scheduled_time = self.entry_times[self._next_entry_index]
         scheduled_dt = now.replace(
             hour=scheduled_time.hour, minute=scheduled_time.minute,
-            second=0, microsecond=0
+            second=scheduled_time.second, microsecond=0
         )
         scout_start = scheduled_dt - timedelta(minutes=self.scout_window_minutes)
         window_end = scheduled_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
@@ -638,6 +669,13 @@ class HydraStrategy(MEICStrategy):
 
         # At or past scheduled time → enter (standard behavior)
         if now >= scheduled_dt:
+            # MKT-034: VIX gate check at scheduled time (E#1 only)
+            if self.vix_gate_enabled and not self._vix_gate_resolved:
+                vix_result = self._check_vix_gate(now)
+                if vix_result == "blocked":
+                    self._deactivate_scouting()
+                    return False  # Slot popped, next loop iteration uses next slot
+                # "resolved" → proceed with entry
             if self._scouting_active:
                 logger.info(
                     f"MKT-031: Scout window expired for Entry #{self._next_entry_index + 1} "
@@ -655,6 +693,19 @@ class HydraStrategy(MEICStrategy):
         self._last_scout_details = details
 
         if score >= self.scout_score_threshold:
+            # MKT-034: Early entry must check VIX gate first (Audit Bug #2)
+            if self.vix_gate_enabled and not self._vix_gate_resolved:
+                vix_result = self._check_vix_gate(now)
+                if vix_result == "resolved":
+                    pass  # VIX allows → proceed with early entry below
+                else:
+                    # "blocked" (slot popped) or "not_yet" (too early for VIX check)
+                    if vix_result == "blocked":
+                        self._deactivate_scouting()
+                        return False  # Slot removed, next iteration uses next slot
+                    # "not_yet": continue scouting, don't enter early yet
+                    return False
+
             logger.info(
                 f"MKT-031: EARLY ENTRY Entry #{self._next_entry_index + 1} "
                 f"Score={score}/{self.scout_score_threshold} "
@@ -682,7 +733,7 @@ class HydraStrategy(MEICStrategy):
         scheduled_time = self.entry_times[self._next_entry_index]
         scheduled_dt = now.replace(
             hour=scheduled_time.hour, minute=scheduled_time.minute,
-            second=0, microsecond=0
+            second=scheduled_time.second, microsecond=0
         )
         scout_start = scheduled_dt - timedelta(minutes=self.scout_window_minutes)
         window_end = scheduled_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
@@ -691,6 +742,90 @@ class HydraStrategy(MEICStrategy):
     def _is_daily_loss_limit_reached(self) -> bool:
         """Disabled for HYDRA — bot always attempts all entries."""
         return False
+
+    # =========================================================================
+    # MKT-034: VIX-SCALED ENTRY TIME SHIFTING
+    # =========================================================================
+
+    def _check_vix_gate(self, now) -> str:
+        """
+        MKT-034: Check VIX level and decide whether to allow E#1 at current slot.
+
+        Returns:
+            "blocked"  - VIX too high, slot removed from entry_times
+            "resolved" - VIX allows entry, schedule locked
+            "not_yet"  - Too early for VIX check at this slot
+        """
+        if not self.entry_times:
+            return "resolved"
+
+        current_slot_time = self.entry_times[0]
+        # Check time is VIX_GATE_CHECK_SECONDS_BEFORE (30s) before entry
+        # :14:30 → check at :14:00, :44:30 → check at :44:00
+        check_time = now.replace(
+            hour=current_slot_time.hour,
+            minute=current_slot_time.minute,
+            second=current_slot_time.second,
+            microsecond=0
+        ) - timedelta(seconds=VIX_GATE_CHECK_SECONDS_BEFORE)
+
+        if now < check_time:
+            return "not_yet"
+
+        # Find which slot index this is in ALL_ENTRY_SLOTS
+        try:
+            slot_index = ALL_ENTRY_SLOTS.index(current_slot_time)
+        except ValueError:
+            # Custom time not in standard slots — resolve immediately
+            self._resolve_vix_gate(0)
+            return "resolved"
+
+        # Floor: slot 2+ always enters
+        if slot_index >= VIX_GATE_FLOOR_SLOT:
+            self._resolve_vix_gate(slot_index)
+            return "resolved"
+
+        # Use current VIX from heartbeat (already populated by _update_market_data)
+        vix = self.current_vix
+        if not vix:  # None or 0.0 (initial state before first fetch)
+            logger.warning("MKT-034: VIX unavailable, using default schedule")
+            self._resolve_vix_gate(slot_index)
+            return "resolved"
+
+        # Determine threshold for this slot
+        if slot_index == 0:
+            threshold = self.vix_medium_threshold  # 20.0
+        elif slot_index == 1:
+            threshold = self.vix_high_threshold    # 23.0
+        else:
+            threshold = self.vix_high_threshold    # Safety fallback
+
+        if vix >= threshold:
+            next_slot = ALL_ENTRY_SLOTS[slot_index + 1]
+            logger.info(
+                f"MKT-034: VIX={vix:.1f} >= {threshold:.1f}, "
+                f"skipping {current_slot_time.strftime('%H:%M:%S')}. "
+                f"Next check at {next_slot.strftime('%H:%M:%S')}"
+            )
+            # Remove blocked slot so standard time check won't trigger it
+            self.entry_times.pop(0)
+            return "blocked"
+        else:
+            logger.info(
+                f"MKT-034: VIX={vix:.1f} < {threshold:.1f}, "
+                f"allowing entry at {current_slot_time.strftime('%H:%M:%S')}"
+            )
+            self._resolve_vix_gate(slot_index)
+            return "resolved"
+
+    def _resolve_vix_gate(self, start_slot_index: int):
+        """MKT-034: Lock entry schedule to 5 consecutive slots from start_slot_index."""
+        self.entry_times = list(ALL_ENTRY_SLOTS[start_slot_index : start_slot_index + 5])
+        self._next_entry_index = 0
+        self._vix_gate_resolved = True
+        self._vix_gate_start_slot = start_slot_index
+        schedule_str = ", ".join(t.strftime('%H:%M:%S') for t in self.entry_times)
+        logger.info(f"MKT-034: VIX gate resolved -> schedule: [{schedule_str}]")
 
     # =========================================================================
     # MKT-031: SMART ENTRY WINDOWS — Scouting Lifecycle
@@ -3501,6 +3636,10 @@ class HydraStrategy(MEICStrategy):
                 trend_line = f"  Trend: {self._current_trend.value.upper()} (EMA {self.ema_short_period}/{self.ema_long_period})"
             lines.insert(0, trend_line)
 
+        # MKT-034: Add VIX gate shift info to heartbeat
+        if self.vix_gate_enabled and self._vix_gate_resolved and self._vix_gate_start_slot > 0:
+            lines.insert(0, f"  VIX-shift: slot {self._vix_gate_start_slot}")
+
         return lines
 
     def build_telegram_snapshot(self) -> str:
@@ -3939,7 +4078,8 @@ class HydraStrategy(MEICStrategy):
         # Next entry
         if self._next_entry_index < len(self.entry_times):
             next_time = self.entry_times[self._next_entry_index]
-            next_str = f"#{self._next_entry_index + 1} @ {next_time.strftime('%I:%M %p')}"
+            time_fmt = '%I:%M:%S %p' if self.vix_gate_enabled else '%I:%M %p'
+            next_str = f"#{self._next_entry_index + 1} @ {next_time.strftime(time_fmt)}"
         else:
             next_str = "All entries placed"
 
@@ -3977,6 +4117,17 @@ class HydraStrategy(MEICStrategy):
             f"Active: {active_count}  |  Stops: {call_stops}C / {put_stops}P",
             f"Next: {next_str}",
         ]
+
+        # MKT-034: Show VIX time shift status
+        if self.vix_gate_enabled:
+            if self._vix_gate_resolved:
+                if self._vix_gate_start_slot > 0:
+                    schedule_str = ", ".join(t.strftime('%H:%M:%S') for t in self.entry_times)
+                    lines.append(f"VIX shift: slot {self._vix_gate_start_slot} [{schedule_str}]")
+                else:
+                    lines.append("VIX shift: default schedule (VIX < 20)")
+            else:
+                lines.append("VIX shift: pending (checking at next slot)")
 
         # MKT-031: Show scouting status when active
         if self._scouting_active and self.smart_entry_enabled:
@@ -4978,6 +5129,9 @@ class HydraStrategy(MEICStrategy):
                 "early_close_pnl": self._early_close_pnl,
                 # MKT-021: Pre-entry ROC gate state
                 "roc_gate_triggered": self._roc_gate_triggered,
+                # MKT-034: VIX gate state
+                "vix_gate_resolved": self._vix_gate_resolved,
+                "vix_gate_start_slot": self._vix_gate_start_slot,
                 "entries": []
             }
 
@@ -5340,6 +5494,10 @@ class HydraStrategy(MEICStrategy):
         self._api_results_window.clear()
         self._early_close_triggered = False  # MKT-018: Reset early close
         self._roc_gate_triggered = False  # MKT-021: Reset ROC gate
+        self._vix_gate_resolved = False  # MKT-034: Reset VIX gate
+        self._vix_gate_start_slot = 0
+        if self.vix_gate_enabled:
+            self.entry_times = list(ALL_ENTRY_SLOTS[:5])  # MKT-034: Reset to default schedule
         self._early_close_time = None
         self._early_close_pnl = None
         self._pnl_history = []  # Reset dashboard P&L curve for new day
@@ -6049,6 +6207,12 @@ class HydraStrategy(MEICStrategy):
             self._early_close_pnl = saved_state.get("early_close_pnl")
             # MKT-021: Restore ROC gate state
             self._roc_gate_triggered = saved_state.get("roc_gate_triggered", False)
+            # MKT-034: Restore VIX gate state
+            vix_gate_resolved = saved_state.get("vix_gate_resolved", False)
+            if vix_gate_resolved and self.vix_gate_enabled:
+                saved_slot = saved_state.get("vix_gate_start_slot", 0)
+                self._resolve_vix_gate(saved_slot)
+                logger.info(f"MKT-034: Restored VIX gate state (slot {saved_slot})")
 
             # Restore P&L history for dashboard persistence
             self._pnl_history = saved_state.get("pnl_history", [])
@@ -6327,6 +6491,8 @@ class HydraStrategy(MEICStrategy):
             preserved_early_close_time = None  # MKT-018
             preserved_early_close_pnl = None  # MKT-018
             preserved_roc_gate_triggered = False  # MKT-021
+            preserved_vix_gate_resolved = False  # MKT-034
+            preserved_vix_gate_start_slot = 0  # MKT-034
             preserved_next_entry_index = 0
             try:
                 if os.path.exists(self.state_file):
@@ -6360,6 +6526,9 @@ class HydraStrategy(MEICStrategy):
                             preserved_early_close_pnl = saved_state.get("early_close_pnl")
                             # MKT-021: Preserve ROC gate state
                             preserved_roc_gate_triggered = saved_state.get("roc_gate_triggered", False)
+                            # MKT-034: Preserve VIX gate state
+                            preserved_vix_gate_resolved = saved_state.get("vix_gate_resolved", False)
+                            preserved_vix_gate_start_slot = saved_state.get("vix_gate_start_slot", 0)
                             preserved_next_entry_index = saved_state.get("next_entry_index", 0)
                             for entry_data in saved_state.get("entries", []):
                                 entry_num = entry_data.get("entry_number")
@@ -6698,6 +6867,9 @@ class HydraStrategy(MEICStrategy):
             self._early_close_pnl = preserved_early_close_pnl
             # MKT-021: Restore ROC gate state
             self._roc_gate_triggered = preserved_roc_gate_triggered
+            # MKT-034: Restore VIX gate state
+            if preserved_vix_gate_resolved and self.vix_gate_enabled:
+                self._resolve_vix_gate(preserved_vix_gate_start_slot)
 
             # Set state based on recovered positions
             # FIX #43 + FIX #47: For one-sided entries, check only the placed side
