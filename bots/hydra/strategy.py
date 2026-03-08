@@ -202,7 +202,7 @@ class HydraStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.8.0 (2026-03-04)
+    Version: 1.10.0 (2026-03-08)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -644,6 +644,14 @@ class HydraStrategy(MEICStrategy):
 
         # MKT-031: Smart entry windows (+ MKT-034 VIX gate integration)
         if not self.smart_entry_enabled:
+            # MKT-034: VIX gate still needs checking even without smart entry
+            if self.vix_gate_enabled and not self._vix_gate_resolved:
+                scheduled_time = self.entry_times[self._next_entry_index] if self._next_entry_index < len(self.entry_times) else None
+                if scheduled_time:
+                    vix_result = self._check_vix_gate(now)
+                    if vix_result == "blocked":
+                        return False
+                    # "resolved" or "not_yet" → fall through to base class
             return super()._should_attempt_entry(now)
 
         if self._next_entry_index >= len(self.entry_times):
@@ -4567,7 +4575,8 @@ class HydraStrategy(MEICStrategy):
             str: Formatted Markdown message for Telegram
         """
         # Entry schedule
-        schedule = ", ".join(t.strftime('%I:%M') for t in self.entry_times)
+        time_fmt = '%I:%M:%S' if self.vix_gate_enabled else '%I:%M'
+        schedule = ", ".join(t.strftime(time_fmt) for t in self.entry_times)
         contracts = self.strategy_config.get("contracts_per_entry", 1)
         mode = "DRY-RUN" if self.dry_run else "LIVE"
 
@@ -4619,6 +4628,14 @@ class HydraStrategy(MEICStrategy):
 
         if self.smart_entry_enabled:
             lines.append(f"Window: {self.scout_window_minutes}min | Threshold: {self.scout_score_threshold}")
+
+        if self.vix_gate_enabled:
+            lines.extend([
+                "",
+                "\u2501\u2501\u2501 VIX Time Shift (MKT-034) \u2501\u2501\u2501",
+                f"Thresholds: {self.vix_medium_threshold:.0f} / {self.vix_high_threshold:.0f}",
+                f"Floor: slot 2 (12:14:30)",
+            ])
 
         return "\n".join(lines)
 

@@ -3,8 +3,9 @@
 main.py - HYDRA 0DTE Trading Bot Entry Point
 
 HYDRA: Multi-entry iron condor bot with credit gates, progressive OTM tightening,
-and smart entry windows (MKT-031). Based on Tammy Chambless's MEIC strategy with
-EMA-based trend detection (informational) and advanced risk controls.
+smart entry windows (MKT-031), and VIX-scaled entry time shifting (MKT-034).
+Based on Tammy Chambless's MEIC strategy with EMA-based trend detection
+(informational) and advanced risk controls.
 
 Strategy Summary:
 -----------------
@@ -139,11 +140,11 @@ def print_banner():
     ║         ══════════════════════                                ║
     ║                                                               ║
     ║         Multi-Entry Iron Condors (SPX 0DTE)                   ║
-    ║         5 Entries | Credit Gates | Smart Entry                 ║
+    ║         5 Entries | Credit Gates | VIX-Scaled                  ║
     ║                                                               ║
-    ║         11:15  11:45  12:15  12:45  13:15                     ║
+    ║         :14:30/:44:30 (VIX-scaled start)                      ║
     ║                                                               ║
-    ║         Version: 1.9.0                                        ║
+    ║         Version: 1.10.0                                       ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
