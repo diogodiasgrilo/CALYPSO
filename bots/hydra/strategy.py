@@ -6887,6 +6887,11 @@ class HydraStrategy(MEICStrategy):
             # MKT-034: Restore VIX gate state
             if preserved_vix_gate_resolved and self.vix_gate_enabled:
                 self._resolve_vix_gate(preserved_vix_gate_start_slot)
+                # _resolve_vix_gate resets _next_entry_index to 0 — restore correct value
+                if recovered_entries:
+                    self._next_entry_index = max(max_entry_num, preserved_next_entry_index)
+                else:
+                    self._next_entry_index = preserved_next_entry_index
 
             # Set state based on recovered positions
             # FIX #43 + FIX #47: For one-sided entries, check only the placed side
