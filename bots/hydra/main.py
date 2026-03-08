@@ -672,7 +672,8 @@ def show_status(config: dict):
         for i, entry_time in enumerate(strategy.entry_times):
             completed = i < status['entries_completed']
             marker = "✓" if completed else "○"
-            print(f"    {marker} Entry #{i+1}: {entry_time.strftime('%H:%M')} ET")
+            time_fmt = '%H:%M:%S' if hasattr(strategy, 'vix_gate_enabled') and strategy.vix_gate_enabled else '%H:%M'
+            print(f"    {marker} Entry #{i+1}: {entry_time.strftime(time_fmt)} ET")
 
         print("\n  Today's Stats:")
         print(f"    Entries Completed: {status['entries_completed']}")
