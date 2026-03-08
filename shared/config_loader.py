@@ -240,7 +240,16 @@ class ConfigLoader:
             "alerts": bot_config.get("alerts", {}),
 
             # TREND FILTER config from bot config (HYDRA specific)
-            "trend_filter": bot_config.get("trend_filter", {})
+            "trend_filter": bot_config.get("trend_filter", {}),
+
+            # Additional bot-specific configs (HYDRA/MEIC)
+            "smart_entry": bot_config.get("smart_entry", {}),
+            "long_salvage": bot_config.get("long_salvage", {}),
+            "vix_time_shift": bot_config.get("vix_time_shift", {}),
+            "order_limits": bot_config.get("order_limits", {}),
+            "slippage_monitoring": bot_config.get("slippage_monitoring", {}),
+            "emergency_close": bot_config.get("emergency_close", {}),
+            "bot_name": bot_config.get("bot_name", "")
         }
 
         # Store sheets credentials for later use by GoogleSheetsLogger
