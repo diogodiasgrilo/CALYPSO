@@ -1053,7 +1053,8 @@ def _build_entry_records(
         call_credit = _safe_float(call_credit_raw) if call_credit_raw not in ("", None) else None
         put_credit_raw = entry.get("Put Credit", "")
         put_credit = _safe_float(put_credit_raw) if put_credit_raw not in ("", None) else None
-        total_credit = _safe_float(entry.get("Total Credit")) or None
+        total_credit_raw = entry.get("Total Credit", "")
+        total_credit = _safe_float(total_credit_raw) if total_credit_raw not in ("", None) else None
 
         records.append({
             "date": date_str,

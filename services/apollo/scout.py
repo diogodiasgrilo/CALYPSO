@@ -16,7 +16,7 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (v1.9.3 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.9.4 — DO NOT hallucinate)
 
 - **5 iron condor entries per day** at 11:15, 11:45, 12:15, 12:45, 13:15 ET (:15/:45 offset from MAE analysis)
 - **Smart entry windows (MKT-031):** 10-minute scouting window before each scheduled entry. Scores market conditions (post-spike ATR calm + momentum pause). Score >= 65 triggers early entry. Otherwise enters at scheduled time.

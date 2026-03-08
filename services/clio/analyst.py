@@ -21,7 +21,7 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 5. **HYDRA is a FULLY AUTOMATED bot** — it makes all decisions algorithmically via its MKT rules. Recommendations should be phrased as potential parameter changes (e.g., "consider raising MKT-011 call minimum from $1.00 to $1.25"), NOT as human trading advice (e.g., "the trader should be more cautious").
 6. **Do NOT repeat generic trading wisdom.** Learnings must be specific to THIS week's data. "Volatility affects premium" is not a learning. "VIX above 22 caused 3 of 4 MKT-011 skips this week, all on call side at 13:15 entries" is a learning.
 
-## HYDRA Strategy Parameters (v1.9.3 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.9.4 — DO NOT hallucinate)
 
 - **5 iron condor entries per day** at 11:15, 11:45, 12:15, 12:45, 13:15 ET (:15/:45 offset from MAE analysis)
 - **Smart entry windows (MKT-031):** 10-min scouting before each entry, 2-parameter scoring, threshold 65 for early entry

@@ -22,7 +22,7 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.9.3)
+## HYDRA Strategy Parameters (v1.9.4)
 
 - **5 iron condor entries per day** at 11:15, 11:45, 12:15, 12:45, 13:15 ET (:15/:45 offset — MKT-031)
 - **Smart entry windows (MKT-031):** 10-minute scouting window before each scheduled entry. Scores market conditions (post-spike ATR calm + momentum pause). Score >= 65 triggers early entry. Otherwise enters at scheduled time.
