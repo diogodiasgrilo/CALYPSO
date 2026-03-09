@@ -710,15 +710,12 @@ class HydraStrategy(MEICStrategy):
         if score >= self.scout_score_threshold:
             # MKT-034: Early entry must check VIX gate first (Audit Bug #2)
             if self.vix_gate_enabled and not self._vix_gate_resolved:
-                vix_result = self._check_vix_gate(now)
+                vix_result = self._check_vix_gate(now, allow_early=True)
                 if vix_result == "resolved":
                     pass  # VIX allows → proceed with early entry below
                 else:
-                    # "blocked" (slot popped) or "not_yet" (too early for VIX check)
-                    if vix_result == "blocked":
-                        self._deactivate_scouting()
-                        return False  # Slot removed, next iteration uses next slot
-                    # "not_yet": continue scouting, don't enter early yet
+                    # "not_yet": VIX too high or unavailable — keep scouting,
+                    # don't enter early. Slot NOT popped (scheduled-time check does that).
                     return False
 
             logger.info(
@@ -762,14 +759,19 @@ class HydraStrategy(MEICStrategy):
     # MKT-034: VIX-SCALED ENTRY TIME SHIFTING
     # =========================================================================
 
-    def _check_vix_gate(self, now) -> str:
+    def _check_vix_gate(self, now, allow_early: bool = False) -> str:
         """
         MKT-034: Check VIX level and decide whether to allow E#1 at current slot.
+
+        Args:
+            allow_early: If True (MKT-031 scouting), skip the check_time guard
+                and return "not_yet" instead of "blocked" when VIX is too high
+                (don't pop the slot — let the scheduled-time check do that).
 
         Returns:
             "blocked"  - VIX too high, slot removed from entry_times
             "resolved" - VIX allows entry, schedule locked
-            "not_yet"  - Too early for VIX check at this slot
+            "not_yet"  - Too early for VIX check / VIX too high during scouting
         """
         if not self.entry_times:
             return "resolved"
@@ -800,7 +802,7 @@ class HydraStrategy(MEICStrategy):
             microsecond=0
         ) - timedelta(seconds=VIX_GATE_CHECK_SECONDS_BEFORE)
 
-        if now < check_time:
+        if now < check_time and not allow_early:
             return "not_yet"
 
         # Find which slot index this is in ALL_ENTRY_SLOTS
@@ -832,6 +834,10 @@ class HydraStrategy(MEICStrategy):
             threshold = self.vix_high_threshold    # Safety fallback
 
         if vix >= threshold:
+            if allow_early:
+                # During scouting: VIX too high for early entry, but don't pop
+                # the slot — let the scheduled-time check make that decision
+                return "not_yet"
             next_slot = ALL_ENTRY_SLOTS[slot_index + 1]
             logger.info(
                 f"MKT-034: VIX={vix:.1f} >= {threshold:.1f}, "
