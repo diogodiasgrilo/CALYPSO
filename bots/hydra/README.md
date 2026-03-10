@@ -215,7 +215,7 @@ sudo journalctl -u hydra -f
 | Trend signal | None | EMA 20/40 (informational only) |
 | Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
-| Stop formula | total_credit - $0.10 | total_credit - $0.15 (covers commission) |
+| Stop formula | total_credit - $0.10 | total_credit + $0.10 (Brian's credit+buffer) |
 | Stop execution | Close both legs | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025 + MKT-033) |
 
 ## Risk Considerations
@@ -258,6 +258,7 @@ bots/hydra/
 
 ## Version History
 
+- **1.10.2** (2026-03-10): Replace MEIC+ stop formula with credit+buffer (Brian's approach): stop = total_credit + $0.10 instead of total_credit - $0.15. Extra cushion reduces marginal stops. Fix: stop level validation now per-side (prevents skipping active side when stopped side has 0). Telegram /set updated: `stop_buffer` replaces `meic_plus`.
 - **1.10.1** (2026-03-09): Fix #83: Emergency close improvements — skip worthless long legs (bid=$0), $0.05 min tick fallback, cancel zombie 409 orders, dynamic limit-only handling. Fix #84: Dashboard P&L history updated after settlement. Commission tracks actual legs closed.
 - **1.10.0** (2026-03-08): MKT-034 VIX-scaled entry time shifting. Entry execution at :14:30/:44:30 (30s before :15/:45 marks). VIX gate checks at :14:00/:44:00 — blocks E#1 if VIX >= threshold (20/23), shifts schedule to later slots. Floor at 12:14:30. Early close cutoff raised to 12:30 PM. Configurable via `vix_time_shift` config section.
 - **1.9.4** (2026-03-08): Configurable stop close mode via `long_salvage.short_only_stop` (default: false = close both legs). Added /clio Telegram command (15 total). Updated all agent prompts to v1.9.3 parameters.

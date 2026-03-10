@@ -75,7 +75,7 @@ If the bot had detected the downtrend and placed only call spreads, it would hav
 
 ### The Core Insight
 
-MEIC's breakeven design means a full IC with one side stopped nets $0 after commission (MEIC+ reduction = $0.15 covers the $15 commission exactly). But a one-sided entry that gets stopped loses the full credit plus commission. This creates an asymmetry:
+MEIC's breakeven design means a full IC with one side stopped nets ~$0. HYDRA uses a credit+buffer stop (stop = credit + $0.10), giving ~$25 more cushion per stop at the cost of ~$25 loss per stop event. But a one-sided entry that gets stopped loses the full credit plus commission. This creates an asymmetry:
 
 - **Full IC in a range-bound market:** Very safe. One side stopped = breakeven. Both sides expire = full profit.
 - **One-sided entry in a trending market:** Risky if wrong. But if the trend is correctly identified, the spread is far OTM on the safe side and has a high probability of expiring worthless.
@@ -414,23 +414,24 @@ Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
 MEIC's core insight: **set the stop loss per side equal to total credit collected**. If one side is stopped and the other expires worthless, the loss on the stopped side exactly equals the profit from the surviving side = breakeven.
 
-With MEIC+ modification: stop = total_credit - $0.15, covering commission on a one-side-stop (4 entry + 1 close = 5 legs × $2.50 = $12.50, buffered to $15). Net P&L on a one-side-stop = +$2.50 (true breakeven with small buffer).
+**HYDRA (v1.10.2+)** uses a credit+buffer approach instead: stop = total_credit + $0.10 (configurable via `stop_buffer`). This gives $25 more cushion per stop vs MEIC+, at the cost of ~$25 loss per stop event. The extra cushion avoids some marginal stops entirely.
 
 ### HYDRA Stop Formula
 
-Full IC stop uses the same formula as base MEIC: `stop_level = total_credit`.
-
 ```
-stop_level = entry.total_credit          (both sides get the SAME level)
+stop_level = entry.total_credit + stop_buffer     (full IC: both sides get the SAME level)
+stop_level = 2 × credit + stop_buffer             (one-sided: Fix #40 pattern)
 ```
 
 | Entry Type | Stop Formula | Example (C=$125, P=$185) |
 |-----------|-------------|--------------------------|
-| Full IC | total_credit | $125 + $185 = $310 per side |
+| Full IC | total_credit + buffer | $125 + $185 = $310 + $10 = $320 per side |
+| Call-only | 2× credit + buffer | 2× $125 = $250 + $10 = $260 |
+| Put-only | 2× credit + buffer | 2× $185 = $370 + $10 = $380 |
 
 **Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($0.75 calls, $1.75 puts) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
 
-**MEIC+ applies after:** If `meic_plus_enabled` and credit exceeds threshold, subtract $0.15 (× 100 = $15) from the stop level. MKT-025 closes only the short leg on stop, so commission is 4 entry + 1 close = 5 legs × $2.50 = $12.50. The $15 reduction provides a $2.50 buffer for slippage.
+**Credit+Buffer approach (v1.10.2):** Stop = total_credit + `stop_buffer` (default $0.10 × 100 = $10). This replaces the earlier MEIC+ design (stop = credit - $0.15). The extra $25/stop cushion ($10 buffer vs -$15 reduction) reduces marginal stops at the cost of ~$25 per stop event. Configurable via `stop_buffer` config key.
 
 **Safety floor:** MIN_STOP_LEVEL = $50. If stop_level is below $50 (e.g., due to zero fill price from API sync issues), skip stop monitoring for that side.
 
@@ -821,8 +822,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: put starting OTM = base × multiplier (put skew = credit viable further OTM) |
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
-| `meic_plus_enabled` | `true` | Enable MEIC+ stop reduction |
-| `meic_plus_reduction` | `0.15` | MEIC+ reduction (covers $15 commission on one-side-stop) |
+| `stop_buffer` | `0.10` | Stop buffer: stop = credit + buffer (Brian's approach — extra cushion per stop) |
 | `max_vix_entry` | `30` | Maximum VIX for new entries |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |

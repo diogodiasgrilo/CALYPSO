@@ -87,12 +87,12 @@ EDITABLE_PARAMS = {
         "min": 1, "max": 5,
         "description": "Contracts per entry",
     },
-    "meic_plus": {
-        "path": "strategy.meic_plus_reduction",
+    "stop_buffer": {
+        "path": "strategy.stop_buffer",
         "type": "float",
         "min": 0.00, "max": 1.00,
         "unit": "$",
-        "description": "MEIC+ commission buffer",
+        "description": "Stop buffer added to credit (Brian's approach)",
     },
     "smart_entry": {
         "path": "smart_entry.enabled",
