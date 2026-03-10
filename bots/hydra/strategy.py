@@ -252,12 +252,14 @@ class HydraStrategy(MEICStrategy):
         self.state_file = HYDRA_STATE_FILE
         self.metrics_file = HYDRA_METRICS_FILE
 
+        # Stop buffer: stop = credit + buffer (Brian's approach)
+        # Must be set BEFORE super().__init__() because recovery uses it
+        # Config stores in per-contract dollars ($0.10), multiply by 100 for total dollars ($10)
+        strategy_cfg = config.get("strategy", {})
+        self.stop_buffer = strategy_cfg.get("stop_buffer", 0.10) * 100
+
         # Call parent init (this sets up everything else including recovery)
         super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
-
-        # Override MEIC+ with stop buffer: stop = credit + buffer (Brian's approach)
-        # Config stores in per-contract dollars ($0.10), multiply by 100 for total dollars ($10)
-        self.stop_buffer = self.strategy_config.get("stop_buffer", 0.10) * 100
 
         logger.info(f"HYDRA using state file: {self.state_file}")
         logger.info(f"HYDRA using metrics file: {self.metrics_file}")
