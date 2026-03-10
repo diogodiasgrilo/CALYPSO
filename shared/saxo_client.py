@@ -2868,7 +2868,7 @@ class SaxoClient:
                     # Continue to next retry with limit order
 
                 # Fix #83c: After 409 Conflict, cancel pending orders before retry
-                if error_info and "409" in str(error_info):
+                if error_info and str(error_info).startswith("409:"):
                     logger.warning(f"Fix #83c: 409 Conflict detected, checking for pending orders...")
                     try:
                         orders = self.get_open_orders()
