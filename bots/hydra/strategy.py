@@ -255,6 +255,10 @@ class HydraStrategy(MEICStrategy):
         # Call parent init (this sets up everything else including recovery)
         super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
 
+        # Override MEIC+ with stop buffer: stop = credit + buffer (Brian's approach)
+        # Config stores in per-contract dollars ($0.10), multiply by 100 for total dollars ($10)
+        self.stop_buffer = self.strategy_config.get("stop_buffer", 0.10) * 100
+
         logger.info(f"HYDRA using state file: {self.state_file}")
         logger.info(f"HYDRA using metrics file: {self.metrics_file}")
 
@@ -3252,19 +3256,11 @@ class HydraStrategy(MEICStrategy):
             # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
             # This prevents immediate false stop triggers from bid-ask spread
             base_stop = credit * 2
-
-            if self.meic_plus_enabled:
-                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if credit > min_credit_for_meic_plus:
-                    stop_level = base_stop - self.meic_plus_reduction
-                else:
-                    stop_level = base_stop
-            else:
-                stop_level = base_stop
+            stop_level = base_stop + self.stop_buffer
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = 0  # No put side
-            logger.info(f"Stop level for call spread: ${stop_level:.2f} (2× credit ${credit:.2f})")
+            logger.info(f"Stop level for call spread: ${stop_level:.2f} (2× credit ${credit:.2f} + buffer ${self.stop_buffer:.2f})")
 
         elif entry.put_only:
             # Only put spread placed
@@ -3276,19 +3272,11 @@ class HydraStrategy(MEICStrategy):
             # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
             # This prevents immediate false stop triggers from bid-ask spread
             base_stop = credit * 2
-
-            if self.meic_plus_enabled:
-                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if credit > min_credit_for_meic_plus:
-                    stop_level = base_stop - self.meic_plus_reduction
-                else:
-                    stop_level = base_stop
-            else:
-                stop_level = base_stop
+            stop_level = base_stop + self.stop_buffer
 
             entry.put_side_stop = stop_level
             entry.call_side_stop = 0  # No call side
-            logger.info(f"Stop level for put spread: ${stop_level:.2f} (2× credit ${credit:.2f})")
+            logger.info(f"Stop level for put spread: ${stop_level:.2f} (2× credit ${credit:.2f} + buffer ${self.stop_buffer:.2f})")
 
         else:
             # Full IC — original Tammy Chambless MEIC rule: stop = total_credit
@@ -3301,21 +3289,13 @@ class HydraStrategy(MEICStrategy):
                 total_credit = MIN_STOP_LEVEL
 
             base_stop = total_credit
-
-            if self.meic_plus_enabled:
-                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if total_credit > min_credit_for_meic_plus:
-                    stop_level = base_stop - self.meic_plus_reduction
-                else:
-                    stop_level = base_stop
-            else:
-                stop_level = total_credit
+            stop_level = base_stop + self.stop_buffer
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = stop_level
             logger.info(
                 f"Stop level for full IC: ${stop_level:.2f} per side "
-                f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f})"
+                f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f} + buffer ${self.stop_buffer:.2f})"
             )
 
     # =========================================================================
@@ -4619,10 +4599,9 @@ class HydraStrategy(MEICStrategy):
         min_credit_call = self.min_viable_credit_per_side / 100
         min_credit_put = self.min_viable_credit_put_side / 100
 
-        # MEIC+
-        meic_plus = self.strategy_config.get("meic_plus_enabled", True)
-        meic_plus_reduction = self.strategy_config.get("meic_plus_reduction", 0.15)
-        meic_plus_str = f"Enabled (-${meic_plus_reduction:.2f})" if meic_plus else "Disabled"
+        # Stop buffer
+        stop_buffer_dollars = self.strategy_config.get("stop_buffer", 0.10)
+        stop_buffer_str = f"+${stop_buffer_dollars:.2f}"
 
         # Early close
         if self.early_close_enabled:
@@ -4647,11 +4626,10 @@ class HydraStrategy(MEICStrategy):
             "",
             "\u2501\u2501\u2501 Credits \u2501\u2501\u2501",
             f"Min credit: Call ${min_credit_call:.2f}  |  Put ${min_credit_put:.2f}",
-            f"MEIC+: {meic_plus_str}",
             "",
             "\u2501\u2501\u2501 Risk \u2501\u2501\u2501",
             f"Max VIX: {self.max_vix_entry:.0f}",
-            f"Stop: credit - ${meic_plus_reduction:.2f}",
+            f"Stop: credit {stop_buffer_str}",
             "",
             "\u2501\u2501\u2501 Exits \u2501\u2501\u2501",
             f"Early close: {ec_str}",
@@ -6046,20 +6024,11 @@ class HydraStrategy(MEICStrategy):
 
             # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
             base_stop = credit * 2
-
-            # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_hydra behavior)
-            if self.meic_plus_enabled:
-                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if credit > min_credit_for_meic_plus:
-                    stop_level = base_stop - self.meic_plus_reduction
-                else:
-                    stop_level = base_stop
-            else:
-                stop_level = base_stop
+            stop_level = base_stop + self.stop_buffer
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = 0  # No put side to monitor
-            logger.info(f"Recovery: Call-only stop = ${stop_level:.2f} (2× credit ${credit:.2f})")
+            logger.info(f"Recovery: Call-only stop = ${stop_level:.2f} (2× credit ${credit:.2f} + buffer ${self.stop_buffer:.2f})")
 
         elif entry.put_only:
             credit = entry.put_spread_credit
@@ -6072,23 +6041,13 @@ class HydraStrategy(MEICStrategy):
 
             # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
             base_stop = credit * 2
-
-            # Apply MEIC+ reduction if enabled (must match _calculate_stop_levels_hydra behavior)
-            if self.meic_plus_enabled:
-                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if credit > min_credit_for_meic_plus:
-                    stop_level = base_stop - self.meic_plus_reduction
-                else:
-                    stop_level = base_stop
-            else:
-                stop_level = base_stop
+            stop_level = base_stop + self.stop_buffer
 
             entry.put_side_stop = stop_level
             entry.call_side_stop = 0  # No call side to monitor
-            logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (2× credit ${credit:.2f})")
+            logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (2× credit ${credit:.2f} + buffer ${self.stop_buffer:.2f})")
         else:
-            # Full IC or stopped entry — total_credit stop (Tammy Chambless MEIC rule)
-            # MKT-019 removed in v1.4.0
+            # Full IC — stop = total_credit + buffer
             total_credit = entry.total_credit
 
             if total_credit < MIN_STOP_LEVEL:
@@ -6099,21 +6058,13 @@ class HydraStrategy(MEICStrategy):
                 total_credit = MIN_STOP_LEVEL
 
             base_stop = total_credit
-
-            if self.meic_plus_enabled:
-                min_credit_for_meic_plus = self.strategy_config.get("meic_plus_min_credit", 1.50) * 100
-                if total_credit > min_credit_for_meic_plus:
-                    stop_level = base_stop - self.meic_plus_reduction
-                else:
-                    stop_level = base_stop
-            else:
-                stop_level = total_credit
+            stop_level = base_stop + self.stop_buffer
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = stop_level
             logger.info(
                 f"Recovery: Full IC stop = ${stop_level:.2f} per side "
-                f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f})"
+                f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f} + buffer ${self.stop_buffer:.2f})"
             )
 
         return entry

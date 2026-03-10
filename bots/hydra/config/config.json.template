@@ -50,9 +50,8 @@
         "min_delta": 5,
         "max_delta": 15,
 
-        "_comment_meic_plus": "MEIC+ modification: stop = credit - $0.15 to cover commission on one-side-stop (4 entry + 1 close = 5 legs × $2.50 = $12.50, buffered to $15)",
-        "meic_plus_enabled": true,
-        "meic_plus_reduction": 0.15,
+        "_comment_stop_buffer": "Stop buffer: stop = credit + $0.10 (Brian's approach — extra cushion, each stop costs ~$25 instead of breakeven)",
+        "stop_buffer": 0.10,
 
         "_comment_risk": "Risk management settings",
         "max_vix_entry": 30,
