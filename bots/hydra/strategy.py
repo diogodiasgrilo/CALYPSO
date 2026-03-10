@@ -3550,16 +3550,16 @@ class HydraStrategy(MEICStrategy):
                     continue
 
                 MIN_VALID_STOP = 50.0
-                if entry.call_side_stop < MIN_VALID_STOP or entry.put_side_stop < MIN_VALID_STOP:
-                    logger.error(f"SAFETY: Invalid stop levels")
-                    continue
-
                 if not call_done:
-                    if entry.call_spread_value >= entry.call_side_stop:
+                    if entry.call_side_stop < MIN_VALID_STOP:
+                        logger.error(f"SAFETY: Invalid call stop ${entry.call_side_stop:.2f} for Entry #{entry.entry_number}")
+                    elif entry.call_spread_value >= entry.call_side_stop:
                         return self._execute_stop_loss(entry, "call")
 
                 if not put_done:
-                    if entry.put_spread_value >= entry.put_side_stop:
+                    if entry.put_side_stop < MIN_VALID_STOP:
+                        logger.error(f"SAFETY: Invalid put stop ${entry.put_side_stop:.2f} for Entry #{entry.entry_number}")
+                    elif entry.put_spread_value >= entry.put_side_stop:
                         return self._execute_stop_loss(entry, "put")
 
         return None
