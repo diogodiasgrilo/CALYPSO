@@ -3303,7 +3303,7 @@ class MEICStrategy:
             if opt_strike == strike and opt_type == put_call:
                 return option.get("Uic")
 
-        logger.error(f"Strike {strike} {put_call} not found in chain for {expiry}")
+        logger.warning(f"Strike {strike} {put_call} not found in chain for {expiry}")
         return None
 
     def _get_position_id_from_order(self, order_result: Dict) -> Optional[str]:
@@ -3834,12 +3834,35 @@ class MEICStrategy:
             # FIX #42: Collect fill prices from each leg
             # Fix #45: Pass entry_number for merged position handling
             # FIX #70: Track deferred legs for batch price lookup after both legs close
+            legs_actually_closed = 0  # Fix #83a: Track for accurate commission
 
             for pos_id, leg_name, uic in positions_to_close:
                 if pos_id:
-                    _, fill_price, order_id = self._close_position_with_retry(
+                    # Fix #83a: Skip closing worthless long legs (bid=$0) on 0DTE
+                    # Deep OTM longs often have no market — Saxo rejects market orders
+                    # with "only limit orders allowed" and limit orders at $0.05 fail too.
+                    # These expire worthless at 4 PM, so closing wastes API calls for ~$0.
+                    if leg_name.startswith("long") and uic:
+                        try:
+                            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+                            bid = 0
+                            if quote:
+                                bid = quote.get("Quote", {}).get("Bid", 0) or quote.get("Bid", 0) or 0
+                            if bid <= 0:
+                                logger.info(
+                                    f"  Fix #83a: Skipping {leg_name} close for Entry #{entry.entry_number} "
+                                    f"(bid=${bid:.2f}, expires worthless on 0DTE)"
+                                )
+                                # Long leg expires worthless — no P&L impact, no commission
+                                continue
+                        except Exception as e:
+                            logger.warning(f"  Fix #83a: Quote check failed for {leg_name}: {e}, proceeding with close")
+
+                    success, fill_price, order_id = self._close_position_with_retry(
                         pos_id, leg_name, uic=uic, entry_number=entry.entry_number
                     )
+                    if success:
+                        legs_actually_closed += 1
                     if fill_price is not None:
                         # Short leg: we BUY to close (cost us money)
                         # Long leg: we SELL to close (gives us money back)
@@ -3902,8 +3925,13 @@ class MEICStrategy:
 
         self.daily_state.total_realized_pnl -= net_loss
 
-        # Track close commission (display only - 2 legs per side × $2.50 close = $5 per side)
-        close_commission = 2 * self.commission_per_leg * self.contracts_per_entry
+        # Track close commission — Fix #83a: use actual legs closed, not hardcoded 2
+        # When worthless long legs are skipped (bid=$0), no trade = no commission
+        if self.dry_run:
+            close_legs = 2  # Dry run assumes both legs
+        else:
+            close_legs = legs_actually_closed if legs_actually_closed > 0 else 2
+        close_commission = close_legs * self.commission_per_leg * self.contracts_per_entry
         entry.close_commission += close_commission
         self.daily_state.total_commission += close_commission
 
@@ -3989,17 +4017,16 @@ class MEICStrategy:
         else:
             buy_sell = BuySell.SELL  # Sell the long position
 
-        # Fix #46: Check if we're in "limit orders only" period (after 3:45 PM ET)
-        # Saxo requires limit orders for the final 15 minutes before market close
-        now = get_us_market_time()
-        is_limit_only_period = now.hour == 15 and now.minute >= 45
+        # Fix #83d: Removed narrow is_limit_only_period time check (was: 3:45+ PM only).
+        # Saxo can restrict market orders at ANY time (observed at 14:34 ET on 2026-03-09).
+        # Now handled dynamically inside place_emergency_order() via error detection.
 
         for attempt in range(EMERGENCY_CLOSE_MAX_ATTEMPTS):
             attempt_num = attempt + 1
 
             try:
                 # Fix #46: Check if position still exists before retrying
-                # This prevents 409 Conflict errors when position is already closed
+                # Fix #83d: Check on ALL attempts (not just retries) to avoid wasted API calls
                 if attempt > 0:
                     positions = self.client.get_positions()
                     position_exists = any(
@@ -4029,25 +4056,10 @@ class MEICStrategy:
                         )
                         self._wait_for_spread_normalization(uic, leg_name)
 
-                # Fix #46: Use limit orders near market close
+                # Fix #83d: Always use MARKET order — place_emergency_order() handles
+                # "limit orders only" error dynamically with Fix #46 + Fix #83b fallback
                 order_type = OrderType.MARKET
                 limit_price = None
-
-                if is_limit_only_period:
-                    logger.info(f"Fix #46: In limit-only period, using LIMIT order for {leg_name}")
-                    quote = self.client.get_quote(uic, asset_type="StockIndexOption")
-                    if quote:
-                        quote_data = quote.get("Quote", quote)
-                        if buy_sell == BuySell.BUY:
-                            # Buying to close - use ask price (aggressive)
-                            limit_price = quote_data.get("Ask") or quote_data.get("Mid")
-                        else:
-                            # Selling to close - use bid price (aggressive)
-                            limit_price = quote_data.get("Bid") or quote_data.get("Mid")
-
-                        if limit_price:
-                            order_type = OrderType.LIMIT
-                            logger.info(f"Fix #46: Using LIMIT @ ${limit_price:.2f}")
 
                 # CRITICAL FIX: Use place_emergency_order with ToClose instead of DELETE endpoint
                 # This is how Iron Fly and Delta Neutral successfully close positions

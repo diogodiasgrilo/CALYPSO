@@ -642,12 +642,21 @@ def main():
         git_ok = git_commit_and_push(journal_path, date_labels)
 
         # 12. Populate backtesting database (non-blocking — errors don't abort)
-        try:
-            db = _get_db(config)
-            for date_str in missing_days:
-                _populate_db_for_date(db, all_data, date_str, config)
-        except Exception as e:
-            logger.warning(f"Backtesting DB population failed (non-critical): {e}")
+        # Retry once on transient "unable to open database file" errors
+        for db_attempt in range(2):
+            try:
+                db = _get_db(config)
+                for date_str in missing_days:
+                    _populate_db_for_date(db, all_data, date_str, config)
+                break  # Success
+            except Exception as e:
+                if db_attempt == 0 and "unable to open" in str(e).lower():
+                    logger.warning(f"Backtesting DB attempt 1 failed ({e}), retrying in 3s...")
+                    import time as _time
+                    _time.sleep(3)
+                else:
+                    logger.warning(f"Backtesting DB population failed (non-critical): {e}")
+                    break
 
         # 13. Telegram alert (reflects git status)
         if homer_config.get("telegram_alert", True):

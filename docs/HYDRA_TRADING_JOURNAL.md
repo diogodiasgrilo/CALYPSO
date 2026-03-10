@@ -41,7 +41,7 @@
 **Capital Deployed**: $10,000-$38,000 per day (varies by entry count and spread width)
 
 ### Period Result
-- **Net P&L**: +$1142.50
+- **Net P&L**: +$1145.00
 - **Winning Days**: 12 (63.2%)
 - **Losing Days**: 7 (36.8%)
 - **Total Entries**: 82
@@ -78,15 +78,15 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Put Stops | 1 | 2 | 4 | 2 | 2 | 2 | 3 | 1 | 2 | 0 | 0 | 2 | 1 | 2 | **1** | **3** | **5** | **4** | **2** |
 | Double Stops | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | **1** | **0** | **0** | **0** | **2** |
 | Stop Loss Debits ($) | 140 | 290 | 410 | 1145 | 1335 | 260 | 380 | 800 | 655 | 340 | 250 | 1025 | 135 | 1180 | **1060** | **305**  | **240**  | **345**  | **985**  |
-| Commission ($) | 30 | 45 | 70 | 60 | 65 | 35 | 45 | 60 | 30 | 55 | 40 | 55 | 35 | 75 | **65** | **47.50** | **75**    | **70**    | **70**    |
+| Commission ($) | 30 | 45 | 70 | 60 | 65 | 35 | 45 | 60 | 30 | 55 | 40 | 55 | 35 | 75 | **65** | **47.50** | **75**    | **70**    | **67.50** |
 | Expired Credits ($) | 520 | 760 | 840 | 1880 | 660 | 610 | 395 | 1550 | 280 | 830 | 490 | 370 | 715 | 1000 | **675** | **540** | **405** | **590** | **340** |
-| Daily P&L ($) | 350 | 425 | 360 | 675 | -740 | 315 | -30 | 690 | -405 | 435 | 200 | -710 | 545 | -255 | **-450** | **187.50** | **90**     | **175**    | **-715**   |
-| Daily P&L (EUR) | 294.27 | 357.99 | 303.31 | 568.71 | -624.26 | 267.32 | -25.47 | 585.74 | -344.10 | ~369.75 | 169.42 | -601.81 | ~462 | ~-216 | **~-382** | **~161.15** | **~77.53**  | **~150.64** | **~-614.51** |
-| Cumulative P&L ($) | 350 | 775 | 1135 | 1810 | 1070 | 1385 | 1355 | 2045 | 1640 | 2075 | 2275 | 1565 | 2110 | 1855 | **1405** | **1592.50** | **1682.50** | **1857.50** | **1142.50** |
-| Cumulative P&L (EUR) | 294.27 | 652.81 | 956.27 | 1524.98 | 902.64 | 1175.35 | 1150.55 | 1736.03 | 1393.38 | ~1763 | 1927.17 | 1326.53 | ~1789 | ~1573 | **~1191** | **~1368.67** | **~1449.39** | **~1598.89** | **~981.93**  |
+| Daily P&L ($) | 350 | 425 | 360 | 675 | -740 | 315 | -30 | 690 | -405 | 435 | 200 | -710 | 545 | -255 | **-450** | **187.50** | **90**     | **175**    | **-712.50** |
+| Daily P&L (EUR) | 294.27 | 357.99 | 303.31 | 568.71 | -624.26 | 267.32 | -25.47 | 585.74 | -344.10 | ~369.75 | 169.42 | -601.81 | ~462 | ~-216 | **~-382** | **~161.15** | **~77.53**  | **~150.64** | **~-612.36** |
+| Cumulative P&L ($) | 350 | 775 | 1135 | 1810 | 1070 | 1385 | 1355 | 2045 | 1640 | 2075 | 2275 | 1565 | 2110 | 1855 | **1405** | **1592.50** | **1682.50** | **1857.50** | **1145.00** |
+| Cumulative P&L (EUR) | 294.27 | 652.81 | 956.27 | 1524.98 | 902.64 | 1175.35 | 1150.55 | 1736.03 | 1393.38 | ~1763 | 1927.17 | 1326.53 | ~1789 | ~1573 | **~1191** | **~1368.67** | **~1449.39** | **~1598.89** | **~984.08**  |
 | Win Rate (%) | 80.0 | 66.7 | 33.3 | 40.0 | 0.0 | 50.0 | 25.0 | 66.7 | 0.0 | 75.0 | 100.0 | 0.0 | 66.7 | 16.7 | **0.0** | **25.0** | **0.0**  | **20.0** | **0.0**  |
 | Capital Deployed ($) | 25000 | 30000 | 32000 | 28000 | 30500 | 20000 | 23000 | 15000 | 12000 | 22000 | 10000 | 21500 | 17500 | 38000 | **37500** | **31000** | **37500** | **37500** | **30000** |
-| Return on Capital (%) | 1.40 | 1.42 | 1.13 | 2.41 | -2.43 | 1.57 | -0.13 | 4.60 | -3.38 | 1.98 | 2.00 | -3.30 | 3.11 | -0.67 | **-1.20** | **0.60**  | **0.24**  | **0.47**  | **-2.38** |
+| Return on Capital (%) | 1.40 | 1.42 | 1.13 | 2.41 | -2.43 | 1.57 | -0.13 | 4.60 | -3.38 | 1.98 | 2.00 | -3.30 | 3.11 | -0.67 | **-1.20** | **0.60**  | **0.24**  | **0.47**  | **-2.38**  |
 | Sortino Ratio | 0.00 | 99.99 | 99.99 | 99.99 | 11.49 | 14.70 | 1.90 | 6.09 | 2.41 | ~3.2 | 4.97 | 2.29 | ~3.5 | ~2.8 | **~2.3** | **~2.9** | **~2.9** | **~3.1** | **~1.8** |
 | Max Loss Stops ($) | 640 | 1170 | 1610 | 3045 | 1885 | 810 | 1265 | 1775 | 915 | 975 | 490 | 1345 | 905 | 1855 | **1395** | **1115** | **1345** | **1260** | **1045** |
 | Max Loss Catastrophic ($) | 24360 | 28830 | 30390 | 24955 | 28615 | 19190 | 21735 | 13225 | 11085 | 21025 | 9510 | 20155 | 16595 | 36145 | **35105** | **29885** | **36155** | **36240** | **28955** |
@@ -1121,7 +1121,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - Commission: $70
 - **Net P&L: +$175** (590 - 345 - 70 = 175)
 
-### Mar 9 (Monday) - NET P&L: -$715
+### Mar 9 (Monday) - NET P&L: -$712.50
 
 **Market**: SPX range 175 pts (2.6%). VIX 31.2→25.1.
 
@@ -1137,7 +1137,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - Entries #2 and #3 produced double-stops: put legs at 6,680 and 6,675 were pressured by the morning gap-down near the 6,635 session low, then call legs stopped later in the afternoon (1:03 PM and 1:18 PM for puts; 3:21 PM and 3:20 PM for calls respectively), generating a combined -$665 P&L impact from those two positions alone.
 - VIX opened at 31.18 and compressed to a low of 24.76 intraday, consistent with a short-squeeze dynamic; despite elevated VIX at open supporting wider spread widths, all four entries were placed at a uniform 75-point spread width with total credits ranging $240–$275, below what a VIX-scaled maximum of 120 points would theoretically allow.
 - Entry #1 fired at 12:08 ET — approximately 7 minutes ahead of the 12:15 scheduled window — indicating MKT-031 smart entry scoring reached threshold early, notable given VIX was still above 31 at that point; its put spread at 6,655 short strike was the only put side to expire worthless, as the 6,635 session low did not hold deep enough to breach it.
-- The 13:15 entry was skipped (1 of 5), consistent with MKT-011 credit gate behavior after a sustained upside move compressed call premium; with $0 in expired credits against $985 in stop loss debits and $70 in commissions, the day produced -$715 net P&L — approximately 2.4x the reported average losing day — with no offset from any surviving leg.
+- The 13:15 entry was skipped (1 of 5), consistent with MKT-011 credit gate behavior after a sustained upside move compressed call premium; with $0 in expired credits against $985 in stop loss debits and $67.50 in commissions, the day produced -$712.50 net P&L — approximately 2.4x the reported average losing day — with no offset from any surviving leg.
 
 ### Stop Timing Log
 
@@ -1152,8 +1152,8 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 - Expired Credits: $340
 - Stop Loss Debits: $985
-- Commission: $70
-- **Net P&L: -$715** (340 - 985 - 70 = -715)
+- Commission: $67.50
+- **Net P&L: -$712.50** (340 - 985 - 67.50 = -712.50)
 
 ---
 
@@ -1230,7 +1230,7 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 | Total Expired Credits | $13450 (54.1% of credit) |
 | Total Stop Loss Debits | $11280 (45.4% of credit) |
 | Total Commission | $1027.50 (4.1% of credit) |
-| Net P&L | +$1142.50 (4.6% net capture rate) |
+| Net P&L | +$1145.00 (4.6% net capture rate) |
 | Average Daily Credit | $1308 |
 | Average Daily P&L | +$60 |
 | Best Day | +$690 (Feb 20) |
@@ -2105,13 +2105,13 @@ When reviewing performance after implementing improvements, fill in this section
 | Call Stops | 4 |
 | Put Stops | 2 |
 | Stop Debits | $985 |
-| Commission | $70 |
+| Commission | $67.50 |
 | Expired Credits | $340 |
-| Daily P&L | -$715 |
-| Cumulative P&L | $1142.50 |
+| Daily P&L | -$712.50 |
+| Cumulative P&L | $1145.00 |
 | Early Close | No |
 
-**Mar 9 Assessment**: SPX's 134-point intraday reversal from 6,676 to a high of 6,810 overwhelmed all four iron condors, triggering call stops on every entry and double stops on entries #2 and #3, producing a -$715 net P&L against $1,045 total credit collected — a 0% win rate and -2.38% return on capital for the session. MKT-031 fired entry #1 seven minutes early at 12:08 ET, and while it captured $265 credit and avoided the double-stop that hit entries #2 and #3, it still stopped on the call side at 12:26 ET as SPX pushed through the 6,765 short call strike; the one MKT-011 skip at the 13:15 window was consistent with call premium compression after a 130+ point upside move. The cumulative P&L holds at $1,142.50 with a 4.52% cumulative ROC, but today's realized loss at 2.4x the average losing day underscores the structural vulnerability of HYDRA's symmetric iron condor configuration in sharp VIX-compression squeeze sessions where directional exposure materializes unilaterally on the call side.
+**Mar 9 Assessment**: SPX's 134-point intraday reversal from 6,676 to a high of 6,810 overwhelmed all four iron condors, triggering call stops on every entry and double stops on entries #2 and #3, producing a -$712.50 net P&L against $1,045 total credit collected — a 0% win rate and -2.38% return on capital for the session. MKT-031 fired entry #1 seven minutes early at 12:08 ET, and while it captured $265 credit and avoided the double-stop that hit entries #2 and #3, it still stopped on the call side at 12:26 ET as SPX pushed through the 6,765 short call strike; the one MKT-011 skip at the 13:15 window was consistent with call premium compression after a 130+ point upside move. The cumulative P&L holds at $1,145.00 with a 4.53% cumulative ROC, but today's realized loss at 2.4x the average losing day underscores the structural vulnerability of HYDRA's symmetric iron condor configuration in sharp VIX-compression squeeze sessions where directional exposure materializes unilaterally on the call side.
 
 ---
 

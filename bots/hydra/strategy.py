@@ -5787,6 +5787,12 @@ class HydraStrategy(MEICStrategy):
             expired_credit = self._process_expired_credits()
             if expired_credit > 0:
                 logger.info(f"FIX #77: Processed ${expired_credit:.2f} expired credits from surviving sides (registry was empty)")
+                # Fix #84: Add final P&L history point after settlement
+                final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
+                now = get_us_market_time()
+                time_key = now.strftime("%H:%M")
+                self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
+                logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
                 self._save_state_to_disk()
             logger.info(f"POS-004: No {self.BOT_NAME} positions in registry - settlement reconciliation complete")
             self._settlement_reconciliation_complete = True
@@ -5839,6 +5845,15 @@ class HydraStrategy(MEICStrategy):
                 # All positions settled
                 logger.info(f"POS-004: All {self.BOT_NAME} positions confirmed settled - reconciliation complete")
                 self._settlement_reconciliation_complete = True
+
+                # Fix #84: Add final P&L history point after settlement so dashboard
+                # shows post-settlement P&L (not stale pre-settlement snapshot)
+                final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
+                now = get_us_market_time()
+                time_key = now.strftime("%H:%M")
+                self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
+                logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
+                self._save_state_to_disk()
 
                 # Log safety event
                 self._log_safety_event(

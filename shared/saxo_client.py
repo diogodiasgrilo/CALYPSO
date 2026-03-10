@@ -2752,6 +2752,18 @@ class SaxoClient:
         limit orders. If we get "only limit orders are allowed" error, we
         automatically retry with a limit order at aggressive pricing.
 
+        Fix #83b (2026-03-09): When quote fails for limit price fallback (e.g.,
+        deep OTM option with no market), use $0.05 minimum tick as limit price
+        for sells (we'd accept any price to close), or $0.05 for buys of
+        nearly worthless options.
+
+        Fix #83c (2026-03-09): After 409 Conflict error, cancel any pending
+        orders for the same position before retrying to prevent zombie orders.
+
+        Fix #83d (2026-03-09): Removed narrow is_limit_only_period time check
+        from caller — Saxo can restrict market orders at any time (observed at
+        14:34 ET on 2026-03-09), not just after 3:45 PM.
+
         Args:
             uic: Instrument UIC
             asset_type: Type of asset
@@ -2833,10 +2845,42 @@ class SaxoClient:
                                     f"Fix #46: Using LIMIT order @ ${current_limit_price:.2f}"
                                 )
                             else:
-                                logger.error(f"Fix #46: Could not get quote for limit price")
+                                # Fix #83b: Quote has no valid Bid/Ask (deep OTM, no market)
+                                # Use $0.05 minimum tick — we accept any price to close
+                                current_limit_price = 0.05
+                                use_limit_order = True
+                                order_data["OrderType"] = OrderType.LIMIT.value
+                                order_data["OrderPrice"] = current_limit_price
+                                logger.warning(
+                                    f"Fix #83b: No valid quote, using minimum tick "
+                                    f"${current_limit_price:.2f} as limit price"
+                                )
                         else:
-                            logger.error(f"Fix #46: Could not fetch quote for UIC {uic}")
+                            # Fix #83b: Quote fetch failed entirely — use $0.05 minimum tick
+                            current_limit_price = 0.05
+                            use_limit_order = True
+                            order_data["OrderType"] = OrderType.LIMIT.value
+                            order_data["OrderPrice"] = current_limit_price
+                            logger.warning(
+                                f"Fix #83b: Quote fetch failed for UIC {uic}, "
+                                f"using minimum tick ${current_limit_price:.2f}"
+                            )
                     # Continue to next retry with limit order
+
+                # Fix #83c: After 409 Conflict, cancel pending orders before retry
+                if error_info and "409" in str(error_info):
+                    logger.warning(f"Fix #83c: 409 Conflict detected, checking for pending orders...")
+                    try:
+                        orders = self.get_open_orders()
+                        for order in (orders or []):
+                            order_uic = order.get("Uic")
+                            order_id = order.get("OrderId")
+                            if order_uic == uic and order_id:
+                                logger.info(f"Fix #83c: Cancelling pending order {order_id} for UIC {uic}")
+                                self.cancel_order(str(order_id))
+                                time_module.sleep(0.5)
+                    except Exception as cancel_err:
+                        logger.warning(f"Fix #83c: Error checking/cancelling orders: {cancel_err}")
 
                 logger.warning(f"Emergency order attempt {attempt + 1}/{max_retries} failed")
 
@@ -2941,8 +2985,10 @@ class SaxoClient:
                 return {}, None
             else:
                 error_text = response.text or ""
+                # Fix #83c: Include status code in error_info for reliable detection
+                error_info_str = f"{response.status_code}:{error_text}"
                 logger.error(f"Emergency request failed: {response.status_code} - {error_text}")
-                return None, error_text
+                return None, error_info_str
 
         except requests.exceptions.Timeout:
             error_msg = f"Timeout for {endpoint}"
