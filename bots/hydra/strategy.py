@@ -383,8 +383,8 @@ class HydraStrategy(MEICStrategy):
             logger.info(f"  VIX time shift (MKT-034): DISABLED")
 
         # MKT-025/MKT-033: Short-only stop + long leg salvage (configurable)
+        # Note: self.short_only_stop already set before super().__init__() (line ~263)
         long_salvage = config.get("long_salvage", {})
-        self.short_only_stop = long_salvage.get("short_only_stop", False)
         self.long_salvage_enabled = long_salvage.get("enabled", True)
         self.long_salvage_min_profit = float(long_salvage.get("min_profit", 10.0))
         logger.info(f"  Stop mode: {'SHORT-ONLY + salvage (MKT-025/033)' if self.short_only_stop else 'BOTH LEGS closed'}")

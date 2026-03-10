@@ -823,7 +823,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
 | `stop_buffer` | `0.10` | Stop buffer: stop = credit + buffer (Brian's approach — extra cushion per stop) |
-| `max_vix_entry` | `30` | Maximum VIX for new entries |
+| `max_vix_entry` | `23` | Maximum VIX for new entries (v1.10.2: lowered from 30 — 19-day analysis showed VIX >= 23 = whipsaw/double-stop risk) |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |
 | `early_close_roc_threshold` | `0.03` | MKT-018 ROC threshold (3.0%). Only used when enabled. |

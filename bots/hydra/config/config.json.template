@@ -54,7 +54,7 @@
         "stop_buffer": 0.10,
 
         "_comment_risk": "Risk management settings",
-        "max_vix_entry": 30,
+        "max_vix_entry": 23,
         "contracts_per_entry": 1,
 
         "_comment_early_close": "MKT-018: INTENTIONALLY DISABLED. Backtest showed no ROC configuration beats hold-to-expiry. Code preserved but dormant. See docs/HYDRA_EARLY_CLOSE_ANALYSIS.md",
