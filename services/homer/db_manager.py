@@ -10,6 +10,7 @@ Tables:
     trade_entries     - Iron condor entry details (strikes, credits, signals)
     trade_stops       - Stop loss events (debit, P&L)
     daily_summaries   - End-of-day totals (SPX OHLC, P&L, entry/stop counts)
+    spread_snapshots  - Per-entry spread values over time (for stop formula backtesting)
     schema_info       - Schema version tracking for future migrations
 """
 
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS market_ticks (
@@ -107,10 +108,19 @@ CREATE TABLE IF NOT EXISTS schema_info (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS spread_snapshots (
+    timestamp TEXT NOT NULL,
+    entry_number INTEGER NOT NULL,
+    call_spread_value REAL,
+    put_spread_value REAL,
+    PRIMARY KEY (timestamp, entry_number)
+);
+
 CREATE INDEX IF NOT EXISTS idx_ticks_date ON market_ticks(substr(timestamp, 1, 10));
 CREATE INDEX IF NOT EXISTS idx_ohlc_date ON market_ohlc_1min(substr(timestamp, 1, 10));
 CREATE INDEX IF NOT EXISTS idx_entries_date ON trade_entries(date);
 CREATE INDEX IF NOT EXISTS idx_stops_date ON trade_stops(date);
+CREATE INDEX IF NOT EXISTS idx_spreads_date ON spread_snapshots(substr(timestamp, 1, 10));
 """
 
 
@@ -172,6 +182,11 @@ class BacktestingDB:
             except sqlite3.OperationalError:
                 pass  # Column already exists
             logger.info("DB migrated to schema v2 (MKT-033 salvage columns)")
+
+        if current < 3:
+            # v3: spread_snapshots table for stop formula backtesting
+            # Table is created by CREATE_TABLES_SQL above, just log migration
+            logger.info("DB migrated to schema v3 (spread_snapshots table)")
 
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode."""
@@ -344,6 +359,29 @@ class BacktestingDB:
             cursor = conn.execute(sql, row)
             return cursor.rowcount
 
+    def insert_spread_snapshots(self, snapshots: List[Dict[str, Any]]) -> int:
+        """Insert per-entry spread value snapshots. Returns rows inserted."""
+        if not snapshots:
+            return 0
+        sql = """
+            INSERT OR IGNORE INTO spread_snapshots
+            (timestamp, entry_number, call_spread_value, put_spread_value)
+            VALUES (?, ?, ?, ?)
+        """
+        rows = [
+            (
+                s["timestamp"],
+                s["entry_number"],
+                s.get("call_spread_value"),
+                s.get("put_spread_value"),
+            )
+            for s in snapshots
+        ]
+        with self._connect() as conn:
+            conn.executemany(sql, rows)
+            inserted = conn.total_changes
+        return inserted
+
     # =========================================================================
     # QUERY HELPERS
     # =========================================================================
@@ -356,11 +394,12 @@ class BacktestingDB:
             "trade_entries",
             "trade_stops",
             "daily_summaries",
+            "spread_snapshots",
         }
         if table not in allowed_tables:
             raise ValueError(f"Unknown table: {table}")
 
-        if table in ("market_ticks", "market_ohlc_1min"):
+        if table in ("market_ticks", "market_ohlc_1min", "spread_snapshots"):
             sql = f"SELECT 1 FROM {table} WHERE substr(timestamp, 1, 10) = ? LIMIT 1"
         else:
             sql = f"SELECT 1 FROM {table} WHERE date = ? LIMIT 1"
@@ -388,6 +427,7 @@ class BacktestingDB:
             "trade_entries",
             "trade_stops",
             "daily_summaries",
+            "spread_snapshots",
         ]
         counts = {}
         with self._connect() as conn:

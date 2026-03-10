@@ -729,6 +729,12 @@ _HEARTBEAT_RE = re.compile(
     r"Trend: (\w+)"
 )
 
+# Regex for parsing entry detail lines that follow heartbeat lines
+# Example: "  Entry #1: C:6950/6925 P:6850/6875 | Credit: $210 | P&L: +$50 | Call: 75% cushion | Put: 60% cushion | SV: 165/142"
+_ENTRY_DETAIL_SV_RE = re.compile(
+    r"Entry #(\d+):.*SV: ([\d.]+)/([\d.]+)"
+)
+
 # Default log file paths (relative to project root)
 DEFAULT_LOG_PATHS = [
     os.path.join("logs", "meic_tf", "bot.log"),  # Feb 5-27 (pre-rename)
@@ -899,6 +905,137 @@ def compute_ohlc_from_ticks(ticks: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         })
 
     return bars
+
+
+def parse_spread_snapshots(
+    date_str: str,
+    log_paths: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Parse per-entry spread value snapshots from heartbeat entry detail lines.
+
+    Looks for lines containing "SV: {call}/{put}" that follow each heartbeat.
+    The timestamp is taken from the preceding heartbeat line.
+
+    Args:
+        date_str: Date to extract ("YYYY-MM-DD").
+        log_paths: Log file paths. Defaults to standard paths.
+
+    Returns:
+        List of dicts matching spread_snapshots schema.
+    """
+    if log_paths is None:
+        log_paths = DEFAULT_LOG_PATHS
+
+    snapshots = {}  # (timestamp, entry_number) -> snapshot dict
+    current_ts = None
+
+    for path in log_paths:
+        if not os.path.exists(path):
+            continue
+
+        try:
+            with open(path) as f:
+                for line in f:
+                    if date_str not in line:
+                        continue
+
+                    # Check if this is a heartbeat line (captures timestamp)
+                    hb_match = _HEARTBEAT_RE.search(line)
+                    if hb_match:
+                        ts = hb_match.group(1)
+                        if ts.startswith(date_str):
+                            current_ts = ts
+                        continue
+
+                    # Check if this is an entry detail line with SV data
+                    if current_ts and "SV:" in line:
+                        sv_match = _ENTRY_DETAIL_SV_RE.search(line)
+                        if sv_match:
+                            entry_num = int(sv_match.group(1))
+                            csv = float(sv_match.group(2))
+                            psv = float(sv_match.group(3))
+                            # Skip if both are 0 (stopped/skipped sides)
+                            if csv > 0 or psv > 0:
+                                key = (current_ts, entry_num)
+                                snapshots[key] = {
+                                    "timestamp": current_ts,
+                                    "entry_number": entry_num,
+                                    "call_spread_value": csv if csv > 0 else None,
+                                    "put_spread_value": psv if psv > 0 else None,
+                                }
+        except IOError as e:
+            logger.warning(f"Failed to read {path}: {e}")
+
+    result = sorted(snapshots.values(), key=lambda s: (s["timestamp"], s["entry_number"]))
+    if result:
+        logger.info(f"Parsed {len(result)} spread snapshots for {date_str}")
+    return result
+
+
+def parse_all_spread_snapshots(
+    log_paths: Optional[List[str]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Parse ALL spread value snapshots from log files, grouped by date.
+
+    Used for backfill mode.
+
+    Returns:
+        Dict mapping date string -> list of snapshot dicts.
+    """
+    if log_paths is None:
+        log_paths = DEFAULT_LOG_PATHS
+
+    snapshots_by_date: Dict[str, Dict[tuple, Dict]] = defaultdict(dict)
+    current_ts = None
+
+    for path in log_paths:
+        if not os.path.exists(path):
+            continue
+
+        count = 0
+        try:
+            with open(path) as f:
+                for line in f:
+                    # Check if this is a heartbeat line
+                    if "HEARTBEAT" in line and "SPX:" in line:
+                        hb_match = _HEARTBEAT_RE.search(line)
+                        if hb_match:
+                            current_ts = hb_match.group(1)
+                        continue
+
+                    # Check entry detail line with SV data
+                    if current_ts and "SV:" in line:
+                        sv_match = _ENTRY_DETAIL_SV_RE.search(line)
+                        if sv_match:
+                            entry_num = int(sv_match.group(1))
+                            csv = float(sv_match.group(2))
+                            psv = float(sv_match.group(3))
+                            if csv > 0 or psv > 0:
+                                date = current_ts[:10]
+                                key = (current_ts, entry_num)
+                                snapshots_by_date[date][key] = {
+                                    "timestamp": current_ts,
+                                    "entry_number": entry_num,
+                                    "call_spread_value": csv if csv > 0 else None,
+                                    "put_spread_value": psv if psv > 0 else None,
+                                }
+                                count += 1
+        except IOError as e:
+            logger.warning(f"Failed to read {path}: {e}")
+
+        logger.info(f"Parsed {count} spread snapshots from {path}")
+
+    # Convert to sorted lists
+    result = {}
+    for date, snap_dict in sorted(snapshots_by_date.items()):
+        result[date] = sorted(snap_dict.values(), key=lambda s: (s["timestamp"], s["entry_number"]))
+
+    logger.info(
+        f"Total: {sum(len(v) for v in result.values())} spread snapshots across {len(result)} dates"
+    )
+    return result
 
 
 def build_db_records(

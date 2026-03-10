@@ -6348,6 +6348,10 @@ class MEICStrategy:
             call_warning = "⚠️" if call_status.endswith("cushion") and call_pct < 30 else ""
             put_warning = "⚠️" if put_status.endswith("cushion") and put_pct < 30 else ""
 
+            # Spread values for backtesting DB (always include for HOMER parsing)
+            csv = call_value if not entry.call_side_stopped and not getattr(entry, 'call_side_skipped', False) else 0
+            psv = put_value if not entry.put_side_stopped and not getattr(entry, 'put_side_skipped', False) else 0
+
             line = (
                 f"  Entry #{entry.entry_number}: "
                 f"C:{entry.short_call_strike}/{entry.long_call_strike} "
@@ -6355,7 +6359,8 @@ class MEICStrategy:
                 f"Credit: ${entry.total_credit:.0f} | "
                 f"P&L: ${total_pnl:+.0f} | "
                 f"Call: {call_status}{call_warning} | "
-                f"Put: {put_status}{put_warning}"
+                f"Put: {put_status}{put_warning} | "
+                f"SV: {csv:.0f}/{psv:.0f}"
             )
             lines.append(line)
 

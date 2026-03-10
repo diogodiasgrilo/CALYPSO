@@ -322,11 +322,12 @@ def _populate_db_for_date(
     from services.homer.data_collector import (
         collect_day_data,
         parse_heartbeat_logs,
+        parse_spread_snapshots,
         compute_ohlc_from_ticks,
         build_db_records,
     )
 
-    counts = {"ticks": 0, "ohlc": 0, "entries": 0, "stops": 0, "summary": 0}
+    counts = {"ticks": 0, "ohlc": 0, "entries": 0, "stops": 0, "summary": 0, "spreads": 0}
 
     # 1. Market ticks (from heartbeat logs)
     if ticks is None:
@@ -339,6 +340,11 @@ def _populate_db_for_date(
         ohlc_bars = compute_ohlc_from_ticks(ticks)
         if ohlc_bars:
             counts["ohlc"] = db.insert_ohlc_1min(ohlc_bars)
+
+        # 2b. Spread value snapshots (from entry detail lines in log)
+        spread_snaps = parse_spread_snapshots(date_str)
+        if spread_snaps:
+            counts["spreads"] = db.insert_spread_snapshots(spread_snaps)
 
     # 3-5. Trade entries, stops, daily summary (from Sheets data)
     day_data = collect_day_data(all_data, date_str, config)
@@ -360,7 +366,8 @@ def _populate_db_for_date(
     if total > 0:
         logger.info(
             f"DB {date_str}: {counts['ticks']} ticks, {counts['ohlc']} ohlc, "
-            f"{counts['entries']} entries, {counts['stops']} stops, {counts['summary']} summary"
+            f"{counts['entries']} entries, {counts['stops']} stops, {counts['summary']} summary, "
+            f"{counts['spreads']} spreads"
         )
 
     return counts
@@ -406,7 +413,7 @@ def _run_backfill():
     logger.info(f"Phase 3: Processing {len(all_dates)} dates ({all_dates[0]} to {all_dates[-1]})")
 
     # 4. Populate DB for each date
-    total_counts = {"ticks": 0, "ohlc": 0, "entries": 0, "stops": 0, "summary": 0}
+    total_counts = {"ticks": 0, "ohlc": 0, "entries": 0, "stops": 0, "summary": 0, "spreads": 0}
     for date_str in all_dates:
         ticks = all_ticks.get(date_str, [])
         try:
