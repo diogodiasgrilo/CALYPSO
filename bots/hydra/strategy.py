@@ -258,6 +258,10 @@ class HydraStrategy(MEICStrategy):
         strategy_cfg = config.get("strategy", {})
         self.stop_buffer = strategy_cfg.get("stop_buffer", 0.10) * 100
 
+        # MKT-025: short_only_stop needed by _save_state_to_disk() during recovery
+        long_salvage = config.get("long_salvage", {})
+        self.short_only_stop = long_salvage.get("short_only_stop", False)
+
         # Call parent init (this sets up everything else including recovery)
         super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
 
