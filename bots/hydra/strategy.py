@@ -2397,6 +2397,24 @@ class HydraStrategy(MEICStrategy):
                     if self.recheck_each_entry:
                         trend = self._get_trend_signal()
 
+                # MKT-035: Check conditional entries BEFORE any strike/API work
+                # Conditional entries (6+) only fire on down days — skip immediately if not
+                is_conditional = self._is_conditional_entry(entry_num)
+                if is_conditional and not self.dry_run:
+                    downday = self._check_downday_filter()
+                    if not downday:
+                        logger.info(
+                            f"MKT-035: Entry #{entry_num} is conditional — "
+                            f"SPX not down enough, skipping"
+                        )
+                        self.daily_state.entries_skipped += 1
+                        self.daily_state.credit_gate_skips += 1
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        self._next_entry_index += 1
+                        return f"Entry #{entry_num} skipped - conditional (MKT-035 not triggered)"
+
                 # Create extended entry object
                 entry = HydraIronCondorEntry(entry_number=entry_num)
                 entry.strategy_id = f"hydra_{get_us_market_time().strftime('%Y%m%d')}_entry{entry_num}"
@@ -2415,31 +2433,16 @@ class HydraStrategy(MEICStrategy):
                     self._apply_progressive_call_tightening(entry)
                     self._apply_progressive_put_tightening(entry)
 
-                # MKT-035: Check down-day filter BEFORE credit gate
+                # MKT-035: Check down-day filter AFTER strikes but BEFORE credit gate
                 credit_gate_handled = False
                 place_put_only = False  # v1.7.1: MKT-011 put-only conversion
                 place_call_only = False  # MKT-035: call-only on down days
                 original_trend = trend  # Save original trend for hybrid logic
-                is_conditional = self._is_conditional_entry(entry_num)
 
                 if not self.dry_run:
-                    # MKT-035: Conditional entries (6+) REQUIRE down-day filter
                     if is_conditional:
-                        downday = self._check_downday_filter()
-                        if not downday:
-                            logger.info(
-                                f"MKT-035: Entry #{entry_num} is conditional — "
-                                f"SPX not down enough, skipping"
-                            )
-                            self.daily_state.entries_skipped += 1
-                            self.daily_state.credit_gate_skips += 1
-                            self._entry_in_progress = False
-                            self._current_entry = None
-                            self.state = MEICState.MONITORING
-                            self._next_entry_index += 1
-                            return f"Entry #{entry_num} skipped - conditional (MKT-035 not triggered)"
-
-                        # Down day confirmed — force call-only for conditional entry
+                        # Conditional entry: we already confirmed downday above,
+                        # so force call-only and check call credit viability
                         entry.call_only = True
                         entry.put_only = False
                         entry.put_side_skipped = True
