@@ -13,6 +13,7 @@ Trend Detection (informational only, does NOT drive entry type):
 Risk Management (beyond base MEIC):
 - MKT-011: Pre-entry credit gate (put-only if call non-viable, skip if put non-viable)
 - MKT-018: Early close on ROC >= 3% (close all positions after entries placed)
+- MKT-035: Call-only on down days (SPX < open -0.3%) with theoretical put stop
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
@@ -145,7 +146,7 @@ class HydraIronCondorEntry(IronCondorEntry):
     trend_signal: Optional[TrendSignal] = None  # The trend signal at entry time
 
     # Fix #49: Track why entry became one-sided (for correct logging)
-    override_reason: Optional[str] = None  # "trend", "mkt-011", "mkt-010", or None
+    override_reason: Optional[str] = None  # "trend", "mkt-011", "mkt-010", "mkt-035", or None
 
     # Fix #59: Track EMA values at entry time for Trades tab logging
     ema_20_at_entry: Optional[float] = None
@@ -397,6 +398,26 @@ class HydraStrategy(MEICStrategy):
             logger.info(f"  Long salvage (MKT-033): {'ENABLED' if self.long_salvage_enabled else 'DISABLED'} "
                         f"(min_profit=${self.long_salvage_min_profit:.0f})")
 
+        # MKT-035: Call-only on down days — when SPX drops threshold% below
+        # today's open, place call spread only (no puts). 20-day data: down days
+        # have 71% put stop rate but only 7% call stop rate. +$920 improvement.
+        self.downday_callonly_enabled = strategy_config.get("downday_callonly_enabled", True)
+        self.downday_threshold_pct = float(strategy_config.get("downday_threshold_pct", 0.003))  # 0.3%
+        self.downday_theoretical_put_credit = float(strategy_config.get("downday_theoretical_put_credit", 2.50)) * 100  # $250
+        # Conditional entry times: only fire when MKT-035 triggers (call-only on down days)
+        conditional_strs = strategy_config.get("conditional_entry_times", [])
+        self._conditional_entry_times = [
+            dt_time(int(p[0]), int(p[1]))
+            for p in (t.split(":") for t in conditional_strs)
+        ] if conditional_strs else []
+        self._base_entry_count = 0  # Set in _parse_entry_times after entry_times is built
+        logger.info(
+            f"  Down day filter (MKT-035): {'ENABLED' if self.downday_callonly_enabled else 'DISABLED'} "
+            f"(threshold: {self.downday_threshold_pct * 100:.1f}%, "
+            f"theoretical put: ${self.downday_theoretical_put_credit / 100:.2f}, "
+            f"conditional entries: {len(self._conditional_entry_times)})"
+        )
+
         # MKT-031: Scouting state (in-memory, no persistence needed)
         self._scouting_active = False
         self._scouting_window_start = None
@@ -605,12 +626,23 @@ class HydraStrategy(MEICStrategy):
                     dt_time(12, 45), dt_time(13, 15)
                 ]
 
+        # MKT-035: Record base entry count before appending conditional entries
+        self._base_entry_count = len(self.entry_times)
+
+        # MKT-035: Append conditional entry times (only fire on down days as call-only)
+        if self._conditional_entry_times:
+            self.entry_times.extend(self._conditional_entry_times)
+            cond_str = ", ".join(t.strftime('%H:%M') for t in self._conditional_entry_times)
+            logger.info(f"MKT-035: {len(self._conditional_entry_times)} conditional entries appended: [{cond_str}]")
+
         if is_early_close_day():
             early_cutoff = dt_time(12, 30)  # Allows entries up to 12:15 (12:14:30 with MKT-034 offset)
             first_entry = self.entry_times[0] if self.entry_times else dt_time(10, 15)
             self.entry_times = [t for t in self.entry_times if t < early_cutoff]
             if not self.entry_times:
                 self.entry_times = [first_entry]
+            # Recalculate base count after cutoff (conditional entries after cutoff are dropped)
+            self._base_entry_count = min(self._base_entry_count, len(self.entry_times))
             logger.info(f"HYDRA early close schedule: {[t.strftime('%H:%M:%S') for t in self.entry_times]}")
 
     # =========================================================================
@@ -1626,6 +1658,50 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"MKT-018: Spawned async fill correction thread for {len(deferred_legs)} legs")
 
     # =========================================================================
+    # MKT-035: DOWN DAY FILTER
+    # =========================================================================
+
+    def _check_downday_filter(self) -> bool:
+        """
+        MKT-035: Check if SPX is down more than threshold from today's open.
+
+        Returns True if call-only should be used (bearish day detected).
+        Uses market_data.spx_open which is set at first WebSocket update (~9:30 AM)
+        and persisted in state file across restarts.
+        """
+        if not self.downday_callonly_enabled:
+            return False
+
+        spx_open = self.market_data.spx_open
+        if spx_open <= 0:
+            logger.warning("MKT-035: No SPX open price available, skipping down-day check")
+            return False
+
+        current = self.current_price
+        if current <= 0:
+            return False
+
+        change_pct = (current - spx_open) / spx_open
+        threshold = -self.downday_threshold_pct
+
+        is_down = change_pct < threshold
+        if is_down:
+            logger.info(
+                f"MKT-035: SPX down {change_pct * 100:.2f}% from open "
+                f"({current:.1f} vs {spx_open:.1f}), threshold {threshold * 100:.1f}% → call-only"
+            )
+        else:
+            logger.info(
+                f"MKT-035: SPX {change_pct * 100:+.2f}% from open "
+                f"({current:.1f} vs {spx_open:.1f}), threshold {threshold * 100:.1f}% → full IC"
+            )
+        return is_down
+
+    def _is_conditional_entry(self, entry_num: int) -> bool:
+        """Check if this entry number is a conditional entry (MKT-035 only)."""
+        return entry_num > self._base_entry_count
+
+    # =========================================================================
     # TREND DETECTION
     # =========================================================================
 
@@ -2336,11 +2412,90 @@ class HydraStrategy(MEICStrategy):
                     self._apply_progressive_call_tightening(entry)
                     self._apply_progressive_put_tightening(entry)
 
-                # MKT-011: Check minimum credit gate before placing orders (primary check)
+                # MKT-035: Check down-day filter BEFORE credit gate
                 credit_gate_handled = False
                 place_put_only = False  # v1.7.1: MKT-011 put-only conversion
+                place_call_only = False  # MKT-035: call-only on down days
                 original_trend = trend  # Save original trend for hybrid logic
+                is_conditional = self._is_conditional_entry(entry_num)
+
                 if not self.dry_run:
+                    # MKT-035: Conditional entries (6+) REQUIRE down-day filter
+                    if is_conditional:
+                        downday = self._check_downday_filter()
+                        if not downday:
+                            logger.info(
+                                f"MKT-035: Entry #{entry_num} is conditional — "
+                                f"SPX not down enough, skipping"
+                            )
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
+                            self._entry_in_progress = False
+                            self._current_entry = None
+                            self.state = MEICState.MONITORING
+                            self._next_entry_index += 1
+                            return f"Entry #{entry_num} skipped - conditional (MKT-035 not triggered)"
+
+                        # Down day confirmed — force call-only for conditional entry
+                        entry.call_only = True
+                        entry.put_only = False
+                        entry.put_side_skipped = True
+                        entry.override_reason = "mkt-035"
+                        place_call_only = True
+                        credit_gate_handled = True
+                        logger.info(
+                            f"MKT-035: Conditional Entry #{entry_num} — down day confirmed, "
+                            f"placing CALL spread only"
+                        )
+
+                        # Still check call credit viability
+                        gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
+                        if est_call < self.min_viable_credit_per_side:
+                            logger.info(
+                                f"MKT-035: Entry #{entry_num} call credit "
+                                f"${est_call / 100:.2f} below minimum — skipping"
+                            )
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
+                            self._entry_in_progress = False
+                            self._current_entry = None
+                            self.state = MEICState.MONITORING
+                            self._next_entry_index += 1
+                            return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
+
+                    else:
+                        # Regular entries (1-5): check MKT-035 for call-only conversion
+                        downday = self._check_downday_filter()
+                        if downday:
+                            # Down day — convert to call-only
+                            entry.call_only = True
+                            entry.put_only = False
+                            entry.put_side_skipped = True
+                            entry.override_reason = "mkt-035"
+                            place_call_only = True
+                            credit_gate_handled = True
+                            logger.info(
+                                f"MKT-035: Entry #{entry_num} — down day filter triggered, "
+                                f"placing CALL spread only"
+                            )
+
+                            # Still check call credit viability
+                            gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
+                            if est_call < self.min_viable_credit_per_side:
+                                logger.info(
+                                    f"MKT-035: Entry #{entry_num} call credit "
+                                    f"${est_call / 100:.2f} below minimum — skipping"
+                                )
+                                self.daily_state.entries_skipped += 1
+                                self.daily_state.credit_gate_skips += 1
+                                self._entry_in_progress = False
+                                self._current_entry = None
+                                self.state = MEICState.MONITORING
+                                self._next_entry_index += 1
+                                return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
+
+                # MKT-011: Check minimum credit gate (only if MKT-035 didn't already handle)
+                if not credit_gate_handled and not self.dry_run:
                     gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
 
                     if gate_result == "skip":
@@ -2354,10 +2509,11 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
                     elif gate_result == "call_only":
-                        # Put credit too low — call-only entries disabled (insufficient data)
+                        # Put credit too low — call-only entries disabled via MKT-011
+                        # (MKT-035 handles call-only differently, this path is for non-down days)
                         logger.warning(
                             f"MKT-011: Entry #{entry_num} put credit non-viable — "
-                            f"SKIPPING (call-only entries disabled)"
+                            f"SKIPPING (call-only entries disabled without MKT-035)"
                         )
                         self._log_safety_event(
                             "MKT-011_SKIP",
@@ -2448,7 +2604,9 @@ class HydraStrategy(MEICStrategy):
                         return f"Entry #{entry_num} skipped - both wings illiquid"
 
                 # Determine entry type and execute
-                if place_put_only:
+                if place_call_only:
+                    logger.info(f"MKT-035: Placing CALL-ONLY entry #{entry_num} (down day)")
+                elif place_put_only:
                     logger.info(f"MKT-011: Placing PUT-ONLY entry #{entry_num} (call non-viable)")
                 else:
                     if original_trend != TrendSignal.NEUTRAL:
@@ -2456,7 +2614,12 @@ class HydraStrategy(MEICStrategy):
                     else:
                         logger.info(f"NEUTRAL → placing full iron condor")
 
-                if place_put_only:
+                if place_call_only:
+                    if self.dry_run:
+                        success = self._simulate_call_spread_only(entry)
+                    else:
+                        success = self._execute_call_spread_only(entry)
+                elif place_put_only:
                     if self.dry_run:
                         success = self._simulate_put_spread_only(entry)
                     else:
@@ -2477,13 +2640,13 @@ class HydraStrategy(MEICStrategy):
                     self.daily_state.entries_completed += 1
                     self.daily_state.total_credit_received += entry.total_credit
 
-                    # Track commission: 2 legs for put-only, 4 for full IC
-                    num_legs = 2 if place_put_only else 4
+                    # Track commission: 2 legs for one-sided, 4 for full IC
+                    num_legs = 2 if (place_put_only or place_call_only) else 4
                     entry.open_commission = num_legs * self.commission_per_leg * self.contracts_per_entry
                     self.daily_state.total_commission += entry.open_commission
 
                     # Track one-sided entry count
-                    if place_put_only:
+                    if place_put_only or place_call_only:
                         self.daily_state.one_sided_entries += 1
 
                     # Calculate stop losses
@@ -2496,7 +2659,26 @@ class HydraStrategy(MEICStrategy):
                     mult = 100 * entry.contracts
                     trend_label = original_trend.value.upper()
 
-                    if place_put_only:
+                    if place_call_only:
+                        # MKT-035: Call-only alert
+                        sc_fill = entry.short_call_fill_price
+                        lc_fill = entry.long_call_fill_price
+                        width = int(entry.long_call_strike - entry.short_call_strike)
+                        spx_chg = ((self.current_price - self.market_data.spx_open) / self.market_data.spx_open * 100) if self.market_data.spx_open > 0 else 0
+                        cond_tag = " (conditional)" if is_conditional else ""
+                        msg_lines = [
+                            f"*Entry #{entry_num}* [MKT-035] Call-Only{cond_tag}",
+                            f"SPX {self.current_price:,.2f} ({spx_chg:+.2f}% from open) | VIX {self.current_vix:.2f}",
+                            f"Trend: {trend_label} | Down day → puts skipped",
+                            "",
+                            f"SC {entry.short_call_strike:.0f} @ ${sc_fill:.2f} (${sc_fill * mult:.0f})",
+                            f"LC {entry.long_call_strike:.0f} @ ${lc_fill:.2f} (-${lc_fill * mult:.0f})",
+                            f"*Call: ${entry.call_spread_credit:.0f}*",
+                            "",
+                            f"Comm: ${entry.open_commission:.0f} | Width: {width}pt",
+                            f"Stop: ${entry.call_side_stop:.0f} (call + ${self.downday_theoretical_put_credit / 100:.2f} theo put)",
+                        ]
+                    elif place_put_only:
                         # Put-only alert
                         sp_fill = entry.short_put_fill_price
                         lp_fill = entry.long_put_fill_price
@@ -2558,7 +2740,12 @@ class HydraStrategy(MEICStrategy):
 
                     self._save_state_to_disk()
 
-                    entry_type = "Put-Only (MKT-011)" if place_put_only else f"[{original_trend.value.upper()}]"
+                    if place_call_only:
+                        entry_type = "Call-Only (MKT-035)"
+                    elif place_put_only:
+                        entry_type = "Put-Only (MKT-011)"
+                    else:
+                        entry_type = f"[{original_trend.value.upper()}]"
                     result_msg = f"Entry #{entry_num} {entry_type} complete - Credit: ${entry.total_credit:.2f}"
                     if attempt > 0:
                         result_msg += f" (after {attempt + 1} attempts)"
@@ -2728,6 +2915,151 @@ class HydraStrategy(MEICStrategy):
         logger.info(
             f"[DRY RUN] Simulated Put-Only Entry #{entry.entry_number}: "
             f"Put credit ${entry.put_spread_credit:.2f}"
+        )
+
+        return True
+
+    # =========================================================================
+    # CALL-ONLY ENTRY EXECUTION (MKT-035 — call-only on down days)
+    # =========================================================================
+    # When SPX drops >= threshold% below today's open, place only the call
+    # spread. 20-day data: down days have 71% put stop rate but only 7% call
+    # stop rate — call-only turns -$15 P&L into +$1,215.
+    #
+    # Leg order (safest): Long Call first (buy protection), then Short Call.
+    # Same patterns as _execute_put_spread_only(): progressive slippage,
+    # rollback, verify fill prices via PositionBase.OpenPrice.
+    # =========================================================================
+
+    def _execute_call_spread_only(self, entry: HydraIronCondorEntry) -> bool:
+        """
+        Execute a call-only entry (MKT-035 down-day conversion).
+
+        Places only the call spread (2 legs) when down-day filter triggers.
+        Long call first for safety, then short call.
+
+        Args:
+            entry: HydraIronCondorEntry with call_only=True already set
+
+        Returns:
+            True if both call legs filled successfully
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            logger.error("Could not determine today's expiry")
+            return False
+
+        filled_legs = []
+
+        try:
+            # 1. Long Call (buy protection first)
+            logger.info(f"Placing Long Call at {entry.long_call_strike}")
+            long_call_result = self._place_option_order(
+                strike=entry.long_call_strike,
+                put_call="Call",
+                buy_sell=BuySell.BUY,
+                expiry=expiry,
+                external_ref=f"{entry.strategy_id}_LC"
+            )
+            if not long_call_result:
+                raise Exception("Long Call order failed")
+            entry.long_call_position_id = long_call_result.get("position_id")
+            entry.long_call_uic = long_call_result.get("uic")
+            long_call_debit = long_call_result.get("debit", 0)
+            entry.long_call_fill_price = long_call_result.get("fill_price", 0)
+            filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
+            self._register_position(entry, "long_call")
+
+            # 2. Short Call (now we have the hedge)
+            logger.info(f"Placing Short Call at {entry.short_call_strike}")
+            short_call_result = self._place_option_order(
+                strike=entry.short_call_strike,
+                put_call="Call",
+                buy_sell=BuySell.SELL,
+                expiry=expiry,
+                external_ref=f"{entry.strategy_id}_SC"
+            )
+            if not short_call_result:
+                raise Exception("Short Call order failed")
+            entry.short_call_position_id = short_call_result.get("position_id")
+            entry.short_call_uic = short_call_result.get("uic")
+            entry.short_call_fill_price = short_call_result.get("fill_price", 0)
+            short_call_credit = short_call_result.get("credit", 0)
+            entry.call_spread_credit = short_call_credit - long_call_debit
+            logger.debug(
+                f"Call spread: short ${short_call_credit:.2f} - long ${long_call_debit:.2f} "
+                f"= net ${entry.call_spread_credit:.2f}"
+            )
+            filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
+            self._register_position(entry, "short_call")
+
+            # Put side not placed — zero out
+            entry.put_spread_credit = 0
+            entry.short_put_fill_price = 0
+            entry.long_put_fill_price = 0
+
+            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
+            self._verify_entry_fill_prices(entry)
+
+            # Set initial monitoring prices for cushion calculation
+            entry.short_call_price = entry.short_call_fill_price
+            entry.long_call_price = entry.long_call_fill_price
+            entry.short_put_price = 0
+            entry.long_put_price = 0
+
+            logger.info(
+                f"Entry #{entry.entry_number} call-only complete: "
+                f"Call credit ${entry.call_spread_credit:.2f}"
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Call-only entry failed at leg {len(filled_legs) + 1}: {e}")
+
+            # Check for naked shorts (short call without long call hedge)
+            has_naked_short = False
+            naked_short_info = None
+            for leg_name, pos_id, uic in filled_legs:
+                if leg_name.startswith("short_"):
+                    hedge_name = "long_" + leg_name[6:]
+                    hedge_filled = any(l[0] == hedge_name for l in filled_legs)
+                    if not hedge_filled:
+                        has_naked_short = True
+                        naked_short_info = (leg_name, pos_id, uic)
+                        break
+
+            if has_naked_short:
+                logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
+                self._handle_naked_short(naked_short_info)
+
+            # Unwind filled legs
+            self._unwind_partial_entry(filled_legs, entry)
+
+            return False
+
+    def _simulate_call_spread_only(self, entry: HydraIronCondorEntry) -> bool:
+        """
+        Simulate a call-only entry (dry-run mode).
+
+        Args:
+            entry: HydraIronCondorEntry with call_only=True
+
+        Returns:
+            True if simulation successful
+        """
+        spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
+        credit_ratio = 0.010  # 1.0% of spread width (calls have lower premium)
+        entry.call_spread_credit = spread_width * credit_ratio * 100 * self.contracts_per_entry
+        entry.put_spread_credit = 0
+
+        base_id = int(datetime.now().timestamp() * 1000)
+        entry.short_call_position_id = f"DRY_{base_id}_SC"
+        entry.long_call_position_id = f"DRY_{base_id}_LC"
+
+        logger.info(
+            f"[DRY RUN] Simulated Call-Only Entry #{entry.entry_number}: "
+            f"Call credit ${entry.call_spread_credit:.2f}"
         )
 
         return True
@@ -3265,14 +3597,27 @@ class HydraStrategy(MEICStrategy):
                 logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
                 credit = MIN_STOP_LEVEL
 
-            # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
-            # This prevents immediate false stop triggers from bid-ask spread
-            base_stop = credit * 2
+            override = getattr(entry, 'override_reason', None)
+            if override == "mkt-035":
+                # MKT-035: Use theoretical put credit for stop calculation
+                # stop = call_credit + theoretical_put ($250) + buffer
+                theoretical_put = self.downday_theoretical_put_credit
+                base_stop = credit + theoretical_put
+                logger.info(
+                    f"MKT-035: Call-only stop = call ${credit:.2f} + "
+                    f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f} "
+                    f"= ${base_stop + self.stop_buffer:.2f}"
+                )
+            else:
+                # Legacy FIX #40: Use 2× credit for one-sided entries
+                base_stop = credit * 2
+                logger.info(f"Stop level for call spread: 2× credit ${credit:.2f} + buffer ${self.stop_buffer:.2f}")
+
             stop_level = base_stop + self.stop_buffer
+            stop_level = max(stop_level, MIN_STOP_LEVEL)
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = 0  # No put side
-            logger.info(f"Stop level for call spread: ${stop_level:.2f} (2× credit ${credit:.2f} + buffer ${self.stop_buffer:.2f})")
 
         elif entry.put_only:
             # Only put spread placed
@@ -4657,6 +5002,18 @@ class HydraStrategy(MEICStrategy):
         if self.smart_entry_enabled:
             lines.append(f"Window: {self.scout_window_minutes}min | Threshold: {self.scout_score_threshold}")
 
+        # MKT-035: Down day filter
+        lines.extend([
+            "",
+            "\u2501\u2501\u2501 Down Day (MKT-035) \u2501\u2501\u2501",
+            f"Enabled: {'Yes' if self.downday_callonly_enabled else 'No'}",
+            f"Threshold: {self.downday_threshold_pct * 100:.1f}% below open",
+            f"Theo put: ${self.downday_theoretical_put_credit / 100:.2f}",
+        ])
+        if self._conditional_entry_times:
+            cond_str = ", ".join(t.strftime('%H:%M') for t in self._conditional_entry_times)
+            lines.append(f"Conditional: {cond_str} (call-only on down days)")
+
         if self.vix_gate_enabled:
             lines.extend([
                 "",
@@ -5068,7 +5425,9 @@ class HydraStrategy(MEICStrategy):
                 entry_type = "Call Spread"
                 # Fix #49: Use override_reason for correct tag
                 override_reason = getattr(entry, 'override_reason', None)
-                if override_reason == "mkt-011":
+                if override_reason == "mkt-035":
+                    trend_tag = "[MKT-035]"
+                elif override_reason == "mkt-011":
                     trend_tag = "[MKT-011]"
                 elif override_reason == "mkt-010":
                     trend_tag = "[MKT-010]"
@@ -6041,13 +6400,25 @@ class HydraStrategy(MEICStrategy):
                 )
                 credit = MIN_STOP_LEVEL
 
-            # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
-            base_stop = credit * 2
+            override = getattr(entry, 'override_reason', None)
+            if override == "mkt-035":
+                # MKT-035: call_credit + theoretical_put + buffer
+                theoretical_put = self.downday_theoretical_put_credit
+                base_stop = credit + theoretical_put
+                logger.info(
+                    f"Recovery: MKT-035 call-only stop = call ${credit:.2f} + "
+                    f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f}"
+                )
+            else:
+                # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
+                base_stop = credit * 2
+
             stop_level = base_stop + self.stop_buffer
+            stop_level = max(stop_level, MIN_STOP_LEVEL)
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = 0  # No put side to monitor
-            logger.info(f"Recovery: Call-only stop = ${stop_level:.2f} (2× credit ${credit:.2f} + buffer ${self.stop_buffer:.2f})")
+            logger.info(f"Recovery: Call-only stop = ${stop_level:.2f}")
 
         elif entry.put_only:
             credit = entry.put_spread_credit

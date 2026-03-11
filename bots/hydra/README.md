@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.10.3 | **Last Updated:** 2026-03-11
+**Version:** 1.11.0 | **Last Updated:** 2026-03-11
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -10,23 +10,27 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 - **Before each entry**, check 20 EMA vs 40 EMA on SPX 1-minute bars
 - **EMA signal is informational only** — logged and stored but does NOT drive entry type
-- **Entries are full iron condors or put-only** — call credit non-viable → put-only if VIX < 18 (MKT-032), skip if VIX >= 18; put credit non-viable → skip (call-only disabled)
+- **Entries are full iron condors, put-only, or call-only** — call credit non-viable → put-only if VIX < 18 (MKT-032), skip if VIX >= 18; put credit non-viable → skip; SPX down ≥ 0.3% from open → call-only (MKT-035)
 
 ### Why This Works
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), and wider starting OTM (MKT-024).
 
-### Entry Schedule (5 entries at :15/:45 marks, Entry #6 dropped in v1.6.0)
+### Entry Schedule (5 base + 2 conditional entries)
 
-**Current schedule (v1.10.3 — MKT-034 disabled, matches winning period Feb 10-27):**
+**Current schedule (v1.11.0 — MKT-034 disabled, matches winning period Feb 10-27):**
 
-| Entry | Time (ET) | Scout Window (MKT-031) |
-|-------|-----------|------------------------|
-| 1 | 10:15 | 10:05-10:15 |
-| 2 | 10:45 | 10:35-10:45 |
-| 3 | 11:15 | 11:05-11:15 |
-| 4 | 11:45 | 11:35-11:45 |
-| 5 | 12:15 | 12:05-12:15 |
+| Entry | Time (ET) | Type | Notes |
+|-------|-----------|------|-------|
+| 1 | 10:15 | Base | Always attempts (full IC or call-only) |
+| 2 | 10:45 | Base | Always attempts |
+| 3 | 11:15 | Base | Always attempts |
+| 4 | 11:45 | Base | Always attempts |
+| 5 | 12:15 | Base | Always attempts |
+| 6 | 12:45 | Conditional (MKT-035) | Only fires on down days as call-only |
+| 7 | 13:15 | Conditional (MKT-035) | Only fires on down days as call-only |
+
+**Conditional entries** only fire when MKT-035 triggers (SPX < open -0.3%). They are always call-only. On non-down days, conditional entries are silently skipped.
 
 On early close days, cutoff is 12:30 PM. MKT-034 (VIX-scaled time shifting) is disabled — neither Tammy Chambless nor John Sandvand use VIX-based scheduling. Code preserved and configurable via `vix_time_shift.enabled`.
 
@@ -41,17 +45,29 @@ Before each scheduled entry, a 10-minute scouting window opens. Market condition
 | Post-spike calm (ATR declining from elevated) | 0-70 | `get_chart_data()` 1-min OHLC, cached |
 | Momentum pause (price calm over 2 min) | 0-30 | `MarketData.price_history` deque (zero API cost) |
 
+### Down Day Filter (MKT-035) — v1.11.0
+
+Before the credit gate, checks if SPX is down >= 0.3% from today's open. When triggered:
+- **Base entries (#1-5):** Converted to call-only (skip puts)
+- **Conditional entries (#6-7):** Only fire when MKT-035 triggers (always call-only)
+- **Stop formula:** `call_credit + theoretical put ($250) + buffer` (not 2× credit)
+- **Credit check:** Call credit must still pass MKT-011 minimum ($0.60)
+
+**20-day data:** On down days, 71% of puts get stopped but only 7% of calls. Full IC P&L on down days: -$15. Call-only P&L: +$1,215 → **+$920 improvement**.
+
 ### Credit Gate (MKT-011)
 
-Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($0.75) and puts ($1.75). Call minimum lowered from $1.00 to $0.75 in v1.7.2 (credit cushion analysis: 68% call cushion vs 61.5% — see `docs/HYDRA_CREDIT_CUSHION_ANALYSIS.md`).
+Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($0.60) and puts ($2.50). MKT-035 runs first — when triggered, only call credit is checked.
 
-| Call Credit | Put Credit | VIX | Action |
-|-------------|------------|-----|--------|
-| >= $0.75 | >= $1.75 | Any | Proceed with full iron condor |
-| < $0.75 | >= $1.75 | < 18 | Place put-only entry (MKT-032 allows) |
-| < $0.75 | >= $1.75 | >= 18 | Skip entry (MKT-032: 2× stop too risky) |
-| >= $0.75 | < $1.75 | Any | Skip entry (call-only disabled) |
-| < $0.75 | < $1.75 | Any | Skip entry |
+| Condition | Call Credit | Put Credit | VIX | Action |
+|-----------|-------------|------------|-----|--------|
+| MKT-035 triggered | >= $0.60 | N/A | Any | Place call-only entry |
+| MKT-035 triggered | < $0.60 | N/A | Any | Skip entry |
+| Normal | >= $0.60 | >= $2.50 | Any | Proceed with full iron condor |
+| Normal | < $0.60 | >= $2.50 | < 18 | Place put-only entry (MKT-032 allows) |
+| Normal | < $0.60 | >= $2.50 | >= 18 | Skip entry (MKT-032: 2× stop too risky) |
+| Normal | >= $0.60 | < $2.50 | Any | Skip entry |
+| Normal | < $0.60 | < $2.50 | Any | Skip entry |
 
 ### Illiquidity Fallback (MKT-010)
 
@@ -140,6 +156,15 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `enabled` | `true` | Enable/disable long leg salvage after short stop (only when `short_only_stop: true`) |
 | `min_profit` | `10.0` | Minimum profit ($) to sell long (covers $5 commission + $5 slippage) |
 
+### Down Day Filter Config (MKT-035)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `downday_callonly_enabled` | `true` | Enable/disable MKT-035 down day filter |
+| `downday_threshold_pct` | `0.003` | 0.3% — SPX must drop this much below open to trigger |
+| `downday_theoretical_put_credit` | `2.50` | Theoretical put credit ($) for stop calculation |
+| `conditional_entry_times` | `["12:45","13:15"]` | Extra entry times that only fire when MKT-035 triggers |
+
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
 Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-021) are **intentionally disabled**. Backtest analysis showed no ROC-based early close configuration beats hold-to-expiry for this strategy. The code is preserved but dormant — set `early_close_enabled: true` in config to re-enable. See `docs/HYDRA_EARLY_CLOSE_ANALYSIS.md` for the full analysis.
@@ -148,8 +173,8 @@ Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-0
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `min_viable_credit_per_side` | `0.75` | MKT-011/MKT-020: Call minimum credit (lowered from $1.00 for 68% call cushion, see HYDRA_CREDIT_CUSHION_ANALYSIS.md) |
-| `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022: Put minimum credit (top of Tammy's $1.00-$1.75 range) |
+| `min_viable_credit_per_side` | `0.60` | MKT-011/MKT-020: Call minimum credit (v1.10.4: lowered from $0.75 — calls are secondary income) |
+| `min_viable_credit_put_side` | `2.50` | MKT-011/MKT-022: Put minimum credit (v1.10.4: raised from $1.75 — 20-day data: $2.50+ = 66.7% survival) |
 | `put_only_max_vix` | `18.0` | MKT-032: Max VIX for put-only entries (skip instead when VIX >= threshold) |
 | `call_starting_otm_multiplier` | `3.5` | MKT-024: Call starting OTM = base × multiplier |
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: Put starting OTM = base × multiplier (higher due to put skew) |
@@ -250,6 +275,7 @@ bots/hydra/
 
 ## Version History
 
+- **1.11.0** (2026-03-11): MKT-035 call-only on down days. When SPX < open -0.3%, place call spread only (no puts). Stop = call_credit + theoretical $2.50 put + buffer. 20-day data: 71% put stop rate on down days vs 7% call stop rate, +$920 improvement. Two conditional entry times (12:45, 13:15) that only fire when MKT-035 triggers as call-only. Configurable via `downday_callonly_enabled`, `downday_threshold_pct`, `downday_theoretical_put_credit`, `conditional_entry_times`.
 - **1.10.3** (2026-03-11): Disable MKT-034 VIX time shifting + remove VIX entry cutoff (max_vix_entry=999). Neither Tammy Chambless nor John Sandvand use VIX cutoffs or time shifting (both studied VIX correlation, found none). Entry times revert to 10:15 AM start (winning period Feb 10-27). Spread widths reverted to 50pt. MKT-034 remains configurable (`vix_time_shift.enabled`).
 - **1.10.2** (2026-03-10): Replace MEIC+ stop formula with credit+buffer (Brian's approach): stop = total_credit + $0.10 instead of total_credit - $0.15. Extra cushion reduces marginal stops. Fix: stop level validation now per-side (prevents skipping active side when stopped side has 0). Telegram /set updated: `stop_buffer` replaces `meic_plus`.
 - **1.10.1** (2026-03-09): Fix #83: Emergency close improvements — skip worthless long legs (bid=$0), $0.05 min tick fallback, cancel zombie 409 orders, dynamic limit-only handling. Fix #84: Dashboard P&L history updated after settlement. Commission tracks actual legs closed.
