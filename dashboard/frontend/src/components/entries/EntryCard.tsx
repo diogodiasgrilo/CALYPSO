@@ -8,6 +8,8 @@ import type { EntryStatus } from "../shared/StatusBadge";
 
 interface EntryCardProps {
   entry: HydraEntry;
+  /** Conditional entries (E6/E7) get distinct visual styling */
+  isConditional?: boolean;
 }
 
 function getEntryStatus(e: HydraEntry): {
@@ -107,7 +109,7 @@ function computeEntryPnl(e: HydraEntry) {
   return { currentPnl, maxProfit };
 }
 
-export function EntryCard({ entry }: EntryCardProps) {
+export function EntryCard({ entry, isConditional }: EntryCardProps) {
   const { status, stoppedSide } = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
 
@@ -152,10 +154,13 @@ export function EntryCard({ entry }: EntryCardProps) {
 
   return (
     <div
-      className="bg-card rounded-lg border border-border-dim p-3 hover:bg-card-hover transition-colors"
+      className={`bg-card rounded-lg p-3 hover:bg-card-hover transition-colors ${
+        isConditional ? "border border-dashed border-border-dim" : "border border-border-dim"
+      }`}
       style={{
         borderLeftColor: borderColor,
         borderLeftWidth: 3,
+        borderLeftStyle: "solid",
       }}
     >
       {/* Header row */}
@@ -167,6 +172,11 @@ export function EntryCard({ entry }: EntryCardProps) {
           {trendLabel && (
             <span className="text-[10px] px-1 py-0.5 rounded bg-bg-elevated text-text-secondary">
               {trendLabel}
+            </span>
+          )}
+          {isConditional && (
+            <span className="text-[9px] px-1 py-0.5 rounded text-text-dim" style={{ backgroundColor: `${colors.info}15`, color: colors.info }}>
+              CALL ONLY
             </span>
           )}
         </div>

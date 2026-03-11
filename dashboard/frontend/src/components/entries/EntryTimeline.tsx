@@ -1,9 +1,13 @@
 import { useHydraStore } from "../../store/hydraStore";
 import type { HydraEntry } from "../../store/hydraStore";
-import { statusColor } from "../../lib/tradingColors";
+import { statusColor, colors } from "../../lib/tradingColors";
 import type { EntryStatus } from "../shared/StatusBadge";
 
-const ENTRY_TIMES = ["11:15", "11:45", "12:15", "12:45", "13:15"];
+// Base entries: 5 scheduled at :15/:45 starting 10:15 AM ET
+const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15", "11:45", "12:15"];
+// Conditional entries: only fire when MKT-035 triggers (SPX < open -0.3%), always call-only
+const CONDITIONAL_ENTRY_TIMES = ["12:45", "13:15"];
+
 const TIMELINE_START = 9.5 * 60; // 9:30 in minutes
 const TIMELINE_END = 16 * 60; // 16:00 in minutes
 const TIMELINE_RANGE = TIMELINE_END - TIMELINE_START;
@@ -23,7 +27,6 @@ function getStatus(entry: HydraEntry | undefined): EntryStatus {
   if (callStopped || putStopped) return "stopped_single"; // single = amber
 
   if (entry.call_side_expired || entry.put_side_expired) return "expired";
-  // Entry has entry_time → it was placed and is active (is_complete may be null in state file)
   if (entry.entry_time) return "active";
   return "placing";
 }
@@ -50,17 +53,18 @@ export function EntryTimeline() {
             16:00
           </span>
 
-          {/* Entry dots */}
-          {ENTRY_TIMES.map((time, i) => {
+          {/* Base entry dots (E1-E5) */}
+          {BASE_ENTRY_TIMES.map((time, i) => {
             const minutes = timeToMinutes(time);
             const pct = ((minutes - TIMELINE_START) / TIMELINE_RANGE) * 100;
-            const entry = entries.find((e) => e.entry_number === i + 1);
+            const entryNum = i + 1;
+            const entry = entries.find((e) => e.entry_number === entryNum);
             const status = getStatus(entry);
             const color = statusColor(status);
 
             return (
               <div
-                key={i}
+                key={`base-${i}`}
                 className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 flex flex-col items-center"
                 style={{ left: `${pct}%` }}
               >
@@ -73,9 +77,43 @@ export function EntryTimeline() {
                       status === "pending" ? "transparent" : color,
                     borderColor: color,
                   }}
-                  title={`E${i + 1} ${time} — ${status}`}
+                  title={`E${entryNum} ${time} — ${status}`}
                 />
                 <span className="text-[9px] text-text-dim mt-1">{time}</span>
+              </div>
+            );
+          })}
+
+          {/* Conditional entry dots (E6-E7) — diamond shape, dashed when pending */}
+          {CONDITIONAL_ENTRY_TIMES.map((time, i) => {
+            const minutes = timeToMinutes(time);
+            const pct = ((minutes - TIMELINE_START) / TIMELINE_RANGE) * 100;
+            const entryNum = 6 + i;
+            const entry = entries.find((e) => e.entry_number === entryNum);
+            const status = getStatus(entry);
+            const color = statusColor(status);
+            const isPending = status === "pending";
+
+            return (
+              <div
+                key={`cond-${i}`}
+                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 flex flex-col items-center"
+                style={{ left: `${pct}%` }}
+              >
+                {/* Diamond shape for conditional entries */}
+                <div
+                  className={`w-3 h-3 rotate-45 ${
+                    status === "active" ? "pulse-live" : ""
+                  }`}
+                  style={{
+                    backgroundColor: isPending ? "transparent" : color,
+                    border: `2px ${isPending ? "dashed" : "solid"} ${isPending ? colors.textDim : color}`,
+                  }}
+                  title={`E${entryNum} ${time} — conditional (MKT-035) — ${status}`}
+                />
+                <span className="text-[9px] mt-1" style={{ color: isPending ? colors.textDim : colors.textSecondary }}>
+                  {time}
+                </span>
               </div>
             );
           })}

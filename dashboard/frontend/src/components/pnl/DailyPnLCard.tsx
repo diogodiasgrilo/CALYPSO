@@ -65,7 +65,14 @@ export function DailyPnLCard() {
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div className="flex justify-between">
             <span className="text-text-secondary">Entries</span>
-            <span className="text-text-primary">{entriesCompleted}/5</span>
+            <span className="text-text-primary">
+              {entriesCompleted}/5
+              {(hydraState?.entries ?? []).some((e) => e.entry_number >= 6) && (
+                <span className="text-text-dim ml-0.5">
+                  +{(hydraState?.entries ?? []).filter((e) => e.entry_number >= 6).length}
+                </span>
+              )}
+            </span>
           </div>
           <div className="flex justify-between">
             <span className="text-text-secondary">Stops</span>
