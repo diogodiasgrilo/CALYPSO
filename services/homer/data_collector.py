@@ -118,8 +118,10 @@ def _build_entries_for_day(
     Positions tab supplements with outcome/stop data (today only, overwritten daily).
     """
     entries_by_num: Dict[str, Dict[str, Any]] = {}
+    original_to_new: Dict[str, List[tuple]] = defaultdict(list)
 
-    # 1. Parse Trades tab for per-entry data
+    # 1. Parse Trades tab for per-entry data (collect into list to handle duplicates)
+    raw_entries: List[tuple] = []  # (timestamp_str, original_entry_num, entry_dict)
     if trades_rows:
         for row in trades_rows:
             action = str(row.get("Action", "")).strip()
@@ -173,7 +175,7 @@ def _build_entries_for_day(
             if not put_credit_val:
                 put_credit_val = str(row.get("", "")).strip()
 
-            entries_by_num[entry_num] = {
+            raw_entries.append((ts, entry_num, {
                 "Entry #": entry_num,
                 "Entry Time": entry_time,
                 "Trend Signal": signal,
@@ -187,9 +189,25 @@ def _build_entries_for_day(
                 "Put Credit": put_credit_val,
                 "Outcome": "",
                 "P&L Impact": "",
-            }
+            }))
+
+    # Sort entries by timestamp and renumber sequentially (handles bot restart duplicates)
+    raw_entries.sort(key=lambda x: x[0])
+    for i, (ts, orig_num, entry) in enumerate(raw_entries, 1):
+        new_num = str(i)
+        entry["Entry #"] = new_num
+        entry["_original_entry_num"] = orig_num
+        entry["_timestamp"] = ts
+        entries_by_num[new_num] = entry
+        original_to_new[orig_num].append((new_num, ts))
+
+    if len(raw_entries) != len(set(ts for ts, _, _ in raw_entries)):
+        logger.info(f"Renumbered {len(raw_entries)} entries for {date_str} (duplicate entry numbers detected)")
+    elif any(str(i + 1) != raw_entries[i][1] for i in range(len(raw_entries))):
+        logger.info(f"Renumbered {len(raw_entries)} entries for {date_str}")
 
     # 1b. Parse Trades tab for stop timing data ("HYDRA Stop #N (CALL/PUT)")
+    # Match stops to entries by STRIKE (primary) or original entry number (fallback)
     if trades_rows:
         for row in trades_rows:
             action = str(row.get("Action", "")).strip()
@@ -207,12 +225,19 @@ def _build_entries_for_day(
             stop_match = re.match(r".*Stop\s*#(\d+)\s*\((\w+)\)", action)
             if not stop_match:
                 continue
-            entry_num = stop_match.group(1)
+            orig_entry_num = stop_match.group(1)
             side = stop_match.group(2).lower()
 
-            if entry_num in entries_by_num:
+            # Match stop to entry: primary by strike, fallback by original entry number
+            stop_strike_str = str(row.get("Strike", "")).strip()
+            stop_ts = str(row.get("Timestamp", "")).strip()
+            matched_num = _match_stop_by_strike(entries_by_num, side, stop_strike_str)
+            if not matched_num:
+                matched_num = _match_original_to_new(original_to_new, orig_entry_num, stop_ts)
+
+            if matched_num and matched_num in entries_by_num:
                 # Extract stop time from Timestamp
-                ts = str(row.get("Timestamp", "")).strip()
+                ts = stop_ts
                 if ts:
                     try:
                         dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
@@ -222,15 +247,15 @@ def _build_entries_for_day(
 
                     # Store per-side stop time; use first stop time as entry's Stop Time
                     key = f"{side.title()} Stop Time"
-                    entries_by_num[entry_num][key] = stop_time
-                    if "Stop Time" not in entries_by_num[entry_num]:
-                        entries_by_num[entry_num]["Stop Time"] = stop_time
+                    entries_by_num[matched_num][key] = stop_time
+                    if "Stop Time" not in entries_by_num[matched_num]:
+                        entries_by_num[matched_num]["Stop Time"] = stop_time
 
                 # Extract stop P&L (negative = loss)
                 stop_pnl = _safe_float(row.get("P&L ($)", 0))
                 if stop_pnl:
-                    existing = _safe_float(entries_by_num[entry_num].get("P&L Impact", 0))
-                    entries_by_num[entry_num]["P&L Impact"] = str(existing + stop_pnl)
+                    existing = _safe_float(entries_by_num[matched_num].get("P&L Impact", 0))
+                    entries_by_num[matched_num]["P&L Impact"] = str(existing + stop_pnl)
 
     # 2. Merge Positions tab data (per-side rows → outcome/stop/spread width data)
     if positions_rows:
@@ -284,6 +309,7 @@ def _build_entries_for_day(
                 entry["Put Spread Width"] = str(row.get("Spread Width", "")).strip()
 
     # 2b. Parse Trades tab for MKT-033 salvage data ("HYDRA Salvage #N (CALL/PUT)")
+    # Match salvage to entries by STRIKE (primary) or original entry number (fallback)
     if trades_rows:
         for row in trades_rows:
             action = str(row.get("Action", "")).strip()
@@ -301,17 +327,24 @@ def _build_entries_for_day(
             salvage_match = re.match(r".*Salvage\s*#(\d+)\s*\((\w+)\)", action)
             if not salvage_match:
                 continue
-            entry_num = salvage_match.group(1)
+            orig_entry_num = salvage_match.group(1)
             side = salvage_match.group(2).lower()
 
-            if entry_num in entries_by_num:
+            # Match salvage to entry: primary by strike, fallback by original entry number
+            salvage_strike_str = str(row.get("Strike", "")).strip()
+            salvage_ts = str(row.get("Timestamp", "")).strip()
+            matched_num = _match_stop_by_strike(entries_by_num, side, salvage_strike_str)
+            if not matched_num:
+                matched_num = _match_original_to_new(original_to_new, orig_entry_num, salvage_ts)
+
+            if matched_num and matched_num in entries_by_num:
                 # Extract revenue from trade_reason: "Long Salvage | Open=$0.35 Close=$0.50 Rev=$50.0"
                 reason = str(row.get("Reason", row.get("Trade Reason", ""))).strip()
                 rev_match = re.search(r"Rev=\$?([\d.]+)", reason)
                 revenue = float(rev_match.group(1)) if rev_match else _safe_float(row.get("P&L ($)", 0))
 
                 key = f"{side.title()} Long Salvage Proceeds"
-                entries_by_num[entry_num][key] = revenue
+                entries_by_num[matched_num][key] = revenue
 
     # 3. Post-process: determine entry type, outcome, total credit
     for entry in entries_by_num.values():
@@ -334,7 +367,19 @@ def _build_entries_for_day(
             if call_credit or put_credit:
                 entry["Total Credit"] = str(call_credit + put_credit)
 
-        # Determine outcome from Positions status
+        # Determine outcome from accumulated stop data (from Trades tab stop rows)
+        # This catches entries whose Positions tab data was overwritten by bot restart
+        if not entry.get("Outcome"):
+            has_call_stop = bool(entry.get("Call Stop Time"))
+            has_put_stop = bool(entry.get("Put Stop Time"))
+            if has_call_stop and has_put_stop:
+                entry["Outcome"] = "Double Stop"
+            elif has_call_stop:
+                entry["Outcome"] = "Call Stopped"
+            elif has_put_stop:
+                entry["Outcome"] = "Put Stopped"
+
+        # Determine outcome from Positions tab status (overwrites if available)
         if not entry.get("Outcome"):
             call_stopped = str(entry.get("Call Stop Triggered", "No")).strip().lower() == "yes"
             put_stopped = str(entry.get("Put Stop Triggered", "No")).strip().lower() == "yes"
@@ -389,20 +434,38 @@ def _fill_missing_stop_data(
     )
 
     # Fallback 1: Parse HYDRA logs for MKT-025 stop events
+    # Log stops are keyed by ORIGINAL bot entry numbers; map to renumbered entries
     log_stops = _read_hydra_logs_for_stops(date_str)
     if log_stops:
-        for entry in stopped_entries:
-            entry_num = str(entry.get("Entry #", ""))
-            if entry_num not in log_stops:
+        # Build reverse map: original entry num -> list of renumbered entries
+        orig_to_entries: Dict[str, List[Dict]] = defaultdict(list)
+        for e in entries:
+            orig = str(e.get("_original_entry_num", e.get("Entry #", "")))
+            orig_to_entries[orig].append(e)
+
+        for orig_num, stop_data in log_stops.items():
+            candidates = orig_to_entries.get(orig_num, [])
+            if not candidates:
                 continue
-            stop_data = log_stops[entry_num]
-            if not entry.get("Stop Time") and stop_data.get("stop_time"):
-                entry["Stop Time"] = stop_data["stop_time"]
+            # If one candidate, use it; if multiple, match by stop time proximity
+            if len(candidates) == 1:
+                target_entry = candidates[0]
+            else:
+                # Match stopped entry (one that has Outcome containing "Stop")
+                stopped_candidates = [
+                    c for c in candidates
+                    if "STOP" in str(c.get("Outcome", "")).upper()
+                ]
+                target_entry = stopped_candidates[0] if len(stopped_candidates) == 1 else candidates[0]
+
+            entry_num = str(target_entry.get("Entry #", ""))
+            if not target_entry.get("Stop Time") and stop_data.get("stop_time"):
+                target_entry["Stop Time"] = stop_data["stop_time"]
                 logger.info(
                     f"Entry #{entry_num}: stop time from logs: {stop_data['stop_time']}"
                 )
-            if not _safe_float(entry.get("P&L Impact", 0)) and stop_data.get("pnl"):
-                entry["P&L Impact"] = str(stop_data["pnl"])
+            if not _safe_float(target_entry.get("P&L Impact", 0)) and stop_data.get("pnl"):
+                target_entry["P&L Impact"] = str(stop_data["pnl"])
                 logger.info(
                     f"Entry #{entry_num}: stop P&L from logs: "
                     f"${stop_data['pnl']:.2f}"
@@ -556,6 +619,67 @@ def _safe_float(value) -> float:
         return float(value)
     except (ValueError, TypeError):
         return 0.0
+
+
+def _match_stop_by_strike(
+    entries_by_num: Dict[str, Dict], side: str, stop_strike_str: str
+) -> Optional[str]:
+    """
+    Match a stop row to an entry by comparing short strike values.
+
+    Stop rows have Strike field like "C:6865.0/6940.0 P:6785.0/6710.0".
+    The first number after C: or P: is the short strike.
+
+    Args:
+        entries_by_num: Dict of renumbered entries keyed by new entry number.
+        side: "call" or "put".
+        stop_strike_str: Full Strike field from the stop row.
+
+    Returns:
+        Matched new entry number string, or None.
+    """
+    # Parse short strike from stop's Strike field
+    prefix = "C:" if side == "call" else "P:"
+    match = re.search(rf"{prefix}(\d+(?:\.\d+)?)", stop_strike_str)
+    if not match:
+        return None
+    # Normalize: remove .0 decimal for comparison
+    stop_short_strike = match.group(1).split(".")[0]
+
+    strike_key = "Short Call Strike" if side == "call" else "Short Put Strike"
+    for num, entry in entries_by_num.items():
+        entry_strike = str(entry.get(strike_key, "")).split(".")[0]
+        if entry_strike and entry_strike == stop_short_strike:
+            return num
+    return None
+
+
+def _match_original_to_new(
+    original_to_new: Dict[str, List[tuple]], orig_entry_num: str, event_timestamp: str
+) -> Optional[str]:
+    """
+    Fallback: match by original entry number + timestamp proximity.
+
+    Args:
+        original_to_new: Maps original entry num -> [(new_num, timestamp_str), ...].
+        orig_entry_num: Original bot entry number.
+        event_timestamp: Timestamp of the event (stop/salvage).
+
+    Returns:
+        Matched new entry number string, or None.
+    """
+    candidates = original_to_new.get(orig_entry_num, [])
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0][0]
+    # Find entry with latest timestamp <= event timestamp
+    best = None
+    for new_num, entry_ts in candidates:
+        if entry_ts <= event_timestamp:
+            if best is None or entry_ts > best[1]:
+                best = (new_num, entry_ts)
+    return best[0] if best else candidates[-1][0]
 
 
 def get_all_trading_dates(all_data: Dict[str, Any]) -> List[str]:
@@ -1238,7 +1362,7 @@ def _build_stop_records(
     if not trades_rows:
         return []
 
-    # Build entry lookup for actual_debit computation
+    # Build entry lookup for actual_debit computation (keyed by renumbered entry #)
     entry_lookup: Dict[str, Dict] = {}
     if entries_data:
         for e in entries_data:
@@ -1262,8 +1386,24 @@ def _build_stop_records(
             logger.warning(f"Could not parse stop action: {action}")
             continue
 
-        entry_num = int(match.group(1))
+        orig_entry_num = match.group(1)
         side = match.group(2).lower()
+
+        # Match stop to renumbered entry by strike (primary) or original number (fallback)
+        stop_strike_str = str(row.get("Strike", "")).strip()
+        matched_entry = _match_stop_by_strike(entry_lookup, side, stop_strike_str)
+        if matched_entry:
+            entry_num = int(matched_entry)
+        else:
+            # Fallback: if only one entry has this original number, use it
+            candidates = [
+                e for e in entries_data
+                if str(e.get("_original_entry_num", e.get("Entry #", ""))) == orig_entry_num
+            ] if entries_data else []
+            if len(candidates) == 1:
+                entry_num = int(candidates[0].get("Entry #", orig_entry_num))
+            else:
+                entry_num = int(orig_entry_num)
 
         # P&L from the row
         pnl = _safe_float(row.get("P&L ($)", 0))
