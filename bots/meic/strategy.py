@@ -533,6 +533,7 @@ class MEICDailyState:
     one_sided_entries: int = 0  # Fix #55: Count of one-sided (put-only or call-only) entries
     trend_overrides: int = 0    # Fix #56: Times trend filter caused one-sided entry
     credit_gate_skips: int = 0  # Fix #57: Times credit gate skipped/modified entry
+    stops_avoided_mkt036: int = 0  # MKT-036: Times breach recovered before confirmation
 
     @property
     def total_stops(self) -> int:
@@ -6138,6 +6139,16 @@ class MEICStrategy:
             else:
                 strike_str = f"P:{entry.short_put_strike}/{entry.long_put_strike}"
 
+            # MKT-036: Include confirmation data in Notes if available
+            trade_reason = f"Stop Loss | Level: ${stop_level:.2f}"
+            conf_seconds = 0
+            breach_recoveries = 0
+            breach_time = getattr(entry, f'{side}_breach_time', None)
+            if breach_time is not None:
+                conf_seconds = int((datetime.now() - breach_time).total_seconds())
+                breach_recoveries = getattr(entry, f'{side}_breach_count', 0)
+                trade_reason += f" | MKT-036: {conf_seconds}s confirmed, {breach_recoveries} recoveries"
+
             self.trade_logger.log_trade(
                 action=f"{self.BOT_NAME} Stop #{entry.entry_number} ({side.upper()})",
                 strike=strike_str,
@@ -6148,7 +6159,7 @@ class MEICStrategy:
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type=f"IC {side.title()} Spread",
-                trade_reason=f"Stop Loss | Level: ${stop_level:.2f}"
+                trade_reason=trade_reason
             )
 
             logger.info(
@@ -6329,6 +6340,11 @@ class MEICStrategy:
                     call_status = f"SALVAGED +${salvage_rev:.0f}"
                 else:
                     call_status = "STOPPED"
+            elif getattr(entry, 'call_breach_time', None) is not None:
+                # MKT-036: Stop confirmation in progress
+                elapsed = (datetime.now() - entry.call_breach_time).total_seconds()
+                conf_window = getattr(self, 'stop_confirmation_seconds', 75)
+                call_status = f"CONF {elapsed:.0f}s/{conf_window}s"
             else:
                 call_status = f"{call_pct:.0f}% cushion"
 
@@ -6341,6 +6357,11 @@ class MEICStrategy:
                     put_status = f"SALVAGED +${salvage_rev:.0f}"
                 else:
                     put_status = "STOPPED"
+            elif getattr(entry, 'put_breach_time', None) is not None:
+                # MKT-036: Stop confirmation in progress
+                elapsed = (datetime.now() - entry.put_breach_time).total_seconds()
+                conf_window = getattr(self, 'stop_confirmation_seconds', 75)
+                put_status = f"CONF {elapsed:.0f}s/{conf_window}s"
             else:
                 put_status = f"{put_pct:.0f}% cushion"
 
@@ -8013,6 +8034,16 @@ class MEICStrategy:
                 short_line = f"{short_label} {short_strike:.0f} closed"
                 long_line = f"{long_label} {long_strike:.0f} closed"
 
+            # MKT-036: Add confirmation context to alert
+            conf_line = ""
+            alert_conf_seconds = 0
+            alert_breach_recoveries = 0
+            alert_breach_time = getattr(entry, f'{side}_breach_time', None)
+            if alert_breach_time is not None:
+                alert_conf_seconds = int((datetime.now() - alert_breach_time).total_seconds())
+                alert_breach_recoveries = getattr(entry, f'{side}_breach_count', 0)
+                conf_line = f"\nConfirmed: {alert_conf_seconds}s ({alert_breach_recoveries} prior recoveries)"
+
             stop_msg = (
                 f"*Entry #{entry.entry_number}* {side.upper()} stopped\n\n"
                 f"{short_line}\n"
@@ -8020,6 +8051,7 @@ class MEICStrategy:
                 f"Credit: ${credit:.0f} | Stop: ${stop_level:.0f}\n"
                 f"*Side loss: -${net_loss:.0f}*\n"
                 f"SPX: {self.current_price:,.2f}"
+                f"{conf_line}"
             )
 
             self.alert_service.send_alert(
@@ -8031,7 +8063,9 @@ class MEICStrategy:
                     "description": f"{self.BOT_NAME} Entry #{entry.entry_number} {side.upper()} side stopped",
                     "entry_number": entry.entry_number,
                     "net_loss": net_loss,
-                    "stop_level": stop_level
+                    "stop_level": stop_level,
+                    "confirmation_seconds": alert_conf_seconds,
+                    "breach_recoveries": alert_breach_recoveries,
                 }
             )
 

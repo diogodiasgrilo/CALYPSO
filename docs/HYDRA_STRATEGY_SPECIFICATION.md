@@ -524,13 +524,61 @@ This is offset by saved slippage ($5-$15) and saved commission ($2.50). Net impa
 
 **Heartbeat display:** Stopped sides with sold longs show "SALVAGED +$X" instead of "STOPPED".
 
+### MKT-036: Stop Confirmation Timer (v1.12.0)
+
+When a spread value breaches the stop level, HYDRA does NOT immediately execute the stop. Instead, it starts a 75-second confirmation window. The stop only fires if the breach persists continuously for the full duration.
+
+**Rules:**
+
+| Event | Action |
+|-------|--------|
+| `spread_value >= stop_level` (first breach) | Set `breach_time = now`, log "CONFIRMING" |
+| Still breached after 75s | **Execute stop** (confirmed) |
+| `spread_value < stop_level` during window | **Reset timer**, log "RECOVERED", increment `stops_avoided_mkt036` |
+| Bot restart with active timer | Timer resets (conservative — re-evaluate fresh) |
+
+**Implementation details:**
+- No threads, no blocking — just a timestamp field per side (`call_breach_time`, `put_breach_time`) checked every heartbeat (~11s)
+- `_save_state_to_disk()` called ONLY on first breach and on recovery (NOT on intermediate heartbeats — avoids hanging risk since the method has no timeout protection)
+- Each entry has independent timer fields — multiple entries can be confirming simultaneously
+- `breach_count` tracks how many times a side has recovered (useful for post-hoc analysis)
+- Recovery events logged to Google Sheets as `MKT-036_RECOVERY` safety events
+
+**20-day backtest results:**
+- 90% of put stops were false (36/40 — SPX closed above the put strike)
+- 48% of stops fired within 15 minutes of entry (median 18 minutes)
+- 75s confirmation: **17 false stops avoided → $2,870 saved**, only 1 real stop missed ($85)
+- Net benefit: **+$2,785** over 20 trading days
+
+**Display:**
+- Terminal heartbeat: `CONF 45s/75s` instead of `0% cushion` during confirmation
+- Telegram snapshot: `⏳33s` instead of cushion percentage
+- Google Sheets stop Notes: `MKT-036: 75s confirmed, 2 recoveries`
+
+**Config:**
+```json
+"stop_confirmation_enabled": true,
+"stop_confirmation_seconds": 75
+```
+
+**Edge cases:**
+1. **Bot restart during confirmation** — Timer resets (conservative). If spread still breached, new timer starts.
+2. **Multiple entries confirming simultaneously** — Independent timer fields per entry. Processed sequentially.
+3. **Flash crash during 75s window** — Max additional loss = delta × price_move × 100. Long leg caps at spread width.
+4. **Rapid oscillation** — `breach_count` tracks recoveries. No escalation behavior.
+5. **Disabled** — Set `stop_confirmation_enabled: false` to revert to immediate stops.
+
 ### Stop Monitoring
 
 The main loop checks stops every ~1-2 seconds:
 
 1. Batch-fetch current spread values for all active entries
 2. For each active side of each entry:
-   - If `spread_value >= stop_level`: trigger stop
+   - If `spread_value >= stop_level`: check MKT-036 confirmation timer
+     - First breach: start 75s timer
+     - Timer elapsed: execute stop
+     - Timer still running: wait for next heartbeat
+   - If `spread_value < stop_level` and timer was active: reset timer (stop avoided)
    - Close both legs via market order (default) or SHORT only if `short_only_stop: true` (MKT-025)
    - If short-only: long leg stays open, expires at settlement; MKT-033 may salvage
    - Record fill prices (deferred async lookup for accurate P&L)
@@ -541,6 +589,7 @@ The main loop checks stops every ~1-2 seconds:
 - **Call side stop:** SPX moves UP toward short call → call spread value increases
 - **Put side stop:** SPX moves DOWN toward short put → put spread value increases
 - **Speed:** 0DTE options have extreme gamma. On Feb 24, Entry #3's call cushion dropped from 64% to 6% in 2 minutes.
+- **MKT-036 delay:** After cushion hits 0%, 75 seconds must elapse before stop executes (configurable)
 
 ---
 
@@ -663,6 +712,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
 | MKT-034 | VIX-Scaled Entry Time Shifting | v1.10.0 | Shifts 5-entry schedule later on high-VIX days. VIX gate checks E#1 at :14:00/:44:00; floor at 12:14:30 |
 | MKT-035 | Call-Only on Down Days | v1.11.0 | When SPX < open -0.3%, convert to call-only (no puts). Stop = call_credit + $250 theo put + buffer. Conditional entries (12:45, 13:15) only fire on down days. 20-day data: 71% put stop rate on down days vs 7% call stop rate |
+| MKT-036 | Stop Confirmation Timer | v1.12.0 | 75-second sustained breach before executing stop. Prevents false stops from brief price spikes. Timer resets if spread recovers. 20-day backtest: 17 false stops avoided ($2,870), 1 real stop missed ($85) |
 
 ### Removed Rules
 

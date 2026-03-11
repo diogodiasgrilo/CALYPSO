@@ -161,6 +161,12 @@ class HydraIronCondorEntry(IronCondorEntry):
     call_long_sold_revenue: float = 0.0  # Gross revenue (fill_price × 100 × contracts)
     put_long_sold_revenue: float = 0.0   # Gross revenue (fill_price × 100 × contracts)
 
+    # MKT-036: Stop confirmation timer (75s sustained breach before executing stop)
+    call_breach_time: Optional[datetime] = None   # When call side first breached stop level
+    put_breach_time: Optional[datetime] = None    # When put side first breached stop level
+    call_breach_count: int = 0                    # How many times call side breached and recovered
+    put_breach_count: int = 0                     # How many times put side breached and recovered
+
     @property
     def is_one_sided(self) -> bool:
         """True if only one side was placed (not a full IC)."""
@@ -419,6 +425,16 @@ class HydraStrategy(MEICStrategy):
             f"(threshold: {self.downday_threshold_pct * 100:.1f}%, "
             f"theoretical put: ${self.downday_theoretical_put_credit / 100:.2f}, "
             f"conditional entries: {len(self._conditional_entry_times)})"
+        )
+
+        # MKT-036: Stop confirmation timer — requires stop condition to persist
+        # for N seconds before executing. 20-day analysis: 75s avoids 17 false stops
+        # ($2,870 saved), misses 1 real ($85). Applies to both put and call sides.
+        self.stop_confirmation_enabled = strategy_config.get("stop_confirmation_enabled", True)
+        self.stop_confirmation_seconds = int(strategy_config.get("stop_confirmation_seconds", 75))
+        logger.info(
+            f"  Stop confirmation (MKT-036): {'ENABLED' if self.stop_confirmation_enabled else 'DISABLED'} "
+            f"({self.stop_confirmation_seconds}s window)"
         )
 
         # MKT-031: Scouting state (in-memory, no persistence needed)
@@ -3111,6 +3127,16 @@ class HydraStrategy(MEICStrategy):
         Returns:
             str describing action taken
         """
+        # MKT-036: Log confirmation context before executing stop
+        breach_time = getattr(entry, f'{side}_breach_time', None)
+        breach_count = getattr(entry, f'{side}_breach_count', 0)
+        if breach_time and self.stop_confirmation_enabled:
+            confirmation_seconds = (datetime.now() - breach_time).total_seconds()
+            logger.info(
+                f"MKT-036: Stop confirmed after {confirmation_seconds:.0f}s, "
+                f"{breach_count} prior recoveries"
+            )
+
         # When short_only_stop is disabled, use base MEIC logic (closes both legs)
         if not self.short_only_stop:
             return super()._execute_stop_loss(entry, side)
@@ -3832,6 +3858,71 @@ class HydraStrategy(MEICStrategy):
             entry.long_put_price = initial_short_price * decay_factor * 0.3
 
     # =========================================================================
+    # MKT-036: Stop confirmation timer helper
+    # =========================================================================
+
+    def _check_stop_with_confirmation(self, entry, side: str, spread_value: float, stop_level: float) -> Optional[str]:
+        """
+        MKT-036: Check stop with confirmation timer.
+
+        Instead of executing immediately when spread_value >= stop_level,
+        requires the breach to persist for stop_confirmation_seconds (default 75s).
+        If spread recovers below stop level during the window, timer resets.
+
+        Returns stop result string if stop executed, or None.
+        """
+        if spread_value >= stop_level:
+            if not self.stop_confirmation_enabled:
+                return self._execute_stop_loss(entry, side)
+
+            breach_time = getattr(entry, f'{side}_breach_time', None)
+            now = datetime.now()
+
+            if breach_time is None:
+                # First breach — start timer
+                setattr(entry, f'{side}_breach_time', now)
+                logger.info(
+                    f"MKT-036: Entry #{entry.entry_number} {side} breached stop "
+                    f"(SV=${spread_value:.0f} >= ${stop_level:.0f}), "
+                    f"confirming {self.stop_confirmation_seconds}s..."
+                )
+                self._save_state_to_disk()  # Save ONCE on first breach
+            else:
+                elapsed = (now - breach_time).total_seconds()
+                if elapsed >= self.stop_confirmation_seconds:
+                    # Confirmed — execute stop
+                    logger.info(
+                        f"MKT-036: Entry #{entry.entry_number} {side} CONFIRMED "
+                        f"after {elapsed:.0f}s"
+                    )
+                    return self._execute_stop_loss(entry, side)
+                # else: still confirming — NO disk I/O, just wait for next heartbeat
+        else:
+            # Spread recovered below stop level — reset timer if active
+            breach_time = getattr(entry, f'{side}_breach_time', None)
+            if breach_time is not None:
+                elapsed = (datetime.now() - breach_time).total_seconds()
+                count = getattr(entry, f'{side}_breach_count', 0) + 1
+                setattr(entry, f'{side}_breach_count', count)
+                setattr(entry, f'{side}_breach_time', None)
+                self.daily_state.stops_avoided_mkt036 += 1
+                logger.info(
+                    f"MKT-036: Entry #{entry.entry_number} {side} RECOVERED after {elapsed:.0f}s "
+                    f"(breach #{count}, SV=${spread_value:.0f} < ${stop_level:.0f})"
+                )
+                self._save_state_to_disk()  # Save ONCE on recovery
+                # Log recovery to Sheets
+                self._log_safety_event(
+                    event_type="MKT-036_RECOVERY",
+                    details=(
+                        f"Entry #{entry.entry_number} {side}: recovered after {elapsed:.0f}s | "
+                        f"SV: ${spread_value:.0f} < ${stop_level:.0f} | Breach #{count}"
+                    ),
+                    result="Stop avoided"
+                )
+        return None
+
+    # =========================================================================
     # OVERRIDE: Stop loss checking for one-sided entries
     # =========================================================================
 
@@ -3867,8 +3958,9 @@ class HydraStrategy(MEICStrategy):
                     logger.error(f"SAFETY: Invalid call stop ${entry.call_side_stop:.2f}")
                     continue
 
-                if entry.call_spread_value >= entry.call_side_stop:
-                    return self._execute_stop_loss(entry, "call")
+                result = self._check_stop_with_confirmation(entry, "call", entry.call_spread_value, entry.call_side_stop)
+                if result:
+                    return result
 
             elif is_hydra_entry and entry.put_only:
                 # Only check put side
@@ -3885,8 +3977,9 @@ class HydraStrategy(MEICStrategy):
                     logger.error(f"SAFETY: Invalid put stop ${entry.put_side_stop:.2f}")
                     continue
 
-                if entry.put_spread_value >= entry.put_side_stop:
-                    return self._execute_stop_loss(entry, "put")
+                result = self._check_stop_with_confirmation(entry, "put", entry.put_spread_value, entry.put_side_stop)
+                if result:
+                    return result
 
             else:
                 # Full IC
@@ -3905,14 +3998,18 @@ class HydraStrategy(MEICStrategy):
                 if not call_done:
                     if entry.call_side_stop < MIN_VALID_STOP:
                         logger.error(f"SAFETY: Invalid call stop ${entry.call_side_stop:.2f} for Entry #{entry.entry_number}")
-                    elif entry.call_spread_value >= entry.call_side_stop:
-                        return self._execute_stop_loss(entry, "call")
+                    else:
+                        result = self._check_stop_with_confirmation(entry, "call", entry.call_spread_value, entry.call_side_stop)
+                        if result:
+                            return result
 
                 if not put_done:
                     if entry.put_side_stop < MIN_VALID_STOP:
                         logger.error(f"SAFETY: Invalid put stop ${entry.put_side_stop:.2f} for Entry #{entry.entry_number}")
-                    elif entry.put_spread_value >= entry.put_side_stop:
-                        return self._execute_stop_loss(entry, "put")
+                    else:
+                        result = self._check_stop_with_confirmation(entry, "put", entry.put_spread_value, entry.put_side_stop)
+                        if result:
+                            return result
 
         return None
 
@@ -4103,10 +4200,15 @@ class HydraStrategy(MEICStrategy):
                 continue
 
             # Status icon
+            # MKT-036: Show yellow when any side is confirming a stop
+            call_confirming = getattr(entry, 'call_breach_time', None) is not None
+            put_confirming = getattr(entry, 'put_breach_time', None) is not None
             if call_done and put_done:
                 icon = "🔴"  # Both sides done
             elif call_done or put_done:
                 icon = "🟡"  # One side done
+            elif call_confirming or put_confirming:
+                icon = "🟡"  # MKT-036: Confirming stop
             else:
                 icon = "🟢"  # Both active
 
@@ -4136,6 +4238,10 @@ class HydraStrategy(MEICStrategy):
                     call_str = "STOP"
             elif call_expired:
                 call_str = "EXP"
+            elif getattr(entry, 'call_breach_time', None) is not None:
+                # MKT-036: Stop confirmation in progress
+                elapsed = (datetime.now() - entry.call_breach_time).total_seconds()
+                call_str = f"⏳{elapsed:.0f}s"
             else:
                 call_pct = ((entry.call_side_stop - call_value) / entry.call_side_stop * 100) if entry.call_side_stop > 0 else 0
                 call_str = f"{call_pct:.0f}%"
@@ -4150,6 +4256,10 @@ class HydraStrategy(MEICStrategy):
                     put_str = "STOP"
             elif put_expired:
                 put_str = "EXP"
+            elif getattr(entry, 'put_breach_time', None) is not None:
+                # MKT-036: Stop confirmation in progress
+                elapsed = (datetime.now() - entry.put_breach_time).total_seconds()
+                put_str = f"⏳{elapsed:.0f}s"
             else:
                 put_pct = ((entry.put_side_stop - put_value) / entry.put_side_stop * 100) if entry.put_side_stop > 0 else 0
                 put_str = f"{put_pct:.0f}%"
@@ -5038,6 +5148,14 @@ class HydraStrategy(MEICStrategy):
             cond_str = ", ".join(t.strftime('%H:%M') for t in self._conditional_entry_times)
             lines.append(f"Conditional: {cond_str} (call-only on down days)")
 
+        # MKT-036: Stop confirmation timer
+        lines.extend([
+            "",
+            "\u2501\u2501\u2501 Stop Confirmation (MKT-036) \u2501\u2501\u2501",
+            f"Enabled: {'Yes' if self.stop_confirmation_enabled else 'No'}",
+            f"Window: {self.stop_confirmation_seconds}s",
+        ])
+
         if self.vix_gate_enabled:
             lines.extend([
                 "",
@@ -5115,6 +5233,7 @@ class HydraStrategy(MEICStrategy):
         # Fix #55/#56/#57: Now tracked directly on daily_state
         metrics['trend_overrides'] = self.daily_state.trend_overrides
         metrics['credit_gate_skips'] = self.daily_state.credit_gate_skips
+        metrics['stops_avoided_mkt036'] = self.daily_state.stops_avoided_mkt036
 
         return metrics
 
@@ -5170,6 +5289,9 @@ class HydraStrategy(MEICStrategy):
                 long_salvage_revenue += getattr(entry, 'call_long_sold_revenue', 0.0)
                 long_salvage_revenue += getattr(entry, 'put_long_sold_revenue', 0.0)
         summary['long_salvage_revenue'] = long_salvage_revenue
+
+        # MKT-036: Stop confirmation stats
+        summary['stops_avoided_mkt036'] = self.daily_state.stops_avoided_mkt036
 
         return summary
 
@@ -5551,6 +5673,8 @@ class HydraStrategy(MEICStrategy):
                 "one_sided_entries": self.daily_state.one_sided_entries,
                 "trend_overrides": self.daily_state.trend_overrides,
                 "credit_gate_skips": self.daily_state.credit_gate_skips,
+                # MKT-036: Stop confirmation avoided counter
+                "stops_avoided_mkt036": self.daily_state.stops_avoided_mkt036,
                 # MKT-018: Early close state
                 "early_close_triggered": self._early_close_triggered,
                 "early_close_time": self._early_close_time.isoformat() if self._early_close_time else None,
@@ -5633,6 +5757,11 @@ class HydraStrategy(MEICStrategy):
                     "put_long_sold": getattr(entry, 'put_long_sold', False),
                     "call_long_sold_revenue": getattr(entry, 'call_long_sold_revenue', 0.0),
                     "put_long_sold_revenue": getattr(entry, 'put_long_sold_revenue', 0.0),
+                    # MKT-036: Stop confirmation timer
+                    "call_breach_time": entry.call_breach_time.isoformat() if getattr(entry, 'call_breach_time', None) else None,
+                    "put_breach_time": entry.put_breach_time.isoformat() if getattr(entry, 'put_breach_time', None) else None,
+                    "call_breach_count": getattr(entry, 'call_breach_count', 0),
+                    "put_breach_count": getattr(entry, 'put_breach_count', 0),
                     # Dashboard: live spread values for cushion display
                     "call_spread_value": entry.call_spread_value if not entry.call_side_stopped else 0,
                     "put_spread_value": entry.put_spread_value if not entry.put_side_stopped else 0,
@@ -6638,6 +6767,8 @@ class HydraStrategy(MEICStrategy):
             self.daily_state.one_sided_entries = saved_state.get("one_sided_entries", 0)
             self.daily_state.trend_overrides = saved_state.get("trend_overrides", 0)
             self.daily_state.credit_gate_skips = saved_state.get("credit_gate_skips", 0)
+            # MKT-036: Restore stop confirmation avoided counter
+            self.daily_state.stops_avoided_mkt036 = saved_state.get("stops_avoided_mkt036", 0)
 
             # MKT-018: Restore early close state
             self._early_close_triggered = saved_state.get("early_close_triggered", False)
@@ -6765,6 +6896,9 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.put_long_sold = entry_data.get("put_long_sold", False)
                 restored_entry.call_long_sold_revenue = entry_data.get("call_long_sold_revenue", 0.0)
                 restored_entry.put_long_sold_revenue = entry_data.get("put_long_sold_revenue", 0.0)
+                # MKT-036: Restore breach counts (NOT breach_time — conservative reset on restart)
+                restored_entry.call_breach_count = entry_data.get("call_breach_count", 0)
+                restored_entry.put_breach_count = entry_data.get("put_breach_count", 0)
                 # Fill prices (for /entry display after restart)
                 restored_entry.short_call_fill_price = entry_data.get("short_call_fill_price", 0)
                 restored_entry.long_call_fill_price = entry_data.get("long_call_fill_price", 0)
@@ -6927,6 +7061,7 @@ class HydraStrategy(MEICStrategy):
             preserved_one_sided_entries = 0
             preserved_trend_overrides = 0
             preserved_credit_gate_skips = 0
+            preserved_stops_avoided_mkt036 = 0
             preserved_entry_credits = {}
             preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
             preserved_market_ohlc = {}
@@ -6956,6 +7091,7 @@ class HydraStrategy(MEICStrategy):
                             preserved_one_sided_entries = saved_state.get("one_sided_entries", 0)
                             preserved_trend_overrides = saved_state.get("trend_overrides", 0)
                             preserved_credit_gate_skips = saved_state.get("credit_gate_skips", 0)
+                            preserved_stops_avoided_mkt036 = saved_state.get("stops_avoided_mkt036", 0)
                             preserved_market_ohlc = saved_state.get("market_data_ohlc", {})
                             preserved_pnl_history = saved_state.get("pnl_history", [])
                             # MKT-018: Preserve early close state
@@ -7021,6 +7157,9 @@ class HydraStrategy(MEICStrategy):
                                         # Actual stop debit (for dashboard per-entry P&L accuracy)
                                         "actual_call_stop_debit": entry_data.get("actual_call_stop_debit", 0.0),
                                         "actual_put_stop_debit": entry_data.get("actual_put_stop_debit", 0.0),
+                                        # MKT-036: Breach counts (NOT breach_time — reset on restart)
+                                        "call_breach_count": entry_data.get("call_breach_count", 0),
+                                        "put_breach_count": entry_data.get("put_breach_count", 0),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -7235,6 +7374,9 @@ class HydraStrategy(MEICStrategy):
                     stopped_entry.put_long_sold = stopped_entry_data.get("put_long_sold", False)
                     stopped_entry.call_long_sold_revenue = stopped_entry_data.get("call_long_sold_revenue", 0.0)
                     stopped_entry.put_long_sold_revenue = stopped_entry_data.get("put_long_sold_revenue", 0.0)
+                    # MKT-036: Restore breach counts (NOT breach_time — conservative reset on restart)
+                    stopped_entry.call_breach_count = stopped_entry_data.get("call_breach_count", 0)
+                    stopped_entry.put_breach_count = stopped_entry_data.get("put_breach_count", 0)
                     # Fill prices (for /entry display after restart)
                     stopped_entry.short_call_fill_price = stopped_entry_data.get("short_call_fill_price", 0)
                     stopped_entry.long_call_fill_price = stopped_entry_data.get("long_call_fill_price", 0)
@@ -7281,6 +7423,7 @@ class HydraStrategy(MEICStrategy):
             self.daily_state.one_sided_entries = preserved_one_sided_entries
             self.daily_state.trend_overrides = preserved_trend_overrides
             self.daily_state.credit_gate_skips = preserved_credit_gate_skips
+            self.daily_state.stops_avoided_mkt036 = preserved_stops_avoided_mkt036
 
             # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
             if preserved_market_ohlc:

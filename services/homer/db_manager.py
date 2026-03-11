@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS market_ticks (
@@ -188,6 +188,21 @@ class BacktestingDB:
             # Table is created by CREATE_TABLES_SQL above, just log migration
             logger.info("DB migrated to schema v3 (spread_snapshots table)")
 
+        if current < 4:
+            # v4: MKT-036 stop confirmation timer columns
+            for col, col_type, default in [
+                ("confirmation_seconds", "INTEGER", "0"),
+                ("breach_recoveries", "INTEGER", "0"),
+            ]:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE trade_stops ADD COLUMN {col} "
+                        f"{col_type} DEFAULT {default}"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+            logger.info("DB migrated to schema v4 (MKT-036 confirmation columns)")
+
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode."""
         conn = sqlite3.connect(self.db_path)
@@ -302,8 +317,9 @@ class BacktestingDB:
             INSERT OR IGNORE INTO trade_stops
             (date, entry_number, side, stop_time, spx_at_stop,
              trigger_level, actual_debit, net_pnl,
-             salvage_sold, salvage_revenue)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             salvage_sold, salvage_revenue,
+             confirmation_seconds, breach_recoveries)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         rows = [
             (
@@ -317,6 +333,8 @@ class BacktestingDB:
                 s.get("net_pnl"),
                 1 if s.get("salvage_sold") else 0,
                 s.get("salvage_revenue", 0.0),
+                s.get("confirmation_seconds", 0),
+                s.get("breach_recoveries", 0),
             )
             for s in stops
         ]

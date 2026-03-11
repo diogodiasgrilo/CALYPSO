@@ -1444,6 +1444,15 @@ def _build_stop_records(
         if level_match:
             trigger_level = _safe_float(level_match.group(1))
 
+        # MKT-036: Parse confirmation data from Notes
+        # Format: "... | MKT-036: 75s confirmed, 2 recoveries"
+        confirmation_seconds = 0
+        breach_recoveries = 0
+        conf_match = re.search(r"MKT-036: (\d+)s confirmed, (\d+) recoveries", notes)
+        if conf_match:
+            confirmation_seconds = int(conf_match.group(1))
+            breach_recoveries = int(conf_match.group(2))
+
         # Compute actual_debit from P&L + per-side credit
         # pnl = -net_loss, net_loss = actual_debit - side_credit
         # So actual_debit = side_credit + abs(pnl)
@@ -1466,6 +1475,8 @@ def _build_stop_records(
             "net_pnl": pnl,
             "salvage_sold": False,
             "salvage_revenue": 0.0,
+            "confirmation_seconds": confirmation_seconds,
+            "breach_recoveries": breach_recoveries,
         })
 
     return records

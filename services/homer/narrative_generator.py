@@ -27,17 +27,19 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
 
-## HYDRA Domain Knowledge (use these exact parameters)
+## HYDRA Domain Knowledge (v1.12.0 — use these exact parameters)
 
-- Entry times: 11:15, 11:45, 12:15, 12:45, 13:15 ET (5 entries per day, :15/:45 offset from MAE analysis)
-- Smart entry windows (MKT-031): 10-min scouting before each entry, 2-parameter scoring, threshold 65
+- Entry times: 10:15, 10:45, 11:15, 11:45, 12:15 ET (5 entries per day, :15/:45 offset from MAE analysis, v1.10.3)
+- Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
 - Spread widths: 60-120 points (VIX-scaled), NOT 5-point wings
-- Min credit thresholds: $0.75 calls, $1.75 puts (MKT-011)
-- Stop formula: total_credit - $0.15 (MEIC+ for true breakeven)
+- Min credit thresholds: $0.60 calls, $2.50 puts (MKT-011). Put-only when call non-viable AND VIX < 18 (MKT-032).
+- Stop formula: total_credit + $0.10 (credit + buffer). One-sided: 2x credit + $0.10.
+- Stop confirmation (MKT-036): 75-second sustained breach before executing stop. Timer resets if spread recovers.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
+- Down-day filter (MKT-035): When SPX drops 0.3% below open, call spreads only (no puts). Conditional entries (12:45, 13:15) fire on down days as call-only.
 - Progressive tightening: MKT-020 (calls) and MKT-022 (puts) scan from wide OTM inward
 - Early close (MKT-018): DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)
-- Entries are full iron condors or put-only (MKT-011: call non-viable → put-only since v1.7.1, call-only disabled)
+- Entries are full iron condors or put-only (MKT-011 override) or call-only (MKT-035 down-day)
 - EMA 20/40 trend signal is informational only (logged but doesn't drive entry type)
 
 ## Tone

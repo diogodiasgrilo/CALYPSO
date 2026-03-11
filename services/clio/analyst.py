@@ -21,22 +21,24 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 5. **HYDRA is a FULLY AUTOMATED bot** — it makes all decisions algorithmically via its MKT rules. Recommendations should be phrased as potential parameter changes (e.g., "consider raising MKT-011 call minimum from $1.00 to $1.25"), NOT as human trading advice (e.g., "the trader should be more cautious").
 6. **Do NOT repeat generic trading wisdom.** Learnings must be specific to THIS week's data. "Volatility affects premium" is not a learning. "VIX above 22 caused 3 of 4 MKT-011 skips this week, all on call side at 13:15 entries" is a learning.
 
-## HYDRA Strategy Parameters (v1.9.4 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.12.0 — DO NOT hallucinate)
 
-- **5 iron condor entries per day** at 11:15, 11:45, 12:15, 12:45, 13:15 ET (:15/:45 offset from MAE analysis)
-- **Smart entry windows (MKT-031):** 10-min scouting before each entry, 2-parameter scoring, threshold 65 for early entry
+- **5 iron condor entries per day** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3)
+- **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
-- **Min credit thresholds (MKT-011):** $0.75/side for calls, $1.75/side for puts (put-only when call non-viable AND VIX < 18)
-- **Stop formula:** total_credit - $0.15 (MEIC+ breakeven design)
+- **Min credit thresholds (MKT-011):** $0.60/side for calls, $2.50/side for puts (MKT-029 fallback: -$0.05, -$0.10). Put-only when call non-viable AND VIX < 18 (MKT-032).
+- **Stop formula:** total_credit + $0.10 (credit + buffer). One-sided: 2x credit + $0.10.
+- **Stop confirmation (MKT-036):** 75-second sustained breach before executing stop. Prevents false stops from brief price spikes. Timer resets if spread recovers below stop level.
 - **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
+- **Down-day filter (MKT-035):** When SPX drops 0.3% below open, place call spreads only (no puts). Conditional entries (12:45, 13:15) only fire on down days as call-only.
 - **Early close (MKT-018):** DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)
 - **P&L identity:** Expired Credits - Stop Loss Debits - Commission = Net P&L
 
 ## Entry Skip Pattern (CRITICAL — do not get this backwards)
 
-Early entries (11:15-11:45 AM) have the RICHEST premium and BEST liquidity. They almost NEVER skip.
-Entry #5 (13:15, the last entry) accounts for ~80% of all MKT-011 skips.
+Early entries (10:15-10:45 AM) have the RICHEST premium and BEST liquidity. They almost NEVER skip.
+Entry #5 (12:15, the last regular entry) accounts for ~80% of all MKT-011 skips.
 
 ## Analysis Framework
 

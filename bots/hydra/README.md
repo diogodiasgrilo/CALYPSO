@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.11.0 | **Last Updated:** 2026-03-11
+**Version:** 1.12.0 | **Last Updated:** 2026-03-11
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -79,7 +79,7 @@ Calls start at 3.5× and puts at 4.0× the VIX-adjusted OTM distance (asymmetric
 
 ### Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts)
 
-From the MKT-024 starting distance, progressively moves the short strike closer to ATM in 5pt steps until credit meets the minimum ($0.75 for calls, $1.75 for puts) or a 25pt OTM floor is reached.
+From the MKT-024 starting distance, progressively moves the short strike closer to ATM in 5pt steps until credit meets the minimum ($0.60 for calls, $2.50 for puts) or a 25pt OTM floor is reached.
 
 ```
 Flow: MKT-024 (wider start) → MKT-020 (calls) → MKT-022 (puts) → MKT-011 credit gate
@@ -165,6 +165,26 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `downday_theoretical_put_credit` | `2.50` | Theoretical put credit ($) for stop calculation |
 | `conditional_entry_times` | `["12:45","13:15"]` | Extra entry times that only fire when MKT-035 triggers |
 
+### Stop Confirmation Timer (MKT-036) — v1.12.0
+
+When a spread value breaches the stop level, a 75-second confirmation window starts before executing the stop. If the spread recovers below the stop level during the window, the timer resets and the stop is avoided.
+
+| Event | Action |
+|-------|--------|
+| `spread_value >= stop_level` (first breach) | Start 75s timer, log "CONFIRMING" |
+| Still breached after 75s | **Execute stop** (confirmed) |
+| `spread_value < stop_level` during window | **Reset timer**, log "RECOVERED" |
+| Bot restart with active timer | Timer resets (conservative — re-evaluate fresh) |
+
+**20-day backtest results:** 17 false stops avoided ($2,870 saved), 1 real stop missed ($85). Applies to both put and call sides.
+
+### Stop Confirmation Config (MKT-036)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `stop_confirmation_enabled` | `true` | Enable/disable MKT-036 stop confirmation timer |
+| `stop_confirmation_seconds` | `75` | Duration (seconds) breach must sustain before executing stop |
+
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
 Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-021) are **intentionally disabled**. Backtest analysis showed no ROC-based early close configuration beats hold-to-expiry for this strategy. The code is preserved but dormant — set `early_close_enabled: true` in config to re-enable. See `docs/HYDRA_EARLY_CLOSE_ANALYSIS.md` for the full analysis.
@@ -228,16 +248,16 @@ sudo journalctl -u hydra -f
 | Entry type | Always full IC | Full IC + credit gate (skip if non-viable) |
 | Starting OTM | VIX-adjusted | 3.5× calls, 4.0× puts (MKT-024), then tightened |
 | Spread widths | 50pt fixed | Asymmetric: call 60pt, put 75pt floor, 75pt cap (MKT-026/027/028) |
-| Credit minimums | $0.50/side | $0.75 calls, $1.75 puts |
+| Credit minimums | $0.50/side | $0.60 calls, $2.50 puts |
 | Trend signal | None | EMA 20/40 (informational only) |
 | Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
-| Stop formula | total_credit - $0.10 | total_credit + $0.10 (Brian's credit+buffer) |
+| Stop formula | total_credit - $0.10 | total_credit + $0.10 (Brian's credit+buffer) + MKT-036 75s confirmation |
 | Stop execution | Close both legs | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025 + MKT-033) |
 
 ## Risk Considerations
 
-1. **Skip rate**: Stricter credit gates (especially $1.75 put minimum) may skip more entries
+1. **Skip rate**: Stricter credit gates (especially $2.50 put minimum) may skip more entries
 2. **Trend reversal risk**: EMA is a lagging indicator; sudden reversals may not be detected immediately
 3. **Hold-to-expiry**: All positions held until settlement (MKT-018 early close intentionally disabled — backtest showed hold outperforms)
 
@@ -275,6 +295,7 @@ bots/hydra/
 
 ## Version History
 
+- **1.12.0** (2026-03-11): MKT-036 stop confirmation timer. When spread value breaches stop level, 75-second confirmation window before executing. If spread recovers below stop level during window, timer resets (stop avoided). 20-day backtest: 17 false stops avoided ($2,870 saved), 1 real stop missed ($85). Configurable via `stop_confirmation_enabled`, `stop_confirmation_seconds`. All agent SYSTEM_PROMPTs updated to v1.12.0.
 - **1.11.0** (2026-03-11): MKT-035 call-only on down days. When SPX < open -0.3%, place call spread only (no puts). Stop = call_credit + theoretical $2.50 put + buffer. 20-day data: 71% put stop rate on down days vs 7% call stop rate, +$920 improvement. Two conditional entry times (12:45, 13:15) that only fire when MKT-035 triggers as call-only. Configurable via `downday_callonly_enabled`, `downday_threshold_pct`, `downday_theoretical_put_credit`, `conditional_entry_times`.
 - **1.10.3** (2026-03-11): Disable MKT-034 VIX time shifting + remove VIX entry cutoff (max_vix_entry=999). Neither Tammy Chambless nor John Sandvand use VIX cutoffs or time shifting (both studied VIX correlation, found none). Entry times revert to 10:15 AM start (winning period Feb 10-27). Spread widths reverted to 50pt. MKT-034 remains configurable (`vix_time_shift.enabled`).
 - **1.10.2** (2026-03-10): Replace MEIC+ stop formula with credit+buffer (Brian's approach): stop = total_credit + $0.10 instead of total_credit - $0.15. Extra cushion reduces marginal stops. Fix: stop level validation now per-side (prevents skipping active side when stopped side has 0). Telegram /set updated: `stop_buffer` replaces `meic_plus`.
