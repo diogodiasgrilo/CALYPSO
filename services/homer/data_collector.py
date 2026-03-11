@@ -225,7 +225,7 @@ def _build_entries_for_day(
         original_to_new[orig_num].append((new_num, ts))
 
     if len(deduped_entries) != len(set(ts for ts, _, _ in deduped_entries)):
-        logger.info(f"Renumbered {len(deduped_entries)} entries for {date_str} (duplicate entry numbers detected)")
+        logger.info(f"Renumbered {len(deduped_entries)} entries for {date_str} (duplicate timestamps detected — likely bot restart)")
     elif any(str(i + 1) != deduped_entries[i][1] for i in range(len(deduped_entries))):
         logger.info(f"Renumbered {len(deduped_entries)} entries for {date_str}")
 
@@ -362,7 +362,7 @@ def _build_entries_for_day(
 
             if matched_num and matched_num in entries_by_num:
                 # Extract revenue from trade_reason: "Long Salvage | Open=$0.35 Close=$0.50 Rev=$50.0"
-                reason = str(row.get("Reason", row.get("Trade Reason", ""))).strip()
+                reason = str(row.get("Notes", "")).strip()
                 rev_match = re.search(r"Rev=\$?([\d.]+)", reason)
                 revenue = float(rev_match.group(1)) if rev_match else _safe_float(row.get("P&L ($)", 0))
 

@@ -75,7 +75,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.10.0"
+HYDRA_VERSION = "1.10.3"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -601,10 +601,11 @@ class HydraStrategy(MEICStrategy):
                 ]
 
         if is_early_close_day():
-            early_cutoff = dt_time(12, 30)  # MKT-034: raised from 12:00 to allow 12:14:30 on high VIX days
+            early_cutoff = dt_time(12, 30)  # Allows entries up to 12:15 (12:14:30 with MKT-034 offset)
+            first_entry = self.entry_times[0] if self.entry_times else dt_time(10, 15)
             self.entry_times = [t for t in self.entry_times if t < early_cutoff]
             if not self.entry_times:
-                self.entry_times = [ALL_ENTRY_SLOTS[0]] if self.vix_gate_enabled else [dt_time(11, 15)]
+                self.entry_times = [first_entry]
             logger.info(f"HYDRA early close schedule: {[t.strftime('%H:%M:%S') for t in self.entry_times]}")
 
     # =========================================================================
@@ -4113,8 +4114,11 @@ class HydraStrategy(MEICStrategy):
             next_str = "All entries placed"
 
         # Filters
-        vix_open = "Open" if vix < self.max_vix_entry else "BLOCKED"
-        vix_detail = f"{vix_open} ({vix:.1f} {'<' if vix < self.max_vix_entry else '>='} {self.max_vix_entry:.0f})"
+        if self.max_vix_entry >= 999:
+            vix_detail = f"No limit (VIX {vix:.1f})"
+        else:
+            vix_open = "Open" if vix < self.max_vix_entry else "BLOCKED"
+            vix_detail = f"{vix_open} ({vix:.1f} {'<' if vix < self.max_vix_entry else '>='} {self.max_vix_entry:.0f})"
 
         try:
             from shared.event_calendar import is_fomc_meeting_day
@@ -4634,7 +4638,7 @@ class HydraStrategy(MEICStrategy):
             f"Min credit: Call ${min_credit_call:.2f}  |  Put ${min_credit_put:.2f}",
             "",
             "\u2501\u2501\u2501 Risk \u2501\u2501\u2501",
-            f"Max VIX: {self.max_vix_entry:.0f}",
+            f"Max VIX: {'No limit' if self.max_vix_entry >= 999 else f'{self.max_vix_entry:.0f}'}",
             f"Stop: credit {stop_buffer_str}",
             "",
             "\u2501\u2501\u2501 Exits \u2501\u2501\u2501",
@@ -5539,13 +5543,17 @@ class HydraStrategy(MEICStrategy):
         self._vix_gate_start_slot = 0
         if self.vix_gate_enabled:
             self.entry_times = list(ALL_ENTRY_SLOTS[:5])  # MKT-034: Reset to default schedule
-            # Re-apply early close filter for new day
-            if is_early_close_day():
-                early_cutoff = dt_time(12, 30)
-                self.entry_times = [t for t in self.entry_times if t < early_cutoff]
-                if not self.entry_times:
-                    self.entry_times = [ALL_ENTRY_SLOTS[0]]
-                logger.info(f"MKT-034: Early close day schedule: {[t.strftime('%H:%M:%S') for t in self.entry_times]}")
+        else:
+            # Non-MKT-034: Re-parse entry times from config for new day
+            self._parse_entry_times()
+        # Re-apply early close filter for new day (both paths)
+        if is_early_close_day():
+            early_cutoff = dt_time(12, 30)
+            first_entry = self.entry_times[0] if self.entry_times else dt_time(10, 15)
+            self.entry_times = [t for t in self.entry_times if t < early_cutoff]
+            if not self.entry_times:
+                self.entry_times = [first_entry]
+            logger.info(f"HYDRA early close day schedule: {[t.strftime('%H:%M:%S') for t in self.entry_times]}")
         self._early_close_time = None
         self._early_close_pnl = None
         self._pnl_history = []  # Reset dashboard P&L curve for new day

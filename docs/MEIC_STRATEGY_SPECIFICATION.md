@@ -1,6 +1,6 @@
 # MEIC (Multiple Entry Iron Condors) Strategy Specification
 
-**Last Updated:** 2026-02-13
+**Last Updated:** 2026-03-11
 **Purpose:** Complete implementation specification for the MEIC 0DTE trading bot
 **Strategy Creator:** Tammy Chambless (the "Queen of 0DTE")
 **Status:** IMPLEMENTED - v1.2.4 (Credit gate + Zero credit safety + P&L fixes + timeout protection + fill price accuracy)
@@ -106,7 +106,7 @@ Enter **6 iron condors throughout the trading day**, each with:
 | Entry 5 | 12:00 PM | Noon entry |
 | Entry 6 | 12:30 PM | Final entry |
 
-**Note:** Entry times are spaced 30-60 minutes apart. The exact schedule above is based on industry best practices (wait 30-90 minutes after market open, complete entries by early afternoon). Tammy's specific times may differ but are only available in her paid course.
+**Note:** Entry times are spaced 30-60 minutes apart. The exact schedule above is based on industry best practices (wait 30-90 minutes after market open, complete entries by early afternoon). Tammy's specific times may differ — she **adjusts entry times monthly** based on backtesting the prior 6 months of data and publishes them in her private Quantum Options Facebook group. Public sources show: Jan 2023 started at 12:00 PM ET (6 entries), Jul 2023 started at 1:00 PM ET (5 entries). Her paid course (Option Omega Academy, 14+ hours) contains the full methodology for determining optimal entry times, including using 20 EMA vs 40 EMA analysis.
 
 ---
 
@@ -119,7 +119,7 @@ Before each scheduled entry, verify:
 | Condition | Requirement | Why |
 |-----------|-------------|-----|
 | Market Hours | 9:30 AM - 4:00 PM ET | SPX trading hours |
-| Not FOMC Day | Skip FOMC announcement days | High volatility risk |
+| Not FOMC Day | Skip FOMC announcement days | High volatility risk (CALYPSO addition — Tammy does not mention FOMC blackouts in public materials) |
 | SPX Price Available | Valid quote from Saxo | Can't calculate strikes |
 | No Circuit Breaker | Bot not in error state | Safety check |
 
@@ -405,6 +405,30 @@ When this happens:
 3. Review if market conditions warranted trading
 4. Continue with normal strategy next day
 
+### Tammy's Original Rules vs CALYPSO Additions
+
+Research into publicly available materials (Scribd presentations, Theta Profits articles, Option Omega course descriptions, trading forums) reveals several rules in our implementation that are **CALYPSO additions**, not part of Tammy's original strategy:
+
+| Rule | Tammy's Original | CALYPSO Addition |
+|------|-----------------|------------------|
+| VIX cutoff (`max_vix_entry`) | **No** — she studied VIX correlation and found none; trades every day | Yes — our bot skips entries above threshold |
+| FOMC blackout | **Not mentioned** in public materials | Yes — our bot skips FOMC days |
+| Fixed entry times | **No** — she adjusts monthly based on backtesting prior 6 months | Yes — our bot uses fixed schedule |
+| Spread width | 50-60pt average (max 100, min 25) | Matches her range |
+| Delta target ~8 | Yes | Yes (implemented) |
+| Stop = total IC credit | Yes | Modified in HYDRA: credit + $0.10 buffer |
+| MEIC+ stop reduction | Yes ($0.10 below net) | Originally implemented, replaced in HYDRA |
+| Credit per side | $0.80-$1.75 (varies by source) | Credit gate added (MKT-011) |
+
+**Key insight from Tammy's research:** She explicitly studied VIX correlation and concluded that **intra-day move size** affects performance, not VIX level — and those moves are hard to predict. She does not skip days based on VIX.
+
+**Sources:**
+- [Tammy Chambless explains her MEIC strategy - Theta Profits](https://www.thetaprofits.com/tammy-chambless-explains-her-meic-strategy-for-trading-0dte-options/)
+- [After 9,000 trades - Theta Profits](https://www.thetaprofits.com/my-most-profitable-options-trading-strategy-0dte-breakeven-iron-condor/)
+- [0DTE MEIC Jan 2023 - Scribd](https://www.scribd.com/document/660667439/0-DTE-MEIC-January-16-2023-by-Tammy-Chambless)
+- [0DTE MEIC Jul 2023 - Scribd](https://www.scribd.com/document/675238799/0-DTE-MEIC-Tammy-Chambless-July-22-2023)
+- [MEIC Course - Option Omega Academy](https://academy.optionomega.com/course/meic)
+
 ---
 
 ## MEIC+ Modification
@@ -668,7 +692,14 @@ def get_my_positions(self):
 
 ### Additional Resources
 
-- [M.E.I.C Course](https://academy.optionomega.com/course/meic) - Option Omega Academy (Tammy's paid course)
+- [M.E.I.C Course](https://academy.optionomega.com/course/meic) - Option Omega Academy (Tammy's paid course, 14+ hours)
+- [0DTE MEIC January 2023 - Scribd](https://www.scribd.com/document/660667439/0-DTE-MEIC-January-16-2023-by-Tammy-Chambless) - Entry times: 12:00 PM start
+- [0DTE MEIC July 2023 - Scribd](https://www.scribd.com/document/675238799/0-DTE-MEIC-Tammy-Chambless-July-22-2023) - Entry times: 1:00 PM start
+- [0DTE trading: Rules, risks and strategies from 3 top experts](https://www.thetaprofits.com/0dte-trading-rules-risks-and-strategies-from-3-top-experts/) - Theta Profits
+- [0 DTE SPX Iron Condors and Credit Spreads (Aug 2020)](https://onlinetradersclub.org/2020-08-13-thu-0-dte-credit-spreads-and-iron-condors-in-spx-tammy-chambless/) - Tammy's pre-MEIC presentation
+- [0DTE Breakeven Iron Condor presentation (Apr 2023)](https://www.slideshare.net/slideshow/0dte-breakeven-iron-condor-how-i-trade-it-230412pdf/257348950) - John Sandvand's SlideShare
+- [The best way to set a stop-loss on credit spreads](https://www.thetaprofits.com/stop-loss-on-credit-spreads-in-0dte-options-trading/) - Theta Profits
+- [My options trading results for 2025](https://www.thetaprofits.com/my-options-trading-results-for-2025-what-actually-worked/) - Sandvand's 2025 results (39.26% return)
 - [Henry Schwartz's Zero-Day SPX Iron Condor Strategy](https://www.cboe.com/insights/posts/henry-schwartzs-zero-day-spx-iron-condor-strategy-a-deep-dive/) - CBOE
 - [Best Time to Get Into a SPX 0-DTE Iron Condor](https://tradersfly.com/blog/best-time-to-get-into-a-spx-0-dte-iron-condor/) - Tradersfly
 - [Easy Peasy Iron Condors (EPIC)](https://aeromir.com/001376781/easy-peasy-iron-condors) - Aeromir
@@ -686,3 +717,4 @@ def get_my_positions(self):
 | Date | Author | Changes |
 |------|--------|---------|
 | 2026-01-27 | Claude | Initial strategy specification from web research |
+| 2026-03-11 | Claude | Clarified Tammy's original rules vs CALYPSO additions (VIX filter, FOMC blackout, entry times). Added research sources. |

@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.10.1 | **Last Updated:** 2026-03-09
+**Version:** 1.10.3 | **Last Updated:** 2026-03-11
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -16,27 +16,19 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), and wider starting OTM (MKT-024).
 
-### Entry Schedule (5 entries — VIX-scaled in v1.10.0, Entry #6 dropped in v1.6.0)
+### Entry Schedule (5 entries at :15/:45 marks, Entry #6 dropped in v1.6.0)
 
-**Default schedule (VIX < 20):**
+**Current schedule (v1.10.3 — MKT-034 disabled, matches winning period Feb 10-27):**
 
-| Entry | Time (ET) | Scout Window |
-|-------|-----------|-------------|
-| 1 | 11:14:30 | 11:04:30-11:14:30 |
-| 2 | 11:44:30 | 11:34:30-11:44:30 |
-| 3 | 12:14:30 | 12:04:30-12:14:30 |
-| 4 | 12:44:30 | 12:34:30-12:44:30 |
-| 5 | 13:14:30 | 13:04:30-13:14:30 |
+| Entry | Time (ET) | Scout Window (MKT-031) |
+|-------|-----------|------------------------|
+| 1 | 10:15 | 10:05-10:15 |
+| 2 | 10:45 | 10:35-10:45 |
+| 3 | 11:15 | 11:05-11:15 |
+| 4 | 11:45 | 11:35-11:45 |
+| 5 | 12:15 | 12:05-12:15 |
 
-**VIX-scaled entry time shifting (MKT-034, v1.10.0):** Entry execution at :14:30/:44:30 (30s before :15/:45 marks — fills land at :15:00 instead of :16:00). VIX gate checks at :14:00/:44:00 for E#1 only:
-
-| VIX at Check | E#1 Start | Schedule |
-|--|--|--|
-| < 20 | 11:14:30 | 11:14:30, 11:44:30, 12:14:30, 12:44:30, 13:14:30 |
-| 20-23 | 11:44:30 | 11:44:30, 12:14:30, 12:44:30, 13:14:30, 13:44:30 |
-| >= 23 | 12:14:30 | 12:14:30, 12:44:30, 13:14:30, 13:44:30, 14:14:30 |
-
-On early close days, cutoff is 12:30 PM (allows 12:14:30 entry on high-VIX days).
+On early close days, cutoff is 12:30 PM. MKT-034 (VIX-scaled time shifting) is disabled — neither Tammy Chambless nor John Sandvand use VIX-based scheduling. Code preserved and configurable via `vix_time_shift.enabled`.
 
 ### Smart Entry Windows (MKT-031) — v1.8.0
 
@@ -258,6 +250,7 @@ bots/hydra/
 
 ## Version History
 
+- **1.10.3** (2026-03-11): Disable MKT-034 VIX time shifting + remove VIX entry cutoff (max_vix_entry=999). Neither Tammy Chambless nor John Sandvand use VIX cutoffs or time shifting (both studied VIX correlation, found none). Entry times revert to 10:15 AM start (winning period Feb 10-27). Spread widths reverted to 50pt. MKT-034 remains configurable (`vix_time_shift.enabled`).
 - **1.10.2** (2026-03-10): Replace MEIC+ stop formula with credit+buffer (Brian's approach): stop = total_credit + $0.10 instead of total_credit - $0.15. Extra cushion reduces marginal stops. Fix: stop level validation now per-side (prevents skipping active side when stopped side has 0). Telegram /set updated: `stop_buffer` replaces `meic_plus`.
 - **1.10.1** (2026-03-09): Fix #83: Emergency close improvements — skip worthless long legs (bid=$0), $0.05 min tick fallback, cancel zombie 409 orders, dynamic limit-only handling. Fix #84: Dashboard P&L history updated after settlement. Commission tracks actual legs closed.
 - **1.10.0** (2026-03-08): MKT-034 VIX-scaled entry time shifting. Entry execution at :14:30/:44:30 (30s before :15/:45 marks). VIX gate checks at :14:00/:44:00 — blocks E#1 if VIX >= threshold (20/23), shifts schedule to later slots. Floor at 12:14:30. Early close cutoff raised to 12:30 PM. Configurable via `vix_time_shift` config section.

@@ -113,7 +113,7 @@ ORDER_RETRY_DELAY_SECONDS = 1.2  # Reduced from 2.0s with batch quote headroom
 POSITION_VERIFY_DELAY_SECONDS = 0.5  # Wait before verifying position exists
 
 # MKT-006: VIX filter
-DEFAULT_MAX_VIX_ENTRY = 25  # Skip remaining entries if VIX > this
+DEFAULT_MAX_VIX_ENTRY = 25  # Skip remaining entries if VIX >= this
 
 # POS-007: Maximum positions check
 MAX_POSITIONS_PER_DAY = 24  # 6 ICs x 4 legs
@@ -745,7 +745,7 @@ class MEICStrategy:
     - Safe partial fill handling (never leave naked shorts)
     - Automatic orphan cleanup on restart
     - Independent stop monitoring per IC
-    - VIX filtering (skip entries if VIX > max_vix_entry)
+    - VIX filtering (skip entries if VIX >= max_vix_entry)
     - FOMC blackout (skip all entries on Fed announcement days)
     - Comprehensive edge case handling (79 cases analyzed)
 

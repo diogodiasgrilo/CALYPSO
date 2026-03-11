@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-03-08
+**Last Updated:** 2026-03-11
 **Version:** 1.10.0
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
@@ -57,7 +57,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 | Philosophy | Always market-neutral | Always full IC + EMA signal (informational) |
 | Entry type | Always full iron condor | Always full iron condor (skip if either side non-viable) |
 | Entries per day | 6 | 5 (Entry #6 dropped in v1.6.0 to free margin for wider put spreads) |
-| Stop formula (full IC) | total_credit per side | total_credit per side (same as base MEIC) |
+| Stop formula (full IC) | total_credit per side (MEIC+: -$0.10) | total_credit + stop_buffer (default +$0.10, Brian's credit+buffer) |
 | Stop execution | Close both legs (short + long) | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025) |
 | Credit gate | Skip if both non-viable | Skip if either side non-viable (MKT-011) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
@@ -106,9 +106,19 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 ### Entry Schedule
 
-5 entries per day, spaced 30 minutes apart. Entry execution at :14:30/:44:30 (30s before :15/:45 marks — fills land at :15:00 instead of :16:00). VIX-scaled start time via MKT-034 (v1.10.0).
+5 entries per day, spaced 30 minutes apart at :15/:45 marks (19-day MAE analysis: 10% lower adverse excursion than :05/:35). Starting at 10:15 AM (v1.10.3 — matches winning period Feb 10-27).
 
-**Default schedule (VIX < 20):**
+**Current schedule (MKT-034 disabled, v1.10.3):**
+
+| Entry | Time (ET) | Notes |
+|-------|-----------|-------|
+| 1 | 10:15 | MKT-031 scouting from 10:05 |
+| 2 | 10:45 | |
+| 3 | 11:15 | |
+| 4 | 11:45 | |
+| 5 | 12:15 | |
+
+**Previous schedule (MKT-034 enabled, v1.10.0-1.10.2):**
 
 | Entry | Time (ET) | Notes |
 |-------|-----------|-------|
@@ -120,7 +130,9 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 Each entry has a 5-minute retry window after the scheduled time. MKT-031 smart entry windows add a 10-minute scouting period BEFORE each scheduled time (see Smart Entry Windows section below).
 
-### VIX-Scaled Entry Time Shifting (MKT-034)
+### VIX-Scaled Entry Time Shifting (MKT-034) — DISABLED (v1.10.3)
+
+> **Status:** DISABLED via `vix_time_shift.enabled: false`. Neither Tammy Chambless nor John Sandvand use VIX-based time shifting. Winning period (Feb 10-27) used early entries starting at 10:05 AM. Code preserved and configurable — set `enabled: true` to re-enable.
 
 At high VIX (>= 20), early entries (11:15-11:45) have 86-100% stop rates while later entries (12:15-12:45) have only 50-67% stop rates with nearly double the P&L per entry. MKT-034 shifts the 5-entry schedule later on high-VIX days.
 
@@ -804,7 +816,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `entry_times` | `["11:15","11:45","12:15","12:45","13:15"]` | Entry schedule (ET). Ignored when `vix_time_shift.enabled` (uses ALL_ENTRY_SLOTS instead) |
+| `entry_times` | `["10:15","10:45","11:15","11:45","12:15"]` | Entry schedule (ET). Used when `vix_time_shift.enabled=false`. Ignored when `vix_time_shift.enabled=true` (uses ALL_ENTRY_SLOTS instead) |
 | `entry_window_minutes` | `5` | Window around entry time |
 | `spread_width` | `50` | Default spread width (points) |
 | `min_spread_width` | `60` | MKT-008 liquidity fallback floor (universal) |
@@ -823,7 +835,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
 | `stop_buffer` | `0.10` | Stop buffer: stop = credit + buffer (Brian's approach — extra cushion per stop) |
-| `max_vix_entry` | `23` | Maximum VIX for new entries (v1.10.2: lowered from 30 — 19-day analysis showed VIX >= 23 = whipsaw/double-stop risk) |
+| `max_vix_entry` | `999` | Maximum VIX for new entries. Set to 999 to effectively disable (v1.10.3). **CALYPSO addition** — neither Tammy Chambless nor John Sandvand (ThetaProfits) use a VIX cutoff; both studied VIX correlation and found none. |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |
 | `early_close_roc_threshold` | `0.03` | MKT-018 ROC threshold (3.0%). Only used when enabled. |
