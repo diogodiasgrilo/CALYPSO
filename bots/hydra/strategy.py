@@ -263,6 +263,15 @@ class HydraStrategy(MEICStrategy):
         long_salvage = config.get("long_salvage", {})
         self.short_only_stop = long_salvage.get("short_only_stop", False)
 
+        # MKT-035: _conditional_entry_times must be set BEFORE super().__init__()
+        # because _parse_entry_times() (called from super) references it
+        conditional_strs = strategy_cfg.get("conditional_entry_times", [])
+        self._conditional_entry_times = [
+            dt_time(int(p[0]), int(p[1]))
+            for p in (t.split(":") for t in conditional_strs)
+        ] if conditional_strs else []
+        self._base_entry_count = 0  # Set in _parse_entry_times after entry_times is built
+
         # Call parent init (this sets up everything else including recovery)
         super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
 
@@ -401,16 +410,10 @@ class HydraStrategy(MEICStrategy):
         # MKT-035: Call-only on down days — when SPX drops threshold% below
         # today's open, place call spread only (no puts). 20-day data: down days
         # have 71% put stop rate but only 7% call stop rate. +$920 improvement.
+        # Note: _conditional_entry_times and _base_entry_count are set BEFORE super().__init__()
         self.downday_callonly_enabled = strategy_config.get("downday_callonly_enabled", True)
         self.downday_threshold_pct = float(strategy_config.get("downday_threshold_pct", 0.003))  # 0.3%
         self.downday_theoretical_put_credit = float(strategy_config.get("downday_theoretical_put_credit", 2.50)) * 100  # $250
-        # Conditional entry times: only fire when MKT-035 triggers (call-only on down days)
-        conditional_strs = strategy_config.get("conditional_entry_times", [])
-        self._conditional_entry_times = [
-            dt_time(int(p[0]), int(p[1]))
-            for p in (t.split(":") for t in conditional_strs)
-        ] if conditional_strs else []
-        self._base_entry_count = 0  # Set in _parse_entry_times after entry_times is built
         logger.info(
             f"  Down day filter (MKT-035): {'ENABLED' if self.downday_callonly_enabled else 'DISABLED'} "
             f"(threshold: {self.downday_threshold_pct * 100:.1f}%, "
