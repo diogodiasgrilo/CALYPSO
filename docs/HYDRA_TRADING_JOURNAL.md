@@ -1162,21 +1162,24 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact | Salvage |
 |-------|------|--------|------|---------------|--------|---------|------------|---------|
-| #1 | 01:16 PM ET | NEUTRAL | Iron Condor | C:6870 P:6800 | $265 ($90C+$175P) | Double Stop | -$275 |  |
-| #2 |  | NEUTRAL | Full IC | C:6870 P:6800 | $265 ($90C+$175P) | Double Stop | -$270 |  |
+| #1 | 12:44 PM ET | NEUTRAL | Iron Condor | C:6865 P:6785 | $250 ($80C+$170P) | Double Stop | -$275 |  |
+| #2 | 01:16 PM ET | NEUTRAL | Iron Condor | C:6870 P:6800 | $265 ($90C+$175P) | Double Stop | -$270 |  |
 
 **Key observations**:
-- Both entries resulted in double-stops, with all 4 legs (2 call, 2 put) stopped out against a 69.7-point intraday range — SPX's opening probe to 6,845 stressed short calls at 6,870, then a reversal to a session low of 6,775.78 breached short puts at 6,785 and 6,800, producing -$275 and -$270 P&L impacts respectively.
-- VIX opened at a suppressed 22.61 before snapping to a session high of 25.70 and closing at 25.65, a dynamic that created a structural trap: call credits of $0.90 (just above the $0.75 MKT-011 floor) and put credits of $1.75 (at the floor) reflected compressed vol at entry, while realized vol was far higher.
-- MKT-011's credit gate drove an exceptional 4-of-6 skip rate, with the first successful placement not occurring until 12:44 ET — implying that the three standard morning entry slots (11:15, 11:45, 12:15) all failed to clear minimum credit thresholds under the low-VIX open environment.
-- Entry #1 exhibits an anomalous stop sequence: the put stop fired at 12:46 PM ET — 30 minutes *before* the 1:16 PM ET recorded entry time — suggesting either a data logging error in the entry timestamp or the put stop time field is incorrectly populated.
-- At -$585 net on $15,000 deployed (-3.9% ROC), today's loss trimmed cumulative P&L from an inferred ~$1,145 to $560, representing the second consecutive above-average loss in an elevated-VIX environment, though cumulative ROC remains positive at +2.26% through day 20.
+- HYDRA restarted mid-day, producing two entries that originally shared the same entry number (#1). Entry #1 entered at 12:44 PM ET (C:6865 P:6785, $250 credit) and Entry #2 at 1:16 PM ET (C:6870 P:6800, $265 credit) — both slightly different strikes due to SPX movement between entries.
+- Both entries resulted in double-stops, with all 4 legs (2 call, 2 put) stopped out against a 69.7-point intraday range — SPX probed to 6,845 (stressing short calls at 6,865/6,870), then reversed to a session low of 6,775.78 (breaching short puts at 6,785 and 6,800), producing -$275 and -$270 P&L impacts respectively.
+- Entry #1's put stop fired just 2 minutes after entry (12:46 PM ET), reflecting that SPX was already near the put strike at entry time. The call stop followed at 1:27 PM ET when SPX rallied back through 6,865.
+- VIX opened at 22.61 before spiking to 25.70 session high and closing at 25.65 — a structural trap where call credits of $0.80-$0.90 (just above MKT-011's $0.75 floor) and put credits of $1.70-$1.75 (at the floor) reflected compressed vol at entry, while realized vol was far higher.
+- MKT-011's credit gate drove an exceptional 4-of-6 skip rate, with the first successful placement not until 12:44 ET — the three standard morning slots all failed to clear minimum credit thresholds.
+- At -$585 net on $15,000 deployed (-3.9% ROC), today's loss trimmed cumulative P&L from ~$1,145 to $560, the second consecutive above-average loss in elevated VIX, though cumulative ROC remains positive at +2.26% through day 20.
 
 ### Stop Timing Log
 
 ```
-12:46 PM ET - Entry #1 Double Stop ($275 loss)
-N/A - Entry #2 Double Stop ($270 loss)
+12:46 PM ET - Entry #1 Put Stop (-$80)
+01:27 PM ET - Entry #1 Call Stop (-$195) → Double Stop ($275 total loss)
+01:28 PM ET - Entry #2 Call Stop (-$185)
+01:36 PM ET - Entry #2 Put Stop (-$85) → Double Stop ($270 total loss)
 ```
 
 ### P&L Reconciliation
