@@ -1474,8 +1474,8 @@ class MEICStrategy:
             return "Daily loss limit reached - done for today"
 
         # MKT-006: Check VIX before new entry
-        if self.current_vix > self.max_vix_entry:
-            logger.warning(f"VIX {self.current_vix:.1f} > {self.max_vix_entry} - skipping remaining entries")
+        if self.current_vix >= self.max_vix_entry:
+            logger.warning(f"VIX {self.current_vix:.1f} >= {self.max_vix_entry} - skipping remaining entries")
             # Don't stop monitoring existing positions
             if self._next_entry_index < len(self.entry_times):
                 self.daily_state.entries_skipped += (len(self.entry_times) - self._next_entry_index)
