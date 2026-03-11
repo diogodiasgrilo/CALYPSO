@@ -1688,16 +1688,11 @@ class HydraStrategy(MEICStrategy):
         threshold = -self.downday_threshold_pct
 
         is_down = change_pct < threshold
-        if is_down:
-            logger.info(
-                f"MKT-035: SPX down {change_pct * 100:.2f}% from open "
-                f"({current:.1f} vs {spx_open:.1f}), threshold {threshold * 100:.1f}% → call-only"
-            )
-        else:
-            logger.info(
-                f"MKT-035: SPX {change_pct * 100:+.2f}% from open "
-                f"({current:.1f} vs {spx_open:.1f}), threshold {threshold * 100:.1f}% → full IC"
-            )
+        triggered = "TRIGGERED → call-only" if is_down else "not triggered"
+        logger.info(
+            f"MKT-035: SPX {change_pct * 100:+.2f}% from open "
+            f"({current:.1f} vs {spx_open:.1f}), threshold {threshold * 100:.1f}% — {triggered}"
+        )
         return is_down
 
     def _is_conditional_entry(self, entry_num: int) -> bool:
