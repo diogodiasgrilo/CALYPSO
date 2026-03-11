@@ -75,7 +75,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.10.3"
+HYDRA_VERSION = "1.10.4"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -332,17 +332,22 @@ class HydraStrategy(MEICStrategy):
         else:
             logger.info(f"  One-sided entries: DISABLED (skip if either side non-viable)")
 
-        # Override min credit from base class $0.50 to $0.75 for HYDRA
-        # Credit cushion analysis (docs/HYDRA_CREDIT_CUSHION_ANALYSIS.md):
-        # $0.75 call min → 68.1% call cushion (above 65% safety threshold)
-        # $1.00 call min → 61.5% call cushion (below threshold, broke Week 1 asymmetry)
-        # Lower call min = less MKT-020 tightening = calls stay further OTM = safer
-        self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 0.75) * 100
+        # Override min credit from base class $0.50 to $0.60 for HYDRA
+        # v1.10.4: Lowered from $0.75 to $0.60 — calls are secondary income (put skew),
+        # lower min = less MKT-020 tightening = calls stay further OTM = safer.
+        # Week 1 data: most entries at VIX<18 were put-only because calls can't produce
+        # viable credit even at 43pt OTM. Don't force calls closer to ATM.
+        self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 0.60) * 100
 
         # Separate put minimum credit
-        # Calls use $0.75 (preserves natural put skew asymmetry)
-        # Puts use $1.75 (MKT-029 fallback to $1.65)
-        self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 1.75) * 100
+        # v1.10.4: Raised from $1.75 to $2.50 — 20-day data analysis:
+        # $2.50-$3.49 bucket = 66.7% survival, +$159 avg P&L (best)
+        # $2.00-$2.49 bucket = 33.3% survival, -$8 avg P&L (worst — dead zone)
+        # $1.50-$1.99 bucket = 48.3% survival, +$23 avg P&L (where current entries land)
+        # Higher minimum forces MKT-022 to scan closer to ATM, landing in the
+        # 42-65pt OTM zone (Week 1 sweet spot) instead of 70-100pt OTM.
+        # MKT-029 fallback: $2.45, $2.40 (dynamic: min - $0.05, min - $0.10)
+        self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 2.50) * 100
         logger.info(f"  Min viable credit - call: ${self.min_viable_credit_per_side / 100:.2f}, put: ${self.min_viable_credit_put_side / 100:.2f}")
 
         # MKT-024: Wider starting OTM multipliers
@@ -1990,8 +1995,8 @@ class HydraStrategy(MEICStrategy):
 
         # Phase 2: MKT-029 graduated thresholds — try primary, then fallbacks
         # Lower thresholds let MKT-020 accept wider (further OTM) strikes with
-        # $95-$99 credit instead of tightening to narrow strikes for $125.
-        # Wider = better cushion = safer.
+        # slightly below-target credit instead of tightening to narrow strikes.
+        # Wider = better cushion = safer. Fallbacks: min-$0.05, min-$0.10.
         call_thresholds = [min_credit, min_credit - 5, min_credit - 10]
         for threshold_idx, threshold in enumerate(call_thresholds):
             for otm_val, short_s, long_s, call_credit in evaluated_candidates:
@@ -2185,8 +2190,8 @@ class HydraStrategy(MEICStrategy):
 
         # Phase 2: MKT-029 graduated thresholds — try primary, then fallbacks
         # Lower thresholds let MKT-022 accept wider (further OTM) strikes with
-        # $170-$174 credit instead of tightening to narrow strikes for $200+.
-        # Wider = better cushion = safer.
+        # slightly below-target credit instead of tightening to narrow strikes.
+        # Wider = better cushion = safer. Fallbacks: min-$0.05, min-$0.10.
         put_thresholds = [min_credit, min_credit - 5, min_credit - 10]
         for threshold_idx, threshold in enumerate(put_thresholds):
             for otm_val, short_s, long_s, put_credit in evaluated_candidates:
