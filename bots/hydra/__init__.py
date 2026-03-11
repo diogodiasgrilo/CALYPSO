@@ -12,7 +12,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both sides viable: Proceed with full iron condor
 - Call non-viable, put viable, VIX < 18: Place put-only entry (MKT-032 VIX gate)
 - Call non-viable, put viable, VIX >= 18: Skip entry (2× stop too risky without hedge)
-- Put non-viable: Skip entry (call-only disabled — insufficient data)
+- Put non-viable: Skip entry (call-only only via MKT-035 down-day filter)
 - Both non-viable: Skip entry entirely
 
 Down Day Filter (MKT-035): When SPX drops >= 0.3% below today's open, place call-only.

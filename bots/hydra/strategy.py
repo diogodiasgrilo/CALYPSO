@@ -191,8 +191,8 @@ class HydraStrategy(MEICStrategy):
 
     Key Features (HYDRA specific, beyond base MEIC):
     - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
-    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $0.75, put min $1.75
-      Call non-viable → put-only entry (v1.7.1). Put non-viable → skip (call-only disabled).
+    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $0.60, put min $2.50
+      Call non-viable → put-only entry (v1.7.1). Put non-viable → skip (call-only only via MKT-035).
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
     - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
     - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms. Code preserved but dormant.
@@ -1925,15 +1925,15 @@ class HydraStrategy(MEICStrategy):
                 )
                 return ("skip", True, estimated_call, estimated_put)
         else:
-            # Put non-viable, call viable → skip (call-only disabled)
+            # Put non-viable, call viable → skip (call-only only via MKT-035 down-day filter)
             logger.warning(
                 f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
                 f"(${estimated_put:.2f} < ${put_min:.2f}) - "
-                f"call ${estimated_call:.2f} viable but call-only entries disabled"
+                f"call ${estimated_call:.2f} viable but call-only only via MKT-035"
             )
             self._log_safety_event(
                 "MKT-011_SKIP",
-                f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable, call-only disabled",
+                f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable, call-only only via MKT-035",
                 "Skipped"
             )
             return ("call_only", True, estimated_call, estimated_put)
@@ -2523,7 +2523,7 @@ class HydraStrategy(MEICStrategy):
                         )
                         self._log_safety_event(
                             "MKT-011_SKIP",
-                            f"Entry #{entry_num} - put non-viable → skip (call-only disabled)",
+                            f"Entry #{entry_num} - put non-viable → skip (call-only only via MKT-035)",
                             "Skipped"
                         )
                         self.daily_state.entries_skipped += 1
@@ -2532,7 +2532,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        return f"Entry #{entry_num} skipped - put non-viable, call-only disabled"
+                        return f"Entry #{entry_num} skipped - put non-viable (call-only only via MKT-035)"
                     elif gate_result == "put_only":
                         # v1.7.1: Call credit non-viable → place put-only entry
                         # Data: 87.5% win rate, +$870 net from 6 qualifying entries
@@ -3955,6 +3955,15 @@ class HydraStrategy(MEICStrategy):
         status['ema_long'] = self._last_ema_long
         status['ema_diff_pct'] = self._last_ema_diff_pct
 
+        # MKT-035: SPX vs open % for heartbeat display
+        spx_open = self.market_data.spx_open
+        if spx_open > 0 and self.current_price > 0:
+            change_pct = (self.current_price - spx_open) / spx_open * 100
+            status['spx_open'] = spx_open
+            status['spx_vs_open_pct'] = change_pct
+            status['mkt035_threshold'] = -self.downday_threshold_pct * 100
+            status['mkt035_triggered'] = change_pct < -self.downday_threshold_pct * 100
+
         # MKT-018: Early close status for heartbeat display
         if self.early_close_enabled:
             if self._early_close_triggered:
@@ -4025,6 +4034,20 @@ class HydraStrategy(MEICStrategy):
         # MKT-034: Add VIX gate shift info to heartbeat
         if self.vix_gate_enabled and self._vix_gate_resolved and self._vix_gate_start_slot > 0:
             lines.insert(0, f"  VIX-shift: slot {self._vix_gate_start_slot}")
+
+        # MKT-035: SPX vs open indicator (after trend line, before entries)
+        spx_open = self.market_data.spx_open
+        if spx_open > 0 and self.current_price > 0:
+            change_pct = (self.current_price - spx_open) / spx_open * 100
+            threshold = -self.downday_threshold_pct * 100
+            sign = "+" if change_pct >= 0 else ""
+            triggered = "CALL-ONLY" if change_pct < threshold else "full IC"
+            insert_idx = 1 if lines else 0  # After trend line
+            lines.insert(insert_idx,
+                f"  MKT-035: SPX {sign}{change_pct:.2f}% vs open "
+                f"({self.current_price:.1f} vs {spx_open:.1f}) | "
+                f"threshold: {threshold:.1f}% | {triggered}"
+            )
 
         return lines
 
