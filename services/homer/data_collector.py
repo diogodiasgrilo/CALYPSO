@@ -193,7 +193,30 @@ def _build_entries_for_day(
 
     # Sort entries by timestamp and renumber sequentially (handles bot restart duplicates)
     raw_entries.sort(key=lambda x: x[0])
-    for i, (ts, orig_num, entry) in enumerate(raw_entries, 1):
+
+    # Deduplicate true duplicate rows (identical timestamp + strikes + credit)
+    # This handles Google Sheets logging the same entry twice
+    deduped_entries = []
+    seen_keys = set()
+    for ts, orig_num, entry in raw_entries:
+        dedup_key = (
+            ts,
+            str(entry.get("Short Call Strike", "")),
+            str(entry.get("Short Put Strike", "")),
+            str(entry.get("Total Credit", "")),
+        )
+        if dedup_key in seen_keys:
+            logger.info(f"Removed duplicate entry for {date_str}: Entry #{orig_num} at {ts} "
+                        f"(C:{entry.get('Short Call Strike')} P:{entry.get('Short Put Strike')} "
+                        f"credit={entry.get('Total Credit')})")
+            continue
+        seen_keys.add(dedup_key)
+        deduped_entries.append((ts, orig_num, entry))
+
+    if len(deduped_entries) < len(raw_entries):
+        logger.info(f"Deduplicated {len(raw_entries)} → {len(deduped_entries)} entries for {date_str}")
+
+    for i, (ts, orig_num, entry) in enumerate(deduped_entries, 1):
         new_num = str(i)
         entry["Entry #"] = new_num
         entry["_original_entry_num"] = orig_num
@@ -201,10 +224,10 @@ def _build_entries_for_day(
         entries_by_num[new_num] = entry
         original_to_new[orig_num].append((new_num, ts))
 
-    if len(raw_entries) != len(set(ts for ts, _, _ in raw_entries)):
-        logger.info(f"Renumbered {len(raw_entries)} entries for {date_str} (duplicate entry numbers detected)")
-    elif any(str(i + 1) != raw_entries[i][1] for i in range(len(raw_entries))):
-        logger.info(f"Renumbered {len(raw_entries)} entries for {date_str}")
+    if len(deduped_entries) != len(set(ts for ts, _, _ in deduped_entries)):
+        logger.info(f"Renumbered {len(deduped_entries)} entries for {date_str} (duplicate entry numbers detected)")
+    elif any(str(i + 1) != deduped_entries[i][1] for i in range(len(deduped_entries))):
+        logger.info(f"Renumbered {len(deduped_entries)} entries for {date_str}")
 
     # 1b. Parse Trades tab for stop timing data ("HYDRA Stop #N (CALL/PUT)")
     # Match stops to entries by STRIKE (primary) or original entry number (fallback)
