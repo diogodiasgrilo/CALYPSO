@@ -23,7 +23,7 @@ SyslogIdentifier=calypso-homer
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/calypso/intel/homer /opt/calypso/docs /opt/calypso/.git
+ReadWritePaths=/opt/calypso/intel/homer /opt/calypso/docs /opt/calypso/.git /opt/calypso/data
 
 # Claude API (120s per narrative × 3 calls per day × N days) + Sheets reads (3×15s) + git (60s) + overhead
 TimeoutStartSec=600
