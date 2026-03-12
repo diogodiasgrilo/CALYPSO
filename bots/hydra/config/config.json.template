@@ -50,8 +50,9 @@
         "min_delta": 5,
         "max_delta": 15,
 
-        "_comment_stop_buffer": "Stop buffer: stop = credit + $0.10 (Brian's approach — extra cushion, each stop costs ~$25 instead of breakeven)",
+        "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses stop_buffer ($0.10). Put uses put_stop_buffer ($5.00 — wider buffer avoids 91% false put stops, 21-day backtest: +$6,885 NET). If put_stop_buffer not set, falls back to stop_buffer for both sides.",
         "stop_buffer": 0.10,
+        "put_stop_buffer": 5.00,
 
         "_comment_risk": "Risk management settings. max_vix_entry: CALYPSO addition (neither Tammy nor Sandvand use VIX cutoffs). Set high to effectively disable.",
         "max_vix_entry": 999,
