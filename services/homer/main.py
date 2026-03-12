@@ -672,6 +672,19 @@ def main():
             )
             send_telegram_alert(config, msg)
 
+        # 14. Write date-named marker file for dashboard agent status
+        # Dashboard reads intel/homer/*.md sorted by name to determine last run time.
+        # Without this, it only finds journal_backup_* files whose mtimes are
+        # unreliable (overwritten by git pull).
+        try:
+            latest_date = missing_days[-1]
+            marker_path = os.path.join(backup_dir, f"{latest_date}.md")
+            with open(marker_path, "w") as f:
+                f.write(f"HOMER completed for {', '.join(date_labels)}\n")
+            logger.info(f"Dashboard marker written: {marker_path}")
+        except Exception as e:
+            logger.warning(f"Failed to write dashboard marker: {e}")
+
     except Exception as e:
         logger.error(f"HOMER failed: {e}", exc_info=True)
         if homer_config.get("telegram_alert", True):
