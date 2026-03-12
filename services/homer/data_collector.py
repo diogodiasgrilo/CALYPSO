@@ -670,9 +670,14 @@ def _match_stop_by_strike(
     stop_short_strike = match.group(1).split(".")[0]
 
     strike_key = "Short Call Strike" if side == "call" else "Short Put Strike"
+    stop_time_key = f"{side.title()} Stop Time"
     for num, entry in entries_by_num.items():
         entry_strike = str(entry.get(strike_key, "")).split(".")[0]
         if entry_strike and entry_strike == stop_short_strike:
+            # Skip entries that already have a stop recorded on this side
+            # (multiple entries can share the same short strike on range-bound days)
+            if entry.get(stop_time_key):
+                continue
             return num
     return None
 

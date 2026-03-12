@@ -19,6 +19,7 @@ import smtplib
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from pathlib import Path
+import time
 import threading
 from queue import Queue
 from email.mime.text import MIMEText
@@ -3735,6 +3736,10 @@ class TradeLoggerService:
         elif "BOT STARTING" in msg_upper or "TRADING BOT STARTING" in msg_upper:
             self.log_monitor("STARTED", message[:60])
 
+    # Max retries for failed Google Sheets writes before giving up
+    SHEETS_WRITE_MAX_RETRIES = 3
+    SHEETS_WRITE_RETRY_DELAY = 2.0  # seconds between retries
+
     def _process_log_queue(self):
         """Process trades from the logging queue."""
         while not self._stop_logging:
@@ -3746,7 +3751,24 @@ class TradeLoggerService:
                 self.local_logger.log_trade(trade)
 
                 if self.google_logger.enabled:
-                    self.google_logger.log_trade(trade)
+                    # Retry on failure to prevent silent data loss
+                    success = False
+                    for attempt in range(1, self.SHEETS_WRITE_MAX_RETRIES + 1):
+                        if self.google_logger.log_trade(trade):
+                            success = True
+                            break
+                        if attempt < self.SHEETS_WRITE_MAX_RETRIES:
+                            logger.warning(
+                                f"SHEETS-RETRY: Attempt {attempt}/{self.SHEETS_WRITE_MAX_RETRIES} "
+                                f"failed for {trade.action}, retrying in {self.SHEETS_WRITE_RETRY_DELAY}s..."
+                            )
+                            time.sleep(self.SHEETS_WRITE_RETRY_DELAY)
+                    if not success:
+                        logger.error(
+                            f"SHEETS-LOST: Failed to write after {self.SHEETS_WRITE_MAX_RETRIES} "
+                            f"attempts: {trade.action} | P&L: {trade.pnl} | "
+                            f"Strike: {trade.strike} — DATA LOST from Sheets"
+                        )
 
                 if self.microsoft_logger.enabled:
                     self.microsoft_logger.log_trade(trade)

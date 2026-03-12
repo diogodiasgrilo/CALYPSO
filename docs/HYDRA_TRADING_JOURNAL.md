@@ -1196,27 +1196,28 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 
 | Entry | Time | Signal | Type | Short Strikes | Credit | Outcome | P&L Impact | Salvage |
 |-------|------|--------|------|---------------|--------|---------|------------|---------|
-| #1 | 10:05 AM ET | NEUTRAL | Iron Condor | C:6880 P:6710 | $255 ($85C+$170P) | Put Stopped | -$290 |  |
+| #1 | 10:05 AM ET | NEUTRAL | Iron Condor | C:6880 P:6710 | $255 ($85C+$170P) | Put Stopped | -$145 |  |
 | #2 | 10:45 AM ET | NEUTRAL | Iron Condor | C:6865 P:6725 | $335 ($60C+$275P) | Put Stopped | -$155 |  |
-| #3 | 11:15 AM ET | NEUTRAL | Iron Condor | C:6850 P:6710 | $330 ($55C+$275P) | Put Stopped |  |  |
+| #3 | 11:15 AM ET | NEUTRAL | Iron Condor | C:6850 P:6710 | $330 ($55C+$275P) | Put Stopped | -$75 |  |
 | #4 | 11:45 AM ET | NEUTRAL | Iron Condor | C:6840 P:6695 | $295 ($55C+$240P) | Put Stopped | -$100 |  |
-| #5 | 12:15 PM ET | NEUTRAL | Iron Condor | C:6835 P:6710 | $360 ($55C+$305P) | Put Stopped |  |  |
+| #5 | 12:15 PM ET | NEUTRAL | Iron Condor | C:6835 P:6710 | $360 ($55C+$305P) | Put Stopped | -$70 |  |
 
 **Key observations**:
-- All 5 entries were stopped on the put side exclusively, with 0 call stops and 0 double stops; SPX's intraday drop to 6,745.41 — roughly 66 points below the session high — sustained enough downside pressure to satisfy the MKT-036 75-second confirmation timer on every put spread while call strikes remained untouched at expiry.
-- Entry #1 (10:05 ET) posted the worst outcome at -$290.00 P&L on only $1.70 put credit, while Entry #5 (12:15 ET) collected the richest put credit of the day at $3.05 ($3.60 total) yet was also stopped, illustrating that elevated put premium driven by late-session IV expansion did not overcome the directional flush.
-- Call credit compressed rapidly from $0.85 at Entry #1 to the MKT-011 floor of $0.60 at Entry #2, then held at $0.55 for Entries #3–5, meaning the call side contributed near-minimum viable premium across all but the first entry.
+- All 5 entries were stopped on the put side exclusively, with 0 call stops and 0 double stops; SPX's intraday drop to 6,745.41 — roughly 66 points below the session high — sustained enough downside pressure on every put spread while call strikes remained untouched at expiry. Note: MKT-036 stop confirmation timer was not yet deployed (v1.12.0 deployed post-market); all stops executed immediately on breach.
+- Entry #2 (10:45 ET) posted the worst net stop loss at -$155 on $2.75 put credit, while Entry #5 (12:15 ET) had the smallest loss at -$70 despite collecting the richest put credit of the day at $3.05 ($3.60 total), demonstrating that higher premium provided more cushion against the directional flush.
+- Entry #1 (10:05 ET) entered 10 minutes early via MKT-031 smart entry (score 65/65) — this was the last MKT-031 early entry before it was disabled mid-session at the 10:33 restart.
+- Call credit compressed rapidly from $0.85 at Entry #1 to $0.60 at Entry #2, then held at $0.55 for Entries #3–5, meaning the call side contributed near-minimum viable premium across all but the first entry.
 - The MKT-035 down-day filter did not engage on any entry — all 5 were placed as full iron condors — indicating SPX had not yet breached the ~0.3% (~20-point) threshold below the 6,761.91 open at the moment each entry fired, despite the intraday low eventually reaching 16 points below open.
-- P&L impact is missing for Entries #3 and #5, making total stop loss debit reconciliation against the reported $545.00 figure incomplete; confirmed figures for Entries #1, #2, and #4 sum to -$545.00, leaving Entry #3 and #5 P&L impacts as not available in the provided data.
+- Individual stop losses: #1 -$145, #2 -$155, #3 -$75, #4 -$100, #5 -$70, totaling $545 in net stop debits. All verified against HYDRA bot logs (entries #3 and #5 were missing from Google Sheets Trades tab due to mid-session restart chaos — 10 restarts on Mar 11 — corrected manually).
 
 ### Stop Timing Log
 
 ```
-10:24 AM ET - Entry #1 Put Stopped ($290 loss)
+10:24 AM ET - Entry #1 Put Stopped ($145 loss)
 11:12 AM ET - Entry #2 Put Stopped ($155 loss)
-N/A - Entry #3 Put Stopped
+11:15 AM ET - Entry #3 Put Stopped ($75 loss)
+12:16 PM ET - Entry #5 Put Stopped ($70 loss)
 01:38 PM ET - Entry #4 Put Stopped ($100 loss)
-N/A - Entry #5 Put Stopped
 ```
 
 ### P&L Reconciliation
@@ -2245,7 +2246,7 @@ When reviewing performance after implementing improvements, fill in this section
 | Cumulative P&L | $250 |
 | Early Close | No |
 
-**Mar 11 Assessment**: All five entries executed as full iron condors with neutral trend signals, and MKT-011's credit gate held puts viable throughout — put credits ranged from $1.70 to $3.05, clearing the $2.50 threshold on four of five entries — yet every put spread was stopped as SPX's 66-point intraday reversal from the 6,811 high walked the market into sustained breach territory on each position, with MKT-036's 75-second confirmation timer firing cleanly on all five. MKT-020/022 progressive tightening is visible in the short call strikes stepping down from 6,880 to 6,835 across the session, while MKT-031 remains disabled and is not a factor; the two skipped entries are attributed to MKT-011 non-viability on conditional slots, consistent with Apollo's pre-market prediction. At -$310 net against a -$466 historical average loss day, the damage was structurally contained — no double-stops, $310 in expired call credits partially offsetting $545 in stop debits — but the uniform put-stop cascade on a day where SPX never breached any short put strike outright underscores the VIX-elevated regime's capacity to inflate spread values into stop territory well before intrinsic value is reached, a configuration risk
+**Mar 11 Assessment**: All five entries executed as full iron condors with neutral trend signals. Put credits ranged from $1.70 to $3.05 across entries. Every put spread was stopped as SPX's 66-point intraday reversal from the 6,811 high sustained enough downside pressure on each position. Note: MKT-036 stop confirmation timer was NOT active — v1.12.0 was deployed post-market, all stops executed on v1.10.0 without confirmation delay. Entry #1 entered 10 minutes early via MKT-031 smart entry (score 65/65) before MKT-031 was disabled at the 10:33 restart; remaining entries followed the scheduled 10:45/11:15/11:45/12:15 times. Two conditional entries (12:45, 13:15) were skipped by MKT-011 credit non-viability. Individual stop losses: #1 -$145, #2 -$155, #3 -$75, #4 -$100, #5 -$70. At -$310 net against a -$466 historical average loss day, the damage was structurally contained — no double-stops, $310 in expired call credits partially offsetting $545 in stop debits — but the uniform put-stop cascade underscores VIX-elevated regime's capacity to inflate spread values into stop territory well before intrinsic value is reached. Ten bot restarts occurred during the session (code deployments), contributing to 2 missing stop records in Google Sheets Trades tab (corrected manually from bot logs).
 
 ---
 

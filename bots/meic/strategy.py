@@ -6163,7 +6163,7 @@ class MEICStrategy:
             )
 
             logger.info(
-                f"Stop logged to Sheets: Entry #{entry.entry_number} {side} side, "
+                f"Stop queued for Sheets: Entry #{entry.entry_number} {side} side, "
                 f"Loss: ${realized_loss:.2f}"
             )
         except Exception as e:
