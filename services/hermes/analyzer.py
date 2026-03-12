@@ -22,14 +22,14 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.12.0)
+## HYDRA Strategy Parameters (v1.12.1)
 
-- **5 iron condor entries per day** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3)
+- **5 base + up to 2 conditional entries (7 max)** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3). Conditional entries (12:45, 13:15) only fire on down days (MKT-035) as call-only.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
 - **Min credit thresholds (MKT-011):** $0.60/side for calls, $2.50/side for puts (MKT-029 fallback: -$0.05, -$0.10). Put-only when call non-viable AND VIX < 18 (MKT-032).
-- **Stop formula:** total_credit + $0.10 (credit + buffer). One-sided: 2x credit + $0.10.
+- **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. One-sided: 2x credit + buffer. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
 - **Stop confirmation (MKT-036):** 75-second sustained breach before executing stop. Prevents false stops from brief price spikes. Timer resets if spread recovers below stop level.
 - **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
 - **Down-day filter (MKT-035):** When SPX drops 0.3% below open, place call spreads only (no puts). Conditional entries (12:45, 13:15) only fire on down days as call-only.

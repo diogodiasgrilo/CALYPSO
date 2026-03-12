@@ -184,6 +184,8 @@ When a spread value breaches the stop level, a 75-second confirmation window sta
 |---------|---------|-------------|
 | `stop_confirmation_enabled` | `true` | Enable/disable MKT-036 stop confirmation timer |
 | `stop_confirmation_seconds` | `75` | Duration (seconds) breach must sustain before executing stop |
+| `stop_buffer` | `0.10` | Call stop buffer: call_stop = credit + $0.10 |
+| `put_stop_buffer` | `5.00` | Put stop buffer: put_stop = credit + $5.00 (wider — avoids 91% false put stops). Falls back to `stop_buffer` if not set. |
 
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
@@ -252,7 +254,7 @@ sudo journalctl -u hydra -f
 | Trend signal | None | EMA 20/40 (informational only) |
 | Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
-| Stop formula | total_credit - $0.10 | total_credit + $0.10 (Brian's credit+buffer) + MKT-036 75s confirmation |
+| Stop formula | total_credit - $0.10 | total_credit + asymmetric buffer (call $0.10, put $5.00) + MKT-036 75s confirmation |
 | Stop execution | Close both legs | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025 + MKT-033) |
 
 ## Risk Considerations

@@ -445,26 +445,29 @@ Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
 MEIC's core insight: **set the stop loss per side equal to total credit collected**. If one side is stopped and the other expires worthless, the loss on the stopped side exactly equals the profit from the surviving side = breakeven.
 
-**HYDRA (v1.10.2+)** uses a credit+buffer approach instead: stop = total_credit + $0.10 (configurable via `stop_buffer`). This gives $25 more cushion per stop vs MEIC+, at the cost of ~$25 loss per stop event. The extra cushion avoids some marginal stops entirely.
+**HYDRA (v1.10.2+)** uses a credit+buffer approach with **asymmetric buffers**: call stop = total_credit + `stop_buffer` ($0.10), put stop = total_credit + `put_stop_buffer` ($5.00). The wider put buffer ($500 vs $10) avoids 91% of false put stops based on 21-day backtest (+$6,885 NET improvement). If `put_stop_buffer` is not set, falls back to `stop_buffer` for both sides.
 
 ### HYDRA Stop Formula
 
 ```
-stop_level = entry.total_credit + stop_buffer     (full IC: both sides get the SAME level)
-stop_level = 2 × credit + stop_buffer             (one-sided via MKT-011: Fix #40 pattern)
-stop_level = call_credit + theoretical_put + buffer (MKT-035 call-only: theoretical put = $250)
+call_stop = entry.total_credit + stop_buffer         (full IC: call side — $0.10 default)
+put_stop  = entry.total_credit + put_stop_buffer     (full IC: put side — $5.00 default)
+stop_level = 2 × credit + put_stop_buffer            (put-only via MKT-011: Fix #40 pattern)
+stop_level = 2 × credit + stop_buffer                (call-only legacy: Fix #40 pattern)
+stop_level = call_credit + theoretical_put + stop_buffer (MKT-035 call-only: theoretical put = $250)
 ```
 
 | Entry Type | Stop Formula | Example (C=$125, P=$185) |
 |-----------|-------------|--------------------------|
-| Full IC | total_credit + buffer | $125 + $185 = $310 + $10 = $320 per side |
-| Call-only (MKT-035) | call_credit + theo_put + buffer | $125 + $250 + $10 = $385 |
-| Call-only (legacy) | 2× credit + buffer | 2× $125 = $250 + $10 = $260 |
-| Put-only | 2× credit + buffer | 2× $185 = $370 + $10 = $380 |
+| Full IC (call side) | total_credit + stop_buffer | $310 + $10 = $320 |
+| Full IC (put side) | total_credit + put_stop_buffer | $310 + $500 = $810 |
+| Call-only (MKT-035) | call_credit + theo_put + stop_buffer | $125 + $250 + $10 = $385 |
+| Call-only (legacy) | 2× credit + stop_buffer | 2× $125 = $250 + $10 = $260 |
+| Put-only | 2× credit + put_stop_buffer | 2× $185 = $370 + $500 = $870 |
 
 **Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($0.60 calls, $2.50 puts) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
 
-**Credit+Buffer approach (v1.10.2):** Stop = total_credit + `stop_buffer` (default $0.10 × 100 = $10). This replaces the earlier MEIC+ design (stop = credit - $0.15). The extra $25/stop cushion ($10 buffer vs -$15 reduction) reduces marginal stops at the cost of ~$25 per stop event. Configurable via `stop_buffer` config key.
+**Credit+Buffer approach (v1.10.2+):** Stop = total_credit + buffer. **Asymmetric buffers (v1.12.0):** call side uses `stop_buffer` (default $0.10 × 100 = $10), put side uses `put_stop_buffer` (default $5.00 × 100 = $500). If `put_stop_buffer` not set, falls back to `stop_buffer` for both. The wider put buffer avoids 91% of false put stops (21-day backtest: +$6,885 NET). Replaces the earlier MEIC+ design (stop = credit - $0.15).
 
 **Safety floor:** MIN_STOP_LEVEL = $50. If stop_level is below $50 (e.g., due to zero fill price from API sync issues), skip stop monitoring for that side.
 
@@ -906,7 +909,8 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: put starting OTM = base × multiplier (put skew = credit viable further OTM) |
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
-| `stop_buffer` | `0.10` | Stop buffer: stop = credit + buffer (Brian's approach — extra cushion per stop) |
+| `stop_buffer` | `0.10` | Call stop buffer: call_stop = credit + $0.10 (Brian's approach — extra cushion per stop) |
+| `put_stop_buffer` | `5.00` | Put stop buffer: put_stop = credit + $5.00 (wider — avoids 91% false put stops, 21-day backtest). Falls back to `stop_buffer` if not set. |
 | `max_vix_entry` | `999` | Maximum VIX for new entries. Set to 999 to effectively disable (v1.10.3). **CALYPSO addition** — neither Tammy Chambless nor John Sandvand (ThetaProfits) use a VIX cutoff; both studied VIX correlation and found none. |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |

@@ -2744,7 +2744,10 @@ class HydraStrategy(MEICStrategy):
                         msg_lines.append("")
                         msg_lines.append(f"*Total: ${entry.total_credit:.0f}* (${entry.call_spread_credit:.0f}C + ${entry.put_spread_credit:.0f}P)")
                         msg_lines.append(f"Comm: ${entry.open_commission:.0f} | Width: {width}pt")
-                        msg_lines.append(f"Stop: ${entry.call_side_stop:.0f}/side")
+                        if entry.call_side_stop != entry.put_side_stop:
+                            msg_lines.append(f"Stop: ${entry.call_side_stop:.0f}C / ${entry.put_side_stop:.0f}P")
+                        else:
+                            msg_lines.append(f"Stop: ${entry.call_side_stop:.0f}/side")
 
                     alert_details = {"attempts": attempt + 1} if attempt > 0 else {}
                     self.alert_service.send_alert(
@@ -5017,6 +5020,9 @@ class HydraStrategy(MEICStrategy):
         lines.append("")
         lines.append("\u2501\u2501\u2501 Today \u2501\u2501\u2501")
         lines.append(f"Stops: {call_stops}C / {put_stops}P / {double_stops}D")
+        avoided = self.daily_state.stops_avoided_mkt036
+        if avoided > 0:
+            lines.append(f"MKT-036 recoveries: {avoided} (stops avoided by timer)")
 
         # Detail per stopped entry
         has_stops_today = False

@@ -92,7 +92,14 @@ EDITABLE_PARAMS = {
         "type": "float",
         "min": 0.00, "max": 1.00,
         "unit": "$",
-        "description": "Stop buffer added to credit (Brian's approach)",
+        "description": "Call stop buffer (credit + buffer)",
+    },
+    "put_stop_buffer": {
+        "path": "strategy.put_stop_buffer",
+        "type": "float",
+        "min": 0.00, "max": 10.00,
+        "unit": "$",
+        "description": "Put stop buffer (wider — avoids false put stops)",
     },
     "smart_entry": {
         "path": "smart_entry.enabled",

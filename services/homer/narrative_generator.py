@@ -27,13 +27,13 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
 
-## HYDRA Domain Knowledge (v1.12.0 — use these exact parameters)
+## HYDRA Domain Knowledge (v1.12.1 — use these exact parameters)
 
-- Entry times: 10:15, 10:45, 11:15, 11:45, 12:15 ET (5 entries per day, :15/:45 offset from MAE analysis, v1.10.3)
+- Entry times: 10:15, 10:45, 11:15, 11:45, 12:15 ET (5 base + up to 2 conditional at 12:45/13:15 on down days, :15/:45 offset, v1.10.3)
 - Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
 - Spread widths: 60-120 points (VIX-scaled), NOT 5-point wings
 - Min credit thresholds: $0.60 calls, $2.50 puts (MKT-011). Put-only when call non-viable AND VIX < 18 (MKT-032).
-- Stop formula: total_credit + $0.10 (credit + buffer). One-sided: 2x credit + $0.10.
+- Stop formula: Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. One-sided: 2x credit + buffer. Put buffer wider to avoid false put stops.
 - Stop confirmation (MKT-036): 75-second sustained breach before executing stop. Timer resets if spread recovers.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
 - Down-day filter (MKT-035): When SPX drops 0.3% below open, call spreads only (no puts). Conditional entries (12:45, 13:15) fire on down days as call-only.
@@ -203,7 +203,8 @@ Focus on:
 - Which active MKT rules triggered and their impact:
   - MKT-011 (credit gate): Did it skip any entries? Were skips justified?
   - MKT-020/022 (progressive tightening): How far did strikes tighten?
-  - MKT-031 (smart entry windows): Did any entries trigger early? Score details?
+  - MKT-035 (down-day filter): Did it trigger call-only entries? Were conditional entries placed?
+  - MKT-036 (stop confirmation): Were any stops avoided by the 75s timer? False stop recoveries?
   - Stop close mode: Both legs closed (default). Were stops efficient?
 - Was this a good or bad day for the current strategy configuration?
 
