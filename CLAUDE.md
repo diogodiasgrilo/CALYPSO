@@ -662,7 +662,7 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 |------|-------|---------|
 | Dashboard | `/` | Live entries, SPX chart, cushion bars, P&L, agents, log feed |
 | History | `/history` | Calendar heat map, day drill-down with OHLC charts |
-| Analytics | `/analytics` | Entry time performance, VIX correlation, stop analysis, day-of-week P&L |
+| Analytics | `/analytics` | 4-tab view: Performance (cumulative P&L, histogram, rolling win rate, day-of-week), Entries (credit by slot, type breakdown, P&L by entry#, OTM scatter), Stops (rate by slot, call/put ratio, slippage, MKT-036 timer), Market (VIX scatter, day range, direction, trend signal) |
 
 ### Key API Endpoints
 | Endpoint | Description |
