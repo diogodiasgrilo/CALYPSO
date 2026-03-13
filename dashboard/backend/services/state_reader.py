@@ -104,18 +104,11 @@ class StateFileReader:
         }
 
         if not self._prev_entries:
-            # First read — seed from already-stopped entries
-            # Use last_saved as approximate stop time (best we have)
-            approx_time = data.get("last_saved") or _now_et_iso()
-            for num, e in current.items():
-                for side, flag in [("call", "call_side_stopped"), ("put", "put_side_stopped")]:
-                    if e.get(flag) and (num, side) not in existing_keys:
-                        self._detected_stops.append({
-                            "entry_number": num,
-                            "side": side,
-                            "stop_time": approx_time,
-                        })
-                        existing_keys.add((num, side))
+            # First read after start — skip seeding. We can't place markers
+            # accurately for already-stopped entries (no stop timestamp in
+            # state file). Entry arrows already show amber/red for stops.
+            # Only detect real-time transitions going forward.
+            pass
         else:
             # Normal read — detect transitions (False → True)
             now = _now_et_iso()
