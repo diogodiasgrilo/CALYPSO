@@ -18,6 +18,7 @@ export function useWebSocket() {
     applyMarketStatus,
     applyOHLCUpdate,
     applyLogLines,
+    applyStopEvents,
     setClientCount,
   } = useHydraStore();
 
@@ -62,6 +63,9 @@ export function useWebSocket() {
           case "log_lines":
             applyLogLines(msg.data);
             break;
+          case "stop_events":
+            applyStopEvents(msg.data);
+            break;
           case "heartbeat":
             if (msg.clients != null) setClientCount(msg.clients);
             // Respond with pong to keep alive
@@ -93,6 +97,7 @@ export function useWebSocket() {
     applyMarketStatus,
     applyOHLCUpdate,
     applyLogLines,
+    applyStopEvents,
     setClientCount,
   ]);
 

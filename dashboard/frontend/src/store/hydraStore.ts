@@ -113,6 +113,12 @@ export interface PnLDataPoint {
   pnl: number;
 }
 
+export interface StopEvent {
+  entry_number: number;
+  side: string;
+  stop_time: string;
+}
+
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
 // ── Store ──
@@ -140,6 +146,9 @@ interface DashboardStore {
   // Live log feed
   logLines: LogEntry[];
 
+  // Live stop events (detected from state file transitions)
+  stopEvents: StopEvent[];
+
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   applySnapshot: (data: Record<string, unknown>) => void;
@@ -148,6 +157,7 @@ interface DashboardStore {
   applyMarketStatus: (data: MarketStatus) => void;
   applyOHLCUpdate: (data: OHLCBar[]) => void;
   applyLogLines: (lines: LogEntry[]) => void;
+  applyStopEvents: (events: StopEvent[]) => void;
   setClientCount: (count: number) => void;
 }
 
@@ -161,6 +171,7 @@ export const useHydraStore = create<DashboardStore>()(
     todayOHLC: [],
     pnlHistory: [],
     logLines: [],
+    stopEvents: [],
 
     setConnectionStatus: (status) =>
       set((s) => {
@@ -181,11 +192,19 @@ export const useHydraStore = create<DashboardStore>()(
         if (data.metrics) s.metrics = data.metrics as CumulativeMetrics;
         if (data.market) s.market = data.market as MarketStatus;
         if (data.today_ohlc) s.todayOHLC = data.today_ohlc as OHLCBar[];
+        if (data.today_stops) {
+          const stops = data.today_stops as StopEvent[];
+          s.stopEvents = stops.filter((e) => e.stop_time);
+        }
         if (data.clients) s.clientCount = data.clients as number;
       }),
 
     applyStateUpdate: (data) =>
       set((s) => {
+        // Day boundary — reset stop events when date changes
+        if (s.hydraState && s.hydraState.date !== data.date) {
+          s.stopEvents = [];
+        }
         s.hydraState = data;
         // Use server-provided P&L history (persisted in hydra_state.json by bot)
         const serverHistory = (data as Record<string, unknown>).pnl_history as PnLDataPoint[] | undefined;
@@ -212,6 +231,21 @@ export const useHydraStore = create<DashboardStore>()(
     applyLogLines: (lines) =>
       set((s) => {
         s.logLines = [...s.logLines, ...lines].slice(-500); // Keep last 500 lines
+      }),
+
+    applyStopEvents: (events) =>
+      set((s) => {
+        // Merge and deduplicate by entry_number + side
+        const existing = new Set(
+          s.stopEvents.map((e) => `${e.entry_number}:${e.side}`)
+        );
+        for (const ev of events) {
+          const key = `${ev.entry_number}:${ev.side}`;
+          if (!existing.has(key)) {
+            s.stopEvents.push(ev);
+            existing.add(key);
+          }
+        }
       }),
 
     setClientCount: (count) =>

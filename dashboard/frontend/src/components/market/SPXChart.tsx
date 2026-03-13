@@ -18,7 +18,7 @@ export function SPXChart() {
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const priceLinesRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]>[]>([]);
 
-  const { todayOHLC, hydraState } = useHydraStore();
+  const { todayOHLC, hydraState, stopEvents } = useHydraStore();
 
   // Create chart on mount
   useEffect(() => {
@@ -127,8 +127,24 @@ export function SPXChart() {
         text: `E${e.entry_number}`,
       }));
 
-    if (markers.length > 0) {
-      createSeriesMarkers(candleSeriesRef.current, markers);
+    // Add stop markers (red circles below bar)
+    const stopMarkers = stopEvents
+      .filter((s) => s.stop_time)
+      .map((s) => ({
+        time: parseET(s.stop_time) as Time,
+        position: "belowBar" as const,
+        color: colors.loss,
+        shape: "circle" as const,
+        text: `S${s.entry_number}${s.side === "call" ? "C" : "P"}`,
+      }))
+      .filter((m) => (m.time as number) > 0);
+
+    const allMarkers = [...markers, ...stopMarkers].sort(
+      (a, b) => (a.time as number) - (b.time as number)
+    );
+
+    if (allMarkers.length > 0) {
+      createSeriesMarkers(candleSeriesRef.current, allMarkers);
     }
 
     // Remove old price lines before adding new ones
@@ -167,7 +183,7 @@ export function SPXChart() {
 
     // Scroll to latest
     chartRef.current?.timeScale().scrollToRealTime();
-  }, [todayOHLC, hydraState?.entries]);
+  }, [todayOHLC, hydraState?.entries, stopEvents]);
 
   return (
     <div>

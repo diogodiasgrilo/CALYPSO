@@ -2,10 +2,29 @@
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("dashboard.state_reader")
+
+# Import get_us_market_time via the same path market_status.py uses
+try:
+    import sys
+    _calypso_root = Path(__file__).resolve().parents[3]
+    if str(_calypso_root) not in sys.path:
+        sys.path.insert(0, str(_calypso_root))
+    from shared.market_hours import get_us_market_time
+    _HAS_MARKET_TIME = True
+except ImportError:
+    _HAS_MARKET_TIME = False
+
+
+def _now_et_iso() -> str:
+    """Get current ET time as ISO string."""
+    if _HAS_MARKET_TIME:
+        return get_us_market_time().isoformat()
+    return datetime.utcnow().isoformat()
 
 
 class StateFileReader:
@@ -15,6 +34,10 @@ class StateFileReader:
         self.file_path = file_path
         self._last_mtime: float = 0.0
         self._last_data: Optional[dict] = None
+        # Stop transition detection
+        self._detected_stops: list[dict] = []
+        self._prev_entries: dict[int, dict] = {}  # keyed by entry_number
+        self._current_date: Optional[str] = None
 
     def read_if_changed(self) -> Optional[dict]:
         """Return parsed JSON if file changed since last read, else None."""
@@ -30,6 +53,7 @@ class StateFileReader:
             if data is not None:
                 self._last_mtime = mtime
                 self._last_data = data
+                self._detect_stop_transitions(data)
             return data
 
         except Exception as e:
@@ -45,11 +69,73 @@ class StateFileReader:
             except OSError:
                 pass
             self._last_data = data
+            self._detect_stop_transitions(data)
         return data
 
     def get_cached(self) -> Optional[dict]:
         """Return last successfully read data without touching disk."""
         return self._last_data
+
+    def get_stop_events(self) -> list[dict]:
+        """Return accumulated stop events detected during this session."""
+        return list(self._detected_stops)
+
+    def _detect_stop_transitions(self, data: dict) -> None:
+        """Compare entry stop flags vs previous read. Record transitions."""
+        state_date = data.get("date")
+        entries = data.get("entries", [])
+
+        # Day boundary — reset everything
+        if state_date != self._current_date:
+            self._detected_stops = []
+            self._prev_entries = {}
+            self._current_date = state_date
+
+        # Build current entry lookup
+        current: dict[int, dict] = {}
+        for e in entries:
+            num = e.get("entry_number")
+            if num is not None:
+                current[num] = e
+
+        # Already-tracked stop keys for dedup
+        existing_keys = {
+            (s["entry_number"], s["side"]) for s in self._detected_stops
+        }
+
+        if not self._prev_entries:
+            # First read — seed from already-stopped entries
+            # Use last_saved as approximate stop time (best we have)
+            approx_time = data.get("last_saved") or _now_et_iso()
+            for num, e in current.items():
+                for side, flag in [("call", "call_side_stopped"), ("put", "put_side_stopped")]:
+                    if e.get(flag) and (num, side) not in existing_keys:
+                        self._detected_stops.append({
+                            "entry_number": num,
+                            "side": side,
+                            "stop_time": approx_time,
+                        })
+                        existing_keys.add((num, side))
+        else:
+            # Normal read — detect transitions (False → True)
+            now = _now_et_iso()
+            for num, e in current.items():
+                prev = self._prev_entries.get(num, {})
+                for side, flag in [("call", "call_side_stopped"), ("put", "put_side_stopped")]:
+                    was_stopped = prev.get(flag, False)
+                    is_stopped = e.get(flag, False)
+                    if not was_stopped and is_stopped and (num, side) not in existing_keys:
+                        self._detected_stops.append({
+                            "entry_number": num,
+                            "side": side,
+                            "stop_time": now,
+                        })
+                        existing_keys.add((num, side))
+                        logger.info(
+                            f"Stop detected: Entry #{num} {side} side"
+                        )
+
+        self._prev_entries = current
 
     def _read_file(self) -> Optional[dict]:
         """Read and parse the JSON file. Returns None on any error."""

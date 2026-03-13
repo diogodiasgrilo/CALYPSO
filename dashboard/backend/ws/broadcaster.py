@@ -28,6 +28,7 @@ class Broadcaster:
         self.live_ohlc = LiveOHLCBuilder()
         self._tasks: list[asyncio.Task] = []
         self._last_ohlc_bar_count: int = 0
+        self._last_stop_count: int = 0
 
     async def start(self) -> None:
         """Start all polling tasks."""
@@ -103,6 +104,14 @@ class Broadcaster:
             entries = await self.db_reader.get_entries_for_date(today)
             stops = await self.db_reader.get_stops_for_date(today)
 
+        # Merge live-detected stop events (during market hours, DB is empty)
+        live_stops = self.state_reader.get_stop_events()
+        if live_stops:
+            db_keys = {(s.get("entry_number"), s.get("side")) for s in stops}
+            for ls in live_stops:
+                if (ls["entry_number"], ls["side"]) not in db_keys:
+                    stops.append(ls)
+
         ohlc = await self._get_merged_ohlc()
         market = get_current_status()
 
@@ -128,6 +137,15 @@ class Broadcaster:
                     await self.manager.broadcast({
                         "type": "state_update",
                         "data": data,
+                    })
+
+                # Check for new stop events
+                stop_events = self.state_reader.get_stop_events()
+                if len(stop_events) > self._last_stop_count:
+                    self._last_stop_count = len(stop_events)
+                    await self.manager.broadcast({
+                        "type": "stop_events",
+                        "data": stop_events,
                     })
             except asyncio.CancelledError:
                 return
