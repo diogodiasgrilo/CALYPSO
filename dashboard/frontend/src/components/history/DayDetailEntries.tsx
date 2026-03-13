@@ -2,21 +2,23 @@ import { colors } from "../../lib/tradingColors";
 import { formatPnL } from "../../lib/formatters";
 import type { DayEntry, DayStop } from "./types";
 
-/** Format entry time from various formats to "HH:MM". */
+/** Format entry time from various formats to "HH:MM" or "HH:MM:SS". */
 function fmtTime(ts: string): string {
   if (!ts) return "\u2014";
-  // "10:15 AM ET" → "10:15"
-  const ampm = ts.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  // "10:15:32 AM ET" or "10:15 AM ET" → "10:15:32" or "10:15"
+  const ampm = ts.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)/i);
   if (ampm) {
     let h = parseInt(ampm[1], 10);
     const min = ampm[2];
-    const period = ampm[3].toUpperCase();
+    const sec = ampm[3]; // may be undefined
+    const period = ampm[4].toUpperCase();
     if (period === "PM" && h !== 12) h += 12;
     if (period === "AM" && h === 12) h = 0;
-    return `${String(h).padStart(2, "0")}:${min}`;
+    const base = `${String(h).padStart(2, "0")}:${min}`;
+    return sec ? `${base}:${sec}` : base;
   }
   // "2026-03-06T11:15:32-05:00" or "2026-03-06 11:15:32"
-  const iso = ts.match(/(\d{2}:\d{2})/);
+  const iso = ts.match(/(\d{2}:\d{2}(?::\d{2})?)/);
   return iso ? iso[1] : "\u2014";
 }
 

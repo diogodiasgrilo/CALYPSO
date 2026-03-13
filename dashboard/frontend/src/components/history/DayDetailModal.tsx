@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { DayDetailSummary } from "./DayDetailSummary";
 import { DayDetailChart } from "./DayDetailChart";
 import { DayDetailEntries } from "./DayDetailEntries";
@@ -9,10 +9,14 @@ import type { DaySummary, DayEntry, DayStop, OHLCBar } from "./types";
 export function DayDetailModal({
   date,
   summary,
+  allDates,
+  onNavigate,
   onClose,
 }: {
   date: string;
   summary: DaySummary | null;
+  allDates: string[];
+  onNavigate: (date: string) => void;
   onClose: () => void;
 }) {
   const [entries, setEntries] = useState<DayEntry[]>([]);
@@ -40,14 +44,26 @@ export function DayDetailModal({
       .catch(() => setLoading(false));
   }, [date]);
 
-  // Escape key
+  // Navigation
+  const sortedDates = useMemo(
+    () => [...allDates].sort((a, b) => a.localeCompare(b)),
+    [allDates]
+  );
+  const currentIdx = sortedDates.indexOf(date);
+  const prevDate = currentIdx > 0 ? sortedDates[currentIdx - 1] : null;
+  const nextDate =
+    currentIdx < sortedDates.length - 1 ? sortedDates[currentIdx + 1] : null;
+
+  // Keyboard: Escape, Left/Right arrows
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft" && prevDate) onNavigate(prevDate);
+      if (e.key === "ArrowRight" && nextDate) onNavigate(nextDate);
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [onClose]);
+  }, [onClose, onNavigate, prevDate, nextDate]);
 
   // Lock body scroll
   useEffect(() => {
@@ -78,9 +94,27 @@ export function DayDetailModal({
       <div className="fixed inset-4 z-50 bg-bg-deep rounded-xl border border-border overflow-y-auto max-sm:inset-0 max-sm:rounded-none">
         {/* Header */}
         <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-3 bg-bg-deep border-b border-border-dim">
-          <h3 className="text-sm font-semibold text-text-primary">
-            {dateFormatted}
-          </h3>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => prevDate && onNavigate(prevDate)}
+              disabled={!prevDate}
+              className="p-1 rounded-md hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary disabled:opacity-20 disabled:cursor-not-allowed"
+              title={prevDate ? `Previous: ${prevDate}` : undefined}
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <h3 className="text-sm font-semibold text-text-primary">
+              {dateFormatted}
+            </h3>
+            <button
+              onClick={() => nextDate && onNavigate(nextDate)}
+              disabled={!nextDate}
+              className="p-1 rounded-md hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary disabled:opacity-20 disabled:cursor-not-allowed"
+              title={nextDate ? `Next: ${nextDate}` : undefined}
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
           <button
             onClick={onClose}
             className="p-1.5 rounded-lg hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary"

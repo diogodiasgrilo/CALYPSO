@@ -148,7 +148,7 @@ def _build_entries_for_day(
             if ts:
                 try:
                     dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                    entry_time = dt.strftime("%I:%M %p ET")
+                    entry_time = dt.strftime("%I:%M:%S %p ET")
                 except ValueError:
                     entry_time = ts
 
@@ -194,23 +194,35 @@ def _build_entries_for_day(
     # Sort entries by timestamp and renumber sequentially (handles bot restart duplicates)
     raw_entries.sort(key=lambda x: x[0])
 
-    # Deduplicate true duplicate rows (identical timestamp + strikes + credit)
-    # This handles Google Sheets logging the same entry twice
+    # Deduplicate entries:
+    # 1. Exact match: same timestamp + strikes + credit (Sheets double-logging)
+    # 2. Strike match: same strikes + credit with different timestamps (multi-source dupes,
+    #    e.g., Sheets row vs log-file fallback with slightly different timestamps)
     deduped_entries = []
-    seen_keys = set()
+    seen_exact_keys = set()
+    seen_strike_keys = set()
     for ts, orig_num, entry in raw_entries:
-        dedup_key = (
-            ts,
+        strike_key = (
             str(entry.get("Short Call Strike", "")),
             str(entry.get("Short Put Strike", "")),
             str(entry.get("Total Credit", "")),
         )
-        if dedup_key in seen_keys:
+        exact_key = (ts,) + strike_key
+
+        if exact_key in seen_exact_keys:
             logger.info(f"Removed duplicate entry for {date_str}: Entry #{orig_num} at {ts} "
-                        f"(C:{entry.get('Short Call Strike')} P:{entry.get('Short Put Strike')} "
+                        f"(exact match: C:{entry.get('Short Call Strike')} P:{entry.get('Short Put Strike')} "
                         f"credit={entry.get('Total Credit')})")
             continue
-        seen_keys.add(dedup_key)
+
+        if strike_key in seen_strike_keys:
+            logger.info(f"Removed duplicate entry for {date_str}: Entry #{orig_num} at {ts} "
+                        f"(same strikes+credit: C:{entry.get('Short Call Strike')} P:{entry.get('Short Put Strike')} "
+                        f"credit={entry.get('Total Credit')})")
+            continue
+
+        seen_exact_keys.add(exact_key)
+        seen_strike_keys.add(strike_key)
         deduped_entries.append((ts, orig_num, entry))
 
     if len(deduped_entries) < len(raw_entries):
@@ -264,7 +276,7 @@ def _build_entries_for_day(
                 if ts:
                     try:
                         dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                        stop_time = dt.strftime("%I:%M %p ET")
+                        stop_time = dt.strftime("%I:%M:%S %p ET")
                     except ValueError:
                         stop_time = ts
 
@@ -525,7 +537,7 @@ def _read_hydra_logs_for_stops(date_str: str) -> Dict[str, Dict[str, Any]]:
             ts_str, entry_num, side = trigger.group(1), trigger.group(2), trigger.group(3)
             try:
                 dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                stop_time = dt.strftime("%I:%M %p ET")
+                stop_time = dt.strftime("%I:%M:%S %p ET")
             except ValueError:
                 stop_time = ts_str
             stops.setdefault(entry_num, {})
