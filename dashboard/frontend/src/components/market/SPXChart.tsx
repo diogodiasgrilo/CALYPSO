@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createChart,
   createSeriesMarkers,
@@ -19,6 +19,7 @@ export function SPXChart() {
   const priceLinesRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]>[]>([]);
 
   const { todayOHLC, hydraState, stopEvents } = useHydraStore();
+  const [showStrikes, setShowStrikes] = useState(true);
 
   // Create chart on mount
   useEffect(() => {
@@ -154,44 +155,57 @@ export function SPXChart() {
     }
     priceLinesRef.current = [];
 
-    // Add price lines for active entries
-    entries.forEach((e) => {
-      const isActive = !!e.entry_time && !e.call_side_stopped && !e.put_side_stopped && !e.call_side_expired && !e.put_side_expired;
-      if (isActive && e.short_call_strike > 0) {
-        const line = series.createPriceLine({
-          price: e.short_call_strike,
-          color: colors.textPrimary,
-          lineWidth: 1,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          axisLabelColor: colors.textPrimary,
-          title: `SC${e.entry_number}`,
-        });
-        priceLinesRef.current.push(line);
-      }
-      if (isActive && e.short_put_strike > 0) {
-        const line = series.createPriceLine({
-          price: e.short_put_strike,
-          color: colors.textPrimary,
-          lineWidth: 1,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          axisLabelColor: colors.textPrimary,
-          title: `SP${e.entry_number}`,
-        });
-        priceLinesRef.current.push(line);
-      }
-    });
+    // Add price lines for active entries (only when toggle is on)
+    if (showStrikes) {
+      entries.forEach((e) => {
+        const isActive = !!e.entry_time && !e.call_side_stopped && !e.put_side_stopped && !e.call_side_expired && !e.put_side_expired;
+        if (isActive && e.short_call_strike > 0) {
+          const line = series.createPriceLine({
+            price: e.short_call_strike,
+            color: colors.loss,
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            axisLabelColor: colors.loss,
+            title: `SC${e.entry_number}`,
+          });
+          priceLinesRef.current.push(line);
+        }
+        if (isActive && e.short_put_strike > 0) {
+          const line = series.createPriceLine({
+            price: e.short_put_strike,
+            color: colors.loss,
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            axisLabelColor: colors.loss,
+            title: `SP${e.entry_number}`,
+          });
+          priceLinesRef.current.push(line);
+        }
+      });
+    }
 
     // Scroll to latest
     chartRef.current?.timeScale().scrollToRealTime();
-  }, [todayOHLC, hydraState?.entries, stopEvents]);
+  }, [todayOHLC, hydraState?.entries, stopEvents, showStrikes]);
 
   return (
     <div>
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
-        SPX 1-Min
-      </h3>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
+          SPX 1-Min
+        </h3>
+        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showStrikes}
+            onChange={(e) => setShowStrikes(e.target.checked)}
+            className="w-3 h-3 rounded accent-loss cursor-pointer"
+          />
+          <span className="text-[10px] text-text-dim">Strikes</span>
+        </label>
+      </div>
       <div
         ref={containerRef}
         className="rounded-lg border border-border-dim overflow-hidden"
