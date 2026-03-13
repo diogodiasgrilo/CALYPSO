@@ -44,6 +44,8 @@ export interface HydraEntry {
   put_spread_value: number;
   call_long_value: number;
   put_long_value: number;
+  call_stop_time: string;
+  put_stop_time: string;
   [key: string]: unknown;
 }
 

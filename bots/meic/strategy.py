@@ -359,6 +359,8 @@ class IronCondorEntry:
     put_side_expired: bool = False   # Put spread expired worthless (PROFIT - kept credit)
     call_side_skipped: bool = False  # Call side was never opened (HYDRA one-sided entry)
     put_side_skipped: bool = False   # Put side was never opened (HYDRA one-sided entry)
+    call_stop_time: str = ""   # ET ISO timestamp when call side stop executed
+    put_stop_time: str = ""    # ET ISO timestamp when put side stop executed
     strategy_id: str = ""  # For Position Registry tracking
 
     # MKT-010: Wing illiquidity tracking (set by MKT-008 adjustment)
@@ -3795,8 +3797,11 @@ class MEICStrategy:
 
         self.state = MEICState.STOP_TRIGGERED
 
+        stop_time = get_us_market_time().isoformat()
+
         if side == "call":
             entry.call_side_stopped = True
+            entry.call_stop_time = stop_time
             self.daily_state.call_stops_triggered += 1
             # EMERGENCY-001: Include UICs for spread checking during close
             positions_to_close = [
@@ -3806,6 +3811,7 @@ class MEICStrategy:
             stop_level = entry.call_side_stop
         else:
             entry.put_side_stopped = True
+            entry.put_stop_time = stop_time
             self.daily_state.put_stops_triggered += 1
             # EMERGENCY-001: Include UICs for spread checking during close
             positions_to_close = [
@@ -5156,6 +5162,9 @@ class MEICStrategy:
                                         "call_only": entry_data.get("call_only", False),
                                         "put_only": entry_data.get("put_only", False),
                                         "trend_signal": entry_data.get("trend_signal"),
+                                        # Stop timestamps (for dashboard stop markers)
+                                        "call_stop_time": entry_data.get("call_stop_time", ""),
+                                        "put_stop_time": entry_data.get("put_stop_time", ""),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -5217,6 +5226,9 @@ class MEICStrategy:
                         entry.call_side_skipped = True
                     if saved.get("put_side_skipped"):
                         entry.put_side_skipped = True
+                    # Restore stop timestamps
+                    entry.call_stop_time = saved.get("call_stop_time", "")
+                    entry.put_stop_time = saved.get("put_stop_time", "")
 
                     # Restore commission tracking
                     entry.open_commission = saved.get("open_commission", 0)
@@ -5279,6 +5291,9 @@ class MEICStrategy:
                     # Fix #61: Restore merge flags
                     stopped_entry.call_side_merged = stopped_entry_data.get("call_side_merged", False)
                     stopped_entry.put_side_merged = stopped_entry_data.get("put_side_merged", False)
+                    # Restore stop timestamps
+                    stopped_entry.call_stop_time = stopped_entry_data.get("call_stop_time", "")
+                    stopped_entry.put_stop_time = stopped_entry_data.get("put_stop_time", "")
                     stopped_entry.is_complete = True
 
                     # Commission
@@ -6981,6 +6996,8 @@ class MEICStrategy:
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,
                     "put_side_stopped": entry.put_side_stopped,
+                    "call_stop_time": entry.call_stop_time,
+                    "put_stop_time": entry.put_stop_time,
                     "call_side_expired": entry.call_side_expired,
                     "put_side_expired": entry.put_side_expired,
                     "call_side_skipped": entry.call_side_skipped,

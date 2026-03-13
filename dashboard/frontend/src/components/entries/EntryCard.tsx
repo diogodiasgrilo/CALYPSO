@@ -117,9 +117,13 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
   const animatedPnl = useAnimatedNumber(currentPnl);
   const animatedMax = useAnimatedNumber(maxProfit);
 
-  // Progress toward max profit (0-100%, can exceed if options decay faster)
+  // Progress toward max profit (0-100%)
+  // When maxProfit <= 0 (stopped entry, best outcome is a loss), show full bar
+  // since the P&L is realized — color (red/amber) indicates loss
   const progressPct =
-    maxProfit > 0 ? Math.max(0, Math.min(100, (currentPnl / maxProfit) * 100)) : 0;
+    maxProfit > 0
+      ? Math.max(0, Math.min(100, (currentPnl / maxProfit) * 100))
+      : currentPnl !== 0 ? 100 : 0;
 
   // Use bot's actual cushion: (stop_level - spread_value) / stop_level
   const callCushion = computeCushion(entry.call_spread_value ?? 0, entry.call_side_stop);

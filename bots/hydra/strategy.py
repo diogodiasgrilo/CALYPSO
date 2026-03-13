@@ -3132,9 +3132,11 @@ class HydraStrategy(MEICStrategy):
         )
 
         self.state = MEICState.STOP_TRIGGERED
+        stop_time = get_us_market_time().isoformat()
 
         if side == "call":
             entry.call_side_stopped = True
+            entry.call_stop_time = stop_time
             self.daily_state.call_stops_triggered += 1
             # MKT-025: Only close the short leg — long expires at settlement
             positions_to_close = [
@@ -3143,6 +3145,7 @@ class HydraStrategy(MEICStrategy):
             stop_level = entry.call_side_stop
         else:
             entry.put_side_stopped = True
+            entry.put_stop_time = stop_time
             self.daily_state.put_stops_triggered += 1
             # MKT-025: Only close the short leg — long expires at settlement
             positions_to_close = [
@@ -5756,6 +5759,9 @@ class HydraStrategy(MEICStrategy):
                     "put_long_sold": getattr(entry, 'put_long_sold', False),
                     "call_long_sold_revenue": getattr(entry, 'call_long_sold_revenue', 0.0),
                     "put_long_sold_revenue": getattr(entry, 'put_long_sold_revenue', 0.0),
+                    # Stop timestamps (for dashboard stop markers)
+                    "call_stop_time": entry.call_stop_time,
+                    "put_stop_time": entry.put_stop_time,
                     # MKT-036: Stop confirmation timer
                     "call_breach_time": entry.call_breach_time.isoformat() if getattr(entry, 'call_breach_time', None) else None,
                     "put_breach_time": entry.put_breach_time.isoformat() if getattr(entry, 'put_breach_time', None) else None,
@@ -6899,6 +6905,9 @@ class HydraStrategy(MEICStrategy):
                 # MKT-036: Restore breach counts (NOT breach_time — conservative reset on restart)
                 restored_entry.call_breach_count = entry_data.get("call_breach_count", 0)
                 restored_entry.put_breach_count = entry_data.get("put_breach_count", 0)
+                # Restore stop timestamps (for dashboard stop markers)
+                restored_entry.call_stop_time = entry_data.get("call_stop_time", "")
+                restored_entry.put_stop_time = entry_data.get("put_stop_time", "")
                 # Fill prices (for /entry display after restart)
                 restored_entry.short_call_fill_price = entry_data.get("short_call_fill_price", 0)
                 restored_entry.long_call_fill_price = entry_data.get("long_call_fill_price", 0)
@@ -7160,6 +7169,9 @@ class HydraStrategy(MEICStrategy):
                                         # MKT-036: Breach counts (NOT breach_time — reset on restart)
                                         "call_breach_count": entry_data.get("call_breach_count", 0),
                                         "put_breach_count": entry_data.get("put_breach_count", 0),
+                                        # Stop timestamps (for dashboard stop markers)
+                                        "call_stop_time": entry_data.get("call_stop_time", ""),
+                                        "put_stop_time": entry_data.get("put_stop_time", ""),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -7244,6 +7256,9 @@ class HydraStrategy(MEICStrategy):
                     # Actual stop debit (for dashboard per-entry P&L accuracy)
                     entry.actual_call_stop_debit = saved.get("actual_call_stop_debit", 0.0)
                     entry.actual_put_stop_debit = saved.get("actual_put_stop_debit", 0.0)
+                    # Restore stop timestamps (for dashboard stop markers)
+                    entry.call_stop_time = saved.get("call_stop_time", "")
+                    entry.put_stop_time = saved.get("put_stop_time", "")
 
                     # Restore entry_time and fill prices (for /entry display)
                     entry_time_str = saved.get("entry_time")
@@ -7385,6 +7400,9 @@ class HydraStrategy(MEICStrategy):
                     # Actual stop debit (for dashboard per-entry P&L accuracy)
                     stopped_entry.actual_call_stop_debit = stopped_entry_data.get("actual_call_stop_debit", 0.0)
                     stopped_entry.actual_put_stop_debit = stopped_entry_data.get("actual_put_stop_debit", 0.0)
+                    # Stop timestamps (for dashboard stop markers)
+                    stopped_entry.call_stop_time = stopped_entry_data.get("call_stop_time", "")
+                    stopped_entry.put_stop_time = stopped_entry_data.get("put_stop_time", "")
 
                     # Position IDs are None (positions closed)
                     stopped_entry.short_call_position_id = None

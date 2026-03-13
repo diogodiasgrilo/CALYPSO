@@ -103,25 +103,38 @@ class StateFileReader:
             (s["entry_number"], s["side"]) for s in self._detected_stops
         }
 
+        # Map side to state file timestamp fields
+        _time_keys = {"call": "call_stop_time", "put": "put_stop_time"}
+
         if not self._prev_entries:
-            # First read after start — skip seeding. We can't place markers
-            # accurately for already-stopped entries (no stop timestamp in
-            # state file). Entry arrows already show amber/red for stops.
-            # Only detect real-time transitions going forward.
-            pass
+            # First read after start — seed already-stopped entries
+            # using real stop timestamps from state file (or entry_time fallback).
+            for num, e in current.items():
+                for side, flag in [("call", "call_side_stopped"), ("put", "put_side_stopped")]:
+                    if e.get(flag) and (num, side) not in existing_keys:
+                        stop_time = e.get(_time_keys[side]) or e.get("entry_time")
+                        if not stop_time:
+                            continue
+                        self._detected_stops.append({
+                            "entry_number": num,
+                            "side": side,
+                            "stop_time": stop_time,
+                        })
+                        existing_keys.add((num, side))
         else:
             # Normal read — detect transitions (False → True)
-            now = _now_et_iso()
             for num, e in current.items():
                 prev = self._prev_entries.get(num, {})
                 for side, flag in [("call", "call_side_stopped"), ("put", "put_side_stopped")]:
                     was_stopped = prev.get(flag, False)
                     is_stopped = e.get(flag, False)
                     if not was_stopped and is_stopped and (num, side) not in existing_keys:
+                        # Use real stop timestamp from state file, fall back to current time
+                        stop_time = e.get(_time_keys[side]) or _now_et_iso()
                         self._detected_stops.append({
                             "entry_number": num,
                             "side": side,
-                            "stop_time": now,
+                            "stop_time": stop_time,
                         })
                         existing_keys.add((num, side))
                         logger.info(

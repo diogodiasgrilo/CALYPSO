@@ -160,10 +160,11 @@ export function SPXChart() {
       if (isActive && e.short_call_strike > 0) {
         const line = series.createPriceLine({
           price: e.short_call_strike,
-          color: colors.textDim,
+          color: colors.textPrimary,
           lineWidth: 1,
           lineStyle: 2,
-          axisLabelVisible: false,
+          axisLabelVisible: true,
+          axisLabelColor: colors.textPrimary,
           title: `SC${e.entry_number}`,
         });
         priceLinesRef.current.push(line);
@@ -171,10 +172,11 @@ export function SPXChart() {
       if (isActive && e.short_put_strike > 0) {
         const line = series.createPriceLine({
           price: e.short_put_strike,
-          color: colors.textDim,
+          color: colors.textPrimary,
           lineWidth: 1,
           lineStyle: 2,
-          axisLabelVisible: false,
+          axisLabelVisible: true,
+          axisLabelColor: colors.textPrimary,
           title: `SP${e.entry_number}`,
         });
         priceLinesRef.current.push(line);
