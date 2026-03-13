@@ -22,9 +22,14 @@ async def get_cumulative():
 
 
 @router.get("/daily")
-async def get_daily(days: int = 30):
+async def get_daily(days: int = 0, year: int = 0):
     """Daily summaries for calendar heat map."""
-    summaries = await db_reader.get_daily_summaries(limit=days)
+    if year > 0:
+        summaries = await db_reader.get_daily_summaries_by_year(year)
+    elif days > 0:
+        summaries = await db_reader.get_daily_summaries(limit=days)
+    else:
+        summaries = await db_reader.get_daily_summaries(limit=365)
     return {"days": len(summaries), "summaries": summaries}
 
 

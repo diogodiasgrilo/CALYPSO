@@ -85,6 +85,14 @@ class BacktestingDBReader:
             (limit,),
         )
 
+    async def get_daily_summaries_by_year(self, year: int) -> list[dict]:
+        """Get all daily summaries for a specific year."""
+        return await to_thread(
+            self._query,
+            "SELECT * FROM daily_summaries WHERE date LIKE ? ORDER BY date",
+            (f"{year}-%",),
+        )
+
     async def get_all_summaries(self) -> list[dict]:
         """Get all daily summaries for analytics."""
         return await to_thread(
