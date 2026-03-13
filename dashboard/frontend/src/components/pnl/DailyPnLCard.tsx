@@ -27,7 +27,6 @@ export function DailyPnLCard() {
   const entries = hydraState?.entries ?? [];
   const commission = hydraState?.total_commission ?? 0;
   const credit = hydraState?.total_credit_received ?? 0;
-  const entriesCompleted = hydraState?.entries_completed ?? 0;
   const totalStops =
     (hydraState?.call_stops_triggered ?? 0) +
     (hydraState?.put_stops_triggered ?? 0);
@@ -66,10 +65,10 @@ export function DailyPnLCard() {
           <div className="flex justify-between">
             <span className="text-text-secondary">Entries</span>
             <span className="text-text-primary">
-              {entriesCompleted}/5
-              {(hydraState?.entries ?? []).some((e) => e.entry_number >= 6) && (
+              {entries.filter((e) => e.entry_number <= 5).length}/5
+              {entries.some((e) => e.entry_number >= 6) && (
                 <span className="text-text-dim ml-0.5">
-                  +{(hydraState?.entries ?? []).filter((e) => e.entry_number >= 6).length}
+                  +{entries.filter((e) => e.entry_number >= 6).length}
                 </span>
               )}
             </span>

@@ -284,6 +284,12 @@ class HydraStrategy(MEICStrategy):
         ] if conditional_strs else []
         self._base_entry_count = 0  # Set in _parse_entry_times after entry_times is built
 
+        # Dashboard: server-side P&L history (persists across page refreshes / clients)
+        # Each element: {"time": "HH:MM", "pnl": float}
+        # Accumulated each heartbeat, one point per minute, reset daily
+        # MUST be set BEFORE super().__init__() — recovery restores saved history
+        self._pnl_history: list = []
+
         # Call parent init (this sets up everything else including recovery)
         super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
 
@@ -291,11 +297,6 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"HYDRA using metrics file: {self.metrics_file}")
 
         self._bot_start_time = datetime.now()
-
-        # Dashboard: server-side P&L history (persists across page refreshes / clients)
-        # Each element: {"time": "HH:MM", "pnl": float}
-        # Accumulated each heartbeat, one point per minute, reset daily
-        self._pnl_history: list = []
 
         logger.info(f"HYDRA Strategy initialized")
         logger.info(f"  Trend filter enabled: {self.trend_enabled}")

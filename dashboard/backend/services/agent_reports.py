@@ -1,6 +1,7 @@
 """Read agent reports (HERMES, APOLLO, CLIO, HOMER, ARGUS)."""
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -8,6 +9,9 @@ from typing import Optional
 logger = logging.getLogger("dashboard.agent_reports")
 
 AGENTS = ["apollo", "hermes", "homer", "clio", "argus"]
+
+# Match date-named report files (YYYY-MM-DD.md) — excludes backup/auxiliary files
+_DATE_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 
 
 class AgentReportReader:
@@ -24,8 +28,11 @@ class AgentReportReader:
         if not agent_dir.exists():
             return None
 
-        # Find markdown files sorted by name (date-based naming)
-        md_files = sorted(agent_dir.glob("*.md"), reverse=True)
+        # Find date-named report files (YYYY-MM-DD.md) — excludes backup/auxiliary files
+        md_files = sorted(
+            [f for f in agent_dir.glob("*.md") if _DATE_FILE_RE.match(f.name)],
+            reverse=True,
+        )
         if not md_files:
             return None
 
@@ -80,7 +87,11 @@ class AgentReportReader:
                 })
                 continue
 
-            md_files = sorted(agent_dir.glob("*.md"), reverse=True)
+            # Filter to date-named files (YYYY-MM-DD.md) — excludes journal_backup_* etc.
+            md_files = sorted(
+                [f for f in agent_dir.glob("*.md") if _DATE_FILE_RE.match(f.name)],
+                reverse=True,
+            )
             if md_files:
                 latest = md_files[0]
                 try:
