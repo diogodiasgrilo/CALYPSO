@@ -19,7 +19,7 @@ export function SPXChart() {
   const priceLinesRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]>[]>([]);
 
   const { todayOHLC, hydraState, stopEvents } = useHydraStore();
-  const [showStrikes, setShowStrikes] = useState(true);
+  const [showStrikes, setShowStrikes] = useState(false);
 
   // Create chart on mount
   useEffect(() => {
@@ -203,7 +203,7 @@ export function SPXChart() {
             onChange={(e) => setShowStrikes(e.target.checked)}
             className="w-3 h-3 rounded accent-loss cursor-pointer"
           />
-          <span className="text-[10px] text-text-dim">Strikes</span>
+          <span className="text-[10px] text-text-dim">Show Strikes</span>
         </label>
       </div>
       <div
