@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.12.0 | **Last Updated:** 2026-03-11
+**Version:** 1.12.1 | **Last Updated:** 2026-03-13
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -10,7 +10,7 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 - **Before each entry**, check 20 EMA vs 40 EMA on SPX 1-minute bars
 - **EMA signal is informational only** — logged and stored but does NOT drive entry type
-- **Entries are full iron condors, put-only, or call-only** — call credit non-viable → put-only if VIX < 18 (MKT-032), skip if VIX >= 18; put credit non-viable → skip; SPX down ≥ 0.3% from open → call-only (MKT-035)
+- **Base entries are full iron condors or put-only** — call credit non-viable → put-only if VIX < 18 (MKT-032), skip if VIX >= 18; put credit non-viable → skip. Conditional entries E6/E7 fire as call-only when SPX drops ≥ 0.3% from open (MKT-035)
 
 ### Why This Works
 
@@ -22,7 +22,7 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 
 | Entry | Time (ET) | Type | Notes |
 |-------|-----------|------|-------|
-| 1 | 10:15 | Base | Always attempts (full IC or call-only) |
+| 1 | 10:15 | Base | Always attempts (full IC or put-only) |
 | 2 | 10:45 | Base | Always attempts |
 | 3 | 11:15 | Base | Always attempts |
 | 4 | 11:45 | Base | Always attempts |
@@ -45,25 +45,25 @@ Before each scheduled entry, a 10-minute scouting window opens. Market condition
 | Post-spike calm (ATR declining from elevated) | 0-70 | `get_chart_data()` 1-min OHLC, cached |
 | Momentum pause (price calm over 2 min) | 0-30 | `MarketData.price_history` deque (zero API cost) |
 
-### Down Day Filter (MKT-035) — v1.11.0
+### Conditional Entry Trigger (MKT-035) — v1.11.0, updated v1.12.1
 
-Before the credit gate, checks if SPX is down >= 0.3% from today's open. When triggered:
-- **Base entries (#1-5):** Converted to call-only (skip puts)
-- **Conditional entries (#6-7):** Only fire when MKT-035 triggers (always call-only)
-- **Stop formula:** `call_credit + theoretical put ($250) + buffer` (not 2× credit)
+Before the credit gate, checks if SPX is down >= 0.3% from today's open. MKT-035 **only affects conditional entries (E6/E7)** — base entries E1-E5 always attempt full ICs regardless of down-day status (the $5.00 put stop buffer provides sufficient protection).
+
+When triggered:
+- **Base entries (#1-5):** Unaffected — always full IC (or put-only via MKT-011)
+- **Conditional entries (#6-7):** Fire as call-only spreads (only on down days)
+- **Stop formula for E6/E7:** `call_credit + theoretical put ($250) + buffer` (not 2× credit)
 - **Credit check:** Call credit must still pass MKT-011 minimum ($0.60)
-
-**20-day data:** On down days, 71% of puts get stopped but only 7% of calls. Full IC P&L on down days: -$15. Call-only P&L: +$1,215 → **+$920 improvement**.
 
 ### Credit Gate (MKT-011)
 
-Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($0.60) and puts ($2.50). MKT-035 runs first — when triggered, only call credit is checked.
+Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($0.60) and puts ($2.50). For conditional entries (E6/E7), MKT-035 runs first — when triggered, only call credit is checked.
 
 | Condition | Call Credit | Put Credit | VIX | Action |
 |-----------|-------------|------------|-----|--------|
-| MKT-035 triggered | >= $0.60 | N/A | Any | Place call-only entry |
-| MKT-035 triggered | < $0.60 | N/A | Any | Skip entry |
-| Normal | >= $0.60 | >= $2.50 | Any | Proceed with full iron condor |
+| Conditional entry (MKT-035) | >= $0.60 | N/A | Any | Place call-only entry |
+| Conditional entry (MKT-035) | < $0.60 | N/A | Any | Skip entry |
+| Base entry | >= $0.60 | >= $2.50 | Any | Proceed with full iron condor |
 | Normal | < $0.60 | >= $2.50 | < 18 | Place put-only entry (MKT-032 allows) |
 | Normal | < $0.60 | >= $2.50 | >= 18 | Skip entry (MKT-032: 2× stop too risky) |
 | Normal | >= $0.60 | < $2.50 | Any | Skip entry |

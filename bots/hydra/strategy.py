@@ -1829,7 +1829,7 @@ class HydraStrategy(MEICStrategy):
 
         Returns:
             Tuple of (result, estimation_worked, estimated_call, estimated_put):
-            - result: "proceed", "call_only", "put_only", or "skip"
+            - result: "proceed", "put_only", "skip", or "call_only" (signals skip — call-only only via MKT-035 conditional entries)
             - estimation_worked: True if we got valid quotes, False if estimation failed
             - estimated_call: estimated call credit in cents (0.0 if failed)
             - estimated_put: estimated put credit in cents (0.0 if failed)
@@ -4125,7 +4125,7 @@ class HydraStrategy(MEICStrategy):
             change_pct = (self.current_price - spx_open) / spx_open * 100
             threshold = -self.downday_threshold_pct * 100
             sign = "+" if change_pct >= 0 else ""
-            triggered = "CALL-ONLY" if change_pct < threshold else "full IC"
+            triggered = "E6/E7 eligible" if change_pct < threshold else "full IC"
             insert_idx = 1 if lines else 0  # After trend line
             lines.insert(insert_idx,
                 f"  MKT-035: SPX {sign}{change_pct:.2f}% vs open "

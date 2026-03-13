@@ -32,7 +32,7 @@
 
 ### What is HYDRA?
 
-HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — entries are full iron condors, put-only (when call credit is non-viable AND VIX < 18, via MKT-011 + MKT-032), or call-only on down days (when SPX drops >= 0.3% below open, via MKT-035).
+HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — base entries are full iron condors or put-only (when call credit is non-viable AND VIX < 18, via MKT-011 + MKT-032). Conditional entries E6/E7 fire as call-only when SPX drops >= 0.3% below open (MKT-035) — base entries E1-E5 are unaffected by down-day status.
 
 Key MKT rules include: pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management — developed iteratively from 12 days of live trading data (Feb 10-26, 2026). Early close (MKT-018/023/021) was tested but intentionally disabled — backtest showed hold-to-expiry outperforms.
 
@@ -212,13 +212,13 @@ Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scout
 
 ### Trend Signal (Informational Only — v1.4.0)
 
-The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. Entry type is determined by MKT-035 (down day filter) and MKT-011 (credit gate): call-only on down days (SPX < open -0.3%), full IC when both sides viable, put-only when call non-viable AND VIX < 18.0 (MKT-032), skip otherwise.
+The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. For base entries E1-E5, entry type is determined by MKT-011 (credit gate): full IC when both sides viable, put-only when call non-viable AND VIX < 18.0 (MKT-032), skip otherwise. Conditional entries E6/E7 only fire when MKT-035 triggers (SPX < open -0.3%), always as call-only.
 
 | Trend Signal | What Gets Placed | Note |
 |--------------|------------------|------|
-| BULLISH (EMA20 > EMA40 by >= 0.2%) | Call-only (MKT-035), full IC, put-only (MKT-011), or skip | Signal logged, not acted on |
-| BEARISH (EMA20 < EMA40 by >= 0.2%) | Call-only (MKT-035), full IC, put-only (MKT-011), or skip | Signal logged, not acted on |
-| NEUTRAL (within 0.2%) | Call-only (MKT-035), full IC, put-only (MKT-011), or skip | Standard behavior |
+| BULLISH (EMA20 > EMA40 by >= 0.2%) | Full IC, put-only (MKT-011), or skip (base); call-only (E6/E7 on down days) | Signal logged, not acted on |
+| BEARISH (EMA20 < EMA40 by >= 0.2%) | Full IC, put-only (MKT-011), or skip (base); call-only (E6/E7 on down days) | Signal logged, not acted on |
+| NEUTRAL (within 0.2%) | Full IC, put-only (MKT-011), or skip (base); call-only (E6/E7 on down days) | Standard behavior |
 
 **Why trend-driven one-sided entries were removed (v1.4.0):** 12-day analysis (Feb 10-26) showed trend-driven one-sided P&L was -$175 across 23 entries. V-shape reversal days (Feb 17, Feb 26) amplified losses. EMA correctly identifies current direction but cannot predict reversals. **MKT-011 credit-driven put-only entries re-enabled (v1.7.1):** 87.5% WR, +$870 net from 6 qualifying entries — these are credit-driven (call side too cheap) not trend-driven.
 
@@ -336,29 +336,27 @@ Each entry goes through these phases in order:
     └── If tightened, re-runs steps 13-16
 ```
 
-### Phase 6.5: Down Day Filter (MKT-035, v1.11.0)
+### Phase 6.5: Conditional Entry Trigger (MKT-035, v1.11.0, updated v1.12.2)
 
 ```
 18.5 MKT-035: Check if SPX < open × (1 - threshold)
      ├── Conditional entry (6+) checked FIRST (before strikes)
      │   ├── NOT down day → SKIP entry immediately (no API calls)
      │   └── Down day → Force CALL-ONLY, proceed to credit check
-     └── Base entry (1-5) checked AFTER strikes
-         ├── NOT down day → Continue to MKT-011 credit gate (full IC path)
-         └── Down day → Force CALL-ONLY, check call credit viability
-             ├── Call credit >= $0.60 → PROCEED with call-only entry
-             └── Call credit < $0.60 → SKIP entry
+     └── Base entry (1-5): MKT-035 DOES NOT APPLY
+         └── Always continues to MKT-011 credit gate (full IC path)
+         └── The $5.00 put stop buffer provides sufficient protection on down days
 ```
 
 ### Phase 7: Credit Gate
 
 ```
 19. MKT-011: Estimate credit from live quotes (call >= $0.60, put >= $2.50 with MKT-029 fallback)
-    ├── MKT-035 triggered → Already handled above (call-only or skip)
+    ├── Conditional entry with MKT-035 triggered → Already handled above (call-only or skip)
     ├── Both sides viable → PROCEED with full iron condor
     ├── Call non-viable, put viable, VIX < 18 → PUT-ONLY entry (MKT-032 allows)
     ├── Call non-viable, put viable, VIX >= 18 → SKIP entry (MKT-032: 2× stop too risky)
-    ├── Put non-viable → SKIP entry (call-only only via MKT-035)
+    ├── Put non-viable → SKIP entry
     └── Both sides below minimum → SKIP entry
 20. MKT-010 fallback: If MKT-011 can't get quotes, use illiquidity flags
     └── Any wing illiquid → SKIP entry

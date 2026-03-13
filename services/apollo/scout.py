@@ -27,7 +27,7 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. One-sided: 2x credit + buffer. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
 - **Stop confirmation (MKT-036):** 75-second sustained breach before executing stop. Prevents false stops from brief price spikes. Timer resets if spread recovers below stop level.
 - **Stop close:** both legs closed via market order (default; configurable short_only_stop for MKT-025 mode)
-- **Down-day filter (MKT-035):** When SPX drops 0.3% below open, place call spreads only (no puts). Conditional entries (12:45, 13:15) only fire on down days as call-only.
+- **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below open, as call-only.
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
 
 ## Entry Skip Pattern (CRITICAL — do not get this backwards)

@@ -36,10 +36,10 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 - Stop formula: Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. One-sided: 2x credit + buffer. Put buffer wider to avoid false put stops.
 - Stop confirmation (MKT-036): 75-second sustained breach before executing stop. Timer resets if spread recovers.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
-- Down-day filter (MKT-035): When SPX drops 0.3% below open, call spreads only (no puts). Conditional entries (12:45, 13:15) fire on down days as call-only.
+- Down-day filter (MKT-035): Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) fire when SPX drops 0.3% below open, as call-only.
 - Progressive tightening: MKT-020 (calls) and MKT-022 (puts) scan from wide OTM inward
 - Early close (MKT-018): DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)
-- Entries are full iron condors or put-only (MKT-011 override) or call-only (MKT-035 down-day)
+- Base entries are full iron condors or put-only (MKT-011 override). Call-only only via conditional entries E6/E7 (MKT-035)
 - EMA 20/40 trend signal is informational only (logged but doesn't drive entry type)
 
 ## Tone

@@ -6,23 +6,24 @@ tightening, and hold-to-expiry. Based on Tammy Chambless's MEIC strategy.
 
 Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars.
 The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
-but is informational only — entries are full iron condors or put-only via MKT-011.
+but is informational only — base entries are full iron condors or put-only via MKT-011.
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both sides viable: Proceed with full iron condor
 - Call non-viable, put viable, VIX < 18: Place put-only entry (MKT-032 VIX gate)
 - Call non-viable, put viable, VIX >= 18: Skip entry (2× stop too risky without hedge)
-- Put non-viable: Skip entry (call-only only via MKT-035 down-day filter)
+- Put non-viable: Skip entry
 - Both non-viable: Skip entry entirely
 
-Down Day Filter (MKT-035): When SPX drops >= 0.3% below today's open, place call-only.
+Conditional Entry Trigger (MKT-035): Only affects conditional entries E6/E7.
+- Base entries E1-E5 always attempt full ICs regardless of down-day status
+- Conditional entries (12:45, 13:15) only fire when SPX drops >= 0.3% below open, as call-only
 - Stop = call_credit + theoretical $2.50 put + buffer (not 2× credit)
-- 20-day data: 71% put stop rate on down days vs 7% call stop rate → +$920 improvement
-- Conditional entries (12:45, 13:15) only fire on down days as call-only
 
 Version History:
 - 1.12.1 (2026-03-12): MKT-036 asymmetric put stop buffer ($5.00 put vs $0.10 call). 21-day backtest: $5.00 put buffer avoids 91% of false put stops (+$6,885 NET). Configurable via put_stop_buffer (falls back to stop_buffer if not set). Telegram /set put_stop_buffer support. Full IC alert shows asymmetric stops. Sheets retry logic (3 attempts with 2s delay). HOMER stop matching fix for same-strike entries. Code audit: all docs, agents, config updated.
 - 1.12.0 (2026-03-11): MKT-036 stop confirmation timer. When spread value breaches stop level, 75-second confirmation window before executing. If spread recovers below stop level during window, timer resets (stop avoided). Prevents false stops from brief price spikes. 20-day backtest: 17 false stops avoided ($2,870 saved), 1 real stop missed ($85). Configurable via stop_confirmation_enabled, stop_confirmation_seconds. All agent SYSTEM_PROMPTs updated to v1.12.0 with correct parameters.
+- 1.12.2 (2026-03-13): MKT-035 scoped to conditional entries only. Base entries E1-E5 always attempt full ICs regardless of down-day status ($5.00 put buffer provides sufficient protection). Conditional entries E6/E7 still fire as call-only on down days (SPX < open -0.3%). Threshold reverted to 0.3%.
 - 1.11.0 (2026-03-11): MKT-035 call-only on down days. When SPX < open -0.3%, place call spread only (no puts). Stop uses theoretical $2.50 put credit instead of 2× call credit. 20-day data: 71% put stop rate on down days vs 7% call stop rate, +$920 improvement. Two conditional entry times (12:45, 13:15) that only fire when MKT-035 triggers. Configurable via downday_callonly_enabled, downday_threshold_pct, downday_theoretical_put_credit, conditional_entry_times.
 - 1.10.4 (2026-03-11): Raise put credit minimum $1.75→$2.50, lower call credit minimum $0.75→$0.60. 20-day data analysis: $2.50-$3.49 put credit bucket = 66.7% survival, +$159 avg EV (best); $2.00-$2.49 = 33.3% survival, -$8 EV (worst); $1.50-$1.99 = 48.3%, +$23 EV. Higher put min forces MKT-022 to scan closer to ATM, landing in Week 1 sweet spot (42-65pt OTM). Lower call min = less MKT-020 tightening = calls stay further OTM. Disable MKT-031 smart entry — enter at scheduled times only.
 - 1.10.3 (2026-03-11): Disable MKT-034 VIX time shifting + remove VIX entry cutoff (max_vix_entry=999). Neither Tammy nor Sandvand use VIX cutoffs. Entry times revert to 10:15 AM start. Spread widths reverted to 50pt. MKT-034 remains configurable.
