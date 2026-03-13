@@ -524,18 +524,18 @@ function EntriesTab({
   const entryTypeData = useMemo(() => {
     const counts: Record<string, number> = {};
     entries.forEach((e) => {
-      const type = e.entry_type || "full";
+      const type = (e.entry_type || "").toLowerCase();
       const label =
-        type === "full" ? "Full IC"
-        : type === "call-only" ? "Call Only"
-        : type === "put-only" ? "Put Only"
-        : type;
+        type.includes("iron") || type === "full" ? "Iron Condor"
+        : type.includes("put") ? "Put Spread"
+        : type.includes("call") ? "Call Spread"
+        : e.entry_type || "Other";
       counts[label] = (counts[label] ?? 0) + 1;
     });
     const pieColors: Record<string, string> = {
-      "Full IC": colors.info,
-      "Call Only": colors.warning,
-      "Put Only": colors.profit,
+      "Iron Condor": colors.info,
+      "Call Spread": colors.warning,
+      "Put Spread": colors.profit,
     };
     return Object.entries(counts).map(([name, value]) => ({
       name,
@@ -568,36 +568,43 @@ function EntriesTab({
       }));
   }, [entries, stopLookup]);
 
-  // 4. OTM distance vs outcome (scatter)
-  const otmData = useMemo(() => {
-    const points: { otm: number; pnl: number; side: string; survived: boolean }[] = [];
+  // 4. OTM distance: survival rate by OTM bucket
+  const otmBucketData = useMemo(() => {
+    const bucketSize = 5; // 5-point OTM buckets
+    const buckets = new Map<number, { total: number; stopped: number }>();
+
     entries.forEach((e) => {
       const entryStops = stopLookup.get(`${e.date}_${e.entry_number}`) ?? [];
       const callStopped = entryStops.some((s) => s.side === "call");
       const putStopped = entryStops.some((s) => s.side === "put");
 
-      if (e.otm_distance_call > 0) {
-        points.push({
-          otm: e.otm_distance_call,
-          pnl: callStopped ? -1 : 1, // simplified: stopped vs survived
-          side: "call",
-          survived: !callStopped,
-        });
+      // Process call side
+      if (e.otm_distance_call != null && e.otm_distance_call > 0) {
+        const b = Math.round(e.otm_distance_call / bucketSize) * bucketSize;
+        const prev = buckets.get(b) ?? { total: 0, stopped: 0 };
+        prev.total += 1;
+        if (callStopped) prev.stopped += 1;
+        buckets.set(b, prev);
       }
-      if (e.otm_distance_put > 0) {
-        points.push({
-          otm: e.otm_distance_put,
-          pnl: putStopped ? -1 : 1,
-          side: "put",
-          survived: !putStopped,
-        });
+      // Process put side
+      if (e.otm_distance_put != null && e.otm_distance_put > 0) {
+        const b = Math.round(e.otm_distance_put / bucketSize) * bucketSize;
+        const prev = buckets.get(b) ?? { total: 0, stopped: 0 };
+        prev.total += 1;
+        if (putStopped) prev.stopped += 1;
+        buckets.set(b, prev);
       }
     });
-    return points;
-  }, [entries, stopLookup]);
 
-  const otmSurvived = otmData.filter((d) => d.survived);
-  const otmStopped = otmData.filter((d) => !d.survived);
+    return [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([otm, data]) => ({
+        otm: `${otm}pt`,
+        survivalRate: data.total > 0 ? ((data.total - data.stopped) / data.total) * 100 : 100,
+        total: data.total,
+        stopped: data.stopped,
+      }));
+  }, [entries, stopLookup]);
 
   return (
     <>
@@ -704,47 +711,41 @@ function EntriesTab({
         )}
       </ChartCard>
 
-      {/* OTM Distance vs Outcome */}
-      <ChartCard title="OTM Distance vs Outcome">
-        {otmData.length === 0 ? (
+      {/* OTM Distance Survival Rate */}
+      <ChartCard title="Survival Rate by OTM Distance">
+        {otmBucketData.length === 0 ? (
           <EmptyChart message="No OTM distance data yet" />
         ) : (
           <ResponsiveContainer width="100%" height={200}>
-            <ScatterChart>
-              <CartesianGrid strokeDasharray="3 3" stroke={colors.borderDim} />
+            <BarChart data={otmBucketData}>
               <XAxis
                 dataKey="otm"
-                name="OTM Distance"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 9, fill: colors.textDim }}
                 axisLine={{ stroke: colors.borderDim }}
-                label={{ value: "OTM (pts)", position: "insideBottom", offset: -2, fontSize: 9, fill: colors.textDim }}
               />
               <YAxis
-                dataKey="pnl"
-                name="Outcome"
-                tick={false}
+                tick={{ fontSize: 10, fill: colors.textDim }}
                 axisLine={false}
-                domain={[-2, 2]}
+                tickFormatter={(v) => `${v}%`}
+                domain={[0, 100]}
               />
               <Tooltip
                 contentStyle={chartTooltipStyle}
                 labelStyle={chartTooltipLabelStyle}
                 itemStyle={chartTooltipItemStyle}
-                cursor={{ strokeDasharray: "3 3", stroke: colors.textDim }}
-                formatter={(value: unknown, name: unknown) => {
-                  if (String(name) === "Outcome") {
-                    return [Number(value) > 0 ? "Survived" : "Stopped", "Outcome"];
-                  }
-                  return [`${Number(value ?? 0).toFixed(1)} pts`, String(name)];
+                cursor={chartCursor}
+                formatter={(value: unknown, _name: unknown, props: { payload?: { total?: number; stopped?: number } }) => {
+                  const v = Number(value ?? 0);
+                  const p = props?.payload;
+                  return [`${v.toFixed(0)}% (${(p?.total ?? 0) - (p?.stopped ?? 0)}/${p?.total} survived)`, "Survival"];
                 }}
               />
-              {otmSurvived.length > 0 && (
-                <Scatter name="Survived" data={otmSurvived} fill={colors.profit} />
-              )}
-              {otmStopped.length > 0 && (
-                <Scatter name="Stopped" data={otmStopped} fill={colors.loss} />
-              )}
-            </ScatterChart>
+              <Bar dataKey="survivalRate" radius={[3, 3, 0, 0]}>
+                {otmBucketData.map((d, i) => (
+                  <Cell key={i} fill={d.survivalRate >= 70 ? colors.profit : d.survivalRate >= 40 ? colors.warning : colors.loss} />
+                ))}
+              </Bar>
+            </BarChart>
           </ResponsiveContainer>
         )}
       </ChartCard>
@@ -815,34 +816,57 @@ function StopsTab({
     ];
   }, [stops]);
 
-  // 3. Stop slippage distribution
+  // 3. Stop slippage distribution (histogram with $10 buckets)
   const slippageData = useMemo(() => {
-    return stops
+    const rawSlippages = stops
       .filter((s) => s.actual_debit > 0 && s.trigger_level > 0)
-      .map((s, i) => ({
-        idx: i + 1,
-        slippage: s.actual_debit - s.trigger_level,
-        label: `E${s.entry_number} ${s.side === "call" ? "C" : "P"}`,
-      }))
-      .sort((a, b) => b.slippage - a.slippage);
+      .map((s) => s.actual_debit - s.trigger_level);
+    if (rawSlippages.length === 0) return [];
+
+    const bucketSize = 10;
+    const minSlip = Math.floor(Math.min(...rawSlippages) / bucketSize) * bucketSize;
+    const maxSlip = Math.ceil(Math.max(...rawSlippages) / bucketSize) * bucketSize;
+    const buckets = new Map<number, number>();
+    for (let b = minSlip; b <= maxSlip; b += bucketSize) {
+      buckets.set(b, 0);
+    }
+    rawSlippages.forEach((s) => {
+      const b = Math.floor(s / bucketSize) * bucketSize;
+      buckets.set(b, (buckets.get(b) ?? 0) + 1);
+    });
+    return [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([bucket, count]) => ({
+        range: `$${bucket}`,
+        count,
+        bucket,
+      }));
   }, [stops]);
 
-  // 4. MKT-036 timer effectiveness
-  const timerData = useMemo(() => {
-    const saved = stops.filter((s) => (s.breach_recoveries ?? 0) > 0).length;
-    const confirmed = stops.filter(
-      (s) => (s.breach_recoveries ?? 0) === 0 && (s.confirmation_seconds ?? 0) > 0,
-    ).length;
-    const noTimer = stops.filter(
-      (s) => (s.confirmation_seconds ?? 0) === 0 && (s.breach_recoveries ?? 0) === 0,
-    ).length;
-    if (saved === 0 && confirmed === 0 && noTimer === 0) return [];
-    return [
-      ...(saved > 0 ? [{ category: "Timer Saved", count: saved }] : []),
-      ...(confirmed > 0 ? [{ category: "Timer Confirmed", count: confirmed }] : []),
-      ...(noTimer > 0 ? [{ category: "No Timer", count: noTimer }] : []),
-    ];
-  }, [stops]);
+  // 4. Stops per day distribution (histogram)
+  const stopsPerDayData = useMemo(() => {
+    const dayStops = new Map<string, number>();
+    stops.forEach((s) => {
+      dayStops.set(s.date, (dayStops.get(s.date) ?? 0) + 1);
+    });
+    // Count how many days had 0, 1, 2, 3+ stops
+    const counts = new Map<number, number>();
+    // Include days with 0 stops
+    const allDates = new Set([...dayStops.keys()]);
+    entries.forEach((e) => allDates.add(e.date));
+    allDates.forEach((date) => {
+      const n = dayStops.get(date) ?? 0;
+      const bucket = Math.min(n, 6); // cap at 6+
+      counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    });
+    return [...counts.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([stopCount, dayCount]) => ({
+        stops: stopCount >= 6 ? "6+" : String(stopCount),
+        days: dayCount,
+        stopCount,
+      }));
+  }, [stops, entries]);
 
   return (
     <>
@@ -915,53 +939,16 @@ function StopsTab({
         )}
       </ChartCard>
 
-      {/* Stop Slippage */}
-      <ChartCard title="Stop Slippage (Actual vs Trigger)">
+      {/* Stop Slippage Distribution */}
+      <ChartCard title="Stop Slippage Distribution">
         {slippageData.length === 0 ? (
           <EmptyChart message="No stop debit data available" />
         ) : (
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={slippageData}>
               <XAxis
-                dataKey="label"
+                dataKey="range"
                 tick={{ fontSize: 9, fill: colors.textDim }}
-                axisLine={{ stroke: colors.borderDim }}
-              />
-              <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
-                axisLine={false}
-                tickFormatter={(v) => `$${v}`}
-              />
-              <Tooltip
-                contentStyle={chartTooltipStyle}
-                labelStyle={chartTooltipLabelStyle}
-                itemStyle={chartTooltipItemStyle}
-                cursor={chartCursor}
-                formatter={(value: unknown) => {
-                  const v = Number(value ?? 0);
-                  return [`$${v.toFixed(2)} ${v > 0 ? "(slippage)" : "(improvement)"}`, "Slippage"];
-                }}
-              />
-              <Bar dataKey="slippage" radius={[3, 3, 0, 0]}>
-                {slippageData.map((d, i) => (
-                  <Cell key={i} fill={d.slippage > 0 ? colors.loss : colors.profit} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        )}
-      </ChartCard>
-
-      {/* MKT-036 Timer */}
-      <ChartCard title="MKT-036 Timer Effectiveness">
-        {timerData.length === 0 ? (
-          <EmptyChart message="No timer data available" />
-        ) : (
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={timerData}>
-              <XAxis
-                dataKey="category"
-                tick={{ fontSize: 10, fill: colors.textDim }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
@@ -974,18 +961,52 @@ function StopsTab({
                 labelStyle={chartTooltipLabelStyle}
                 itemStyle={chartTooltipItemStyle}
                 cursor={chartCursor}
-                formatter={(value: unknown) => [`${value} stops`, "Count"]}
+                formatter={(value: unknown) => [`${Number(value ?? 0)} stops`, "Count"]}
               />
               <Bar dataKey="count" radius={[3, 3, 0, 0]}>
-                {timerData.map((d, i) => (
+                {slippageData.map((d, i) => (
+                  <Cell key={i} fill={d.bucket > 0 ? colors.loss : d.bucket < 0 ? colors.profit : colors.textDim} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </ChartCard>
+
+      {/* Stops Per Day */}
+      <ChartCard title="Stops Per Day Distribution">
+        {stopsPerDayData.length === 0 ? (
+          <EmptyChart message="No stop data available" />
+        ) : (
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={stopsPerDayData}>
+              <XAxis
+                dataKey="stops"
+                tick={{ fontSize: 10, fill: colors.textDim }}
+                axisLine={{ stroke: colors.borderDim }}
+                label={{ value: "# Stops", position: "insideBottom", offset: -2, fontSize: 9, fill: colors.textDim }}
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: colors.textDim }}
+                axisLine={false}
+                allowDecimals={false}
+                label={{ value: "Days", angle: -90, position: "insideLeft", fontSize: 9, fill: colors.textDim }}
+              />
+              <Tooltip
+                contentStyle={chartTooltipStyle}
+                labelStyle={chartTooltipLabelStyle}
+                itemStyle={chartTooltipItemStyle}
+                cursor={chartCursor}
+                formatter={(value: unknown) => [`${value} days`, "Count"]}
+              />
+              <Bar dataKey="days" radius={[3, 3, 0, 0]}>
+                {stopsPerDayData.map((d, i) => (
                   <Cell
                     key={i}
                     fill={
-                      d.category === "Timer Saved"
-                        ? colors.profit
-                        : d.category === "Timer Confirmed"
-                          ? colors.warning
-                          : colors.textDim
+                      d.stopCount === 0 ? colors.profit
+                      : d.stopCount <= 2 ? colors.warning
+                      : colors.loss
                     }
                   />
                 ))}
@@ -1029,22 +1050,25 @@ function MarketTab({
     [summaries],
   );
 
-  // 3. P&L by market direction
+  // 3. P&L by market direction (computed from SPX open/close)
   const directionData = useMemo(() => {
     const map = new Map<string, { total: number; count: number }>();
     summaries.forEach((s) => {
-      const dir = s.day_type || "Unknown";
+      if (!s.spx_open || !s.spx_close) return;
+      const change = s.spx_close - s.spx_open;
+      const dir = change > 5 ? "UP" : change < -5 ? "DOWN" : "FLAT";
       const prev = map.get(dir) ?? { total: 0, count: 0 };
       prev.total += s.net_pnl || 0;
       prev.count += 1;
       map.set(dir, prev);
     });
-    return [...map.entries()]
-      .filter(([d]) => d !== "Unknown")
-      .map(([dir, data]) => ({
+    const order = ["UP", "FLAT", "DOWN"];
+    return order
+      .filter((d) => map.has(d))
+      .map((dir) => ({
         direction: dir,
-        avgPnl: data.count > 0 ? data.total / data.count : 0,
-        count: data.count,
+        avgPnl: map.get(dir)!.total / map.get(dir)!.count,
+        count: map.get(dir)!.count,
       }));
   }, [summaries]);
 
