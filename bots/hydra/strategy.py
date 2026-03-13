@@ -2488,35 +2488,10 @@ class HydraStrategy(MEICStrategy):
                             return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
 
                     else:
-                        # Regular entries (1-5): check MKT-035 for call-only conversion
-                        downday = self._check_downday_filter()
-                        if downday:
-                            # Down day — convert to call-only
-                            entry.call_only = True
-                            entry.put_only = False
-                            entry.put_side_skipped = True
-                            entry.override_reason = "mkt-035"
-                            place_call_only = True
-                            credit_gate_handled = True
-                            logger.info(
-                                f"MKT-035: Entry #{entry_num} — down day filter triggered, "
-                                f"placing CALL spread only"
-                            )
-
-                            # Still check call credit viability
-                            gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
-                            if est_call < self.min_viable_credit_per_side:
-                                logger.info(
-                                    f"MKT-035: Entry #{entry_num} call credit "
-                                    f"${est_call / 100:.2f} below minimum — skipping"
-                                )
-                                self.daily_state.entries_skipped += 1
-                                self.daily_state.credit_gate_skips += 1
-                                self._entry_in_progress = False
-                                self._current_entry = None
-                                self.state = MEICState.MONITORING
-                                self._next_entry_index += 1
-                                return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
+                        # Regular entries (1-5): MKT-035 disabled for base entries
+                        # The $5.00 put buffer provides sufficient protection on down days.
+                        # MKT-035 only applies to conditional entries (E6/E7).
+                        pass
 
                 # MKT-011: Check minimum credit gate (only if MKT-035 didn't already handle)
                 if not credit_gate_handled and not self.dry_run:
