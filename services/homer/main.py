@@ -186,9 +186,35 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
                 logger.error(f"git commit failed: {result.stderr}")
                 return False
 
+        # Fetch remote to check if we're behind
+        subprocess.run(
+            ["git", "fetch", "origin", "main"],
+            cwd=_project_root,
+            capture_output=True,
+            timeout=30,
+        )
+
+        # Rebase our commit on top of any new remote commits
+        rebase_result = subprocess.run(
+            ["git", "rebase", "origin/main"],
+            cwd=_project_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if rebase_result.returncode != 0:
+            logger.warning(f"git rebase failed (conflict?): {rebase_result.stderr}")
+            subprocess.run(
+                ["git", "rebase", "--abort"],
+                cwd=_project_root,
+                capture_output=True,
+                timeout=10,
+            )
+            return False
+
         # Push
         result = subprocess.run(
-            ["git", "push"],
+            ["git", "push", "origin", "main"],
             cwd=_project_root,
             capture_output=True,
             text=True,
