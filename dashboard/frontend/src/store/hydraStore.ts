@@ -96,6 +96,7 @@ export interface MarketStatus {
   early_close_reason?: string;
   is_fomc_day?: boolean;
   is_fomc_announcement?: boolean;
+  is_fomc_t_plus_one?: boolean;
   next_fomc?: string;
   days_until_fomc?: number;
   next_event?: {

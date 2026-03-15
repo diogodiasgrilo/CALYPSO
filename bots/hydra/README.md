@@ -165,27 +165,28 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `downday_theoretical_put_credit` | `2.50` | Theoretical put credit ($) for stop calculation |
 | `conditional_entry_times` | `["12:45","13:15"]` | Extra entry times that only fire when MKT-035 triggers |
 
-### Stop Confirmation Timer (MKT-036) — v1.12.0
+### Stop Confirmation Timer (MKT-036) — INTENTIONALLY DISABLED
 
-When a spread value breaches the stop level, a 75-second confirmation window starts before executing the stop. If the spread recovers below the stop level during the window, the timer resets and the stop is avoided.
+MKT-036 stop confirmation timer is **intentionally disabled**. The $5.00 put buffer (`put_stop_buffer`) is the chosen solution for false stops instead. Code preserved but dormant — set `stop_confirmation_enabled: true` to re-enable.
 
-| Event | Action |
-|-------|--------|
-| `spread_value >= stop_level` (first breach) | Start 75s timer, log "CONFIRMING" |
-| Still breached after 75s | **Execute stop** (confirmed) |
-| `spread_value < stop_level` during window | **Reset timer**, log "RECOVERED" |
-| Bot restart with active timer | Timer resets (conservative — re-evaluate fresh) |
-
-**20-day backtest results:** 17 false stops avoided ($2,870 saved), 1 real stop missed ($85). Applies to both put and call sides.
-
-### Stop Confirmation Config (MKT-036)
+When enabled: 75-second confirmation window before executing stop. 20-day backtest: 17 false stops avoided ($2,870 saved), 1 real stop missed ($85).
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `stop_confirmation_enabled` | `true` | Enable/disable MKT-036 stop confirmation timer |
+| `stop_confirmation_enabled` | `false` | Enable/disable MKT-036 stop confirmation timer (DISABLED) |
 | `stop_confirmation_seconds` | `75` | Duration (seconds) breach must sustain before executing stop |
 | `stop_buffer` | `0.10` | Call stop buffer: call_stop = credit + $0.10 |
 | `put_stop_buffer` | `5.00` | Put stop buffer: put_stop = credit + $5.00 (wider — avoids 91% false put stops). Falls back to `stop_buffer` if not set. |
+
+### FOMC T+1 Call-Only (MKT-038)
+
+On the day after FOMC announcement (T+1), forces all entries to call-only spreads. Research shows T+1 is 66.7% down days with 23% more volatility — put-side exposure is dangerous.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `fomc_t1_callonly_enabled` | `true` | Force call-only entries on day after FOMC announcement |
+
+Stop formula for MKT-038 entries: `call_credit + theoretical $2.50 put + call buffer` (same as MKT-035).
 
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
@@ -254,7 +255,8 @@ sudo journalctl -u hydra -f
 | Trend signal | None | EMA 20/40 (informational only) |
 | Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
-| Stop formula | total_credit - $0.10 | total_credit + asymmetric buffer (call $0.10, put $5.00) + MKT-036 75s confirmation |
+| Stop formula | total_credit - $0.10 | total_credit + asymmetric buffer (call $0.10, put $5.00). MKT-036 timer DISABLED. |
+| FOMC handling | Skip both days | Skip both days (MKT-008) + T+1 call-only (MKT-038) |
 | Stop execution | Close both legs | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025 + MKT-033) |
 
 ## Risk Considerations
@@ -297,7 +299,8 @@ bots/hydra/
 
 ## Version History
 
-- **1.12.0** (2026-03-11): MKT-036 stop confirmation timer. When spread value breaches stop level, 75-second confirmation window before executing. If spread recovers below stop level during window, timer resets (stop avoided). 20-day backtest: 17 false stops avoided ($2,870 saved), 1 real stop missed ($85). Configurable via `stop_confirmation_enabled`, `stop_confirmation_seconds`. All agent SYSTEM_PROMPTs updated to v1.12.0.
+- **1.13.0** (2026-03-15): MKT-038 FOMC T+1 call-only mode. On the day after FOMC announcement, forces all entries to call-only spreads. Research: T+1 is 66.7% down days, 23% more volatility. Stop formula same as MKT-035. MKT-036 stop confirmation timer documented as DISABLED (was deployed in v1.12.0 but disabled on VM in favor of $5.00 put buffer).
+- **1.12.0** (2026-03-11): MKT-036 stop confirmation timer code deployed. Subsequently DISABLED on VM — $5.00 put buffer (`put_stop_buffer`) chosen as the solution instead. Code preserved, configurable via `stop_confirmation_enabled`. All agent SYSTEM_PROMPTs updated to v1.12.0.
 - **1.11.0** (2026-03-11): MKT-035 call-only on down days. When SPX < open -0.3%, place call spread only (no puts). Stop = call_credit + theoretical $2.50 put + buffer. 20-day data: 71% put stop rate on down days vs 7% call stop rate, +$920 improvement. Two conditional entry times (12:45, 13:15) that only fire when MKT-035 triggers as call-only. Configurable via `downday_callonly_enabled`, `downday_threshold_pct`, `downday_theoretical_put_credit`, `conditional_entry_times`.
 - **1.10.3** (2026-03-11): Disable MKT-034 VIX time shifting + remove VIX entry cutoff (max_vix_entry=999). Neither Tammy Chambless nor John Sandvand use VIX cutoffs or time shifting (both studied VIX correlation, found none). Entry times revert to 10:15 AM start (winning period Feb 10-27). Spread widths reverted to 50pt. MKT-034 remains configurable (`vix_time_shift.enabled`).
 - **1.10.2** (2026-03-10): Replace MEIC+ stop formula with credit+buffer (Brian's approach): stop = total_credit + $0.10 instead of total_credit - $0.15. Extra cushion reduces marginal stops. Fix: stop level validation now per-side (prevents skipping active side when stopped side has 0). Telegram /set updated: `stop_buffer` replaces `meic_plus`.

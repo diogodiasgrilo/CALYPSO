@@ -146,7 +146,7 @@ class HydraIronCondorEntry(IronCondorEntry):
     trend_signal: Optional[TrendSignal] = None  # The trend signal at entry time
 
     # Fix #49: Track why entry became one-sided (for correct logging)
-    override_reason: Optional[str] = None  # "trend", "mkt-011", "mkt-010", "mkt-035", or None
+    override_reason: Optional[str] = None  # "trend", "mkt-011", "mkt-010", "mkt-035", "mkt-038", or None
 
     # Fix #59: Track EMA values at entry time for Trades tab logging
     ema_20_at_entry: Optional[float] = None
@@ -432,6 +432,14 @@ class HydraStrategy(MEICStrategy):
             f"(threshold: {self.downday_threshold_pct * 100:.1f}%, "
             f"theoretical put: ${self.downday_theoretical_put_credit / 100:.2f}, "
             f"conditional entries: {len(self._conditional_entry_times)})"
+        )
+
+        # MKT-038: Call-only entries on T+1 after FOMC announcement
+        # Research: T+1 is 66.7% down days with 23% more volatility.
+        # Force call-only entries to avoid put-side exposure.
+        self.fomc_t1_callonly_enabled = strategy_config.get("fomc_t1_callonly_enabled", True)
+        logger.info(
+            f"  FOMC T+1 filter (MKT-038): {'ENABLED' if self.fomc_t1_callonly_enabled else 'DISABLED'}"
         )
 
         # MKT-036: Stop confirmation timer — requires stop condition to persist
@@ -2493,6 +2501,36 @@ class HydraStrategy(MEICStrategy):
                         # MKT-035 only applies to conditional entries (E6/E7).
                         pass
 
+                # MKT-038: Force call-only on T+1 after FOMC announcement
+                if not credit_gate_handled and not self.dry_run and self.fomc_t1_callonly_enabled:
+                    from shared.event_calendar import is_fomc_t_plus_one
+                    if is_fomc_t_plus_one():
+                        entry.call_only = True
+                        entry.put_only = False
+                        entry.put_side_skipped = True
+                        entry.override_reason = "mkt-038"
+                        place_call_only = True
+                        credit_gate_handled = True
+                        logger.info(
+                            f"MKT-038: Entry #{entry_num} — FOMC T+1 (announcement yesterday), "
+                            f"placing CALL spread only"
+                        )
+
+                        # Check call credit viability
+                        gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
+                        if est_call < self.min_viable_credit_per_side:
+                            logger.info(
+                                f"MKT-038: Entry #{entry_num} call credit "
+                                f"${est_call / 100:.2f} below minimum — skipping"
+                            )
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
+                            self._entry_in_progress = False
+                            self._current_entry = None
+                            self.state = MEICState.MONITORING
+                            self._next_entry_index += 1
+                            return f"Entry #{entry_num} skipped - call credit non-viable (MKT-038)"
+
                 # MKT-011: Check minimum credit gate (only if MKT-035 didn't already handle)
                 if not credit_gate_handled and not self.dry_run:
                     gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
@@ -2659,16 +2697,22 @@ class HydraStrategy(MEICStrategy):
                     trend_label = original_trend.value.upper()
 
                     if place_call_only:
-                        # MKT-035: Call-only alert
+                        # MKT-035/MKT-038: Call-only alert
                         sc_fill = entry.short_call_fill_price
                         lc_fill = entry.long_call_fill_price
                         width = int(entry.long_call_strike - entry.short_call_strike)
                         spx_chg = ((self.current_price - self.market_data.spx_open) / self.market_data.spx_open * 100) if self.market_data.spx_open > 0 else 0
                         cond_tag = " (conditional)" if is_conditional else ""
+                        override = getattr(entry, 'override_reason', None) or "mkt-035"
+                        override_tag = override.upper()
+                        if override == "mkt-038":
+                            reason_text = "FOMC T+1 → puts skipped"
+                        else:
+                            reason_text = "Down day → puts skipped"
                         msg_lines = [
-                            f"*Entry #{entry_num}* [MKT-035] Call-Only{cond_tag}",
+                            f"*Entry #{entry_num}* [{override_tag}] Call-Only{cond_tag}",
                             f"SPX {self.current_price:,.2f} ({spx_chg:+.2f}% from open) | VIX {self.current_vix:.2f}",
-                            f"Trend: {trend_label} | Down day → puts skipped",
+                            f"Trend: {trend_label} | {reason_text}",
                             "",
                             f"SC {entry.short_call_strike:.0f} @ ${sc_fill:.2f} (${sc_fill * mult:.0f})",
                             f"LC {entry.long_call_strike:.0f} @ ${lc_fill:.2f} (-${lc_fill * mult:.0f})",
@@ -3613,13 +3657,13 @@ class HydraStrategy(MEICStrategy):
                 credit = MIN_STOP_LEVEL
 
             override = getattr(entry, 'override_reason', None)
-            if override == "mkt-035":
-                # MKT-035: Use theoretical put credit for stop calculation
+            if override in ("mkt-035", "mkt-038"):
+                # MKT-035/MKT-038: Use theoretical put credit for stop calculation
                 # stop = call_credit + theoretical_put ($250) + buffer
                 theoretical_put = self.downday_theoretical_put_credit
                 base_stop = credit + theoretical_put
                 logger.info(
-                    f"MKT-035: Call-only stop = call ${credit:.2f} + "
+                    f"{override.upper()}: Call-only stop = call ${credit:.2f} + "
                     f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f} "
                     f"= ${base_stop + self.stop_buffer:.2f}"
                 )
@@ -5575,6 +5619,8 @@ class HydraStrategy(MEICStrategy):
                 override_reason = getattr(entry, 'override_reason', None)
                 if override_reason == "mkt-035":
                     trend_tag = "[MKT-035]"
+                elif override_reason == "mkt-038":
+                    trend_tag = "[MKT-038]"
                 elif override_reason == "mkt-011":
                     trend_tag = "[MKT-011]"
                 elif override_reason == "mkt-010":
@@ -6559,12 +6605,12 @@ class HydraStrategy(MEICStrategy):
                 credit = MIN_STOP_LEVEL
 
             override = getattr(entry, 'override_reason', None)
-            if override == "mkt-035":
-                # MKT-035: call_credit + theoretical_put + buffer
+            if override in ("mkt-035", "mkt-038"):
+                # MKT-035/MKT-038: call_credit + theoretical_put + buffer
                 theoretical_put = self.downday_theoretical_put_credit
                 base_stop = credit + theoretical_put
                 logger.info(
-                    f"Recovery: MKT-035 call-only stop = call ${credit:.2f} + "
+                    f"Recovery: {override.upper()} call-only stop = call ${credit:.2f} + "
                     f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f}"
                 )
             else:

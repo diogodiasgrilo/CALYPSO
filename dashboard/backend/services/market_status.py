@@ -26,6 +26,7 @@ try:
     from shared.event_calendar import (
         is_fomc_meeting_day,
         is_fomc_announcement_day,
+        is_fomc_t_plus_one,
         get_next_fomc_date,
     )
     MARKET_HOURS_AVAILABLE = True
@@ -89,6 +90,7 @@ def get_current_status() -> dict:
             today = get_us_market_time().date()
             result["is_fomc_day"] = is_fomc_meeting_day(today)
             result["is_fomc_announcement"] = is_fomc_announcement_day(today)
+            result["is_fomc_t_plus_one"] = is_fomc_t_plus_one(today)
             next_fomc = get_next_fomc_date(today)
             if next_fomc:
                 result["next_fomc"] = next_fomc.isoformat()
@@ -99,6 +101,7 @@ def get_current_status() -> dict:
         except Exception:
             result["is_fomc_day"] = False
             result["is_fomc_announcement"] = False
+            result["is_fomc_t_plus_one"] = False
             result["next_fomc"] = None
             result["days_until_fomc"] = None
 

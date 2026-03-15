@@ -165,6 +165,27 @@ def is_fomc_announcement_day(check_date: date = None) -> bool:
     return check_date in announcement_dates
 
 
+def is_fomc_t_plus_one(check_date: date = None) -> bool:
+    """
+    Check if today is T+1 after an FOMC announcement (day after day 2).
+
+    Research shows T+1 after FOMC is the most dangerous day for iron condors:
+    66.7% down days, 23% more volatility than normal. Used by MKT-038 to force
+    call-only entries on T+1.
+
+    Args:
+        check_date: Date to check (defaults to today)
+
+    Returns:
+        True if yesterday was an FOMC announcement day (day 2)
+    """
+    if check_date is None:
+        check_date = get_us_market_time().date()
+
+    yesterday = check_date - timedelta(days=1)
+    return is_fomc_announcement_day(yesterday)
+
+
 def get_next_fomc_date(from_date: date = None) -> Optional[date]:
     """
     Get the next FOMC meeting date from a given date.

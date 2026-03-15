@@ -19,49 +19,68 @@ function formatNextOpen(isoStr: string | undefined): string {
   }
 }
 
-/** FOMC alert strip — rendered as overlay above any state. */
+/** FOMC alert strip — rendered as overlay above any state.
+ *  Shows HYDRA-specific behavior for each FOMC phase:
+ *  T-1: Normal trading (favorable for premium selling)
+ *  T+0: All entries skipped (MKT-008 blackout)
+ *  T+1: Call-only entries (MKT-038)
+ */
 export function FOMCBanner() {
   const market = useHydraStore((s) => s.market);
   if (!market) return null;
 
   const isFomcDay = market.is_fomc_day;
   const isAnnouncement = market.is_fomc_announcement;
+  const isTPlus1 = market.is_fomc_t_plus_one;
   const daysUntil = market.days_until_fomc;
 
-  // Show on FOMC day or 1-2 days before
-  if (!isFomcDay && (daysUntil == null || daysUntil > 2 || daysUntil <= 0)) return null;
+  // Show on: FOMC day, T+1, or 1-2 days before
+  const showApproaching = !isFomcDay && !isTPlus1 && daysUntil != null && daysUntil > 0 && daysUntil <= 2;
+  if (!isFomcDay && !isTPlus1 && !showApproaching) return null;
+
+  // Determine headline + HYDRA behavior tag
+  let headline: string;
+  let hydraTag: string;
+  let hydraTagColor: string;
+
+  if (isAnnouncement) {
+    headline = "FOMC Announcement Day — Rate Decision at 2:00 PM ET";
+    hydraTag = "HYDRA: All entries skipped (MKT-008)";
+    hydraTagColor = colors.loss;
+  } else if (isFomcDay) {
+    headline = "FOMC Meeting Day 1 — Announcement Tomorrow at 2:00 PM ET";
+    hydraTag = "HYDRA: All entries skipped (MKT-008)";
+    hydraTagColor = colors.loss;
+  } else if (isTPlus1) {
+    headline = "Post-FOMC Day (T+1) — Elevated Volatility Expected";
+    hydraTag = "HYDRA: Call-only entries (MKT-038) — puts skipped";
+    hydraTagColor = colors.warning;
+  } else {
+    headline = `FOMC Meeting in ${daysUntil} day${daysUntil !== 1 ? "s" : ""}`;
+    hydraTag = daysUntil === 1
+      ? "HYDRA: Normal trading today — entries skipped tomorrow"
+      : "HYDRA: Normal trading — FOMC approaching";
+    hydraTagColor = colors.textDim;
+  }
 
   return (
     <div
-      className="rounded-lg border px-4 py-2.5 flex items-center gap-3"
+      className="rounded-lg border px-4 py-2.5 flex items-start gap-3"
       style={{
-        backgroundColor: "rgba(210, 153, 34, 0.08)",
+        backgroundColor: isTPlus1
+          ? "rgba(210, 153, 34, 0.05)"
+          : "rgba(210, 153, 34, 0.08)",
         borderColor: "rgba(210, 153, 34, 0.25)",
       }}
     >
-      <AlertTriangle size={16} style={{ color: colors.warning }} className="shrink-0" />
-      <div className="text-xs">
-        {isAnnouncement ? (
-          <span style={{ color: colors.warning }} className="font-semibold">
-            FOMC Announcement Day — Rate Decision at 2:00 PM ET
-          </span>
-        ) : isFomcDay ? (
-          <span style={{ color: colors.warning }} className="font-semibold">
-            FOMC Meeting Day 1 — Announcement Tomorrow at 2:00 PM ET
-          </span>
-        ) : (
-          <span className="text-text-secondary">
-            FOMC Meeting in{" "}
-            <span style={{ color: colors.warning }} className="font-semibold">
-              {daysUntil} day{daysUntil !== 1 ? "s" : ""}
-            </span>
-          </span>
-        )}
-        {isFomcDay && (
-          <span className="text-text-dim ml-2">
-            — HYDRA skips all entries on FOMC days
-          </span>
-        )}
+      <AlertTriangle size={16} style={{ color: colors.warning }} className="shrink-0 mt-0.5" />
+      <div className="text-xs space-y-1">
+        <div style={{ color: colors.warning }} className="font-semibold">
+          {headline}
+        </div>
+        <div style={{ color: hydraTagColor }}>
+          {hydraTag}
+        </div>
       </div>
     </div>
   );

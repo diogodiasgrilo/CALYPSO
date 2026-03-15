@@ -64,8 +64,11 @@
         "downday_theoretical_put_credit": 2.50,
         "conditional_entry_times": ["12:45", "13:15"],
 
-        "_comment_stop_confirmation": "MKT-036: Sustained breach confirmation. Requires stop condition to persist for N seconds before closing. 20-day analysis: 75s avoids 17 false stops ($2,870 saved), misses 1 real ($85). Applies to both put and call sides.",
-        "stop_confirmation_enabled": true,
+        "_comment_fomc_t1": "MKT-038: Call-only entries on T+1 after FOMC announcement. Research: T+1 is 66.7% down days, 23% more volatile. Forces call-only spreads to avoid put-side exposure.",
+        "fomc_t1_callonly_enabled": true,
+
+        "_comment_stop_confirmation": "MKT-036: Sustained breach confirmation. INTENTIONALLY DISABLED — $5.00 put buffer (put_stop_buffer) is the chosen solution instead. Code preserved but dormant. When enabled: requires stop condition to persist for N seconds before closing.",
+        "stop_confirmation_enabled": false,
         "stop_confirmation_seconds": 75,
 
         "_comment_early_close": "MKT-018: INTENTIONALLY DISABLED. Backtest showed no ROC configuration beats hold-to-expiry. Code preserved but dormant. See docs/HYDRA_EARLY_CLOSE_ANALYSIS.md",
