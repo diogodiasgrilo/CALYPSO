@@ -92,6 +92,16 @@ export interface MarketStatus {
   is_open: boolean;
   is_trading_day: boolean;
   is_early_close: boolean;
+  holiday_name?: string;
+  early_close_reason?: string;
+  is_fomc_day?: boolean;
+  is_fomc_announcement?: boolean;
+  next_fomc?: string;
+  days_until_fomc?: number;
+  next_event?: {
+    next_open: string;
+    hours_until_open: number;
+  };
 }
 
 export interface OHLCBar {

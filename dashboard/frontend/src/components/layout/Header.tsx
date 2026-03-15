@@ -1,7 +1,7 @@
 import { Volume2, VolumeX } from "lucide-react";
 import { useHydraStore } from "../../store/hydraStore";
 import { formatPrice } from "../../lib/formatters";
-import { vixColor } from "../../lib/tradingColors";
+import { vixColor, colors } from "../../lib/tradingColors";
 import { useFlashOnChange } from "../../hooks/useFlashOnChange";
 import { isMuted, toggleMute } from "../../lib/sounds";
 import { useState } from "react";
@@ -93,15 +93,42 @@ export function Header() {
       {/* Right: Market status + mute + clock */}
       <div className="flex items-center gap-4">
         {market && (
-          <span
-            className={`text-xs px-2 py-0.5 rounded ${
-              market.is_open
-                ? "bg-profit/20 text-profit"
-                : "bg-bg-elevated text-text-secondary"
-            }`}
-          >
-            {market.is_open ? "MARKET OPEN" : "CLOSED"}
-          </span>
+          <div className="flex items-center gap-1.5">
+            {market.is_fomc_day && (
+              <span
+                className="text-xs px-2 py-0.5 rounded font-semibold"
+                style={{ backgroundColor: "rgba(210, 153, 34, 0.2)", color: colors.warning }}
+              >
+                FOMC
+              </span>
+            )}
+            <span
+              className="text-xs px-2 py-0.5 rounded"
+              style={
+                market.is_open
+                  ? { backgroundColor: "rgba(126, 232, 199, 0.2)", color: colors.profit }
+                  : !market.is_trading_day && market.holiday_name
+                    ? { backgroundColor: "rgba(248, 81, 73, 0.2)", color: colors.loss }
+                    : market.session === "pre_market"
+                      ? { backgroundColor: "rgba(88, 166, 255, 0.2)", color: colors.info }
+                      : market.session === "after_hours"
+                        ? { backgroundColor: "rgba(88, 166, 255, 0.2)", color: colors.info }
+                        : { backgroundColor: "var(--bg-elevated)", color: "var(--text-secondary)" }
+              }
+            >
+              {market.is_open
+                ? "MARKET OPEN"
+                : !market.is_trading_day && market.holiday_name
+                  ? "HOLIDAY"
+                  : !market.is_trading_day
+                    ? "WEEKEND"
+                    : market.session === "pre_market"
+                      ? "PRE-MARKET"
+                      : market.session === "after_hours"
+                        ? "AFTER HOURS"
+                        : "CLOSED"}
+            </span>
+          </div>
         )}
         <button
           onClick={handleMuteToggle}
