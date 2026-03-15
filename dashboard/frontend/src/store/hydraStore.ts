@@ -121,6 +121,31 @@ export interface StopEvent {
   stop_time: string;
 }
 
+export interface AgentInfo {
+  agent: string;
+  last_run: string | null;
+  last_file: string | null;
+  available: boolean;
+}
+
+export interface ComparisonStats {
+  avg_pnl: number;
+  avg_entries: number;
+  avg_stops: number;
+  avg_credit: number;
+  best_day: number;
+  worst_day: number;
+  total_days: number;
+}
+
+export interface Toast {
+  id: string;
+  type: "stop" | "entry" | "info" | "error";
+  title: string;
+  message: string;
+  timestamp: number;
+}
+
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
 // ── Store ──
@@ -151,6 +176,19 @@ interface DashboardStore {
   // Live stop events (detected from state file transitions)
   stopEvents: StopEvent[];
 
+  // Agent status (from WebSocket)
+  agentStatus: AgentInfo[];
+
+  // Comparison statistics (averages from historical data)
+  comparisons: ComparisonStats | null;
+
+  // Toast notifications
+  toasts: Toast[];
+
+  // UI preferences (persisted via actions, not localStorage — ephemeral per session)
+  showStrikes: boolean;
+  muted: boolean;
+
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   applySnapshot: (data: Record<string, unknown>) => void;
@@ -160,7 +198,13 @@ interface DashboardStore {
   applyOHLCUpdate: (data: OHLCBar[]) => void;
   applyLogLines: (lines: LogEntry[]) => void;
   applyStopEvents: (events: StopEvent[]) => void;
+  applyAgentsUpdate: (agents: AgentInfo[]) => void;
+  applyComparisons: (data: ComparisonStats) => void;
+  addToast: (toast: Omit<Toast, "id" | "timestamp">) => void;
+  removeToast: (id: string) => void;
   setClientCount: (count: number) => void;
+  toggleStrikes: () => void;
+  toggleMuted: () => void;
 }
 
 export const useHydraStore = create<DashboardStore>()(
@@ -174,6 +218,11 @@ export const useHydraStore = create<DashboardStore>()(
     pnlHistory: [],
     logLines: [],
     stopEvents: [],
+    agentStatus: [],
+    comparisons: null,
+    toasts: [],
+    showStrikes: false,
+    muted: false,
 
     setConnectionStatus: (status) =>
       set((s) => {
@@ -198,6 +247,8 @@ export const useHydraStore = create<DashboardStore>()(
           const stops = data.today_stops as StopEvent[];
           s.stopEvents = stops.filter((e) => e.stop_time);
         }
+        if (data.agents) s.agentStatus = data.agents as AgentInfo[];
+        if (data.comparisons) s.comparisons = data.comparisons as ComparisonStats;
         if (data.clients) s.clientCount = data.clients as number;
       }),
 
@@ -250,9 +301,47 @@ export const useHydraStore = create<DashboardStore>()(
         }
       }),
 
+    applyAgentsUpdate: (agents) =>
+      set((s) => {
+        s.agentStatus = agents;
+      }),
+
+    applyComparisons: (data) =>
+      set((s) => {
+        s.comparisons = data;
+      }),
+
+    addToast: (toast) =>
+      set((s) => {
+        s.toasts.push({
+          ...toast,
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          timestamp: Date.now(),
+        });
+        // Keep at most 5 toasts
+        if (s.toasts.length > 5) {
+          s.toasts = s.toasts.slice(-5);
+        }
+      }),
+
+    removeToast: (id) =>
+      set((s) => {
+        s.toasts = s.toasts.filter((t) => t.id !== id);
+      }),
+
     setClientCount: (count) =>
       set((s) => {
         s.clientCount = count;
+      }),
+
+    toggleStrikes: () =>
+      set((s) => {
+        s.showStrikes = !s.showStrikes;
+      }),
+
+    toggleMuted: () =>
+      set((s) => {
+        s.muted = !s.muted;
       }),
   }))
 );

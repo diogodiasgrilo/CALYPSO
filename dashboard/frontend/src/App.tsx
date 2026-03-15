@@ -1,3 +1,4 @@
+import { useState, useCallback } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
 import { LayoutDashboard, CalendarDays, BarChart3 } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
@@ -5,6 +6,9 @@ import { Dashboard } from "./pages/Dashboard";
 import { History } from "./pages/History";
 import { Analytics } from "./pages/Analytics";
 import { useWebSocket } from "./hooks/useWebSocket";
+import { CommandPalette } from "./components/shared/CommandPalette";
+import { ToastContainer } from "./components/shared/ToastContainer";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
 function NavTabs() {
   const linkClass = ({ isActive }: { isActive: boolean }) =>
@@ -34,6 +38,13 @@ function NavTabs() {
 
 function App() {
   useWebSocket();
+  const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
+
+  const togglePalette = useCallback(() => {
+    setCmdPaletteOpen((prev) => !prev);
+  }, []);
+
+  useKeyboardShortcuts({ onCommandPalette: togglePalette });
 
   return (
     <DashboardLayout>
@@ -45,6 +56,8 @@ function App() {
           <Route path="/analytics" element={<Analytics />} />
         </Routes>
       </div>
+      <CommandPalette open={cmdPaletteOpen} onClose={() => setCmdPaletteOpen(false)} />
+      <ToastContainer />
     </DashboardLayout>
   );
 }

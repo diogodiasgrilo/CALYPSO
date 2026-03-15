@@ -1,12 +1,14 @@
-/** HYDRA brand color system — extracted from the HYDRA logo. */
+/** HYDRA brand color system — 3-level surface depth + semantic colors. */
 
 export const colors = {
-  // Backgrounds (matched to HYDRA logo)
-  bg: "#2a3a42",
-  bgDeep: "#1e2c33",
-  bgElevated: "#344a52",
+  // Surface depth system (3 elevation levels)
+  bg: "#1a2229", // Level 0 — page background
+  bgDeep: "#1a2229", // alias for bg
+  card: "#222e35", // Level 1 — cards/panels
+  cardHover: "#283338", // Level 1 hover
+  bgElevated: "#2d3b43", // Level 2 — modals/tooltips/dropdowns
   border: "#3d5058",
-  borderDim: "#2f424a",
+  borderDim: "rgba(255, 255, 255, 0.06)",
 
   // P&L
   profit: "#7ee8c7",
@@ -21,10 +23,6 @@ export const colors = {
   textPrimary: "#e8edf3",
   textSecondary: "#8b9bb0",
   textDim: "#5e6e82",
-
-  // Cards
-  card: "#1e2c33",
-  cardHover: "#253540",
 } as const;
 
 /** Color for a P&L value. */

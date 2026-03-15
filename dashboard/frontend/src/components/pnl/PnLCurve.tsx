@@ -5,6 +5,7 @@ import {
   YAxis,
   Tooltip,
   ReferenceLine,
+  ReferenceArea,
   ResponsiveContainer,
 } from "recharts";
 import { useHydraStore } from "../../store/hydraStore";
@@ -12,7 +13,8 @@ import { colors } from "../../lib/tradingColors";
 import { formatPnL } from "../../lib/formatters";
 
 export function PnLCurve() {
-  const { pnlHistory } = useHydraStore();
+  const pnlHistory = useHydraStore((s) => s.pnlHistory);
+  const comparisons = useHydraStore((s) => s.comparisons);
 
   // Determine current P&L from last data point
   const lastPoint = pnlHistory[pnlHistory.length - 1];
@@ -22,12 +24,15 @@ export function PnLCurve() {
   const isNegative = displayPnl < 0;
   const lineColor = isNegative ? colors.loss : colors.profit;
 
+  // Threshold bands from comparison data
+  const avgPnl = comparisons?.avg_pnl ?? 0;
+  const bestDay = comparisons?.best_day ?? 0;
+  const worstDay = comparisons?.worst_day ?? 0;
+
   if (pnlHistory.length === 0) {
     return (
       <div>
-        <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
-          Intraday P&L
-        </h3>
+        <h3 className="label-upper mb-2">Intraday P&L</h3>
         <div className="bg-card rounded-lg border border-border-dim p-8 flex items-center justify-center">
           <span className="text-text-dim text-xs">No entry data yet</span>
         </div>
@@ -37,9 +42,7 @@ export function PnLCurve() {
 
   return (
     <div>
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
-        Intraday P&L
-      </h3>
+      <h3 className="label-upper mb-2">Intraday P&L</h3>
       <div className="bg-card rounded-lg border border-border-dim p-2">
         <ResponsiveContainer width="100%" height={150}>
           <AreaChart data={pnlHistory}>
@@ -56,7 +59,7 @@ export function PnLCurve() {
             <XAxis
               dataKey="time"
               tick={{ fontSize: 10, fill: colors.textDim }}
-              axisLine={{ stroke: colors.borderDim }}
+              axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
               tickLine={false}
             />
             <YAxis
@@ -76,7 +79,32 @@ export function PnLCurve() {
               }}
               formatter={(value: unknown) => [formatPnL(Number(value ?? 0)), "P&L"]}
             />
+            {/* Threshold bands */}
+            {bestDay > 0 && (
+              <ReferenceArea
+                y1={avgPnl}
+                y2={bestDay}
+                fill={colors.profit}
+                fillOpacity={0.06}
+              />
+            )}
+            {worstDay < 0 && (
+              <ReferenceArea
+                y1={worstDay}
+                y2={Math.min(avgPnl, 0)}
+                fill={colors.loss}
+                fillOpacity={0.06}
+              />
+            )}
             <ReferenceLine y={0} stroke={colors.textDim} strokeDasharray="3 3" />
+            {avgPnl !== 0 && (
+              <ReferenceLine
+                y={avgPnl}
+                stroke={colors.info}
+                strokeDasharray="4 4"
+                strokeOpacity={0.4}
+              />
+            )}
             <Area
               type="monotone"
               dataKey="pnl"

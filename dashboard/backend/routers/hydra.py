@@ -1,6 +1,9 @@
 """HYDRA state and entry endpoints."""
 
+import re
+
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
@@ -8,6 +11,8 @@ from dashboard.backend.services.db_reader import BacktestingDBReader
 from dashboard.backend.services.market_status import get_today_et
 
 router = APIRouter(prefix="/api/hydra", tags=["hydra"])
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 state_reader = StateFileReader(settings.hydra_state_file)
 db_reader = BacktestingDBReader(settings.backtesting_db)
@@ -25,6 +30,8 @@ async def get_state():
 @router.get("/entries")
 async def get_entries(date_str: str | None = None):
     """Today's entries (or specific date) with full details."""
+    if date_str is not None and not _DATE_RE.match(date_str):
+        return JSONResponse(status_code=400, content={"error": "Invalid date format. Use YYYY-MM-DD."})
     if date_str is None:
         # Try state file first for live data
         state = state_reader.get_cached() or state_reader.read_latest()

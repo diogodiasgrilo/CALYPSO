@@ -4,7 +4,10 @@ import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { DayDetailSummary } from "./DayDetailSummary";
 import { DayDetailChart } from "./DayDetailChart";
 import { DayDetailEntries } from "./DayDetailEntries";
+import { SessionReplay } from "./SessionReplay";
 import type { DaySummary, DayEntry, DayStop, OHLCBar } from "./types";
+
+type DetailTab = "overview" | "replay";
 
 export function DayDetailModal({
   date,
@@ -23,6 +26,7 @@ export function DayDetailModal({
   const [stops, setStops] = useState<DayStop[]>([]);
   const [bars, setBars] = useState<OHLCBar[]>([]);
   const [loading, setLoading] = useState(true);
+  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
 
   // Fetch detail data
   useEffect(() => {
@@ -123,23 +127,48 @@ export function DayDetailModal({
           </button>
         </div>
 
+        {/* Tab selector */}
+        <div className="flex gap-1 mx-5 mt-3 bg-bg rounded-lg p-1 w-fit">
+          {(["overview", "replay"] as DetailTab[]).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setDetailTab(tab)}
+              className={`px-3 py-1 text-xs font-semibold uppercase tracking-wider rounded-md transition-colors ${
+                detailTab === tab
+                  ? "bg-bg-elevated text-text-primary"
+                  : "text-text-dim hover:text-text-secondary"
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+
         {/* Content */}
         <div className="p-5 space-y-5">
-          {/* Summary stats (instant — uses pre-loaded summary) */}
-          {summary && <DayDetailSummary summary={summary} />}
-
-          {loading ? (
-            <div className="flex items-center justify-center h-40 text-text-dim text-xs">
-              Loading day details...
-            </div>
-          ) : (
+          {detailTab === "overview" && (
             <>
-              {/* SPX Chart */}
-              <DayDetailChart date={date} bars={bars} entries={entries} stops={stops} />
+              {/* Summary stats (instant — uses pre-loaded summary) */}
+              {summary && <DayDetailSummary summary={summary} />}
 
-              {/* Entries + Stops Tables */}
-              <DayDetailEntries entries={entries} stops={stops} />
+              {loading ? (
+                <div className="flex items-center justify-center h-40 text-text-dim text-xs">
+                  Loading day details...
+                </div>
+              ) : (
+                <>
+                  {/* SPX Chart */}
+                  <DayDetailChart date={date} bars={bars} entries={entries} stops={stops} />
+
+                  {/* Entries + Stops Tables */}
+                  <DayDetailEntries entries={entries} stops={stops} />
+                </>
+              )}
             </>
+          )}
+
+          {detailTab === "replay" && (
+            <SessionReplay date={date} />
           )}
         </div>
       </div>

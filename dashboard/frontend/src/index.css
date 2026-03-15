@@ -2,11 +2,12 @@
 
 /* ── HYDRA Brand Theme (CSS custom properties) ── */
 @theme {
-  --color-bg: #2a3a42;
-  --color-bg-deep: #1e2c33;
-  --color-bg-elevated: #344a52;
+  /* Surface depth system (3 elevation levels) */
+  --color-bg: #1a2229;
+  --color-bg-deep: #161d23;
+  --color-bg-elevated: #2d3b43;
   --color-border: #3d5058;
-  --color-border-dim: #2f424a;
+  --color-border-dim: rgba(255, 255, 255, 0.06);
 
   --color-profit: #7ee8c7;
   --color-profit-muted: #5a9e8a;
@@ -20,8 +21,8 @@
   --color-text-secondary: #8b9bb0;
   --color-text-dim: #5e6e82;
 
-  --color-card: #1e2c33;
-  --color-card-hover: #253540;
+  --color-card: #222e35;
+  --color-card-hover: #283338;
 }
 
 /* ── Base styles ── */
@@ -35,14 +36,19 @@ html {
 
 body {
   margin: 0;
-  font-family:
-    "SF Mono", "Fira Code", "JetBrains Mono", ui-monospace, monospace;
-  background-color: var(--color-bg-deep);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  background-color: var(--color-bg);
   color: var(--color-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-size: 14px;
   line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.font-mono {
+  font-family: "SF Mono", "Fira Code", "JetBrains Mono", ui-monospace, monospace;
 }
 
 #root {
@@ -51,13 +57,50 @@ body {
   flex-direction: column;
 }
 
+/* ── Typography utility classes ── */
+.label-upper {
+  font-size: 0.75rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-secondary);
+}
+
+.metric-hero {
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.metric-lg {
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.metric-body {
+  font-size: 1rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.ts-label {
+  font-size: 0.6875rem;
+  font-weight: 400;
+  color: var(--color-text-dim);
+}
+
 /* ── Scrollbar (WebKit) ── */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--color-bg-deep);
+  background: var(--color-bg);
 }
 ::-webkit-scrollbar-thumb {
   background: var(--color-border);
@@ -84,3 +127,70 @@ body {
 .flash-up { animation: flash-green 0.6s ease-out; }
 .flash-down { animation: flash-red 0.6s ease-out; }
 .pulse-live { animation: pulse-green 2s ease-in-out infinite; }
+
+/* ── Scale pulse for animated numbers ── */
+@keyframes scale-pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+.scale-pulse { animation: scale-pulse 0.3s ease-in-out; }
+
+/* ── Skeleton loading shimmer ── */
+@keyframes shimmer {
+  0% { background-position: -1000px 0; }
+  100% { background-position: 1000px 0; }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(255, 255, 255, 0.08) 50%,
+    rgba(255, 255, 255, 0.04) 100%
+  );
+  background-size: 1000px 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 6px;
+}
+
+/* ── Toast animations ── */
+@keyframes toast-in {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes toast-out {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0; }
+}
+.toast-enter { animation: toast-in 0.3s ease-out forwards; }
+.toast-exit { animation: toast-out 0.3s ease-in forwards; }
+
+/* ── Command palette backdrop ── */
+.cmd-backdrop {
+  backdrop-filter: blur(8px);
+  background-color: color-mix(in srgb, var(--color-bg) 70%, transparent);
+}
+
+/* ── Ambient state gradient ── */
+.ambient-profit {
+  background: radial-gradient(ellipse at top center, rgba(126, 232, 199, 0.04), transparent 60%);
+  transition: opacity 2s ease;
+}
+.ambient-loss {
+  background: radial-gradient(ellipse at top center, rgba(248, 81, 73, 0.04), transparent 60%);
+  transition: opacity 2s ease;
+}
+
+/* ── Elevation border ── */
+.elevation-border {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+  .flash-up, .flash-down { animation: none; }
+  .pulse-live { animation: none; }
+  .scale-pulse { animation: none; }
+  .toast-enter, .toast-exit { animation: none; }
+}

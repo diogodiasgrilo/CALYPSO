@@ -1,14 +1,17 @@
-/** WebSocket hook with exponential backoff reconnection. */
+/** WebSocket hook with exponential backoff reconnection and heartbeat timeout. */
 
 import { useEffect, useRef, useCallback } from "react";
 import { useHydraStore } from "../store/hydraStore";
 
 const MAX_RECONNECT_DELAY = 30_000;
+/** If no message received for this long, declare connection dead and reconnect. */
+const HEARTBEAT_TIMEOUT_MS = 60_000;
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectDelay = useRef(1000);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const heartbeatTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const {
     setConnectionStatus,
@@ -19,8 +22,22 @@ export function useWebSocket() {
     applyOHLCUpdate,
     applyLogLines,
     applyStopEvents,
+    applyAgentsUpdate,
+    applyComparisons,
+    addToast,
     setClientCount,
   } = useHydraStore();
+
+  /** Reset heartbeat timeout — called on every received message. */
+  const resetHeartbeatTimer = useCallback(() => {
+    if (heartbeatTimer.current) clearTimeout(heartbeatTimer.current);
+    heartbeatTimer.current = setTimeout(() => {
+      // No message for 60s — connection is zombie
+      console.warn("[WS] Heartbeat timeout — reconnecting");
+      setConnectionStatus("disconnected");
+      wsRef.current?.close();
+    }, HEARTBEAT_TIMEOUT_MS);
+  }, [setConnectionStatus]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -38,9 +55,13 @@ export function useWebSocket() {
     ws.onopen = () => {
       setConnectionStatus("connected");
       reconnectDelay.current = 1000; // Reset backoff
+      resetHeartbeatTimer(); // Start heartbeat monitoring
     };
 
     ws.onmessage = (event) => {
+      // Reset heartbeat on ANY message
+      resetHeartbeatTimer();
+
       try {
         const msg = JSON.parse(event.data);
 
@@ -65,6 +86,19 @@ export function useWebSocket() {
             break;
           case "stop_events":
             applyStopEvents(msg.data);
+            // Toast notification for new stops
+            for (const stop of msg.data) {
+              if (stop.stop_time) {
+                addToast({
+                  type: "stop",
+                  title: `Stop Triggered`,
+                  message: `Entry #${stop.entry_number} ${stop.side} side stopped`,
+                });
+              }
+            }
+            break;
+          case "agents_update":
+            applyAgentsUpdate(msg.data);
             break;
           case "heartbeat":
             if (msg.clients != null) setClientCount(msg.clients);
@@ -82,6 +116,7 @@ export function useWebSocket() {
     ws.onclose = () => {
       setConnectionStatus("disconnected");
       wsRef.current = null;
+      if (heartbeatTimer.current) clearTimeout(heartbeatTimer.current);
       scheduleReconnect();
     };
 
@@ -98,7 +133,11 @@ export function useWebSocket() {
     applyOHLCUpdate,
     applyLogLines,
     applyStopEvents,
+    applyAgentsUpdate,
+    applyComparisons,
+    addToast,
     setClientCount,
+    resetHeartbeatTimer,
   ]);
 
   const scheduleReconnect = useCallback(() => {
@@ -123,6 +162,7 @@ export function useWebSocket() {
     connect();
     return () => {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (heartbeatTimer.current) clearTimeout(heartbeatTimer.current);
       wsRef.current?.close();
     };
   }, [connect]);

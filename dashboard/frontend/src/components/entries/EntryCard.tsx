@@ -204,7 +204,7 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
         <div className="mb-2">
           <div className="flex items-baseline justify-between mb-1">
             <span
-              className="text-base font-bold font-mono"
+              className="metric-body font-bold"
               style={{
                 color: status === "stopped_single" && currentPnl < 0
                   ? statusColor("stopped_single") // amber for single stop loss

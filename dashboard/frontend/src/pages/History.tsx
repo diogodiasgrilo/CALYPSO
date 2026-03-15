@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Download } from "lucide-react";
 import { MonthCalendar, groupByMonth } from "../components/history/MonthCalendar";
 import { DailySummaryTable } from "../components/history/DailySummaryTable";
 import { DayDetailModal } from "../components/history/DayDetailModal";
+import { PeriodSummary } from "../components/history/PeriodSummary";
+import { exportDailySummariesCSV } from "../lib/exportUtils";
 import type { DaySummary } from "../components/history/types";
 
 export function History() {
@@ -51,9 +53,7 @@ export function History() {
     <div className="space-y-4">
       {/* Compact header: title + year dropdown + legend */}
       <div className="flex items-center gap-3">
-        <h2 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
-          P&L Calendar
-        </h2>
+        <h2 className="label-upper">P&L Calendar</h2>
         <div className="relative">
           <select
             value={selectedYear}
@@ -91,6 +91,22 @@ export function History() {
           <span>Profit</span>
         </div>
       </div>
+
+      {/* Period Summaries */}
+      <PeriodSummary summaries={summaries} />
+
+      {/* Export button */}
+      {summaries.length > 0 && (
+        <div className="flex justify-end">
+          <button
+            onClick={() => exportDailySummariesCSV(summaries as unknown as Record<string, unknown>[])}
+            className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors px-2 py-1 rounded border border-border-dim hover:border-text-dim"
+          >
+            <Download size={12} />
+            Export CSV
+          </button>
+        </div>
+      )}
 
       {/* Month Calendar Grid */}
       <div className="bg-card rounded-lg border border-border-dim p-3">

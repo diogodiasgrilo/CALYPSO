@@ -19,6 +19,10 @@ import {
 } from "recharts";
 import { colors } from "../lib/tradingColors";
 import { formatPnL } from "../lib/formatters";
+import { EquityCurve } from "../components/pnl/EquityCurve";
+import { CorrelationHeatmap } from "../components/market/CorrelationHeatmap";
+import { Download } from "lucide-react";
+import { exportEntriesCSV } from "../lib/exportUtils";
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -77,8 +81,8 @@ const TAB_LABELS: Record<AnalyticsTab, string> = {
 };
 
 const SCHEDULED_SLOTS = [
-  605, 635, 665, 675, 695, 705, 725, 735, 755, 765, 795,
-]; // 10:05,10:35,11:05,11:15,11:35,11:45,12:05,12:15,12:35,12:45,13:15
+  615, 645, 675, 705, 735, 765, 795,
+]; // 10:15,10:45,11:15,11:45,12:15,12:45,13:15 (E1-E5 base + E6/E7 conditional)
 
 const SLOT_LABELS: Record<number, string> = {
   605: "10:05", 635: "10:35", 665: "11:05", 675: "11:15",
@@ -232,10 +236,32 @@ export function Analytics() {
         ))}
       </div>
 
+      {/* Export button */}
+      <div className="flex justify-end">
+        <button
+          onClick={() => {
+            if (activeTab === "entries" || activeTab === "stops") {
+              exportEntriesCSV((activeTab === "entries" ? entries : stops) as unknown as Record<string, unknown>[]);
+            } else {
+              exportEntriesCSV(summaries as unknown as Record<string, unknown>[]);
+            }
+          }}
+          className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors px-2 py-1 rounded border border-border-dim hover:border-text-dim"
+        >
+          <Download size={12} />
+          Export CSV
+        </button>
+      </div>
+
       {/* Tab content */}
       <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
         {activeTab === "performance" && (
-          <PerformanceTab summaries={sortedSummaries} />
+          <>
+            <PerformanceTab summaries={sortedSummaries} />
+            <div className="col-span-2 max-lg:col-span-1">
+              <EquityCurve dailySummaries={sortedSummaries} />
+            </div>
+          </>
         )}
         {activeTab === "entries" && (
           <EntriesTab entries={entries} stopLookup={stopLookup} />
@@ -244,11 +270,16 @@ export function Analytics() {
           <StopsTab entries={entries} stops={stops} />
         )}
         {activeTab === "market" && (
-          <MarketTab
-            summaries={sortedSummaries}
-            entries={entries}
-            stopLookup={stopLookup}
-          />
+          <>
+            <MarketTab
+              summaries={sortedSummaries}
+              entries={entries}
+              stopLookup={stopLookup}
+            />
+            <div className="col-span-2 max-lg:col-span-1">
+              <CorrelationHeatmap data={sortedSummaries} />
+            </div>
+          </>
         )}
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useMemo } from "react";
 import {
   createChart,
   createSeriesMarkers,
@@ -9,17 +9,39 @@ import {
   ColorType,
   CrosshairMode,
 } from "lightweight-charts";
-import { useHydraStore } from "../../store/hydraStore";
+import { useHydraStore, type HydraEntry } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
+
+/** Parse ET timestamp → epoch seconds (Lightweight Charts renders as-if-UTC → shows ET labels). */
+function parseET(ts: string): number {
+  const m = ts.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+  if (!m) return 0;
+  const utcDate = new Date(`${m[1]}T${m[2]}Z`);
+  return isNaN(utcDate.getTime()) ? 0 : utcDate.getTime() / 1000;
+}
+
+/** Stable hash of entry fields relevant to markers/price lines. */
+function entriesHash(entries: HydraEntry[]): string {
+  return entries.map(e =>
+    `${e.entry_number}|${e.entry_time}|${e.call_side_stopped}|${e.put_side_stopped}|${e.call_side_expired}|${e.put_side_expired}|${e.short_call_strike}|${e.short_put_strike}`
+  ).join("~");
+}
 
 export function SPXChart() {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const priceLinesRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]>[]>([]);
+  const prevEntriesHashRef = useRef("");
+  const prevStopCountRef = useRef(0);
 
-  const { todayOHLC, hydraState, stopEvents } = useHydraStore();
-  const [showStrikes, setShowStrikes] = useState(false);
+  const todayOHLC = useHydraStore((s) => s.todayOHLC);
+  const hydraEntries = useHydraStore((s) => s.hydraState?.entries);
+  const stopEvents = useHydraStore((s) => s.stopEvents);
+  const showStrikes = useHydraStore((s) => s.showStrikes);
+  const toggleStrikes = useHydraStore((s) => s.toggleStrikes);
+
+  const entries = useMemo(() => hydraEntries ?? [], [hydraEntries]);
 
   // Create chart on mount
   useEffect(() => {
@@ -29,7 +51,7 @@ export function SPXChart() {
       layout: {
         background: { type: ColorType.Solid, color: colors.card },
         textColor: colors.textSecondary,
-        fontFamily: "'SF Mono', 'Fira Code', monospace",
+        fontFamily: "Inter, 'SF Mono', 'Fira Code', monospace",
         fontSize: 11,
       },
       grid: {
@@ -66,8 +88,8 @@ export function SPXChart() {
     candleSeriesRef.current = candleSeries;
 
     // Handle resize
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
+    const observer = new ResizeObserver((resizeEntries) => {
+      for (const entry of resizeEntries) {
         chart.applyOptions({
           width: entry.contentRect.width,
           height: entry.contentRect.height,
@@ -84,22 +106,9 @@ export function SPXChart() {
     };
   }, []);
 
-  // Update data when OHLC changes
+  // Update candlestick data when OHLC changes
   useEffect(() => {
     if (!candleSeriesRef.current || todayOHLC.length === 0) return;
-
-    // Parse timestamp and return epoch seconds that Lightweight Charts will display as ET.
-    // Handles two formats:
-    //   OHLC: "2026-03-06 12:15:00" (bare ET, no timezone suffix)
-    //   Entry: "2026-03-06T11:15:32.014246-05:00" (ISO with timezone offset)
-    // In BOTH cases the date+time digits ARE the ET wall clock time, so we extract
-    // them and return epoch-as-if-UTC so the chart axis shows ET labels.
-    function parseET(ts: string): number {
-      const m = ts.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
-      if (!m) return 0;
-      const utcDate = new Date(`${m[1]}T${m[2]}Z`);
-      return isNaN(utcDate.getTime()) ? 0 : utcDate.getTime() / 1000;
-    }
 
     const data = todayOHLC.map((bar) => ({
       time: parseET(bar.timestamp) as Time,
@@ -110,9 +119,24 @@ export function SPXChart() {
     }));
 
     candleSeriesRef.current.setData(data);
+    chartRef.current?.timeScale().scrollToRealTime();
+  }, [todayOHLC]);
 
-    // Add entry markers via v5 primitive
-    const entries = hydraState?.entries ?? [];
+  // Update markers and price lines only when entries/stops actually change
+  useEffect(() => {
+    if (!candleSeriesRef.current) return;
+
+    const currentHash = entriesHash(entries);
+    const currentStopCount = stopEvents.length;
+
+    // Skip if nothing changed (OHLC updates won't trigger marker rebuild)
+    if (currentHash === prevEntriesHashRef.current && currentStopCount === prevStopCountRef.current && !showStrikes) {
+      return;
+    }
+    prevEntriesHashRef.current = currentHash;
+    prevStopCountRef.current = currentStopCount;
+
+    // Build entry markers
     const markers = entries
       .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()))
       .map((e) => ({
@@ -120,15 +144,15 @@ export function SPXChart() {
         position: "aboveBar" as const,
         color:
           e.call_side_stopped && e.put_side_stopped
-            ? colors.loss // double stop = red
+            ? colors.loss
             : e.call_side_stopped || e.put_side_stopped
-              ? colors.warning // single stop = amber
-              : colors.info, // active = blue
+              ? colors.warning
+              : colors.info,
         shape: "arrowDown" as const,
         text: `E${e.entry_number}`,
       }));
 
-    // Add stop markers (red circles below bar)
+    // Build stop markers
     const stopMarkers = stopEvents
       .filter((s) => s.stop_time)
       .map((s) => ({
@@ -148,14 +172,13 @@ export function SPXChart() {
       createSeriesMarkers(candleSeriesRef.current, allMarkers);
     }
 
-    // Remove old price lines before adding new ones
+    // Update price lines
     const series = candleSeriesRef.current;
     for (const line of priceLinesRef.current) {
       series.removePriceLine(line);
     }
     priceLinesRef.current = [];
 
-    // Add price lines for active entries (only when toggle is on)
     if (showStrikes) {
       entries.forEach((e) => {
         const isActive = !!e.entry_time && !e.call_side_stopped && !e.put_side_stopped && !e.call_side_expired && !e.put_side_expired;
@@ -185,22 +208,17 @@ export function SPXChart() {
         }
       });
     }
-
-    // Scroll to latest
-    chartRef.current?.timeScale().scrollToRealTime();
-  }, [todayOHLC, hydraState?.entries, stopEvents, showStrikes]);
+  }, [entries, stopEvents, showStrikes]);
 
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
-          SPX 1-Min
-        </h3>
+        <h3 className="label-upper">SPX 1-Min</h3>
         <label className="flex items-center gap-1.5 cursor-pointer select-none">
           <input
             type="checkbox"
             checked={showStrikes}
-            onChange={(e) => setShowStrikes(e.target.checked)}
+            onChange={toggleStrikes}
             className="w-3 h-3 rounded accent-loss cursor-pointer"
           />
           <span className="text-[10px] text-text-dim">Show Strikes</span>

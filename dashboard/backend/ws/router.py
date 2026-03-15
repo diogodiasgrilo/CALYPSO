@@ -38,9 +38,20 @@ async def websocket_dashboard(
     await _manager.connect(websocket)
 
     try:
-        # Send full snapshot on connect
-        snapshot = await _broadcaster.get_snapshot()
-        await _manager.send_to(websocket, snapshot)
+        # Send full snapshot on connect — with failure recovery
+        try:
+            snapshot = await _broadcaster.get_snapshot()
+            if not snapshot or not snapshot.get("state"):
+                logger.warning("Snapshot has no state data — sending partial snapshot")
+            await _manager.send_to(websocket, snapshot)
+        except Exception as e:
+            logger.error(f"Failed to build snapshot: {e}")
+            try:
+                await websocket.close(code=1011, reason="Failed to load state")
+            except Exception:
+                pass
+            await _manager.disconnect(websocket)
+            return
 
         # Keep connection alive and handle client messages
         while True:
@@ -48,11 +59,18 @@ async def websocket_dashboard(
             # Client can send "pong" in response to heartbeat
             # or "refresh" to request a new snapshot
             if data == "refresh":
-                snapshot = await _broadcaster.get_snapshot()
-                await _manager.send_to(websocket, snapshot)
+                try:
+                    snapshot = await _broadcaster.get_snapshot()
+                    await _manager.send_to(websocket, snapshot)
+                except Exception as e:
+                    logger.error(f"Failed to build refresh snapshot: {e}")
 
     except WebSocketDisconnect:
         await _manager.disconnect(websocket)
     except Exception as e:
         logger.warning(f"WebSocket error: {e}")
+        try:
+            await websocket.close(code=1011, reason="Internal error")
+        except Exception:
+            pass
         await _manager.disconnect(websocket)

@@ -66,7 +66,7 @@ shared/               # Shared modules used by all bots
 services/             # Standalone services (independent of trading bots)
   token_keeper/       # Keeps Saxo OAuth tokens fresh 24/7
 
-dashboard/            # HYDRA Dashboard (read-only monitoring, v0.1.0)
+dashboard/            # HYDRA Dashboard (read-only monitoring, v2.0.0)
   backend/            # FastAPI + WebSocket (port 8001)
   frontend/           # React 19 + TypeScript + Vite (built → dist/)
   deploy/             # systemd service + nginx config
@@ -630,7 +630,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sqlite3 /opt/calypso
 
 ---
 
-## HYDRA Dashboard (v0.1.0 — Deployed 2026-03-06)
+## HYDRA Dashboard (v2.0.0 — Deployed 2026-03-15)
 
 Real-time read-only monitoring dashboard for the HYDRA trading bot. **100% read-only — zero changes to the bot.** HYDRA has no idea the dashboard exists.
 
@@ -653,16 +653,16 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 
 ### Tech Stack
 - **Backend:** FastAPI + uvicorn, SQLite (query_only=TRUE), WebSocket broadcaster
-- **Frontend:** React 19 + TypeScript + Vite, Tailwind CSS v4, Zustand, Recharts, TradingView Lightweight Charts
+- **Frontend:** React 19 + TypeScript + Vite, Tailwind CSS v4, Zustand, Recharts, TradingView Lightweight Charts, Inter font (Google Fonts CDN)
 - **PWA:** vite-plugin-pwa (installable on iOS/Android)
 - **Widget:** iOS Scriptable widget (`scriptable/HYDRA_Widget.js`)
 
 ### Pages
 | Page | Route | Content |
 |------|-------|---------|
-| Dashboard | `/` | Live entries, SPX chart, cushion bars, P&L, agents, log feed |
-| History | `/history` | Calendar heat map, day drill-down with OHLC charts |
-| Analytics | `/analytics` | 4-tab view: Performance (cumulative P&L, histogram, rolling win rate, day-of-week), Entries (credit by slot, type breakdown, P&L by entry#, OTM scatter), Stops (rate by slot, call/put ratio, slippage, MKT-036 timer), Market (VIX scatter, day range, direction, trend signal) |
+| Dashboard | `/` | Live entries, SPX chart, cushion bars, P&L with comparison context, position heatmap, performance metrics (Sharpe/Sortino/etc.), agents, log feed, ambient state gradient |
+| History | `/history` | Calendar heat map, week/month summary cards, day drill-down with OHLC charts + session replay, CSV export |
+| Analytics | `/analytics` | 4-tab view: Performance (cumulative P&L, equity curve with drawdown, histogram, rolling win rate, day-of-week), Entries (credit by slot, type breakdown, P&L by entry#, OTM scatter), Stops (rate by slot, call/put ratio, slippage, MKT-036 timer), Market (VIX scatter, day range, direction, trend signal, correlation heatmap) |
 
 ### Key API Endpoints
 | Endpoint | Description |
@@ -675,8 +675,10 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 | `GET /api/metrics/daily?days=30` | Daily summaries for calendar |
 | `GET /api/market/ohlc?date=YYYY-MM-DD` | 1-min OHLC for SPX chart |
 | `GET /api/agents/status` | Agent last-run times |
+| `GET /api/metrics/comparisons` | Historical comparison stats (avg P&L, avg credit, etc.) |
+| `GET /api/metrics/performance` | Daily P&L array for client-side stats (Sharpe, etc.) |
 | `GET /api/widget` | Flat JSON for iOS Scriptable |
-| `WS /ws/dashboard` | WebSocket for real-time updates |
+| `WS /ws/dashboard` | WebSocket for real-time updates (heartbeat timeout, agent status, comparisons) |
 
 ### Safety Guarantees
 - Dashboard is **100% read-only** — never writes to state files, metrics, DB, or logs
@@ -709,8 +711,8 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 ```
 
 ### Color System (HYDRA Brand)
-All colors derived from the HYDRA logo (dark teal background):
-- Background: `#2a3a42` / Deep: `#1e2c33` / Elevated: `#344a52`
+All colors derived from the HYDRA logo (dark teal background), 3-level surface depth:
+- Level 0 (page): `#1a2229` / Level 1 (cards): `#222e35` / Level 2 (elevated): `#2d3b43`
 - Profit: `#7ee8c7` (mint) / Loss: `#f85149` (coral) / Warning: `#d29922` (amber)
 - Defined in `dashboard/frontend/src/lib/tradingColors.ts` and `src/index.css`
 
