@@ -46,6 +46,20 @@ export function PerformanceMetrics() {
       .catch(() => setError(true));
   }, []);
 
+  // useMemo MUST be called unconditionally (Rules of Hooks — no hooks after early returns)
+  const stats = useMemo(() => {
+    if (!dailyPnls || dailyPnls.length < 2) return null;
+    return {
+      sharpe: sharpeRatio(dailyPnls),
+      sortino: sortinoRatio(dailyPnls),
+      dd: maxDrawdown(dailyPnls),
+      calmar: calmarRatio(dailyPnls),
+      pf: profitFactor(dailyPnls),
+      exp: expectancy(dailyPnls),
+      wlRatio: avgWinLossRatio(dailyPnls),
+    };
+  }, [dailyPnls]);
+
   if (error) {
     return (
       <div>
@@ -72,7 +86,7 @@ export function PerformanceMetrics() {
     );
   }
 
-  if (dailyPnls.length < 2) {
+  if (!stats) {
     return (
       <div>
         <h3 className="label-upper mb-2">Performance</h3>
@@ -84,16 +98,6 @@ export function PerformanceMetrics() {
       </div>
     );
   }
-
-  const stats = useMemo(() => ({
-    sharpe: sharpeRatio(dailyPnls),
-    sortino: sortinoRatio(dailyPnls),
-    dd: maxDrawdown(dailyPnls),
-    calmar: calmarRatio(dailyPnls),
-    pf: profitFactor(dailyPnls),
-    exp: expectancy(dailyPnls),
-    wlRatio: avgWinLossRatio(dailyPnls),
-  }), [dailyPnls]);
 
   const { sharpe, sortino, dd, calmar, pf, exp, wlRatio } = stats;
 
