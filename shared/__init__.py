@@ -17,7 +17,7 @@ This package contains common utilities used by all trading strategies:
 - sheets_reader: Read-only Google Sheets access for agents (SheetsReader)
 - claude_client: Thin Claude API wrapper for agents (get_anthropic_client, ask_claude)
 
-Last Updated: 2026-03-01 (Added SheetsReader and claude_client for agent infrastructure)
+Last Updated: 2026-03-15 (Added is_fomc_t_plus_one for MKT-038)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================
@@ -271,6 +271,7 @@ from shared.event_calendar import (
     get_fomc_announcement_dates,
     is_fomc_meeting_day,
     is_fomc_announcement_day,
+    is_fomc_t_plus_one,
     get_next_fomc_date,
     is_fomc_approaching,
     FOMC_DATES_2026,
@@ -307,7 +308,7 @@ __all__ = [
     'MarketStatusMonitor',
     # Event Calendar (FOMC dates - single source of truth)
     'get_fomc_dates', 'get_fomc_announcement_dates', 'is_fomc_meeting_day',
-    'is_fomc_announcement_day', 'get_next_fomc_date', 'is_fomc_approaching', 'FOMC_DATES_2026',
+    'is_fomc_announcement_day', 'is_fomc_t_plus_one', 'get_next_fomc_date', 'is_fomc_approaching', 'FOMC_DATES_2026',
     # Position Registry (for multi-bot same-underlying support)
     'PositionRegistry',
     # Token Coordinator (for multi-bot token sharing, used by Token Keeper service)

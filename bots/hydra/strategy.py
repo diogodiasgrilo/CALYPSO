@@ -76,7 +76,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.10.4"
+HYDRA_VERSION = "1.14.0"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -442,10 +442,10 @@ class HydraStrategy(MEICStrategy):
             f"  FOMC T+1 filter (MKT-038): {'ENABLED' if self.fomc_t1_callonly_enabled else 'DISABLED'}"
         )
 
-        # MKT-036: Stop confirmation timer — requires stop condition to persist
-        # for N seconds before executing. 20-day analysis: 75s avoids 17 false stops
-        # ($2,870 saved), misses 1 real ($85). Applies to both put and call sides.
-        self.stop_confirmation_enabled = strategy_config.get("stop_confirmation_enabled", True)
+        # MKT-036: Stop confirmation timer — INTENTIONALLY DISABLED.
+        # $5.00 put buffer (put_stop_buffer) is the chosen solution instead.
+        # Code preserved but dormant. When enabled: requires stop to persist N seconds.
+        self.stop_confirmation_enabled = strategy_config.get("stop_confirmation_enabled", False)
         self.stop_confirmation_seconds = int(strategy_config.get("stop_confirmation_seconds", 75))
         logger.info(
             f"  Stop confirmation (MKT-036): {'ENABLED' if self.stop_confirmation_enabled else 'DISABLED'} "
@@ -4644,8 +4644,13 @@ class HydraStrategy(MEICStrategy):
             vix_detail = f"{vix_open} ({vix:.1f} {'<' if vix < self.max_vix_entry else '>='} {self.max_vix_entry:.0f})"
 
         try:
-            from shared.event_calendar import is_fomc_meeting_day
-            fomc = "Yes" if is_fomc_meeting_day() else "No"
+            from shared.event_calendar import is_fomc_meeting_day, is_fomc_t_plus_one
+            if is_fomc_meeting_day():
+                fomc = "Yes (entries skipped)"
+            elif is_fomc_t_plus_one():
+                fomc = "T+1 (call-only MKT-038)"
+            else:
+                fomc = "No"
         except Exception:
             fomc = "No"
 

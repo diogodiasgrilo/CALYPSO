@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.12.1 | **Last Updated:** 2026-03-13
+**Version:** 1.14.0 | **Last Updated:** 2026-03-15
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -131,20 +131,20 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `chart_bars_count` | `50` | Number of 1-min bars to fetch |
 | `chart_horizon_minutes` | `1` | Bar interval (1 = 1 minute) |
 
-### Smart Entry Config (MKT-031)
+### Smart Entry Config (MKT-031) — DISABLED (v1.10.4)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `true` | Enable/disable smart entry scouting |
+| `enabled` | `false` | Enable/disable smart entry scouting (DISABLED) |
 | `window_minutes` | `10` | Scouting window before each entry (minutes) |
 | `score_threshold` | `65` | Score >= this triggers early entry |
 | `momentum_threshold_pct` | `0.05` | Momentum calm threshold (0.05 = 0.05%) |
 
-### VIX-Scaled Entry Time Shifting Config (MKT-034)
+### VIX-Scaled Entry Time Shifting Config (MKT-034) — DISABLED (v1.10.3)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `true` | Enable/disable VIX-scaled entry time shifting |
+| `enabled` | `false` | Enable/disable VIX-scaled entry time shifting (DISABLED) |
 | `medium_vix_threshold` | `20.0` | VIX >= this skips slot 0 (11:14:30), shifts to 11:44:30 |
 | `high_vix_threshold` | `23.0` | VIX >= this skips slot 1 (11:44:30), shifts to 12:14:30 (floor) |
 
@@ -299,8 +299,10 @@ bots/hydra/
 
 ## Version History
 
-- **1.13.0** (2026-03-15): MKT-038 FOMC T+1 call-only mode. On the day after FOMC announcement, forces all entries to call-only spreads. Research: T+1 is 66.7% down days, 23% more volatility. Stop formula same as MKT-035. MKT-036 stop confirmation timer documented as DISABLED (was deployed in v1.12.0 but disabled on VM in favor of $5.00 put buffer).
-- **1.12.0** (2026-03-11): MKT-036 stop confirmation timer code deployed. Subsequently DISABLED on VM — $5.00 put buffer (`put_stop_buffer`) chosen as the solution instead. Code preserved, configurable via `stop_confirmation_enabled`. All agent SYSTEM_PROMPTs updated to v1.12.0.
+- **1.14.0** (2026-03-15): MKT-038 FOMC T+1 call-only mode. Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call_credit + theoretical $2.50 put + buffer. MKT-036 stop confirmation timer documented as DISABLED (code preserved, $5.00 put buffer is the chosen solution). Telegram `/status` shows T+1 status. All agent SYSTEM_PROMPTs updated to v1.13.0. `stop_confirmation_enabled` default changed to `false`.
+- **1.13.0** (2026-03-13): Stop timestamps in state file. Dashboard SPX chart stop markers + entry strike lines. MKT-035 scoped to conditional entries only.
+- **1.12.1** (2026-03-12): Asymmetric put stop buffer ($5.00 put vs $0.10 call). 21-day backtest: 91% false put stops avoided.
+- **1.12.0** (2026-03-11): MKT-036 stop confirmation timer code deployed. Subsequently DISABLED on VM — $5.00 put buffer (`put_stop_buffer`) chosen as the solution instead. Code preserved, configurable via `stop_confirmation_enabled`.
 - **1.11.0** (2026-03-11): MKT-035 call-only on down days. When SPX < open -0.3%, place call spread only (no puts). Stop = call_credit + theoretical $2.50 put + buffer. 20-day data: 71% put stop rate on down days vs 7% call stop rate, +$920 improvement. Two conditional entry times (12:45, 13:15) that only fire when MKT-035 triggers as call-only. Configurable via `downday_callonly_enabled`, `downday_threshold_pct`, `downday_theoretical_put_credit`, `conditional_entry_times`.
 - **1.10.3** (2026-03-11): Disable MKT-034 VIX time shifting + remove VIX entry cutoff (max_vix_entry=999). Neither Tammy Chambless nor John Sandvand use VIX cutoffs or time shifting (both studied VIX correlation, found none). Entry times revert to 10:15 AM start (winning period Feb 10-27). Spread widths reverted to 50pt. MKT-034 remains configurable (`vix_time_shift.enabled`).
 - **1.10.2** (2026-03-10): Replace MEIC+ stop formula with credit+buffer (Brian's approach): stop = total_credit + $0.10 instead of total_credit - $0.15. Extra cushion reduces marginal stops. Fix: stop level validation now per-side (prevents skipping active side when stopped side has 0). Telegram /set updated: `stop_buffer` replaces `meic_plus`.

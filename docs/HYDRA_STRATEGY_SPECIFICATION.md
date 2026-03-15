@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-03-11
-**Version:** 1.11.0
+**Last Updated:** 2026-03-15
+**Version:** 1.14.0
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -329,10 +329,10 @@ Each entry goes through these phases in order:
 
 ```
 17. MKT-020: Call tightening — move short call closer in 5pt steps
-    └── Until credit >= $0.75 (call minimum) or 25pt OTM floor
+    └── Until credit >= $0.60 (call minimum) or 25pt OTM floor
     └── If tightened, re-runs steps 13-16
 18. MKT-022: Put tightening — mirror of MKT-020 for put side
-    └── Same 5pt steps, $1.75 target (put minimum), 25pt floor
+    └── Same 5pt steps, $2.50 target (put minimum), 25pt floor
     └── If tightened, re-runs steps 13-16
 ```
 
@@ -428,12 +428,12 @@ This pipeline prevents Saxo from rejecting orders or merging positions:
 | 3 | MKT-014 | Warn if MKT-013 landed on illiquid strike | MKT-013 can undo MKT-007's liquidity optimization |
 | 4 | Fix #66 | Re-run Fix #44 after MKT-013 | MKT-013 shifts longs too, potentially creating new conflicts |
 | 5 | MKT-015 | Move new long strikes 5pt further OTM if they overlap existing long strikes | Saxo merges same-strike longs, deleting older position ID |
-| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $0.75 minimum |
-| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $1.75 minimum |
+| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $0.60 minimum |
+| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $2.50 minimum |
 
 Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
-**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $1.75 (top of Tammy's range), calls use $0.75 (lowered from $1.00 in v1.7.2 for 68% call cushion — see HYDRA_CREDIT_CUSHION_ANALYSIS.md). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
+**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $2.50 (v1.10.4 raised from $1.75 — 20-day data: $2.50-$3.49 bucket = 66.7% survival +$159 EV), calls use $0.60 (v1.10.4 lowered from $0.75 — calls are secondary income, lower min keeps calls further OTM). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
 
 ---
 
@@ -566,11 +566,7 @@ The main loop checks stops every ~1-2 seconds:
 
 1. Batch-fetch current spread values for all active entries
 2. For each active side of each entry:
-   - If `spread_value >= stop_level`: check MKT-036 confirmation timer
-     - First breach: start 75s timer
-     - Timer elapsed: execute stop
-     - Timer still running: wait for next heartbeat
-   - If `spread_value < stop_level` and timer was active: reset timer (stop avoided)
+   - If `spread_value >= stop_level`: execute stop immediately (MKT-036 timer is DISABLED)
    - Close both legs via market order (default) or SHORT only if `short_only_stop: true` (MKT-025)
    - If short-only: long leg stays open, expires at settlement; MKT-033 may salvage
    - Record fill prices (deferred async lookup for accurate P&L)
@@ -581,7 +577,7 @@ The main loop checks stops every ~1-2 seconds:
 - **Call side stop:** SPX moves UP toward short call → call spread value increases
 - **Put side stop:** SPX moves DOWN toward short put → put spread value increases
 - **Speed:** 0DTE options have extreme gamma. On Feb 24, Entry #3's call cushion dropped from 64% to 6% in 2 minutes.
-- **MKT-036 delay:** After cushion hits 0%, 75 seconds must elapse before stop executes (configurable)
+- **Put buffer:** $5.00 put buffer absorbs 91% of false put stops (21-day backtest). Call buffer is $0.10.
 
 ---
 
@@ -676,7 +672,7 @@ Entry #1 → #2 → #3 placed normally
 
 ## MKT Rules Reference
 
-### Active Rules (as of v1.10.0)
+### Active Rules (as of v1.14.0)
 
 | Rule | Name | Added | What It Does |
 |------|------|-------|-------------|
@@ -689,16 +685,16 @@ Entry #1 → #2 → #3 placed normally
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
 | MKT-018 | Early Close on ROC | v1.3.0 | **DISABLED** — Hold-to-expiry outperforms. Close all when ROC >= 3% (if re-enabled) |
-| MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $0.75 |
+| MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $0.60 |
 | MKT-021 | Pre-Entry ROC Gate | v1.3.2 | **DISABLED** — Only active when MKT-018 enabled. Skip entries #4/#5 if ROC >= 3% |
-| MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $1.75 |
+| MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $2.50 |
 | MKT-023 | Smart Hold Check | v1.3.7 | **DISABLED** — Only active when MKT-018 enabled. Compare close-now vs hold |
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
 | MKT-025 | Short-Only Stop Close | v1.4.3 | **Configurable** (`short_only_stop`, default: false). When true: close SHORT only, long expires. When false: close both legs (default since v1.9.4) |
 | MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days) |
 | MKT-027 | VIX-Scaled Spread Width | v1.6.0 | Continuous formula `VIX × 3.5` with per-side floors (MKT-028), cap 75pt |
 | MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper) |
-| MKT-029 | Graduated Credit Fallback | v1.6.2 | Calls $1.00→$0.95→$0.90, puts $1.75→$1.70→$1.65 (prevents skipping entries barely below minimum) |
+| MKT-029 | Graduated Credit Fallback | v1.6.2 | -$0.05, -$0.10 steps below minimum (prevents skipping entries barely below minimum) |
 | MKT-031 | Smart Entry Windows | v1.8.0 | 10-min scouting before each entry; 2-parameter scoring (ATR calm + momentum pause); score >= 65 triggers early entry |
 | MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 18.0 (80% WR calm markets); at VIX >= 18 skip instead (2× stop too risky) |
 | MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
@@ -724,7 +720,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-007 | MKT-013 | MKT-007 moves strikes closer (liquid); MKT-013 moves them further (overlap). Can undo each other. |
 | MKT-013 | Fix #44/66 | MKT-013 shifts longs; Fix #66 re-checks for new long-vs-short conflicts. |
 | MKT-024 | MKT-020/022 | MKT-024 sets wider starting OTM; MKT-020/022 scan inward from there. |
-| MKT-020/022 | MKT-011 | Tightening runs first; MKT-011 re-validates with fresh quotes (call $0.75, put $1.75). |
+| MKT-020/022 | MKT-011 | Tightening runs first; MKT-011 re-validates with fresh quotes (call $0.60, put $2.50). |
 | MKT-021 | MKT-018 | MKT-021 skips entries → satisfies MKT-018 gate → early close fires same cycle. |
 | MKT-018 | MKT-023 | MKT-023 is a sub-check within MKT-018; can override close decision with HOLD. |
 | MKT-025 | Settlement | Short-only close leaves long leg open; settlement auto-cleans orphaned positions. |
@@ -893,8 +889,8 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `max_delta` | `15` | Maximum acceptable delta |
 | `min_credit_per_side` | `1.00` | Credit warning threshold ($/side) |
 | `max_credit_per_side` | `1.75` | Credit warning ceiling ($/side) |
-| `min_viable_credit_per_side` | `0.75` | MKT-011/MKT-020 call minimum (v1.7.2: lowered from $1.00 for 68% call cushion — see HYDRA_CREDIT_CUSHION_ANALYSIS.md) |
-| `min_viable_credit_put_side` | `1.75` | MKT-011/MKT-022 put minimum (top of Tammy's $1.00-$1.75 range) |
+| `min_viable_credit_per_side` | `0.60` | MKT-011/MKT-020 call minimum (v1.10.4: lowered from $0.75 — calls secondary income, lower keeps them further OTM) |
+| `min_viable_credit_put_side` | `2.50` | MKT-011/MKT-022 put minimum (v1.10.4: raised from $1.75 — $2.50-$3.49 bucket = 66.7% survival +$159 EV) |
 | `call_starting_otm_multiplier` | `3.5` | MKT-024: call starting OTM = base × multiplier (batch API = zero extra cost) |
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: put starting OTM = base × multiplier (put skew = credit viable further OTM) |
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
@@ -932,9 +928,9 @@ EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at
 
 Put premiums are typically 2-7× higher than call premiums at the same delta. This means:
 - MKT-024 starts calls at 3.5× and puts at 4.0× base OTM to give MKT-020/022 room to find optimal strikes
-- MKT-011 uses separate thresholds: calls $0.75 (v1.7.2, lowered from $1.00), puts $1.75
-- MKT-020 call tightening now reaches $0.75 more easily → fewer MKT-011 skips/conversions
-- MKT-022 with $1.75 put minimum finds the widest viable put strike, reducing unnecessary tightness
+- MKT-011 uses separate thresholds: calls $0.60 (v1.10.4), puts $2.50 (v1.10.4)
+- MKT-020 call tightening reaches $0.60 easily → fewer MKT-011 skips/conversions
+- MKT-022 with $2.50 put minimum forces closer-to-ATM puts into the Week 1 sweet spot (42-65pt OTM)
 - Total_credit stop (shared by both sides) is adequate because MKT-020/022 keeps skew at 1-2x
 
 ### Saxo Position Merging

@@ -16,7 +16,7 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (v1.12.0 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.13.0 — DO NOT hallucinate)
 
 - **5 base + up to 2 conditional entries (7 max)** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3 — matches winning period Feb 10-27). Conditional entries (12:45, 13:15) only fire on down days (MKT-035) as call-only.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
@@ -25,9 +25,10 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
 - **Min credit thresholds (MKT-011):** $0.60/side for calls, $2.50/side for puts (MKT-029 fallback: -$0.05, -$0.10). Put-only when call non-viable AND VIX < 18 (MKT-032).
 - **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. One-sided: 2x credit + buffer. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
-- **Stop confirmation (MKT-036):** 75-second sustained breach before executing stop. Prevents false stops from brief price spikes. Timer resets if spread recovers below stop level.
+- **Stop confirmation (MKT-036):** DISABLED. $5.00 put buffer is the chosen solution instead. Code preserved but dormant.
 - **Stop close:** both legs closed via market order (default; configurable short_only_stop for MKT-025 mode)
 - **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below open, as call-only.
+- **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
 
 ## Entry Skip Pattern (CRITICAL — do not get this backwards)
@@ -74,7 +75,7 @@ RISK: RED
 
 IMPORTANT: HYDRA is a FULLY AUTOMATED bot — it makes all decisions algorithmically.
 Do NOT say things like "consider pushing strikes wider" or "HYDRA should be prepared to skip."
-HYDRA's MKT-020/022/011/013/035/036 rules handle all of this automatically.
+HYDRA's MKT-020/022/011/013/035/038 rules handle all of this automatically.
 Instead, PREDICT what HYDRA will likely do: "Expect MKT-020 to tighten calls inward"
 or "MKT-011 may skip Entry #5 if call premium decays below $0.60."
 
