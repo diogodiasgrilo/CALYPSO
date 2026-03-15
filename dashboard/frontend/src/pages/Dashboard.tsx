@@ -7,19 +7,20 @@ import { AgentStatusPanel } from "../components/agents/AgentStatusPanel";
 import { LiveLogFeed } from "../components/logs/LiveLogFeed";
 import { PerformanceMetrics } from "../components/pnl/PerformanceMetrics";
 import { PositionHeatmap } from "../components/market/PositionHeatmap";
-import { MarketContextBanner, FOMCBanner } from "../components/market/MarketContextBanner";
+import { MarketContextBanner, FOMCBanner, OffDaySummaryCards } from "../components/market/MarketContextBanner";
 import { useHydraStore } from "../store/hydraStore";
 
 export function Dashboard() {
   const realizedPnl = useHydraStore((s) => s.hydraState?.total_realized_pnl ?? 0);
   const commission = useHydraStore((s) => s.hydraState?.total_commission ?? 0);
   const market = useHydraStore((s) => s.market);
-  const entries = useHydraStore((s) => s.hydraState?.entries ?? []);
+  const hydraState = useHydraStore((s) => s.hydraState);
   const todayOHLC = useHydraStore((s) => s.todayOHLC);
   const netPnl = realizedPnl - commission;
 
+  const entries = hydraState?.entries;
   const isLive = market?.is_open === true;
-  const hasEntries = entries.some((e) => e.entry_time);
+  const hasEntries = entries?.some((e) => e.entry_time) ?? false;
   const hasChartData = todayOHLC.length > 0;
   const showFullLayout = isLive || hasEntries || hasChartData;
 
@@ -60,7 +61,7 @@ export function Dashboard() {
           <>
             {/* Compact layout — weekend, holiday, pre-market */}
             <MarketContextBanner />
-            <DailyPnLCard />
+            <OffDaySummaryCards />
             <PerformanceMetrics />
           </>
         )}
