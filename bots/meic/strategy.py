@@ -7382,7 +7382,20 @@ class MEICStrategy:
         """
         ORDER-004: Check if we have sufficient buying power for a new IC entry.
 
-        Queries account balance and verifies minimum margin is available.
+        Queries Saxo /port/v1/balances endpoint and verifies that available
+        margin exceeds MIN_BUYING_POWER_PER_IC before allowing a new entry.
+
+        Fix #85 (2026-03-16): Previous field names were wrong — code checked for
+        "AvailableMargin", "CashAvailable", "MarginAvailable" which don't exist
+        in Saxo's response. The 4th fallback "NetEquityForMargin" DID exist but
+        represents TOTAL equity (credit limit), not AVAILABLE margin (credit limit
+        minus used). This meant the check never caught margin exhaustion.
+
+        Correct Saxo balance fields (verified via live diagnostic):
+          - MarginAvailableForTrading: Available margin after subtracting positions
+          - SpendingPower: Same value, alternative name
+          - CashAvailableForTrading: Cash portion available
+          - NetEquityForMargin: Total equity for margin (last resort fallback)
 
         Returns:
             Tuple of (has_sufficient_bp, message)
@@ -7396,31 +7409,53 @@ class MEICStrategy:
                 logger.warning("ORDER-004: Could not fetch account balance")
                 return True, "Balance check skipped (API unavailable)"
 
-            # Extract available margin/buying power
-            # Saxo returns different fields - check for common ones
+            # Fix #85: Use correct Saxo field names (verified 2026-03-16).
+            # Priority: MarginAvailableForTrading (best) → SpendingPower (same value)
+            # → CashAvailableForTrading → NetEquityForMargin (total equity, last resort)
             available = None
-            for field in ["AvailableMargin", "CashAvailable", "MarginAvailable", "NetEquityForMargin"]:
+            field_used = None
+            for field in ["MarginAvailableForTrading", "SpendingPower",
+                          "CashAvailableForTrading", "NetEquityForMargin"]:
                 if field in balance:
                     available = balance[field]
+                    field_used = field
                     break
 
             if available is None:
-                logger.warning("ORDER-004: No recognized margin field in balance response")
+                logger.warning(
+                    "ORDER-004: No recognized margin field in balance response. "
+                    f"Available keys: {list(balance.keys())[:10]}"
+                )
                 return True, "Balance check skipped (no margin field)"
 
+            # Log margin snapshot for diagnostics
+            margin_used = balance.get("MarginUsedByCurrentPositions", 0)
+            margin_pct = balance.get("MarginUtilizationPct", 0)
+            total_value = balance.get("TotalValue", 0)
+            logger.info(
+                f"ORDER-004: Margin snapshot — "
+                f"Available: ${available:,.2f} (via {field_used}), "
+                f"Used: ${abs(margin_used):,.2f}, "
+                f"Utilization: {margin_pct:.1f}%, "
+                f"Account: ${total_value:,.2f}"
+            )
+
             # Calculate required margin for next entry
-            # Each IC needs spread_width * 100 margin (approx)
+            # Each IC needs max(call_spread, put_spread) × $100 × contracts
             required = MIN_BUYING_POWER_PER_IC
 
             if available < required:
                 logger.warning(
                     f"ORDER-004: Insufficient buying power. "
-                    f"Available: ${available:.2f}, Required: ${required:.2f}"
+                    f"Available: ${available:,.2f}, Required: ${required:,.2f}, "
+                    f"Utilization: {margin_pct:.1f}%"
                 )
-                return False, f"Insufficient BP: ${available:.2f} < ${required:.2f}"
+                return False, (
+                    f"Insufficient BP: ${available:,.2f} < ${required:,.2f} "
+                    f"(margin {margin_pct:.1f}% used)"
+                )
 
-            logger.info(f"ORDER-004: Buying power OK - ${available:.2f} available")
-            return True, f"BP OK: ${available:.2f}"
+            return True, f"BP OK: ${available:,.2f} (margin {margin_pct:.1f}% used)"
 
         except Exception as e:
             logger.error(f"ORDER-004: Error checking buying power: {e}")

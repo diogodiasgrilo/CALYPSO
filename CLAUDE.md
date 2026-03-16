@@ -1058,6 +1058,25 @@ gcloud secrets versions access latest --secret=SECRET_NAME --project=calypso-tra
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
 ```
 
+### Saxo Balance API Field Names (Fix #85, 2026-03-16)
+
+The `/port/v1/balances` endpoint returns these key financial fields (verified via live diagnostic):
+
+| Field | Value (example) | Use For |
+|-------|----------------|---------|
+| `MarginAvailableForTrading` | $22,354.67 | **Available margin for new trades** (USE THIS) |
+| `SpendingPower` | $22,354.67 | Same as MarginAvailableForTrading |
+| `CashAvailableForTrading` | $22,354.67 | Cash portion available |
+| `MarginUsedByCurrentPositions` | -$17,500.00 | Margin locked by open positions |
+| `MarginUtilizationPct` | 43.91 | Percentage of margin used |
+| `NetEquityForMargin` | $39,854.67 | Total equity (NOT available — don't use for margin checks) |
+| `TotalValue` | $50,459.67 | Total account value |
+| `CashBalance` | $38,928.63 | Total cash in account |
+
+**CRITICAL:** `NetEquityForMargin` is total equity (like a credit limit), NOT available margin. Use `MarginAvailableForTrading` for pre-entry margin validation.
+
+**Note:** The `/port/v1/accounts/{key}` endpoint (`get_account_info()`) returns account metadata only (AccountType, Currency, etc.) — NO financial data. Use `get_balance()` for all financial queries.
+
 ### Pre-Market Price Fetching Fails (Before 7:00 AM ET)
 
 **Symptom:** Bots log "No quote yet" or fail to get prices during what appears to be pre-market hours.
@@ -1458,3 +1477,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 68. **Emergency Close Fails on Worthless Long Legs (Fix #83, 2026-03-09)** - Entry #4's long call at strike 6815 had bid=$0 (deep OTM, worthless on 0DTE). Saxo required limit orders at 14:34 ET but `get_quote()` returned no valid price for the worthless option. All 15 close attempts failed (5 outer × 3 inner), creating an orphaned position and generating 409 Conflict errors from zombie pending orders. Four-part fix: (a) Skip closing worthless long legs (bid=$0) during stop loss — same pattern as Fix #81 in early close. 0DTE options at $0 expire worthless, no need to close. (b) $0.05 minimum tick fallback in `place_emergency_order()` when quote fails entirely. (c) Cancel zombie pending orders after 409 Conflict before retry. (d) Removed narrow `is_limit_only_period` time check (3:45+ PM only) from `_close_position_with_retry()` — Saxo can restrict market orders at any time, `place_emergency_order()` handles this dynamically. Also fixed commission tracking to count only actually-closed legs instead of hardcoded 2. (Cost: Mar 9 Entry #4 long_call orphaned, $2.50 commission discrepancy per occurrence)
 
 69. **Dashboard P&L History Missing Post-Settlement Point (Fix #84, 2026-03-09)** - Dashboard showed stale pre-settlement P&L (-$690) instead of final settled P&L (-$712.50). Root cause: `pnl_history` array in state file only had pre-settlement snapshots from heartbeat. After `check_after_hours_settlement()` adjusted `total_realized_pnl` with expired credits, no final P&L point was written. Dashboard's last data point was from before settlement. Fix: Add final P&L history point after settlement completes, in both empty-registry and normal settlement paths, then save state to disk. (Cost: Dashboard History page showed wrong final P&L for every trading day)
+
+70. **Pre-Entry Margin Check Was a No-Op — Wrong Saxo Field Names (Fix #85, 2026-03-16)** - `_check_buying_power()` (ORDER-004) never actually validated margin. The code checked for field names `["AvailableMargin", "CashAvailable", "MarginAvailable", "NetEquityForMargin"]` in the Saxo `/port/v1/balances` response. The first three DON'T EXIST in Saxo's API. The fourth (`NetEquityForMargin`) exists but represents TOTAL equity (~$39,854), not AVAILABLE margin (~$22,354). Since total equity always exceeds $5,000, the check always passed — even when margin was nearly exhausted. Live VM diagnostic confirmed the correct Saxo field names: `MarginAvailableForTrading` ($22,354.67 = actual available margin), `SpendingPower` (same value), `CashAvailableForTrading`, `MarginUsedByCurrentPositions` (-$17,500 = margin locked by positions), `MarginUtilizationPct` (43.91%). Solution: Updated field priority to `["MarginAvailableForTrading", "SpendingPower", "CashAvailableForTrading", "NetEquityForMargin"]`. Added margin snapshot logging (available, used, utilization%, account total) at each entry. Also discovered `_is_daily_loss_limit_reached()` uses `get_account_info()` which returns NO financial data — falls back to hardcoded $50K default. Not fixed because HYDRA overrides to always return False (MKT-016/017 removed). (Cost: ORDER-004 margin gate was non-functional for all 23+ trading days — no incident because account had sufficient margin at 1 contract, but would have been dangerous at 2+ contracts)

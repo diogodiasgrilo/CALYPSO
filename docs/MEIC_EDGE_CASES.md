@@ -135,8 +135,8 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Trigger** | Saxo rejects order due to insufficient margin (late in day with many positions) |
 | **Expected Handling** | Log margin rejection, skip this entry, continue with existing positions. |
 | **Risk Level** | ✅ LOW |
-| **Implementation** | `_check_buying_power()` pre-checks margin BEFORE attempting entry. Requires MIN_BUYING_POWER_PER_IC=$5000. Skips entry and sends alert if insufficient. See strategy.py:2967-3020. |
-| **Resolution** | FIXED - Pre-entry margin check with alert on insufficient BP. Entry gracefully skipped. |
+| **Implementation** | `_check_buying_power()` pre-checks margin BEFORE attempting entry. Requires MIN_BUYING_POWER_PER_IC=$5000. Skips entry and sends alert if insufficient. Uses Saxo `/port/v1/balances` endpoint field `MarginAvailableForTrading`. |
+| **Resolution** | FIXED - Pre-entry margin check with alert on insufficient BP. Entry gracefully skipped. **Fix #85 (2026-03-16):** Corrected Saxo field names — previous code checked for non-existent fields (`AvailableMargin`, `CashAvailable`, `MarginAvailable`). Now uses correct fields: `MarginAvailableForTrading`, `SpendingPower`, `CashAvailableForTrading`. |
 
 ### 2.5 Order Rejected Due to Invalid Strike
 | | |
@@ -725,7 +725,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 | ID | Issue | Resolution |
 |----|-------|------------|
 | CONN-005 | 429 rate limit handling | Implemented in SaxoClient with exponential backoff |
-| ORDER-004 | Pre-entry margin check | `_check_buying_power()` validates BP before entry |
+| ORDER-004 | Pre-entry margin check | `_check_buying_power()` validates BP before entry (Fix #85: corrected Saxo field names) |
 | MKT-005 | Market halt detection | `_check_market_halt()` detects trading halts |
 | MKT-007 | Strike adjustment for illiquidity | `_adjust_strike_for_liquidity()` moves strikes closer to ATM |
 | TIME-001 | Clock sync validation | `_validate_system_clock()` + `_is_clock_reliable()` |
