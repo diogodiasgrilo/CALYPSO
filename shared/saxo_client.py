@@ -1302,12 +1302,13 @@ class SaxoClient:
 
         return results
 
-    def get_option_greeks(self, uic: int) -> Optional[Dict]:
+    def get_option_greeks(self, uic: int, asset_type: str = "StockIndexOption") -> Optional[Dict]:
         """
         Get Greeks (Delta, Gamma, Theta, Vega) for an option.
 
         Args:
             uic: Unique Instrument Code for the option
+            asset_type: Saxo asset type (default "StockIndexOption" for SPX/SPXW)
 
         Returns:
             dict: Greeks data including Theta, or None if not available.
@@ -1317,7 +1318,7 @@ class SaxoClient:
         params = {
             "AccountKey": self.account_key,
             "Uic": uic,
-            "AssetType": "StockOption",
+            "AssetType": asset_type,
             "FieldGroups": "Quote,Greeks"
         }
 

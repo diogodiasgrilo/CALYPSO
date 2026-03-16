@@ -523,6 +523,109 @@ def should_close_for_event(
 
 
 # ============================================================================
+# CPI Release Dates (Bureau of Labor Statistics)
+# Source: https://www.bls.gov/schedule/news_release/cpi.htm
+# ============================================================================
+
+CPI_DATES_2026 = [
+    date(2026, 1, 14),   # Dec 2025 CPI
+    date(2026, 2, 11),   # Jan 2026 CPI
+    date(2026, 3, 11),   # Feb 2026 CPI
+    date(2026, 4, 14),   # Mar 2026 CPI
+    date(2026, 5, 13),   # Apr 2026 CPI
+    date(2026, 6, 10),   # May 2026 CPI
+    date(2026, 7, 15),   # Jun 2026 CPI
+    date(2026, 8, 12),   # Jul 2026 CPI
+    date(2026, 9, 16),   # Aug 2026 CPI
+    date(2026, 10, 14),  # Sep 2026 CPI
+    date(2026, 11, 12),  # Oct 2026 CPI
+    date(2026, 12, 10),  # Nov 2026 CPI
+]
+
+# ============================================================================
+# Non-Farm Payrolls (NFP/Jobs Report) — first Friday of each month
+# Source: https://www.bls.gov/schedule/news_release/empsit.htm
+# Released at 8:30 AM ET (before market open)
+# ============================================================================
+
+NFP_DATES_2026 = [
+    date(2026, 1, 9),    # Dec 2025 NFP
+    date(2026, 2, 6),    # Jan 2026 NFP
+    date(2026, 3, 6),    # Feb 2026 NFP
+    date(2026, 4, 3),    # Mar 2026 NFP
+    date(2026, 5, 8),    # Apr 2026 NFP
+    date(2026, 6, 5),    # May 2026 NFP
+    date(2026, 7, 2),    # Jun 2026 NFP
+    date(2026, 8, 7),    # Jul 2026 NFP
+    date(2026, 9, 4),    # Aug 2026 NFP
+    date(2026, 10, 2),   # Sep 2026 NFP
+    date(2026, 11, 6),   # Oct 2026 NFP
+    date(2026, 12, 4),   # Nov 2026 NFP
+]
+
+
+def is_opex_week(check_date: date = None) -> bool:
+    """Check if date falls in monthly options expiration week (third Friday).
+
+    Monthly OpEx = third Friday of the month. OpEx "week" = Mon-Fri containing
+    that third Friday. OpEx weeks often have different volatility patterns.
+    """
+    if check_date is None:
+        check_date = get_us_market_time().date()
+
+    # Find third Friday of the month
+    # First day of month
+    first_day = check_date.replace(day=1)
+    # Find first Friday (weekday 4)
+    days_until_friday = (4 - first_day.weekday()) % 7
+    first_friday = first_day + timedelta(days=days_until_friday)
+    # Third Friday = first Friday + 14 days
+    third_friday = first_friday + timedelta(days=14)
+
+    # OpEx week = Monday through Friday containing third Friday
+    opex_monday = third_friday - timedelta(days=third_friday.weekday())
+    opex_friday = opex_monday + timedelta(days=4)
+
+    return opex_monday <= check_date <= opex_friday
+
+
+def get_economic_events_for_date(check_date: date = None) -> List[str]:
+    """Return list of economic event names for a given date.
+
+    Used for tagging daily_summaries with what events occurred.
+    Returns e.g. ["CPI", "FOMC_T1"] or [] if no events.
+    """
+    if check_date is None:
+        check_date = get_us_market_time().date()
+
+    events = []
+
+    # FOMC
+    if is_fomc_meeting_day(check_date):
+        if is_fomc_announcement_day(check_date):
+            events.append("FOMC_ANNOUNCEMENT")
+        else:
+            events.append("FOMC_DAY1")
+
+    if is_fomc_t_plus_one(check_date):
+        events.append("FOMC_T1")
+
+    # CPI (8:30 AM release — before market open, absorbed by entry time)
+    if check_date in CPI_DATES_2026:
+        events.append("CPI")
+
+    # NFP/Jobs Report (8:30 AM release)
+    if check_date in NFP_DATES_2026:
+        events.append("NFP")
+
+    # OpEx week
+    if is_opex_week(check_date):
+        events.append("OPEX_WEEK")
+
+    return events
+
+
+# ============================================================================
 # Test
 # ============================================================================
 

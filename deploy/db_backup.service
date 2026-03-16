@@ -1,0 +1,30 @@
+[Unit]
+Description=CALYPSO SQLite Database Backup to GCS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+# Backup backtesting.db to Google Cloud Storage
+ExecStart=/bin/bash -c '\
+    DATE=$(date +%%Y%%m%%d); \
+    /usr/bin/gsutil cp /opt/calypso/data/backtesting.db \
+    gs://calypso-backups/backtesting_${DATE}.db && \
+    echo "Backup complete: backtesting_${DATE}.db" || \
+    echo "Backup FAILED"'
+
+# Also backup metrics and state files
+ExecStartPost=/bin/bash -c '\
+    DATE=$(date +%%Y%%m%%d); \
+    /usr/bin/gsutil cp /opt/calypso/data/hydra_metrics.json \
+    gs://calypso-backups/hydra_metrics_${DATE}.json 2>/dev/null; \
+    /usr/bin/gsutil cp /opt/calypso/data/hydra_state.json \
+    gs://calypso-backups/hydra_state_${DATE}.json 2>/dev/null; \
+    true'
+
+StandardOutput=journal
+StandardError=journal

@@ -299,6 +299,19 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"HYDRA using state file: {self.state_file}")
         logger.info(f"HYDRA using metrics file: {self.metrics_file}")
 
+        # DataRecorder: real-time SQLite writes (non-critical, never affects trading)
+        self._data_recorder = None
+        self._last_stop_time = None  # For cascade gap tracking
+        self._last_margin_snapshot = {}  # From _check_buying_power
+        try:
+            from shared.data_recorder import DataRecorder
+            db_path = os.path.join(DATA_DIR, "backtesting.db")
+            self._data_recorder = DataRecorder(db_path)
+            self._data_recorder.ensure_schema()
+            logger.info(f"DataRecorder initialized: {db_path}")
+        except Exception as e:
+            logger.warning(f"DataRecorder init failed (non-critical): {e}")
+
         self._bot_start_time = datetime.now()
 
         logger.info(f"HYDRA Strategy initialized")
@@ -2430,6 +2443,276 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.warning(f"Failed to send skip alert for Entry #{entry_num}: {e}")
 
+        # Record skip to SQLite for counterfactual tracking
+        if self._data_recorder:
+            try:
+                now_ts = get_us_market_time()
+                self._data_recorder.record_skipped_entry({
+                    "date": now_ts.strftime('%Y-%m-%d'),
+                    "entry_number": entry_num,
+                    "skip_time": now_ts.strftime('%Y-%m-%d %H:%M:%S'),
+                    "skip_reason": skip_reason,
+                    "spx_at_skip": self.current_price,
+                    "vix_at_skip": self.current_vix,
+                })
+            except Exception:
+                pass
+
+    # ========================================================================
+    # DataRecorder: Real-time SQLite writes (non-critical, fire-and-forget)
+    # ========================================================================
+
+    def _record_heartbeat_to_db(self):
+        """Write current heartbeat data to SQLite (called every ~10s)."""
+        if not self._data_recorder:
+            return
+        try:
+            now = get_us_market_time()
+            timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
+
+            # 1. Market tick
+            self._data_recorder.record_tick(
+                timestamp=timestamp,
+                spx_price=self.current_price,
+                vix_level=self.current_vix,
+                trend_signal=self._current_trend.value if self._current_trend else "unknown",
+                bot_state=self.state.value if hasattr(self.state, 'value') else str(self.state),
+                entry_count=self.daily_state.entries_completed,
+                active_count=len(self.daily_state.active_entries),
+            )
+
+            # 2. Spread snapshots with individual leg prices
+            snapshots = []
+            for entry in self.daily_state.active_entries:
+                call_done = (entry.call_side_stopped
+                             or getattr(entry, 'call_side_expired', False)
+                             or getattr(entry, 'call_side_skipped', False))
+                put_done = (entry.put_side_stopped
+                            or getattr(entry, 'put_side_expired', False)
+                            or getattr(entry, 'put_side_skipped', False))
+                if call_done and put_done:
+                    continue
+
+                csv = entry.call_spread_value if not call_done else 0
+                psv = entry.put_spread_value if not put_done else 0
+                if csv > 0 or psv > 0:
+                    snapshots.append({
+                        "entry_number": entry.entry_number,
+                        "call_spread_value": csv if csv > 0 else None,
+                        "put_spread_value": psv if psv > 0 else None,
+                        "short_call_price": entry.short_call_price if not call_done else None,
+                        "long_call_price": entry.long_call_price if not call_done else None,
+                        "short_put_price": entry.short_put_price if not put_done else None,
+                        "long_put_price": entry.long_put_price if not put_done else None,
+                    })
+
+            if snapshots:
+                self._data_recorder.record_spread_snapshots(
+                    timestamp=timestamp, snapshots=snapshots
+                )
+        except Exception as e:
+            logger.debug(f"DataRecorder heartbeat failed: {e}")
+
+    def _record_entry_to_db(self, entry):
+        """Record entry data to SQLite with execution quality metrics.
+
+        Greeks are fetched in a daemon thread to avoid blocking the main loop.
+        """
+        if not self._data_recorder:
+            return
+        try:
+            now = get_us_market_time()
+            date_str = now.strftime('%Y-%m-%d')
+
+            # Compute bid-ask width from current quotes (already fetched in memory)
+            # These are the current mid prices — slippage = difference vs fill
+            call_slippage = None
+            put_slippage = None
+            if entry.short_call_fill_price and entry.short_call_price:
+                call_slippage = round(entry.short_call_fill_price - entry.short_call_price, 4)
+            if entry.short_put_fill_price and entry.short_put_price:
+                put_slippage = round(entry.short_put_fill_price - entry.short_put_price, 4)
+
+            entry_data = {
+                "date": date_str,
+                "entry_number": entry.entry_number,
+                "entry_time": entry.entry_time.strftime('%Y-%m-%d %H:%M:%S') if entry.entry_time else None,
+                "spx_at_entry": self.current_price,
+                "vix_at_entry": self.current_vix,
+                "expected_move": getattr(self, '_last_expected_move', None),
+                "trend_signal": entry.trend_signal.value if entry.trend_signal else None,
+                "entry_type": "call_only" if entry.call_only else ("put_only" if entry.put_only else "full_ic"),
+                "override_reason": getattr(entry, 'override_reason', None),
+                "short_call_strike": entry.short_call_strike,
+                "long_call_strike": entry.long_call_strike,
+                "short_put_strike": entry.short_put_strike,
+                "long_put_strike": entry.long_put_strike,
+                "call_credit": entry.call_spread_credit,
+                "put_credit": entry.put_spread_credit,
+                "total_credit": entry.total_credit,
+                "call_spread_width": abs(entry.long_call_strike - entry.short_call_strike) if entry.long_call_strike else 0,
+                "put_spread_width": abs(entry.short_put_strike - entry.long_put_strike) if entry.long_put_strike else 0,
+                "otm_distance_call": entry.short_call_strike - self.current_price if entry.short_call_strike else None,
+                "otm_distance_put": self.current_price - entry.short_put_strike if entry.short_put_strike else None,
+                # Execution quality
+                "slippage_call": call_slippage,
+                "slippage_put": put_slippage,
+                # Margin snapshot
+                "margin_available": self._last_margin_snapshot.get("available"),
+                "margin_utilization_pct": self._last_margin_snapshot.get("utilization_pct"),
+                "config_version": HYDRA_VERSION,
+            }
+
+            # Write entry data immediately (without Greeks)
+            self._data_recorder.record_entry(entry_data)
+
+            # Fetch Greeks in daemon thread (avoid blocking main loop)
+            # Greeks are purely for analytics — entry is already placed
+            import threading
+            def _fetch_and_update_greeks():
+                try:
+                    greeks_data = {}
+                    for side, uic in [("call", entry.short_call_uic), ("put", entry.short_put_uic)]:
+                        if uic:
+                            g = self.client.get_option_greeks(uic, asset_type="StockIndexOption")
+                            if g:
+                                greeks_data[side] = g
+                    if greeks_data:
+                        # Update the DB row with Greeks
+                        with self._data_recorder._connect() as conn:
+                            for side in ("call", "put"):
+                                g = greeks_data.get(side, {})
+                                if g:
+                                    conn.execute(
+                                        f"""UPDATE trade_entries SET
+                                        delta_{side} = ?, theta_{side} = ?, vega_{side} = ?
+                                        WHERE date = ? AND entry_number = ?""",
+                                        (g.get("Delta"), g.get("Theta"), g.get("Vega"),
+                                         date_str, entry.entry_number)
+                                    )
+                            conn.commit()
+                except Exception as e:
+                    logger.debug(f"Greeks fetch failed (non-critical): {e}")
+
+            thread = threading.Thread(target=_fetch_and_update_greeks, daemon=True)
+            thread.start()
+
+        except Exception as e:
+            logger.debug(f"DataRecorder entry write failed: {e}")
+
+    def _record_stop_to_db(self, entry, side: str, stop_level: float,
+                           actual_close_cost: float):
+        """Record stop loss data to SQLite with execution quality metrics."""
+        if not self._data_recorder:
+            return
+        try:
+            now = get_us_market_time()
+            date_str = now.strftime('%Y-%m-%d')
+
+            # Minutes held since entry
+            minutes_held = None
+            if entry.entry_time:
+                minutes_held = (now - entry.entry_time).total_seconds() / 60
+
+            # SPX move since entry
+            spx_move = None
+            spx_at_entry = getattr(entry, '_spx_at_entry', None)
+            if spx_at_entry:
+                spx_move = self.current_price - spx_at_entry
+
+            # Cascade gap (seconds since previous stop)
+            cascade_gap = None
+            if self._last_stop_time:
+                cascade_gap = (now - self._last_stop_time).total_seconds()
+            self._last_stop_time = now
+
+            # Quoted mid at stop (from current prices on entry)
+            if side == "call":
+                quoted_mid = entry.call_spread_value if entry.call_spread_value else None
+                credit = entry.call_spread_credit
+            else:
+                quoted_mid = entry.put_spread_value if entry.put_spread_value else None
+                credit = entry.put_spread_credit
+
+            slippage = None
+            if actual_close_cost and quoted_mid:
+                slippage = actual_close_cost - quoted_mid
+
+            self._data_recorder.record_stop({
+                "date": date_str,
+                "entry_number": entry.entry_number,
+                "side": side,
+                "stop_time": now.strftime('%H:%M:%S'),
+                "spx_at_stop": self.current_price,
+                "trigger_level": stop_level,
+                "actual_debit": actual_close_cost,
+                "net_pnl": -(actual_close_cost - credit) if actual_close_cost and credit else None,
+                "quoted_mid_at_stop": quoted_mid,
+                "slippage_on_close": slippage,
+                "spx_move_since_entry": spx_move,
+                "minutes_held": minutes_held,
+                "cascade_gap_seconds": cascade_gap,
+            })
+        except Exception as e:
+            logger.debug(f"DataRecorder stop write failed: {e}")
+
+    def _record_daily_summary_to_db(self):
+        """Record daily summary to SQLite with economic events and overnight gap."""
+        if not self._data_recorder:
+            return
+        try:
+            import json as _json
+            from shared.event_calendar import get_economic_events_for_date, is_opex_week
+
+            now = get_us_market_time()
+            date_str = now.strftime('%Y-%m-%d')
+            summary = self.get_daily_summary()
+
+            events = get_economic_events_for_date(now.date())
+            overnight_gap = self._data_recorder.get_yesterday_spx_close(date_str)
+            if overnight_gap is not None and self.market_data.spx_open:
+                overnight_gap = self.market_data.spx_open - overnight_gap
+            else:
+                overnight_gap = None
+
+            spx_low = self.market_data.spx_low
+            if spx_low == float('inf'):
+                spx_low = None
+            day_range = None
+            if spx_low is not None:
+                day_range = self.market_data.spx_high - spx_low
+
+            self._data_recorder.record_daily_summary({
+                "date": date_str,
+                "spx_open": self.market_data.spx_open,
+                "spx_close": self.current_price,
+                "spx_high": self.market_data.spx_high,
+                "spx_low": spx_low,
+                "day_range": day_range,
+                "vix_open": self.market_data.vix_open,
+                "vix_close": self.current_vix,
+                "entries_placed": summary.get("entries_completed", 0),
+                "entries_stopped": summary.get("call_stops", 0) + summary.get("put_stops", 0),
+                "entries_expired": summary.get("entries_completed", 0) - (summary.get("call_stops", 0) + summary.get("put_stops", 0)),
+                "gross_pnl": summary.get("total_pnl", 0),
+                "net_pnl": summary.get("total_pnl", 0) - summary.get("total_commission", 0),
+                "commission": summary.get("total_commission", 0),
+                "day_of_week": now.strftime('%A'),
+                "overnight_gap": overnight_gap,
+                "economic_events": _json.dumps(events) if events else None,
+                "config_version": HYDRA_VERSION,
+                "opex_week": 1 if is_opex_week(now.date()) else 0,
+            })
+
+            # Compute MAE/MFE from spread_snapshots
+            self._data_recorder.compute_mae_mfe(date_str)
+
+            # WAL checkpoint (prevent unbounded WAL growth)
+            self._data_recorder.wal_checkpoint()
+
+        except Exception as e:
+            logger.debug(f"DataRecorder daily summary failed: {e}")
+
     # OVERRIDE: Entry initiation with trend detection
     # =========================================================================
 
@@ -2798,6 +3081,10 @@ class HydraStrategy(MEICStrategy):
 
                     # Log to Google Sheets
                     self._log_entry(entry)
+
+                    # Record to SQLite (with daemon-thread Greeks fetch)
+                    entry._spx_at_entry = self.current_price
+                    self._record_entry_to_db(entry)
 
                     # Send entry alert
                     mult = 100 * entry.contracts
@@ -3278,7 +3565,12 @@ class HydraStrategy(MEICStrategy):
 
         # When short_only_stop is disabled, use base MEIC logic (closes both legs)
         if not self.short_only_stop:
-            return super()._execute_stop_loss(entry, side)
+            result = super()._execute_stop_loss(entry, side)
+            # Record stop to SQLite
+            stop_level = entry.call_side_stop if side == "call" else entry.put_side_stop
+            actual_debit = entry.actual_call_stop_debit if side == "call" else entry.actual_put_stop_debit
+            self._record_stop_to_db(entry, side, stop_level, actual_debit)
+            return result
 
         logger.warning(
             f"MKT-025 STOP TRIGGERED: Entry #{entry.entry_number} {side} side "
@@ -3393,6 +3685,9 @@ class HydraStrategy(MEICStrategy):
         # Flush batched alerts
         time.sleep(0.1)
         self._flush_batched_alerts()
+
+        # Record stop to SQLite
+        self._record_stop_to_db(entry, side, stop_level, actual_close_cost)
 
         # MKT-033: Immediately try to sell the long leg if profitable
         if self.long_salvage_enabled and not self.dry_run:

@@ -3315,8 +3315,13 @@ class LocalFileLogger:
             datefmt="%Y-%m-%d %H:%M:%S"
         )
 
-        # File handler
-        file_handler = logging.FileHandler(self.log_file, encoding="utf-8")
+        # File handler (TimedRotatingFileHandler: rotate at midnight, keep 7 days)
+        # Rotated files: bot.log.2026-03-16, bot.log.2026-03-15, etc.
+        # Midnight rotation avoids mid-day log file switches that could disrupt parsing.
+        from logging.handlers import TimedRotatingFileHandler
+        file_handler = TimedRotatingFileHandler(
+            self.log_file, when="midnight", backupCount=7, encoding="utf-8"
+        )
         file_handler.setLevel(getattr(logging, self.log_level))
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)

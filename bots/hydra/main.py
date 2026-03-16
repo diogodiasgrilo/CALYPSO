@@ -318,6 +318,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                                 trade_logger.log_event("Settlement complete - sending daily summary...")
                                 try:
                                     strategy.log_daily_summary()
+                                    strategy._record_daily_summary_to_db()
                                     # Fix #65: Also log post-settlement account summary and performance metrics
                                     # These were previously only logged during market hours heartbeat (pre-settlement),
                                     # meaning the final values with settled P&L were never recorded
@@ -475,6 +476,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     strategy.log_performance_metrics()
                     strategy.log_position_snapshot()
                     strategy._save_state_to_disk()
+                    strategy._record_heartbeat_to_db()
                     last_status_time = now
 
                 # Hourly Bot Logs

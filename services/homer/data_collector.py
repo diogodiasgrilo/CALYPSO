@@ -900,10 +900,22 @@ _ENTRY_DETAIL_SV_RE = re.compile(
 )
 
 # Default log file paths (relative to project root)
-DEFAULT_LOG_PATHS = [
-    os.path.join("logs", "meic_tf", "bot.log"),  # Feb 5-27 (pre-rename)
-    os.path.join("logs", "hydra", "bot.log"),     # Feb 28+ (post-rename)
-]
+# Includes rotated files from TimedRotatingFileHandler (bot.log.YYYY-MM-DD)
+def _get_default_log_paths():
+    """Build log paths including any rotated files."""
+    paths = [
+        os.path.join("logs", "meic_tf", "bot.log"),  # Feb 5-27 (pre-rename)
+        os.path.join("logs", "hydra", "bot.log"),     # Feb 28+ (post-rename)
+    ]
+    # Add rotated files (TimedRotatingFileHandler creates bot.log.YYYY-MM-DD)
+    hydra_log_dir = os.path.join("logs", "hydra")
+    if os.path.isdir(hydra_log_dir):
+        for f in sorted(os.listdir(hydra_log_dir)):
+            if f.startswith("bot.log.") and f != "bot.log":
+                paths.append(os.path.join(hydra_log_dir, f))
+    return paths
+
+DEFAULT_LOG_PATHS = _get_default_log_paths()
 
 
 def parse_heartbeat_logs(

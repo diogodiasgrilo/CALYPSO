@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS market_ticks (
@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS trade_entries (
     mkt031_early INTEGER,
     otm_distance_call REAL,
     otm_distance_put REAL,
+    delta_call REAL,
+    delta_put REAL,
+    theta_call REAL,
+    theta_put REAL,
+    vega_call REAL,
+    vega_put REAL,
+    bid_ask_width_call REAL,
+    bid_ask_width_put REAL,
+    time_to_fill_ms INTEGER,
+    slippage_call REAL,
+    slippage_put REAL,
+    margin_available REAL,
+    margin_utilization_pct REAL,
+    config_version TEXT,
+    attempts INTEGER DEFAULT 1,
     PRIMARY KEY (date, entry_number)
 );
 
@@ -80,6 +95,13 @@ CREATE TABLE IF NOT EXISTS trade_stops (
     net_pnl REAL,
     salvage_sold INTEGER DEFAULT 0,
     salvage_revenue REAL DEFAULT 0.0,
+    confirmation_seconds INTEGER DEFAULT 0,
+    breach_recoveries INTEGER DEFAULT 0,
+    quoted_mid_at_stop REAL,
+    slippage_on_close REAL,
+    spx_move_since_entry REAL,
+    minutes_held REAL,
+    cascade_gap_seconds REAL,
     PRIMARY KEY (date, entry_number, side)
 );
 
@@ -100,7 +122,12 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
     commission REAL,
     long_salvage_revenue REAL DEFAULT 0.0,
     day_type TEXT,
-    day_of_week TEXT
+    day_of_week TEXT,
+    overnight_gap REAL,
+    realized_volatility REAL,
+    economic_events TEXT,
+    config_version TEXT,
+    opex_week INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS schema_info (
@@ -113,7 +140,42 @@ CREATE TABLE IF NOT EXISTS spread_snapshots (
     entry_number INTEGER NOT NULL,
     call_spread_value REAL,
     put_spread_value REAL,
+    short_call_price REAL,
+    long_call_price REAL,
+    short_put_price REAL,
+    long_put_price REAL,
     PRIMARY KEY (timestamp, entry_number)
+);
+
+CREATE TABLE IF NOT EXISTS skipped_entries (
+    date TEXT NOT NULL,
+    entry_number INTEGER NOT NULL,
+    skip_time TEXT,
+    skip_reason TEXT,
+    spx_at_skip REAL,
+    vix_at_skip REAL,
+    theoretical_short_call REAL,
+    theoretical_long_call REAL,
+    theoretical_short_put REAL,
+    theoretical_long_put REAL,
+    estimated_call_credit REAL,
+    estimated_put_credit REAL,
+    would_have_stopped INTEGER,
+    theoretical_pnl REAL,
+    PRIMARY KEY (date, entry_number)
+);
+
+CREATE TABLE IF NOT EXISTS entry_mae_mfe (
+    date TEXT NOT NULL,
+    entry_number INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    mae_value REAL,
+    mae_time TEXT,
+    mfe_value REAL,
+    mfe_time TEXT,
+    cushion_min_pct REAL,
+    cushion_min_time TEXT,
+    PRIMARY KEY (date, entry_number, side)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ticks_date ON market_ticks(substr(timestamp, 1, 10));
@@ -121,6 +183,8 @@ CREATE INDEX IF NOT EXISTS idx_ohlc_date ON market_ohlc_1min(substr(timestamp, 1
 CREATE INDEX IF NOT EXISTS idx_entries_date ON trade_entries(date);
 CREATE INDEX IF NOT EXISTS idx_stops_date ON trade_stops(date);
 CREATE INDEX IF NOT EXISTS idx_spreads_date ON spread_snapshots(substr(timestamp, 1, 10));
+CREATE INDEX IF NOT EXISTS idx_skipped_date ON skipped_entries(date);
+CREATE INDEX IF NOT EXISTS idx_mae_mfe_date ON entry_mae_mfe(date);
 """
 
 
@@ -202,6 +266,53 @@ class BacktestingDB:
                 except sqlite3.OperationalError:
                     pass  # Column already exists
             logger.info("DB migrated to schema v4 (MKT-036 confirmation columns)")
+
+        if current < 5:
+            # v5: DataRecorder enrichment columns
+            v5_alters = [
+                # spread_snapshots: individual leg prices
+                "ALTER TABLE spread_snapshots ADD COLUMN short_call_price REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN long_call_price REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN short_put_price REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN long_put_price REAL",
+                # trade_entries: Greeks
+                "ALTER TABLE trade_entries ADD COLUMN delta_call REAL",
+                "ALTER TABLE trade_entries ADD COLUMN delta_put REAL",
+                "ALTER TABLE trade_entries ADD COLUMN theta_call REAL",
+                "ALTER TABLE trade_entries ADD COLUMN theta_put REAL",
+                "ALTER TABLE trade_entries ADD COLUMN vega_call REAL",
+                "ALTER TABLE trade_entries ADD COLUMN vega_put REAL",
+                # trade_entries: execution quality
+                "ALTER TABLE trade_entries ADD COLUMN bid_ask_width_call REAL",
+                "ALTER TABLE trade_entries ADD COLUMN bid_ask_width_put REAL",
+                "ALTER TABLE trade_entries ADD COLUMN time_to_fill_ms INTEGER",
+                "ALTER TABLE trade_entries ADD COLUMN slippage_call REAL",
+                "ALTER TABLE trade_entries ADD COLUMN slippage_put REAL",
+                # trade_entries: margin & config
+                "ALTER TABLE trade_entries ADD COLUMN margin_available REAL",
+                "ALTER TABLE trade_entries ADD COLUMN margin_utilization_pct REAL",
+                "ALTER TABLE trade_entries ADD COLUMN config_version TEXT",
+                "ALTER TABLE trade_entries ADD COLUMN attempts INTEGER DEFAULT 1",
+                # trade_stops: enrichment
+                "ALTER TABLE trade_stops ADD COLUMN quoted_mid_at_stop REAL",
+                "ALTER TABLE trade_stops ADD COLUMN slippage_on_close REAL",
+                "ALTER TABLE trade_stops ADD COLUMN spx_move_since_entry REAL",
+                "ALTER TABLE trade_stops ADD COLUMN minutes_held REAL",
+                "ALTER TABLE trade_stops ADD COLUMN cascade_gap_seconds REAL",
+                # daily_summaries: enrichment
+                "ALTER TABLE daily_summaries ADD COLUMN overnight_gap REAL",
+                "ALTER TABLE daily_summaries ADD COLUMN realized_volatility REAL",
+                "ALTER TABLE daily_summaries ADD COLUMN economic_events TEXT",
+                "ALTER TABLE daily_summaries ADD COLUMN config_version TEXT",
+                "ALTER TABLE daily_summaries ADD COLUMN opex_week INTEGER DEFAULT 0",
+            ]
+            for sql in v5_alters:
+                try:
+                    conn.execute(sql)
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+            # New tables created by CREATE_TABLES_SQL above
+            logger.info("DB migrated to schema v5 (DataRecorder enrichment columns)")
 
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode."""
@@ -413,6 +524,8 @@ class BacktestingDB:
             "trade_stops",
             "daily_summaries",
             "spread_snapshots",
+            "skipped_entries",
+            "entry_mae_mfe",
         }
         if table not in allowed_tables:
             raise ValueError(f"Unknown table: {table}")

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily CALYPSO SQLite Database Backup
+
+[Timer]
+# Run at 6:00 PM ET (23:00 UTC during EST, 22:00 UTC during EDT)
+# After settlement and HOMER have completed
+OnCalendar=*-*-* 23:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
