@@ -46,6 +46,7 @@ export interface HydraEntry {
   put_long_value: number;
   call_stop_time: string;
   put_stop_time: string;
+  skip_reason?: string;
   [key: string]: unknown;
 }
 
@@ -72,6 +73,10 @@ export interface HydraState {
     vix_low: number;
   };
   last_saved: string;
+  entry_schedule?: {
+    base: string[];
+    conditional: string[];
+  };
   [key: string]: unknown;
 }
 

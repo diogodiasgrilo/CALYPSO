@@ -219,7 +219,7 @@ def _trim_state_for_prompt(state: Dict[str, Any]) -> Dict[str, Any]:
         "total_credit_received", "total_realized_pnl", "total_commission",
         "call_stops_triggered", "put_stops_triggered", "double_stops",
         "early_close_triggered", "early_close_time", "early_close_pnl",
-        "market_data_ohlc",
+        "market_data_ohlc", "entry_schedule",
     ]
     trimmed = {k: state[k] for k in keep_top if k in state}
 
@@ -234,7 +234,7 @@ def _trim_state_for_prompt(state: Dict[str, Any]) -> Dict[str, Any]:
         "call_side_skipped", "put_side_skipped",
         "call_long_sold", "put_long_sold",
         "call_long_sold_revenue", "put_long_sold_revenue",
-        "trend_signal", "override_reason", "early_closed",
+        "trend_signal", "override_reason", "skip_reason", "early_closed",
         "is_complete", "open_commission", "close_commission",
     ]
     trimmed["entries"] = []

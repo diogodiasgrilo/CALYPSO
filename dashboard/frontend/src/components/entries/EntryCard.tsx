@@ -113,6 +113,36 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
   const { status, stoppedSide } = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
 
+  // Fully-skipped entry: minimal card with reason
+  if (status === "skipped" && entry.skip_reason) {
+    return (
+      <div
+        className={`bg-card rounded-lg p-3 ${
+          isConditional ? "border border-dashed border-border-dim" : "border border-border-dim"
+        }`}
+        style={{
+          borderLeftColor: colors.textDim,
+          borderLeftWidth: 3,
+          borderLeftStyle: "solid",
+          opacity: 0.7,
+        }}
+      >
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-text-dim font-semibold text-sm">
+            E{entry.entry_number}
+          </span>
+          <StatusBadge status="skipped" />
+        </div>
+        <div className="text-xs text-text-secondary mb-1">
+          {entry.entry_time ? formatTime(entry.entry_time) : "--:--"}
+        </div>
+        <div className="text-[10px] text-text-dim leading-tight">
+          {entry.skip_reason}
+        </div>
+      </div>
+    );
+  }
+
   const { currentPnl, maxProfit } = computeEntryPnl(entry);
   const animatedPnl = useAnimatedNumber(currentPnl);
   const animatedMax = useAnimatedNumber(maxProfit);

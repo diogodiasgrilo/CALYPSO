@@ -238,7 +238,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 **Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
 
-### HYDRA Bot Details (v1.15.1 - Updated 2026-03-16)
+### HYDRA Bot Details (v1.16.0 - Updated 2026-03-16)
 - **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
 - **Structure:** 5 base entries + 2 conditional entries per day at :15/:45 marks starting 10:15 AM ET (v1.10.3 — matches winning period Feb 10-27). Full iron condors or put-only (MKT-011) + credit gate. VIX entry cutoff disabled (max_vix_entry=999, neither Tammy nor Sandvand use VIX cutoffs). Conditional entries E6/E7 (12:45, 13:15) only fire when MKT-035 triggers (SPX < open -0.3%), always as call-only. Base entries E1-E5 always attempt full ICs regardless of down-day status ($5.00 put buffer provides protection).
 - **VIX-Scaled Entry Time Shifting (MKT-034):** DISABLED (v1.10.3). Code preserved and configurable via `vix_time_shift.enabled`. When enabled: shifts 5-entry schedule later on high-VIX days. Neither Tammy nor Sandvand use VIX-based time shifting.
@@ -461,7 +461,7 @@ Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Telegram/Gmail �
 | CRITICAL | Telegram + Email | Circuit breaker, emergency exit, naked position, ITM risk close |
 | HIGH | Telegram + Email | Stop loss, max loss, wing breach, roll failed, vigilant mode entry |
 | MEDIUM | Telegram + Email | Position opened/closed, profit target, roll complete, recenter |
-| LOW | Telegram + Email | Bot started/stopped, daily summary, vigilant mode exit |
+| LOW | Telegram + Email | Bot started/stopped, daily summary, vigilant mode exit, entry skipped (Telegram only) |
 
 **Note:** ALL alerts go to Telegram (rich Markdown formatting) + Email.
 
@@ -1261,7 +1261,7 @@ SCRIPT
 8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
 9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
 10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by HYDRA for trend filtering
-11. **HYDRA bot:** Running in LIVE mode (v1.15.1, deployed 2026-03-16) - ONLY active trading bot - 5 base entries + 2 conditional entries at :15/:45 marks starting 10:15 AM ET (MKT-034 VIX time shifting DISABLED) + MKT-031 smart entry DISABLED (v1.10.4 — enter at scheduled times only) + MKT-035 conditional entries only (E6/E7 at 12:45/13:15 fire as call-only when SPX < open -0.3%; base entries E1-E5 always full ICs) + EMA 20/40 trend signal (informational only) + wider starting OTM 3.5×/4.0× multiplier (MKT-024) + 50pt spread width + credit gate: call $0.60, put $2.50 with MKT-029 fallback (MKT-011) + put-only entries when call non-viable AND VIX < 25 (MKT-032/MKT-039) + call-only entries when put non-viable (MKT-040, 89% WR) + VIX entry cutoff disabled (max_vix_entry=999) + early close DISABLED (MKT-018) + stop = total_credit + asymmetric buffer (call $0.10, put $5.00), MKT-036 confirmation timer DISABLED, MKT-039 put-only stop: credit + $5.00 (was 2× credit), MKT-040 call-only stop: 2× credit + $0.10, MKT-035/038 E6/E7: call + $2.50 theo put + call buffer + MKT-038 FOMC T+1 call-only (all entries forced call-only day after FOMC announcement) + configurable stop close mode (default: both legs) + progressive OTM tightening (MKT-020/MKT-022) + 15 Telegram commands
+11. **HYDRA bot:** Running in LIVE mode (v1.16.0, deployed 2026-03-16) - ONLY active trading bot - 5 base entries + 2 conditional entries at :15/:45 marks starting 10:15 AM ET (MKT-034 VIX time shifting DISABLED) + MKT-031 smart entry DISABLED (v1.10.4 — enter at scheduled times only) + MKT-035 conditional entries only (E6/E7 at 12:45/13:15 fire as call-only when SPX < open -0.3%; base entries E1-E5 always full ICs) + EMA 20/40 trend signal (informational only) + wider starting OTM 3.5×/4.0× multiplier (MKT-024) + 50pt spread width + credit gate: call $0.60, put $2.50 with MKT-029 fallback (MKT-011) + put-only entries when call non-viable AND VIX < 25 (MKT-032/MKT-039) + call-only entries when put non-viable (MKT-040, 89% WR) + VIX entry cutoff disabled (max_vix_entry=999) + early close DISABLED (MKT-018) + stop = total_credit + asymmetric buffer (call $0.10, put $5.00), MKT-036 confirmation timer DISABLED, MKT-039 put-only stop: credit + $5.00 (was 2× credit), MKT-040 call-only stop: 2× credit + $0.10, MKT-035/038 E6/E7: call + $2.50 theo put + call buffer + MKT-038 FOMC T+1 call-only (all entries forced call-only day after FOMC announcement) + configurable stop close mode (default: both legs) + progressive OTM tightening (MKT-020/MKT-022) + 15 Telegram commands + skip alerts: Telegram ENTRY_SKIPPED at all 8 skip paths with detailed reasons (v1.16.0) + state file: `entry_schedule` (base+conditional times), `skip_reason` per entry + dashboard: mobile-responsive header, pending cards with scheduled times, skipped cards with reason
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
 14. **HOMER agent:** Runs at 5:30 PM ET weekdays — auto-updates HYDRA Trading Journal with new trading days, commits + pushes, sends Telegram alert

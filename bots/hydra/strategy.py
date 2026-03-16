@@ -76,7 +76,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.15.1"
+HYDRA_VERSION = "1.16.0"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -167,6 +167,9 @@ class HydraIronCondorEntry(IronCondorEntry):
     call_breach_count: int = 0                    # How many times call side breached and recovered
     put_breach_count: int = 0                     # How many times put side breached and recovered
 
+    # Skip tracking: human-readable reason when entry is fully skipped (both sides)
+    skip_reason: str = ""  # e.g. "MKT-011: both sides below minimum credit"
+
     @property
     def is_one_sided(self) -> bool:
         """True if only one side was placed (not a full IC)."""
@@ -193,7 +196,7 @@ class HydraStrategy(MEICStrategy):
     Extends MEICStrategy with EMA-based trend detection and credit validation:
     - Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars
     - Signal is informational only — logged and stored but does NOT drive entry type
-    - All entries are full iron condors or put-only (MKT-011 conversion)
+    - All entries are full ICs, put-only (MKT-011/MKT-032), or call-only (MKT-035/038/040)
 
     Key Features (HYDRA specific, beyond base MEIC):
     - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
@@ -2380,6 +2383,53 @@ class HydraStrategy(MEICStrategy):
         return False
 
     # =========================================================================
+    # =========================================================================
+    # Skip tracking + alerting helper
+    # =========================================================================
+
+    def _record_skipped_entry(self, entry_num: int, skip_reason: str,
+                              alert_details: str = "", send_alert: bool = True):
+        """
+        Record a skipped entry in daily_state.entries and optionally send Telegram alert.
+
+        Creates a minimal HydraIronCondorEntry with both sides marked as skipped,
+        appends it to daily_state.entries so the dashboard can display it, and
+        sends a LOW-priority Telegram alert with the skip reason.
+
+        Args:
+            entry_num: The entry number (1-7)
+            skip_reason: Human-readable skip reason (e.g. "MKT-011: both sides below minimum credit")
+            alert_details: Additional context for the Telegram message (estimated credits, VIX, etc.)
+            send_alert: Whether to send a Telegram alert (False when caller sends its own alert)
+        """
+        now = get_us_market_time()
+        skipped = HydraIronCondorEntry(entry_number=entry_num)
+        skipped.is_complete = True
+        skipped.call_side_skipped = True
+        skipped.put_side_skipped = True
+        skipped.skip_reason = skip_reason
+        skipped.entry_time = now.isoformat()
+        self.daily_state.entries.append(skipped)
+
+        if not send_alert:
+            return
+
+        # Telegram alert
+        time_str = now.strftime('%H:%M ET')
+        alert_msg = f"Entry #{entry_num} skipped at {time_str}\nReason: {skip_reason}"
+        if alert_details:
+            alert_msg += f"\n{alert_details}"
+
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.ENTRY_SKIPPED,
+                title=f"Entry #{entry_num} Skipped",
+                message=alert_msg,
+                details={"entry_number": entry_num, "reason": skip_reason}
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send skip alert for Entry #{entry_num}: {e}")
+
     # OVERRIDE: Entry initiation with trend detection
     # =========================================================================
 
@@ -2391,6 +2441,7 @@ class HydraStrategy(MEICStrategy):
         1. Check trend signal before entry
         2. Place one-sided spread if trending
         3. Place full IC if neutral
+        4. Record skipped entries with reason + send Telegram alert (v1.16.0)
 
         Returns:
             str: Description of action taken
@@ -2421,6 +2472,8 @@ class HydraStrategy(MEICStrategy):
             logger.warning(f"ORDER-004: {bp_message}")
             self.daily_state.entries_skipped += 1
             self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, f"Insufficient margin: {bp_message}", send_alert=False)
+            # Keep existing HIGH alert for margin (more urgent than generic skip)
             self.alert_service.send_alert(
                 alert_type=AlertType.MAX_LOSS,
                 title=f"Entry #{entry_num} Skipped - Insufficient Margin",
@@ -2465,6 +2518,9 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
+                        self._record_skipped_entry(
+                            entry_num, "MKT-035: SPX not down enough for conditional entry"
+                        )
                         return f"Entry #{entry_num} skipped - conditional (MKT-035 not triggered)"
 
                 # Create extended entry object
@@ -2519,6 +2575,11 @@ class HydraStrategy(MEICStrategy):
                             self._current_entry = None
                             self.state = MEICState.MONITORING
                             self._next_entry_index += 1
+                            self._record_skipped_entry(
+                                entry_num,
+                                f"MKT-035: call credit non-viable (${est_call / 100:.2f} < ${self.min_viable_credit_per_side / 100:.2f})",
+                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})"
+                            )
                             return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
 
                     else:
@@ -2555,6 +2616,11 @@ class HydraStrategy(MEICStrategy):
                             self._current_entry = None
                             self.state = MEICState.MONITORING
                             self._next_entry_index += 1
+                            self._record_skipped_entry(
+                                entry_num,
+                                f"MKT-038: call credit non-viable on FOMC T+1 (${est_call / 100:.2f} < ${self.min_viable_credit_per_side / 100:.2f})",
+                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})"
+                            )
                             return f"Entry #{entry_num} skipped - call credit non-viable (MKT-038)"
 
                 # MKT-011: Check minimum credit gate (only if MKT-035 didn't already handle)
@@ -2570,6 +2636,23 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
+                        # Determine specific skip reason for dashboard/alert
+                        if estimation_worked and est_call < self.min_viable_credit_per_side and est_put < self.min_viable_credit_put_side:
+                            skip_reason = f"MKT-011: both sides below minimum credit (call ${est_call / 100:.2f}, put ${est_put / 100:.2f})"
+                            skip_details = (
+                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
+                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})"
+                            )
+                        elif self.current_vix and self.current_vix >= self.put_only_max_vix:
+                            skip_reason = f"MKT-032: VIX {self.current_vix:.1f} too high for put-only (max {self.put_only_max_vix:.1f})"
+                            skip_details = f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for put-only)"
+                        else:
+                            skip_reason = f"MKT-011: credit gate skip (call ${est_call / 100:.2f}, put ${est_put / 100:.2f})"
+                            skip_details = (
+                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
+                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})"
+                            )
+                        self._record_skipped_entry(entry_num, skip_reason, skip_details)
                         return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
                     elif gate_result == "call_only":
                         # MKT-040: Put credit non-viable → convert to call-only entry
@@ -2624,6 +2707,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
+                        self._record_skipped_entry(entry_num, "MKT-010: call wings illiquid")
                         return f"Entry #{entry_num} skipped - call illiquid, no one-sided entries"
                     elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
                         # Put wing illiquid — no one-sided entries, skip
@@ -2642,6 +2726,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
+                        self._record_skipped_entry(entry_num, "MKT-010: put wings illiquid")
                         return f"Entry #{entry_num} skipped - put illiquid, no one-sided entries"
                     elif entry.call_wing_illiquid and entry.put_wing_illiquid:
                         # Both wings illiquid — skip entry
@@ -2659,6 +2744,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
+                        self._record_skipped_entry(entry_num, "MKT-010: both wings illiquid")
                         return f"Entry #{entry_num} skipped - both wings illiquid"
 
                 # Determine entry type and execute
@@ -5763,6 +5849,11 @@ class HydraStrategy(MEICStrategy):
                 # MKT-034: VIX gate state
                 "vix_gate_resolved": self._vix_gate_resolved,
                 "vix_gate_start_slot": self._vix_gate_start_slot,
+                # Dashboard: entry schedule for pending slot display
+                "entry_schedule": {
+                    "base": [t.strftime('%H:%M') for t in self.entry_times[:self._base_entry_count]],
+                    "conditional": [t.strftime('%H:%M') for t in self._conditional_entry_times],
+                },
                 "entries": []
             }
 
@@ -5819,6 +5910,8 @@ class HydraStrategy(MEICStrategy):
                     "trend_signal": getattr(entry, 'trend_signal', None).value if getattr(entry, 'trend_signal', None) else None,
                     # Fix #49: Track override reason for correct logging after recovery
                     "override_reason": getattr(entry, 'override_reason', None),
+                    # Skip tracking: reason when entry is fully skipped
+                    "skip_reason": getattr(entry, 'skip_reason', ""),
                     # Fill prices (for /entry display after restart)
                     "short_call_fill_price": entry.short_call_fill_price,
                     "long_call_fill_price": entry.long_call_fill_price,
@@ -6993,6 +7086,8 @@ class HydraStrategy(MEICStrategy):
                 # Actual stop debit (for dashboard per-entry P&L accuracy)
                 restored_entry.actual_call_stop_debit = entry_data.get("actual_call_stop_debit", 0.0)
                 restored_entry.actual_put_stop_debit = entry_data.get("actual_put_stop_debit", 0.0)
+                # v1.16.0: Restore skip reason for dashboard display
+                restored_entry.skip_reason = entry_data.get("skip_reason", "")
 
                 if is_fully_done:
                     restored_entry.is_complete = True

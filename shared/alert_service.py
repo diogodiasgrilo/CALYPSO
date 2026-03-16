@@ -137,6 +137,9 @@ class AlertType(Enum):
     # Position Snapshot (periodic Telegram dashboard)
     POSITION_SNAPSHOT = "position_snapshot"
 
+    # Entry Events
+    ENTRY_SKIPPED = "entry_skipped"  # Entry skipped (credit gate, VIX gate, illiquidity, etc.)
+
 
 # Default priority mapping for alert types
 DEFAULT_PRIORITIES = {
@@ -183,6 +186,7 @@ DEFAULT_PRIORITIES = {
     AlertType.MARKET_CLOSED: AlertPriority.LOW,
     AlertType.MARKET_HOLIDAY: AlertPriority.LOW,
     AlertType.MARKET_EARLY_CLOSE: AlertPriority.LOW,
+    AlertType.ENTRY_SKIPPED: AlertPriority.LOW,  # Informational — entry skipped
 }
 
 
@@ -384,6 +388,7 @@ class AlertService:
         AlertType.MARKET_HOLIDAY,      # Informational
         AlertType.MARKET_EARLY_CLOSE,  # Informational
         AlertType.POSITION_SNAPSHOT,   # 30-min dashboard — Telegram glance
+        AlertType.ENTRY_SKIPPED,       # Entry skipped — informational
     }
 
     def _should_send_email(self, alert_type: AlertType, priority: AlertPriority) -> bool:

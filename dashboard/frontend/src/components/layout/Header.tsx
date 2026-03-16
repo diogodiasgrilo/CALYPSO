@@ -32,33 +32,33 @@ export function Header() {
   };
 
   return (
-    <header className="flex items-center justify-between px-4 py-2 bg-bg border-b border-border-dim">
+    <header className="flex items-center justify-between px-4 max-sm:px-2 py-2 bg-bg border-b border-border-dim">
       {/* Left: Logo + title + connection */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 max-sm:gap-2">
         <img
           src="/hydra-logo.png"
           alt="HYDRA"
-          className="h-8 w-8 rounded"
+          className="h-8 w-8 max-sm:h-6 max-sm:w-6 rounded"
           onError={(e) => {
             (e.target as HTMLImageElement).style.display = "none";
           }}
         />
-        <span className="text-text-primary font-bold text-base tracking-wide">
+        <span className="text-text-primary font-bold text-base max-sm:text-sm tracking-wide">
           HYDRA
         </span>
-        <div className="flex items-center gap-1.5 ml-2">
+        <div className="flex items-center gap-1.5 ml-2 max-sm:ml-1">
           <div className={`w-2 h-2 rounded-full ${connDot}`} />
-          <span className="text-text-secondary text-xs capitalize">
+          <span className="text-text-secondary text-xs capitalize hidden sm:inline">
             {connectionStatus}
           </span>
         </div>
       </div>
 
       {/* Center: SPX + VIX */}
-      <div className="flex items-center gap-6">
+      <div className="flex items-center gap-6 max-sm:gap-3">
         {spx > 0 && (
           <div
-            className={`text-sm ${
+            className={`text-sm max-sm:text-xs ${
               spxFlash === "up"
                 ? "flash-up"
                 : spxFlash === "down"
@@ -74,7 +74,7 @@ export function Header() {
         )}
         {vix > 0 && (
           <div
-            className={`text-sm ${
+            className={`text-sm max-sm:text-xs ${
               vixFlash === "up"
                 ? "flash-up"
                 : vixFlash === "down"
@@ -90,20 +90,20 @@ export function Header() {
         )}
       </div>
 
-      {/* Right: Market status + mute + clock */}
-      <div className="flex items-center gap-4">
+      {/* Right: Market status + mute */}
+      <div className="flex items-center gap-4 max-sm:gap-2">
         {market && (
           <div className="flex items-center gap-1.5">
             {market.is_fomc_day && (
               <span
-                className="text-xs px-2 py-0.5 rounded font-semibold"
+                className="text-xs px-2 py-0.5 rounded font-semibold max-sm:hidden"
                 style={{ backgroundColor: "rgba(210, 153, 34, 0.2)", color: colors.warning }}
               >
                 FOMC
               </span>
             )}
             <span
-              className="text-xs px-2 py-0.5 rounded"
+              className="text-xs px-2 max-sm:px-1 py-0.5 rounded"
               style={
                 market.is_open
                   ? { backgroundColor: "rgba(126, 232, 199, 0.2)", color: colors.profit }
@@ -117,15 +117,15 @@ export function Header() {
               }
             >
               {market.is_open
-                ? "MARKET OPEN"
+                ? "OPEN"
                 : !market.is_trading_day && market.holiday_name
                   ? "HOLIDAY"
                   : !market.is_trading_day
                     ? "WEEKEND"
                     : market.session === "pre_market"
-                      ? "PRE-MARKET"
+                      ? "PRE-MKT"
                       : market.session === "after_hours"
-                        ? "AFTER HOURS"
+                        ? "AH"
                         : "CLOSED"}
             </span>
           </div>

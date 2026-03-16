@@ -1,9 +1,11 @@
 import { useHydraStore } from "../../store/hydraStore";
 import { EntryCard } from "./EntryCard";
+import { colors } from "../../lib/tradingColors";
 
 export function EntryGrid() {
   const { hydraState } = useHydraStore();
   const entries = hydraState?.entries ?? [];
+  const schedule = hydraState?.entry_schedule;
 
   // 5 base entry slots (E1-E5)
   const baseSlots = Array.from({ length: 5 }, (_, i) =>
@@ -26,12 +28,11 @@ export function EntryGrid() {
           entry ? (
             <EntryCard key={i} entry={entry} />
           ) : (
-            <div
+            <PendingSlot
               key={i}
-              className="bg-card rounded-lg border border-border-dim p-3 flex items-center justify-center min-h-[120px]"
-            >
-              <span className="text-text-dim text-xs">E{i + 1}</span>
-            </div>
+              entryNum={i + 1}
+              scheduledTime={schedule?.base?.[i]}
+            />
           )
         )}
       </div>
@@ -46,19 +47,48 @@ export function EntryGrid() {
             entry ? (
               <EntryCard key={`cond-${i}`} entry={entry} isConditional />
             ) : (
-              <div
+              <PendingSlot
                 key={`cond-${i}`}
-                className="bg-card rounded-lg border border-dashed border-border-dim p-3 flex items-center justify-center min-h-[120px]"
-              >
-                <div className="text-center">
-                  <span className="text-text-dim text-xs block">E{6 + i}</span>
-                  <span className="text-[9px] text-text-dim">call only</span>
-                </div>
-              </div>
+                entryNum={6 + i}
+                scheduledTime={schedule?.conditional?.[i]}
+                isConditional
+              />
             )
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Empty placeholder card for entries not yet placed. */
+function PendingSlot({
+  entryNum,
+  scheduledTime,
+  isConditional,
+}: {
+  entryNum: number;
+  scheduledTime?: string;
+  isConditional?: boolean;
+}) {
+  return (
+    <div
+      className={`bg-card rounded-lg p-3 flex flex-col items-center justify-center min-h-[120px] ${
+        isConditional
+          ? "border border-dashed border-border-dim"
+          : "border border-border-dim"
+      }`}
+    >
+      <span className="text-text-dim text-xs font-semibold">E{entryNum}</span>
+      {scheduledTime && (
+        <span className="text-text-dim text-[10px] mt-1">{scheduledTime} ET</span>
+      )}
+      <span
+        className="text-[9px] mt-1 px-1.5 py-0.5 rounded"
+        style={{ backgroundColor: `${colors.textDim}15`, color: colors.textDim }}
+      >
+        {isConditional ? "call only · scheduled" : "scheduled"}
+      </span>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
 **Last Updated:** 2026-03-16
-**Version:** 1.15.1
+**Version:** 1.16.0
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -675,7 +675,7 @@ Entry #1 → #2 → #3 placed normally
 
 ## MKT Rules Reference
 
-### Active Rules (as of v1.15.1)
+### Active Rules (as of v1.16.0)
 
 | Rule | Name | Added | What It Does |
 |------|------|-------|-------------|
@@ -952,9 +952,9 @@ Saxo merges positions at the same strike and direction into a single position, d
 
 0DTE options settle between 4:00 PM and 2:00 AM ET. The bot checks for settlement after market close. Fix #82 prevents the midnight reset from locking the settlement gate. Fix #77 ensures expired credits are processed even when the position registry is empty.
 
-### One-Sided Entry Risk (Historical — removed in v1.4.0)
+### One-Sided Entry Risk
 
-One-sided entries were removed in v1.4.0. All entries are now full iron condors or skipped entirely. Historical context: one-sided entries (v1.0.0-v1.3.x) that got stopped lost the full credit plus commission, which was worse than a full IC stop (breakeven by design). This was a key motivation for switching to full-IC-only in v1.4.0.
+One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/MKT-038/MKT-040) that get stopped lose the full credit plus commission. MKT-039 (v1.15.0) tightened put-only stop from 2×credit to credit+buffer (max loss $750→$500) since $5.00 put buffer prevents false stops. Call-only keeps 2× stop ($0.10 buffer too small without it). Historical context: trend-driven one-sided entries were removed in v1.4.0, then credit-driven put-only was re-enabled in v1.7.1 and call-only added in v1.15.1.
 
 ---
 
@@ -979,3 +979,37 @@ One-sided entries were removed in v1.4.0. All entries are now full iron condors 
 | `bots/hydra/config/config.json.template` | Config template |
 | `data/hydra_state.json` | Daily state persistence (on VM) |
 | `data/hydra_metrics.json` | Cumulative metrics (on VM) |
+
+### State File Fields (v1.16.0)
+
+**Top-level fields added:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `entry_schedule.base` | `string[]` | Scheduled base entry times (e.g., `["10:15","10:45","11:15","11:45","12:15"]`) |
+| `entry_schedule.conditional` | `string[]` | Scheduled conditional entry times (e.g., `["12:45","13:15"]`) |
+
+**Per-entry fields added:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `skip_reason` | `string` | Human-readable skip reason (empty if not skipped). Set when both sides are skipped. |
+
+### Skip Alert Behavior (v1.16.0)
+
+When an entry is skipped, the bot: (1) records a minimal `HydraIronCondorEntry` with `is_complete=True`, both sides flagged as skipped, and `skip_reason` set, (2) sends a Telegram `ENTRY_SKIPPED` alert (LOW priority, Telegram-only) with the reason and context.
+
+**Skip reasons by path:**
+
+| Path | Reason | Alert |
+|------|--------|-------|
+| Margin insufficient | `"Insufficient margin"` | No (existing HIGH alert) |
+| MKT-035 not triggered | `"MKT-035: SPX not down enough for conditional entry"` | Yes |
+| MKT-035 call non-viable | `"MKT-035: call credit non-viable ($X.XX < $0.60)"` | Yes |
+| MKT-038 call non-viable | `"MKT-038: call credit non-viable on FOMC T+1 ($X.XX < $0.60)"` | Yes |
+| MKT-011 both non-viable | `"MKT-011: both sides below minimum credit (call $X.XX, put $X.XX)"` | Yes |
+| MKT-032 VIX gate | `"MKT-032: VIX X.X too high for put-only (max 25.0)"` | Yes |
+| MKT-010 one wing illiquid | `"MKT-010: [call/put] wings illiquid"` | Yes |
+| MKT-010 both illiquid | `"MKT-010: both wings illiquid"` | Yes |
+
+Skipped entries are inert — zero credits/strikes, `is_complete=True`, no P&L impact, no stop monitoring, no settlement processing.
