@@ -34,7 +34,23 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 - **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
 - **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below open, as call-only.
 - **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
+- **FOMC blackout (MKT-008):** ALL entries skipped on FOMC meeting days (Day 1 + Day 2).
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
+
+## 2026 FOMC Calendar (GROUND TRUTH — use these dates, do NOT guess)
+
+| Meeting | Day 1 (skip) | Day 2 / Announcement (skip) | T+1 (call-only MKT-038) |
+|---------|-------------|----------------------------|--------------------------|
+| Jan     | Jan 27 Tue  | Jan 28 Wed                 | Jan 29 Thu               |
+| Mar     | Mar 17 Tue  | Mar 18 Wed                 | Mar 19 Thu               |
+| Apr     | Apr 28 Tue  | Apr 29 Wed                 | Apr 30 Thu               |
+| Jun     | Jun 16 Tue  | Jun 17 Wed                 | Jun 18 Thu               |
+| Jul     | Jul 28 Tue  | Jul 29 Wed                 | Jul 30 Thu               |
+| Sep     | Sep 15 Tue  | Sep 16 Wed                 | Sep 17 Thu               |
+| Oct     | Oct 27 Tue  | Oct 28 Wed                 | Oct 29 Thu               |
+| Dec     | Dec 8 Tue   | Dec 9 Wed                  | Dec 10 Thu               |
+
+CRITICAL: Cross-reference the trading date against this table to correctly identify FOMC days.
 
 ## Entry Skip Pattern
 
