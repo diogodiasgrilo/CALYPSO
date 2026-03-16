@@ -76,7 +76,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.14.0"
+HYDRA_VERSION = "1.15.0"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -346,10 +346,11 @@ class HydraStrategy(MEICStrategy):
         # When false: call non-viable → skip entry entirely (pre-v1.7.1 behavior)
         self.one_sided_entries_enabled = strategy_config.get("one_sided_entries_enabled", True)
 
-        # MKT-032: VIX cutoff for put-only entries — at VIX >= threshold, put-only entries
-        # are too risky (2× stop with no hedge in volatile conditions, 50% WR at VIX 18-21).
-        # Below threshold (calm markets), put-only has 80% WR and 2× stop is rarely hit.
-        self.put_only_max_vix = float(strategy_config.get("put_only_max_vix", 18.0))
+        # MKT-032/MKT-039: VIX cutoff for put-only entries — at VIX >= threshold, put-only
+        # entries skipped (no call hedge in high volatility). MKT-039 (v1.15.0) raised
+        # from 18→25 and changed put-only stop from 2×credit to credit+buffer. The $5.00
+        # put buffer prevents false stops; 2× multiplier was redundant.
+        self.put_only_max_vix = float(strategy_config.get("put_only_max_vix", 25.0))
         if self.one_sided_entries_enabled:
             logger.info(f"  One-sided entries: ENABLED (put-only allowed when VIX < {self.put_only_max_vix})")
         else:
@@ -1825,12 +1826,12 @@ class HydraStrategy(MEICStrategy):
 
     def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool, float, float]:
         """
-        MKT-011 + MKT-032: Check if estimated credit is above minimum viable threshold.
+        MKT-011 + MKT-032/MKT-039: Check if estimated credit is above minimum viable threshold.
 
         Returns viability assessment with estimated credits. When call side
         is non-viable but put side meets threshold, returns "put_only" only
         if VIX < put_only_max_vix (MKT-032). At elevated VIX, returns "skip"
-        instead (2× stop too risky without call hedge).
+        instead (no call hedge in volatile conditions).
 
         Args:
             entry: HydraIronCondorEntry with strikes calculated
@@ -1903,9 +1904,9 @@ class HydraStrategy(MEICStrategy):
 
         # One side viable, other not
         if not call_viable:
-            # MKT-032: VIX gate for put-only entries
-            # At VIX >= threshold, put-only is too risky (2× stop, no hedge, 50% WR).
-            # At VIX < threshold (calm markets), put-only has 80% WR.
+            # MKT-032/MKT-039: VIX gate for put-only entries
+            # At VIX >= threshold, put-only skipped (no call hedge in volatile conditions).
+            # At VIX < threshold, put-only viable (credit + $5.00 buffer prevents false stops).
             vix_allows_put_only = self.current_vix < self.put_only_max_vix
             if self.one_sided_entries_enabled and vix_allows_put_only:
                 # Call non-viable, put viable, VIX calm → put-only entry (v1.7.1)
@@ -2736,7 +2737,7 @@ class HydraStrategy(MEICStrategy):
                             f"*Put: ${entry.put_spread_credit:.0f}*",
                             "",
                             f"Comm: ${entry.open_commission:.0f} | Width: {width}pt",
-                            f"Stop: ${entry.put_side_stop:.0f} (2× credit)",
+                            f"Stop: ${entry.put_side_stop:.0f} (credit + buffer)",
                         ]
                     else:
                         # Full IC alert
@@ -3685,14 +3686,16 @@ class HydraStrategy(MEICStrategy):
                 logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
                 credit = MIN_STOP_LEVEL
 
-            # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
-            # This prevents immediate false stop triggers from bid-ask spread
-            base_stop = credit * 2
+            # MKT-039: Put-only stop = credit + $5.00 buffer (same pattern as full IC puts).
+            # The $5.00 put buffer prevents 91% of false stops (21-day backtest); the old
+            # 2× multiplier was redundant and inflated max loss ($750→$500 with MKT-039).
+            # Note: Call-only legacy keeps 2× because call buffer is only $0.10.
+            base_stop = credit
             stop_level = base_stop + self.put_stop_buffer
 
             entry.put_side_stop = stop_level
             entry.call_side_stop = 0  # No call side
-            logger.info(f"Stop level for put spread: ${stop_level:.2f} (2× credit ${credit:.2f} + buffer ${self.put_stop_buffer:.2f})")
+            logger.info(f"Stop level for put spread: ${stop_level:.2f} (credit ${credit:.2f} + buffer ${self.put_stop_buffer:.2f})")
 
         else:
             # Full IC — original Tammy Chambless MEIC rule: stop = total_credit
@@ -6597,9 +6600,9 @@ class HydraStrategy(MEICStrategy):
         # CRITICAL SAFETY CHECK: Prevent zero stop levels
         MIN_STOP_LEVEL = 50.0
 
-        # FIX #40 (2026-02-06): For one-sided entries, use 2× credit for stop
-        # This matches _calculate_stop_levels_hydra behavior and prevents immediate false triggers
-        # due to bid-ask spread making spread_value slightly higher than credit at entry
+        # One-sided entry stop levels (must match _calculate_stop_levels_hydra behavior).
+        # Call-only: 2× credit + $0.10 buffer (FIX #40 — $0.10 too small without 2×).
+        # Put-only: credit + $5.00 buffer (MKT-039 — $5.00 buffer prevents false stops, 2× redundant).
         if entry.call_only:
             credit = entry.call_spread_credit
             if credit < MIN_STOP_LEVEL:
@@ -6638,13 +6641,13 @@ class HydraStrategy(MEICStrategy):
                 )
                 credit = MIN_STOP_LEVEL
 
-            # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
-            base_stop = credit * 2
+            # MKT-039: Put-only stop = credit + $5.00 buffer (matches _calculate_stop_levels_hydra)
+            base_stop = credit
             stop_level = base_stop + self.put_stop_buffer
 
             entry.put_side_stop = stop_level
             entry.call_side_stop = 0  # No call side to monitor
-            logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (2× credit ${credit:.2f} + buffer ${self.put_stop_buffer:.2f})")
+            logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (credit ${credit:.2f} + buffer ${self.put_stop_buffer:.2f})")
         else:
             # Full IC — stop = total_credit + buffer (asymmetric: call uses stop_buffer, put uses put_stop_buffer)
             total_credit = entry.total_credit
