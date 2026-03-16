@@ -1,4 +1,4 @@
-import { useHydraStore } from "../../store/hydraStore";
+import { useHydraStore, type HydraState } from "../../store/hydraStore";
 import { EntryCard } from "./EntryCard";
 import { colors } from "../../lib/tradingColors";
 
@@ -61,6 +61,25 @@ export function EntryGrid() {
   );
 }
 
+/** Check if a scheduled time (e.g. "11:45") has passed based on latest heartbeat ET time. */
+function isTimePast(scheduledTime: string, hydraState: HydraState | null): boolean {
+  if (!scheduledTime) return false;
+  // last_saved is ET ISO string, e.g. "2026-03-16T13:59:10.258047-04:00"
+  // Extract ET hours/minutes directly from the string to avoid timezone conversion
+  const lastSaved = hydraState?.last_saved;
+  if (!lastSaved) return false;
+  try {
+    const timeMatch = lastSaved.match(/T(\d{2}):(\d{2})/);
+    if (!timeMatch) return false;
+    const etHours = parseInt(timeMatch[1], 10);
+    const etMinutes = parseInt(timeMatch[2], 10);
+    const [schedH, schedM] = scheduledTime.split(":").map(Number);
+    return etHours > schedH || (etHours === schedH && etMinutes >= schedM);
+  } catch {
+    return false;
+  }
+}
+
 /** Empty placeholder card for entries not yet placed. */
 function PendingSlot({
   entryNum,
@@ -71,6 +90,13 @@ function PendingSlot({
   scheduledTime?: string;
   isConditional?: boolean;
 }) {
+  const { hydraState } = useHydraStore();
+  const past = scheduledTime ? isTimePast(scheduledTime, hydraState) : false;
+
+  const label = past
+    ? isConditional ? "not triggered" : "window passed"
+    : isConditional ? "call only · scheduled" : "scheduled";
+
   return (
     <div
       className={`bg-card rounded-lg p-3 flex flex-col items-center justify-center min-h-[120px] ${
@@ -78,6 +104,7 @@ function PendingSlot({
           ? "border border-dashed border-border-dim"
           : "border border-border-dim"
       }`}
+      style={past ? { opacity: 0.5 } : undefined}
     >
       <span className="text-text-dim text-xs font-semibold">E{entryNum}</span>
       {scheduledTime && (
@@ -87,7 +114,7 @@ function PendingSlot({
         className="text-[9px] mt-1 px-1.5 py-0.5 rounded"
         style={{ backgroundColor: `${colors.textDim}15`, color: colors.textDim }}
       >
-        {isConditional ? "call only · scheduled" : "scheduled"}
+        {label}
       </span>
     </div>
   );
