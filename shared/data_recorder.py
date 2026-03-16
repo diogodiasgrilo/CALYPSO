@@ -445,13 +445,13 @@ class DataRecorder:
         """
         def _compute():
             with self._connect() as conn:
-                # Get all entries for the date
+                # Get all entries with their stop levels for cushion calculation
                 entries = conn.execute(
-                    "SELECT entry_number FROM trade_entries WHERE date = ?",
+                    "SELECT entry_number, total_credit FROM trade_entries WHERE date = ?",
                     (date_str,)
                 ).fetchall()
 
-                for (entry_num,) in entries:
+                for entry_num, total_credit in entries:
                     for side, col in [("call", "call_spread_value"), ("put", "put_spread_value")]:
                         rows = conn.execute(
                             f"""SELECT timestamp, {col}
@@ -470,14 +470,23 @@ class DataRecorder:
                         # MFE = min value (lowest cost-to-close = best moment)
                         mfe_row = min(rows, key=lambda r: r[1])
 
+                        # Cushion min % = (1 - mae_value / stop_level) * 100
+                        # Use total_credit as approximate stop level (actual stop = credit + buffer)
+                        cushion_min_pct = None
+                        cushion_min_time = None
+                        if total_credit and total_credit > 0:
+                            cushion_min_pct = round((1.0 - mae_row[1] / total_credit) * 100, 1)
+                            cushion_min_time = mae_row[0]  # Same time as MAE
+
                         conn.execute(
                             """INSERT OR REPLACE INTO entry_mae_mfe
                             (date, entry_number, side, mae_value, mae_time,
-                             mfe_value, mfe_time)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                             mfe_value, mfe_time, cushion_min_pct, cushion_min_time)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (date_str, entry_num, side,
                              mae_row[1], mae_row[0],
-                             mfe_row[1], mfe_row[0])
+                             mfe_row[1], mfe_row[0],
+                             cushion_min_pct, cushion_min_time)
                         )
 
                 conn.commit()

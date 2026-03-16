@@ -543,9 +543,10 @@ CPI_DATES_2026 = [
 ]
 
 # ============================================================================
-# Non-Farm Payrolls (NFP/Jobs Report) — first Friday of each month
+# Non-Farm Payrolls (NFP/Jobs Report) — typically first Friday of each month
 # Source: https://www.bls.gov/schedule/news_release/empsit.htm
 # Released at 8:30 AM ET (before market open)
+# Note: BLS adjusts for holidays (Jan/May delayed to 2nd Friday, Jul on Thursday)
 # ============================================================================
 
 NFP_DATES_2026 = [

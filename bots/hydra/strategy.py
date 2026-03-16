@@ -2523,10 +2523,30 @@ class HydraStrategy(MEICStrategy):
             now = get_us_market_time()
             date_str = now.strftime('%Y-%m-%d')
 
-            # Compute bid-ask width from current quotes (already fetched in memory)
-            # These are the current mid prices — slippage = difference vs fill
+            # Fetch current quotes for bid-ask width (single batch API call, fast)
+            call_ba_width = None
+            put_ba_width = None
             call_slippage = None
             put_slippage = None
+            try:
+                quote_uics = [u for u in [entry.short_call_uic, entry.short_put_uic] if u]
+                if quote_uics:
+                    quotes = self.client.get_quotes_batch(quote_uics, asset_type="StockIndexOption")
+                    for side_uic, side_name in [(entry.short_call_uic, "call"), (entry.short_put_uic, "put")]:
+                        if side_uic and side_uic in quotes:
+                            q = quotes[side_uic].get("Quote", {})
+                            bid = q.get("Bid", 0) or 0
+                            ask = q.get("Ask", 0) or 0
+                            if bid > 0 and ask > 0:
+                                width = round(ask - bid, 4)
+                                if side_name == "call":
+                                    call_ba_width = width
+                                else:
+                                    put_ba_width = width
+            except Exception:
+                pass
+
+            # Slippage: fill price vs current mid (approximate)
             if entry.short_call_fill_price and entry.short_call_price:
                 call_slippage = round(entry.short_call_fill_price - entry.short_call_price, 4)
             if entry.short_put_fill_price and entry.short_put_price:
@@ -2554,8 +2574,12 @@ class HydraStrategy(MEICStrategy):
                 "otm_distance_call": entry.short_call_strike - self.current_price if entry.short_call_strike else None,
                 "otm_distance_put": self.current_price - entry.short_put_strike if entry.short_put_strike else None,
                 # Execution quality
+                "bid_ask_width_call": call_ba_width,
+                "bid_ask_width_put": put_ba_width,
+                "time_to_fill_ms": getattr(entry, '_fill_time_ms', None),
                 "slippage_call": call_slippage,
                 "slippage_put": put_slippage,
+                "attempts": getattr(entry, '_fill_attempts', 1),
                 # Margin snapshot
                 "margin_available": self._last_margin_snapshot.get("available"),
                 "margin_utilization_pct": self._last_margin_snapshot.get("utilization_pct"),
@@ -3041,6 +3065,9 @@ class HydraStrategy(MEICStrategy):
                     else:
                         logger.info(f"NEUTRAL → placing full iron condor")
 
+                import time as _time
+                _fill_start = _time.monotonic()
+
                 if place_call_only:
                     if self.dry_run:
                         success = self._simulate_call_spread_only(entry)
@@ -3056,6 +3083,9 @@ class HydraStrategy(MEICStrategy):
                         success = self._simulate_entry(entry)
                     else:
                         success = self._execute_entry(entry)
+
+                entry._fill_time_ms = int((_time.monotonic() - _fill_start) * 1000)
+                entry._fill_attempts = attempt + 1
 
                 if success:
                     entry.entry_time = get_us_market_time()
