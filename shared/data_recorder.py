@@ -153,9 +153,47 @@ class DataRecorder:
         """Run schema migration v4 → v5 (additive ALTER TABLE only).
 
         Safe to call multiple times — duplicate column errors are silently ignored.
+        Also creates base tables if they don't exist (fresh database scenario).
         """
         def _migrate():
             with self._connect() as conn:
+                # Create base tables if they don't exist (fresh DB or HOMER never ran)
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT);
+                    CREATE TABLE IF NOT EXISTS market_ticks (
+                        timestamp TEXT PRIMARY KEY, spx_price REAL NOT NULL, vix_level REAL,
+                        trend_signal TEXT, bot_state TEXT, entry_count INTEGER, active_count INTEGER);
+                    CREATE TABLE IF NOT EXISTS trade_entries (
+                        date TEXT NOT NULL, entry_number INTEGER NOT NULL,
+                        entry_time TEXT, spx_at_entry REAL, vix_at_entry REAL,
+                        expected_move REAL, trend_signal TEXT, entry_type TEXT, override_reason TEXT,
+                        short_call_strike REAL, long_call_strike REAL,
+                        short_put_strike REAL, long_put_strike REAL,
+                        call_credit REAL, put_credit REAL, total_credit REAL,
+                        call_spread_width REAL, put_spread_width REAL,
+                        mkt031_score INTEGER, mkt031_early INTEGER,
+                        otm_distance_call REAL, otm_distance_put REAL,
+                        PRIMARY KEY (date, entry_number));
+                    CREATE TABLE IF NOT EXISTS trade_stops (
+                        date TEXT NOT NULL, entry_number INTEGER NOT NULL, side TEXT NOT NULL,
+                        stop_time TEXT, spx_at_stop REAL, trigger_level REAL,
+                        actual_debit REAL, net_pnl REAL,
+                        salvage_sold INTEGER DEFAULT 0, salvage_revenue REAL DEFAULT 0.0,
+                        confirmation_seconds INTEGER DEFAULT 0, breach_recoveries INTEGER DEFAULT 0,
+                        PRIMARY KEY (date, entry_number, side));
+                    CREATE TABLE IF NOT EXISTS daily_summaries (
+                        date TEXT PRIMARY KEY, spx_open REAL, spx_close REAL,
+                        spx_high REAL, spx_low REAL, day_range REAL,
+                        vix_open REAL, vix_close REAL,
+                        entries_placed INTEGER, entries_stopped INTEGER, entries_expired INTEGER,
+                        gross_pnl REAL, net_pnl REAL, commission REAL,
+                        long_salvage_revenue REAL DEFAULT 0.0, day_type TEXT, day_of_week TEXT);
+                    CREATE TABLE IF NOT EXISTS spread_snapshots (
+                        timestamp TEXT NOT NULL, entry_number INTEGER NOT NULL,
+                        call_spread_value REAL, put_spread_value REAL,
+                        PRIMARY KEY (timestamp, entry_number));
+                """)
+
                 # Check current version
                 try:
                     row = conn.execute(
@@ -370,8 +408,10 @@ class DataRecorder:
     def record_daily_summary(self, summary_data: Dict[str, Any]) -> bool:
         """Write daily_summaries row with enrichment fields.
 
-        Uses INSERT OR REPLACE so DataRecorder can overwrite HOMER's row
-        with richer data (economic events, overnight gap, etc.).
+        Uses INSERT OR IGNORE — DataRecorder writes first (settlement ~4PM),
+        HOMER writes second (5:30PM). First writer wins. HOMER can UPDATE
+        specific columns (day_type from Claude narrative) after its INSERT
+        is ignored.
         """
         def _write():
             cols = [
@@ -390,7 +430,7 @@ class DataRecorder:
 
             with self._connect() as conn:
                 conn.execute(
-                    f"INSERT OR REPLACE INTO daily_summaries ({col_names}) VALUES ({placeholders})",
+                    f"INSERT OR IGNORE INTO daily_summaries ({col_names}) VALUES ({placeholders})",
                     values,
                 )
                 conn.commit()

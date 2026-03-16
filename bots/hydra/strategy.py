@@ -2424,6 +2424,20 @@ class HydraStrategy(MEICStrategy):
         skipped.entry_time = now
         self.daily_state.entries.append(skipped)
 
+        # Record skip to SQLite (before alert guard — must run even when send_alert=False)
+        if self._data_recorder:
+            try:
+                self._data_recorder.record_skipped_entry({
+                    "date": now.strftime('%Y-%m-%d'),
+                    "entry_number": entry_num,
+                    "skip_time": now.strftime('%Y-%m-%d %H:%M:%S'),
+                    "skip_reason": skip_reason,
+                    "spx_at_skip": self.current_price,
+                    "vix_at_skip": self.current_vix,
+                })
+            except Exception:
+                pass
+
         if not send_alert:
             return
 
@@ -2442,21 +2456,6 @@ class HydraStrategy(MEICStrategy):
             )
         except Exception as e:
             logger.warning(f"Failed to send skip alert for Entry #{entry_num}: {e}")
-
-        # Record skip to SQLite for counterfactual tracking
-        if self._data_recorder:
-            try:
-                now_ts = get_us_market_time()
-                self._data_recorder.record_skipped_entry({
-                    "date": now_ts.strftime('%Y-%m-%d'),
-                    "entry_number": entry_num,
-                    "skip_time": now_ts.strftime('%Y-%m-%d %H:%M:%S'),
-                    "skip_reason": skip_reason,
-                    "spx_at_skip": self.current_price,
-                    "vix_at_skip": self.current_vix,
-                })
-            except Exception:
-                pass
 
     # ========================================================================
     # DataRecorder: Real-time SQLite writes (non-critical, fire-and-forget)
@@ -2693,10 +2692,11 @@ class HydraStrategy(MEICStrategy):
                 "vix_close": self.current_vix,
                 "entries_placed": summary.get("entries_completed", 0),
                 "entries_stopped": summary.get("call_stops", 0) + summary.get("put_stops", 0),
-                "entries_expired": summary.get("entries_completed", 0) - (summary.get("call_stops", 0) + summary.get("put_stops", 0)),
+                "entries_expired": max(0, summary.get("entries_completed", 0) - (summary.get("call_stops", 0) + summary.get("put_stops", 0))),
                 "gross_pnl": summary.get("total_pnl", 0),
                 "net_pnl": summary.get("total_pnl", 0) - summary.get("total_commission", 0),
                 "commission": summary.get("total_commission", 0),
+                "long_salvage_revenue": summary.get("long_salvage_revenue", 0.0),
                 "day_of_week": now.strftime('%A'),
                 "overnight_gap": overnight_gap,
                 "economic_events": _json.dumps(events) if events else None,

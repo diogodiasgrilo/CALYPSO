@@ -275,7 +275,10 @@ from shared.event_calendar import (
     get_next_fomc_date,
     is_fomc_approaching,
     FOMC_DATES_2026,
+    is_opex_week,
+    get_economic_events_for_date,
 )
+from shared.data_recorder import DataRecorder
 from shared.position_registry import PositionRegistry
 from shared.token_coordinator import TokenCoordinator, get_token_coordinator
 from shared.sheets_reader import SheetsReader
@@ -309,6 +312,9 @@ __all__ = [
     # Event Calendar (FOMC dates - single source of truth)
     'get_fomc_dates', 'get_fomc_announcement_dates', 'is_fomc_meeting_day',
     'is_fomc_announcement_day', 'is_fomc_t_plus_one', 'get_next_fomc_date', 'is_fomc_approaching', 'FOMC_DATES_2026',
+    'is_opex_week', 'get_economic_events_for_date',
+    # Data Recorder (real-time SQLite writes from trading loop)
+    'DataRecorder',
     # Position Registry (for multi-bot same-underlying support)
     'PositionRegistry',
     # Token Coordinator (for multi-bot token sharing, used by Token Keeper service)
