@@ -156,17 +156,19 @@ At high VIX (>= 20), early entries (11:15-11:45) have 86-100% stop rates while l
 
 **Config:** `vix_time_shift.enabled`, `medium_vix_threshold` (20.0), `high_vix_threshold` (23.0).
 
-### Smart Entry Windows (MKT-031)
+### Smart Entry Windows (MKT-031) — DISABLED (v1.10.4)
+
+> **Status:** DISABLED via `smart_entry.enabled: false`. Early entries add complexity without proven edge — enter at scheduled times only. Code preserved and configurable — set `enabled: true` to re-enable.
 
 Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scouting window before each entry. Market conditions are scored every main-loop cycle (~2-5s). If the composite score >= 65, the bot enters early. Otherwise, it enters at the scheduled time (identical to previous behavior).
 
 ```
-11:04:30  Scouting opens — start scoring every 2-5s
-11:08     Score = 42 (momentum rough, ATR high)
-11:10     Score = 71 → check VIX gate (MKT-034) → VIX OK → EARLY ENTRY
+10:05     Scouting opens — start scoring every 2-5s
+10:08     Score = 42 (momentum rough, ATR high)
+10:10     Score = 71 → EARLY ENTRY
   -- OR --
-11:14:30  Window expires → check VIX gate → VIX OK → ENTER ANYWAY
-11:19:30  Original 5-min retry window still available if entry fails
+10:15     Window expires → ENTER ANYWAY (scheduled time)
+10:20     Original 5-min retry window still available if entry fails
 ```
 
 **Scoring (2 parameters, 100 max):**
@@ -453,8 +455,8 @@ MEIC's core insight: **set the stop loss per side equal to total credit collecte
 ```
 call_stop = entry.total_credit + stop_buffer         (full IC: call side — $0.10 default)
 put_stop  = entry.total_credit + put_stop_buffer     (full IC: put side — $5.00 default)
-stop_level = 2 × credit + put_stop_buffer            (put-only via MKT-011: Fix #40 pattern)
-stop_level = 2 × credit + stop_buffer                (call-only via MKT-040: Fix #40 pattern)
+stop_level = credit + put_stop_buffer                 (put-only via MKT-039: tighter stop, $5.00 buffer sufficient)
+stop_level = 2 × credit + stop_buffer                (call-only via MKT-040: Fix #40 pattern, $0.10 buffer too small without 2×)
 stop_level = call_credit + theoretical_put + stop_buffer (MKT-035 call-only: theoretical put = $250)
 ```
 
@@ -741,7 +743,7 @@ Entry #1 → #2 → #3 placed normally
 | State | Description |
 |-------|-------------|
 | IDLE | No position, waiting for market open |
-| WAITING_FIRST_ENTRY | Market open, waiting for first entry (VIX-scaled via MKT-034, default 11:14:30; scouting from 11:04:30 via MKT-031) |
+| WAITING_FIRST_ENTRY | Market open, waiting for first entry (10:15 AM default; MKT-034 DISABLED, MKT-031 DISABLED) |
 | ENTRY_IN_PROGRESS | Currently placing an entry |
 | MONITORING | Active entries, watching stops + ROC |
 | STOP_TRIGGERED | Processing a stop loss |
@@ -753,7 +755,7 @@ Entry #1 → #2 → #3 placed normally
 
 ```
 IDLE → WAITING_FIRST_ENTRY           (9:30 AM)
-WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (VIX-scaled via MKT-034, or earlier via MKT-031)
+WAITING_FIRST_ENTRY → ENTRY_IN_PROGRESS  (10:15 AM default; MKT-034/MKT-031 DISABLED)
 ENTRY_IN_PROGRESS → MONITORING       (entry placed)
 MONITORING → ENTRY_IN_PROGRESS       (next entry time)
 MONITORING → STOP_TRIGGERED          (spread_value >= stop_level)
@@ -769,10 +771,9 @@ Any → HALTED                         (critical: overnight positions, stale reg
 |-----------|-------|
 | Midnight | `_reset_for_new_day()`: clear daily state, verify stale registry (Fix #82) |
 | 9:30 AM | Market opens, transition to WAITING_FIRST_ENTRY |
-| 11:04:30 | MKT-031 scouting opens for Entry #1 (default schedule; VIX-scaled via MKT-034) |
-| 11:14:00 | MKT-034 VIX gate check for E#1 (VIX < 20 → allow, VIX >= 20 → shift to next slot) |
-| 11:14:30 | Entry #1 (default; VIX 20-23 → 11:44:30, VIX >= 23 → 12:14:30). Earlier if MKT-031 score >= 65. |
-| +30 min | Entry #2-#5 at successive :14:30/:44:30 slots (no further VIX gating) |
+| 10:15 | Entry #1 (MKT-034 VIX time shifting DISABLED, MKT-031 smart entry DISABLED since v1.10.3/v1.10.4) |
+| +30 min | Entry #2-#5 at :15/:45 slots (10:45, 11:15, 11:45, 12:15) |
+| 12:45, 13:15 | Conditional E6/E7 (MKT-035 only — fires as call-only when SPX < open -0.3%) |
 | Last entry + | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
 | 3:45 PM | Last 15 min, positions expire naturally at settlement |
 | 4:00 PM | Market close, 0DTE options expire/settle |

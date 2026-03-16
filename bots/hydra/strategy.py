@@ -1883,33 +1883,33 @@ class HydraStrategy(MEICStrategy):
                 if estimated_put >= fallback:
                     put_viable = True
                     logger.info(
-                        f"MKT-029: Put credit ${estimated_put:.2f} accepted at "
-                        f"fallback ${fallback:.2f} (primary: ${put_min:.2f})"
+                        f"MKT-029: Put credit ${estimated_put / 100:.2f} accepted at "
+                        f"fallback ${fallback / 100:.2f} (primary: ${put_min / 100:.2f})"
                     )
                     self._log_safety_event(
                         "MKT-029_PUT_FALLBACK",
-                        f"Entry #{entry.entry_number}: put ${estimated_put:.2f} "
-                        f"at fallback ${fallback:.2f}"
+                        f"Entry #{entry.entry_number}: put ${estimated_put / 100:.2f} "
+                        f"at fallback ${fallback / 100:.2f}"
                     )
                     break
 
         if call_viable and put_viable:
             logger.info(
                 f"MKT-011: Credit gate PASSED for Entry #{entry.entry_number}: "
-                f"Call ${estimated_call:.2f} (min: ${call_min:.2f}), "
-                f"Put ${estimated_put:.2f} (min: ${put_min:.2f})"
+                f"Call ${estimated_call / 100:.2f} (min: ${call_min / 100:.2f}), "
+                f"Put ${estimated_put / 100:.2f} (min: ${put_min / 100:.2f})"
             )
             return ("proceed", True, estimated_call, estimated_put)
 
         if not call_viable and not put_viable:
             logger.warning(
                 f"MKT-011: SKIPPING Entry #{entry.entry_number} - both sides non-viable. "
-                f"Call ${estimated_call:.2f} (min: ${call_min:.2f}), "
-                f"Put ${estimated_put:.2f} (min: ${put_min:.2f})"
+                f"Call ${estimated_call / 100:.2f} (min: ${call_min / 100:.2f}), "
+                f"Put ${estimated_put / 100:.2f} (min: ${put_min / 100:.2f})"
             )
             self._log_safety_event(
                 "MKT-011_ENTRY_SKIPPED",
-                f"Entry #{entry.entry_number} - call ${estimated_call:.2f}, put ${estimated_put:.2f}",
+                f"Entry #{entry.entry_number} - call ${estimated_call / 100:.2f}, put ${estimated_put / 100:.2f}",
                 "Skipped"
             )
             return ("skip", True, estimated_call, estimated_put)
@@ -1924,14 +1924,14 @@ class HydraStrategy(MEICStrategy):
                 # Call non-viable, put viable, VIX calm → put-only entry (v1.7.1)
                 logger.info(
                     f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
-                    f"(${estimated_call:.2f} < ${call_min:.2f}) - "
-                    f"put ${estimated_put:.2f} viable, VIX {self.current_vix:.1f} < "
+                    f"(${estimated_call / 100:.2f} < ${call_min / 100:.2f}) - "
+                    f"put ${estimated_put / 100:.2f} viable, VIX {self.current_vix:.1f} < "
                     f"{self.put_only_max_vix} → converting to put-only"
                 )
                 self._log_safety_event(
                     "MKT-011_PUT_ONLY",
-                    f"Entry #{entry.entry_number} - call ${estimated_call:.2f} non-viable, "
-                    f"put ${estimated_put:.2f} → put-only (VIX {self.current_vix:.1f})",
+                    f"Entry #{entry.entry_number} - call ${estimated_call / 100:.2f} non-viable, "
+                    f"put ${estimated_put / 100:.2f} → put-only (VIX {self.current_vix:.1f})",
                     "Put-Only"
                 )
                 return ("put_only", True, estimated_call, estimated_put)
@@ -1939,7 +1939,7 @@ class HydraStrategy(MEICStrategy):
                 # MKT-032: VIX too high for put-only → skip
                 logger.warning(
                     f"MKT-032: Entry #{entry.entry_number} call credit non-viable "
-                    f"(${estimated_call:.2f} < ${call_min:.2f}) - "
+                    f"(${estimated_call / 100:.2f} < ${call_min / 100:.2f}) - "
                     f"VIX {self.current_vix:.1f} >= {self.put_only_max_vix} → "
                     f"SKIPPING (put-only too risky at elevated VIX)"
                 )
@@ -1954,7 +1954,7 @@ class HydraStrategy(MEICStrategy):
                 # One-sided disabled → skip entirely
                 logger.warning(
                     f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
-                    f"(${estimated_call:.2f} < ${call_min:.2f}) - "
+                    f"(${estimated_call / 100:.2f} < ${call_min / 100:.2f}) - "
                     f"SKIPPING (one-sided entries disabled)"
                 )
                 self._log_safety_event(
@@ -1970,20 +1970,20 @@ class HydraStrategy(MEICStrategy):
             if self.one_sided_entries_enabled:
                 logger.info(
                     f"MKT-040: Entry #{entry.entry_number} put credit non-viable "
-                    f"(${estimated_put:.2f} < ${put_min:.2f}) - "
-                    f"call ${estimated_call:.2f} viable → converting to call-only"
+                    f"(${estimated_put / 100:.2f} < ${put_min / 100:.2f}) - "
+                    f"call ${estimated_call / 100:.2f} viable → converting to call-only"
                 )
                 self._log_safety_event(
                     "MKT-040_CALL_ONLY",
-                    f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable, "
-                    f"call ${estimated_call:.2f} → call-only",
+                    f"Entry #{entry.entry_number} - put ${estimated_put / 100:.2f} non-viable, "
+                    f"call ${estimated_call / 100:.2f} → call-only",
                     "Call-Only"
                 )
                 return ("call_only", True, estimated_call, estimated_put)
             else:
                 logger.warning(
                     f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
-                    f"(${estimated_put:.2f} < ${put_min:.2f}) - "
+                    f"(${estimated_put / 100:.2f} < ${put_min / 100:.2f}) - "
                     f"SKIPPING (one-sided entries disabled)"
                 )
                 self._log_safety_event(
@@ -2408,7 +2408,7 @@ class HydraStrategy(MEICStrategy):
         skipped.call_side_skipped = True
         skipped.put_side_skipped = True
         skipped.skip_reason = skip_reason
-        skipped.entry_time = now.isoformat()
+        skipped.entry_time = now
         self.daily_state.entries.append(skipped)
 
         if not send_alert:
@@ -2659,8 +2659,8 @@ class HydraStrategy(MEICStrategy):
                         # Data: 89% WR for low-credit call-only, +$46 EV per entry
                         logger.info(
                             f"MKT-040: Entry #{entry_num} put credit non-viable "
-                            f"(${est_put:.2f}) → converting to call-only "
-                            f"(call ${est_call:.2f})"
+                            f"(${est_put / 100:.2f}) → converting to call-only "
+                            f"(call ${est_call / 100:.2f})"
                         )
                         entry.call_only = True
                         entry.put_only = False
@@ -2673,8 +2673,8 @@ class HydraStrategy(MEICStrategy):
                         # Data: 87.5% win rate, +$870 net from 6 qualifying entries
                         logger.info(
                             f"MKT-011: Entry #{entry_num} call credit non-viable "
-                            f"(${est_call:.2f}) → converting to put-only "
-                            f"(put ${est_put:.2f})"
+                            f"(${est_call / 100:.2f}) → converting to put-only "
+                            f"(put ${est_put / 100:.2f})"
                         )
                         entry.put_only = True
                         entry.call_side_skipped = True
@@ -3750,8 +3750,8 @@ class HydraStrategy(MEICStrategy):
         - Full IC: stop = total_credit (original Tammy Chambless MEIC rule)
         - One-sided (legacy, kept for recovery): stop = 2 × single_side_credit
 
-        MKT-020/MKT-022 progressive tightening + credit minimums ($0.75 calls,
-        $1.75 puts) reduced skew from 3-7x to 1-3x. Lower call min (v1.7.2) preserves
+        MKT-020/MKT-022 progressive tightening + credit minimums ($0.60 calls,
+        $2.50 puts) reduced skew from 3-7x to 1-3x. Lower call min (v1.7.2) preserves
         natural put skew asymmetry for better call cushion (68% vs 61.5%).
 
         Args:
@@ -3809,7 +3809,7 @@ class HydraStrategy(MEICStrategy):
         else:
             # Full IC — original Tammy Chambless MEIC rule: stop = total_credit
             # MKT-019 (2× max credit) removed in v1.4.0: MKT-020/MKT-022 tightening
-            # + credit minimums ($0.75 calls, $1.75 puts) keep skew manageable.
+            # + credit minimums ($0.60 calls, $2.50 puts) keep skew manageable.
             total_credit = entry.total_credit
 
             if total_credit < MIN_STOP_LEVEL:
@@ -3959,11 +3959,7 @@ class HydraStrategy(MEICStrategy):
                 put_done = entry.put_side_stopped or getattr(entry, 'put_side_expired', False) or getattr(entry, 'put_side_skipped', False)
                 if call_done and put_done:
                     continue
-                is_hydra = isinstance(entry, HydraIronCondorEntry)
-                if is_hydra and (entry.call_only or entry.put_only):
-                    self._simulate_hydra_entry_prices(entry)
-                else:
-                    self._simulate_hydra_entry_prices(entry)
+                self._simulate_hydra_entry_prices(entry)
             return
         # Live mode: parent's batch handles one-sided entries naturally
         super()._batch_update_entry_prices()
