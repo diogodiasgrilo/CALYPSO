@@ -27,13 +27,13 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
 
-## HYDRA Domain Knowledge (v1.15.0 — use these exact parameters)
+## HYDRA Domain Knowledge (v1.15.1 — use these exact parameters)
 
 - Entry times: 10:15, 10:45, 11:15, 11:45, 12:15 ET (5 base + up to 2 conditional at 12:45/13:15 on down days, :15/:45 offset, v1.10.3)
 - Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
 - Spread widths: call floor 60pt, put floor 75pt, cap 75pt (VIX-scaled via MKT-027/028), NOT 5-point wings
-- Min credit thresholds: $0.60 calls, $2.50 puts (MKT-011). Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039).
-- Stop formula: Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. Call-only legacy: 2x credit + $0.10. Put-only (MKT-039): credit + $5.00. Put buffer wider to avoid false put stops.
+- Min credit thresholds: $0.60 calls, $2.50 puts (MKT-011). Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
+- Stop formula: Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): 2x credit + $0.10. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer.
 - Stop confirmation (MKT-036): DISABLED. $5.00 put buffer is the chosen solution instead. Code preserved but dormant.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
 - Down-day filter (MKT-035): Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) fire when SPX drops 0.3% below open, as call-only.

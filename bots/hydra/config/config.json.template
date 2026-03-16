@@ -33,7 +33,7 @@
         "max_credit_per_side": 1.75,
         "credit_balance_tolerance": 0.25,
 
-        "_comment_credit_gate": "MKT-011: Credit gate thresholds. Calls $0.60, puts $2.50 (v1.10.4: 20-day data — $2.50-$3.49 bucket = 66.7% surv, +$159 EV vs $1.50-$1.99 = 48.3% surv, +$23 EV. Higher min forces MKT-022 closer to ATM into Week 1 sweet spot 42-65pt OTM). MKT-029 fallback: -$0.05, -$0.10. MKT-032/MKT-039: put-only only when VIX < put_only_max_vix (raised 18→25 in v1.15.0)",
+        "_comment_credit_gate": "MKT-011: Credit gate thresholds. Calls $0.60, puts $2.50 (v1.10.4: 20-day data — $2.50-$3.49 bucket = 66.7% surv, +$159 EV vs $1.50-$1.99 = 48.3% surv, +$23 EV. Higher min forces MKT-022 closer to ATM into Week 1 sweet spot 42-65pt OTM). MKT-029 fallback: -$0.05, -$0.10. MKT-032/MKT-039: put-only only when VIX < put_only_max_vix (raised 18→25 in v1.15.0). MKT-040: call-only when put non-viable (89% WR, +$46 EV)",
         "one_sided_entries_enabled": true,
         "put_only_max_vix": 25.0,
         "min_viable_credit_per_side": 0.60,

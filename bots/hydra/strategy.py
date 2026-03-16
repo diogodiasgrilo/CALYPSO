@@ -76,7 +76,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.15.0"
+HYDRA_VERSION = "1.15.1"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -198,7 +198,7 @@ class HydraStrategy(MEICStrategy):
     Key Features (HYDRA specific, beyond base MEIC):
     - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
     - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $0.60, put min $2.50
-      Call non-viable → put-only entry (v1.7.1). Put non-viable → skip (call-only only via MKT-035).
+      Call non-viable → put-only entry (v1.7.1). Put non-viable → call-only entry (MKT-040).
     - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
     - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
     - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms. Code preserved but dormant.
@@ -1696,6 +1696,14 @@ class HydraStrategy(MEICStrategy):
     # MKT-035: DOWN DAY FILTER
     # =========================================================================
 
+    def _call_only_stop_label(self, override: str) -> str:
+        """Return human-readable stop formula label for call-only Telegram alerts."""
+        if override in ("mkt-035", "mkt-038"):
+            return f"call + ${self.downday_theoretical_put_credit / 100:.2f} theo put"
+        else:
+            # MKT-040 / legacy: 2× credit + buffer
+            return "2× credit"
+
     def _check_downday_filter(self) -> bool:
         """
         MKT-035: Check if SPX is down more than threshold from today's open.
@@ -1826,19 +1834,20 @@ class HydraStrategy(MEICStrategy):
 
     def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool, float, float]:
         """
-        MKT-011 + MKT-032/MKT-039: Check if estimated credit is above minimum viable threshold.
+        MKT-011 + MKT-032/MKT-039/MKT-040: Check if estimated credit is above minimum viable threshold.
 
         Returns viability assessment with estimated credits. When call side
         is non-viable but put side meets threshold, returns "put_only" only
-        if VIX < put_only_max_vix (MKT-032). At elevated VIX, returns "skip"
-        instead (no call hedge in volatile conditions).
+        if VIX < put_only_max_vix (MKT-032). When put side is non-viable
+        but call side meets threshold, returns "call_only" (MKT-040).
+        At elevated VIX with no viable put, returns "skip".
 
         Args:
             entry: HydraIronCondorEntry with strikes calculated
 
         Returns:
             Tuple of (result, estimation_worked, estimated_call, estimated_put):
-            - result: "proceed", "put_only", "skip", or "call_only" (signals skip — call-only only via MKT-035 conditional entries)
+            - result: "proceed", "put_only", "call_only", or "skip"
             - estimation_worked: True if we got valid quotes, False if estimation failed
             - estimated_call: estimated call credit in cents (0.0 if failed)
             - estimated_put: estimated put credit in cents (0.0 if failed)
@@ -1952,18 +1961,34 @@ class HydraStrategy(MEICStrategy):
                 )
                 return ("skip", True, estimated_call, estimated_put)
         else:
-            # Put non-viable, call viable → skip (call-only only via MKT-035 down-day filter)
-            logger.warning(
-                f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
-                f"(${estimated_put:.2f} < ${put_min:.2f}) - "
-                f"call ${estimated_call:.2f} viable but call-only only via MKT-035"
-            )
-            self._log_safety_event(
-                "MKT-011_SKIP",
-                f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable, call-only only via MKT-035",
-                "Skipped"
-            )
-            return ("call_only", True, estimated_call, estimated_put)
+            # MKT-040: Put non-viable, call viable → convert to call-only
+            # Data: low-credit call-only entries have 89% WR, +$46 EV per entry.
+            # Max loss ~$70 (2× credit + $0.10 buffer on ~$60 credit).
+            if self.one_sided_entries_enabled:
+                logger.info(
+                    f"MKT-040: Entry #{entry.entry_number} put credit non-viable "
+                    f"(${estimated_put:.2f} < ${put_min:.2f}) - "
+                    f"call ${estimated_call:.2f} viable → converting to call-only"
+                )
+                self._log_safety_event(
+                    "MKT-040_CALL_ONLY",
+                    f"Entry #{entry.entry_number} - put ${estimated_put:.2f} non-viable, "
+                    f"call ${estimated_call:.2f} → call-only",
+                    "Call-Only"
+                )
+                return ("call_only", True, estimated_call, estimated_put)
+            else:
+                logger.warning(
+                    f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
+                    f"(${estimated_put:.2f} < ${put_min:.2f}) - "
+                    f"SKIPPING (one-sided entries disabled)"
+                )
+                self._log_safety_event(
+                    "MKT-011_SKIP",
+                    f"Entry #{entry.entry_number} - put non-viable, one-sided disabled",
+                    "Skipped"
+                )
+                return ("skip", True, estimated_call, estimated_put)
 
     def _apply_progressive_call_tightening(self, entry: HydraIronCondorEntry) -> bool:
         """
@@ -2547,24 +2572,19 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
                     elif gate_result == "call_only":
-                        # Put credit too low — call-only entries disabled via MKT-011
-                        # (MKT-035 handles call-only differently, this path is for non-down days)
-                        logger.warning(
-                            f"MKT-011: Entry #{entry_num} put credit non-viable — "
-                            f"SKIPPING (call-only entries disabled without MKT-035)"
+                        # MKT-040: Put credit non-viable → convert to call-only entry
+                        # Data: 89% WR for low-credit call-only, +$46 EV per entry
+                        logger.info(
+                            f"MKT-040: Entry #{entry_num} put credit non-viable "
+                            f"(${est_put:.2f}) → converting to call-only "
+                            f"(call ${est_call:.2f})"
                         )
-                        self._log_safety_event(
-                            "MKT-011_SKIP",
-                            f"Entry #{entry_num} - put non-viable → skip (call-only only via MKT-035)",
-                            "Skipped"
-                        )
-                        self.daily_state.entries_skipped += 1
-                        self.daily_state.credit_gate_skips += 1
-                        self._entry_in_progress = False
-                        self._current_entry = None
-                        self.state = MEICState.MONITORING
-                        self._next_entry_index += 1
-                        return f"Entry #{entry_num} skipped - put non-viable (call-only only via MKT-035)"
+                        entry.call_only = True
+                        entry.put_only = False
+                        entry.put_side_skipped = True
+                        entry.override_reason = "mkt-040"
+                        place_call_only = True
+                        credit_gate_handled = True
                     elif gate_result == "put_only":
                         # v1.7.1: Call credit non-viable → place put-only entry
                         # Data: 87.5% win rate, +$870 net from 6 qualifying entries
@@ -2698,7 +2718,7 @@ class HydraStrategy(MEICStrategy):
                     trend_label = original_trend.value.upper()
 
                     if place_call_only:
-                        # MKT-035/MKT-038: Call-only alert
+                        # MKT-035/MKT-038/MKT-040: Call-only alert
                         sc_fill = entry.short_call_fill_price
                         lc_fill = entry.long_call_fill_price
                         width = int(entry.long_call_strike - entry.short_call_strike)
@@ -2708,6 +2728,8 @@ class HydraStrategy(MEICStrategy):
                         override_tag = override.upper()
                         if override == "mkt-038":
                             reason_text = "FOMC T+1 → puts skipped"
+                        elif override == "mkt-040":
+                            reason_text = "Put credit non-viable → call-only"
                         else:
                             reason_text = "Down day → puts skipped"
                         msg_lines = [
@@ -2720,7 +2742,7 @@ class HydraStrategy(MEICStrategy):
                             f"*Call: ${entry.call_spread_credit:.0f}*",
                             "",
                             f"Comm: ${entry.open_commission:.0f} | Width: {width}pt",
-                            f"Stop: ${entry.call_side_stop:.0f} (call + ${self.downday_theoretical_put_credit / 100:.2f} theo put)",
+                            f"Stop: ${entry.call_side_stop:.0f} ({self._call_only_stop_label(override)})",
                         ]
                     elif place_put_only:
                         # Put-only alert
@@ -2788,7 +2810,8 @@ class HydraStrategy(MEICStrategy):
                     self._save_state_to_disk()
 
                     if place_call_only:
-                        entry_type = "Call-Only (MKT-035)"
+                        override = getattr(entry, 'override_reason', None) or "mkt-035"
+                        entry_type = f"Call-Only ({override.upper()})"
                     elif place_put_only:
                         entry_type = "Put-Only (MKT-011)"
                     else:

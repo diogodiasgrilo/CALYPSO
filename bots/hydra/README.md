@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.15.0 | **Last Updated:** 2026-03-16
+**Version:** 1.15.1 | **Last Updated:** 2026-03-16
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -10,7 +10,7 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 - **Before each entry**, check 20 EMA vs 40 EMA on SPX 1-minute bars
 - **EMA signal is informational only** — logged and stored but does NOT drive entry type
-- **Base entries are full iron condors or put-only** — call credit non-viable → put-only if VIX < 25 (MKT-032/MKT-039), skip if VIX >= 25; put credit non-viable → skip. Conditional entries E6/E7 fire as call-only when SPX drops ≥ 0.3% from open (MKT-035)
+- **Base entries are full iron condors or one-sided** — call credit non-viable → put-only if VIX < 25 (MKT-032/MKT-039), skip if VIX >= 25; put credit non-viable → call-only (MKT-040, 89% WR). Conditional entries E6/E7 fire as call-only when SPX drops ≥ 0.3% from open (MKT-035)
 
 ### Why This Works
 
@@ -66,7 +66,7 @@ Before placing any orders, HYDRA estimates the expected credit by fetching optio
 | Base entry | >= $0.60 | >= $2.50 | Any | Proceed with full iron condor |
 | Normal | < $0.60 | >= $2.50 | < 25 | Place put-only entry (MKT-032/MKT-039 allows) |
 | Normal | < $0.60 | >= $2.50 | >= 25 | Skip entry (MKT-032: no call hedge in volatile conditions) |
-| Normal | >= $0.60 | < $2.50 | Any | Skip entry |
+| Normal | >= $0.60 | < $2.50 | Any | Place call-only entry (MKT-040: 89% WR, +$46 EV) |
 | Normal | < $0.60 | < $2.50 | Any | Skip entry |
 
 ### Illiquidity Fallback (MKT-010)
@@ -248,7 +248,7 @@ sudo journalctl -u hydra -f
 
 | Aspect | Pure MEIC | HYDRA |
 |--------|-----------|---------|
-| Entry type | Always full IC | Full IC + credit gate (skip if non-viable) |
+| Entry type | Always full IC | Full IC, put-only (MKT-032), or call-only (MKT-035/038/040) via credit gate |
 | Starting OTM | VIX-adjusted | 3.5× calls, 4.0× puts (MKT-024), then tightened |
 | Spread widths | 50pt fixed | Asymmetric: call 60pt, put 75pt floor, 75pt cap (MKT-026/027/028) |
 | Credit minimums | $0.50/side | $0.60 calls, $2.50 puts |
@@ -299,6 +299,7 @@ bots/hydra/
 
 ## Version History
 
+- **1.15.1** (2026-03-16): MKT-040 call-only entries when put credit non-viable. When put credit < $2.50 but call credit >= $0.60, place call-only entry instead of skipping. Data: 89% WR for low-credit call-only entries, +$46 EV per entry. Stop = 2× credit + $0.10 (Fix #40 legacy formula). No VIX gate (unlike MKT-032 for put-only). Gated by existing `one_sided_entries_enabled` config. Override reason: `mkt-040`.
 - **1.15.0** (2026-03-16): MKT-039 put-only stop tightening + MKT-032 VIX gate raise. Put-only stop changed from 2×credit+buffer to credit+buffer — $5.00 put buffer already prevents 91% false stops, 2× was redundant (max loss $750→$500). MKT-032 VIX gate raised 18→25 (tighter stop makes put-only viable at moderate VIX). Call-only legacy keeps 2× ($0.10 buffer too small without it). All agent SYSTEM_PROMPTs updated to v1.15.0.
 - **1.14.0** (2026-03-15): MKT-038 FOMC T+1 call-only mode. Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call_credit + theoretical $2.50 put + buffer. MKT-036 stop confirmation timer documented as DISABLED (code preserved, $5.00 put buffer is the chosen solution). Telegram `/status` shows T+1 status. All agent SYSTEM_PROMPTs updated to v1.13.0. `stop_confirmation_enabled` default changed to `false`.
 - **1.13.0** (2026-03-13): Stop timestamps in state file. Dashboard SPX chart stop markers + entry strike lines. MKT-035 scoped to conditional entries only.

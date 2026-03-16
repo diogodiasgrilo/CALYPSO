@@ -16,15 +16,15 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (v1.15.0 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.15.1 — DO NOT hallucinate)
 
 - **5 base + up to 2 conditional entries (7 max)** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3 — matches winning period Feb 10-27). Conditional entries (12:45, 13:15) only fire on down days (MKT-035) as call-only.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
 - **VIX-scaled entry time shifting (MKT-034):** DISABLED (v1.10.3). Neither Tammy nor Sandvand use VIX-based time shifting.
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
-- **Min credit thresholds (MKT-011):** $0.60/side for calls, $2.50/side for puts (MKT-029 fallback: -$0.05, -$0.10). Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039).
-- **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. Call-only legacy: 2x credit + $0.10. Put-only (MKT-039): credit + $5.00. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
+- **Min credit thresholds (MKT-011):** $0.60/side for calls, $2.50/side for puts (MKT-029 fallback: -$0.05, -$0.10). Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
+- **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): 2x credit + $0.10. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
 - **Stop confirmation (MKT-036):** DISABLED. $5.00 put buffer is the chosen solution instead. Code preserved but dormant.
 - **Stop close:** both legs closed via market order (default; configurable short_only_stop for MKT-025 mode)
 - **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below open, as call-only.

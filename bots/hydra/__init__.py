@@ -12,7 +12,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both sides viable: Proceed with full iron condor
 - Call non-viable, put viable, VIX < 25: Place put-only entry (MKT-032/MKT-039 VIX gate)
 - Call non-viable, put viable, VIX >= 25: Skip entry (no call hedge in volatile conditions)
-- Put non-viable: Skip entry
+- Put non-viable, call viable: Place call-only entry (MKT-040, v1.15.1)
 - Both non-viable: Skip entry entirely
 
 Conditional Entry Trigger (MKT-035): Only affects conditional entries E6/E7.
@@ -21,6 +21,7 @@ Conditional Entry Trigger (MKT-035): Only affects conditional entries E6/E7.
 - Stop = call_credit + theoretical $2.50 put + buffer (not 2× credit)
 
 Version History:
+- 1.15.1 (2026-03-16): MKT-040 call-only entries when put non-viable. When put credit below minimum but call viable, place call-only instead of skipping. Data: 89% WR for low-credit call-only, +$46 EV per entry. Stop = 2× credit + $0.10 (Fix #40 legacy). Override reason: "mkt-040".
 - 1.15.0 (2026-03-16): MKT-039 put-only stop tightening + MKT-032 VIX gate raise. Put-only stop changed from 2×credit+buffer to credit+buffer — $5.00 put buffer already prevents 91% false stops, 2× was redundant (max loss $750→$500). MKT-032 VIX gate raised 18→25 (tighter stop makes put-only viable at moderate VIX). Call-only legacy keeps 2× ($0.10 buffer too small without it). All agent SYSTEM_PROMPTs updated to v1.15.0.
 - 1.14.0 (2026-03-15): MKT-038 FOMC T+1 call-only mode. Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call_credit + theoretical $2.50 put + buffer. MKT-036 stop confirmation timer documented as DISABLED (code preserved, $5.00 put buffer is the chosen solution). All agent SYSTEM_PROMPTs updated to v1.13.0.
 - 1.13.0 (2026-03-13): Stop timestamps in state file (call_stop_time/put_stop_time on IronCondorEntry). Dashboard SPX chart now shows red circle stop markers at actual stop time + white price lines for active entry strikes. Negative P&L bar fill fix for stopped entries. MKT-035 scoped to conditional entries only — base entries E1-E5 always attempt full ICs regardless of down-day status ($5.00 put buffer provides sufficient protection). Conditional entries E6/E7 still fire as call-only on down days (SPX < open -0.3%). Threshold reverted to 0.3%.
