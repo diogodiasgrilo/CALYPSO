@@ -22,7 +22,7 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.15.1)
+## HYDRA Strategy Parameters (v1.16.0)
 
 - **5 base + up to 2 conditional entries (7 max)** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3). Conditional entries (12:45, 13:15) only fire on down days (MKT-035) as call-only.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.

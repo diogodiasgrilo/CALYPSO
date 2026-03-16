@@ -113,8 +113,8 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
   const { status, stoppedSide } = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
 
-  // Fully-skipped entry: minimal card with reason
-  if (status === "skipped" && entry.skip_reason) {
+  // Fully-skipped entry: minimal card with reason (guard handles legacy data without skip_reason)
+  if (status === "skipped") {
     return (
       <div
         className={`bg-card rounded-lg p-3 ${
@@ -136,9 +136,11 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
         <div className="text-xs text-text-secondary mb-1">
           {entry.entry_time ? formatTime(entry.entry_time) : "--:--"}
         </div>
-        <div className="text-[10px] text-text-dim leading-tight">
-          {entry.skip_reason}
-        </div>
+        {entry.skip_reason && (
+          <div className="text-[10px] text-text-dim leading-tight">
+            {entry.skip_reason}
+          </div>
+        )}
       </div>
     );
   }

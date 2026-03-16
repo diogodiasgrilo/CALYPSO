@@ -16,7 +16,7 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (v1.15.1 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.16.0 — DO NOT hallucinate)
 
 - **5 base + up to 2 conditional entries (7 max)** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3 — matches winning period Feb 10-27). Conditional entries (12:45, 13:15) only fire on down days (MKT-035) as call-only.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.

@@ -27,7 +27,7 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
 
-## HYDRA Domain Knowledge (v1.15.1 — use these exact parameters)
+## HYDRA Domain Knowledge (v1.16.0 — use these exact parameters)
 
 - Entry times: 10:15, 10:45, 11:15, 11:45, 12:15 ET (5 base + up to 2 conditional at 12:45/13:15 on down days, :15/:45 offset, v1.10.3)
 - Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
