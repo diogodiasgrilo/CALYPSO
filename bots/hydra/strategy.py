@@ -7092,15 +7092,17 @@ class HydraStrategy(MEICStrategy):
                 credit = MIN_STOP_LEVEL
 
             # All call-only entries: call_credit + theoretical_put + buffer
-            theoretical_put = self.downday_theoretical_put_credit
+            # Use getattr with default — recovery may run before HYDRA config is loaded
+            theoretical_put = getattr(self, 'downday_theoretical_put_credit', 250.0)
+            stop_buffer = getattr(self, 'stop_buffer', 10.0)
             base_stop = credit + theoretical_put
             override = getattr(entry, 'override_reason', None) or "mkt-040"
             logger.info(
                 f"Recovery: {override.upper()} call-only stop = call ${credit:.2f} + "
-                f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f}"
+                f"theoretical put ${theoretical_put:.2f} + buffer ${stop_buffer:.2f}"
             )
 
-            stop_level = base_stop + self.stop_buffer
+            stop_level = base_stop + stop_buffer
             stop_level = max(stop_level, MIN_STOP_LEVEL)
 
             entry.call_side_stop = stop_level
