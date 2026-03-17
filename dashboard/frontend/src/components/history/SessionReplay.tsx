@@ -7,6 +7,7 @@ import {
   YAxis,
   ReferenceLine,
   ResponsiveContainer,
+  Tooltip,
 } from "recharts";
 import { colors } from "../../lib/tradingColors";
 
@@ -20,11 +21,15 @@ interface Tick {
 interface ReplayEntry {
   entry_number: number;
   entry_time: string;
-  /** Normalized 24h time "HH:MM:SS" for comparison with tick timestamps. */
   entry_time_24h: string;
   total_credit: number;
   short_call_strike: number;
   short_put_strike: number;
+}
+
+interface PnLPoint {
+  time: string; // "HH:MM"
+  pnl: number;
 }
 
 type ReplayState = "idle" | "loading" | "ready" | "playing" | "paused" | "complete";
@@ -32,16 +37,10 @@ type ReplayState = "idle" | "loading" | "ready" | "playing" | "paused" | "comple
 const SPEEDS = [1, 2, 5, 10] as const;
 
 /**
- * Extract 24h "HH:MM:SS" from any entry_time format:
- *   "10:16:59 AM ET" → "10:16:59"
- *   "02:16:59 PM ET" → "14:16:59"
- *   "2026-03-16 10:16:59" → "10:16:59"
- *   "2026-03-16T10:16:59" → "10:16:59"
+ * Extract 24h "HH:MM:SS" from any entry_time format.
  */
 function toTime24h(ts: string): string {
   if (!ts) return "00:00:00";
-
-  // Try AM/PM format: "10:16:59 AM ET" or "10:16 AM ET"
   const ampm = ts.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)/i);
   if (ampm) {
     let h = parseInt(ampm[1], 10);
@@ -52,52 +51,42 @@ function toTime24h(ts: string): string {
     if (period === "AM" && h === 12) h = 0;
     return `${String(h).padStart(2, "0")}:${min}:${sec}`;
   }
-
-  // Full timestamp: "2026-03-16 10:16:59" or "2026-03-16T10:16:59..."
   const full = ts.match(/\d{4}-\d{2}-\d{2}[T ](\d{2}:\d{2}:\d{2})/);
   if (full) return full[1];
-
-  // Bare time: "10:16:59" or "10:16"
   const bare = ts.match(/^(\d{2}:\d{2}(?::\d{2})?)$/);
   if (bare) return bare[1].length === 5 ? bare[1] + ":00" : bare[1];
-
   return "00:00:00";
 }
 
-/** Extract "HH:MM:SS" from tick timestamp "2026-03-16 09:30:02". */
 function tickTime(ts: string): string {
   return ts.slice(11, 19);
 }
 
-/** Format time for display: "HH:MM" from any format. */
 function fmtEntryTime(ts: string): string {
-  const t = toTime24h(ts);
-  return t.slice(0, 5); // "HH:MM"
+  return toTime24h(ts).slice(0, 5);
 }
 
-interface SessionReplayProps {
-  date: string;
-}
-
-export function SessionReplay({ date }: SessionReplayProps) {
+export function SessionReplay({ date }: { date: string }) {
   const [state, setState] = useState<ReplayState>("idle");
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [entries, setEntries] = useState<ReplayEntry[]>([]);
+  const [pnlCurve, setPnlCurve] = useState<PnLPoint[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Load data
+  // Load all data in parallel
   useEffect(() => {
     setState("loading");
     Promise.all([
       fetch(`/api/market/ticks?date_str=${date}`).then((r) => r.json()),
       fetch(`/api/hydra/entries?date_str=${date}`).then((r) => r.json()),
+      fetch(`/api/market/replay_pnl?date_str=${date}`).then((r) => r.json()),
     ])
-      .then(([tickData, entryData]) => {
-        const t = (tickData.ticks ?? tickData ?? []) as Tick[];
+      .then(([tickData, entryData, pnlData]) => {
+        const t = (tickData.ticks ?? []) as Tick[];
         setTicks(t);
-        // Normalize entries: DB has total_credit, state file has per-side credits
+
         const rawEntries = (entryData.entries ?? []) as Record<string, unknown>[];
         setEntries(rawEntries.map((e) => {
           const rawTime = (e.entry_time ?? "") as string;
@@ -110,48 +99,52 @@ export function SessionReplay({ date }: SessionReplayProps) {
             short_put_strike: (e.short_put_strike ?? 0) as number,
           };
         }));
+
+        setPnlCurve((pnlData.pnl_curve ?? []) as PnLPoint[]);
         setCurrentIndex(0);
         setState(t.length > 0 ? "ready" : "idle");
       })
       .catch(() => setState("idle"));
   }, [date]);
 
-  // Cleanup interval
   useEffect(() => {
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, []);
 
   const currentTick = ticks[currentIndex] ?? null;
 
-  // Entries visible up to current time (compare normalized 24h times)
+  // Entries visible up to current time
   const visibleEntries = useMemo(() => {
     if (!currentTick) return [];
     const now = tickTime(currentTick.timestamp);
     return entries.filter((e) => e.entry_time_24h <= now);
   }, [entries, currentTick]);
 
-  // P&L curve data up to current index — incremental O(n) approach
-  const pnlData = useMemo(() => {
-    if (ticks.length === 0 || entries.length === 0) return [];
-    // Pre-sort entries by normalized 24h time for a single-pass scan
-    const sorted = [...entries].sort((a, b) => a.entry_time_24h.localeCompare(b.entry_time_24h));
-    let entryIdx = 0;
-    let runningCredit = 0;
-    const data: { time: string; pnl: number }[] = [];
-    for (let i = 0; i <= currentIndex && i < ticks.length; i++) {
-      const t = ticks[i];
-      const tTime = tickTime(t.timestamp);
-      // Advance through sorted entries that are now visible
-      while (entryIdx < sorted.length && sorted[entryIdx].entry_time_24h <= tTime) {
-        runningCredit += sorted[entryIdx].total_credit;
-        entryIdx++;
-      }
-      data.push({ time: t.timestamp.slice(11, 16), pnl: runningCredit });
+  // Slice the real P&L curve up to current tick time
+  const visiblePnl = useMemo(() => {
+    if (pnlCurve.length === 0 || !currentTick) return [];
+    const nowMinute = currentTick.timestamp.slice(11, 16);
+    // Find last point <= current time
+    let endIdx = 0;
+    for (let i = 0; i < pnlCurve.length; i++) {
+      if (pnlCurve[i].time <= nowMinute) endIdx = i + 1;
+      else break;
     }
-    return data;
-  }, [ticks, entries, currentIndex]);
+    return pnlCurve.slice(0, endIdx);
+  }, [pnlCurve, currentTick]);
+
+  // Current P&L value for display
+  const currentPnl = visiblePnl.length > 0 ? visiblePnl[visiblePnl.length - 1].pnl : 0;
+
+  // Y-axis domain: symmetric around 0 or fit data
+  const yDomain = useMemo(() => {
+    if (pnlCurve.length === 0) return [-100, 100];
+    const allVals = pnlCurve.map((p) => p.pnl);
+    const max = Math.max(...allVals, 0);
+    const min = Math.min(...allVals, 0);
+    const pad = Math.max(Math.abs(max), Math.abs(min)) * 0.15 + 50;
+    return [Math.floor(min - pad), Math.ceil(max + pad)];
+  }, [pnlCurve]);
 
   const play = useCallback(() => {
     if (ticks.length === 0) return;
@@ -180,11 +173,8 @@ export function SessionReplay({ date }: SessionReplayProps) {
     setState("ready");
   }, []);
 
-  // Update interval when speed changes during playback
   useEffect(() => {
-    if (state === "playing") {
-      play();
-    }
+    if (state === "playing") play();
   }, [speed, play]);
 
   const timeLabel = currentTick?.timestamp?.slice(11, 19) ?? "--:--:--";
@@ -205,6 +195,8 @@ export function SessionReplay({ date }: SessionReplayProps) {
     );
   }
 
+  const pnlColor = currentPnl >= 0 ? colors.profit : colors.loss;
+
   return (
     <div className="space-y-3">
       {/* Controls */}
@@ -222,16 +214,13 @@ export function SessionReplay({ date }: SessionReplayProps) {
           <RotateCcw size={14} />
         </button>
 
-        {/* Speed selector */}
         <div className="flex gap-1">
           {SPEEDS.map((s) => (
             <button
               key={s}
               onClick={() => setSpeed(s)}
               className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                speed === s
-                  ? "bg-info/20 text-info"
-                  : "text-text-dim hover:text-text-secondary"
+                speed === s ? "bg-info/20 text-info" : "text-text-dim hover:text-text-secondary"
               }`}
             >
               {s}x
@@ -239,32 +228,26 @@ export function SessionReplay({ date }: SessionReplayProps) {
           ))}
         </div>
 
-        {/* Time display */}
         <span className="text-xs font-mono text-text-primary ml-auto">{timeLabel}</span>
       </div>
 
-      {/* Progress bar / scrubber */}
-      <div className="relative">
-        <input
-          type="range"
-          min={0}
-          max={ticks.length - 1}
-          value={currentIndex}
-          onChange={(e) => {
-            const idx = Number(e.target.value);
-            setCurrentIndex(idx);
-            if (state === "playing" && intervalRef.current) {
-              clearInterval(intervalRef.current);
-            }
-            setState("paused");
-          }}
-          className="w-full h-1.5 appearance-none bg-bg-elevated rounded-full cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-info"
-        />
-      </div>
+      {/* Scrubber */}
+      <input
+        type="range"
+        min={0}
+        max={ticks.length - 1}
+        value={currentIndex}
+        onChange={(e) => {
+          setCurrentIndex(Number(e.target.value));
+          if (state === "playing" && intervalRef.current) clearInterval(intervalRef.current);
+          setState("paused");
+        }}
+        className="w-full h-1.5 appearance-none bg-bg-elevated rounded-full cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-info"
+      />
 
-      {/* SPX + VIX display */}
+      {/* SPX / VIX / P&L display */}
       {currentTick && (
-        <div className="flex gap-4 text-xs">
+        <div className="flex gap-4 text-xs items-baseline">
           <div>
             <span className="text-text-secondary mr-1">SPX</span>
             <span className="text-text-primary font-semibold">
@@ -277,17 +260,31 @@ export function SessionReplay({ date }: SessionReplayProps) {
               {currentTick.vix_level?.toFixed(1) ?? "--"}
             </span>
           </div>
+          {visiblePnl.length > 0 && (
+            <div>
+              <span className="text-text-secondary mr-1">P&L</span>
+              <span className="font-semibold" style={{ color: pnlColor }}>
+                {currentPnl >= 0 ? "+" : ""}${currentPnl.toFixed(0)}
+              </span>
+            </div>
+          )}
           <div className="ml-auto text-text-dim">
             {currentTick.bot_state ?? ""}
           </div>
         </div>
       )}
 
-      {/* Mini P&L curve */}
-      {pnlData.length > 1 && (
+      {/* Real P&L curve from spread_snapshots */}
+      {visiblePnl.length > 1 && (
         <div className="bg-card rounded-lg border border-border-dim p-2">
-          <ResponsiveContainer width="100%" height={100}>
-            <AreaChart data={pnlData}>
+          <ResponsiveContainer width="100%" height={140}>
+            <AreaChart data={visiblePnl}>
+              <defs>
+                <linearGradient id="pnlGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={colors.profit} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={colors.profit} stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
               <XAxis
                 dataKey="time"
                 tick={{ fontSize: 9, fill: colors.textDim }}
@@ -295,20 +292,32 @@ export function SessionReplay({ date }: SessionReplayProps) {
                 tickLine={false}
               />
               <YAxis
-                width={40}
+                width={45}
+                domain={yDomain}
                 tick={{ fontSize: 9, fill: colors.textDim }}
                 axisLine={false}
                 tickLine={false}
                 tickFormatter={(v: number) => `$${v}`}
               />
               <ReferenceLine y={0} stroke={colors.textDim} strokeDasharray="3 3" />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: colors.card,
+                  border: `1px solid ${colors.borderDim}`,
+                  borderRadius: 6,
+                  fontSize: 11,
+                }}
+                labelStyle={{ color: colors.textSecondary }}
+                formatter={(value: number | undefined) => [`$${(value ?? 0).toFixed(2)}`, "P&L"]}
+              />
               <Area
                 type="monotone"
                 dataKey="pnl"
-                stroke={colors.profit}
-                fill={colors.profit}
-                fillOpacity={0.15}
+                stroke={pnlColor}
+                fill="url(#pnlGradient)"
                 strokeWidth={1.5}
+                dot={false}
+                isAnimationActive={false}
               />
             </AreaChart>
           </ResponsiveContainer>

@@ -43,6 +43,16 @@ async def get_ticks(date_str: str | None = None):
     return {"date": target, "count": len(ticks), "ticks": ticks}
 
 
+@router.get("/replay_pnl")
+async def get_replay_pnl(date_str: str | None = None):
+    """Unrealized P&L curve from spread_snapshots for session replay."""
+    if err := _validate_date(date_str):
+        return JSONResponse(status_code=400, content={"error": err})
+    target = date_str or get_today_et()
+    curve = await db_reader.get_replay_pnl(target)
+    return {"date": target, "count": len(curve), "pnl_curve": curve}
+
+
 @router.get("/status")
 async def get_status():
     """Current market session status."""

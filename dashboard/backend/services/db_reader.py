@@ -167,6 +167,74 @@ class BacktestingDBReader:
         )
         return [row["net_pnl"] for row in rows if row.get("net_pnl") is not None]
 
+    async def get_replay_pnl(self, date_str: str) -> list[dict]:
+        """Compute unrealized P&L curve from spread_snapshots + trade_entries.
+
+        Returns 1-minute resolution [{time: "HH:MM", pnl: float}] showing
+        how total P&L fluctuated throughout the day as SPX moved.
+        """
+        def _compute():
+            try:
+                conn = self._get_connection()
+
+                # Get per-entry credits
+                entry_rows = conn.execute(
+                    "SELECT entry_number, call_credit, put_credit FROM trade_entries WHERE date = ?",
+                    (date_str,),
+                ).fetchall()
+                credits = {}
+                for r in entry_rows:
+                    credits[r["entry_number"]] = (r["call_credit"] or 0) + (r["put_credit"] or 0)
+
+                if not credits:
+                    return []
+
+                # Get all spread snapshots for the day
+                snap_rows = conn.execute(
+                    "SELECT timestamp, entry_number, call_spread_value, put_spread_value "
+                    "FROM spread_snapshots WHERE timestamp LIKE ? ORDER BY timestamp",
+                    (f"{date_str}%",),
+                ).fetchall()
+
+                if not snap_rows:
+                    return []
+
+                # Group by timestamp, compute total P&L
+                from collections import OrderedDict
+                by_minute: OrderedDict[str, float] = OrderedDict()
+
+                current_ts = None
+                current_pnl = 0.0
+                entry_pnls: dict[int, float] = {}
+
+                for row in snap_rows:
+                    ts = row["timestamp"]
+                    minute_key = ts[:16]  # "2026-03-16 10:16"
+                    entry_num = row["entry_number"]
+                    cost = (row["call_spread_value"] or 0) + (row["put_spread_value"] or 0)
+                    credit = credits.get(entry_num, 0)
+                    entry_pnls[entry_num] = credit - cost
+
+                    if minute_key != current_ts:
+                        if current_ts is not None:
+                            by_minute[current_ts] = sum(entry_pnls.values())
+                        current_ts = minute_key
+
+                # Last minute
+                if current_ts is not None:
+                    by_minute[current_ts] = sum(entry_pnls.values())
+
+                return [
+                    {"time": ts[11:16], "pnl": round(pnl, 2)}
+                    for ts, pnl in by_minute.items()
+                ]
+
+            except Exception as e:
+                logger.warning(f"replay_pnl computation error: {e}")
+                return []
+
+        return await to_thread(_compute)
+
     async def is_available(self) -> bool:
         """Check if database file exists and is readable."""
         try:
