@@ -23,7 +23,7 @@ function parseET(ts: string): number {
 /** Stable hash of entry fields relevant to markers/price lines. */
 function entriesHash(entries: HydraEntry[]): string {
   return entries.map(e =>
-    `${e.entry_number}|${e.entry_time}|${e.call_side_stopped}|${e.put_side_stopped}|${e.call_side_expired}|${e.put_side_expired}|${e.short_call_strike}|${e.short_put_strike}`
+    `${e.entry_number}|${e.entry_time}|${e.call_side_stopped}|${e.put_side_stopped}|${e.call_side_expired}|${e.put_side_expired}|${e.call_side_skipped}|${e.put_side_skipped}|${e.short_call_strike}|${e.short_put_strike}`
   ).join("~");
 }
 

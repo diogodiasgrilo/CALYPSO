@@ -59,7 +59,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 | Entries per day | 6 | 5 (Entry #6 dropped in v1.6.0 to free margin for wider put spreads) |
 | Stop formula (full IC) | total_credit per side (MEIC+: -$0.10) | total_credit + stop_buffer (default +$0.10, Brian's credit+buffer) |
 | Stop execution | Close both legs (short + long) | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025) |
-| Credit gate | Skip if both non-viable | Call non-viable → put-only; put non-viable → call-only (MKT-040); both → skip |
+| Credit gate | Skip if both non-viable | Call non-viable → put-only; put non-viable → retry tighter puts, then call-only (MKT-040); both → skip |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | OTM tightening | None | Progressive 5pt steps (MKT-020/022) |
 
@@ -214,7 +214,7 @@ Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scout
 
 ### Trend Signal (Informational Only — v1.4.0)
 
-The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. For base entries E1-E5, entry type is determined by MKT-011 (credit gate): full IC when both sides viable, put-only when call non-viable AND VIX < 25.0 (MKT-032/MKT-039), call-only when put non-viable but call viable (MKT-040), skip when both non-viable. Conditional entries E6/E7 only fire when MKT-035 triggers (SPX < open -0.3%), always as call-only.
+The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. For base entries E1-E5, entry type is determined by MKT-011 (credit gate): full IC when both sides viable, put-only when call non-viable AND VIX < 25.0 (MKT-032/MKT-039), call-only when put non-viable but call viable after retrying tighter puts (MKT-040), skip when both non-viable. Conditional entries E6/E7 only fire when MKT-035 triggers (SPX < open -0.3%), always as call-only.
 
 | Trend Signal | What Gets Placed | Note |
 |--------------|------------------|------|
@@ -358,7 +358,8 @@ Each entry goes through these phases in order:
     ├── Both sides viable → PROCEED with full iron condor
     ├── Call non-viable, put viable, VIX < 25 → PUT-ONLY entry (MKT-032/MKT-039 allows)
     ├── Call non-viable, put viable, VIX >= 25 → SKIP entry (MKT-032: no call hedge)
-    ├── Put non-viable, call viable → CALL-ONLY entry (MKT-040: 89% WR, +$46 EV)
+    ├── Put non-viable, call viable → Retry with tighter put strikes (5pt closer, max 2 retries)
+    │   └── Still non-viable after retries → CALL-ONLY entry (MKT-040: 89% WR, +$46 EV)
     ├── Put non-viable, call non-viable → SKIP entry
     └── Both sides below minimum → SKIP entry
 20. MKT-010 fallback: If MKT-011 can't get quotes, use illiquidity flags
@@ -456,7 +457,7 @@ MEIC's core insight: **set the stop loss per side equal to total credit collecte
 call_stop = entry.total_credit + stop_buffer         (full IC: call side — $0.10 default)
 put_stop  = entry.total_credit + put_stop_buffer     (full IC: put side — $5.00 default)
 stop_level = credit + put_stop_buffer                 (put-only via MKT-039: tighter stop, $5.00 buffer sufficient)
-stop_level = 2 × credit + stop_buffer                (call-only via MKT-040: Fix #40 pattern, $0.10 buffer too small without 2×)
+stop_level = call_credit + theoretical_put + stop_buffer (call-only via MKT-040: unified with MKT-035/038)
 stop_level = call_credit + theoretical_put + stop_buffer (MKT-035 call-only: theoretical put = $250)
 ```
 
@@ -465,7 +466,7 @@ stop_level = call_credit + theoretical_put + stop_buffer (MKT-035 call-only: the
 | Full IC (call side) | total_credit + stop_buffer | $310 + $10 = $320 |
 | Full IC (put side) | total_credit + put_stop_buffer | $310 + $500 = $810 |
 | Call-only (MKT-035) | call_credit + theo_put + stop_buffer | $125 + $250 + $10 = $385 |
-| Call-only (MKT-040) | 2× credit + stop_buffer | 2× $125 = $250 + $10 = $260 |
+| Call-only (MKT-040) | call_credit + theo_put + stop_buffer | $125 + $250 + $10 = $385 |
 | Put-only (MKT-039) | credit + put_stop_buffer | $185 + $500 = $685 |
 
 **Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($0.60 calls, $2.50 puts) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
@@ -552,7 +553,7 @@ On the day after FOMC announcement (T+1), all entries are forced to call-only sp
 - Put-side exposure is highly dangerous on T+1
 
 **Rules:**
-- T+0 (FOMC day): MKT-008 blocks ALL entries (both days of meeting)
+- T+0 (FOMC announcement day only): MKT-008 blocks ALL entries (day 1 trades normally)
 - T+1 (day after announcement): MKT-038 forces call-only entries
 - T-1 (day before FOMC): No changes — actually favorable for premium selling (69.6% win rate)
 
@@ -685,7 +686,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-008 | Long Wing Liquidity | v1.0.0 | Reduce spread width if long wing illiquid; sets illiquidity flags |
 | MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | 40-80pt spreads based on VIX level |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
-| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call non-viable → put-only if VIX < 25 (MKT-032/MKT-039), else skip; put non-viable → call-only (MKT-040); both non-viable → skip |
+| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call non-viable → put-only if VIX < 25 (MKT-032/MKT-039), else skip; put non-viable → retry with tighter puts (5pt closer, max 2 retries), then call-only (MKT-040); both non-viable → skip |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
@@ -708,7 +709,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-036 | Stop Confirmation Timer | v1.12.0 | **DISABLED.** $5.00 put buffer chosen instead. When enabled: 75-second sustained breach before executing stop. Code preserved, configurable. |
 | MKT-038 | FOMC T+1 Call-Only | v1.13.0 | Day after FOMC announcement: force all entries to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call + $2.50 theo put + buffer |
 | MKT-039 | Put-Only Stop Tightening | v1.15.0 | Put-only stop changed from 2×credit+buffer to credit+buffer. $5.00 put buffer already prevents 91% false stops; 2× was redundant (max loss $750→$500). MKT-032 VIX gate raised 18→25. |
-| MKT-040 | Call-Only When Put Non-Viable | v1.15.1 | When put credit below minimum but call viable, place call-only (89% WR, +$46 EV). Stop = 2× credit + $0.10. |
+| MKT-040 | Call-Only When Put Non-Viable | v1.15.1 | When put credit below minimum but call viable, place call-only (89% WR, +$46 EV). Stop = call + theo $2.50 put + buffer (unified with MKT-035/038). |
 
 ### Removed Rules
 
@@ -955,7 +956,7 @@ Saxo merges positions at the same strike and direction into a single position, d
 
 ### One-Sided Entry Risk
 
-One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/MKT-038/MKT-040) that get stopped lose the full credit plus commission. MKT-039 (v1.15.0) tightened put-only stop from 2×credit to credit+buffer (max loss $750→$500) since $5.00 put buffer prevents false stops. Call-only keeps 2× stop ($0.10 buffer too small without it). Historical context: trend-driven one-sided entries were removed in v1.4.0, then credit-driven put-only was re-enabled in v1.7.1 and call-only added in v1.15.1.
+One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/MKT-038/MKT-040) that get stopped lose the full credit plus commission. MKT-039 (v1.15.0) tightened put-only stop from 2×credit to credit+buffer (max loss $750→$500) since $5.00 put buffer prevents false stops. Call-only (MKT-040) uses call + theo $2.50 put + buffer (unified with MKT-035/038). Historical context: trend-driven one-sided entries were removed in v1.4.0, then credit-driven put-only was re-enabled in v1.7.1 and call-only added in v1.15.1.
 
 ---
 

@@ -1979,7 +1979,7 @@ class HydraStrategy(MEICStrategy):
         else:
             # MKT-040: Put non-viable, call viable → convert to call-only
             # Data: low-credit call-only entries have 89% WR, +$46 EV per entry.
-            # Max loss ~$70 (2× credit + $0.10 buffer on ~$60 credit).
+            # Stop = call_credit + theoretical $2.50 put + call buffer (unified with MKT-035/038).
             if self.one_sided_entries_enabled:
                 logger.info(
                     f"MKT-040: Entry #{entry.entry_number} put credit non-viable "
@@ -2965,11 +2965,18 @@ class HydraStrategy(MEICStrategy):
                         # MKT-011 retry: Before converting to call-only, try tightening
                         # the put 5pt closer to ATM and re-checking credit. MKT-022 may
                         # have found a borderline strike that moved in the 2s between scans.
+                        # Capped at 2 iterations (10pt) to avoid blocking the main loop
+                        # (each iteration fetches 4 quotes via REST API).
                         put_retry_succeeded = False
                         current_put_otm = abs(self.current_price - entry.short_put_strike)
                         min_put_floor = self.min_put_otm_distance  # 25pt floor
+                        max_retries = 2
+                        api_failures = 0
 
-                        while current_put_otm > min_put_floor:
+                        for retry_i in range(max_retries):
+                            if current_put_otm <= min_put_floor:
+                                break  # at floor, can't tighten more
+
                             # Tighten 5pt closer to ATM
                             entry.short_put_strike += 5
                             entry.long_put_strike += 5
@@ -2978,17 +2985,20 @@ class HydraStrategy(MEICStrategy):
                             # Re-estimate credit at new strikes
                             _, est_put_retry = self._estimate_entry_credit(entry)
                             if est_put_retry <= 0:
-                                break  # estimation failed
+                                api_failures += 1
+                                if api_failures >= 2:
+                                    break  # persistent API failure
+                                continue  # transient failure, try next 5pt
 
                             logger.info(
-                                f"MKT-011 retry: Put tightened to {current_put_otm:.0f}pt OTM "
-                                f"(SP {entry.short_put_strike:.0f}), credit ${est_put_retry / 100:.2f}"
+                                f"MKT-011 retry {retry_i + 1}/{max_retries}: Put tightened to "
+                                f"{current_put_otm:.0f}pt OTM (SP {entry.short_put_strike:.0f}), "
+                                f"credit ${est_put_retry / 100:.2f}"
                             )
 
                             # Check with MKT-029 fallbacks
                             put_min = self.min_viable_credit_put_side
                             if est_put_retry >= put_min or est_put_retry >= (put_min - 10):
-                                # Put is now viable (or within MKT-029 fallback range)
                                 put_retry_succeeded = True
                                 est_put = est_put_retry
                                 logger.info(
@@ -3003,10 +3013,17 @@ class HydraStrategy(MEICStrategy):
                                 break
 
                         if put_retry_succeeded:
+                            # Re-run strike conflict checks after changing put strikes
+                            # (same bug class as Fix #44, #50, #66, #67 — new strikes
+                            # could collide with existing entries)
+                            self._adjust_for_strike_conflicts(entry)
+                            self._adjust_for_same_strike_overlap(entry)
+                            self._adjust_for_strike_conflicts(entry)
+                            self._adjust_for_long_strike_overlap(entry)
                             # Full IC — gate passed after tightening
                             credit_gate_handled = True
                         else:
-                            # MKT-040: Put still non-viable at floor → convert to call-only
+                            # MKT-040: Put still non-viable after retry → convert to call-only
                             logger.info(
                                 f"MKT-040: Entry #{entry_num} put credit non-viable after retry "
                                 f"(${est_put / 100:.2f}) → converting to call-only "

@@ -130,8 +130,9 @@ def is_fomc_meeting_day(check_date: date = None) -> bool:
     """
     Check if a specific date is ANY day of an FOMC meeting (day 1 or day 2).
 
-    Use this to block trading on ALL FOMC meeting days. Markets are volatile
-    on both days - day 1 due to anticipation, day 2 due to the announcement.
+    Use this for informational purposes (e.g., dashboard display). MKT-008
+    uses is_fomc_announcement_day() for blocking. Day 1 is a regular meeting
+    (no announcement). Day 2 has the 2:00 PM ET announcement.
 
     Args:
         check_date: Date to check (defaults to today)
