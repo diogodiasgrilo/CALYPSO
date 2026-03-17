@@ -7432,7 +7432,7 @@ class MEICStrategy:
                 )
                 return True, "Balance check skipped (no margin field)"
 
-            # Log margin snapshot for diagnostics
+            # Log margin snapshot for diagnostics + store for DataRecorder
             margin_used = balance.get("MarginUsedByCurrentPositions", 0)
             margin_pct = balance.get("MarginUtilizationPct", 0)
             total_value = balance.get("TotalValue", 0)
@@ -7443,6 +7443,14 @@ class MEICStrategy:
                 f"Utilization: {margin_pct:.1f}%, "
                 f"Account: ${total_value:,.2f}"
             )
+
+            # Store for DataRecorder (read by _record_entry_to_db)
+            self._last_margin_snapshot = {
+                "available": available,
+                "used": margin_used,
+                "utilization_pct": margin_pct,
+                "total_value": total_value,
+            }
 
             # Calculate required margin for next entry
             # Each IC needs max(call_spread, put_spread) × $100 × contracts
