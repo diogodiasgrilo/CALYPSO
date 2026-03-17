@@ -17,7 +17,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 
 Conditional Entry Trigger (MKT-035): Only affects conditional entries E6/E7.
 - Base entries E1-E5 always attempt full ICs regardless of down-day status
-- Conditional entries (12:45, 13:15) only fire when SPX drops >= 0.3% below open, as call-only
+- Conditional entries (12:45, 13:15) only fire when SPX drops >= 0.3% below session high, as call-only
 - Stop = call_credit + theoretical $2.50 put + buffer (not 2× credit)
 
 Version History:

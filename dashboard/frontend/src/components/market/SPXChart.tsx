@@ -34,6 +34,7 @@ export function SPXChart() {
   const priceLinesRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]>[]>([]);
   const prevEntriesHashRef = useRef("");
   const prevStopCountRef = useRef(0);
+  const prevShowStrikesRef = useRef(false);
 
   const todayOHLC = useHydraStore((s) => s.todayOHLC);
   const hydraEntries = useHydraStore((s) => s.hydraState?.entries);
@@ -130,11 +131,13 @@ export function SPXChart() {
     const currentStopCount = stopEvents.length;
 
     // Skip if nothing changed (OHLC updates won't trigger marker rebuild)
-    if (currentHash === prevEntriesHashRef.current && currentStopCount === prevStopCountRef.current && !showStrikes) {
+    const strikesChanged = showStrikes !== prevShowStrikesRef.current;
+    if (currentHash === prevEntriesHashRef.current && currentStopCount === prevStopCountRef.current && !strikesChanged) {
       return;
     }
     prevEntriesHashRef.current = currentHash;
     prevStopCountRef.current = currentStopCount;
+    prevShowStrikesRef.current = showStrikes;
 
     // Build entry markers
     const markers = entries

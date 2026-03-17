@@ -28,26 +28,26 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 - **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
 - **Min credit thresholds (MKT-011):** $0.60/side for calls, $2.50/side for puts (MKT-029 fallback: -$0.05, -$0.10). Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
-- **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): 2x credit + $0.10. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
+- **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): call + $2.50 theo put + buffer. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
 - **Stop confirmation (MKT-036):** DISABLED. $5.00 put buffer is the chosen solution instead. Code preserved but dormant.
 - **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
-- **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below open, as call-only.
+- **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below session high, as call-only.
 - **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
-- **FOMC blackout (MKT-008):** ALL entries skipped on FOMC meeting days (Day 1 + Day 2).
+- **FOMC blackout (MKT-008):** ALL entries skipped on FOMC announcement day only (Day 1 trades normally).
 - **Early close (MKT-018):** DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)
 
 ## 2026 FOMC Calendar (GROUND TRUTH — use these dates, do NOT guess)
 
-| Meeting | Day 1 (skip) | Day 2 / Announcement (skip) | T+1 (call-only MKT-038) |
-|---------|-------------|----------------------------|--------------------------|
-| Jan     | Jan 27 Tue  | Jan 28 Wed                 | Jan 29 Thu               |
-| Mar     | Mar 17 Tue  | Mar 18 Wed                 | Mar 19 Thu               |
-| Apr     | Apr 28 Tue  | Apr 29 Wed                 | Apr 30 Thu               |
-| Jun     | Jun 16 Tue  | Jun 17 Wed                 | Jun 18 Thu               |
-| Jul     | Jul 28 Tue  | Jul 29 Wed                 | Jul 30 Thu               |
-| Sep     | Sep 15 Tue  | Sep 16 Wed                 | Sep 17 Thu               |
-| Oct     | Oct 27 Tue  | Oct 28 Wed                 | Oct 29 Thu               |
-| Dec     | Dec 8 Tue   | Dec 9 Wed                  | Dec 10 Thu               |
+| Meeting | Day 1 (trade normally) | Day 2 / Announcement (skip) | T+1 (call-only MKT-038) |
+|---------|----------------------|----------------------------|--------------------------|
+| Jan     | Jan 27 Tue           | Jan 28 Wed                 | Jan 29 Thu               |
+| Mar     | Mar 17 Tue           | Mar 18 Wed                 | Mar 19 Thu               |
+| Apr     | Apr 28 Tue           | Apr 29 Wed                 | Apr 30 Thu               |
+| Jun     | Jun 16 Tue           | Jun 17 Wed                 | Jun 18 Thu               |
+| Jul     | Jul 28 Tue           | Jul 29 Wed                 | Jul 30 Thu               |
+| Sep     | Sep 15 Tue           | Sep 16 Wed                 | Sep 17 Thu               |
+| Oct     | Oct 27 Tue           | Oct 28 Wed                 | Oct 29 Thu               |
+| Dec     | Dec 8 Tue            | Dec 9 Wed                  | Dec 10 Thu               |
 
 CRITICAL: Cross-reference the trading date against this table to correctly identify FOMC days.
 - **P&L identity:** Expired Credits - Stop Loss Debits - Commission = Net P&L

@@ -204,7 +204,6 @@ class BacktestingDBReader:
                 by_minute: OrderedDict[str, float] = OrderedDict()
 
                 current_ts = None
-                current_pnl = 0.0
                 entry_pnls: dict[int, float] = {}
 
                 for row in snap_rows:

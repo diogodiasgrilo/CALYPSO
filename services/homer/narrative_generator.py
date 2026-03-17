@@ -33,12 +33,12 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 - Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
 - Spread widths: call floor 60pt, put floor 75pt, cap 75pt (VIX-scaled via MKT-027/028), NOT 5-point wings
 - Min credit thresholds: $0.60 calls, $2.50 puts (MKT-011). Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
-- Stop formula: Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): 2x credit + $0.10. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer.
+- Stop formula: Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): call + $2.50 theo put + buffer. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer.
 - Stop confirmation (MKT-036): DISABLED. $5.00 put buffer is the chosen solution instead. Code preserved but dormant.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
-- Down-day filter (MKT-035): Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) fire when SPX drops 0.3% below open, as call-only.
+- Down-day filter (MKT-035): Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) fire when SPX drops 0.3% below session high, as call-only.
 - FOMC T+1 call-only (MKT-038): Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
-- FOMC blackout (MKT-008): ALL entries skipped on FOMC meeting days (Day 1 + Day 2).
+- FOMC blackout (MKT-008): ALL entries skipped on FOMC announcement day only (Day 1 trades normally).
 - 2026 FOMC dates: Jan 27-28, Mar 17-18, Apr 28-29, Jun 16-17, Jul 28-29, Sep 15-16, Oct 27-28, Dec 8-9. Announcement = Day 2. T+1 = day after Day 2.
 - Progressive tightening: MKT-020 (calls) and MKT-022 (puts) scan from wide OTM inward
 - Early close (MKT-018): DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)

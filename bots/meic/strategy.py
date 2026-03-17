@@ -779,6 +779,7 @@ class MEICStrategy:
         self.config = config
         self.trade_logger = logger_service
         self.dry_run = dry_run
+        self._last_margin_snapshot = {}  # Populated by ORDER-004, read by DataRecorder
 
         # CONFIG-001: Validate configuration on startup
         # Note: _validate_config is called later after self is fully initialized

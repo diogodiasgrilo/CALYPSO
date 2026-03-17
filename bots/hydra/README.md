@@ -10,7 +10,7 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 - **Before each entry**, check 20 EMA vs 40 EMA on SPX 1-minute bars
 - **EMA signal is informational only** — logged and stored but does NOT drive entry type
-- **Base entries are full iron condors or one-sided** — call credit non-viable → put-only if VIX < 25 (MKT-032/MKT-039), skip if VIX >= 25; put credit non-viable → call-only (MKT-040, 89% WR). Conditional entries E6/E7 fire as call-only when SPX drops ≥ 0.3% from open (MKT-035)
+- **Base entries are full iron condors or one-sided** — call credit non-viable → put-only if VIX < 25 (MKT-032/MKT-039), skip if VIX >= 25; put credit non-viable → call-only (MKT-040, 89% WR). Conditional entries E6/E7 fire as call-only when SPX drops >= 0.3% from session high (MKT-035)
 
 ### Why This Works
 
@@ -30,7 +30,7 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 | 6 | 12:45 | Conditional (MKT-035) | Only fires on down days as call-only |
 | 7 | 13:15 | Conditional (MKT-035) | Only fires on down days as call-only |
 
-**Conditional entries** only fire when MKT-035 triggers (SPX < open -0.3%). They are always call-only. On non-down days, conditional entries are silently skipped.
+**Conditional entries** only fire when MKT-035 triggers (SPX drops >= 0.3% below session high). They are always call-only. On non-down days, conditional entries are silently skipped.
 
 On early close days, cutoff is 12:30 PM. MKT-034 (VIX-scaled time shifting) is disabled — neither Tammy Chambless nor John Sandvand use VIX-based scheduling. Code preserved and configurable via `vix_time_shift.enabled`.
 
@@ -161,7 +161,7 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `downday_callonly_enabled` | `true` | Enable/disable MKT-035 down day filter |
-| `downday_threshold_pct` | `0.003` | 0.3% — SPX must drop this much below open to trigger |
+| `downday_threshold_pct` | `0.003` | 0.3% — SPX must drop this much below session high to trigger |
 | `downday_theoretical_put_credit` | `2.50` | Theoretical put credit ($) for stop calculation |
 | `conditional_entry_times` | `["12:45","13:15"]` | Extra entry times that only fire when MKT-035 triggers |
 
@@ -256,7 +256,7 @@ sudo journalctl -u hydra -f
 | Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | Stop formula | total_credit - $0.10 | total_credit + asymmetric buffer (call $0.10, put $5.00). MKT-036 timer DISABLED. |
-| FOMC handling | Skip both days | Skip announcement day only (MKT-008) + T+1 call-only (MKT-038) |
+| FOMC handling | Skip announcement day | Skip announcement day only (MKT-008) + T+1 call-only (MKT-038) |
 | Stop execution | Close both legs | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025 + MKT-033) |
 
 ## Risk Considerations
