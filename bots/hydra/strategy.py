@@ -1722,32 +1722,38 @@ class HydraStrategy(MEICStrategy):
 
     def _check_downday_filter(self) -> bool:
         """
-        MKT-035: Check if SPX is down more than threshold from today's open.
+        MKT-035: Check if SPX is down more than threshold from today's high.
 
         Returns True if call-only should be used (bearish day detected).
-        Uses market_data.spx_open which is set at first WebSocket update (~9:30 AM)
-        and persisted in state file across restarts.
+        Uses market_data.spx_high (intraday high) instead of spx_open to catch
+        intraday reversals — SPX might open flat, rally, then drop hard.
+        Falls back to spx_open if spx_high not available yet.
         """
         if not self.downday_callonly_enabled:
             return False
 
-        spx_open = self.market_data.spx_open
-        if spx_open <= 0:
-            logger.warning("MKT-035: No SPX open price available, skipping down-day check")
+        # Use intraday high as reference (catches reversals better than open)
+        spx_ref = self.market_data.spx_high
+        ref_label = "high"
+        if not spx_ref or spx_ref <= 0:
+            spx_ref = self.market_data.spx_open
+            ref_label = "open"
+        if not spx_ref or spx_ref <= 0:
+            logger.warning("MKT-035: No SPX high/open price available, skipping down-day check")
             return False
 
         current = self.current_price
         if current <= 0:
             return False
 
-        change_pct = (current - spx_open) / spx_open
+        change_pct = (current - spx_ref) / spx_ref
         threshold = -self.downday_threshold_pct
 
         is_down = change_pct < threshold
         triggered = "TRIGGERED → call-only" if is_down else "not triggered"
         logger.info(
-            f"MKT-035: SPX {change_pct * 100:+.2f}% from open "
-            f"({current:.1f} vs {spx_open:.1f}), threshold {threshold * 100:.1f}% — {triggered}"
+            f"MKT-035: SPX {change_pct * 100:+.2f}% from {ref_label} "
+            f"({current:.1f} vs {spx_ref:.1f}), threshold {threshold * 100:.1f}% — {triggered}"
         )
         return is_down
 
@@ -4576,12 +4582,13 @@ class HydraStrategy(MEICStrategy):
         status['ema_long'] = self._last_ema_long
         status['ema_diff_pct'] = self._last_ema_diff_pct
 
-        # MKT-035: SPX vs open % for heartbeat display
-        spx_open = self.market_data.spx_open
-        if spx_open > 0 and self.current_price > 0:
-            change_pct = (self.current_price - spx_open) / spx_open * 100
-            status['spx_open'] = spx_open
-            status['spx_vs_open_pct'] = change_pct
+        # MKT-035: SPX vs high % for heartbeat display
+        spx_ref = self.market_data.spx_high or self.market_data.spx_open
+        if spx_ref and spx_ref > 0 and self.current_price > 0:
+            change_pct = (self.current_price - spx_ref) / spx_ref * 100
+            status['spx_open'] = self.market_data.spx_open
+            status['spx_high'] = self.market_data.spx_high
+            status['spx_vs_high_pct'] = change_pct
             status['mkt035_threshold'] = -self.downday_threshold_pct * 100
             status['mkt035_triggered'] = change_pct < -self.downday_threshold_pct * 100
 
@@ -4656,17 +4663,18 @@ class HydraStrategy(MEICStrategy):
         if self.vix_gate_enabled and self._vix_gate_resolved and self._vix_gate_start_slot > 0:
             lines.insert(0, f"  VIX-shift: slot {self._vix_gate_start_slot}")
 
-        # MKT-035: SPX vs open indicator (after trend line, before entries)
-        spx_open = self.market_data.spx_open
-        if spx_open > 0 and self.current_price > 0:
-            change_pct = (self.current_price - spx_open) / spx_open * 100
+        # MKT-035: SPX vs high indicator (after trend line, before entries)
+        spx_ref = self.market_data.spx_high or self.market_data.spx_open
+        if spx_ref and spx_ref > 0 and self.current_price > 0:
+            change_pct = (self.current_price - spx_ref) / spx_ref * 100
             threshold = -self.downday_threshold_pct * 100
             sign = "+" if change_pct >= 0 else ""
             triggered = "E6/E7 eligible" if change_pct < threshold else "full IC"
+            ref_label = "high" if self.market_data.spx_high and self.market_data.spx_high > 0 else "open"
             insert_idx = 1 if lines else 0  # After trend line
             lines.insert(insert_idx,
-                f"  MKT-035: SPX {sign}{change_pct:.2f}% vs open "
-                f"({self.current_price:.1f} vs {spx_open:.1f}) | "
+                f"  MKT-035: SPX {sign}{change_pct:.2f}% vs {ref_label} "
+                f"({self.current_price:.1f} vs {spx_ref:.1f}) | "
                 f"threshold: {threshold:.1f}% | {triggered}"
             )
 
