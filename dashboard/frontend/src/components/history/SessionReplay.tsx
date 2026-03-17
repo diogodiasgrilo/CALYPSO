@@ -46,13 +46,21 @@ export function SessionReplay({ date }: SessionReplayProps) {
   useEffect(() => {
     setState("loading");
     Promise.all([
-      fetch(`/api/market/ticks?date=${date}`).then((r) => r.json()),
-      fetch(`/api/hydra/entries?date=${date}`).then((r) => r.json()),
+      fetch(`/api/market/ticks?date_str=${date}`).then((r) => r.json()),
+      fetch(`/api/hydra/entries?date_str=${date}`).then((r) => r.json()),
     ])
       .then(([tickData, entryData]) => {
         const t = (tickData.ticks ?? tickData ?? []) as Tick[];
         setTicks(t);
-        setEntries((entryData.entries ?? []) as ReplayEntry[]);
+        // Normalize entries: DB has total_credit, state file has per-side credits
+        const rawEntries = (entryData.entries ?? []) as Record<string, unknown>[];
+        setEntries(rawEntries.map((e) => ({
+          entry_number: (e.entry_number ?? 0) as number,
+          entry_time: (e.entry_time ?? "") as string,
+          total_credit: (e.total_credit ?? ((e.call_spread_credit as number ?? 0) + (e.put_spread_credit as number ?? 0))) as number,
+          short_call_strike: (e.short_call_strike ?? 0) as number,
+          short_put_strike: (e.short_put_strike ?? 0) as number,
+        })));
         setCurrentIndex(0);
         setState(t.length > 0 ? "ready" : "idle");
       })

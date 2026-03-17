@@ -23,7 +23,7 @@ function computeUnrealizedPnl(entries: HydraEntry[]): number {
 }
 
 /** Comparison arrow indicator. invert=true flips colors (for metrics where lower is better, like stops). */
-function CompareArrow({ value, avg, suffix = "avg", invert = false }: { value: number; avg: number; suffix?: string; invert?: boolean }) {
+function CompareArrow({ value, avg, suffix = "avg", invert = false, prefix = "$" }: { value: number; avg: number; suffix?: string; invert?: boolean; prefix?: string }) {
   if (avg === 0 || !Number.isFinite(value) || !Number.isFinite(avg)) return null;
   const isAbove = value > avg;
   const isBelow = value < avg;
@@ -33,7 +33,7 @@ function CompareArrow({ value, avg, suffix = "avg", invert = false }: { value: n
   const arrowColor = isAbove ? goodColor : isBelow ? badColor : colors.textDim;
   return (
     <span className="text-[10px] ml-1" style={{ color: arrowColor }}>
-      {arrow} vs ${Math.abs(avg).toFixed(0)} {suffix}
+      {arrow} vs {prefix}{Math.abs(avg).toFixed(0)} {suffix}
     </span>
   );
 }
@@ -105,7 +105,7 @@ export function DailyPnLCard() {
                 {totalStops}
               </span>
               {comparisons && (
-                <CompareArrow value={totalStops} avg={avgStops} invert />
+                <CompareArrow value={totalStops} avg={avgStops} invert prefix="" />
               )}
             </span>
           </div>

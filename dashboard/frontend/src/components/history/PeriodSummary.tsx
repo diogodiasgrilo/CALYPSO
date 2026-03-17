@@ -1,5 +1,4 @@
-import { useState, useMemo } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { useMemo } from "react";
 import { formatPnL } from "../../lib/formatters";
 import { pnlColor, colors } from "../../lib/tradingColors";
 import type { DaySummary } from "./types";
@@ -46,8 +45,6 @@ function SummaryCard({
   label: string;
   days: DaySummary[];
 }) {
-  const [open, setOpen] = useState(true);
-
   const stats = useMemo(() => {
     const totalPnl = days.reduce((a, d) => a + (d.net_pnl ?? 0), 0);
     const totalEntries = days.reduce((a, d) => a + (d.entries_placed ?? 0), 0);
@@ -65,51 +62,42 @@ function SummaryCard({
 
   return (
     <div className="bg-card rounded-lg border border-border-dim">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="w-full flex items-center justify-between px-3 py-2 hover:bg-card-hover transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          {open ? <ChevronDown size={12} className="text-text-dim" /> : <ChevronRight size={12} className="text-text-dim" />}
-          <span className="label-upper">{label}</span>
-        </div>
+      <div className="flex items-center justify-between px-3 py-2">
+        <span className="label-upper">{label}</span>
         <span className="metric-body font-bold" style={{ color: pnlColor(totalPnl) }}>
           {formatPnL(totalPnl)}
         </span>
-      </button>
-      {open && (
-        <div className="px-3 pb-3 grid grid-cols-3 gap-x-4 gap-y-1 text-xs">
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Days</span>
-            <span className="text-text-primary">{days.length}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Entries</span>
-            <span className="text-text-primary">{totalEntries}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Stops</span>
-            <span style={{ color: totalStops > 0 ? colors.loss : colors.textPrimary }}>{totalStops}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">W/L</span>
-            <span>
-              <span style={{ color: colors.profit }}>{wins}</span>
-              <span className="text-text-dim">/</span>
-              <span style={{ color: colors.loss }}>{losses}</span>
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Best</span>
-            <span style={{ color: pnlColor(best) }}>{formatPnL(best)}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Worst</span>
-            <span style={{ color: pnlColor(worst) }}>{formatPnL(worst)}</span>
-          </div>
+      </div>
+      <div className="px-3 pb-3 grid grid-cols-3 gap-x-4 gap-y-1 text-xs">
+        <div className="flex justify-between">
+          <span className="text-text-secondary">Days</span>
+          <span className="text-text-primary">{days.length}</span>
         </div>
-      )}
+        <div className="flex justify-between">
+          <span className="text-text-secondary">Entries</span>
+          <span className="text-text-primary">{totalEntries}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-text-secondary">Stops</span>
+          <span style={{ color: totalStops > 0 ? colors.loss : colors.textPrimary }}>{totalStops}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-text-secondary">W/L</span>
+          <span>
+            <span style={{ color: colors.profit }}>{wins}</span>
+            <span className="text-text-dim">/</span>
+            <span style={{ color: colors.loss }}>{losses}</span>
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-text-secondary">Best</span>
+          <span style={{ color: pnlColor(best) }}>{formatPnL(best)}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-text-secondary">Worst</span>
+          <span style={{ color: pnlColor(worst) }}>{formatPnL(worst)}</span>
+        </div>
+      </div>
     </div>
   );
 }

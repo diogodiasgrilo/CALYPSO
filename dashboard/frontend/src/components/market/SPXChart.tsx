@@ -181,27 +181,32 @@ export function SPXChart() {
 
     if (showStrikes) {
       entries.forEach((e) => {
-        const isActive = !!e.entry_time && !e.call_side_stopped && !e.put_side_stopped && !e.call_side_expired && !e.put_side_expired;
-        if (isActive && e.short_call_strike > 0) {
+        if (!e.entry_time) return;
+        const isActive = !e.call_side_stopped && !e.put_side_stopped && !e.call_side_expired && !e.put_side_expired;
+        // Active entries: solid red. Expired/stopped: dimmer, dotted.
+        const lineColor = isActive ? colors.loss : colors.textDim;
+        const lineStyle = isActive ? 2 : 3; // 2=dashed, 3=dotted
+
+        if (e.short_call_strike > 0 && !e.call_side_skipped) {
           const line = series.createPriceLine({
             price: e.short_call_strike,
-            color: colors.loss,
+            color: lineColor,
             lineWidth: 1,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            axisLabelColor: colors.loss,
+            lineStyle,
+            axisLabelVisible: isActive,
+            axisLabelColor: lineColor,
             title: `SC${e.entry_number}`,
           });
           priceLinesRef.current.push(line);
         }
-        if (isActive && e.short_put_strike > 0) {
+        if (e.short_put_strike > 0 && !e.put_side_skipped) {
           const line = series.createPriceLine({
             price: e.short_put_strike,
-            color: colors.loss,
+            color: lineColor,
             lineWidth: 1,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            axisLabelColor: colors.loss,
+            lineStyle,
+            axisLabelVisible: isActive,
+            axisLabelColor: lineColor,
             title: `SP${e.entry_number}`,
           });
           priceLinesRef.current.push(line);

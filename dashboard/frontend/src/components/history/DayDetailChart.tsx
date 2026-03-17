@@ -35,15 +35,18 @@ function parseTimeForDate(ts: string, dateStr: string): number {
   const full = parseET(ts);
   if (full > 0) return full;
 
-  // Parse "HH:MM AM/PM" or "HH:MM AM ET" format
-  const ampm = ts.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  // Parse "HH:MM:SS AM/PM ET" or "HH:MM AM ET" format
+  // Must include optional seconds (?::(\d{2}))? to avoid matching "16:59 AM"
+  // from "10:16:59 AM ET" (minutes:seconds misread as hours:minutes)
+  const ampm = ts.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)/i);
   if (ampm) {
     let h = parseInt(ampm[1], 10);
     const min = parseInt(ampm[2], 10);
-    const period = ampm[3].toUpperCase();
+    const sec = ampm[3] ? parseInt(ampm[3], 10) : 0;
+    const period = ampm[4].toUpperCase();
     if (period === "PM" && h !== 12) h += 12;
     if (period === "AM" && h === 12) h = 0;
-    const utcDate = new Date(`${dateStr}T${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}:00Z`);
+    const utcDate = new Date(`${dateStr}T${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}Z`);
     return isNaN(utcDate.getTime()) ? 0 : utcDate.getTime() / 1000;
   }
 
