@@ -9,7 +9,6 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { colors } from "../../lib/tradingColors";
-// colors used by charts below
 
 interface Tick {
   timestamp: string;
@@ -21,6 +20,8 @@ interface Tick {
 interface ReplayEntry {
   entry_number: number;
   entry_time: string;
+  /** Normalized 24h time "HH:MM:SS" for comparison with tick timestamps. */
+  entry_time_24h: string;
   total_credit: number;
   short_call_strike: number;
   short_put_strike: number;
@@ -29,6 +30,50 @@ interface ReplayEntry {
 type ReplayState = "idle" | "loading" | "ready" | "playing" | "paused" | "complete";
 
 const SPEEDS = [1, 2, 5, 10] as const;
+
+/**
+ * Extract 24h "HH:MM:SS" from any entry_time format:
+ *   "10:16:59 AM ET" → "10:16:59"
+ *   "02:16:59 PM ET" → "14:16:59"
+ *   "2026-03-16 10:16:59" → "10:16:59"
+ *   "2026-03-16T10:16:59" → "10:16:59"
+ */
+function toTime24h(ts: string): string {
+  if (!ts) return "00:00:00";
+
+  // Try AM/PM format: "10:16:59 AM ET" or "10:16 AM ET"
+  const ampm = ts.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)/i);
+  if (ampm) {
+    let h = parseInt(ampm[1], 10);
+    const min = ampm[2];
+    const sec = ampm[3] ?? "00";
+    const period = ampm[4].toUpperCase();
+    if (period === "PM" && h !== 12) h += 12;
+    if (period === "AM" && h === 12) h = 0;
+    return `${String(h).padStart(2, "0")}:${min}:${sec}`;
+  }
+
+  // Full timestamp: "2026-03-16 10:16:59" or "2026-03-16T10:16:59..."
+  const full = ts.match(/\d{4}-\d{2}-\d{2}[T ](\d{2}:\d{2}:\d{2})/);
+  if (full) return full[1];
+
+  // Bare time: "10:16:59" or "10:16"
+  const bare = ts.match(/^(\d{2}:\d{2}(?::\d{2})?)$/);
+  if (bare) return bare[1].length === 5 ? bare[1] + ":00" : bare[1];
+
+  return "00:00:00";
+}
+
+/** Extract "HH:MM:SS" from tick timestamp "2026-03-16 09:30:02". */
+function tickTime(ts: string): string {
+  return ts.slice(11, 19);
+}
+
+/** Format time for display: "HH:MM" from any format. */
+function fmtEntryTime(ts: string): string {
+  const t = toTime24h(ts);
+  return t.slice(0, 5); // "HH:MM"
+}
 
 interface SessionReplayProps {
   date: string;
@@ -54,13 +99,17 @@ export function SessionReplay({ date }: SessionReplayProps) {
         setTicks(t);
         // Normalize entries: DB has total_credit, state file has per-side credits
         const rawEntries = (entryData.entries ?? []) as Record<string, unknown>[];
-        setEntries(rawEntries.map((e) => ({
-          entry_number: (e.entry_number ?? 0) as number,
-          entry_time: (e.entry_time ?? "") as string,
-          total_credit: (e.total_credit ?? ((e.call_spread_credit as number ?? 0) + (e.put_spread_credit as number ?? 0))) as number,
-          short_call_strike: (e.short_call_strike ?? 0) as number,
-          short_put_strike: (e.short_put_strike ?? 0) as number,
-        })));
+        setEntries(rawEntries.map((e) => {
+          const rawTime = (e.entry_time ?? "") as string;
+          return {
+            entry_number: (e.entry_number ?? 0) as number,
+            entry_time: rawTime,
+            entry_time_24h: toTime24h(rawTime),
+            total_credit: (e.total_credit ?? ((e.call_spread_credit as number ?? 0) + (e.put_spread_credit as number ?? 0))) as number,
+            short_call_strike: (e.short_call_strike ?? 0) as number,
+            short_put_strike: (e.short_put_strike ?? 0) as number,
+          };
+        }));
         setCurrentIndex(0);
         setState(t.length > 0 ? "ready" : "idle");
       })
@@ -76,24 +125,26 @@ export function SessionReplay({ date }: SessionReplayProps) {
 
   const currentTick = ticks[currentIndex] ?? null;
 
-  // Entries visible up to current time
+  // Entries visible up to current time (compare normalized 24h times)
   const visibleEntries = useMemo(() => {
     if (!currentTick) return [];
-    return entries.filter((e) => e.entry_time <= currentTick.timestamp);
+    const now = tickTime(currentTick.timestamp);
+    return entries.filter((e) => e.entry_time_24h <= now);
   }, [entries, currentTick]);
 
   // P&L curve data up to current index — incremental O(n) approach
   const pnlData = useMemo(() => {
     if (ticks.length === 0 || entries.length === 0) return [];
-    // Pre-sort entries by time for a single-pass scan
-    const sorted = [...entries].sort((a, b) => a.entry_time.localeCompare(b.entry_time));
+    // Pre-sort entries by normalized 24h time for a single-pass scan
+    const sorted = [...entries].sort((a, b) => a.entry_time_24h.localeCompare(b.entry_time_24h));
     let entryIdx = 0;
     let runningCredit = 0;
     const data: { time: string; pnl: number }[] = [];
     for (let i = 0; i <= currentIndex && i < ticks.length; i++) {
       const t = ticks[i];
+      const tTime = tickTime(t.timestamp);
       // Advance through sorted entries that are now visible
-      while (entryIdx < sorted.length && sorted[entryIdx].entry_time <= t.timestamp) {
+      while (entryIdx < sorted.length && sorted[entryIdx].entry_time_24h <= tTime) {
         runningCredit += sorted[entryIdx].total_credit;
         entryIdx++;
       }
@@ -243,7 +294,13 @@ export function SessionReplay({ date }: SessionReplayProps) {
                 axisLine={false}
                 tickLine={false}
               />
-              <YAxis hide />
+              <YAxis
+                width={40}
+                tick={{ fontSize: 9, fill: colors.textDim }}
+                axisLine={false}
+                tickLine={false}
+                tickFormatter={(v: number) => `$${v}`}
+              />
               <ReferenceLine y={0} stroke={colors.textDim} strokeDasharray="3 3" />
               <Area
                 type="monotone"
@@ -268,7 +325,7 @@ export function SessionReplay({ date }: SessionReplayProps) {
             >
               <div className="flex justify-between mb-1">
                 <span className="font-semibold text-text-primary">E{e.entry_number}</span>
-                <span className="text-text-dim">{e.entry_time.slice(11, 16)}</span>
+                <span className="text-text-dim">{fmtEntryTime(e.entry_time)}</span>
               </div>
               <div className="flex justify-between text-text-secondary">
                 <span>C:{e.short_call_strike}</span>
