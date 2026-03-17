@@ -40,7 +40,7 @@ from enum import Enum
 from shared.saxo_client import SaxoClient, BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day
-from shared.event_calendar import is_fomc_meeting_day
+from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day
 from shared.position_registry import PositionRegistry
 
 # Configure module logger
@@ -934,9 +934,11 @@ class MEICStrategy:
         logger.info(f"  MEIC+ enabled: {self.meic_plus_enabled}")
         logger.info(f"  Position Registry: {REGISTRY_FILE}")
 
-        # Check for FOMC day (both days of meeting, not just announcement day)
-        if is_fomc_meeting_day():
-            logger.warning("TODAY IS FOMC MEETING DAY - No entries will be placed")
+        # Check for FOMC announcement day (day 2 only — day 1 is safe to trade)
+        if is_fomc_announcement_day():
+            logger.warning("TODAY IS FOMC ANNOUNCEMENT DAY - No entries will be placed")
+        elif is_fomc_meeting_day():
+            logger.info("FOMC meeting day 1 (no announcement) - normal trading")
 
     def _parse_entry_times(self):
         """Parse entry times from config or use defaults."""
@@ -1041,12 +1043,14 @@ class MEICStrategy:
         # POS-003: Periodic position reconciliation (hourly)
         self._check_hourly_reconciliation()
 
-        # MKT-008: Skip all trading on FOMC days (both days of meeting)
-        if is_fomc_meeting_day():
+        # MKT-008: Skip all trading on FOMC announcement day (day 2 only)
+        # Day 1 has no announcement/press conference — safe to trade normally.
+        # Day 2 has the 2:00 PM ET announcement — high volatility risk.
+        if is_fomc_announcement_day():
             if self.state != MEICState.DAILY_COMPLETE:
                 self.state = MEICState.DAILY_COMPLETE
-                logger.info("FOMC meeting day - skipping all entries")
-            return "FOMC day - no trading"
+                logger.info("FOMC announcement day - skipping all entries")
+            return "FOMC announcement day - no trading"
 
         # State machine
         if self.state == MEICState.IDLE:

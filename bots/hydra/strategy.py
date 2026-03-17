@@ -5077,9 +5077,11 @@ class HydraStrategy(MEICStrategy):
             vix_detail = f"{vix_open} ({vix:.1f} {'<' if vix < self.max_vix_entry else '>='} {self.max_vix_entry:.0f})"
 
         try:
-            from shared.event_calendar import is_fomc_meeting_day, is_fomc_t_plus_one
-            if is_fomc_meeting_day():
-                fomc = "Yes (entries skipped)"
+            from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day, is_fomc_t_plus_one
+            if is_fomc_announcement_day():
+                fomc = "ANNOUNCEMENT DAY (entries skipped)"
+            elif is_fomc_meeting_day():
+                fomc = "Day 1 (no announcement, normal trading)"
             elif is_fomc_t_plus_one():
                 fomc = "T+1 (call-only MKT-038)"
             else:
