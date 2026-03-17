@@ -2962,19 +2962,62 @@ class HydraStrategy(MEICStrategy):
                         self._record_skipped_entry(entry_num, skip_reason, skip_details)
                         return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
                     elif gate_result == "call_only":
-                        # MKT-040: Put credit non-viable → convert to call-only entry
-                        # Data: 89% WR for low-credit call-only, +$46 EV per entry
-                        logger.info(
-                            f"MKT-040: Entry #{entry_num} put credit non-viable "
-                            f"(${est_put / 100:.2f}) → converting to call-only "
-                            f"(call ${est_call / 100:.2f})"
-                        )
-                        entry.call_only = True
-                        entry.put_only = False
-                        entry.put_side_skipped = True
-                        entry.override_reason = "mkt-040"
-                        place_call_only = True
-                        credit_gate_handled = True
+                        # MKT-011 retry: Before converting to call-only, try tightening
+                        # the put 5pt closer to ATM and re-checking credit. MKT-022 may
+                        # have found a borderline strike that moved in the 2s between scans.
+                        put_retry_succeeded = False
+                        current_put_otm = abs(self.current_price - entry.short_put_strike)
+                        min_put_floor = self.min_put_otm_distance  # 25pt floor
+
+                        while current_put_otm > min_put_floor:
+                            # Tighten 5pt closer to ATM
+                            entry.short_put_strike += 5
+                            entry.long_put_strike += 5
+                            current_put_otm = abs(self.current_price - entry.short_put_strike)
+
+                            # Re-estimate credit at new strikes
+                            _, est_put_retry = self._estimate_entry_credit(entry)
+                            if est_put_retry <= 0:
+                                break  # estimation failed
+
+                            logger.info(
+                                f"MKT-011 retry: Put tightened to {current_put_otm:.0f}pt OTM "
+                                f"(SP {entry.short_put_strike:.0f}), credit ${est_put_retry / 100:.2f}"
+                            )
+
+                            # Check with MKT-029 fallbacks
+                            put_min = self.min_viable_credit_put_side
+                            if est_put_retry >= put_min or est_put_retry >= (put_min - 10):
+                                # Put is now viable (or within MKT-029 fallback range)
+                                put_retry_succeeded = True
+                                est_put = est_put_retry
+                                logger.info(
+                                    f"MKT-011 retry: Put now viable at ${est_put / 100:.2f} "
+                                    f"after tightening to {current_put_otm:.0f}pt OTM → proceeding as full IC"
+                                )
+                                self._log_safety_event(
+                                    "MKT-011_RETRY_SUCCESS",
+                                    f"Entry #{entry_num}: put viable after retry at {current_put_otm:.0f}pt OTM, "
+                                    f"credit ${est_put / 100:.2f}"
+                                )
+                                break
+
+                        if put_retry_succeeded:
+                            # Full IC — gate passed after tightening
+                            credit_gate_handled = True
+                        else:
+                            # MKT-040: Put still non-viable at floor → convert to call-only
+                            logger.info(
+                                f"MKT-040: Entry #{entry_num} put credit non-viable after retry "
+                                f"(${est_put / 100:.2f}) → converting to call-only "
+                                f"(call ${est_call / 100:.2f})"
+                            )
+                            entry.call_only = True
+                            entry.put_only = False
+                            entry.put_side_skipped = True
+                            entry.override_reason = "mkt-040"
+                            place_call_only = True
+                            credit_gate_handled = True
                     elif gate_result == "put_only":
                         # v1.7.1: Call credit non-viable → place put-only entry
                         # Data: 87.5% win rate, +$870 net from 6 qualifying entries
@@ -4091,21 +4134,18 @@ class HydraStrategy(MEICStrategy):
                 logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
                 credit = MIN_STOP_LEVEL
 
-            override = getattr(entry, 'override_reason', None)
-            if override in ("mkt-035", "mkt-038"):
-                # MKT-035/MKT-038: Use theoretical put credit for stop calculation
-                # stop = call_credit + theoretical_put ($250) + buffer
-                theoretical_put = self.downday_theoretical_put_credit
-                base_stop = credit + theoretical_put
-                logger.info(
-                    f"{override.upper()}: Call-only stop = call ${credit:.2f} + "
-                    f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f} "
-                    f"= ${base_stop + self.stop_buffer:.2f}"
-                )
-            else:
-                # Legacy FIX #40: Use 2× credit for one-sided entries
-                base_stop = credit * 2
-                logger.info(f"Stop level for call spread: 2× credit ${credit:.2f} + buffer ${self.stop_buffer:.2f}")
+            # All call-only entries use theoretical put for stop calculation:
+            # stop = call_credit + theoretical_put ($250) + buffer
+            # This applies to MKT-035 (conditional), MKT-038 (FOMC T+1),
+            # and MKT-040 (put non-viable) — consistent formula for all.
+            theoretical_put = self.downday_theoretical_put_credit
+            base_stop = credit + theoretical_put
+            override = getattr(entry, 'override_reason', None) or "mkt-040"
+            logger.info(
+                f"{override.upper()}: Call-only stop = call ${credit:.2f} + "
+                f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f} "
+                f"= ${base_stop + self.stop_buffer:.2f}"
+            )
 
             stop_level = base_stop + self.stop_buffer
             stop_level = max(stop_level, MIN_STOP_LEVEL)
@@ -7040,7 +7080,7 @@ class HydraStrategy(MEICStrategy):
         MIN_STOP_LEVEL = 50.0
 
         # One-sided entry stop levels (must match _calculate_stop_levels_hydra behavior).
-        # Call-only: 2× credit + $0.10 buffer (FIX #40 — $0.10 too small without 2×).
+        # Call-only: call_credit + theoretical_put ($250) + buffer (consistent for all call-only types).
         # Put-only: credit + $5.00 buffer (MKT-039 — $5.00 buffer prevents false stops, 2× redundant).
         if entry.call_only:
             credit = entry.call_spread_credit
@@ -7051,18 +7091,14 @@ class HydraStrategy(MEICStrategy):
                 )
                 credit = MIN_STOP_LEVEL
 
-            override = getattr(entry, 'override_reason', None)
-            if override in ("mkt-035", "mkt-038"):
-                # MKT-035/MKT-038: call_credit + theoretical_put + buffer
-                theoretical_put = self.downday_theoretical_put_credit
-                base_stop = credit + theoretical_put
-                logger.info(
-                    f"Recovery: {override.upper()} call-only stop = call ${credit:.2f} + "
-                    f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f}"
-                )
-            else:
-                # FIX #40: Use 2× credit for one-sided entries to match full IC behavior
-                base_stop = credit * 2
+            # All call-only entries: call_credit + theoretical_put + buffer
+            theoretical_put = self.downday_theoretical_put_credit
+            base_stop = credit + theoretical_put
+            override = getattr(entry, 'override_reason', None) or "mkt-040"
+            logger.info(
+                f"Recovery: {override.upper()} call-only stop = call ${credit:.2f} + "
+                f"theoretical put ${theoretical_put:.2f} + buffer ${self.stop_buffer:.2f}"
+            )
 
             stop_level = base_stop + self.stop_buffer
             stop_level = max(stop_level, MIN_STOP_LEVEL)
