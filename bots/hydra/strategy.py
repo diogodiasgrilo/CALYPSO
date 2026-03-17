@@ -2849,16 +2849,20 @@ class HydraStrategy(MEICStrategy):
                     last_error = "Failed to calculate strikes"
                     continue
 
-                # MKT-020/MKT-022: Progressive OTM tightening for all entries (all are full IC)
-                if not self.dry_run:
-                    self._apply_progressive_call_tightening(entry)
-                    self._apply_progressive_put_tightening(entry)
-
-                # MKT-035: Check down-day filter AFTER strikes but BEFORE credit gate
+                # Determine if this is a conditional entry (MKT-035 E6/E7) before tightening
+                # so we can skip put tightening (saves API calls + main loop time)
                 credit_gate_handled = False
                 place_put_only = False  # v1.7.1: MKT-011 put-only conversion
                 place_call_only = False  # MKT-035: call-only on down days
                 original_trend = trend  # Save original trend for hybrid logic
+
+                # MKT-020/MKT-022: Progressive OTM tightening
+                if not self.dry_run:
+                    self._apply_progressive_call_tightening(entry)
+                    if not is_conditional:
+                        # Only tighten puts for base entries — conditional entries
+                        # are always call-only (MKT-035), put tightening wastes API calls
+                        self._apply_progressive_put_tightening(entry)
 
                 if not self.dry_run:
                     if is_conditional:
