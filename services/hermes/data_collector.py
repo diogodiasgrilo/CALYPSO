@@ -209,7 +209,18 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     entries_placed = state.get("entries_completed", 0)
     entries_skipped = state.get("entries_skipped", 0)
     entries_failed = state.get("entries_failed", 0)
-    total_attempted = entries_placed + entries_skipped + entries_failed
+
+    # Total entry slots = base + conditional from entry_schedule, default 7
+    entry_schedule = state.get("entry_schedule", {})
+    if isinstance(entry_schedule, dict) and "total_attempted" in entry_schedule:
+        total_entry_slots = entry_schedule["total_attempted"]
+    elif isinstance(entry_schedule, dict):
+        base = len(entry_schedule.get("base", []))
+        conditional = len(entry_schedule.get("conditional", []))
+        total_entry_slots = (base + conditional) if (base + conditional) > 0 else 7
+    else:
+        total_entry_slots = 7
+    total_attempted = total_entry_slots
 
     call_stops = state.get("call_stops_triggered", 0)
     put_stops = state.get("put_stops_triggered", 0)
