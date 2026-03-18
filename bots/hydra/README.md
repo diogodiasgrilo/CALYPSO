@@ -164,6 +164,14 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `downday_threshold_pct` | `0.003` | 0.3% — SPX must drop this much below session high to trigger |
 | `downday_theoretical_put_credit` | `2.50` | Theoretical put credit ($) for stop calculation |
 | `conditional_entry_times` | `["12:45","13:15"]` | Extra entry times that only fire when MKT-035 triggers |
+| `conditional_e6_enabled` | `true` | Enable/disable E6 (12:45) conditional entry individually |
+| `conditional_e7_enabled` | `true` | Enable/disable E7 (13:15) conditional entry individually |
+
+### FOMC Announcement Day Override
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `fomc_announcement_skip` | `true` | MKT-008: Skip all entries on FOMC announcement day. Set `false` to trade normally |
 
 ### Stop Confirmation Timer (MKT-036) — INTENTIONALLY DISABLED
 

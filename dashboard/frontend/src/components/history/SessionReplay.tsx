@@ -281,8 +281,8 @@ export function SessionReplay({ date }: { date: string }) {
             <AreaChart data={visiblePnl}>
               <defs>
                 <linearGradient id="pnlGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={colors.profit} stopOpacity={0.25} />
-                  <stop offset="100%" stopColor={colors.profit} stopOpacity={0.02} />
+                  <stop offset="0%" stopColor={pnlColor} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={pnlColor} stopOpacity={0.02} />
                 </linearGradient>
               </defs>
               <XAxis

@@ -204,7 +204,7 @@ def _build_entries_for_day(
                 "P&L Impact": "",
             }))
 
-    # Sort entries by timestamp and renumber sequentially (handles bot restart duplicates)
+    # Sort entries by timestamp, preserving original entry numbers (handles bot restart duplicates)
     raw_entries.sort(key=lambda x: x[0])
 
     # Deduplicate entries:

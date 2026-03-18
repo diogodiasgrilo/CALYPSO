@@ -114,7 +114,8 @@ def _build_data_context(summary: Dict, entries: list, hermes_report: str = None)
         lines.append("")
         lines.append('<data source="entry_detail">')
         for i, entry in enumerate(entries):
-            lines.append(f"  Entry #{i+1}:")
+            entry_num = entry.get("Entry #", i + 1)
+            lines.append(f"  Entry #{entry_num}:")
             for key, val in entry.items():
                 lines.append(f"    {key}: {val}")
         lines.append("</data>")

@@ -12,7 +12,7 @@ Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
 - Both sides viable: Proceed with full iron condor
 - Call non-viable, put viable, VIX < 25: Place put-only entry (MKT-032/MKT-039 VIX gate)
 - Call non-viable, put viable, VIX >= 25: Skip entry (no call hedge in volatile conditions)
-- Put non-viable, call viable: Place call-only entry (MKT-040, v1.15.1)
+- Put non-viable, call viable: Retry with tighter put strikes (5pt closer, max 2 retries), then call-only entry (MKT-040, v1.15.1)
 - Both non-viable: Skip entry entirely
 
 Conditional Entry Trigger (MKT-035): Only affects conditional entries E6/E7.

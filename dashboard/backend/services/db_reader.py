@@ -212,12 +212,13 @@ class BacktestingDBReader:
                     entry_num = row["entry_number"]
                     cost = (row["call_spread_value"] or 0) + (row["put_spread_value"] or 0)
                     credit = credits.get(entry_num, 0)
-                    entry_pnls[entry_num] = credit - cost
 
                     if minute_key != current_ts:
                         if current_ts is not None:
                             by_minute[current_ts] = sum(entry_pnls.values())
                         current_ts = minute_key
+
+                    entry_pnls[entry_num] = credit - cost
 
                 # Last minute
                 if current_ts is not None:

@@ -58,7 +58,7 @@
         "max_vix_entry": 999,
         "contracts_per_entry": 1,
 
-        "_comment_downday": "MKT-035: Conditional entry trigger (E6/E7 only). Base entries E1-E5 always attempt full ICs regardless of down-day status. When SPX drops 0.3% below open, conditional entries fire as call-only. Stop uses theoretical $2.50 put credit + buffer.",
+        "_comment_downday": "MKT-035: Conditional entry trigger (E6/E7 only). Base entries E1-E5 always attempt full ICs regardless of down-day status. When SPX drops 0.3% below session high, conditional entries fire as call-only. Stop uses theoretical $2.50 put credit + buffer.",
         "downday_callonly_enabled": true,
         "downday_threshold_pct": 0.003,
         "downday_theoretical_put_credit": 2.50,

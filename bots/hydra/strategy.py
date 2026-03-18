@@ -13,7 +13,7 @@ Trend Detection (informational only, does NOT drive entry type):
 Risk Management (beyond base MEIC):
 - MKT-011: Pre-entry credit gate (put-only if call non-viable, skip if put non-viable)
 - MKT-018: Early close on ROC >= 3% (close all positions after entries placed)
-- MKT-035: Call-only on down days (SPX < open -0.3%) with theoretical put stop
+- MKT-035: Call-only on down days (SPX drops >= 0.3% below session high) with theoretical put stop
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
@@ -1725,11 +1725,8 @@ class HydraStrategy(MEICStrategy):
 
     def _call_only_stop_label(self, override: str) -> str:
         """Return human-readable stop formula label for call-only Telegram alerts."""
-        if override in ("mkt-035", "mkt-038"):
-            return f"call + ${self.downday_theoretical_put_credit / 100:.2f} theo put"
-        else:
-            # MKT-040 / legacy: 2× credit + buffer
-            return "2× credit"
+        # All call-only types use unified formula: call + theo put + buffer
+        return f"call + ${self.downday_theoretical_put_credit / 100:.2f} theo put"
 
     def _check_downday_filter(self) -> bool:
         """
@@ -5707,7 +5704,7 @@ class HydraStrategy(MEICStrategy):
             "",
             "\u2501\u2501\u2501 Down Day (MKT-035) \u2501\u2501\u2501",
             f"Enabled: {'Yes' if self.downday_callonly_enabled else 'No'}",
-            f"Threshold: {self.downday_threshold_pct * 100:.1f}% below open",
+            f"Threshold: {self.downday_threshold_pct * 100:.1f}% below session high",
             f"Theo put: ${self.downday_theoretical_put_credit / 100:.2f}",
         ])
         if self._conditional_entry_times:
@@ -6145,6 +6142,8 @@ class HydraStrategy(MEICStrategy):
                     trend_tag = "[MKT-011]"
                 elif override_reason == "mkt-010":
                     trend_tag = "[MKT-010]"
+                elif override_reason == "mkt-040":
+                    trend_tag = "[MKT-040]"
                 else:
                     trend_tag = "[BEARISH]"
             elif is_hydra_entry and entry.put_only:
