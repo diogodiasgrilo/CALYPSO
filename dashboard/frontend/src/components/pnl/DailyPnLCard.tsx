@@ -22,19 +22,29 @@ function computeUnrealizedPnl(entries: HydraEntry[]): number {
   return total;
 }
 
-/** Comparison arrow indicator. invert=true flips colors (for metrics where lower is better, like stops). */
-function CompareArrow({ value, avg, suffix = "avg", invert = false, prefix = "$" }: { value: number; avg: number; suffix?: string; invert?: boolean; prefix?: string }) {
+/** Compact comparison badge */
+function CompareBadge({ value, avg, invert = false, prefix = "$" }: { value: number; avg: number; invert?: boolean; prefix?: string }) {
   if (avg === 0 || !Number.isFinite(value) || !Number.isFinite(avg)) return null;
   const isAbove = value > avg;
   const isBelow = value < avg;
-  const arrow = isAbove ? "\u2191" : isBelow ? "\u2193" : "\u2192";
+  const arrow = isAbove ? "\u2191" : isBelow ? "\u2193" : "";
   const goodColor = invert ? colors.loss : colors.profit;
   const badColor = invert ? colors.profit : colors.loss;
-  const arrowColor = isAbove ? goodColor : isBelow ? badColor : colors.textDim;
+  const color = isAbove ? goodColor : isBelow ? badColor : colors.textDim;
   return (
-    <span className="text-[10px] ml-1" style={{ color: arrowColor }}>
-      {arrow} vs {prefix}{Math.abs(avg).toFixed(0)} {suffix}
+    <span className="text-[9px] ml-1 opacity-70" style={{ color }}>
+      {arrow}{prefix}{Math.abs(avg).toFixed(0)}
     </span>
+  );
+}
+
+/** Stat cell — label on top, value below */
+function StatCell({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
+  return (
+    <div className={`text-center ${className}`}>
+      <div className="text-[10px] text-text-dim uppercase tracking-wider mb-0.5">{label}</div>
+      <div className="text-sm font-semibold text-text-primary">{children}</div>
+    </div>
   );
 }
 
@@ -49,7 +59,6 @@ export function DailyPnLCard() {
     (hydraState?.put_stops_triggered ?? 0);
 
   // Live P&L = realized (actual stop costs from bot) + unrealized (active spread values)
-  // total_realized_pnl tracks actual execution prices including slippage
   const realizedPnl = hydraState?.total_realized_pnl ?? 0;
   const unrealizedPnl = useMemo(() => computeUnrealizedPnl(entries), [entries]);
   const netPnl = realizedPnl + unrealizedPnl - commission;
@@ -68,12 +77,17 @@ export function DailyPnLCard() {
   const avgCredit = comparisons?.avg_credit ?? 0;
   const avgStops = comparisons?.avg_stops ?? 0;
 
+  const baseEntries = entries.filter((e) => e.entry_number <= 5).length;
+  const conditionalEntries = entries.filter((e) => e.entry_number >= 6).length;
+
   return (
     <div className="space-y-3">
       {/* Today */}
       <div className="bg-card rounded-lg border border-border-dim p-4">
-        <h3 className="label-upper mb-3">Today</h3>
-        <div className="text-center mb-3">
+        <h3 className="label-upper mb-2">Today</h3>
+
+        {/* Hero P&L */}
+        <div className="text-center mb-4">
           <span
             className="metric-hero"
             style={{ color: pnlColor(animatedPnl) }}
@@ -81,54 +95,42 @@ export function DailyPnLCard() {
             {formatPnL(animatedPnl)}
           </span>
           {comparisons && (
-            <div className="mt-1">
-              <CompareArrow value={netPnl} avg={avgPnl} />
+            <div className="text-[10px] mt-0.5 opacity-60" style={{ color: pnlColor(avgPnl) }}>
+              avg {formatPnL(avgPnl)}
             </div>
           )}
         </div>
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Entries</span>
-            <span className="text-text-primary">
-              {entries.filter((e) => e.entry_number <= 5).length}/5
-              {entries.some((e) => e.entry_number >= 6) && (
-                <span className="text-text-dim ml-0.5">
-                  +{entries.filter((e) => e.entry_number >= 6).length}
-                </span>
-              )}
+
+        {/* Stat grid — 4 columns, centered */}
+        <div className="grid grid-cols-4 gap-1 pt-3 border-t border-border-dim">
+          <StatCell label="Entries">
+            {baseEntries}/5
+            {conditionalEntries > 0 && (
+              <span className="text-text-dim text-xs">+{conditionalEntries}</span>
+            )}
+          </StatCell>
+          <StatCell label="Stops">
+            <span style={{ color: totalStops > 0 ? colors.loss : colors.textPrimary }}>
+              {totalStops}
             </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Stops</span>
-            <span>
-              <span style={{ color: totalStops > 0 ? colors.loss : colors.textPrimary }}>
-                {totalStops}
-              </span>
-              {comparisons && (
-                <CompareArrow value={totalStops} avg={avgStops} invert prefix="" />
-              )}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Credit</span>
-            <span>
-              <span className="text-text-primary">${credit.toFixed(2)}</span>
-              {comparisons && avgCredit > 0 && (
-                <CompareArrow value={credit} avg={avgCredit} />
-              )}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Commission</span>
-            <span className="text-text-primary">${commission.toFixed(2)}</span>
-          </div>
+            {comparisons && <CompareBadge value={totalStops} avg={avgStops} invert prefix="" />}
+          </StatCell>
+          <StatCell label="Credit">
+            ${credit.toFixed(0)}
+            {comparisons && avgCredit > 0 && <CompareBadge value={credit} avg={avgCredit} />}
+          </StatCell>
+          <StatCell label="Comm.">
+            ${commission.toFixed(0)}
+          </StatCell>
         </div>
       </div>
 
       {/* Cumulative */}
       <div className="bg-card rounded-lg border border-border-dim p-4">
-        <h3 className="label-upper mb-3">Cumulative</h3>
-        <div className="text-center mb-3">
+        <h3 className="label-upper mb-2">Cumulative</h3>
+
+        {/* Hero cumulative P&L */}
+        <div className="text-center mb-4">
           <span
             className="metric-lg"
             style={{ color: pnlColor(cumulativePnl) }}
@@ -136,31 +138,25 @@ export function DailyPnLCard() {
             {formatPnL(cumulativePnl)}
           </span>
         </div>
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Days</span>
-            <span className="text-text-primary">{totalDays}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Win Rate</span>
-            <span className="text-text-primary">
-              {winRate(winningDays, losingDays)}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">W/L</span>
-            <span>
-              <span style={{ color: colors.profit }}>{winningDays}</span>
-              <span className="text-text-dim">/</span>
-              <span style={{ color: colors.loss }}>{losingDays}</span>
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Avg/Day</span>
+
+        {/* Stat grid — 4 columns, centered */}
+        <div className="grid grid-cols-4 gap-1 pt-3 border-t border-border-dim">
+          <StatCell label="Days">
+            {totalDays}
+          </StatCell>
+          <StatCell label="Win Rate">
+            {winRate(winningDays, losingDays)}
+          </StatCell>
+          <StatCell label="W/L">
+            <span style={{ color: colors.profit }}>{winningDays}</span>
+            <span className="text-text-dim">/</span>
+            <span style={{ color: colors.loss }}>{losingDays}</span>
+          </StatCell>
+          <StatCell label="Avg/Day">
             <span style={{ color: pnlColor(avgPerDay) }}>
               {formatPnL(avgPerDay)}
             </span>
-          </div>
+          </StatCell>
         </div>
       </div>
     </div>
