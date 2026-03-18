@@ -291,10 +291,10 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
       {entry.short_call_strike > 0 && (
         <div className="mt-2 text-[10px] text-text-dim flex justify-between">
           <span>
-            C:{entry.short_call_strike}/{entry.long_call_strike}
+            C:{entry.call_side_skipped ? '0/0' : `${entry.short_call_strike}/${entry.long_call_strike}`}
           </span>
           <span>
-            P:{entry.short_put_strike}/{entry.long_put_strike}
+            P:{entry.put_side_skipped ? '0/0' : `${entry.short_put_strike}/${entry.long_put_strike}`}
           </span>
         </div>
       )}

@@ -140,7 +140,19 @@ def _build_entries_for_day(
             if not match:
                 continue
             entry_num = match.group(1)
-            signal = match.group(2)
+            tag = match.group(2)  # e.g. "BEARISH", "MKT-035", "MKT-040", "NEUTRAL"
+
+            # Separate the bracket tag into trend_signal vs override_reason.
+            # MKT-* tags are override reasons, not trend signals.
+            # Direction tags (BEARISH/BULLISH) are the effective direction but
+            # NOT the actual EMA trend signal — Positions tab has the authoritative
+            # trend signal, which gets merged in step 2.
+            if tag in _MKT_OVERRIDE_TAGS:
+                override_reason = tag.lower()
+                signal = ""  # Will be filled from Positions tab
+            else:
+                override_reason = ""
+                signal = tag  # BEARISH, BULLISH, NEUTRAL
 
             # Parse entry time from Timestamp
             entry_time = ""
@@ -179,6 +191,7 @@ def _build_entries_for_day(
                 "Entry #": entry_num,
                 "Entry Time": entry_time,
                 "Trend Signal": signal,
+                "Override Reason": override_reason,
                 "Entry Type": entry_type,
                 "Short Call Strike": short_call,
                 "Short Put Strike": short_put,
@@ -228,18 +241,15 @@ def _build_entries_for_day(
     if len(deduped_entries) < len(raw_entries):
         logger.info(f"Deduplicated {len(raw_entries)} → {len(deduped_entries)} entries for {date_str}")
 
-    for i, (ts, orig_num, entry) in enumerate(deduped_entries, 1):
-        new_num = str(i)
-        entry["Entry #"] = new_num
+    for _ts, orig_num, entry in deduped_entries:
+        # Preserve original schedule-based entry_number (e.g. 5, 7) so DB
+        # records match HYDRA's real-time DataRecorder entries and avoid
+        # duplicate rows with different primary keys.
+        entry["Entry #"] = orig_num
         entry["_original_entry_num"] = orig_num
-        entry["_timestamp"] = ts
-        entries_by_num[new_num] = entry
-        original_to_new[orig_num].append((new_num, ts))
-
-    if len(deduped_entries) != len(set(ts for ts, _, _ in deduped_entries)):
-        logger.info(f"Renumbered {len(deduped_entries)} entries for {date_str} (duplicate timestamps detected — likely bot restart)")
-    elif any(str(i + 1) != deduped_entries[i][1] for i in range(len(deduped_entries))):
-        logger.info(f"Renumbered {len(deduped_entries)} entries for {date_str}")
+        entry["_timestamp"] = _ts
+        entries_by_num[orig_num] = entry
+        original_to_new[orig_num].append((orig_num, _ts))
 
     # 1b. Parse Trades tab for stop timing data ("HYDRA Stop #N (CALL/PUT)")
     # Match stops to entries by STRIKE (primary) or original entry number (fallback)
@@ -314,6 +324,7 @@ def _build_entries_for_day(
                     "Entry #": entry_num,
                     "Entry Time": "",
                     "Trend Signal": str(row.get("Trend Signal", "NEUTRAL")).strip(),
+                    "Override Reason": "",
                     "Entry Type": "",
                     "Short Call Strike": "",
                     "Short Put Strike": "",
@@ -325,6 +336,13 @@ def _build_entries_for_day(
                 }
 
             entry = entries_by_num[entry_num]
+
+            # Positions tab has the authoritative trend signal (from EMA classification).
+            # Trades tab bracket tags like [BEARISH] are the effective direction, not the
+            # actual trend. Always prefer Positions tab trend signal.
+            pos_trend = str(row.get("Trend Signal", "")).strip()
+            if pos_trend:
+                entry["Trend Signal"] = pos_trend
 
             if side == "call":
                 if not entry.get("Short Call Strike"):
@@ -881,6 +899,10 @@ def _read_version_history() -> List[Dict[str, str]]:
 # BACKTESTING DATABASE — Data extraction and transformation
 # =========================================================================
 
+# Override reason tags from Sheets Action bracket (e.g. "[MKT-035]")
+# These are MKT rules, not EMA trend signals — map to override_reason field.
+_MKT_OVERRIDE_TAGS = {"MKT-035", "MKT-038", "MKT-040", "MKT-011", "MKT-010"}
+
 # Regex for parsing heartbeat log lines (handles both meic_tf and hydra format)
 # Example: "2026-02-10 09:30:24 | INFO | shared.logger_service | HEARTBEAT | WaitingFirstEntry | SPX: 6970.55 | VIX: 17.35 | Entries: 0/6 | Active: 0 | Trend: neutral"
 _HEARTBEAT_RE = re.compile(
@@ -1351,15 +1373,26 @@ def _build_entry_records(
         otm_call = abs(spx_at_entry - short_call) if spx_at_entry and short_call else None
         otm_put = abs(spx_at_entry - short_put) if spx_at_entry and short_put else None
 
-        # Entry type
-        entry_type = entry.get("Entry Type", "")
-        if not entry_type:
+        # Entry type — normalize to DataRecorder convention (ic, call_only, put_only)
+        raw_type = entry.get("Entry Type", "").strip().lower()
+        if raw_type in ("iron condor", "full ic", "ic"):
+            entry_type = "ic"
+        elif raw_type in ("call spread", "call only", "call_only"):
+            entry_type = "call_only"
+        elif raw_type in ("put spread", "put only", "put_only"):
+            entry_type = "put_only"
+        elif not raw_type:
+            # Infer from strikes
             if short_call and short_put:
-                entry_type = "Full IC"
+                entry_type = "ic"
             elif short_call:
-                entry_type = "Call Only"
+                entry_type = "call_only"
             elif short_put:
-                entry_type = "Put Only"
+                entry_type = "put_only"
+            else:
+                entry_type = ""
+        else:
+            entry_type = raw_type  # Pass through unknown types
 
         # Credits — avoid `or None` which turns 0.0 into None
         call_credit_raw = entry.get("Call Credit", "")
@@ -1376,9 +1409,9 @@ def _build_entry_records(
             "spx_at_entry": spx_at_entry,
             "vix_at_entry": vix_at_entry,
             "expected_move": expected_move,
-            "trend_signal": entry.get("Trend Signal"),
+            "trend_signal": (entry.get("Trend Signal") or "").lower() or None,
             "entry_type": entry_type or None,
-            "override_reason": entry.get("Override Reason"),
+            "override_reason": (entry.get("Override Reason") or "").lower() or None,
             "short_call_strike": short_call or None,
             "long_call_strike": long_call,
             "short_put_strike": short_put or None,
