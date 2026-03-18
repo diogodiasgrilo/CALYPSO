@@ -13,6 +13,7 @@ from dashboard.backend.ws.manager import ConnectionManager
 from dashboard.backend.ws.broadcaster import Broadcaster
 from dashboard.backend.ws import router as ws_router_module
 from dashboard.backend.routers import hydra, metrics, market, agents, widget, simulator
+from dashboard.backend.services.live_state import LiveStateProvider
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +30,12 @@ async def lifespan(app: FastAPI):
     """Start broadcaster on startup, stop on shutdown."""
     logger.info("HYDRA Dashboard starting")
     ws_router_module.set_dependencies(manager, broadcaster)
+
+    # Wire up live data sources for REST endpoints (bridges gap until HOMER runs)
+    live_state = LiveStateProvider(broadcaster.state_reader)
+    market.set_live_sources(broadcaster.live_ohlc, live_state)
+    metrics.set_live_state(live_state)
+
     await broadcaster.start()
     yield
     logger.info("HYDRA Dashboard shutting down")

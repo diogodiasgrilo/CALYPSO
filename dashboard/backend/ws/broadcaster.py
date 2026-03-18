@@ -10,6 +10,7 @@ from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.db_reader import BacktestingDBReader
 from dashboard.backend.services.log_tailer import LogTailer
 from dashboard.backend.services.live_ohlc import LiveOHLCBuilder
+from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_current_status, get_today_et
 from dashboard.backend.services.agent_reports import AgentReportReader
 from dashboard.backend.ws.manager import ConnectionManager
@@ -27,6 +28,7 @@ class Broadcaster:
         self.db_reader = BacktestingDBReader(settings.backtesting_db)
         self.log_tailer = LogTailer(settings.hydra_log_file)
         self.live_ohlc = LiveOHLCBuilder()
+        self.live_state = LiveStateProvider(self.state_reader)
         self.agent_reader = AgentReportReader(settings.agent_intel_dir)
         self._tasks: list[asyncio.Task] = []
         self._last_ohlc_bar_count: int = 0
@@ -114,6 +116,12 @@ class Broadcaster:
         if await self.db_reader.is_available():
             entries = await self.db_reader.get_entries_for_date(today)
             stops = await self.db_reader.get_stops_for_date(today)
+
+        # Fall back to state file for today's entries/stops when DB is empty
+        if not entries:
+            entries = self.live_state.get_today_entries()
+        if not stops:
+            stops = self.live_state.get_today_stops()
 
         # Merge live-detected stop events (during market hours, DB is empty)
         live_stops = self.state_reader.get_stop_events()

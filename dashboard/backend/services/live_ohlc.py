@@ -32,6 +32,8 @@ class LiveOHLCBuilder:
         self._last_spx: float = 0.0
         self._last_vix: float = 0.0
         self._tick_count: int = 0
+        # Raw ticks for /api/market/ticks fallback
+        self._ticks: list[dict] = []
 
     @property
     def last_spx(self) -> float:
@@ -44,6 +46,7 @@ class LiveOHLCBuilder:
     def reset(self) -> None:
         """Reset for a new trading day."""
         self._bars.clear()
+        self._ticks.clear()
         self._current_date = ""
         self._last_spx = 0.0
         self._last_vix = 0.0
@@ -80,12 +83,20 @@ class LiveOHLCBuilder:
             # New day? Reset bars.
             if date_str != self._current_date:
                 self._bars.clear()
+                self._ticks.clear()
                 self._current_date = date_str
                 self._tick_count = 0
 
             self._last_spx = spx
             self._last_vix = vix
             self._tick_count += 1
+
+            # Store raw tick for /api/market/ticks fallback
+            self._ticks.append({
+                "timestamp": ts,
+                "spx_price": spx,
+                "vix_level": vix,
+            })
 
             # Update or create 1-minute bar
             if minute_key in self._bars:
@@ -106,6 +117,10 @@ class LiveOHLCBuilder:
             changed = True
 
         return changed
+
+    def get_ticks(self) -> list[dict]:
+        """Return raw heartbeat ticks matching market_ticks schema."""
+        return list(self._ticks)
 
     def get_ohlc_bars(self) -> list[dict]:
         """Return all bars as sorted list matching SQLite schema.
