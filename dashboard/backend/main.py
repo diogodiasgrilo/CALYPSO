@@ -12,7 +12,7 @@ from dashboard.backend.config import settings
 from dashboard.backend.ws.manager import ConnectionManager
 from dashboard.backend.ws.broadcaster import Broadcaster
 from dashboard.backend.ws import router as ws_router_module
-from dashboard.backend.routers import hydra, metrics, market, agents, widget
+from dashboard.backend.routers import hydra, metrics, market, agents, widget, simulator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +57,7 @@ app.include_router(metrics.router)
 app.include_router(market.router)
 app.include_router(agents.router)
 app.include_router(widget.router)
+app.include_router(simulator.router)
 
 # WebSocket router
 app.include_router(ws_router_module.router)
