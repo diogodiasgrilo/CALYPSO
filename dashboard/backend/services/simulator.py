@@ -208,6 +208,37 @@ class SimulatorEngine:
             ohlc = self._ohlc.get(date, [])
             has_snapshots = len(snapshots) > 0
 
+            # Check if this day has per-entry credit data
+            has_credit_data = any(
+                (e.get("call_credit") is not None and e["call_credit"] > 0) or
+                (e.get("put_credit") is not None and e["put_credit"] > 0)
+                for e in entries
+            )
+
+            if not has_credit_data:
+                # No credit data — can't simulate, pass through as-is
+                actual_pnl = summary.get("net_pnl") or 0
+                day_results.append(SimDayResult(
+                    date=date,
+                    actual_net_pnl=round(actual_pnl, 2),
+                    simulated_net_pnl=round(actual_pnl, 2),
+                    delta_pnl=0,
+                    actual_entries=len(entries),
+                    simulated_entries=len(entries),
+                    actual_stops=sum(
+                        1 for e in entries
+                        if any(stops_map.get((date, e["entry_number"], s))
+                               for s in ("call", "put"))
+                    ),
+                    simulated_stops=sum(
+                        1 for e in entries
+                        if any(stops_map.get((date, e["entry_number"], s))
+                               for s in ("call", "put"))
+                    ),
+                    simulation_tier=0,  # 0 = no simulation possible
+                ))
+                continue
+
             day_result = self._simulate_day(
                 date, entries, stops_map, skipped, snapshots, ohlc,
                 summary, params, has_snapshots,
