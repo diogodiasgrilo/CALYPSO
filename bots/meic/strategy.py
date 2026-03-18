@@ -936,8 +936,12 @@ class MEICStrategy:
         logger.info(f"  Position Registry: {REGISTRY_FILE}")
 
         # Check for FOMC announcement day (day 2 only — day 1 is safe to trade)
+        fomc_skip = self.strategy_config.get("fomc_announcement_skip", True)
         if is_fomc_announcement_day():
-            logger.warning("TODAY IS FOMC ANNOUNCEMENT DAY - No entries will be placed")
+            if fomc_skip:
+                logger.warning("TODAY IS FOMC ANNOUNCEMENT DAY - No entries will be placed")
+            else:
+                logger.warning("TODAY IS FOMC ANNOUNCEMENT DAY - Trading normally (fomc_announcement_skip=False)")
         elif is_fomc_meeting_day():
             logger.info("FOMC meeting day 1 (no announcement) - normal trading")
 
