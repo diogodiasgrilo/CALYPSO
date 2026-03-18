@@ -54,8 +54,8 @@ export function EquityCurve({ dailySummaries }: EquityCurveProps) {
                 <stop offset="100%" stopColor={equityColor} stopOpacity={0} />
               </linearGradient>
               <linearGradient id={ddGradId} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={colors.loss} stopOpacity={0} />
-                <stop offset="100%" stopColor={colors.loss} stopOpacity={0.15} />
+                <stop offset="0%" stopColor={colors.loss} stopOpacity={0.35} />
+                <stop offset="100%" stopColor={colors.loss} stopOpacity={0.12} />
               </linearGradient>
             </defs>
             <XAxis
@@ -89,7 +89,9 @@ export function EquityCurve({ dailySummaries }: EquityCurveProps) {
             <Area
               type="monotone"
               dataKey="drawdown"
-              stroke="transparent"
+              stroke={colors.loss}
+              strokeWidth={1}
+              strokeOpacity={0.4}
               fill={`url(#${ddGradId})`}
             />
             <Area
