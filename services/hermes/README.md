@@ -1,6 +1,6 @@
 # HERMES v1.1.0 — Daily Execution Quality Analyst
 
-**Last Updated:** 2026-03-03
+**Last Updated:** 2026-03-18
 
 Runs at 5:00 PM ET on weekdays via systemd timer. Pre-computes a cheat sheet of all arithmetic (counts, P&L, streaks), sends it to Claude for narrative analysis, saves a report, and sends a summary alert.
 

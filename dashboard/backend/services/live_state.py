@@ -6,6 +6,7 @@ same schema the DB readers return, so REST endpoints can fall back to live data.
 """
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 from dashboard.backend.services.state_reader import StateFileReader
@@ -43,17 +44,13 @@ class LiveStateProvider:
         commission = state.get("total_commission", 0)
         net_pnl = gross_pnl - commission
 
-        # Count stopped and expired entries
+        # Count stopped and expired entries (per entry, not per side)
         stopped = 0
         expired = 0
         for e in entries:
-            if e.get("call_side_stopped"):
+            if e.get("call_side_stopped") or e.get("put_side_stopped"):
                 stopped += 1
-            if e.get("put_side_stopped"):
-                stopped += 1
-            if e.get("call_side_expired"):
-                expired += 1
-            if e.get("put_side_expired"):
+            if e.get("call_side_expired") or e.get("put_side_expired"):
                 expired += 1
 
         # Get SPX/VIX from first and last entry or pnl_history
@@ -67,8 +64,8 @@ class LiveStateProvider:
         spx_low = min(spx_values) if spx_values else None
 
         vix_open = entries[0].get("vix_at_entry") if entries else None
+        vix_close = (pnl_history[-1].get("vix") if pnl_history else vix_open) or vix_open
 
-        from datetime import datetime
         today = get_today_et()
         try:
             day_of_week = datetime.strptime(today, "%Y-%m-%d").strftime("%A")
@@ -83,7 +80,7 @@ class LiveStateProvider:
             "spx_low": spx_low,
             "day_range": round(spx_high - spx_low, 2) if spx_high and spx_low else None,
             "vix_open": vix_open,
-            "vix_close": vix_open,  # Best available
+            "vix_close": vix_close,
             "entries_placed": len(entries),
             "entries_stopped": stopped,
             "entries_expired": expired,
