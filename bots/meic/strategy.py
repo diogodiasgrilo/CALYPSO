@@ -1047,7 +1047,9 @@ class MEICStrategy:
         # MKT-008: Skip all trading on FOMC announcement day (day 2 only)
         # Day 1 has no announcement/press conference — safe to trade normally.
         # Day 2 has the 2:00 PM ET announcement — high volatility risk.
-        if is_fomc_announcement_day():
+        # Override via config: set "fomc_announcement_skip": false to trade normally on announcement day.
+        fomc_skip = self.strategy_config.get("fomc_announcement_skip", True)
+        if is_fomc_announcement_day() and fomc_skip:
             if self.state != MEICState.DAILY_COMPLETE:
                 self.state = MEICState.DAILY_COMPLETE
                 logger.info("FOMC announcement day - skipping all entries")
