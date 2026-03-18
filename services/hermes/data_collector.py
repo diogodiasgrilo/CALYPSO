@@ -320,6 +320,12 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     # --- Early close ---
     early_close_triggered = state.get("early_close_triggered", False)
 
+    # --- FOMC config (user-configurable override) ---
+    hydra_config = _read_json_file("bots/hydra/config/config.json")
+    fomc_skip = True  # default
+    if hydra_config:
+        fomc_skip = hydra_config.get("strategy", {}).get("fomc_announcement_skip", True)
+
     return {
         "entry_outcomes": entry_outcomes,
         "entries_placed": entries_placed,
@@ -348,6 +354,7 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
         "vix": vix,
         "cumulative": cumulative,
         "apollo": apollo,
+        "fomc_announcement_skip": fomc_skip,
     }
 
 

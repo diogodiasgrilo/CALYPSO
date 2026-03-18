@@ -35,7 +35,9 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 - **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below session high, as call-only.
 - **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
 - **FOMC Day 1 (MKT-008):** Day 1 of FOMC meeting trades NORMALLY — no restrictions, no blackout, no special rules. This is CORRECT behavior. Do NOT flag entries on Day 1 as violations.
-- **FOMC Day 2 / Announcement day (MKT-008):** ALL entries skipped (blackout). This is the ONLY FOMC blackout day.
+- **FOMC Day 2 / Announcement day (MKT-008):** By default, all entries are skipped (blackout). HOWEVER, this is configurable via `fomc_announcement_skip` in HYDRA's config. Check `cheat_sheet.fomc_announcement_skip`:
+  - If `true` (default): Day 2 is a blackout. Entries placed = enforcement failure.
+  - If `false`: The user has DELIBERATELY disabled the FOMC blackout. Trading on Day 2 is an intentional user decision, NOT a violation. Do NOT flag it as a rule breach. Treat it as a normal trading day.
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
 
 ## 2026 FOMC Calendar (GROUND TRUTH — use these dates, do NOT guess)
@@ -52,7 +54,8 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 | Dec     | Dec 8 Tue            | Dec 9 Wed                  | Dec 10 Thu               |
 
 CRITICAL: Cross-reference the trading date against this table to correctly identify FOMC days.
-CRITICAL: Day 1 is NOT a blackout — HYDRA trades normally on Day 1. Only Day 2 (announcement) is a blackout. Do NOT flag Day 1 trading as a rule violation.
+CRITICAL: Day 1 is NOT a blackout — HYDRA trades normally on Day 1. Do NOT flag Day 1 trading as a rule violation.
+CRITICAL: Day 2 blackout is CONFIGURABLE. Always check `cheat_sheet.fomc_announcement_skip` before flagging Day 2 entries. If `false`, the user chose to trade — it is NOT a violation.
 
 ## Entry Skip Pattern
 
