@@ -34,7 +34,8 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 - **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
 - **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below session high, as call-only.
 - **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
-- **FOMC blackout (MKT-008):** ALL entries skipped on FOMC announcement day only (Day 1 trades normally).
+- **FOMC Day 1 (MKT-008):** Day 1 of FOMC meeting trades NORMALLY — no restrictions, no blackout, no special rules. This is CORRECT behavior. Do NOT flag entries on Day 1 as violations.
+- **FOMC Day 2 / Announcement day (MKT-008):** ALL entries skipped (blackout). This is the ONLY FOMC blackout day.
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
 
 ## 2026 FOMC Calendar (GROUND TRUTH — use these dates, do NOT guess)
@@ -51,6 +52,7 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 | Dec     | Dec 8 Tue            | Dec 9 Wed                  | Dec 10 Thu               |
 
 CRITICAL: Cross-reference the trading date against this table to correctly identify FOMC days.
+CRITICAL: Day 1 is NOT a blackout — HYDRA trades normally on Day 1. Only Day 2 (announcement) is a blackout. Do NOT flag Day 1 trading as a rule violation.
 
 ## Entry Skip Pattern
 

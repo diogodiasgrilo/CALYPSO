@@ -4748,18 +4748,29 @@ class HydraStrategy(MEICStrategy):
                 lines.append(f"⏩ #{entry.entry_number} Skipped (MKT-011)")
                 continue
 
-            # Status icon
-            # MKT-036: Show yellow when any side is confirming a stop
+            # Status icon logic:
+            # - Green: all opened sides still active (skipped sides don't count against)
+            # - Yellow: MKT-036 stop confirmation in progress
+            # - Red: any opened side was stopped
+            # A "done-bad" side is one that was stopped (actual loss).
+            # A "done-ok" side is one that expired or was skipped (no negative impact).
             call_confirming = getattr(entry, 'call_breach_time', None) is not None
             put_confirming = getattr(entry, 'put_breach_time', None) is not None
-            if call_done and put_done:
-                icon = "🔴"  # Both sides done
-            elif call_done or put_done:
-                icon = "🟡"  # One side done
+            any_stopped = call_stopped or put_stopped
+            # Check if all OPENED sides are done (exclude skipped sides)
+            call_opened = not call_skipped
+            put_opened = not put_skipped
+            all_opened_done = (not call_opened or call_done) and (not put_opened or put_done)
+
+            both_stopped = call_stopped and put_stopped
+            if both_stopped:
+                icon = "🔴"  # Both opened sides stopped (worst case)
+            elif any_stopped:
+                icon = "🟡"  # One side stopped (other active, expired, or skipped)
             elif call_confirming or put_confirming:
                 icon = "🟡"  # MKT-036: Confirming stop
             else:
-                icon = "🟢"  # Both active
+                icon = "🟢"  # All opened sides active or expired/skipped (good)
 
             # Strikes line
             lines.append("")
