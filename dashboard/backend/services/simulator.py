@@ -280,9 +280,14 @@ class SimulatorEngine:
                 continue
 
             # --- Filter 2: credit gate ---
-            sim_type, gate_note = self._apply_credit_gate(
-                etype, call_credit, put_credit, vix, params
-            )
+            # Skip credit gate if credits are NULL (early data without credit columns)
+            has_credit_data = entry.get("call_credit") is not None or entry.get("put_credit") is not None
+            if has_credit_data and total_credit > 0:
+                sim_type, gate_note = self._apply_credit_gate(
+                    etype, call_credit, put_credit, vix, params
+                )
+            else:
+                sim_type, gate_note = etype, ""
             if sim_type == "skipped":
                 sim_entries.append(SimEntryResult(
                     entry_number=enum, actual_type=etype, simulated_type="skipped",
@@ -296,7 +301,16 @@ class SimulatorEngine:
             # --- Simulate stops ---
             entry_snaps = snaps_by_entry.get(enum, [])
 
-            if has_snapshots and entry_snaps:
+            if not has_credit_data or total_credit <= 0:
+                # No credit data — can't simulate stops, use actual outcome
+                actual_entry_pnl = self._calc_actual_entry_pnl(entry, call_stop_rec, put_stop_rec)
+                sim_result = {
+                    "gross_pnl": actual_entry_pnl,
+                    "sim_call_stopped": was_call_stopped,
+                    "sim_put_stopped": was_put_stopped,
+                    "note": "no credit data",
+                }
+            elif has_snapshots and entry_snaps:
                 sim_result = self._simulate_entry_with_snapshots(
                     entry, sim_type, entry_snaps, params
                 )
