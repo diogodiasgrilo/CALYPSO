@@ -19,8 +19,8 @@ logger = logging.getLogger("dashboard.simulator")
 # Minimum trading days with spread_snapshots before simulator unlocks
 REQUIRED_FULL_SIM_DAYS = 30
 
-# Date from which all required tables are populated
-DATA_START_DATE = "2026-03-17"
+# Date from which spread_snapshots + credit data are populated
+DATA_START_DATE = "2026-03-11"
 
 
 @dataclass
@@ -201,6 +201,11 @@ class SimulatorEngine:
 
         for summary in self._summaries:
             date = summary["date"]
+
+            # Only simulate days with reliable data
+            if date < DATA_START_DATE:
+                continue
+
             entries = entries_by_date.get(date, [])
             stops_map = stops_by_date.get(date, {})
             skipped = skipped_by_date.get(date, [])
