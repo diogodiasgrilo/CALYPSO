@@ -13,7 +13,7 @@ Trend Detection (informational only, does NOT drive entry type):
 Risk Management (beyond base MEIC):
 - MKT-011: Pre-entry credit gate (put-only if call non-viable, skip if put non-viable)
 - MKT-018: Early close on ROC >= 3% (close all positions after entries placed)
-- MKT-035: Call-only on down days (SPX drops >= 0.3% below session high) with theoretical put stop
+- MKT-035: Call-only on down days (SPX drops >= 0.3% below open) with theoretical put stop
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
@@ -1730,24 +1730,20 @@ class HydraStrategy(MEICStrategy):
 
     def _check_downday_filter(self) -> bool:
         """
-        MKT-035: Check if SPX is down more than threshold from today's high.
+        MKT-035: Check if SPX is down more than threshold from today's open.
 
         Returns True if call-only should be used (bearish day detected).
-        Uses market_data.spx_high (intraday high) instead of spx_open to catch
-        intraday reversals — SPX might open flat, rally, then drop hard.
-        Falls back to spx_open if spx_high not available yet.
+        Uses market_data.spx_open as the reference price — a down day means
+        SPX has dropped below where it opened, not below an intraday high.
         """
         if not self.downday_callonly_enabled:
             return False
 
-        # Use intraday high as reference (catches reversals better than open)
-        spx_ref = self.market_data.spx_high
-        ref_label = "high"
+        # Use open price as reference
+        spx_ref = self.market_data.spx_open
+        ref_label = "open"
         if not spx_ref or spx_ref <= 0:
-            spx_ref = self.market_data.spx_open
-            ref_label = "open"
-        if not spx_ref or spx_ref <= 0:
-            logger.warning("MKT-035: No SPX high/open price available, skipping down-day check")
+            logger.warning("MKT-035: No SPX open price available, skipping down-day check")
             return False
 
         current = self.current_price
@@ -4618,13 +4614,13 @@ class HydraStrategy(MEICStrategy):
         status['ema_long'] = self._last_ema_long
         status['ema_diff_pct'] = self._last_ema_diff_pct
 
-        # MKT-035: SPX vs high % for heartbeat display
-        spx_ref = self.market_data.spx_high or self.market_data.spx_open
+        # MKT-035: SPX vs open % for heartbeat display
+        spx_ref = self.market_data.spx_open
         if spx_ref and spx_ref > 0 and self.current_price > 0:
             change_pct = (self.current_price - spx_ref) / spx_ref * 100
             status['spx_open'] = self.market_data.spx_open
             status['spx_high'] = self.market_data.spx_high
-            status['spx_vs_high_pct'] = change_pct
+            status['spx_vs_open_pct'] = change_pct
             status['mkt035_threshold'] = -self.downday_threshold_pct * 100
             status['mkt035_triggered'] = change_pct < -self.downday_threshold_pct * 100
 
@@ -4699,17 +4695,16 @@ class HydraStrategy(MEICStrategy):
         if self.vix_gate_enabled and self._vix_gate_resolved and self._vix_gate_start_slot > 0:
             lines.insert(0, f"  VIX-shift: slot {self._vix_gate_start_slot}")
 
-        # MKT-035: SPX vs high indicator (after trend line, before entries)
-        spx_ref = self.market_data.spx_high or self.market_data.spx_open
+        # MKT-035: SPX vs open indicator (after trend line, before entries)
+        spx_ref = self.market_data.spx_open
         if spx_ref and spx_ref > 0 and self.current_price > 0:
             change_pct = (self.current_price - spx_ref) / spx_ref * 100
             threshold = -self.downday_threshold_pct * 100
             sign = "+" if change_pct >= 0 else ""
             triggered = "E6/E7 eligible" if change_pct < threshold else "full IC"
-            ref_label = "high" if self.market_data.spx_high and self.market_data.spx_high > 0 else "open"
             insert_idx = 1 if lines else 0  # After trend line
             lines.insert(insert_idx,
-                f"  MKT-035: SPX {sign}{change_pct:.2f}% vs {ref_label} "
+                f"  MKT-035: SPX {sign}{change_pct:.2f}% vs open "
                 f"({self.current_price:.1f} vs {spx_ref:.1f}) | "
                 f"threshold: {threshold:.1f}% | {triggered}"
             )
@@ -5744,7 +5739,7 @@ class HydraStrategy(MEICStrategy):
             "",
             "\u2501\u2501\u2501 Down Day (MKT-035) \u2501\u2501\u2501",
             f"Enabled: {'Yes' if self.downday_callonly_enabled else 'No'}",
-            f"Threshold: {self.downday_threshold_pct * 100:.1f}% below session high",
+            f"Threshold: {self.downday_threshold_pct * 100:.1f}% below open",
             f"Theo put: ${self.downday_theoretical_put_credit / 100:.2f}",
         ])
         if self._conditional_entry_times:
