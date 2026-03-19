@@ -53,6 +53,11 @@ async def get_ohlc(date_str: str | None = None):
     if not ohlc and _live_ohlc and _is_today(target):
         ohlc = _live_ohlc.get_ohlc_bars()
 
+    # Final fallback: compute OHLC from market_ticks (covers today before HOMER runs
+    # and after bot restarts that clear the live OHLC builder)
+    if not ohlc:
+        ohlc = await db_reader.compute_ohlc_from_ticks(target)
+
     return {"date": target, "count": len(ohlc), "bars": ohlc}
 
 

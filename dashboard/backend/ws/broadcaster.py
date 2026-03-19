@@ -28,7 +28,7 @@ class Broadcaster:
         self.db_reader = BacktestingDBReader(settings.backtesting_db)
         self.log_tailer = LogTailer(settings.hydra_log_file)
         self.live_ohlc = LiveOHLCBuilder()
-        self.live_state = LiveStateProvider(self.state_reader)
+        self.live_state = LiveStateProvider(self.state_reader, db_reader=self.db_reader)
         self.agent_reader = AgentReportReader(settings.agent_intel_dir)
         self._tasks: list[asyncio.Task] = []
         self._last_ohlc_bar_count: int = 0

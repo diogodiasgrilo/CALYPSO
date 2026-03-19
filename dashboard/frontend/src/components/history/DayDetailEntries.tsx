@@ -125,12 +125,16 @@ export function DayDetailEntries({
                   {e.override_reason || e.trend_signal || "\u2014"}
                 </td>
                 <td className="px-2 py-1.5 text-right font-mono text-text-secondary">
-                  {e.short_call_strike > 0
+                  {e.entry_type === "PUT" || e.entry_type === "put_only"
+                    ? "\u2014"
+                    : e.short_call_strike > 0
                     ? `${e.short_call_strike}/${e.long_call_strike}`
                     : "\u2014"}
                 </td>
                 <td className="px-2 py-1.5 text-right font-mono text-text-secondary">
-                  {e.short_put_strike > 0
+                  {e.entry_type === "CALL" || e.entry_type === "call_only"
+                    ? "\u2014"
+                    : e.short_put_strike > 0
                     ? `${e.short_put_strike}/${e.long_put_strike}`
                     : "\u2014"}
                 </td>

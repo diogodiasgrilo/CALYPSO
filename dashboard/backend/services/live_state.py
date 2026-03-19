@@ -18,8 +18,9 @@ logger = logging.getLogger("dashboard.live_state")
 class LiveStateProvider:
     """Provides today's data from state file in DB-compatible format."""
 
-    def __init__(self, state_reader: StateFileReader):
+    def __init__(self, state_reader: StateFileReader, db_reader=None):
         self._reader = state_reader
+        self._db_reader = db_reader
 
     def _get_today_state(self) -> Optional[dict]:
         """Get state if it's for today."""
@@ -42,7 +43,6 @@ class LiveStateProvider:
 
         gross_pnl = state.get("total_realized_pnl", 0)
         commission = state.get("total_commission", 0)
-        net_pnl = gross_pnl - commission
 
         # Count stopped and expired entries (per entry, not per side)
         stopped = 0
@@ -52,6 +52,31 @@ class LiveStateProvider:
                 stopped += 1
             if e.get("call_side_expired") or e.get("put_side_expired"):
                 expired += 1
+
+        # After market close (4 PM ET), add unrealized credits from active entries
+        # that will expire worthless. total_realized_pnl only includes settled entries,
+        # but active entries' credits are guaranteed profit on 0DTE after 4 PM.
+        try:
+            now_et = datetime.now()
+            # Simple ET approximation: check if hour >= 16 (4 PM)
+            # The state file date check above ensures we're looking at today
+            import zoneinfo
+            et_tz = zoneinfo.ZoneInfo("America/New_York")
+            now_et = datetime.now(et_tz)
+            if now_et.hour >= 16:
+                for e in entries:
+                    call_done = e.get("call_side_stopped") or e.get("call_side_expired") or e.get("call_side_skipped")
+                    put_done = e.get("put_side_stopped") or e.get("put_side_expired") or e.get("put_side_skipped")
+                    if not call_done:
+                        # Active call side will expire — add its credit
+                        gross_pnl += e.get("call_spread_credit", 0) or 0
+                    if not put_done:
+                        # Active put side will expire — add its credit
+                        gross_pnl += e.get("put_spread_credit", 0) or 0
+        except Exception:
+            pass  # Fall back to pre-settlement value
+
+        net_pnl = gross_pnl - commission
 
         # Get SPX/VIX from first and last entry or pnl_history
         pnl_history = state.get("pnl_history", [])
@@ -65,6 +90,33 @@ class LiveStateProvider:
 
         vix_open = entries[0].get("vix_at_entry") if entries else None
         vix_close = (pnl_history[-1].get("vix") if pnl_history else vix_open) or vix_open
+
+        # Fallback: if SPX/VIX still None, try market_ticks from DB
+        if (spx_open is None or spx_close is None) and self._db_reader:
+            try:
+                import sqlite3
+                from asyncio import get_event_loop
+                conn = sqlite3.connect(self._db_reader._db_path)
+                conn.row_factory = sqlite3.Row
+                today = get_today_et()
+                rows = conn.execute(
+                    "SELECT spx_price, vix_level FROM market_ticks WHERE timestamp LIKE ? ORDER BY timestamp",
+                    (f"{today}%",),
+                ).fetchall()
+                conn.close()
+                if rows:
+                    spx_prices = [r["spx_price"] for r in rows if r["spx_price"]]
+                    vix_levels = [r["vix_level"] for r in rows if r["vix_level"]]
+                    if spx_prices:
+                        spx_open = spx_open or spx_prices[0]
+                        spx_close = spx_prices[-1]
+                        spx_high = max(spx_prices)
+                        spx_low = min(spx_prices)
+                    if vix_levels:
+                        vix_open = vix_open or vix_levels[0]
+                        vix_close = vix_levels[-1]
+            except Exception as e:
+                logger.debug(f"SPX/VIX tick fallback failed: {e}")
 
         today = get_today_et()
         try:
@@ -108,6 +160,10 @@ class LiveStateProvider:
             elif e.get("put_only"):
                 entry_type = "PUT"
 
+            # Hide strikes for skipped sides (call-only → no put strikes, put-only → no call strikes)
+            is_call_only = e.get("call_only", False)
+            is_put_only = e.get("put_only", False)
+
             result.append({
                 "date": today,
                 "entry_number": e.get("entry_number"),
@@ -117,15 +173,15 @@ class LiveStateProvider:
                 "trend_signal": e.get("trend_signal", "neutral"),
                 "entry_type": entry_type,
                 "override_reason": e.get("override_reason", ""),
-                "short_call_strike": e.get("short_call_strike"),
-                "long_call_strike": e.get("long_call_strike"),
-                "short_put_strike": e.get("short_put_strike"),
-                "long_put_strike": e.get("long_put_strike"),
-                "call_credit": call_credit,
-                "put_credit": put_credit,
+                "short_call_strike": e.get("short_call_strike") if not is_put_only else None,
+                "long_call_strike": e.get("long_call_strike") if not is_put_only else None,
+                "short_put_strike": e.get("short_put_strike") if not is_call_only else None,
+                "long_put_strike": e.get("long_put_strike") if not is_call_only else None,
+                "call_credit": call_credit if not is_put_only else 0,
+                "put_credit": put_credit if not is_call_only else 0,
                 "total_credit": call_credit + put_credit,
-                "otm_distance_call": e.get("otm_distance_call"),
-                "otm_distance_put": e.get("otm_distance_put"),
+                "otm_distance_call": e.get("otm_distance_call") if not is_put_only else None,
+                "otm_distance_put": e.get("otm_distance_put") if not is_call_only else None,
             })
         return result
 

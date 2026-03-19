@@ -79,6 +79,44 @@ class BacktestingDBReader:
             (f"{date_str}%",),
         )
 
+    async def compute_ohlc_from_ticks(self, date_str: str) -> list[dict]:
+        """Compute 1-minute OHLC bars from market_ticks when OHLC table is empty.
+
+        Fallback for today's data before HOMER populates market_ohlc_1min at 5:30 PM.
+        """
+        ticks = await self.get_today_ticks(date_str)
+        if not ticks:
+            return []
+
+        # Group ticks by minute
+        from collections import defaultdict
+        minutes: dict[str, list[float]] = defaultdict(list)
+        vix_by_minute: dict[str, float] = {}
+        for t in ticks:
+            ts = t.get("timestamp", "")
+            price = t.get("spx_price", 0)
+            vix = t.get("vix_level", 0)
+            if not ts or not price:
+                continue
+            # "2026-03-19 10:15:32" → "2026-03-19 10:15"
+            minute_key = ts[:16]
+            minutes[minute_key].append(price)
+            if vix:
+                vix_by_minute[minute_key] = vix
+
+        bars = []
+        for minute_key in sorted(minutes.keys()):
+            prices = minutes[minute_key]
+            bars.append({
+                "timestamp": f"{minute_key}:00",
+                "open": prices[0],
+                "high": max(prices),
+                "low": min(prices),
+                "close": prices[-1],
+                "vix": vix_by_minute.get(minute_key, 0),
+            })
+        return bars
+
     async def get_entries_for_date(self, date_str: str) -> list[dict]:
         """Get trade entries for a specific date."""
         return await to_thread(
