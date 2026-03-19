@@ -52,6 +52,26 @@ Utility scripts for analysis, testing, and diagnostics. All scripts are run from
 
 ---
 
+## HYDRA Backtesting Scripts (SQLite DB)
+
+These scripts run against `data/backtesting.db` (populated daily by HOMER). Must be run from repo root — no Saxo API needed.
+
+| Script | Purpose |
+|--------|---------|
+| `backtest_mkt035_ref.py` | Sweep MKT-035 thresholds 0.1%-2.0% using SPX open as reference for E6/E7 |
+| `backtest_stop_buffers.py` | Full IC put buffer + conditional call buffer optimal value analysis |
+| `backtest_call_buffer_sweep.py` | Sweep call buffer $0.00-$5.00, shows P&L impact at each level |
+| `backtest_call_buffer_detail.py` | Detail view: exactly which call stops avoided at $0.30 vs $0.10 buffer |
+| `backtest_call_buffer_deep.py` | Deep analysis: max adverse excursion after each call stop |
+
+```bash
+# Run locally (no VM needed — reads local DB copy)
+python scripts/backtest_stop_buffers.py
+python scripts/backtest_mkt035_ref.py
+```
+
+---
+
 ## API & WebSocket Testing
 
 | Script | Purpose | When to Use |

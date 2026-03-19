@@ -77,6 +77,8 @@ export interface HydraState {
     base: string[];
     conditional: string[];
   };
+  fomc_t1_callonly_enabled?: boolean;
+  downday_callonly_enabled?: boolean;
   [key: string]: unknown;
 }
 

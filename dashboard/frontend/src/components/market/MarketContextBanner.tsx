@@ -27,12 +27,15 @@ function formatNextOpen(isoStr: string | undefined): string {
  */
 export function FOMCBanner() {
   const market = useHydraStore((s) => s.market);
+  const hydraState = useHydraStore((s) => s.hydraState);
   if (!market) return null;
 
   const isFomcDay = market.is_fomc_day;
   const isAnnouncement = market.is_fomc_announcement;
   const isTPlus1 = market.is_fomc_t_plus_one;
   const daysUntil = market.days_until_fomc;
+  // MKT-038 config flag from state file (default true if not yet populated)
+  const mkt038Enabled = hydraState?.fomc_t1_callonly_enabled !== false;
 
   // Show on: FOMC day, T+1, or 1-2 days before
   const showApproaching = !isFomcDay && !isTPlus1 && daysUntil != null && daysUntil > 0 && daysUntil <= 2;
@@ -53,8 +56,10 @@ export function FOMCBanner() {
     hydraTagColor = colors.profit;
   } else if (isTPlus1) {
     headline = "Post-FOMC Day (T+1) — Elevated Volatility Expected";
-    hydraTag = "HYDRA: Call-only entries (MKT-038) — puts skipped";
-    hydraTagColor = colors.warning;
+    hydraTag = mkt038Enabled
+      ? "HYDRA: Call-only entries (MKT-038) — puts skipped"
+      : "HYDRA: Normal trading (MKT-038 disabled)";
+    hydraTagColor = mkt038Enabled ? colors.warning : colors.textSecondary;
   } else {
     headline = `FOMC Meeting in ${daysUntil} day${daysUntil !== 1 ? "s" : ""}`;
     hydraTag = daysUntil === 1

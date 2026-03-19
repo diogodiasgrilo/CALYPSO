@@ -57,9 +57,6 @@ class LiveStateProvider:
         # that will expire worthless. total_realized_pnl only includes settled entries,
         # but active entries' credits are guaranteed profit on 0DTE after 4 PM.
         try:
-            now_et = datetime.now()
-            # Simple ET approximation: check if hour >= 16 (4 PM)
-            # The state file date check above ensures we're looking at today
             import zoneinfo
             et_tz = zoneinfo.ZoneInfo("America/New_York")
             now_et = datetime.now(et_tz)
@@ -95,8 +92,7 @@ class LiveStateProvider:
         if (spx_open is None or spx_close is None) and self._db_reader:
             try:
                 import sqlite3
-                from asyncio import get_event_loop
-                conn = sqlite3.connect(self._db_reader._db_path)
+                conn = sqlite3.connect(self._db_reader.db_path)
                 conn.row_factory = sqlite3.Row
                 today = get_today_et()
                 rows = conn.execute(

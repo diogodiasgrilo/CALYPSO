@@ -40,6 +40,7 @@ from shared.saxo_client import SaxoClient, BuySell
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_early_close_day
 from shared.technical_indicators import get_current_ema, calculate_atr
+from shared.event_calendar import is_fomc_t_plus_one
 
 # Import the base MEIC classes we need
 from bots.meic.strategy import (
@@ -2875,7 +2876,6 @@ class HydraStrategy(MEICStrategy):
                 original_trend = trend  # Save original trend for hybrid logic
 
                 # Check MKT-038 (FOMC T+1) once here so we can skip put tightening
-                from shared.event_calendar import is_fomc_t_plus_one
                 is_fomc_t1 = (
                     self.fomc_t1_callonly_enabled and not self.dry_run
                     and is_fomc_t_plus_one()
@@ -5189,7 +5189,7 @@ class HydraStrategy(MEICStrategy):
             vix_detail = f"{vix_open} ({vix:.1f} {'<' if vix < self.max_vix_entry else '>='} {self.max_vix_entry:.0f})"
 
         try:
-            from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day, is_fomc_t_plus_one
+            from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day
             if is_fomc_announcement_day():
                 fomc = "ANNOUNCEMENT DAY (entries skipped)"
             elif is_fomc_meeting_day():
@@ -6291,6 +6291,9 @@ class HydraStrategy(MEICStrategy):
                     "base": [t.strftime('%H:%M') for t in self.entry_times[:self._base_entry_count]],
                     "conditional": [t.strftime('%H:%M') for t in self._conditional_entry_times],
                 },
+                # Dashboard: config flags for banner display
+                "fomc_t1_callonly_enabled": self.fomc_t1_callonly_enabled,
+                "downday_callonly_enabled": self.downday_callonly_enabled,
                 "entries": []
             }
 

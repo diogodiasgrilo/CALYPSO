@@ -161,11 +161,14 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
   const callCushion = computeCushion(entry.call_spread_value ?? 0, entry.call_side_stop);
   const putCushion = computeCushion(entry.put_spread_value ?? 0, entry.put_side_stop);
 
-  // Trend signal badge
+  // Trend signal badge — show override reason if it drove the entry type
   const trendLabel =
-    entry.override_reason === "mkt-011"
-      ? "MKT-011"
-      : entry.trend_signal ?? "";
+    entry.override_reason === "mkt-011" ? "MKT-011"
+    : entry.override_reason === "mkt-035" ? "MKT-035"
+    : entry.override_reason === "mkt-038" ? "MKT-038"
+    : entry.override_reason === "mkt-040" ? "MKT-040"
+    : entry.override_reason === "mkt-039" ? "MKT-039"
+    : entry.trend_signal ?? "";
 
   // Show live data for active entries AND single-stopped entries (surviving side still live)
   const showLiveData =
