@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
 **Last Updated:** 2026-03-16
-**Version:** 1.16.0
+**Version:** 1.16.1
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -434,8 +434,8 @@ This pipeline prevents Saxo from rejecting orders or merging positions:
 | 3 | MKT-014 | Warn if MKT-013 landed on illiquid strike | MKT-013 can undo MKT-007's liquidity optimization |
 | 4 | Fix #66 | Re-run Fix #44 after MKT-013 | MKT-013 shifts longs too, potentially creating new conflicts |
 | 5 | MKT-015 | Move new long strikes 5pt further OTM if they overlap existing long strikes | Saxo merges same-strike longs, deleting older position ID |
-| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $0.60 minimum |
-| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $2.50 minimum |
+| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $0.60 minimum (MKT-029 floor $0.50) |
+| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $2.50 minimum (MKT-029 floor $2.40) |
 
 Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
@@ -678,7 +678,7 @@ Entry #1 → #2 → #3 placed normally
 
 ## MKT Rules Reference
 
-### Active Rules (as of v1.16.0)
+### Active Rules (as of v1.16.1)
 
 | Rule | Name | Added | What It Does |
 |------|------|-------|-------------|
@@ -700,7 +700,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days) |
 | MKT-027 | VIX-Scaled Spread Width | v1.6.0 | Continuous formula `VIX × 3.5` with per-side floors (MKT-028), cap 75pt |
 | MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper) |
-| MKT-029 | Graduated Credit Fallback | v1.6.2 | -$0.05, -$0.10 steps below minimum (prevents skipping entries barely below minimum) |
+| MKT-029 | Graduated Credit Fallback | v1.6.2 | -$0.05, -$0.10 steps below minimum for BOTH calls and puts (call floor $0.50, put floor $2.40). Applied in MKT-011 gate, MKT-020/022 tightening, and MKT-035/038 call-only skip checks. |
 | MKT-031 | Smart Entry Windows | v1.8.0 | 10-min scouting before each entry; 2-parameter scoring (ATR calm + momentum pause); score >= 65 triggers early entry |
 | MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 25.0 (MKT-039 raised from 18, tighter stop makes put-only viable at moderate VIX); at VIX >= 25 skip |
 | MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
@@ -728,7 +728,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-007 | MKT-013 | MKT-007 moves strikes closer (liquid); MKT-013 moves them further (overlap). Can undo each other. |
 | MKT-013 | Fix #44/66 | MKT-013 shifts longs; Fix #66 re-checks for new long-vs-short conflicts. |
 | MKT-024 | MKT-020/022 | MKT-024 sets wider starting OTM; MKT-020/022 scan inward from there. |
-| MKT-020/022 | MKT-011 | Tightening runs first; MKT-011 re-validates with fresh quotes (call $0.60, put $2.50). |
+| MKT-020/022 | MKT-011 | Tightening runs first (uses MKT-029 fallbacks); MKT-011 re-validates with fresh quotes and its own MKT-029 fallbacks (call $0.60/$0.50, put $2.50/$2.40). |
 | MKT-021 | MKT-018 | MKT-021 skips entries → satisfies MKT-018 gate → early close fires same cycle. |
 | MKT-018 | MKT-023 | MKT-023 is a sub-check within MKT-018; can override close decision with HOLD. |
 | MKT-025 | Settlement | Short-only close leaves long leg open; settlement auto-cleans orphaned positions. |
@@ -938,8 +938,8 @@ EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at
 
 Put premiums are typically 2-7× higher than call premiums at the same delta. This means:
 - MKT-024 starts calls at 3.5× and puts at 4.0× base OTM to give MKT-020/022 room to find optimal strikes
-- MKT-011 uses separate thresholds: calls $0.60 (v1.10.4), puts $2.50 (v1.10.4)
-- MKT-020 call tightening reaches $0.60 easily → fewer MKT-011 skips/conversions
+- MKT-011 uses separate thresholds: calls $0.60 (v1.10.4), puts $2.50 (v1.10.4), with MKT-029 graduated fallback (call floor $0.50, put floor $2.40)
+- MKT-020 call tightening reaches $0.60 easily (or $0.50 at MKT-029 floor) → fewer MKT-011 skips/conversions
 - MKT-022 with $2.50 put minimum forces closer-to-ATM puts into the Week 1 sweet spot (42-65pt OTM)
 - Total_credit stop (shared by both sides) is adequate because MKT-020/022 keeps skew at 1-2x
 
@@ -985,7 +985,7 @@ One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/M
 | `data/hydra_state.json` | Daily state persistence (on VM) |
 | `data/hydra_metrics.json` | Cumulative metrics (on VM) |
 
-### State File Fields (v1.16.0)
+### State File Fields (v1.16.1)
 
 **Top-level fields added:**
 
@@ -1000,7 +1000,7 @@ One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/M
 |-------|------|-------------|
 | `skip_reason` | `string` | Human-readable skip reason (empty if not skipped). Set when both sides are skipped. |
 
-### Skip Alert Behavior (v1.16.0)
+### Skip Alert Behavior (v1.16.1)
 
 When an entry is skipped, the bot: (1) records a minimal `HydraIronCondorEntry` with `is_complete=True`, both sides flagged as skipped, and `skip_reason` set, (2) sends a Telegram `ENTRY_SKIPPED` alert (LOW priority, Telegram-only) with the reason and context.
 
@@ -1010,8 +1010,8 @@ When an entry is skipped, the bot: (1) records a minimal `HydraIronCondorEntry` 
 |------|--------|-------|
 | Margin insufficient | `"Insufficient margin"` | No (existing HIGH alert) |
 | MKT-035 not triggered | `"MKT-035: SPX not down enough for conditional entry"` | Yes |
-| MKT-035 call non-viable | `"MKT-035: call credit non-viable ($X.XX < $0.60)"` | Yes |
-| MKT-038 call non-viable | `"MKT-038: call credit non-viable on FOMC T+1 ($X.XX < $0.60)"` | Yes |
+| MKT-035 call non-viable | `"MKT-035: call credit non-viable ($X.XX < $0.50)"` | Yes |
+| MKT-038 call non-viable | `"MKT-038: call credit non-viable on FOMC T+1 ($X.XX < $0.50)"` | Yes |
 | MKT-011 both non-viable | `"MKT-011: both sides below minimum credit (call $X.XX, put $X.XX)"` | Yes |
 | MKT-032 VIX gate | `"MKT-032: VIX X.X too high for put-only (max 25.0)"` | Yes |
 | MKT-010 one wing illiquid | `"MKT-010: [call/put] wings illiquid"` | Yes |

@@ -9,6 +9,8 @@ The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
 but is informational only — base entries are full iron condors or put-only via MKT-011.
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
+MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.50, put floor $2.40).
+MKT-035/MKT-038 call-only entries also use MKT-029 call floor ($0.50).
 - Both sides viable: Proceed with full iron condor
 - Call non-viable, put viable, VIX < 25: Place put-only entry (MKT-032/MKT-039 VIX gate)
 - Call non-viable, put viable, VIX >= 25: Skip entry (no call hedge in volatile conditions)
@@ -21,6 +23,7 @@ Conditional Entry Trigger (MKT-035): Only affects conditional entries E6/E7.
 - Stop = call_credit + theoretical $2.50 put + buffer (not 2× credit)
 
 Version History:
+- 1.16.1 (2026-03-19): MKT-029 graduated call fallback in credit gate. Previously only puts had MKT-029 fallback (-$0.05, -$0.10) in _check_credit_gate(); calls used hard $0.60 minimum. Now both sides use graduated fallback: call $0.60→$0.55→$0.50, put $2.50→$2.45→$2.40. MKT-035/MKT-038 call-only skip checks also lowered from $0.60 to $0.50 floor. Fixed stale comments referencing $0.75 calls and $1.75 puts. All agent prompts updated.
 - 1.16.0 (2026-03-16): Skip alerts + dashboard improvements. Telegram ENTRY_SKIPPED alerts at all 8 skip paths in _initiate_entry() with detailed reasons (MKT-011 both non-viable, MKT-032 VIX gate, MKT-035 not triggered, MKT-038 call non-viable, MKT-010 illiquidity, margin). Skipped entries now persisted in state file with skip_reason field for dashboard display. entry_schedule (base + conditional times) added to state file. Dashboard: mobile-responsive header, pending entry cards show scheduled times, skipped entry cards show reason. HERMES can see entry_schedule + skip_reason in trimmed state.
 - 1.15.1 (2026-03-16): MKT-040 call-only entries when put non-viable. When put credit below minimum but call viable, place call-only instead of skipping. Data: 89% WR for low-credit call-only, +$46 EV per entry. Stop = call + theo $2.50 put + buffer (unified with MKT-035/038). Override reason: "mkt-040".
 - 1.15.0 (2026-03-16): MKT-039 put-only stop tightening + MKT-032 VIX gate raise. Put-only stop changed from 2×credit+buffer to credit+buffer — $5.00 put buffer already prevents 91% false stops, 2× was redundant (max loss $750→$500). MKT-032 VIX gate raised 18→25 (tighter stop makes put-only viable at moderate VIX). Call-only later unified to call + theo $2.50 put + buffer. All agent SYSTEM_PROMPTs updated to v1.15.0.

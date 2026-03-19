@@ -45,7 +45,7 @@ Multi-strategy options trading platform using Saxo Bank API, running on Google C
 - EMA 20/40 trend signal is informational only (logged, does NOT drive entry type)
 - **Asymmetric spreads (MKT-028)**: Call floor 60pt, put floor 75pt, cap 75pt
 - **Starting OTM (MKT-024)**: 3.5× calls, 4.0× puts, scans inward via MKT-020/022
-- **Credit Gate (MKT-011)**: $0.75 calls, $1.75 puts — call non-viable → put-only entry (v1.7.1, 87.5% WR), call-only disabled
+- **Credit Gate (MKT-011)**: $0.60 calls, $2.50 puts with MKT-029 graduated fallback (call floor $0.50, put floor $2.40) — call non-viable → put-only (VIX < 25), put non-viable → call-only (MKT-040, 89% WR)
 - **MKT-025**: Short-only stop close (long expires at settlement)
 - **Hold-to-expiry**: MKT-018 early close intentionally disabled (backtest shows hold outperforms)
 - **Smart Entry Windows (MKT-031)**: 10-min scouting before each entry, score >= 65 triggers early entry

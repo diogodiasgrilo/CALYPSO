@@ -76,7 +76,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.16.0"
+HYDRA_VERSION = "1.16.1"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -1893,18 +1893,32 @@ class HydraStrategy(MEICStrategy):
             )
             return ("proceed", False, 0.0, 0.0)  # estimation_worked = False
 
-        # Separate thresholds: calls use min_viable_credit_per_side ($0.75),
-        # puts use min_viable_credit_put_side ($1.75 — top of Tammy's range)
+        # Separate thresholds: calls use min_viable_credit_per_side ($0.60),
+        # puts use min_viable_credit_put_side ($2.50)
         call_min = self.min_viable_credit_per_side
         put_min = self.min_viable_credit_put_side
         call_viable = estimated_call >= call_min
         put_viable = estimated_put >= put_min
 
-        # MKT-029: Call side uses strict $0.75 minimum (no fallbacks)
-        # If call can't reach $0.75, entry converts to put-only instead of
-        # forcing a weak full IC. Data shows put-only at 87.5% win rate.
+        # MKT-029: Graduated call fallback — try min-$0.05, then min-$0.10
+        # Accepts borderline call credits instead of skipping or converting to
+        # put-only. Keeps entries further OTM (wider cushion = safer).
+        if not call_viable:
+            for fallback in [call_min - 5, call_min - 10]:
+                if estimated_call >= fallback:
+                    call_viable = True
+                    logger.info(
+                        f"MKT-029: Call credit ${estimated_call / 100:.2f} accepted at "
+                        f"fallback ${fallback / 100:.2f} (primary: ${call_min / 100:.2f})"
+                    )
+                    self._log_safety_event(
+                        "MKT-029_CALL_FALLBACK",
+                        f"Entry #{entry.entry_number}: call ${estimated_call / 100:.2f} "
+                        f"at fallback ${fallback / 100:.2f}"
+                    )
+                    break
 
-        # MKT-029: Graduated put fallback — try $1.70, then $1.65
+        # MKT-029: Graduated put fallback — try min-$0.05, then min-$0.10
         if not put_viable:
             for fallback in [put_min - 5, put_min - 10]:
                 if estimated_put >= fallback:
@@ -2044,7 +2058,7 @@ class HydraStrategy(MEICStrategy):
 
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_call_otm_distance
-        min_credit = self.min_viable_credit_per_side  # In cents (e.g., 75 for $0.75)
+        min_credit = self.min_viable_credit_per_side  # In cents (e.g., 60 for $0.60)
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
 
         initial_short_call = entry.short_call_strike
@@ -2223,7 +2237,7 @@ class HydraStrategy(MEICStrategy):
         to ATM in 5pt steps until credit >= minimum or OTM floor is reached.
 
         Uses put-specific minimum credit (min_viable_credit_put_side, default
-        $1.75) which is the top of Tammy's $1.00-$1.75 per-side range.
+        $2.50) — raised from $1.75 based on 20-day data analysis.
 
         Uses batch quote API for efficiency: 1 chain fetch + 1 batch quote
         regardless of how many candidate strikes are evaluated.
@@ -2239,7 +2253,7 @@ class HydraStrategy(MEICStrategy):
 
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_put_otm_distance
-        min_credit = self.min_viable_credit_put_side  # Put-specific: $175 for $1.75
+        min_credit = self.min_viable_credit_put_side  # Put-specific: $250 for $2.50
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
 
         initial_short_put = entry.short_put_strike
@@ -2887,12 +2901,13 @@ class HydraStrategy(MEICStrategy):
                             f"placing CALL spread only"
                         )
 
-                        # Still check call credit viability
+                        # Still check call credit viability (with MKT-029 fallback: min-$0.10)
                         gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
-                        if est_call < self.min_viable_credit_per_side:
+                        call_floor = self.min_viable_credit_per_side - 10  # MKT-029 hard floor
+                        if est_call < call_floor:
                             logger.info(
                                 f"MKT-035: Entry #{entry_num} call credit "
-                                f"${est_call / 100:.2f} below minimum — skipping"
+                                f"${est_call / 100:.2f} below floor — skipping"
                             )
                             self.daily_state.entries_skipped += 1
                             self.daily_state.credit_gate_skips += 1
@@ -2902,8 +2917,8 @@ class HydraStrategy(MEICStrategy):
                             self._next_entry_index += 1
                             self._record_skipped_entry(
                                 entry_num,
-                                f"MKT-035: call credit non-viable (${est_call / 100:.2f} < ${self.min_viable_credit_per_side / 100:.2f})",
-                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})"
+                                f"MKT-035: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
+                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})"
                             )
                             return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
 
@@ -2928,12 +2943,13 @@ class HydraStrategy(MEICStrategy):
                             f"placing CALL spread only"
                         )
 
-                        # Check call credit viability
+                        # Check call credit viability (with MKT-029 fallback: min-$0.10)
                         gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
-                        if est_call < self.min_viable_credit_per_side:
+                        call_floor = self.min_viable_credit_per_side - 10  # MKT-029 hard floor
+                        if est_call < call_floor:
                             logger.info(
                                 f"MKT-038: Entry #{entry_num} call credit "
-                                f"${est_call / 100:.2f} below minimum — skipping"
+                                f"${est_call / 100:.2f} below floor — skipping"
                             )
                             self.daily_state.entries_skipped += 1
                             self.daily_state.credit_gate_skips += 1
@@ -2943,8 +2959,8 @@ class HydraStrategy(MEICStrategy):
                             self._next_entry_index += 1
                             self._record_skipped_entry(
                                 entry_num,
-                                f"MKT-038: call credit non-viable on FOMC T+1 (${est_call / 100:.2f} < ${self.min_viable_credit_per_side / 100:.2f})",
-                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})"
+                                f"MKT-038: call credit non-viable on FOMC T+1 (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
+                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})"
                             )
                             return f"Entry #{entry_num} skipped - call credit non-viable (MKT-038)"
 
@@ -3328,7 +3344,7 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # PUT-ONLY ENTRY EXECUTION (v1.7.1 — MKT-011 re-enablement)
     # =========================================================================
-    # When call credit is non-viable (< $0.75 strict), place only the put
+    # When call credit is non-viable (< $0.60 with MKT-029 floor $0.50), place only the put
     # spread. Data from Feb 10 - Mar 2: 87.5% win rate, +$870 net from
     # 6 qualifying entries.
     #

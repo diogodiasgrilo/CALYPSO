@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.16.0 | **Last Updated:** 2026-03-16
+**Version:** 1.16.1 | **Last Updated:** 2026-03-19
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -57,17 +57,19 @@ When triggered:
 
 ### Credit Gate (MKT-011)
 
-Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($0.60) and puts ($2.50). For conditional entries (E6/E7), MKT-035 runs first — when triggered, only call credit is checked.
+Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($0.60) and puts ($2.50), with MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.50, put floor $2.40). For conditional entries (E6/E7), MKT-035 runs first — when triggered, only call credit is checked. MKT-035 and MKT-038 call-only entries also use the MKT-029 call floor ($0.50).
 
 | Condition | Call Credit | Put Credit | VIX | Action |
 |-----------|-------------|------------|-----|--------|
-| Conditional entry (MKT-035) | >= $0.60 | N/A | Any | Place call-only entry |
-| Conditional entry (MKT-035) | < $0.60 | N/A | Any | Skip entry |
-| Base entry | >= $0.60 | >= $2.50 | Any | Proceed with full iron condor |
-| Normal | < $0.60 | >= $2.50 | < 25 | Place put-only entry (MKT-032/MKT-039 allows) |
-| Normal | < $0.60 | >= $2.50 | >= 25 | Skip entry (MKT-032: no call hedge in volatile conditions) |
-| Normal | >= $0.60 | < $2.50 | Any | Retry with tighter put strikes (5pt, max 2 retries), then call-only (MKT-040: 89% WR) |
-| Normal | < $0.60 | < $2.50 | Any | Skip entry |
+| Conditional entry (MKT-035) | >= $0.50 (MKT-029 floor) | N/A | Any | Place call-only entry |
+| Conditional entry (MKT-035) | < $0.50 | N/A | Any | Skip entry |
+| FOMC T+1 (MKT-038) | >= $0.50 (MKT-029 floor) | N/A | Any | Place call-only entry |
+| FOMC T+1 (MKT-038) | < $0.50 | N/A | Any | Skip entry |
+| Base entry | >= $0.60 ($0.50 w/ MKT-029) | >= $2.50 ($2.40 w/ MKT-029) | Any | Proceed with full iron condor |
+| Normal | < $0.50 | >= $2.40 | < 25 | Place put-only entry (MKT-032/MKT-039 allows) |
+| Normal | < $0.50 | >= $2.40 | >= 25 | Skip entry (MKT-032: no call hedge in volatile conditions) |
+| Normal | >= $0.60 ($0.50 w/ MKT-029) | < $2.40 | Any | Retry with tighter put strikes (5pt, max 2 retries), then call-only (MKT-040: 89% WR) |
+| Normal | < $0.50 | < $2.40 | Any | Skip entry |
 
 ### Illiquidity Fallback (MKT-010)
 
@@ -79,7 +81,7 @@ Calls start at 3.5× and puts at 4.0× the VIX-adjusted OTM distance (asymmetric
 
 ### Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts)
 
-From the MKT-024 starting distance, progressively moves the short strike closer to ATM in 5pt steps until credit meets the minimum ($0.60 for calls, $2.50 for puts) or a 25pt OTM floor is reached.
+From the MKT-024 starting distance, progressively moves the short strike closer to ATM in 5pt steps until credit meets the minimum ($0.60 for calls, $2.50 for puts — with MKT-029 fallback floors $0.50/$2.40) or a 25pt OTM floor is reached.
 
 ```
 Flow: MKT-024 (wider start) → MKT-020 (calls) → MKT-022 (puts) → MKT-011 credit gate
@@ -259,7 +261,7 @@ sudo journalctl -u hydra -f
 | Entry type | Always full IC | Full IC, put-only (MKT-032), or call-only (MKT-035/038/040) via credit gate |
 | Starting OTM | VIX-adjusted | 3.5× calls, 4.0× puts (MKT-024), then tightened |
 | Spread widths | 50pt fixed | Asymmetric: call 60pt, put 75pt floor, 75pt cap (MKT-026/027/028) |
-| Credit minimums | $0.50/side | $0.60 calls, $2.50 puts |
+| Credit minimums | $0.50/side | $0.60 calls, $2.50 puts (MKT-029 floors: $0.50/$2.40) |
 | Trend signal | None | EMA 20/40 (informational only) |
 | Smart entry | None | MKT-031 10-min scouting windows (post-spike + momentum scoring) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
@@ -307,6 +309,7 @@ bots/hydra/
 
 ## Version History
 
+- **1.16.1** (2026-03-19): MKT-029 graduated call fallback in credit gate. Calls now have graduated fallback like puts: $0.60→$0.55→$0.50. MKT-035/MKT-038 call-only skip checks lowered from $0.60 to $0.50 floor. Fixed stale comments ($0.75→$0.60, $1.75→$2.50). All agent prompts updated.
 - **1.16.0** (2026-03-16): Skip alerts + dashboard improvements. Telegram ENTRY_SKIPPED alerts at all 8 skip paths with detailed reasons. Skipped entries persisted in state file with `skip_reason` field. `entry_schedule` (base + conditional times) added to state file. Dashboard: mobile-responsive header, pending cards show scheduled times, skipped cards show reason. HERMES trimmed state includes `entry_schedule` + `skip_reason`.
 - **1.15.1** (2026-03-16): MKT-040 call-only entries when put credit non-viable. When put credit < $2.50 but call credit >= $0.60, place call-only entry instead of skipping. Data: 89% WR for low-credit call-only entries, +$46 EV per entry. Stop = call + theo $2.50 put + buffer (unified with MKT-035/038). No VIX gate (unlike MKT-032 for put-only). Gated by existing `one_sided_entries_enabled` config. Override reason: `mkt-040`.
 - **1.15.0** (2026-03-16): MKT-039 put-only stop tightening + MKT-032 VIX gate raise. Put-only stop changed from 2×credit+buffer to credit+buffer — $5.00 put buffer already prevents 91% false stops, 2× was redundant (max loss $750→$500). MKT-032 VIX gate raised 18→25 (tighter stop makes put-only viable at moderate VIX). Call-only later unified to call + theo $2.50 put + buffer. All agent SYSTEM_PROMPTs updated to v1.15.0.
