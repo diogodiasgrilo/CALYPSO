@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-03-16
+**Last Updated:** 2026-03-19
 **Version:** 1.16.1
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)

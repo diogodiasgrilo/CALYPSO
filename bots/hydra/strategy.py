@@ -530,8 +530,8 @@ class HydraStrategy(MEICStrategy):
         above the minimum credit threshold.
 
         This gives puts more breathing room on volatile days (put skew means
-        $1.75 credit is found much further OTM) while calls still tighten
-        to reach $1.00 as before.
+        $2.50 credit is found much further OTM) while calls still tighten
+        to reach $0.60 ($0.50 with MKT-029 fallback floor).
 
         Args:
             entry: HydraIronCondorEntry to populate with strikes
@@ -2878,12 +2878,20 @@ class HydraStrategy(MEICStrategy):
                 place_call_only = False  # MKT-035: call-only on down days
                 original_trend = trend  # Save original trend for hybrid logic
 
+                # Check MKT-038 (FOMC T+1) once here so we can skip put tightening
+                from shared.event_calendar import is_fomc_t_plus_one
+                is_fomc_t1 = (
+                    self.fomc_t1_callonly_enabled and not self.dry_run
+                    and is_fomc_t_plus_one()
+                )
+
                 # MKT-020/MKT-022: Progressive OTM tightening
                 if not self.dry_run:
                     self._apply_progressive_call_tightening(entry)
-                    if not is_conditional:
-                        # Only tighten puts for base entries — conditional entries
-                        # are always call-only (MKT-035), put tightening wastes API calls
+                    if not is_conditional and not is_fomc_t1:
+                        # Skip put tightening for unconditional call-only entries:
+                        # MKT-035 conditional (E6/E7) and MKT-038 FOMC T+1 base entries
+                        # both never place puts — scanning wastes multiple API calls
                         self._apply_progressive_put_tightening(entry)
 
                 if not self.dry_run:
@@ -2902,7 +2910,9 @@ class HydraStrategy(MEICStrategy):
                         )
 
                         # Still check call credit viability (with MKT-029 fallback: min-$0.10)
-                        gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
+                        # NOTE: do NOT zero put strikes yet — _estimate_entry_credit needs real
+                        # strike values to look up UICs (zeroing causes estimation to fail → skip)
+                        _, _, est_call, _ = self._check_credit_gate(entry)
                         call_floor = self.min_viable_credit_per_side - 10  # MKT-029 hard floor
                         if est_call < call_floor:
                             logger.info(
@@ -2929,40 +2939,38 @@ class HydraStrategy(MEICStrategy):
                         pass
 
                 # MKT-038: Force call-only on T+1 after FOMC announcement
-                if not credit_gate_handled and not self.dry_run and self.fomc_t1_callonly_enabled:
-                    from shared.event_calendar import is_fomc_t_plus_one
-                    if is_fomc_t_plus_one():
-                        entry.call_only = True
-                        entry.put_only = False
-                        entry.put_side_skipped = True
-                        entry.override_reason = "mkt-038"
-                        place_call_only = True
-                        credit_gate_handled = True
-                        logger.info(
-                            f"MKT-038: Entry #{entry_num} — FOMC T+1 (announcement yesterday), "
-                            f"placing CALL spread only"
-                        )
+                if not credit_gate_handled and is_fomc_t1:
+                    entry.call_only = True
+                    entry.put_only = False
+                    entry.put_side_skipped = True
+                    entry.override_reason = "mkt-038"
+                    place_call_only = True
+                    credit_gate_handled = True
+                    logger.info(
+                        f"MKT-038: Entry #{entry_num} — FOMC T+1 (announcement yesterday), "
+                        f"placing CALL spread only"
+                    )
 
-                        # Check call credit viability (with MKT-029 fallback: min-$0.10)
-                        gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
-                        call_floor = self.min_viable_credit_per_side - 10  # MKT-029 hard floor
-                        if est_call < call_floor:
-                            logger.info(
-                                f"MKT-038: Entry #{entry_num} call credit "
-                                f"${est_call / 100:.2f} below floor — skipping"
-                            )
-                            self.daily_state.entries_skipped += 1
-                            self.daily_state.credit_gate_skips += 1
-                            self._entry_in_progress = False
-                            self._current_entry = None
-                            self.state = MEICState.MONITORING
-                            self._next_entry_index += 1
-                            self._record_skipped_entry(
-                                entry_num,
-                                f"MKT-038: call credit non-viable on FOMC T+1 (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})"
-                            )
-                            return f"Entry #{entry_num} skipped - call credit non-viable (MKT-038)"
+                    # Check call credit viability (with MKT-029 fallback: min-$0.10)
+                    _, _, est_call, _ = self._check_credit_gate(entry)
+                    call_floor = self.min_viable_credit_per_side - 10  # MKT-029 hard floor
+                    if est_call < call_floor:
+                        logger.info(
+                            f"MKT-038: Entry #{entry_num} call credit "
+                            f"${est_call / 100:.2f} below floor — skipping"
+                        )
+                        self.daily_state.entries_skipped += 1
+                        self.daily_state.credit_gate_skips += 1
+                        self._entry_in_progress = False
+                        self._current_entry = None
+                        self.state = MEICState.MONITORING
+                        self._next_entry_index += 1
+                        self._record_skipped_entry(
+                            entry_num,
+                            f"MKT-038: call credit non-viable on FOMC T+1 (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
+                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})"
+                        )
+                        return f"Entry #{entry_num} skipped - call credit non-viable (MKT-038)"
 
                 # MKT-011: Check minimum credit gate (only if MKT-035 didn't already handle)
                 if not credit_gate_handled and not self.dry_run:
@@ -4789,11 +4797,16 @@ class HydraStrategy(MEICStrategy):
                 icon = "🟢"  # All opened sides active or expired/skipped (good)
 
             # Strikes line
+            put_strike_str = (
+                "SKIP"
+                if put_skipped
+                else f"{entry.short_put_strike:.0f}/{entry.long_put_strike:.0f}"
+            )
             lines.append("")
             lines.append(
                 f"{icon} #{entry.entry_number} "
                 f"C:{entry.short_call_strike:.0f}/{entry.long_call_strike:.0f} "
-                f"P:{entry.short_put_strike:.0f}/{entry.long_put_strike:.0f}"
+                f"P:{put_strike_str}"
             )
 
             # Credit, P&L, cushion line
