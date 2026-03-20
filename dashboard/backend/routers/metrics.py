@@ -8,7 +8,7 @@ from dashboard.backend.config import settings
 from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.db_reader import BacktestingDBReader
 from dashboard.backend.services.live_state import LiveStateProvider
-from dashboard.backend.services.market_status import get_today_et
+from dashboard.backend.services.market_status import get_today_et, is_after_market_close
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
@@ -35,7 +35,9 @@ def _has_today(summaries: list[dict]) -> bool:
 
 
 def _append_today_summary(summaries: list[dict]) -> list[dict]:
-    """Append today's live summary if not already in the list."""
+    """Append today's live summary only after market close (4:00 PM ET)."""
+    if not is_after_market_close():
+        return summaries
     if _live_state and not _has_today(summaries):
         today_summary = _live_state.get_today_summary()
         if today_summary:
@@ -74,8 +76,8 @@ async def get_all_entries():
     """All historical entries for analytics."""
     entries = await db_reader.get_all_entries()
 
-    # Append today's entries from state file if not in DB yet
-    if _live_state:
+    # Append today's entries from state file only after market close
+    if _live_state and is_after_market_close():
         today = get_today_et()
         has_today = any(e.get("date") == today for e in entries)
         if not has_today:
@@ -91,8 +93,8 @@ async def get_all_stops():
     """All historical stops for analytics."""
     stops = await db_reader.get_all_stops()
 
-    # Append today's stops from state file if not in DB yet
-    if _live_state:
+    # Append today's stops from state file only after market close
+    if _live_state and is_after_market_close():
         today = get_today_et()
         has_today = any(s.get("date") == today for s in stops)
         if not has_today:
@@ -108,8 +110,8 @@ async def get_comparisons():
     """Comparison statistics (averages across all trading days)."""
     data = await db_reader.get_comparison_stats()
 
-    # If we have DB data, augment with today's values for more accurate stats
-    if data and _live_state:
+    # If we have DB data, augment with today's values only after market close
+    if data and _live_state and is_after_market_close():
         today_summary = _live_state.get_today_summary()
         today_entries = _live_state.get_today_entries()
         if today_summary:
@@ -141,8 +143,8 @@ async def get_performance():
     """Daily P&L values for client-side performance metric calculations."""
     pnls = await db_reader.get_daily_pnls()
 
-    # Append today's net P&L if not in DB yet
-    if _live_state:
+    # Append today's net P&L only after market close
+    if _live_state and is_after_market_close():
         today_pnl = _live_state.get_today_net_pnl()
         if today_pnl is not None:
             # Check if today is already in DB by comparing count

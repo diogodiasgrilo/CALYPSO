@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useHydraStore } from "../../store/hydraStore";
 import type { HydraEntry } from "../../store/hydraStore";
 import { statusColor, colors } from "../../lib/tradingColors";
@@ -34,6 +35,18 @@ function getStatus(entry: HydraEntry | undefined): EntryStatus {
 export function EntryTimeline() {
   const { hydraState } = useHydraStore();
   const entries = hydraState?.entries ?? [];
+
+  const [showConditional, setShowConditional] = useState(true);
+  useEffect(() => {
+    fetch("/api/hydra/bot-config")
+      .then((r) => r.json())
+      .then((cfg) => {
+        setShowConditional(
+          cfg.conditional_e6_enabled !== false || cfg.conditional_e7_enabled !== false
+        );
+      })
+      .catch(() => {});
+  }, []);
 
   return (
     <div>
@@ -84,8 +97,8 @@ export function EntryTimeline() {
             );
           })}
 
-          {/* Conditional entry dots (E6-E7) — diamond shape, dashed when pending */}
-          {CONDITIONAL_ENTRY_TIMES.map((time, i) => {
+          {/* Conditional entry dots (E6-E7) — hidden when disabled in config */}
+          {showConditional && CONDITIONAL_ENTRY_TIMES.map((time, i) => {
             const minutes = timeToMinutes(time);
             const pct = ((minutes - TIMELINE_START) / TIMELINE_RANGE) * 100;
             const entryNum = 6 + i;

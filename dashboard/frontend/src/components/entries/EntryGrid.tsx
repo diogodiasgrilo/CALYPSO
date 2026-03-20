@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useHydraStore, type HydraState } from "../../store/hydraStore";
 import { EntryCard } from "./EntryCard";
 import { colors } from "../../lib/tradingColors";
@@ -6,6 +7,18 @@ export function EntryGrid() {
   const { hydraState } = useHydraStore();
   const entries = hydraState?.entries ?? [];
   const schedule = hydraState?.entry_schedule;
+
+  const [showConditional, setShowConditional] = useState(true);
+  useEffect(() => {
+    fetch("/api/hydra/bot-config")
+      .then((r) => r.json())
+      .then((cfg) => {
+        setShowConditional(
+          cfg.conditional_e6_enabled !== false || cfg.conditional_e7_enabled !== false
+        );
+      })
+      .catch(() => {});
+  }, []);
 
   // 5 base entry slots (E1-E5)
   const baseSlots = Array.from({ length: 5 }, (_, i) =>
@@ -37,26 +50,28 @@ export function EntryGrid() {
         )}
       </div>
 
-      {/* Conditional entries: E6-E7 (MKT-035 down-day call-only) */}
-      <div className="mt-2">
-        <span className="text-[10px] text-text-dim uppercase tracking-wider">
-          Conditional (MKT-035 down day)
-        </span>
-        <div className="grid grid-cols-5 gap-2 max-lg:grid-cols-3 max-sm:grid-cols-1 mt-1">
-          {conditionalSlots.map((entry, i) =>
-            entry ? (
-              <EntryCard key={`cond-${i}`} entry={entry} isConditional />
-            ) : (
-              <PendingSlot
-                key={`cond-${i}`}
-                entryNum={6 + i}
-                scheduledTime={schedule?.conditional?.[i]}
-                isConditional
-              />
-            )
-          )}
+      {/* Conditional entries: E6-E7 (MKT-035 down-day call-only) — hidden when disabled in config */}
+      {showConditional && (
+        <div className="mt-2">
+          <span className="text-[10px] text-text-dim uppercase tracking-wider">
+            Conditional (MKT-035 down day)
+          </span>
+          <div className="grid grid-cols-5 gap-2 max-lg:grid-cols-3 max-sm:grid-cols-1 mt-1">
+            {conditionalSlots.map((entry, i) =>
+              entry ? (
+                <EntryCard key={`cond-${i}`} entry={entry} isConditional />
+              ) : (
+                <PendingSlot
+                  key={`cond-${i}`}
+                  entryNum={6 + i}
+                  scheduledTime={schedule?.conditional?.[i]}
+                  isConditional
+                />
+              )
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

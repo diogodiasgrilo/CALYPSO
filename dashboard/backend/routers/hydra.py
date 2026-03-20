@@ -1,5 +1,6 @@
 """HYDRA state and entry endpoints."""
 
+import json
 import re
 
 from fastapi import APIRouter
@@ -16,6 +17,22 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 state_reader = StateFileReader(settings.hydra_state_file)
 db_reader = BacktestingDBReader(settings.backtesting_db)
+
+
+@router.get("/bot-config")
+async def get_bot_config():
+    """Read E6/E7 enabled flags from bot config file."""
+    config_path = settings.calypso_root / "bots/hydra/config/config.json"
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        strategy = config.get("strategy", {})
+        return {
+            "conditional_e6_enabled": strategy.get("conditional_e6_enabled", True),
+            "conditional_e7_enabled": strategy.get("conditional_e7_enabled", True),
+        }
+    except Exception:
+        return {"conditional_e6_enabled": True, "conditional_e7_enabled": True}
 
 
 @router.get("/state")

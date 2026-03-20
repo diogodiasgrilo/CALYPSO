@@ -35,6 +35,14 @@ except ImportError:
     MARKET_HOURS_AVAILABLE = False
 
 
+def is_after_market_close() -> bool:
+    """Return True if current ET time is 4:00 PM or later (market closed)."""
+    if MARKET_HOURS_AVAILABLE:
+        now = get_us_market_time()
+        return now.hour >= 16
+    return False
+
+
 def get_today_et() -> str:
     """Get today's date in Eastern Time as YYYY-MM-DD string.
 
