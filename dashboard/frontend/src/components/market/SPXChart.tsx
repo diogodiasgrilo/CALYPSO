@@ -139,9 +139,9 @@ export function SPXChart() {
     prevStopCountRef.current = currentStopCount;
     prevShowStrikesRef.current = showStrikes;
 
-    // Build entry markers (exclude skipped entries — they have skip_reason set)
+    // Build entry markers (exclude fully-skipped entries where both sides were never placed)
     const markers = entries
-      .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()) && !e.skip_reason)
+      .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()) && !(e.call_side_skipped && e.put_side_skipped))
       .map((e) => ({
         time: parseET(e.entry_time!) as Time,
         position: "aboveBar" as const,
