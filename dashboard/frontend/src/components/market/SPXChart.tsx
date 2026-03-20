@@ -139,9 +139,9 @@ export function SPXChart() {
     prevStopCountRef.current = currentStopCount;
     prevShowStrikesRef.current = showStrikes;
 
-    // Build entry markers
+    // Build entry markers (exclude skipped entries — they have skip_reason set)
     const markers = entries
-      .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()))
+      .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()) && !e.skip_reason)
       .map((e) => ({
         time: parseET(e.entry_time!) as Time,
         position: "aboveBar" as const,

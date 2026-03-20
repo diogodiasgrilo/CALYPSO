@@ -108,13 +108,12 @@ class StateFileReader:
 
         if not self._prev_entries:
             # First read after start — seed already-stopped entries
-            # using real stop timestamps from state file (or entry_time fallback).
+            # using real stop timestamps from state file (or entry_time fallback,
+            # or current time as last resort — same as the live transition path).
             for num, e in current.items():
                 for side, flag in [("call", "call_side_stopped"), ("put", "put_side_stopped")]:
                     if e.get(flag) and (num, side) not in existing_keys:
-                        stop_time = e.get(_time_keys[side]) or e.get("entry_time")
-                        if not stop_time:
-                            continue
+                        stop_time = e.get(_time_keys[side]) or e.get("entry_time") or _now_et_iso()
                         self._detected_stops.append({
                             "entry_number": num,
                             "side": side,
