@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
 import { useHydraStore } from "../../store/hydraStore";
 import type { HydraEntry } from "../../store/hydraStore";
 import { statusColor, colors } from "../../lib/tradingColors";
 import type { EntryStatus } from "../shared/StatusBadge";
+import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 
 // Base entries: 5 scheduled at :15/:45 starting 10:15 AM ET
 const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15", "11:45", "12:15"];
 // Conditional entries: only fire when MKT-035 triggers (SPX < open -0.3%), always call-only
+// Hidden entirely when conditional_e6_enabled and conditional_e7_enabled are both false in config
 const CONDITIONAL_ENTRY_TIMES = ["12:45", "13:15"];
 
 const TIMELINE_START = 9.5 * 60; // 9:30 in minutes
@@ -35,18 +36,7 @@ function getStatus(entry: HydraEntry | undefined): EntryStatus {
 export function EntryTimeline() {
   const { hydraState } = useHydraStore();
   const entries = hydraState?.entries ?? [];
-
-  const [showConditional, setShowConditional] = useState(true);
-  useEffect(() => {
-    fetch("/api/hydra/bot-config")
-      .then((r) => r.json())
-      .then((cfg) => {
-        setShowConditional(
-          cfg.conditional_e6_enabled !== false || cfg.conditional_e7_enabled !== false
-        );
-      })
-      .catch(() => {});
-  }, []);
+  const showConditional = useShowConditionalEntries();
 
   return (
     <div>

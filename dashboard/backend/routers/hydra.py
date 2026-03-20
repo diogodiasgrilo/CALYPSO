@@ -1,10 +1,13 @@
 """HYDRA state and entry endpoints."""
 
 import json
+import logging
 import re
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("dashboard.hydra")
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
@@ -31,7 +34,8 @@ async def get_bot_config():
             "conditional_e6_enabled": strategy.get("conditional_e6_enabled", True),
             "conditional_e7_enabled": strategy.get("conditional_e7_enabled", True),
         }
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Could not read bot config ({config_path}): {e}")
         return {"conditional_e6_enabled": True, "conditional_e7_enabled": True}
 
 

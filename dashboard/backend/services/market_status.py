@@ -36,10 +36,15 @@ except ImportError:
 
 
 def is_after_market_close() -> bool:
-    """Return True if current ET time is 4:00 PM or later (market closed)."""
+    """Return True if current ET time is at or past market close.
+
+    Uses 1:00 PM on early close days (Black Friday, July 3rd, Christmas Eve),
+    4:00 PM on regular days.
+    """
     if MARKET_HOURS_AVAILABLE:
         now = get_us_market_time()
-        return now.hour >= 16
+        close_hour = 13 if is_early_close_day() else 16
+        return now.hour >= close_hour
     return False
 
 

@@ -916,8 +916,8 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `downday_threshold_pct` | `0.003` | MKT-035: SPX must drop this % below the session open to trigger (0.3%) |
 | `downday_theoretical_put_credit` | `2.50` | MKT-035: Theoretical put credit ($) for stop calculation |
 | `conditional_entry_times` | `["12:45","13:15"]` | MKT-035: Extra entries that only fire on down days |
-| `conditional_e6_enabled` | `true` | MKT-035: Enable/disable E6 conditional entry individually |
-| `conditional_e7_enabled` | `true` | MKT-035: Enable/disable E7 conditional entry individually |
+| `conditional_e6_enabled` | `false` | MKT-035: Enable/disable E6 conditional entry individually. **Currently DISABLED** (2026-03-20) — re-enable after 10+ valid-trigger days accumulate |
+| `conditional_e7_enabled` | `false` | MKT-035: Enable/disable E7 conditional entry individually. **Currently DISABLED** (2026-03-20) — re-enable after 10+ valid-trigger days accumulate |
 
 ### Filters (`config.filters`)
 

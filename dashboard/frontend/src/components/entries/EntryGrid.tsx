@@ -1,24 +1,13 @@
-import { useEffect, useState } from "react";
 import { useHydraStore, type HydraState } from "../../store/hydraStore";
 import { EntryCard } from "./EntryCard";
 import { colors } from "../../lib/tradingColors";
+import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 
 export function EntryGrid() {
   const { hydraState } = useHydraStore();
   const entries = hydraState?.entries ?? [];
   const schedule = hydraState?.entry_schedule;
-
-  const [showConditional, setShowConditional] = useState(true);
-  useEffect(() => {
-    fetch("/api/hydra/bot-config")
-      .then((r) => r.json())
-      .then((cfg) => {
-        setShowConditional(
-          cfg.conditional_e6_enabled !== false || cfg.conditional_e7_enabled !== false
-        );
-      })
-      .catch(() => {});
-  }, []);
+  const showConditional = useShowConditionalEntries();
 
   // 5 base entry slots (E1-E5)
   const baseSlots = Array.from({ length: 5 }, (_, i) =>
