@@ -27,14 +27,15 @@ DATA_START_DATE = "2026-03-11"
 class SimParams:
     """Simulator input parameters — the config knobs."""
     stop_buffer: float = 0.10           # call-side buffer ($/contract)
-    put_stop_buffer: float = 5.00       # put-side buffer ($/contract)
-    min_credit_call: float = 60.0       # call credit gate ($ total, not per-share)
-    min_credit_put: float = 250.0       # put credit gate ($ total)
+    put_stop_buffer: float = 1.00       # put-side buffer ($/contract) — optimized from $5.00
+    min_credit_call: float = 125.0      # call credit gate ($ total) — optimized from $60
+    min_credit_put: float = 225.0       # put credit gate ($ total) — optimized from $250
     put_only_max_vix: float = 25.0      # MKT-032 VIX gate for put-only
     max_entries: int = 5                # max base entries per day
     commission_per_leg: float = 2.50    # per-leg commission
     conditional_entries: bool = True     # E6/E7 enabled
-    downday_threshold_pct: float = 0.003  # MKT-035 threshold
+    downday_threshold_pct: float = 0.003  # MKT-035 downday threshold (0.3%)
+    upday_threshold_pct: float = 0.004    # Upday-035 threshold (0.4%)
 
 
 @dataclass

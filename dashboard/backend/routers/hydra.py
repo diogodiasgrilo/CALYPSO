@@ -31,12 +31,23 @@ async def get_bot_config():
             config = json.load(f)
         strategy = config.get("strategy", {})
         return {
-            "conditional_e6_enabled": strategy.get("conditional_e6_enabled", True),
-            "conditional_e7_enabled": strategy.get("conditional_e7_enabled", True),
+            "conditional_e6_enabled": strategy.get("conditional_e6_enabled", False),
+            "conditional_e7_enabled": strategy.get("conditional_e7_enabled", False),
+            "conditional_upday_e6_enabled": strategy.get("conditional_upday_e6_enabled", False),
+            "conditional_upday_e7_enabled": strategy.get("conditional_upday_e7_enabled", False),
+            "downday_threshold_pct": strategy.get("downday_threshold_pct", 0.003),
+            "upday_threshold_pct": strategy.get("upday_threshold_pct", 0.004),
         }
     except Exception as e:
         logger.warning(f"Could not read bot config ({config_path}): {e}")
-        return {"conditional_e6_enabled": True, "conditional_e7_enabled": True}
+        return {
+            "conditional_e6_enabled": False,
+            "conditional_e7_enabled": False,
+            "conditional_upday_e6_enabled": False,
+            "conditional_upday_e7_enabled": False,
+            "downday_threshold_pct": 0.003,
+            "upday_threshold_pct": 0.004,
+        }
 
 
 @router.get("/state")

@@ -1,7 +1,7 @@
 import { useHydraStore, type HydraState } from "../../store/hydraStore";
 import { EntryCard } from "./EntryCard";
 import { colors } from "../../lib/tradingColors";
-import { useShowConditionalEntries } from "../../hooks/useBotConfig";
+import { useShowConditionalEntries, useBotConfig } from "../../hooks/useBotConfig";
 
 export function EntryGrid() {
   const { hydraState } = useHydraStore();
@@ -14,7 +14,7 @@ export function EntryGrid() {
     entries.find((e) => e.entry_number === i + 1) ?? null
   );
 
-  // 2 conditional entry slots (E6-E7) — MKT-035 call-only entries
+  // 2 conditional entry slots (E6: upday put-only, E7: downday call-only)
   const conditionalSlots = Array.from({ length: 2 }, (_, i) =>
     entries.find((e) => e.entry_number === 6 + i) ?? null
   );
@@ -39,11 +39,11 @@ export function EntryGrid() {
         )}
       </div>
 
-      {/* Conditional entries: E6-E7 (MKT-035 down-day call-only) — hidden when disabled in config */}
+      {/* Conditional entries: E6 (upday put-only) + E7 (downday call-only) — hidden when all disabled */}
       {showConditional && (
         <div className="mt-2">
           <span className="text-[10px] text-text-dim uppercase tracking-wider">
-            Conditional (MKT-035 down day)
+            Conditional (E6: up-day ↑ put-only · E7: down-day ↓ call-only)
           </span>
           <div className="grid grid-cols-5 gap-2 max-lg:grid-cols-3 max-sm:grid-cols-1 mt-1">
             {conditionalSlots.map((entry, i) =>
@@ -99,7 +99,9 @@ function PendingSlot({
 
   const label = past
     ? isConditional ? "not triggered" : "window passed"
-    : isConditional ? "call only · scheduled" : "scheduled";
+    : isConditional
+      ? (entryNum === 6 ? "put only · scheduled" : "call only · scheduled")
+      : "scheduled";
 
   return (
     <div

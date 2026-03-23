@@ -1,0 +1,5 @@
+combo_id,put_stop_buffer,min_put_credit,min_call_credit,one_sided_entries_enabled,fomc_t1_callonly_enabled,stop_buffer,entry_schedule,early_exit_time,train_net_pnl,train_sharpe,train_max_dd,train_win_rate,train_avg_net_per_day,train_stop_rate,train_total_entries,train_total_skipped,train_days,val_net_pnl,val_sharpe,val_max_dd,val_win_rate,val_avg_net_per_day,val_stop_rate,val_days
+1,50,2.25,1.25,True,False,10,current,,104064.99876052141,2.51907557964019,-13125.000445768237,60.16713091922006,144.93732417899918,25.282308657465496,3188,402,718,,,,,,,
+2,60,2.25,1.25,True,False,10,current,,103179.99892480671,2.4345375829869544,-13330.0003901124,59.749303621169915,143.7047338785609,24.921580928481806,3188,402,718,,,,,,,
+3,75,2.25,1.25,True,False,10,current,,105009.9989105761,2.4207385387834237,-14655.000286996365,60.16713091922006,146.25348037684694,24.41969887076537,3188,402,718,,,,,,,
+0,40,2.25,1.25,True,False,10,current,,99269.99871134758,2.4018225197326775,-14410.000398680568,60.02785515320335,138.25905113001056,25.815558343789206,3188,402,718,,,,,,,

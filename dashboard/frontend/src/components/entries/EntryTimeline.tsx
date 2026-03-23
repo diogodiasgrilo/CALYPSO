@@ -6,8 +6,9 @@ import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 
 // Base entries: 5 scheduled at :15/:45 starting 10:15 AM ET
 const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15", "11:45", "12:15"];
-// Conditional entries: only fire when MKT-035 triggers (SPX < open -0.3%), always call-only
-// Hidden entirely when conditional_e6_enabled and conditional_e7_enabled are both false in config
+// Conditional entries: E6 (12:45) fires put-only when SPX rises ≥ 0.4% from open (Upday-035)
+//                      E7 (13:15) fires call-only when SPX drops ≥ 0.3% from open (MKT-035)
+// Hidden when all conditional flags are disabled in bot config
 const CONDITIONAL_ENTRY_TIMES = ["12:45", "13:15"];
 
 const TIMELINE_START = 9.5 * 60; // 9:30 in minutes
@@ -112,7 +113,7 @@ export function EntryTimeline() {
                     backgroundColor: isPending ? "transparent" : color,
                     border: `2px ${isPending ? "dashed" : "solid"} ${isPending ? colors.textDim : color}`,
                   }}
-                  title={`E${entryNum} ${time} — conditional (MKT-035) — ${status}`}
+                  title={`E${entryNum} ${time} — ${entryNum === 6 ? "Upday-035 put-only" : "MKT-035 call-only"} — ${status}`}
                 />
                 <span className="text-[9px] mt-1" style={{ color: isPending ? colors.textDim : colors.textSecondary }}>
                   {time}
