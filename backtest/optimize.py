@@ -93,8 +93,10 @@ XL_GRID = {
     "callside_min_upday_pct":         [None],              # LOCKED (full IC on all days beats call-only-on-up-days)
     "base_entry_downday_callonly_pct": [0.40],  # LOCKED (32% MaxDD reduction, near-zero Sharpe cost)
     "base_entry_upday_putonly_pct":    [None],  # LOCKED (Upday-035 E6 already covers up-day; adding would concentrate put risk)
+    "movement_entry_pct":  [None, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0],  # SWEEPING: SPX move % to trigger next E1-E5 slot early
+    "max_vix_entry":       [None],              # LOCKED pending movement sweep result
 }
-# 1 combination (all params locked)
+# 8 combinations (sweeping movement_entry_pct)
 
 FULL_GRID = {
     "put_stop_buffer":            [100, 200, 300, 400, 500, 600, 700, 800, 1000],
@@ -147,6 +149,8 @@ class OptCombo:
     callside_min_upday_pct: Optional[float] = None  # only place calls on E1-E5 if SPX up >= this %
     base_entry_downday_callonly_pct: Optional[float] = None  # E1-E5 call-only when SPX down >= this %
     base_entry_upday_putonly_pct: Optional[float] = None     # E1-E5 put-only when SPX up >= this %
+    movement_entry_pct: Optional[float] = None               # fire next E1-E5 slot when SPX moves >= this % from last entry
+    max_vix_entry: Optional[float] = None                    # skip all entries if VIX >= this
 
     # Training metrics
     train_net_pnl: float = 0.0
@@ -314,6 +318,10 @@ def _worker(args: Tuple[dict, date, date, str]) -> dict:
         cfg.base_entry_downday_callonly_pct = combo["base_entry_downday_callonly_pct"]
     if "base_entry_upday_putonly_pct" in combo:
         cfg.base_entry_upday_putonly_pct = combo["base_entry_upday_putonly_pct"]
+    if "movement_entry_pct" in combo:
+        cfg.movement_entry_pct = combo["movement_entry_pct"]
+    if "max_vix_entry" in combo:
+        cfg.max_vix_entry = combo["max_vix_entry"]
 
     try:
         # Suppress run_backtest()'s internal print() calls
@@ -612,6 +620,8 @@ def build_opt_combos(raw_results: List[dict]) -> List[OptCombo]:
             callside_min_upday_pct=r.get("callside_min_upday_pct", None),
             base_entry_downday_callonly_pct=r.get("base_entry_downday_callonly_pct", None),
             base_entry_upday_putonly_pct=r.get("base_entry_upday_putonly_pct", None),
+            movement_entry_pct=r.get("movement_entry_pct", None),
+            max_vix_entry=r.get("max_vix_entry", None),
             train_net_pnl=r.get("train_net_pnl", 0.0),
             train_sharpe=r.get("train_sharpe", -999.0),
             train_max_dd=r.get("train_max_dd", 0.0),

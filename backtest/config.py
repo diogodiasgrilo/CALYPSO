@@ -64,6 +64,7 @@ class BacktestConfig:
     put_credit_floor: float = 2.15          # MKT-029 hard floor after fallbacks (min_put_credit - $0.10)
     one_sided_entries_enabled: bool = True  # if False, skip all put-only and call-only entries
     put_only_max_vix: float = 25.0          # MKT-032: only place put-only if VIX < this
+    max_vix_entry: Optional[float] = None   # Skip ALL entries (full IC + one-sided) if VIX >= this. None = no gate.
     put_tighten_retries: int = 2            # MKT-040: retries before going call-only
     put_tighten_step: int = 5              # points to tighten per retry
 
@@ -89,6 +90,14 @@ class BacktestConfig:
     # Positions already stopped are unaffected. Closing commissions apply.
     # None = hold to 4 PM expiry (default, no closing commission).
     early_exit_time: Optional[str] = None  # e.g. "13:00", "14:30", "15:00"
+
+    # ── Movement-triggered entries (E1-E5) ────────────────────────────────────
+    # If set, each base slot fires as soon as SPX moves >= this % in either
+    # direction from the previous entry's SPX price (or session open for E1).
+    # Scheduled time becomes a hard fallback — the slot fires no later than
+    # its scheduled time regardless of movement.  E6/E7 are unaffected.
+    # None = disabled (time-based only, current behaviour).
+    movement_entry_pct: Optional[float] = None  # e.g. 0.3 = fire next slot when SPX moves 0.3%
 
     # ── Call-side upward-move filter (E1-E5 base entries) ────────────────────
     # If set, the call spread is only placed on E1-E5 when SPX is already UP

@@ -287,6 +287,13 @@ def _simulate_entry(
         result.skip_reason = "no_market_data"
         return result
 
+    # ── Global VIX gate ───────────────────────────────────────────────────
+    max_vix = getattr(cfg, "max_vix_entry", None)
+    if max_vix is not None and vix >= max_vix:
+        result.entry_type = "skipped"
+        result.skip_reason = f"vix_gate ({vix:.1f} >= {max_vix})"
+        return result
+
     result.spx_at_entry = spx
     result.vix_at_entry = vix
 
@@ -834,23 +841,61 @@ def simulate_day(
 
     day = DayResult(date=trading_date)
 
-    # ── Base entries ────────────────────────────────────────────────────
+    # ── Base entries (E1-E5) ─────────────────────────────────────────────
     entry_ms_list = cfg.entry_times_as_ms()
-    for i, entry_ms in enumerate(entry_ms_list, 1):
-        res = _simulate_entry(
-            entry_num=i,
-            entry_ms=entry_ms,
-            is_conditional=False,
-            is_fomc_t1=is_fomc_t1,
-            spx_open=spx_open,
-            chain_df=chain_df,
-            lookup=lookup,
-            spx_df=spx_df,
-            vix_df=vix_df,
-            cfg=cfg,
-            monitor_times=monitor_times,
-        )
-        day.entries.append(res)
+    movement_pct = getattr(cfg, "movement_entry_pct", None)
+
+    if movement_pct is None:
+        # Standard time-based entries
+        for i, entry_ms in enumerate(entry_ms_list, 1):
+            res = _simulate_entry(
+                entry_num=i,
+                entry_ms=entry_ms,
+                is_conditional=False,
+                is_fomc_t1=is_fomc_t1,
+                spx_open=spx_open,
+                chain_df=chain_df,
+                lookup=lookup,
+                spx_df=spx_df,
+                vix_df=vix_df,
+                cfg=cfg,
+                monitor_times=monitor_times,
+            )
+            day.entries.append(res)
+    else:
+        # Movement-triggered entries: each slot fires when SPX moves >= movement_pct
+        # from the previous entry's SPX price.  Scheduled time is a hard fallback.
+        last_ref_spx = spx_open
+        next_slot = 0
+        fired_at_ms = {}  # slot_idx → actual bar_ms when fired
+
+        for bar_ms in monitor_times:
+            if next_slot >= len(entry_ms_list):
+                break
+            scheduled_ms = entry_ms_list[next_slot]
+            bar_spx = _get_index_price(spx_df, bar_ms)
+            if bar_spx <= 0:
+                continue
+            move_pct = (abs(bar_spx - last_ref_spx) / last_ref_spx * 100
+                        if last_ref_spx > 0 else 0.0)
+            if bar_ms >= scheduled_ms or move_pct >= movement_pct:
+                fired_at_ms[next_slot] = bar_ms
+                res = _simulate_entry(
+                    entry_num=next_slot + 1,
+                    entry_ms=bar_ms,           # actual trigger time (may be earlier than scheduled)
+                    is_conditional=False,
+                    is_fomc_t1=is_fomc_t1,
+                    spx_open=spx_open,
+                    chain_df=chain_df,
+                    lookup=lookup,
+                    spx_df=spx_df,
+                    vix_df=vix_df,
+                    cfg=cfg,
+                    monitor_times=monitor_times,
+                )
+                day.entries.append(res)
+                last_ref_spx = bar_spx         # update reference for next slot
+                next_slot += 1
 
     # ── Conditional entries (E6/E7) ─────────────────────────────────────
     cond_times = cfg.conditional_times_as_ms()
