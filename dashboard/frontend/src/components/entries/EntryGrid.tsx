@@ -1,7 +1,7 @@
 import { useHydraStore, type HydraState } from "../../store/hydraStore";
 import { EntryCard } from "./EntryCard";
 import { colors } from "../../lib/tradingColors";
-import { useShowConditionalEntries, useBotConfig } from "../../hooks/useBotConfig";
+import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 
 export function EntryGrid() {
   const { hydraState } = useHydraStore();
