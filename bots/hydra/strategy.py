@@ -3073,7 +3073,7 @@ class HydraStrategy(MEICStrategy):
                     else:
                         # Base entries (E1-E5): apply down-day call-only filter if triggered
                         if _base_downday_triggered:
-                            spx_ref = self.market_data.spx_open
+                            spx_ref = self.market_data.spx_open  # already set above; re-read for log
                             move_pct = (self.current_price - spx_ref) / spx_ref * 100
                             entry.call_only = True
                             entry.put_only = False
@@ -4869,18 +4869,30 @@ class HydraStrategy(MEICStrategy):
         if self.vix_gate_enabled and self._vix_gate_resolved and self._vix_gate_start_slot > 0:
             lines.insert(0, f"  VIX-shift: slot {self._vix_gate_start_slot}")
 
-        # MKT-035: SPX vs open indicator (after trend line, before entries)
+        # MKT-035 / Base-Downday: SPX vs open indicator (after trend line, before entries)
         spx_ref = self.market_data.spx_open
         if spx_ref and spx_ref > 0 and self.current_price > 0:
             change_pct = (self.current_price - spx_ref) / spx_ref * 100
-            threshold = -self.downday_threshold_pct * 100
+            e6e7_threshold = -self.downday_threshold_pct * 100
             sign = "+" if change_pct >= 0 else ""
-            triggered = "E6/E7 eligible" if change_pct < threshold else "full IC"
+            # E6/E7 conditional eligibility (MKT-035)
+            e6e7_eligible = change_pct < e6e7_threshold
+            # E1-E5 base-entry down-day call-only
+            base_downday_active = (
+                self.base_entry_downday_callonly_pct is not None
+                and change_pct < -(self.base_entry_downday_callonly_pct * 100)
+            )
+            if base_downday_active:
+                triggered = "E1-E5/E6/E7: call-only"
+            elif e6e7_eligible:
+                triggered = "E6/E7 eligible | E1-E5: full IC"
+            else:
+                triggered = "full IC"
             insert_idx = 1 if lines else 0  # After trend line
             lines.insert(insert_idx,
-                f"  MKT-035: SPX {sign}{change_pct:.2f}% vs open "
+                f"  Down-day: SPX {sign}{change_pct:.2f}% vs open "
                 f"({self.current_price:.1f} vs {spx_ref:.1f}) | "
-                f"threshold: {threshold:.1f}% | {triggered}"
+                f"E6/E7 thr: {e6e7_threshold:.1f}% | {triggered}"
             )
 
         return lines
@@ -6353,6 +6365,8 @@ class HydraStrategy(MEICStrategy):
                     trend_tag = "[MKT-010]"
                 elif override_reason == "mkt-040":
                     trend_tag = "[MKT-040]"
+                elif override_reason == "base-downday":
+                    trend_tag = "[BASE-DOWNDAY]"
                 else:
                     trend_tag = "[BEARISH]"
             elif is_hydra_entry and entry.put_only:

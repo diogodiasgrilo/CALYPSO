@@ -102,7 +102,10 @@ class BacktestConfig:
     # force the base entry to call-only (no puts).  Mirrors MKT-035 logic but
     # applies to all 5 base entries instead of only E6/E7.
     # None = disabled (full IC regardless of direction, current behaviour).
-    base_entry_downday_callonly_pct: Optional[float] = None  # e.g. 0.2
+    # UNIT NOTE: stored here in PERCENTAGE units (e.g. 0.40 = 0.4%).
+    # The live bot config uses DECIMAL FRACTION units (e.g. 0.004 = 0.4%).
+    # Do NOT copy this value directly to bots/hydra/config/config.json.
+    base_entry_downday_callonly_pct: Optional[float] = None  # e.g. 0.40 (= 0.4%)
 
     # Up-day put-only: if SPX is up >= this % from open at entry time,
     # force the base entry to put-only (no calls).  Mirrors Upday-035 logic.
