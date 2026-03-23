@@ -90,6 +90,13 @@ class BacktestConfig:
     # None = hold to 4 PM expiry (default, no closing commission).
     early_exit_time: Optional[str] = None  # e.g. "13:00", "14:30", "15:00"
 
+    # ── Call-side upward-move filter (E1-E5 base entries) ────────────────────
+    # If set, the call spread is only placed on E1-E5 when SPX is already UP
+    # at least this % from the session open at entry time.  If the market
+    # hasn't moved up enough, the entry becomes put-only.
+    # None = disabled (always attempt the call side, current behaviour).
+    callside_min_upday_pct: Optional[float] = None  # e.g. 0.2 = only calls if SPX up 0.2%+
+
     # ── Net-return threshold exit ─────────────────────────────────────────────
     # If set, close ALL surviving open positions the first time the day's
     # net P&L / total credit collected >= this fraction.  Entries scheduled

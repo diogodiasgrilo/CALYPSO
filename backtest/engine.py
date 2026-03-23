@@ -356,6 +356,18 @@ def _simulate_entry(
             )
             return result
 
+    # ── Call-side upward-move filter (E1-E5 base entries only) ──────────
+    # Only apply when neither side is already forced (i.e. base entries where
+    # FOMC T+1 / MKT-035 / Upday-035 haven't already decided the entry type).
+    callside_min_up = getattr(cfg, "callside_min_upday_pct", None)
+    if (callside_min_up is not None
+            and not force_put_only
+            and not force_call_only
+            and spx_open > 0):
+        rise_pct = (spx - spx_open) / spx_open * 100
+        if rise_pct < callside_min_up:
+            force_put_only = True
+
     # ── Strike calculation ───────────────────────────────────────────────
     otm_dist = _calc_otm_distance(vix, cfg.target_delta)
     call_spread_width = _calc_spread_width(vix, "call", cfg)
