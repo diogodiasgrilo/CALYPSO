@@ -29,6 +29,7 @@ class BacktestConfig:
     downday_threshold_pct: float = 0.3       # 0.3% drop triggers conditional entries
     downday_reference: str = "open"          # reference price for threshold: "open" or "high"
     downday_theoretical_put_credit: float = 1000.0  # $10.00 × 100 — used in call-only stop (walk-forward optimized)
+    upday_theoretical_call_credit: float = 0.0   # added to put-only stop level (mirrors downday_theoretical_put_credit)
 
     # ── Conditional E6/E7 up-day put-only entries ────────────────────────────
     # Fire as put-only when SPX rises >= upday_threshold_pct above reference

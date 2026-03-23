@@ -439,7 +439,8 @@ def _simulate_entry(
             result.entry_type = "skipped"
             result.skip_reason = "upday-035_no_put_credit"
             return result
-        put_stop = put_credit + cfg.put_stop_buffer
+        # For put-only stop: put_credit + theoretical_call + buffer (mirrors call-only formula)
+        put_stop = put_credit + getattr(cfg, "upday_theoretical_call_credit", 0.0) + cfg.put_stop_buffer
         put_stop = max(put_stop, cfg.min_stop_level)
         result.entry_type = "put_only"
         result.short_put = put_short
@@ -486,7 +487,8 @@ def _simulate_entry(
             result.skip_reason = f"mkt-011_call_non_viable_vix_too_high ({vix:.1f} >= {cfg.put_only_max_vix})"
             return result
         result.entry_type = "put_only"
-        put_stop = put_credit + cfg.put_stop_buffer
+        # For put-only stop: put_credit + theoretical_call + buffer (mirrors call-only formula)
+        put_stop = put_credit + getattr(cfg, "upday_theoretical_call_credit", 0.0) + cfg.put_stop_buffer
         put_stop = max(put_stop, cfg.min_stop_level)
         result.short_put = put_short
         result.long_put = put_long

@@ -88,6 +88,7 @@ XL_GRID = {
     "upday_threshold_pct":        [0.40],              # LOCKED
     "upday_reference":            ["open"],            # LOCKED
     "downday_theoretical_put_credit": [1000],             # LOCKED ($10.00 × 100 — call-only stop buffer)
+    "upday_theoretical_call_credit":  [0],                # LOCKED ($0 — tight stop correct for put-only)
 }
 # 5 combinations
 
@@ -137,6 +138,7 @@ class OptCombo:
     upday_threshold_pct: float = 0.3       # % SPX rise to trigger up-day put-only
     upday_reference: str = "open"          # reference price: "open" or "low"
     downday_theoretical_put_credit: float = 1000.0  # $ added to call-only stop level (locked)
+    upday_theoretical_call_credit: float = 0.0      # $ added to put-only stop level
 
     # Training metrics
     train_net_pnl: float = 0.0
@@ -294,6 +296,8 @@ def _worker(args: Tuple[dict, date, date, str]) -> dict:
         cfg.upday_reference = combo["upday_reference"]
     if "downday_theoretical_put_credit" in combo:
         cfg.downday_theoretical_put_credit = combo["downday_theoretical_put_credit"]
+    if "upday_theoretical_call_credit" in combo:
+        cfg.upday_theoretical_call_credit = combo["upday_theoretical_call_credit"]
 
     try:
         # Suppress run_backtest()'s internal print() calls
@@ -586,7 +590,8 @@ def build_opt_combos(raw_results: List[dict]) -> List[OptCombo]:
             conditional_upday_e7_enabled=r.get("conditional_upday_e7_enabled", False),
             upday_threshold_pct=r.get("upday_threshold_pct", 0.3),
             upday_reference=r.get("upday_reference", "open"),
-            downday_theoretical_put_credit=r.get("downday_theoretical_put_credit", 250.0),
+            downday_theoretical_put_credit=r.get("downday_theoretical_put_credit", 1000.0),
+            upday_theoretical_call_credit=r.get("upday_theoretical_call_credit", 0.0),
             train_net_pnl=r.get("train_net_pnl", 0.0),
             train_sharpe=r.get("train_sharpe", -999.0),
             train_max_dd=r.get("train_max_dd", 0.0),
