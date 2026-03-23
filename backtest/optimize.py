@@ -79,9 +79,9 @@ XL_GRID = {
     "fomc_t1_callonly_enabled":   [True],            # LOCKED
     "put_only_max_vix":           [25.0],            # LOCKED
     "target_delta":               [8.0],             # LOCKED
-    "conditional_e6_enabled":     [False],             # LOCKED
+    "conditional_e6_enabled":     [False],             # LOCKED (baseline Sharpe best; E6 adds P&L but hurts MaxDD)
     "conditional_e7_enabled":     [True],              # LOCKED
-    "downday_threshold_pct":      [0.3],               # LOCKED
+    "downday_threshold_pct":      [0.3],               # LOCKED (0.4% raises E7 bar too, hurts performance)
     "downday_reference":          ["open"],            # LOCKED
     "conditional_upday_e6_enabled": [True],            # LOCKED
     "conditional_upday_e7_enabled": [False],           # LOCKED

@@ -477,12 +477,24 @@ class HydraStrategy(MEICStrategy):
         self.downday_callonly_enabled = strategy_config.get("downday_callonly_enabled", True)
         self.downday_threshold_pct = float(strategy_config.get("downday_threshold_pct", 0.003))  # 0.3%
         self.downday_theoretical_put_credit = float(strategy_config.get("downday_theoretical_put_credit", 2.50)) * 100  # $250
+        # Base-entry down-day call-only: E1-E5 convert to call-only when SPX drops >= threshold from open.
+        # None = disabled (full IC regardless of direction — backtest-confirmed optimal baseline).
+        # Set to 0.004 (0.4%) to match backtest-optimized value.
+        _base_pct = strategy_config.get("base_entry_downday_callonly_pct", None)
+        self.base_entry_downday_callonly_pct = float(_base_pct) if _base_pct is not None else None
         logger.info(
             f"  Down day filter (MKT-035): {'ENABLED' if self.downday_callonly_enabled else 'DISABLED'} "
             f"(threshold: {self.downday_threshold_pct * 100:.1f}%, "
             f"theoretical put: ${self.downday_theoretical_put_credit / 100:.2f}, "
             f"conditional entries: {len(self._conditional_entry_times)})"
         )
+        if self.base_entry_downday_callonly_pct is not None:
+            logger.info(
+                f"  Base-entry down-day call-only: ENABLED "
+                f"(threshold: {self.base_entry_downday_callonly_pct * 100:.1f}% drop from open, applies to E1-E5)"
+            )
+        else:
+            logger.info("  Base-entry down-day call-only: DISABLED")
         # Upday put-only conditional (mirror of MKT-035)
         self.upday_putonly_enabled = bool(
             strategy_config.get("conditional_upday_e6_enabled", False) or
@@ -2963,13 +2975,25 @@ class HydraStrategy(MEICStrategy):
                     and is_fomc_t_plus_one()
                 )
 
+                # Base-entry down-day call-only: evaluate early so we can skip put tightening.
+                # Only applies to E1-E5 (not conditional slots), and not when FOMC T+1 already
+                # forces call-only (avoids double-logging).
+                _base_downday_triggered = False
+                if (not is_conditional and not is_fomc_t1
+                        and self.base_entry_downday_callonly_pct is not None
+                        and not self.dry_run):
+                    spx_ref = self.market_data.spx_open
+                    if spx_ref and spx_ref > 0 and self.current_price > 0:
+                        if (self.current_price - spx_ref) / spx_ref <= -self.base_entry_downday_callonly_pct:
+                            _base_downday_triggered = True
+
                 # MKT-020/MKT-022: Progressive OTM tightening
                 if not self.dry_run:
                     if not _upday_triggered:
                         # Skip call tightening for upday put-only entries (call side not placed)
                         self._apply_progressive_call_tightening(entry)
-                    if not is_conditional and not is_fomc_t1:
-                        # Skip put tightening for downday call-only / FOMC T+1 entries
+                    if not is_conditional and not is_fomc_t1 and not _base_downday_triggered:
+                        # Skip put tightening for downday call-only / FOMC T+1 / base-downday entries
                         self._apply_progressive_put_tightening(entry)
                     elif _upday_triggered:
                         # Upday put-only: DO apply put tightening (we're placing the put side)
@@ -3047,8 +3071,42 @@ class HydraStrategy(MEICStrategy):
                             return f"Entry #{entry_num} skipped - put credit non-viable (Upday-035)"
 
                     else:
-                        # Regular entries (1-5): conditional checks don't apply to base entries
-                        pass
+                        # Base entries (E1-E5): apply down-day call-only filter if triggered
+                        if _base_downday_triggered:
+                            spx_ref = self.market_data.spx_open
+                            move_pct = (self.current_price - spx_ref) / spx_ref * 100
+                            entry.call_only = True
+                            entry.put_only = False
+                            entry.put_side_skipped = True
+                            entry.override_reason = "base-downday"
+                            place_call_only = True
+                            credit_gate_handled = True
+                            logger.info(
+                                f"Base-Downday: Entry #{entry_num} — SPX {move_pct:+.2f}% vs open "
+                                f"(threshold: -{self.base_entry_downday_callonly_pct * 100:.1f}%), "
+                                f"placing CALL spread only"
+                            )
+
+                            # Check call credit viability (MKT-029 floor: min-$0.10)
+                            _, _, est_call, _ = self._check_credit_gate(entry)
+                            call_floor = self.min_viable_credit_per_side - 10
+                            if est_call < call_floor:
+                                logger.info(
+                                    f"Base-Downday: Entry #{entry_num} call credit "
+                                    f"${est_call / 100:.2f} below floor — skipping"
+                                )
+                                self.daily_state.entries_skipped += 1
+                                self.daily_state.credit_gate_skips += 1
+                                self._entry_in_progress = False
+                                self._current_entry = None
+                                self.state = MEICState.MONITORING
+                                self._next_entry_index += 1
+                                self._record_skipped_entry(
+                                    entry_num,
+                                    f"Base-Downday: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
+                                    f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})"
+                                )
+                                return f"Entry #{entry_num} skipped - call credit non-viable (Base-Downday)"
 
                 # MKT-038: Force call-only on T+1 after FOMC announcement
                 if not credit_gate_handled and is_fomc_t1:
