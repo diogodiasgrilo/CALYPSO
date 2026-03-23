@@ -91,10 +91,10 @@ XL_GRID = {
     "upday_theoretical_call_credit":  [0],                # LOCKED ($0 — tight stop correct for put-only)
     "net_return_exit_pct":            [None],              # LOCKED (hold to 4PM beats all thresholds)
     "callside_min_upday_pct":         [None],              # LOCKED (full IC on all days beats call-only-on-up-days)
-    "base_entry_downday_callonly_pct": [None, 0.10, 0.20, 0.30, 0.40, 0.50],  # SWEEP: E1-E5 call-only on down days
-    "base_entry_upday_putonly_pct":    [None, 0.10, 0.20, 0.30, 0.40, 0.50],  # SWEEP: E1-E5 put-only on up days
+    "base_entry_downday_callonly_pct": [0.40],  # LOCKED (32% MaxDD reduction, near-zero Sharpe cost)
+    "base_entry_upday_putonly_pct":    [None],  # LOCKED (Upday-035 E6 already covers up-day; adding would concentrate put risk)
 }
-# 36 combinations (6 × 6)
+# 1 combination (all params locked)
 
 FULL_GRID = {
     "put_stop_buffer":            [100, 200, 300, 400, 500, 600, 700, 800, 1000],
