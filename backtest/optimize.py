@@ -94,9 +94,9 @@ XL_GRID = {
     "base_entry_downday_callonly_pct": [0.40],  # LOCKED (32% MaxDD reduction, near-zero Sharpe cost)
     "base_entry_upday_putonly_pct":    [None],  # LOCKED (Upday-035 E6 already covers up-day; adding would concentrate put risk)
     "movement_entry_pct":  [None, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0],  # SWEEPING: SPX move % to trigger next E1-E5 slot early
-    "max_vix_entry":       [None],              # LOCKED pending movement sweep result
+    "max_vix_entry":       [None, 18.0, 20.0, 22.0, 25.0, 30.0],       # SWEEPING: skip all entries if VIX >= this
 }
-# 8 combinations (sweeping movement_entry_pct)
+# 8 × 6 = 48 combinations
 
 FULL_GRID = {
     "put_stop_buffer":            [100, 200, 300, 400, 500, 600, 700, 800, 1000],
