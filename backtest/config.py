@@ -90,6 +90,14 @@ class BacktestConfig:
     # None = hold to 4 PM expiry (default, no closing commission).
     early_exit_time: Optional[str] = None  # e.g. "13:00", "14:30", "15:00"
 
+    # ── Net-return threshold exit ─────────────────────────────────────────────
+    # If set, close ALL surviving open positions the first time the day's
+    # net P&L / total credit collected >= this fraction.  Entries scheduled
+    # after the exit bar are skipped.  Closing commissions apply.
+    # None = disabled (hold to 4 PM or until stopped).
+    # Example: 0.50 = exit when net P&L reaches 50 % of collected credit.
+    net_return_exit_pct: Optional[float] = None
+
     # ── Simulation behaviour ─────────────────────────────────────────────────
     # Interval (ms) between stop checks. 300000 = 5-min (matches data resolution).
     monitor_interval_ms: int = 300000
