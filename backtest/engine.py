@@ -356,17 +356,27 @@ def _simulate_entry(
             )
             return result
 
-    # ── Call-side upward-move filter (E1-E5 base entries only) ──────────
-    # Only apply when neither side is already forced (i.e. base entries where
-    # FOMC T+1 / MKT-035 / Upday-035 haven't already decided the entry type).
-    callside_min_up = getattr(cfg, "callside_min_upday_pct", None)
-    if (callside_min_up is not None
-            and not force_put_only
-            and not force_call_only
-            and spx_open > 0):
-        rise_pct = (spx - spx_open) / spx_open * 100
-        if rise_pct < callside_min_up:
+    # ── Directional filter for E1-E5 base entries ────────────────────────
+    # Only fires when neither force flag is set (i.e. FOMC T+1 / MKT-035 /
+    # Upday-035 haven't already decided the entry type).
+    # Down >= threshold → call-only; Up >= threshold → put-only; else full IC.
+    # callside_min_upday_pct is a simpler legacy check (up-only); superseded
+    # by the combined base_entry_*_pct params when those are set.
+    if not force_put_only and not force_call_only and spx_open > 0:
+        move_pct = (spx - spx_open) / spx_open * 100  # positive = up, negative = down
+
+        down_thresh = getattr(cfg, "base_entry_downday_callonly_pct", None)
+        up_thresh   = getattr(cfg, "base_entry_upday_putonly_pct", None)
+
+        if down_thresh is not None and move_pct <= -down_thresh:
+            force_call_only = True
+        elif up_thresh is not None and move_pct >= up_thresh:
             force_put_only = True
+        else:
+            # Legacy single-direction filter (callside_min_upday_pct)
+            legacy_up = getattr(cfg, "callside_min_upday_pct", None)
+            if legacy_up is not None and move_pct < legacy_up:
+                force_put_only = True
 
     # ── Strike calculation ───────────────────────────────────────────────
     otm_dist = _calc_otm_distance(vix, cfg.target_delta)

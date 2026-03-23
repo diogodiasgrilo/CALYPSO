@@ -91,8 +91,10 @@ XL_GRID = {
     "upday_theoretical_call_credit":  [0],                # LOCKED ($0 — tight stop correct for put-only)
     "net_return_exit_pct":            [None],              # LOCKED (hold to 4PM beats all thresholds)
     "callside_min_upday_pct":         [None],              # LOCKED (full IC on all days beats call-only-on-up-days)
+    "base_entry_downday_callonly_pct": [None, 0.10, 0.20, 0.30, 0.40, 0.50],  # SWEEP: E1-E5 call-only on down days
+    "base_entry_upday_putonly_pct":    [None, 0.10, 0.20, 0.30, 0.40, 0.50],  # SWEEP: E1-E5 put-only on up days
 }
-# 1 combination (all params locked)
+# 36 combinations (6 × 6)
 
 FULL_GRID = {
     "put_stop_buffer":            [100, 200, 300, 400, 500, 600, 700, 800, 1000],
@@ -143,6 +145,8 @@ class OptCombo:
     upday_theoretical_call_credit: float = 0.0      # $ added to put-only stop level
     net_return_exit_pct: Optional[float] = None     # exit when net_pnl/credit >= this fraction
     callside_min_upday_pct: Optional[float] = None  # only place calls on E1-E5 if SPX up >= this %
+    base_entry_downday_callonly_pct: Optional[float] = None  # E1-E5 call-only when SPX down >= this %
+    base_entry_upday_putonly_pct: Optional[float] = None     # E1-E5 put-only when SPX up >= this %
 
     # Training metrics
     train_net_pnl: float = 0.0
@@ -306,6 +310,10 @@ def _worker(args: Tuple[dict, date, date, str]) -> dict:
         cfg.net_return_exit_pct = combo["net_return_exit_pct"]
     if "callside_min_upday_pct" in combo:
         cfg.callside_min_upday_pct = combo["callside_min_upday_pct"]
+    if "base_entry_downday_callonly_pct" in combo:
+        cfg.base_entry_downday_callonly_pct = combo["base_entry_downday_callonly_pct"]
+    if "base_entry_upday_putonly_pct" in combo:
+        cfg.base_entry_upday_putonly_pct = combo["base_entry_upday_putonly_pct"]
 
     try:
         # Suppress run_backtest()'s internal print() calls
@@ -602,6 +610,8 @@ def build_opt_combos(raw_results: List[dict]) -> List[OptCombo]:
             upday_theoretical_call_credit=r.get("upday_theoretical_call_credit", 0.0),
             net_return_exit_pct=r.get("net_return_exit_pct", None),
             callside_min_upday_pct=r.get("callside_min_upday_pct", None),
+            base_entry_downday_callonly_pct=r.get("base_entry_downday_callonly_pct", None),
+            base_entry_upday_putonly_pct=r.get("base_entry_upday_putonly_pct", None),
             train_net_pnl=r.get("train_net_pnl", 0.0),
             train_sharpe=r.get("train_sharpe", -999.0),
             train_max_dd=r.get("train_max_dd", 0.0),
@@ -628,6 +638,8 @@ def print_training_table(combos: List[OptCombo], top_n: int = 20):
         c.entry_schedule != "current" or c.early_exit_time is not None
         or c.stop_buffer != 10.0 or c.net_return_exit_pct is not None
         or c.callside_min_upday_pct is not None
+        or c.base_entry_downday_callonly_pct is not None
+        or c.base_entry_upday_putonly_pct is not None
         for c in combos[:top_n]
     )
 
@@ -637,26 +649,29 @@ def print_training_table(combos: List[OptCombo], top_n: int = 20):
         print(f"{'='*155}")
         print(
             f"  {'#':>3}  {'PutBuf':>7}  {'PutMin':>7}  {'CallMin':>7}  {'CallBuf':>7}  "
-            f"{'1-Sided':>7}  {'Schedule':>9}  {'Exit':>6}  {'NRet%':>6}  {'CallUp%':>7}  "
+            f"{'1-Sided':>7}  {'Schedule':>9}  {'Exit':>6}  {'NRet%':>6}  "
+            f"{'DnCall%':>7}  {'UpPut%':>6}  "
             f"{'Sharpe':>7}  {'Net P&L':>10}  {'Win%':>5}  "
             f"{'MaxDD':>10}  {'Stops%':>7}  {'Entries':>7}  {'Days':>5}"
         )
-        print(f"  {'-'*158}")
+        print(f"  {'-'*168}")
         for rank, c in enumerate(combos[:top_n], 1):
-            buf_str = f"${c.put_stop_buffer/100:.2g}"
+            buf_str  = f"${c.put_stop_buffer/100:.2g}"
             cbuf_str = f"${c.stop_buffer/100:.2f}"
             one_sided = "Yes" if c.one_sided_entries_enabled else "No"
-            exit_str = c.early_exit_time or "4:00PM"
-            nret_str = f"{c.net_return_exit_pct:.0%}" if c.net_return_exit_pct else "off"
-            cup_str = f"{c.callside_min_upday_pct:.2f}%" if c.callside_min_upday_pct else "off"
+            exit_str  = c.early_exit_time or "4:00PM"
+            nret_str  = f"{c.net_return_exit_pct:.0%}" if c.net_return_exit_pct else "off"
+            dn_str    = f"{c.base_entry_downday_callonly_pct:.2f}%" if c.base_entry_downday_callonly_pct else "off"
+            up_str    = f"{c.base_entry_upday_putonly_pct:.2f}%" if c.base_entry_upday_putonly_pct else "off"
             print(
                 f"  {rank:>3}  {buf_str:>7}  {c.min_put_credit:>7.2f}  {c.min_call_credit:>7.2f}  "
-                f"{cbuf_str:>7}  {one_sided:>7}  {c.entry_schedule:>9}  {exit_str:>6}  {nret_str:>6}  {cup_str:>7}  "
+                f"{cbuf_str:>7}  {one_sided:>7}  {c.entry_schedule:>9}  {exit_str:>6}  {nret_str:>6}  "
+                f"{dn_str:>7}  {up_str:>6}  "
                 f"{c.train_sharpe:>7.2f}  ${c.train_net_pnl:>9,.0f}  "
                 f"{c.train_win_rate:>4.1f}%  ${c.train_max_dd:>9,.0f}  "
                 f"{c.train_stop_rate:>6.1f}%  {c.train_total_entries:>7}  {c.train_days:>5}"
             )
-        print(f"{'='*163}\n")
+        print(f"{'='*168}\n")
     else:
         print(f"\n{'='*115}")
         print(f"  TOP {top_n} CONFIGURATIONS — TRAINING (ranked by Sharpe)")

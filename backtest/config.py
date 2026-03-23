@@ -97,6 +97,18 @@ class BacktestConfig:
     # None = disabled (always attempt the call side, current behaviour).
     callside_min_upday_pct: Optional[float] = None  # e.g. 0.2 = only calls if SPX up 0.2%+
 
+    # ── Directional filter for E1-E5 base entries ────────────────────────────
+    # Down-day call-only: if SPX is down >= this % from open at entry time,
+    # force the base entry to call-only (no puts).  Mirrors MKT-035 logic but
+    # applies to all 5 base entries instead of only E6/E7.
+    # None = disabled (full IC regardless of direction, current behaviour).
+    base_entry_downday_callonly_pct: Optional[float] = None  # e.g. 0.2
+
+    # Up-day put-only: if SPX is up >= this % from open at entry time,
+    # force the base entry to put-only (no calls).  Mirrors Upday-035 logic.
+    # None = disabled.
+    base_entry_upday_putonly_pct: Optional[float] = None  # e.g. 0.2
+
     # ── Net-return threshold exit ─────────────────────────────────────────────
     # If set, close ALL surviving open positions the first time the day's
     # net P&L / total credit collected >= this fraction.  Entries scheduled
