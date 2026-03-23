@@ -1,0 +1,748 @@
+"""
+HYDRA Backtest Engine
+
+Simulates HYDRA's exact entry logic against historical ThetaData:
+  - VIX-adjusted OTM distance (base_distance_at_vix15=40, ~8-delta)
+  - Spread width formula (VIX × multiplier, per-side floors)
+  - Progressive tightening scan (MKT-020 calls / MKT-022 puts)
+  - Credit gate (MKT-011) with MKT-029 graduated fallback
+  - Put-only entries when call non-viable + VIX < threshold (MKT-032/039)
+  - Call-only entries when put non-viable after retries (MKT-040)
+  - E6/E7 conditional down-day call-only entries (MKT-035)
+  - FOMC T+1 forced call-only (MKT-038)
+  - Per-side stop monitoring at each 5-min interval
+  - Settlement (expiry) as full profit at 4 PM
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+from .config import BacktestConfig
+from .downloader import load_index_day, load_chain_day, get_spxw_trading_days
+
+
+# ── Data structures ────────────────────────────────────────────────────────
+
+@dataclass
+class EntryResult:
+    entry_num: int
+    entry_time_ms: int
+    entry_type: str = ""     # "full_ic" | "call_only" | "put_only" | "skipped"
+    skip_reason: str = ""
+
+    # Strikes (0 if side not placed)
+    short_call: float = 0
+    long_call: float = 0
+    short_put: float = 0
+    long_put: float = 0
+
+    # Credits collected (in dollars)
+    call_credit: float = 0.0
+    put_credit: float = 0.0
+
+    # Stop levels (in dollars)
+    call_stop: float = 0.0
+    put_stop: float = 0.0
+
+    # Outcomes
+    call_outcome: str = ""   # "expired" | "stopped" | "skipped"
+    put_outcome: str = ""
+    call_exit_ms: int = 0
+    put_exit_ms: int = 0
+    call_close_cost: float = 0.0  # dollars paid to close (0 if expired)
+    put_close_cost: float = 0.0
+
+    # P&L
+    gross_pnl: float = 0.0
+    commission: float = 0.0
+    net_pnl: float = 0.0
+
+    # Context
+    spx_at_entry: float = 0.0
+    vix_at_entry: float = 0.0
+    call_spread_width: int = 0
+    put_spread_width: int = 0
+
+
+@dataclass
+class DayResult:
+    date: date
+    entries: List[EntryResult] = field(default_factory=list)
+
+    @property
+    def gross_pnl(self) -> float:
+        return sum(e.gross_pnl for e in self.entries)
+
+    @property
+    def commission(self) -> float:
+        return sum(e.commission for e in self.entries)
+
+    @property
+    def net_pnl(self) -> float:
+        return sum(e.net_pnl for e in self.entries)
+
+    @property
+    def entries_placed(self) -> int:
+        return sum(1 for e in self.entries if e.entry_type != "skipped")
+
+    @property
+    def entries_skipped(self) -> int:
+        return sum(1 for e in self.entries if e.entry_type == "skipped")
+
+    @property
+    def stops_hit(self) -> int:
+        return sum(
+            (1 if e.call_outcome == "stopped" else 0) +
+            (1 if e.put_outcome == "stopped" else 0)
+            for e in self.entries
+        )
+
+
+# ── Chain lookup helpers ────────────────────────────────────────────────────
+
+def _build_chain_lookup(chain_df: pd.DataFrame) -> Dict:
+    """
+    Build a fast lookup: {(strike, right, ms_of_day): (bid, ask, mid)}
+    """
+    if chain_df.empty:
+        return {}
+    lookup = {}
+    for row in chain_df.itertuples(index=False):
+        lookup[(row.strike, row.right, row.ms_of_day)] = (row.bid, row.ask, row.mid)
+    return lookup
+
+
+def _get_bid(lookup: Dict, strike: float, right: str, ms: int) -> float:
+    """Get bid price for a specific strike/right/time. Returns 0 if not found."""
+    val = lookup.get((strike, right, ms))
+    if val is None:
+        return 0.0
+    bid, ask, mid = val
+    return bid
+
+
+def _get_ask(lookup: Dict, strike: float, right: str, ms: int) -> float:
+    """Get ask price for a specific strike/right/time. Returns 0 if not found."""
+    val = lookup.get((strike, right, ms))
+    if val is None:
+        return 0.0
+    bid, ask, mid = val
+    return ask
+
+
+def _get_spread_open_credit(lookup: Dict, short_strike: float, long_strike: float,
+                             right: str, ms: int) -> float:
+    """
+    Credit received when opening a spread (selling short, buying long).
+    Uses bid for short leg and ask for long leg — the realistic fill prices.
+    Returns dollars (× 100 multiplier).
+    Long ask of 0 is allowed (deep OTM long is essentially free).
+    """
+    short_bid = _get_bid(lookup, short_strike, right, ms)
+    if short_bid == 0:
+        return 0.0  # no bid on short → can't collect credit
+    long_ask = _get_ask(lookup, long_strike, right, ms)
+    # long_ask == 0 is fine: deep OTM long costs nothing
+    return max(0.0, (short_bid - long_ask) * 100)
+
+
+def _get_spread_close_cost(lookup: Dict, short_strike: float, long_strike: float,
+                            right: str, ms: int) -> float:
+    """
+    Cost to close a spread (buying back short, selling long).
+    Uses ask for short leg and bid for long leg — the realistic fill prices.
+    Returns dollars (× 100 multiplier).
+    """
+    short_ask = _get_ask(lookup, short_strike, right, ms)
+    long_bid  = _get_bid(lookup, long_strike, right, ms)
+    if short_ask == 0 or long_bid == 0:
+        return 0.0
+    return max(0.0, (short_ask - long_bid) * 100)
+
+
+def _nearest_ms(chain_df: pd.DataFrame, target_ms: int) -> int:
+    """Find the nearest available ms_of_day in the chain data."""
+    if chain_df.empty:
+        return target_ms
+    avail = chain_df["ms_of_day"].unique()
+    if len(avail) == 0:
+        return target_ms
+    idx = np.argmin(np.abs(avail - target_ms))
+    return int(avail[idx])
+
+
+def _get_index_price(index_df: pd.DataFrame, target_ms: int) -> float:
+    """Get the index price at or just before target_ms."""
+    if index_df.empty:
+        return 0.0
+    before = index_df[index_df["ms_of_day"] <= target_ms]
+    if before.empty:
+        return float(index_df.iloc[0]["price"])
+    row = before.iloc[-1]
+    return float(row["price"])
+
+
+def _compute_ema(prices: pd.Series, period: int) -> pd.Series:
+    return prices.ewm(span=period, adjust=False).mean()
+
+
+# ── Strike selection ────────────────────────────────────────────────────────
+
+def _calc_otm_distance(vix: float, target_delta: float) -> int:
+    """
+    VIX-adjusted OTM distance for ~target_delta options.
+    Mirrors live HYDRA formula exactly.
+    """
+    base_distance_at_vix15 = 40
+    delta_adjustment = 8.0 / target_delta
+    vix_factor = max(0.7, min(2.5, vix / 15.0))
+    otm = base_distance_at_vix15 * vix_factor * delta_adjustment
+    otm = round(otm / 5) * 5
+    return max(25, min(120, int(otm)))
+
+
+def _calc_spread_width(vix: float, side: str, cfg: BacktestConfig) -> int:
+    """MKT-027/028: VIX-scaled spread width with per-side floors and cap."""
+    width = round(vix * cfg.spread_vix_multiplier / 5) * 5
+    if side == "put":
+        width = max(cfg.put_min_spread_width, width)
+    else:
+        width = max(cfg.call_min_spread_width, width)
+    return min(width, cfg.max_spread_width)
+
+
+def _scan_for_viable_strike(
+    lookup: Dict,
+    spx_rounded: float,
+    side: str,           # "call" or "put"
+    spread_width: int,
+    starting_otm: int,
+    min_otm: int,
+    min_credit: float,   # in dollars
+    ms: int,
+) -> Tuple[Optional[float], Optional[float], float]:
+    """
+    MKT-020/022: Progressive OTM tightening.
+    Scan from starting_otm inward in 5pt steps until credit >= min_credit.
+    Returns (short_strike, long_strike, credit_dollars) or (None, None, 0).
+    """
+    right = "C" if side == "call" else "P"
+    otm = starting_otm
+    while otm >= min_otm:
+        if side == "call":
+            short_s = spx_rounded + otm
+            long_s = short_s + spread_width
+        else:
+            short_s = spx_rounded - otm
+            long_s = short_s - spread_width
+
+        credit = _get_spread_open_credit(lookup, short_s, long_s, right, ms)
+        if credit >= min_credit:
+            return short_s, long_s, credit
+        otm -= 5
+
+    return None, None, 0.0
+
+
+# ── Per-entry simulation ────────────────────────────────────────────────────
+
+def _simulate_entry(
+    entry_num: int,
+    entry_ms: int,
+    is_conditional: bool,
+    is_fomc_t1: bool,
+    spx_open: float,        # session open price (for conditional threshold)
+    chain_df: pd.DataFrame,
+    lookup: Dict,
+    spx_df: pd.DataFrame,
+    vix_df: pd.DataFrame,
+    cfg: BacktestConfig,
+    monitor_times: List[int],
+) -> EntryResult:
+
+    result = EntryResult(entry_num=entry_num, entry_time_ms=entry_ms)
+
+    # ── Skip if entry fires at or after early exit time ──────────────────
+    early_ms = cfg.early_exit_time_ms()
+    if early_ms and entry_ms >= early_ms:
+        result.entry_type = "skipped"
+        result.skip_reason = "entry_at_or_after_early_exit"
+        return result
+
+    # ── Get market data at entry time ────────────────────────────────────
+    actual_ms = _nearest_ms(chain_df, entry_ms)
+    spx = _get_index_price(spx_df, entry_ms)
+    vix = _get_index_price(vix_df, entry_ms)
+
+    if spx <= 0 or vix <= 0:
+        result.entry_type = "skipped"
+        result.skip_reason = "no_market_data"
+        return result
+
+    result.spx_at_entry = spx
+    result.vix_at_entry = vix
+
+    # Round SPX to nearest 5 (SPX strikes in 5pt increments)
+    spx_rounded = round(spx / 5) * 5
+
+    # ── Determine entry mode ─────────────────────────────────────────────
+    # MKT-035: Conditional entries → call-only if SPX dropped enough
+    # MKT-038: FOMC T+1 → force call-only for ALL entries
+    force_call_only = False
+    if is_fomc_t1 and cfg.fomc_t1_callonly_enabled:
+        force_call_only = True
+        result.entry_type = "call_only"
+        result.skip_reason = "mkt-038"
+    elif is_conditional:
+        drop_pct = (spx_open - spx) / spx_open * 100 if spx_open > 0 else 0
+        if drop_pct >= cfg.downday_threshold_pct:
+            force_call_only = True
+            result.entry_type = "call_only"
+            result.skip_reason = "mkt-035"
+        else:
+            result.entry_type = "skipped"
+            result.skip_reason = f"conditional_no_trigger ({drop_pct:.2f}%)"
+            return result
+
+    # ── Strike calculation ───────────────────────────────────────────────
+    otm_dist = _calc_otm_distance(vix, cfg.target_delta)
+    call_spread_width = _calc_spread_width(vix, "call", cfg)
+    put_spread_width = _calc_spread_width(vix, "put", cfg)
+
+    call_starting_otm = int(round((otm_dist * cfg.call_starting_otm_multiplier) / 5) * 5)
+    call_starting_otm = max(25, min(240, call_starting_otm))
+    put_starting_otm = int(round((otm_dist * cfg.put_starting_otm_multiplier) / 5) * 5)
+    put_starting_otm = max(25, min(240, put_starting_otm))
+
+    result.call_spread_width = call_spread_width
+    result.put_spread_width = put_spread_width
+
+    # ── Credit gate + progressive tightening (MKT-011/020/022) ──────────
+    call_short = call_long = None
+    call_credit = 0.0
+    put_short = put_long = None
+    put_credit = 0.0
+
+    if not force_call_only:
+        # Scan for viable call strike
+        call_short, call_long, call_credit = _scan_for_viable_strike(
+            lookup, spx_rounded, "call", call_spread_width,
+            call_starting_otm, cfg.min_call_otm_distance,
+            cfg.min_call_credit * 100, actual_ms
+        )
+        # With MKT-029 fallback (graduated floor)
+        if call_short is None and cfg.call_credit_floor > 0:
+            call_short, call_long, call_credit = _scan_for_viable_strike(
+                lookup, spx_rounded, "call", call_spread_width,
+                call_starting_otm, cfg.min_call_otm_distance,
+                cfg.call_credit_floor * 100, actual_ms
+            )
+
+        # Scan for viable put strike
+        put_starting_otm_original = put_starting_otm
+        put_short, put_long, put_credit = _scan_for_viable_strike(
+            lookup, spx_rounded, "put", put_spread_width,
+            put_starting_otm, cfg.min_put_otm_distance,
+            cfg.min_put_credit * 100, actual_ms
+        )
+        # MKT-040: put non-viable → tighten retries (5pt closer each time) before calling it call-only
+        if put_short is None:
+            for _ in range(cfg.put_tighten_retries):
+                put_starting_otm = max(cfg.min_put_otm_distance, put_starting_otm - cfg.put_tighten_step)
+                put_short, put_long, put_credit = _scan_for_viable_strike(
+                    lookup, spx_rounded, "put", put_spread_width,
+                    put_starting_otm, cfg.min_put_otm_distance,
+                    cfg.min_put_credit * 100, actual_ms
+                )
+                if put_short is not None:
+                    break
+        # MKT-029 put fallback floor: scan full original range with lower credit threshold
+        if put_short is None and cfg.put_credit_floor > 0:
+            put_short, put_long, put_credit = _scan_for_viable_strike(
+                lookup, spx_rounded, "put", put_spread_width,
+                put_starting_otm_original, cfg.min_put_otm_distance,
+                cfg.put_credit_floor * 100, actual_ms
+            )
+
+    elif force_call_only:
+        # Forced call-only — only scan call side
+        call_short, call_long, call_credit = _scan_for_viable_strike(
+            lookup, spx_rounded, "call", call_spread_width,
+            call_starting_otm, cfg.min_call_otm_distance,
+            cfg.call_credit_floor * 100, actual_ms
+        )
+
+    # ── Determine entry type based on what's viable ───────────────────────
+    if force_call_only:
+        if call_short is None:
+            result.entry_type = "skipped"
+            result.skip_reason = f"mkt-011_call_only_no_credit (forced: {result.skip_reason})"
+            return result
+        result.entry_type = "call_only"
+        # For call-only stop: call_credit + theoretical_put + buffer
+        call_stop = call_credit + cfg.downday_theoretical_put_credit + cfg.stop_buffer
+        call_stop = max(call_stop, cfg.min_stop_level)
+        result.short_call = call_short
+        result.long_call = call_long
+        result.call_credit = call_credit
+        result.call_stop = call_stop
+        result.put_outcome = "skipped"
+
+    elif call_short is not None and put_short is not None:
+        result.entry_type = "full_ic"
+        total_credit = call_credit + put_credit
+        call_stop = total_credit + cfg.stop_buffer
+        put_stop = total_credit + cfg.put_stop_buffer
+        call_stop = max(call_stop, cfg.min_stop_level)
+        put_stop = max(put_stop, cfg.min_stop_level)
+        result.short_call = call_short
+        result.long_call = call_long
+        result.short_put = put_short
+        result.long_put = put_long
+        result.call_credit = call_credit
+        result.put_credit = put_credit
+        result.call_stop = call_stop
+        result.put_stop = put_stop
+
+    elif call_short is None and put_short is not None:
+        # MKT-032/039: put-only if VIX < threshold and one-sided entries enabled
+        if not cfg.one_sided_entries_enabled or vix >= cfg.put_only_max_vix:
+            result.entry_type = "skipped"
+            result.skip_reason = f"mkt-011_call_non_viable_vix_too_high ({vix:.1f} >= {cfg.put_only_max_vix})"
+            return result
+        result.entry_type = "put_only"
+        put_stop = put_credit + cfg.put_stop_buffer
+        put_stop = max(put_stop, cfg.min_stop_level)
+        result.short_put = put_short
+        result.long_put = put_long
+        result.put_credit = put_credit
+        result.put_stop = put_stop
+        result.call_outcome = "skipped"
+
+    elif call_short is not None and put_short is None:
+        # MKT-040: call-only when put non-viable (only if one-sided entries enabled)
+        if not cfg.one_sided_entries_enabled:
+            result.entry_type = "skipped"
+            result.skip_reason = "one_sided_disabled_put_non_viable"
+            return result
+        call_stop = call_credit + cfg.downday_theoretical_put_credit + cfg.stop_buffer
+        call_stop = max(call_stop, cfg.min_stop_level)
+        result.entry_type = "call_only"
+        result.skip_reason = "mkt-040"
+        result.short_call = call_short
+        result.long_call = call_long
+        result.call_credit = call_credit
+        result.call_stop = call_stop
+        result.put_outcome = "skipped"
+
+    else:
+        result.entry_type = "skipped"
+        result.skip_reason = "mkt-011_both_non_viable"
+        return result
+
+    # ── Stop monitoring + early exit ──────────────────────────────────────
+    call_stopped = False
+    put_stopped = False
+    # Track which sides are active
+    call_active = result.entry_type in ("full_ic", "call_only")
+    put_active = result.entry_type in ("full_ic", "put_only")
+
+    # early_ms already computed above (used to skip entries at/after exit time)
+    for monitor_ms in monitor_times:
+        if monitor_ms <= entry_ms:
+            continue  # don't check before entry
+
+        # Stop checks: use ask-based close cost (realistic fill price)
+        if call_active and not call_stopped:
+            cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+            if cv > 0 and cv >= result.call_stop:
+                call_stopped = True
+                result.call_outcome = "stopped"
+                result.call_exit_ms = monitor_ms
+                result.call_close_cost = cv
+
+        if put_active and not put_stopped:
+            pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+            if pv > 0 and pv >= result.put_stop:
+                put_stopped = True
+                result.put_outcome = "stopped"
+                result.put_exit_ms = monitor_ms
+                result.put_close_cost = pv
+
+        # Early exit: close any remaining open sides at this bar
+        if early_ms and monitor_ms >= early_ms:
+            if call_active and not call_stopped:
+                cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                result.call_outcome = "early_exit"
+                result.call_exit_ms = monitor_ms
+                result.call_close_cost = cv  # 0.0 if quote missing (treated as worthless)
+                call_stopped = True
+            if put_active and not put_stopped:
+                pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                result.put_outcome = "early_exit"
+                result.put_exit_ms = monitor_ms
+                result.put_close_cost = pv
+                put_stopped = True
+            break  # don't monitor past early exit time
+
+        if (not call_active or call_stopped) and (not put_active or put_stopped):
+            break  # both sides resolved
+
+    # ── Settlement (4 PM) ─────────────────────────────────────────────────
+    if call_active and not call_stopped:
+        result.call_outcome = "expired"
+        result.call_close_cost = 0.0
+    if put_active and not put_stopped:
+        result.put_outcome = "expired"
+        result.put_close_cost = 0.0
+
+    # ── P&L ───────────────────────────────────────────────────────────────
+    # Opening commission: always charged ($2.50/leg × legs placed)
+    # Closing commission: only when actively closed (stopped or early_exit)
+    # Expiry: no closing commission — legs expire worthless, no transaction needed
+    legs_placed = 0
+    legs_closed = 0
+    gross = 0.0
+
+    if call_active:
+        legs_placed += 2
+        gross += result.call_credit - result.call_close_cost
+        if result.call_outcome in ("stopped", "early_exit"):
+            legs_closed += 2
+
+    if put_active:
+        legs_placed += 2
+        gross += result.put_credit - result.put_close_cost
+        if result.put_outcome in ("stopped", "early_exit"):
+            legs_closed += 2
+
+    commission = cfg.commission_per_leg * (legs_placed + legs_closed) * cfg.contracts
+    result.gross_pnl = gross * cfg.contracts
+    result.commission = commission
+    result.net_pnl = result.gross_pnl - commission
+
+    return result
+
+
+# ── Per-day simulation ─────────────────────────────────────────────────────
+
+def simulate_day(
+    trading_date: date,
+    cfg: BacktestConfig,
+    cache_dir: Path,
+    fomc_t1_dates: set,
+) -> Optional[DayResult]:
+
+    # Load data
+    chain_df = load_chain_day(trading_date, cache_dir)
+    if chain_df.empty:
+        return None
+
+    spx_df = load_index_day("SPX", trading_date, cache_dir)
+    vix_df = load_index_day("VIX", trading_date, cache_dir)
+    if spx_df.empty or vix_df.empty:
+        return None
+
+    lookup = _build_chain_lookup(chain_df)
+    monitor_times = sorted(chain_df["ms_of_day"].unique().tolist())
+
+    # Session open price (first valid 1-min SPX bar at/after 9:30)
+    spx_open_row = spx_df[spx_df["price"] > 0]
+    spx_open = float(spx_open_row.iloc[0]["price"]) if not spx_open_row.empty else 0.0
+
+    is_fomc_t1 = trading_date in fomc_t1_dates
+
+    day = DayResult(date=trading_date)
+
+    # ── Base entries ────────────────────────────────────────────────────
+    entry_ms_list = cfg.entry_times_as_ms()
+    for i, entry_ms in enumerate(entry_ms_list, 1):
+        res = _simulate_entry(
+            entry_num=i,
+            entry_ms=entry_ms,
+            is_conditional=False,
+            is_fomc_t1=is_fomc_t1,
+            spx_open=spx_open,
+            chain_df=chain_df,
+            lookup=lookup,
+            spx_df=spx_df,
+            vix_df=vix_df,
+            cfg=cfg,
+            monitor_times=monitor_times,
+        )
+        day.entries.append(res)
+
+    # ── Conditional entries (E6/E7) ─────────────────────────────────────
+    cond_times = cfg.conditional_times_as_ms()
+    cond_enabled = [cfg.conditional_e6_enabled, cfg.conditional_e7_enabled]
+    for i, (cond_ms, enabled) in enumerate(zip(cond_times, cond_enabled), 6):
+        if not enabled:
+            continue
+        res = _simulate_entry(
+            entry_num=i,
+            entry_ms=cond_ms,
+            is_conditional=True,
+            is_fomc_t1=is_fomc_t1,
+            spx_open=spx_open,
+            chain_df=chain_df,
+            lookup=lookup,
+            spx_df=spx_df,
+            vix_df=vix_df,
+            cfg=cfg,
+            monitor_times=monitor_times,
+        )
+        day.entries.append(res)
+
+    return day
+
+
+# ── Full backtest ───────────────────────────────────────────────────────────
+
+def run_backtest(cfg: BacktestConfig) -> List[DayResult]:
+    cache_dir = Path(cfg.cache_dir)
+    trading_days = get_spxw_trading_days(cfg.start_date, cfg.end_date, cache_dir)
+
+    # Build FOMC T+1 date set
+    fomc_t1_dates = set(cfg.fomc_t1_dates)
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from shared.event_calendar import get_fomc_announcement_dates
+        years = range(cfg.start_date.year, cfg.end_date.year + 1)
+        for fomc_date in [d for yr in years for d in get_fomc_announcement_dates(yr)]:
+            if isinstance(fomc_date, date):
+                t1 = fomc_date + timedelta(days=1)
+                # Skip weekends
+                if t1.weekday() < 5:
+                    fomc_t1_dates.add(t1)
+    except ImportError:
+        pass  # Use whatever was in cfg
+
+    results = []
+    n_total = len(trading_days)
+    print(f"\nRunning backtest: {cfg.start_date} → {cfg.end_date} ({n_total} days)\n")
+
+    for i, d in enumerate(trading_days, 1):
+        day_result = simulate_day(d, cfg, cache_dir, fomc_t1_dates)
+        if day_result is None:
+            continue
+        results.append(day_result)
+
+        if i % 50 == 0 or i == n_total:
+            cum_net = sum(r.net_pnl for r in results)
+            print(f"  [{i}/{n_total}] {d}  cumulative net P&L: ${cum_net:+.0f}")
+
+    return results
+
+
+# ── Results summary ─────────────────────────────────────────────────────────
+
+def summarize(results: List[DayResult]) -> pd.DataFrame:
+    """Convert list of DayResult to a tidy daily DataFrame."""
+    rows = []
+    for day in results:
+        for e in day.entries:
+            rows.append({
+                "date": day.date,
+                "entry_num": e.entry_num,
+                "entry_type": e.entry_type,
+                "skip_reason": e.skip_reason,
+                "spx": e.spx_at_entry,
+                "vix": e.vix_at_entry,
+                "short_call": e.short_call,
+                "long_call": e.long_call,
+                "short_put": e.short_put,
+                "long_put": e.long_put,
+                "call_credit": e.call_credit,
+                "put_credit": e.put_credit,
+                "call_stop": e.call_stop,
+                "put_stop": e.put_stop,
+                "call_outcome": e.call_outcome,
+                "put_outcome": e.put_outcome,
+                "call_close_cost": e.call_close_cost,
+                "put_close_cost": e.put_close_cost,
+                "gross_pnl": e.gross_pnl,
+                "commission": e.commission,
+                "net_pnl": e.net_pnl,
+            })
+    return pd.DataFrame(rows)
+
+
+def print_stats(results: List[DayResult]):
+    """Print a performance summary."""
+    if not results:
+        print("No results.")
+        return
+
+    daily_net = [r.net_pnl for r in results]
+    total_net = sum(daily_net)
+    winning_days = sum(1 for x in daily_net if x > 0)
+    losing_days = sum(1 for x in daily_net if x < 0)
+    flat_days = len(daily_net) - winning_days - losing_days
+    win_rate = winning_days / len(daily_net) * 100 if daily_net else 0
+
+    all_entries = [e for r in results for e in r.entries]
+    placed = [e for e in all_entries if e.entry_type != "skipped"]
+    full_ics = [e for e in placed if e.entry_type == "full_ic"]
+    call_onlys = [e for e in placed if e.entry_type == "call_only"]
+    put_onlys = [e for e in placed if e.entry_type == "put_only"]
+    skipped = [e for e in all_entries if e.entry_type == "skipped"]
+
+    call_stops = sum(1 for e in placed if e.call_outcome == "stopped")
+    put_stops = sum(1 for e in placed if e.put_outcome == "stopped")
+    total_stops = call_stops + put_stops
+    stop_rate = total_stops / (len(placed) * 2) * 100 if placed else 0
+
+    # Sharpe (annualized, assuming ~252 trading days/year)
+    if len(daily_net) > 1:
+        arr = pd.Series(daily_net)
+        sharpe = arr.mean() / arr.std() * math.sqrt(252) if arr.std() > 0 else 0
+    else:
+        sharpe = 0
+
+    # Max drawdown
+    cumulative = pd.Series(daily_net).cumsum()
+    rolling_max = cumulative.cummax()
+    drawdown = cumulative - rolling_max
+    max_dd = float(drawdown.min())
+
+    avg_credit = sum(e.call_credit + e.put_credit for e in placed) / len(placed) if placed else 0
+    avg_net_per_day = total_net / len(results) if results else 0
+    avg_net_per_entry = total_net / len(placed) if placed else 0
+
+    print(f"\n{'='*60}")
+    print(f"  HYDRA BACKTEST RESULTS")
+    print(f"{'='*60}")
+    print(f"  Period:         {results[0].date} → {results[-1].date}")
+    print(f"  Trading days:   {len(results)}")
+    print(f"")
+    print(f"  ── P&L ──────────────────────────────────────────────────")
+    print(f"  Total net P&L:  ${total_net:+,.0f}")
+    print(f"  Avg net/day:    ${avg_net_per_day:+.0f}")
+    print(f"  Avg net/entry:  ${avg_net_per_entry:+.0f}")
+    print(f"  Max drawdown:   ${max_dd:,.0f}")
+    print(f"  Sharpe ratio:   {sharpe:.2f}")
+    print(f"")
+    print(f"  ── Win/Loss ─────────────────────────────────────────────")
+    print(f"  Win rate:       {win_rate:.1f}%  ({winning_days}W / {losing_days}L / {flat_days}F)")
+    print(f"")
+    print(f"  ── Entries ──────────────────────────────────────────────")
+    print(f"  Total placed:   {len(placed)}  (avg {len(placed)/len(results):.1f}/day)")
+    print(f"  Full ICs:       {len(full_ics)}")
+    print(f"  Call-only:      {len(call_onlys)}")
+    print(f"  Put-only:       {len(put_onlys)}")
+    print(f"  Skipped:        {len(skipped)}")
+    print(f"  Avg credit:     ${avg_credit:.0f}")
+    print(f"")
+    print(f"  ── Stops ────────────────────────────────────────────────")
+    print(f"  Call stops:     {call_stops}")
+    print(f"  Put stops:      {put_stops}")
+    print(f"  Stop rate:      {stop_rate:.1f}% of sides placed")
+    print(f"{'='*60}\n")
