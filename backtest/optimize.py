@@ -79,16 +79,17 @@ XL_GRID = {
     "fomc_t1_callonly_enabled":   [True],            # LOCKED
     "put_only_max_vix":           [25.0],            # LOCKED
     "target_delta":               [8.0],             # LOCKED
-    "conditional_e6_enabled":     [False],             # LOCKED (E6 hurts Sharpe)
-    "conditional_e7_enabled":     [True],              # LOCKED (E7 adds value)
+    "conditional_e6_enabled":     [False],             # LOCKED
+    "conditional_e7_enabled":     [True],              # LOCKED
     "downday_threshold_pct":      [0.3],               # LOCKED
-    "downday_reference":          ["open"],            # LOCKED (open beats high)
-    "conditional_upday_e6_enabled": [True],            # LOCKED (E6 upday wins)
-    "conditional_upday_e7_enabled": [False],           # LOCKED (E7 upday doesn't help)
+    "downday_reference":          ["open"],            # LOCKED
+    "conditional_upday_e6_enabled": [True],            # LOCKED
+    "conditional_upday_e7_enabled": [False],           # LOCKED
     "upday_threshold_pct":        [0.40],              # LOCKED
     "upday_reference":            ["open"],            # LOCKED
+    "downday_theoretical_put_credit": [1000],             # LOCKED ($10.00 × 100 — call-only stop buffer)
 }
-# 1 combination (all locked)
+# 5 combinations
 
 FULL_GRID = {
     "put_stop_buffer":            [100, 200, 300, 400, 500, 600, 700, 800, 1000],
@@ -135,6 +136,7 @@ class OptCombo:
     conditional_upday_e7_enabled: bool = False  # upday put-only at 13:15
     upday_threshold_pct: float = 0.3       # % SPX rise to trigger up-day put-only
     upday_reference: str = "open"          # reference price: "open" or "low"
+    downday_theoretical_put_credit: float = 1000.0  # $ added to call-only stop level (locked)
 
     # Training metrics
     train_net_pnl: float = 0.0
@@ -290,6 +292,8 @@ def _worker(args: Tuple[dict, date, date, str]) -> dict:
         cfg.upday_threshold_pct = combo["upday_threshold_pct"]
     if "upday_reference" in combo:
         cfg.upday_reference = combo["upday_reference"]
+    if "downday_theoretical_put_credit" in combo:
+        cfg.downday_theoretical_put_credit = combo["downday_theoretical_put_credit"]
 
     try:
         # Suppress run_backtest()'s internal print() calls
@@ -517,7 +521,8 @@ def _make_dashboard(
         one_s = "Y" if r.get("one_sided_entries_enabled", False) else "N"
         sched = r.get("entry_schedule", "current")
         exit_t = r.get("early_exit_time") or "4PM"
-        params = f"put={buf} p≥{put_min:.2f} c≥{call_min:.2f} cb={cbuf} 1s={one_s} {sched}/{exit_t}"
+        theo = r.get("downday_theoretical_put_credit", 250)
+        params = f"put={buf} theo=${theo/100:.2f} p≥{put_min:.2f} c≥{call_min:.2f} cb={cbuf} 1s={one_s} {sched}/{exit_t}"
 
         sharpe_style = "bold green" if sharpe > 1.5 else ("green" if sharpe > 0.5 else ("yellow" if sharpe > 0 else "red"))
         pnl_style = "green" if pnl > 0 else "red"
@@ -581,6 +586,7 @@ def build_opt_combos(raw_results: List[dict]) -> List[OptCombo]:
             conditional_upday_e7_enabled=r.get("conditional_upday_e7_enabled", False),
             upday_threshold_pct=r.get("upday_threshold_pct", 0.3),
             upday_reference=r.get("upday_reference", "open"),
+            downday_theoretical_put_credit=r.get("downday_theoretical_put_credit", 250.0),
             train_net_pnl=r.get("train_net_pnl", 0.0),
             train_sharpe=r.get("train_sharpe", -999.0),
             train_max_dd=r.get("train_max_dd", 0.0),

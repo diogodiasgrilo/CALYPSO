@@ -28,7 +28,7 @@ class BacktestConfig:
     conditional_entry_times: List[str] = field(default_factory=lambda: ["12:45", "13:15"])
     downday_threshold_pct: float = 0.3       # 0.3% drop triggers conditional entries
     downday_reference: str = "open"          # reference price for threshold: "open" or "high"
-    downday_theoretical_put_credit: float = 250.0  # $2.50 × 100 — used in call-only stop
+    downday_theoretical_put_credit: float = 1000.0  # $10.00 × 100 — used in call-only stop (walk-forward optimized)
 
     # ── Conditional E6/E7 up-day put-only entries ────────────────────────────
     # Fire as put-only when SPX rises >= upday_threshold_pct above reference
@@ -60,7 +60,7 @@ class BacktestConfig:
     min_call_credit: float = 0.60           # primary minimum per call side ($)
     min_put_credit: float = 2.50            # primary minimum per put side ($)
     call_credit_floor: float = 0.50         # MKT-029 hard floor after fallbacks
-    put_credit_floor: float = 2.40          # MKT-029 hard floor after fallbacks
+    put_credit_floor: float = 2.15          # MKT-029 hard floor after fallbacks (min_put_credit - $0.10)
     one_sided_entries_enabled: bool = True  # if False, skip all put-only and call-only entries
     put_only_max_vix: float = 25.0          # MKT-032: only place put-only if VIX < this
     put_tighten_retries: int = 2            # MKT-040: retries before going call-only
@@ -133,23 +133,30 @@ class BacktestConfig:
 # ── Preset configs ────────────────────────────────────────────────────────────
 
 def live_config() -> BacktestConfig:
-    """Exact parameters running on HYDRA as of 2026-03-22 (synced from VM config.json)."""
+    """Exact parameters running on HYDRA as of 2026-03-23 (synced from VM config.json)."""
     return BacktestConfig(
         entry_times=["10:15", "10:45", "11:15", "11:45", "12:15"],
         conditional_e6_enabled=False,
-        conditional_e7_enabled=False,
-        fomc_t1_callonly_enabled=False,       # VM: fomc_t1_callonly_enabled=false
+        conditional_e7_enabled=True,          # VM: E7 downday call-only enabled
+        conditional_upday_e6_enabled=True,    # VM: E6 upday put-only enabled
+        conditional_upday_e7_enabled=False,
+        downday_threshold_pct=0.3,
+        upday_threshold_pct=0.40,
+        fomc_t1_callonly_enabled=True,
         call_starting_otm_multiplier=3.5,
         put_starting_otm_multiplier=4.0,
         spread_vix_multiplier=3.5,
-        call_min_spread_width=50,             # VM: fixed 50pt
-        put_min_spread_width=50,              # VM: fixed 50pt
+        call_min_spread_width=50,
+        put_min_spread_width=50,
         max_spread_width=50,
-        min_call_credit=0.60,                 # VM: min_viable_credit_per_side=0.6
-        min_put_credit=2.50,                  # VM: min_viable_credit_put_side=2.5
-        stop_buffer=10.0,                     # VM: stop_buffer=0.1 × 100
-        put_stop_buffer=500.0,                # VM: put_stop_buffer=5.0 × 100
-        one_sided_entries_enabled=False,      # VM: one_sided_entries_enabled=false
+        min_call_credit=1.25,                 # VM: min_viable_credit_per_side=1.25
+        min_put_credit=2.25,                  # VM: min_viable_credit_put_side=2.25
+        put_credit_floor=2.15,                # VM: dynamic floor = min - $0.10
+        stop_buffer=10.0,
+        put_stop_buffer=100.0,                # VM: put_stop_buffer=1.0 × 100
+        one_sided_entries_enabled=True,
+        put_only_max_vix=25.0,
+        downday_theoretical_put_credit=1000.0,  # VM: 10.0 × 100 (walk-forward optimized)
     )
 
 
