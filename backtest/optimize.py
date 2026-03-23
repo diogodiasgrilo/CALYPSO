@@ -70,7 +70,7 @@ ENTRY_SCHEDULES = {
 
 XL_GRID = {
     "put_stop_buffer":            [100],              # LOCKED
-    "min_put_credit":             [2.25],            # LOCKED
+    "min_put_credit":             [2.25],            # LOCKED (confirmed optimal: sweet spot between quality/quantity)
     "min_call_credit":            [1.25],            # LOCKED
     "stop_buffer":                [10],              # LOCKED
     "one_sided_entries_enabled":  [True],            # LOCKED
