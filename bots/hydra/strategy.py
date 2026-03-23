@@ -297,6 +297,27 @@ class HydraStrategy(MEICStrategy):
                 logger.info(f"MKT-035: E7 disabled via config (conditional_e7_enabled=False)")
                 continue
             self._conditional_entry_times.append(t)
+        self._conditional_downday_times_set = set(self._conditional_entry_times)
+
+        # Upday conditional put-only entries (mirror of MKT-035 for bullish days)
+        upday_e6_enabled = strategy_cfg.get("conditional_upday_e6_enabled", False)
+        upday_e7_enabled = strategy_cfg.get("conditional_upday_e7_enabled", False)
+        self._conditional_upday_entry_times = []
+        for i, t in enumerate(all_conditional):
+            if i == 0 and not upday_e6_enabled:
+                continue
+            if i == 1 and not upday_e7_enabled:
+                continue
+            self._conditional_upday_entry_times.append(t)
+        self._conditional_upday_times_set = set(self._conditional_upday_entry_times)
+
+        # Merge: add any upday times not already covered by downday list into _conditional_entry_times
+        # so _parse_entry_times() includes them in entry_times
+        _extra_upday = [t for t in self._conditional_upday_entry_times
+                        if t not in self._conditional_downday_times_set]
+        if _extra_upday:
+            self._conditional_entry_times = self._conditional_entry_times + _extra_upday
+
         self._base_entry_count = 0  # Set in _parse_entry_times after entry_times is built
 
         # Dashboard: server-side P&L history (persists across page refreshes / clients)
@@ -461,6 +482,19 @@ class HydraStrategy(MEICStrategy):
             f"(threshold: {self.downday_threshold_pct * 100:.1f}%, "
             f"theoretical put: ${self.downday_theoretical_put_credit / 100:.2f}, "
             f"conditional entries: {len(self._conditional_entry_times)})"
+        )
+        # Upday put-only conditional (mirror of MKT-035)
+        self.upday_putonly_enabled = bool(
+            strategy_config.get("conditional_upday_e6_enabled", False) or
+            strategy_config.get("conditional_upday_e7_enabled", False)
+        )
+        self.upday_threshold_pct = float(strategy_config.get("upday_threshold_pct", 0.004))  # 0.4%
+        self.upday_reference = strategy_config.get("upday_reference", "open")
+        logger.info(
+            f"  Up day filter: {'ENABLED' if self.upday_putonly_enabled else 'DISABLED'} "
+            f"(threshold: +{self.upday_threshold_pct * 100:.1f}%, "
+            f"reference: {self.upday_reference}, "
+            f"upday slots: {len(self._conditional_upday_entry_times)})"
         )
 
         # MKT-038: Call-only entries on T+1 after FOMC announcement
@@ -1763,8 +1797,50 @@ class HydraStrategy(MEICStrategy):
         return is_down
 
     def _is_conditional_entry(self, entry_num: int) -> bool:
-        """Check if this entry number is a conditional entry (MKT-035 only)."""
+        """Check if this entry number is a conditional slot (downday OR upday)."""
         return entry_num > self._base_entry_count
+
+    def _is_downday_conditional_entry(self, entry_num: int) -> bool:
+        """Check if this entry's time slot is enabled for downday call-only (MKT-035)."""
+        if entry_num < 1 or entry_num > len(self.entry_times):
+            return False
+        return self.entry_times[entry_num - 1] in self._conditional_downday_times_set
+
+    def _is_upday_conditional_entry(self, entry_num: int) -> bool:
+        """Check if this entry's time slot is enabled for upday put-only."""
+        if entry_num < 1 or entry_num > len(self.entry_times):
+            return False
+        return self.entry_times[entry_num - 1] in self._conditional_upday_times_set
+
+    def _check_upday_filter(self) -> bool:
+        """
+        Check if SPX is up more than upday_threshold_pct from today's open.
+
+        Returns True if put-only should be used (bullish day detected).
+        Reference is always session open (upday_reference="open" or "low" both
+        use spx_open — intraday low tracking not yet implemented in live bot).
+        """
+        if not self.upday_putonly_enabled:
+            return False
+
+        spx_ref = self.market_data.spx_open
+        if not spx_ref or spx_ref <= 0:
+            logger.warning("Upday-035: No SPX open price available, skipping up-day check")
+            return False
+
+        current = self.current_price
+        if current <= 0:
+            return False
+
+        change_pct = (current - spx_ref) / spx_ref
+        is_up = change_pct > self.upday_threshold_pct
+
+        triggered = "TRIGGERED → put-only" if is_up else "not triggered"
+        logger.info(
+            f"Upday-035: SPX {change_pct * 100:+.2f}% from open "
+            f"({current:.1f} vs {spx_ref:.1f}), threshold +{self.upday_threshold_pct * 100:.1f}% — {triggered}"
+        )
+        return is_up
 
     # =========================================================================
     # TREND DETECTION
@@ -2834,15 +2910,21 @@ class HydraStrategy(MEICStrategy):
                     if self.recheck_each_entry:
                         trend = self._get_trend_signal()
 
-                # MKT-035: Check conditional entries BEFORE any strike/API work
-                # Conditional entries (6+) only fire on down days — skip immediately if not
+                # MKT-035 / Upday-035: Check conditional entries BEFORE any strike/API work
+                # Conditional entries (6+) fire as call-only on down days or put-only on up days
                 is_conditional = self._is_conditional_entry(entry_num)
+                _downday_triggered = False
+                _upday_triggered = False
                 if is_conditional and not self.dry_run:
-                    downday = self._check_downday_filter()
-                    if not downday:
+                    if self._is_downday_conditional_entry(entry_num):
+                        _downday_triggered = self._check_downday_filter()
+                    if self._is_upday_conditional_entry(entry_num) and not _downday_triggered:
+                        _upday_triggered = self._check_upday_filter()
+                    if not _downday_triggered and not _upday_triggered:
+                        direction = "down" if self._is_downday_conditional_entry(entry_num) else "up"
                         logger.info(
-                            f"MKT-035: Entry #{entry_num} is conditional — "
-                            f"SPX not down enough, skipping"
+                            f"Conditional Entry #{entry_num} — "
+                            f"SPX did not meet {direction}-day threshold, skipping"
                         )
                         self.daily_state.entries_skipped += 1
                         self.daily_state.credit_gate_skips += 1
@@ -2851,9 +2933,9 @@ class HydraStrategy(MEICStrategy):
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
                         self._record_skipped_entry(
-                            entry_num, "MKT-035: SPX not down enough for conditional entry"
+                            entry_num, f"Conditional: no {direction}-day trigger"
                         )
-                        return f"Entry #{entry_num} skipped - conditional (MKT-035 not triggered)"
+                        return f"Entry #{entry_num} skipped - conditional (no trigger)"
 
                 # Create extended entry object
                 entry = HydraIronCondorEntry(entry_number=entry_num)
@@ -2883,17 +2965,19 @@ class HydraStrategy(MEICStrategy):
 
                 # MKT-020/MKT-022: Progressive OTM tightening
                 if not self.dry_run:
-                    self._apply_progressive_call_tightening(entry)
+                    if not _upday_triggered:
+                        # Skip call tightening for upday put-only entries (call side not placed)
+                        self._apply_progressive_call_tightening(entry)
                     if not is_conditional and not is_fomc_t1:
-                        # Skip put tightening for unconditional call-only entries:
-                        # MKT-035 conditional (E6/E7) and MKT-038 FOMC T+1 base entries
-                        # both never place puts — scanning wastes multiple API calls
+                        # Skip put tightening for downday call-only / FOMC T+1 entries
+                        self._apply_progressive_put_tightening(entry)
+                    elif _upday_triggered:
+                        # Upday put-only: DO apply put tightening (we're placing the put side)
                         self._apply_progressive_put_tightening(entry)
 
                 if not self.dry_run:
-                    if is_conditional:
-                        # Conditional entry: we already confirmed downday above,
-                        # so force call-only and check call credit viability
+                    if is_conditional and _downday_triggered:
+                        # Conditional entry: down day confirmed → force call-only (MKT-035)
                         entry.call_only = True
                         entry.put_only = False
                         entry.put_side_skipped = True
@@ -2928,10 +3012,42 @@ class HydraStrategy(MEICStrategy):
                             )
                             return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
 
+                    elif is_conditional and _upday_triggered:
+                        # Up day confirmed → force put-only (Upday-035)
+                        entry.put_only = True
+                        entry.call_only = False
+                        entry.call_side_skipped = True
+                        entry.override_reason = "upday-035"
+                        place_put_only = True
+                        credit_gate_handled = True
+                        logger.info(
+                            f"Upday-035: Conditional Entry #{entry_num} — up day confirmed, "
+                            f"placing PUT spread only"
+                        )
+
+                        # Check put credit viability (MKT-029 floor: min-$0.10)
+                        _, _, _, est_put = self._check_credit_gate(entry)
+                        put_floor = self.min_viable_credit_put_side - 10  # MKT-029 hard floor
+                        if est_put < put_floor:
+                            logger.info(
+                                f"Upday-035: Entry #{entry_num} put credit "
+                                f"${est_put / 100:.2f} below floor — skipping"
+                            )
+                            self.daily_state.entries_skipped += 1
+                            self.daily_state.credit_gate_skips += 1
+                            self._entry_in_progress = False
+                            self._current_entry = None
+                            self.state = MEICState.MONITORING
+                            self._next_entry_index += 1
+                            self._record_skipped_entry(
+                                entry_num,
+                                f"Upday-035: put credit non-viable (${est_put / 100:.2f} < ${put_floor / 100:.2f})",
+                                f"• Put est: ${est_put / 100:.2f} (floor ${put_floor / 100:.2f}, primary ${self.min_viable_credit_put_side / 100:.2f})"
+                            )
+                            return f"Entry #{entry_num} skipped - put credit non-viable (Upday-035)"
+
                     else:
-                        # Regular entries (1-5): MKT-035 disabled for base entries
-                        # The $5.00 put buffer provides sufficient protection on down days.
-                        # MKT-035 only applies to conditional entries (E6/E7).
+                        # Regular entries (1-5): conditional checks don't apply to base entries
                         pass
 
                 # MKT-038: Force call-only on T+1 after FOMC announcement

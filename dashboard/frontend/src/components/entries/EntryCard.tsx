@@ -168,6 +168,7 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
     : entry.override_reason === "mkt-038" ? "MKT-038"
     : entry.override_reason === "mkt-040" ? "MKT-040"
     : entry.override_reason === "mkt-039" ? "MKT-039"
+    : entry.override_reason === "upday-035" ? "Upday-035"
     : entry.trend_signal ?? "";
 
   // Show live data for active entries AND single-stopped entries (surviving side still live)

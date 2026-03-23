@@ -265,6 +265,7 @@ def _simulate_entry(
     vix_df: pd.DataFrame,
     cfg: BacktestConfig,
     monitor_times: List[int],
+    is_upday_conditional: bool = False,  # upday put-only trigger enabled for this slot
 ) -> EntryResult:
 
     result = EntryResult(entry_num=entry_num, entry_time_ms=entry_ms)
@@ -293,22 +294,66 @@ def _simulate_entry(
     spx_rounded = round(spx / 5) * 5
 
     # ── Determine entry mode ─────────────────────────────────────────────
-    # MKT-035: Conditional entries → call-only if SPX dropped enough
+    # MKT-035: Conditional down-day entries → call-only if SPX dropped enough
     # MKT-038: FOMC T+1 → force call-only for ALL entries
+    # Upday conditional: put-only if SPX rose enough (mirror of MKT-035)
     force_call_only = False
+    force_put_only = False
+    market_open_ms = 34_200_000  # 9:30 AM ET in ms
+
     if is_fomc_t1 and cfg.fomc_t1_callonly_enabled:
         force_call_only = True
         result.entry_type = "call_only"
         result.skip_reason = "mkt-038"
-    elif is_conditional:
-        drop_pct = (spx_open - spx) / spx_open * 100 if spx_open > 0 else 0
-        if drop_pct >= cfg.downday_threshold_pct:
+    elif is_conditional or is_upday_conditional:
+        # ── Down-day reference (open or intraday high) ────────────────────
+        if is_conditional:
+            if getattr(cfg, "downday_reference", "open") == "high":
+                mask = (
+                    (spx_df["ms_of_day"] >= market_open_ms) &
+                    (spx_df["ms_of_day"] <= entry_ms) &
+                    (spx_df["price"] > 0)
+                )
+                down_ref = float(spx_df.loc[mask, "price"].max()) if mask.any() else spx_open
+                if down_ref <= 0:
+                    down_ref = spx_open
+            else:
+                down_ref = spx_open
+            drop_pct = (down_ref - spx) / down_ref * 100 if down_ref > 0 else 0
+        else:
+            drop_pct = 0.0
+
+        # ── Up-day reference (open or intraday low) ───────────────────────
+        if is_upday_conditional:
+            if getattr(cfg, "upday_reference", "open") == "low":
+                mask = (
+                    (spx_df["ms_of_day"] >= market_open_ms) &
+                    (spx_df["ms_of_day"] <= entry_ms) &
+                    (spx_df["price"] > 0)
+                )
+                up_ref = float(spx_df.loc[mask, "price"].min()) if mask.any() else spx_open
+                if up_ref <= 0:
+                    up_ref = spx_open
+            else:
+                up_ref = spx_open
+            rise_pct = (spx - up_ref) / up_ref * 100 if up_ref > 0 else 0
+        else:
+            rise_pct = 0.0
+
+        # ── Decide which trigger fires (down-day takes priority) ──────────
+        if is_conditional and drop_pct >= cfg.downday_threshold_pct:
             force_call_only = True
             result.entry_type = "call_only"
             result.skip_reason = "mkt-035"
+        elif is_upday_conditional and rise_pct >= getattr(cfg, "upday_threshold_pct", 0.3):
+            force_put_only = True
+            result.entry_type = "put_only"
+            result.skip_reason = "upday-035"
         else:
             result.entry_type = "skipped"
-            result.skip_reason = f"conditional_no_trigger ({drop_pct:.2f}%)"
+            result.skip_reason = (
+                f"conditional_no_trigger (drop={drop_pct:.2f}% rise={rise_pct:.2f}%)"
+            )
             return result
 
     # ── Strike calculation ───────────────────────────────────────────────
@@ -330,7 +375,16 @@ def _simulate_entry(
     put_short = put_long = None
     put_credit = 0.0
 
-    if not force_call_only:
+    if force_put_only:
+        # Forced put-only (upday conditional) — only scan put side
+        put_starting_otm_original = put_starting_otm
+        put_short, put_long, put_credit = _scan_for_viable_strike(
+            lookup, spx_rounded, "put", put_spread_width,
+            put_starting_otm, cfg.min_put_otm_distance,
+            cfg.put_credit_floor * 100, actual_ms
+        )
+
+    elif not force_call_only:
         # Scan for viable call strike
         call_short, call_long, call_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "call", call_spread_width,
@@ -380,7 +434,21 @@ def _simulate_entry(
         )
 
     # ── Determine entry type based on what's viable ───────────────────────
-    if force_call_only:
+    if force_put_only:
+        if put_short is None:
+            result.entry_type = "skipped"
+            result.skip_reason = "upday-035_no_put_credit"
+            return result
+        put_stop = put_credit + cfg.put_stop_buffer
+        put_stop = max(put_stop, cfg.min_stop_level)
+        result.entry_type = "put_only"
+        result.short_put = put_short
+        result.long_put = put_long
+        result.put_credit = put_credit
+        result.put_stop = put_stop
+        result.call_outcome = "skipped"
+
+    elif force_call_only:
         if call_short is None:
             result.entry_type = "skipped"
             result.skip_reason = f"mkt-011_call_only_no_credit (forced: {result.skip_reason})"
@@ -581,14 +649,19 @@ def simulate_day(
 
     # ── Conditional entries (E6/E7) ─────────────────────────────────────
     cond_times = cfg.conditional_times_as_ms()
-    cond_enabled = [cfg.conditional_e6_enabled, cfg.conditional_e7_enabled]
-    for i, (cond_ms, enabled) in enumerate(zip(cond_times, cond_enabled), 6):
-        if not enabled:
+    cond_down = [cfg.conditional_e6_enabled, cfg.conditional_e7_enabled]
+    cond_up = [
+        getattr(cfg, "conditional_upday_e6_enabled", False),
+        getattr(cfg, "conditional_upday_e7_enabled", False),
+    ]
+    for i, (cond_ms, down_en, up_en) in enumerate(zip(cond_times, cond_down, cond_up), 6):
+        if not down_en and not up_en:
             continue
         res = _simulate_entry(
             entry_num=i,
             entry_ms=cond_ms,
-            is_conditional=True,
+            is_conditional=down_en,
+            is_upday_conditional=up_en,
             is_fomc_t1=is_fomc_t1,
             spx_open=spx_open,
             chain_df=chain_df,

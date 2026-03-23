@@ -69,15 +69,26 @@ ENTRY_SCHEDULES = {
 # ── Parameter grids ─────────────────────────────────────────────────────────
 
 XL_GRID = {
-    "put_stop_buffer":            [75, 100, 125, 150],
-    "min_put_credit":             [3.00],
-    "min_call_credit":            [1.00, 1.25, 1.50, 1.75, 2.00],
-    "stop_buffer":                [5, 10],
-    "one_sided_entries_enabled":  [True, False],
-    "entry_schedule":             ["current"],
-    "early_exit_time":            [None],
+    "put_stop_buffer":            [100],              # LOCKED
+    "min_put_credit":             [2.25],            # LOCKED
+    "min_call_credit":            [1.25],            # LOCKED
+    "stop_buffer":                [10],              # LOCKED
+    "one_sided_entries_enabled":  [True],            # LOCKED
+    "entry_schedule":             ["current"],       # LOCKED
+    "early_exit_time":            [None],            # LOCKED
+    "fomc_t1_callonly_enabled":   [True],            # LOCKED
+    "put_only_max_vix":           [25.0],            # LOCKED
+    "target_delta":               [8.0],             # LOCKED
+    "conditional_e6_enabled":     [False],             # LOCKED (E6 hurts Sharpe)
+    "conditional_e7_enabled":     [True],              # LOCKED (E7 adds value)
+    "downday_threshold_pct":      [0.3],               # LOCKED
+    "downday_reference":          ["open"],            # LOCKED (open beats high)
+    "conditional_upday_e6_enabled": [True],            # LOCKED (E6 upday wins)
+    "conditional_upday_e7_enabled": [False],           # LOCKED (E7 upday doesn't help)
+    "upday_threshold_pct":        [0.40],              # LOCKED
+    "upday_reference":            ["open"],            # LOCKED
 }
-# 4 × 1 × 5 × 2 × 2 × 1 × 1 = 80 combinations
+# 1 combination (all locked)
 
 FULL_GRID = {
     "put_stop_buffer":            [100, 200, 300, 400, 500, 600, 700, 800, 1000],
@@ -114,6 +125,16 @@ class OptCombo:
     stop_buffer: float = 10.0               # call-side stop buffer
     entry_schedule: str = "current"         # entry time preset name
     early_exit_time: Optional[str] = None   # HH:MM or None
+    put_only_max_vix: float = 25.0          # VIX ceiling for put-only entries
+    target_delta: float = 8.0              # OTM delta target for strike selection
+    conditional_e6_enabled: bool = False   # MKT-035: E6 conditional down-day entry
+    conditional_e7_enabled: bool = False   # MKT-035: E7 conditional down-day entry
+    downday_threshold_pct: float = 0.3     # % SPX drop below open to trigger conditional
+    downday_reference: str = "open"        # reference price: "open" or "high"
+    conditional_upday_e6_enabled: bool = False  # upday put-only at 12:45
+    conditional_upday_e7_enabled: bool = False  # upday put-only at 13:15
+    upday_threshold_pct: float = 0.3       # % SPX rise to trigger up-day put-only
+    upday_reference: str = "open"          # reference price: "open" or "low"
 
     # Training metrics
     train_net_pnl: float = 0.0
@@ -249,6 +270,26 @@ def _worker(args: Tuple[dict, date, date, str]) -> dict:
         cfg.entry_times = ENTRY_SCHEDULES[combo["entry_schedule"]]
     if "early_exit_time" in combo:
         cfg.early_exit_time = combo["early_exit_time"]
+    if "put_only_max_vix" in combo:
+        cfg.put_only_max_vix = combo["put_only_max_vix"]
+    if "target_delta" in combo:
+        cfg.target_delta = combo["target_delta"]
+    if "conditional_e6_enabled" in combo:
+        cfg.conditional_e6_enabled = combo["conditional_e6_enabled"]
+    if "conditional_e7_enabled" in combo:
+        cfg.conditional_e7_enabled = combo["conditional_e7_enabled"]
+    if "downday_threshold_pct" in combo:
+        cfg.downday_threshold_pct = combo["downday_threshold_pct"]
+    if "downday_reference" in combo:
+        cfg.downday_reference = combo["downday_reference"]
+    if "conditional_upday_e6_enabled" in combo:
+        cfg.conditional_upday_e6_enabled = combo["conditional_upday_e6_enabled"]
+    if "conditional_upday_e7_enabled" in combo:
+        cfg.conditional_upday_e7_enabled = combo["conditional_upday_e7_enabled"]
+    if "upday_threshold_pct" in combo:
+        cfg.upday_threshold_pct = combo["upday_threshold_pct"]
+    if "upday_reference" in combo:
+        cfg.upday_reference = combo["upday_reference"]
 
     try:
         # Suppress run_backtest()'s internal print() calls
@@ -530,6 +571,16 @@ def build_opt_combos(raw_results: List[dict]) -> List[OptCombo]:
             stop_buffer=r.get("stop_buffer", 10.0),
             entry_schedule=r.get("entry_schedule", "current"),
             early_exit_time=r.get("early_exit_time", None),
+            put_only_max_vix=r.get("put_only_max_vix", 25.0),
+            target_delta=r.get("target_delta", 8.0),
+            conditional_e6_enabled=r.get("conditional_e6_enabled", False),
+            conditional_e7_enabled=r.get("conditional_e7_enabled", False),
+            downday_threshold_pct=r.get("downday_threshold_pct", 0.3),
+            downday_reference=r.get("downday_reference", "open"),
+            conditional_upday_e6_enabled=r.get("conditional_upday_e6_enabled", False),
+            conditional_upday_e7_enabled=r.get("conditional_upday_e7_enabled", False),
+            upday_threshold_pct=r.get("upday_threshold_pct", 0.3),
+            upday_reference=r.get("upday_reference", "open"),
             train_net_pnl=r.get("train_net_pnl", 0.0),
             train_sharpe=r.get("train_sharpe", -999.0),
             train_max_dd=r.get("train_max_dd", 0.0),

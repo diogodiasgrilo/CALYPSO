@@ -17,12 +17,22 @@ MKT-035/MKT-038 call-only entries also use MKT-029 call floor ($0.50).
 - Put non-viable, call viable: Retry with tighter put strikes (5pt closer, max 2 retries), then call-only entry (MKT-040, v1.15.1)
 - Both non-viable: Skip entry entirely
 
-Conditional Entry Trigger (MKT-035): Only affects conditional entries E6/E7.
-- Base entries E1-E5 always attempt full ICs regardless of down-day status
-- Conditional entries (12:45, 13:15) only fire when SPX drops >= 0.3% below the session open, as call-only
-- Stop = call_credit + theoretical $2.50 put + buffer (not 2× credit)
+Conditional Entry Trigger (MKT-035 / Upday-035): Only affects conditional entries E6/E7.
+- Base entries E1-E5 always attempt full ICs regardless of down-day/up-day status
+- Conditional down-day entries (MKT-035): only fire when SPX drops >= 0.3% below session open, as call-only
+  Stop = call_credit + theoretical $2.50 put + buffer (not 2× credit)
+- Conditional up-day entries (Upday-035): only fire when SPX rises >= 0.4% above session open, as put-only
+  Stop = put_credit + put_stop_buffer ($5.00); DISABLED on VM by default (conditional_upday_e6/e7_enabled=false)
 
 Version History:
+- 1.17.0 (2026-03-23): Upday-035 conditional up-day put-only entries. Mirror of MKT-035 for bullish days:
+  when SPX rises >= upday_threshold_pct (default 0.4%) above session open, conditional slots E6/E7 fire as
+  put-only instead of being skipped. Stop = put_credit + put_stop_buffer. Configurable via
+  conditional_upday_e6_enabled / conditional_upday_e7_enabled / upday_threshold_pct / upday_reference.
+  DISABLED on VM by default. Dashboard EntryCard shows "Upday-035" label for override_reason="upday-035".
+  Backtest support added (backtest/engine.py is_upday_conditional, backtest/config.py, backtest/optimize.py).
+  APOLLO scout.py system prompt updated to reflect correct MKT-035 reference price (session open, not high)
+  and to document Upday-035.
 - 1.16.1 (2026-03-19): MKT-029 graduated call fallback in credit gate. Previously only puts had MKT-029 fallback (-$0.05, -$0.10) in _check_credit_gate(); calls used hard $0.60 minimum. Now both sides use graduated fallback: call $0.60→$0.55→$0.50, put $2.50→$2.45→$2.40. MKT-035/MKT-038 call-only skip checks also lowered from $0.60 to $0.50 floor. Fixed stale comments referencing $0.75 calls and $1.75 puts. All agent prompts updated.
 - 1.16.0 (2026-03-16): Skip alerts + dashboard improvements. Telegram ENTRY_SKIPPED alerts at all 8 skip paths in _initiate_entry() with detailed reasons (MKT-011 both non-viable, MKT-032 VIX gate, MKT-035 not triggered, MKT-038 call non-viable, MKT-010 illiquidity, margin). Skipped entries now persisted in state file with skip_reason field for dashboard display. entry_schedule (base + conditional times) added to state file. Dashboard: mobile-responsive header, pending entry cards show scheduled times, skipped entry cards show reason. HERMES can see entry_schedule + skip_reason in trimmed state.
 - 1.15.1 (2026-03-16): MKT-040 call-only entries when put non-viable. When put credit below minimum but call viable, place call-only instead of skipping. Data: 89% WR for low-credit call-only, +$46 EV per entry. Stop = call + theo $2.50 put + buffer (unified with MKT-035/038). Override reason: "mkt-040".

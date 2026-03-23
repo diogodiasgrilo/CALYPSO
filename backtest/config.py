@@ -27,7 +27,15 @@ class BacktestConfig:
     conditional_e7_enabled: bool = False
     conditional_entry_times: List[str] = field(default_factory=lambda: ["12:45", "13:15"])
     downday_threshold_pct: float = 0.3       # 0.3% drop triggers conditional entries
+    downday_reference: str = "open"          # reference price for threshold: "open" or "high"
     downday_theoretical_put_credit: float = 250.0  # $2.50 × 100 — used in call-only stop
+
+    # ── Conditional E6/E7 up-day put-only entries ────────────────────────────
+    # Fire as put-only when SPX rises >= upday_threshold_pct above reference
+    conditional_upday_e6_enabled: bool = False
+    conditional_upday_e7_enabled: bool = False
+    upday_threshold_pct: float = 0.3         # % SPX rise to trigger up-day put-only
+    upday_reference: str = "open"            # reference price: "open" or "low" (intraday low)
 
     # ── FOMC T+1 call-only (MKT-038) ─────────────────────────────────────────
     # On the day after FOMC, force all entries to call-only
