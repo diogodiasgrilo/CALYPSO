@@ -28,7 +28,7 @@ class BacktestConfig:
     conditional_entry_times: List[str] = field(default_factory=lambda: ["12:45", "13:15"])
     downday_threshold_pct: float = 0.3       # 0.3% drop triggers conditional entries
     downday_reference: str = "open"          # reference price for threshold: "open" or "high"
-    downday_theoretical_put_credit: float = 1000.0  # $10.00 × 100 — used in call-only stop (walk-forward optimized)
+    downday_theoretical_put_credit: float = 175.0   # $1.75 × 100 — used in call-only stop (sweep optimal 2026-03-24)
     upday_theoretical_call_credit: float = 0.0   # added to put-only stop level (mirrors downday_theoretical_put_credit)
 
     # ── Conditional E6/E7 up-day put-only entries ────────────────────────────
@@ -95,10 +95,13 @@ class BacktestConfig:
     # ── Price-based stop (alternative to spread-value stop) ──────────────────
     # If set, stop triggers when SPX reaches within this many points of the
     # short strike (on the ITM side), instead of using spread-value vs credit.
-    # e.g. 1.0 → stop when SPX >= short_call + 1  (call side)
-    #              stop when SPX <= short_put  - 1  (put side)
+    # price_stop_inward=True  (default): fires N pts BEFORE the short strike
+    #   call: spx >= short_call - N   put: spx <= short_put + N   (matches live bot)
+    # price_stop_inward=False (legacy):  fires N pts PAST   the short strike
+    #   call: spx >= short_call + N   put: spx <= short_put - N
     # None = use standard credit-based stop (current behaviour).
     price_based_stop_points: Optional[float] = None
+    price_stop_inward: bool = True  # True = matches live bot direction
 
     # ── VIX-conditional early exit ────────────────────────────────────────────
     # If set, early_exit_time only triggers when VIX at open >= this threshold.
@@ -190,7 +193,14 @@ class BacktestConfig:
 # ── Preset configs ────────────────────────────────────────────────────────────
 
 def live_config() -> BacktestConfig:
-    """Exact parameters running on HYDRA as of 2026-03-23 (synced from VM config.json)."""
+    """Exact parameters running on HYDRA as of 2026-03-24 (synced from VM config.json).
+
+    Confirmed optimal values (2026-03-24 sweeps):
+      - price_based_stop_points: None  (credit-based stop, Sharpe 1.740 vs 0.928 for N=0.3)
+      - downday_theoretical_put_credit: 175.0  ($1.75 × 100, sweep over $0.50–$10.00)
+      - base_entry_downday_callonly_pct: 0.60  (0.6% = 0.006 on VM, sweep optimal Sharpe 2.056)
+      - upday_threshold_pct: 0.60  (0.6% = 0.006 on VM, sweep confirmed 2026-03-24)
+    """
     return BacktestConfig(
         entry_times=["10:15", "10:45", "11:15", "11:45", "12:15"],
         conditional_e6_enabled=False,
@@ -198,7 +208,7 @@ def live_config() -> BacktestConfig:
         conditional_upday_e6_enabled=True,    # VM: E6 upday put-only enabled
         conditional_upday_e7_enabled=False,
         downday_threshold_pct=0.3,
-        upday_threshold_pct=0.40,
+        upday_threshold_pct=0.60,             # VM: 0.006 decimal (sweep confirmed 2026-03-24 — within noise of 0.50% best)
         fomc_t1_callonly_enabled=True,
         call_starting_otm_multiplier=3.5,
         put_starting_otm_multiplier=4.0,
@@ -213,7 +223,9 @@ def live_config() -> BacktestConfig:
         put_stop_buffer=100.0,                # VM: put_stop_buffer=1.0 × 100
         one_sided_entries_enabled=True,
         put_only_max_vix=25.0,
-        downday_theoretical_put_credit=1000.0,  # VM: 10.0 × 100 (walk-forward optimized)
+        price_based_stop_points=None,         # credit-based stop (sweep optimal 2026-03-24)
+        downday_theoretical_put_credit=175.0, # VM: 1.75 × 100 (sweep optimal 2026-03-24)
+        base_entry_downday_callonly_pct=0.60, # VM: 0.006 decimal (sweep optimal 2026-03-24)
     )
 
 

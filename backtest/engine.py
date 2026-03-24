@@ -562,6 +562,7 @@ def _simulate_entry(
     put_active = result.entry_type in ("full_ic", "put_only")
 
     price_stop_pts = getattr(cfg, "price_based_stop_points", None)
+    price_stop_inward = getattr(cfg, "price_stop_inward", True)
 
     # early_ms already computed above (used to skip entries at/after exit time)
     for monitor_ms in monitor_times:
@@ -575,14 +576,13 @@ def _simulate_entry(
         slip = getattr(cfg, "stop_slippage_per_leg", 0.0) * 2 * 100  # 2 legs × $100 multiplier
         if call_active and not call_stopped:
             if price_stop_pts is not None:
-                if spx_now > 0 and spx_now >= result.short_call + price_stop_pts:
+                if spx_now > 0 and spx_now >= result.short_call - (price_stop_pts if price_stop_inward else -price_stop_pts):
                     cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
-                    if cv <= 0:
-                        cv = round((spx_now - result.short_call) * 100, 2)
-                    call_stopped = True
-                    result.call_outcome = "stopped"
-                    result.call_exit_ms = monitor_ms
-                    result.call_close_cost = cv + slip
+                    if cv > 0:  # only stop if we have a real quote — cv=0 means no data
+                        call_stopped = True
+                        result.call_outcome = "stopped"
+                        result.call_exit_ms = monitor_ms
+                        result.call_close_cost = cv + slip
             else:
                 cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
                 if cv > 0 and cv >= result.call_stop:
@@ -593,14 +593,13 @@ def _simulate_entry(
 
         if put_active and not put_stopped:
             if price_stop_pts is not None:
-                if spx_now > 0 and spx_now <= result.short_put - price_stop_pts:
+                if spx_now > 0 and spx_now <= result.short_put + (price_stop_pts if price_stop_inward else -price_stop_pts):
                     pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
-                    if pv <= 0:
-                        pv = round((result.short_put - spx_now) * 100, 2)
-                    put_stopped = True
-                    result.put_outcome = "stopped"
-                    result.put_exit_ms = monitor_ms
-                    result.put_close_cost = pv + slip
+                    if pv > 0:  # only stop if we have a real quote — pv=0 means no data
+                        put_stopped = True
+                        result.put_outcome = "stopped"
+                        result.put_exit_ms = monitor_ms
+                        result.put_close_cost = pv + slip
             else:
                 pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
                 if pv > 0 and pv >= result.put_stop:
@@ -1014,7 +1013,7 @@ def simulate_day(
 
 # ── Full backtest ───────────────────────────────────────────────────────────
 
-def run_backtest(cfg: BacktestConfig) -> List[DayResult]:
+def run_backtest(cfg: BacktestConfig, verbose: bool = True) -> List[DayResult]:
     cache_dir = Path(cfg.cache_dir)
     trading_days = get_spxw_trading_days(cfg.start_date, cfg.end_date, cache_dir)
 
@@ -1036,7 +1035,8 @@ def run_backtest(cfg: BacktestConfig) -> List[DayResult]:
 
     results = []
     n_total = len(trading_days)
-    print(f"\nRunning backtest: {cfg.start_date} → {cfg.end_date} ({n_total} days)\n")
+    if verbose:
+        print(f"\nRunning backtest: {cfg.start_date} → {cfg.end_date} ({n_total} days)\n")
 
     for i, d in enumerate(trading_days, 1):
         day_result = simulate_day(d, cfg, cache_dir, fomc_t1_dates)
@@ -1044,7 +1044,7 @@ def run_backtest(cfg: BacktestConfig) -> List[DayResult]:
             continue
         results.append(day_result)
 
-        if i % 50 == 0 or i == n_total:
+        if verbose and (i % 50 == 0 or i == n_total):
             cum_net = sum(r.net_pnl for r in results)
             print(f"  [{i}/{n_total}] {d}  cumulative net P&L: ${cum_net:+.0f}")
 

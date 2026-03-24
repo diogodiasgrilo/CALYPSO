@@ -78,7 +78,7 @@ XL_GRID = {
     "stop_slippage_per_leg":             [0.0, 0.10, 0.20],
     "early_exit_time":                   [None],
     # ── All confirmed-locked params ───────────────────────────────────────────
-    "downday_theoretical_put_credit":    [150],    # LOCKED — $1.50
+    "downday_theoretical_put_credit":    [175],    # LOCKED — $1.75 × 100 (sweep optimal 2026-03-24)
     "min_put_credit":                    [1.75],   # LOCKED
     "min_call_credit":                   [1.25],   # LOCKED
     "put_stop_buffer":                   [100],    # LOCKED
@@ -114,7 +114,7 @@ FULL_GRID = {
     # ── Locked: confirmed by slippage sweep 2026-03-23 ───────────────────────
     "price_based_stop_points":           [0.1],     # LOCKED — 0.1pt price-based stop (best Sharpe + slippage-robust)
     # ── Locked: confirmed by theo-put sweep 2026-03-23 ──────────────────────
-    "downday_theoretical_put_credit":    [150],     # LOCKED
+    "downday_theoretical_put_credit":    [175],     # LOCKED — $1.75 × 100 (sweep optimal 2026-03-24)
     # ── Locked: confirmed by 630-combo sweep 2026-03-23 ─────────────────────
     "put_stop_buffer":                   [100],     # LOCKED
     "one_sided_entries_enabled":         [True],    # LOCKED
@@ -166,7 +166,7 @@ class OptCombo:
     conditional_upday_e7_enabled: bool = False  # upday put-only at 13:15
     upday_threshold_pct: float = 0.3       # % SPX rise to trigger up-day put-only
     upday_reference: str = "open"          # reference price: "open" or "low"
-    downday_theoretical_put_credit: float = 1000.0  # $ added to call-only stop level (locked)
+    downday_theoretical_put_credit: float = 175.0   # $1.75 × 100 — sweep optimal 2026-03-24
     upday_theoretical_call_credit: float = 0.0      # $ added to put-only stop level
     net_return_exit_pct: Optional[float] = None     # exit when net_pnl/credit >= this fraction
     callside_min_upday_pct: Optional[float] = None  # only place calls on E1-E5 if SPX up >= this %
