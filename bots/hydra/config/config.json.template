@@ -50,9 +50,12 @@
         "min_delta": 5,
         "max_delta": 15,
 
-        "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses stop_buffer ($0.10). Put uses put_stop_buffer ($5.00 — wider buffer avoids 91% false put stops, 21-day backtest: +$6,885 NET). If put_stop_buffer not set, falls back to stop_buffer for both sides.",
+        "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses stop_buffer ($0.10). Put uses put_stop_buffer ($5.00 — wider buffer avoids 91% false put stops, 21-day backtest: +$6,885 NET). If put_stop_buffer not set, falls back to stop_buffer for both sides. Only used when price_based_stop_points is null.",
         "stop_buffer": 0.10,
         "put_stop_buffer": 5.00,
+
+        "_comment_price_stop": "Price-based stop (replaces credit-based stop when set). Triggers when SPX reaches within N pts of the short strike: call side stops when SPX >= short_call - N, put side stops when SPX <= short_put + N. Applies to ALL entry types (full IC, call-only, put-only). Walk-forward backtest: 0.1pt gives Sharpe 2.098 vs credit-based 2.075, slippage-robust. Set to null to use credit-based stop.",
+        "price_based_stop_points": null,
 
         "_comment_risk": "Risk management settings. max_vix_entry: CALYPSO addition (neither Tammy nor Sandvand use VIX cutoffs). Set high to effectively disable.",
         "max_vix_entry": 999,

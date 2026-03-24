@@ -275,9 +275,26 @@ class HydraStrategy(MEICStrategy):
         if self.put_stop_buffer != self.stop_buffer:
             logger.info(f"  Asymmetric stop buffer: call=${self.stop_buffer/100:.2f}, put=${self.put_stop_buffer/100:.2f}")
 
+        # Price-based stop: trigger when SPX reaches within N points of the short strike.
+        # When set, replaces the credit-based spread-value check for ALL entry types
+        # (full IC, call-only, put-only). Set to None to use credit-based stop (default).
+        # Must be set BEFORE super().__init__() so recovery can use it.
+        _price_stop = strategy_cfg.get("price_based_stop_points", None)
+        self.price_based_stop_points: Optional[float] = float(_price_stop) if _price_stop is not None else None
+        if self.price_based_stop_points is not None:
+            logger.info(f"  Price-based stop: ENABLED — trigger {self.price_based_stop_points} pts from short strike")
+        else:
+            logger.info(f"  Price-based stop: DISABLED — using credit-based stop")
+
         # MKT-025: short_only_stop needed by _save_state_to_disk() during recovery
         long_salvage = config.get("long_salvage", {})
         self.short_only_stop = long_salvage.get("short_only_stop", False)
+
+        # MKT-035: downday_theoretical_put_credit must be set BEFORE super().__init__()
+        # because recovery (_reconstruct_entry_from_positions) uses it to compute call-only
+        # stop levels. Without this, the getattr fallback at line ~7361 uses $2.50 instead
+        # of the configured value (e.g. $5.00).
+        self.downday_theoretical_put_credit = float(strategy_cfg.get("downday_theoretical_put_credit", 2.50)) * 100
 
         # MKT-035: _conditional_entry_times must be set BEFORE super().__init__()
         # because _parse_entry_times() (called from super) references it
@@ -4680,6 +4697,10 @@ class HydraStrategy(MEICStrategy):
         # Batch-fetch ALL option prices in a single API call
         self._batch_update_entry_prices()
 
+        # Price-based stop: fetch SPX price once per loop (refreshed by WebSocket)
+        price_stop_pts = self.price_based_stop_points  # None = use credit-based stop
+        spx_now = self.current_price if price_stop_pts is not None else 0.0
+
         for entry in self.daily_state.active_entries:
             # Handle as HydraIronCondorEntry if possible
             is_hydra_entry = isinstance(entry, HydraIronCondorEntry)
@@ -4694,14 +4715,27 @@ class HydraStrategy(MEICStrategy):
                     logger.error(f"DATA-003: Skipping stop check - {pnl_message}")
                     continue
 
-                MIN_VALID_STOP = 50.0
-                if entry.call_side_stop < MIN_VALID_STOP:
-                    logger.error(f"SAFETY: Invalid call stop ${entry.call_side_stop:.2f}")
-                    continue
-
-                result = self._check_stop_with_confirmation(entry, "call", entry.call_spread_value, entry.call_side_stop)
-                if result:
-                    return result
+                if price_stop_pts is not None:
+                    # Price-based: stop when SPX >= short_call - N pts
+                    if spx_now > 0 and entry.short_call_strike > 0:
+                        trigger = entry.short_call_strike - price_stop_pts
+                        if spx_now >= trigger:
+                            logger.warning(
+                                f"PRICE-STOP E#{entry.entry_number} call-only: "
+                                f"SPX {spx_now:.2f} >= trigger {trigger:.2f} "
+                                f"(short_call={entry.short_call_strike:.0f} - {price_stop_pts}pts)"
+                            )
+                            result = self._execute_stop_loss(entry, "call")
+                            if result:
+                                return result
+                else:
+                    MIN_VALID_STOP = 50.0
+                    if entry.call_side_stop < MIN_VALID_STOP:
+                        logger.error(f"SAFETY: Invalid call stop ${entry.call_side_stop:.2f}")
+                        continue
+                    result = self._check_stop_with_confirmation(entry, "call", entry.call_spread_value, entry.call_side_stop)
+                    if result:
+                        return result
 
             elif is_hydra_entry and entry.put_only:
                 # Only check put side
@@ -4713,14 +4747,27 @@ class HydraStrategy(MEICStrategy):
                     logger.error(f"DATA-003: Skipping stop check - {pnl_message}")
                     continue
 
-                MIN_VALID_STOP = 50.0
-                if entry.put_side_stop < MIN_VALID_STOP:
-                    logger.error(f"SAFETY: Invalid put stop ${entry.put_side_stop:.2f}")
-                    continue
-
-                result = self._check_stop_with_confirmation(entry, "put", entry.put_spread_value, entry.put_side_stop)
-                if result:
-                    return result
+                if price_stop_pts is not None:
+                    # Price-based: stop when SPX <= short_put + N pts
+                    if spx_now > 0 and entry.short_put_strike > 0:
+                        trigger = entry.short_put_strike + price_stop_pts
+                        if spx_now <= trigger:
+                            logger.warning(
+                                f"PRICE-STOP E#{entry.entry_number} put-only: "
+                                f"SPX {spx_now:.2f} <= trigger {trigger:.2f} "
+                                f"(short_put={entry.short_put_strike:.0f} + {price_stop_pts}pts)"
+                            )
+                            result = self._execute_stop_loss(entry, "put")
+                            if result:
+                                return result
+                else:
+                    MIN_VALID_STOP = 50.0
+                    if entry.put_side_stop < MIN_VALID_STOP:
+                        logger.error(f"SAFETY: Invalid put stop ${entry.put_side_stop:.2f}")
+                        continue
+                    result = self._check_stop_with_confirmation(entry, "put", entry.put_spread_value, entry.put_side_stop)
+                    if result:
+                        return result
 
             else:
                 # Full IC
@@ -4737,20 +4784,48 @@ class HydraStrategy(MEICStrategy):
 
                 MIN_VALID_STOP = 50.0
                 if not call_done:
-                    if entry.call_side_stop < MIN_VALID_STOP:
-                        logger.error(f"SAFETY: Invalid call stop ${entry.call_side_stop:.2f} for Entry #{entry.entry_number}")
+                    if price_stop_pts is not None:
+                        # Price-based: stop when SPX >= short_call - N pts
+                        if spx_now > 0 and entry.short_call_strike > 0:
+                            trigger = entry.short_call_strike - price_stop_pts
+                            if spx_now >= trigger:
+                                logger.warning(
+                                    f"PRICE-STOP E#{entry.entry_number} call (IC): "
+                                    f"SPX {spx_now:.2f} >= trigger {trigger:.2f} "
+                                    f"(short_call={entry.short_call_strike:.0f} - {price_stop_pts}pts)"
+                                )
+                                result = self._execute_stop_loss(entry, "call")
+                                if result:
+                                    return result
                     else:
-                        result = self._check_stop_with_confirmation(entry, "call", entry.call_spread_value, entry.call_side_stop)
-                        if result:
-                            return result
+                        if entry.call_side_stop < MIN_VALID_STOP:
+                            logger.error(f"SAFETY: Invalid call stop ${entry.call_side_stop:.2f} for Entry #{entry.entry_number}")
+                        else:
+                            result = self._check_stop_with_confirmation(entry, "call", entry.call_spread_value, entry.call_side_stop)
+                            if result:
+                                return result
 
                 if not put_done:
-                    if entry.put_side_stop < MIN_VALID_STOP:
-                        logger.error(f"SAFETY: Invalid put stop ${entry.put_side_stop:.2f} for Entry #{entry.entry_number}")
+                    if price_stop_pts is not None:
+                        # Price-based: stop when SPX <= short_put + N pts
+                        if spx_now > 0 and entry.short_put_strike > 0:
+                            trigger = entry.short_put_strike + price_stop_pts
+                            if spx_now <= trigger:
+                                logger.warning(
+                                    f"PRICE-STOP E#{entry.entry_number} put (IC): "
+                                    f"SPX {spx_now:.2f} <= trigger {trigger:.2f} "
+                                    f"(short_put={entry.short_put_strike:.0f} + {price_stop_pts}pts)"
+                                )
+                                result = self._execute_stop_loss(entry, "put")
+                                if result:
+                                    return result
                     else:
-                        result = self._check_stop_with_confirmation(entry, "put", entry.put_spread_value, entry.put_side_stop)
-                        if result:
-                            return result
+                        if entry.put_side_stop < MIN_VALID_STOP:
+                            logger.error(f"SAFETY: Invalid put stop ${entry.put_side_stop:.2f} for Entry #{entry.entry_number}")
+                        else:
+                            result = self._check_stop_with_confirmation(entry, "put", entry.put_spread_value, entry.put_side_stop)
+                            if result:
+                                return result
 
         return None
 
@@ -6480,7 +6555,9 @@ class HydraStrategy(MEICStrategy):
                     "conditional": [t.strftime('%H:%M') for t in self._conditional_entry_times],
                 },
                 # Dashboard: config flags for banner display
-                "fomc_t1_callonly_enabled": self.fomc_t1_callonly_enabled,
+                # getattr: fomc_t1_callonly_enabled is set post-super(); if state save is
+                # triggered during base-class recovery it may not exist yet.
+                "fomc_t1_callonly_enabled": getattr(self, 'fomc_t1_callonly_enabled', True),
                 "downday_callonly_enabled": self.downday_callonly_enabled,
                 "entries": []
             }
@@ -7320,20 +7397,31 @@ class HydraStrategy(MEICStrategy):
             # If we have exactly call side OR put side, it's likely a one-sided HYDRA entry
             # FIX #47: Use "skipped" instead of "stopped" for sides that were never opened
             if has_call_side and not has_put_side:
-                # Has call spread only - could be BEARISH (call_only) entry
-                # Mark as call_only - stop checking will only monitor call side
+                # Only call spread found in Saxo. Two possibilities:
+                #   (a) Designed call-only entry (MKT-035/038/040) — put side was never opened
+                #   (b) Full IC where put side was stopped intraday — only call remains
+                # We cannot determine which from positions alone. Tentatively set call_only=True
+                # so stop monitoring watches the right side. State file restoration (lines ~8017-8031)
+                # will overwrite call_only/put_side_skipped with the authoritative values.
                 entry.call_only = True
                 entry.put_only = False
                 entry.call_side_stopped = False
-                entry.put_side_skipped = True  # Put was never opened, not stopped
-                logger.info(f"Entry #{entry_number}: Detected as CALL-ONLY entry (bearish trend, put side skipped)")
+                entry.put_side_skipped = True  # Tentative — state file may change to put_side_stopped
+                logger.info(
+                    f"Entry #{entry_number}: Only call side found in Saxo — "
+                    f"tentatively CALL-ONLY (state file will correct if put was stopped intraday)"
+                )
             elif has_put_side and not has_call_side:
-                # Has put spread only - could be BULLISH (put_only) entry
+                # Only put spread found. Could be designed put-only OR full IC with stopped call.
+                # Tentative classification; state file restoration is authoritative.
                 entry.call_only = False
                 entry.put_only = True
-                entry.call_side_skipped = True  # Call was never opened, not stopped
+                entry.call_side_skipped = True  # Tentative — state file may change to call_side_stopped
                 entry.put_side_stopped = False
-                logger.info(f"Entry #{entry_number}: Detected as PUT-ONLY entry (bullish trend, call side skipped)")
+                logger.info(
+                    f"Entry #{entry_number}: Only put side found in Saxo — "
+                    f"tentatively PUT-ONLY (state file will correct if call was stopped intraday)"
+                )
             else:
                 # Mixed partial - probably a stopped entry (not skipped)
                 entry.call_side_stopped = not has_call_side
@@ -8103,7 +8191,11 @@ class HydraStrategy(MEICStrategy):
                                 f"Entry #{entry.entry_number}: Restored missing long call from state file "
                                 f"(strike={saved_lc_strike}, uic={saved_lc_uic}) - likely merged position"
                             )
-                    if not entry.put_side_stopped and entry.long_put_strike == 0:
+                    # Only restore missing long put for entries where the put side was actually active.
+                    # Skip call-only entries (put_side_skipped=True): the state file may have a
+                    # stale long_put_strike from before the entry type was finalized, and restoring
+                    # it would trigger a spurious "Restored missing long put" warning.
+                    if not entry.put_side_stopped and not entry.put_side_skipped and entry.long_put_strike == 0:
                         saved_lp_strike = saved.get("long_put_strike", 0)
                         saved_lp_uic = saved.get("long_put_uic")
                         if saved_lp_strike:

@@ -5,9 +5,9 @@ Walk-forward grid search over the 5 highest-impact HYDRA parameters.
 Optimizes on training period, validates on out-of-sample period.
 
 Usage:
-    python -m backtest.optimize                    # full 1260-combo grid (~7 min on 12 cores)
+    python -m backtest.optimize                    # full 384-combo threshold sweep (~3 min on 8 cores)
     python -m backtest.optimize --quick            # 108-combo test grid (~1 min)
-    python -m backtest.optimize --xl               # XL 18,144-combo grid
+    python -m backtest.optimize --xl               # XL early-exit × entry-count sweep (24 combos)
     python -m backtest.optimize --train-end 2024-12-31 --val-start 2025-01-01
     python -m backtest.optimize --workers 4
     python -m backtest.optimize --top-n 20
@@ -61,7 +61,9 @@ from backtest.engine import run_backtest, DayResult
 ENTRY_SCHEDULES = {
     "current":   ["10:15", "10:45", "11:15", "11:45", "12:15"],           # 5 entries (live HYDRA)
     "meic_6":    ["10:05", "10:35", "11:05", "11:35", "12:05", "12:35"],  # 6 entries (original MEIC)
-    "morning_3": ["10:15", "10:45", "11:15"],                             # 3 morning-only entries
+    "morning_2": ["10:15", "10:45"],                                       # 2 entries — pairs with 11:00/11:30 exit
+    "morning_3": ["10:15", "10:45", "11:15"],                             # 3 entries — pairs with 11:30/12:00 exit
+    "morning_4": ["10:15", "10:45", "11:15", "11:45"],                    # 4 entries — pairs with 12:00/12:30 exit
     "hourly_4":  ["10:15", "11:15", "12:15", "13:00"],                    # 4 hourly entries
 }
 
@@ -69,52 +71,73 @@ ENTRY_SCHEDULES = {
 # ── Parameter grids ─────────────────────────────────────────────────────────
 
 XL_GRID = {
-    "put_stop_buffer":            [100],              # LOCKED
-    "min_put_credit":             [2.25],            # LOCKED (confirmed optimal: sweet spot between quality/quantity)
-    "min_call_credit":            [1.25],            # LOCKED
-    "stop_buffer":                [10],              # LOCKED
-    "one_sided_entries_enabled":  [True],            # LOCKED
-    "entry_schedule":             ["current"],       # LOCKED
-    "early_exit_time":            [None],            # LOCKED
-    "fomc_t1_callonly_enabled":   [True],            # LOCKED
-    "put_only_max_vix":           [25.0],            # LOCKED
-    "target_delta":               [8.0],             # LOCKED
-    "conditional_e6_enabled":     [False],             # LOCKED (baseline Sharpe best; E6 adds P&L but hurts MaxDD)
-    "conditional_e7_enabled":     [True],              # LOCKED
-    "downday_threshold_pct":      [0.3],               # LOCKED (0.4% raises E7 bar too, hurts performance)
-    "downday_reference":          ["open"],            # LOCKED
-    "conditional_upday_e6_enabled": [True],            # LOCKED
-    "conditional_upday_e7_enabled": [False],           # LOCKED
-    "upday_threshold_pct":        [0.40],              # LOCKED
-    "upday_reference":            ["open"],            # LOCKED
-    "downday_theoretical_put_credit": [1000],             # LOCKED ($10.00 × 100 — call-only stop buffer)
-    "upday_theoretical_call_credit":  [0],                # LOCKED ($0 — tight stop correct for put-only)
-    "net_return_exit_pct":            [None],              # LOCKED (hold to 4PM beats all thresholds)
-    "callside_min_upday_pct":         [None],              # LOCKED (full IC on all days beats call-only-on-up-days)
-    "base_entry_downday_callonly_pct": [0.40],  # LOCKED (32% MaxDD reduction, near-zero Sharpe cost)
-    "base_entry_upday_putonly_pct":    [None],  # LOCKED (Upday-035 E6 already covers up-day; adding would concentrate put risk)
-    "movement_entry_pct":  [None, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0],  # SWEEPING: SPX move % to trigger next E1-E5 slot early
-    "max_vix_entry":       [None, 18.0, 20.0, 22.0, 25.0, 30.0],       # SWEEPING: skip all entries if VIX >= this
+    # ── Swept parameters: price-based stop vs credit-based stop ──────────────
+    # price_based_stop_points=None  → current behaviour: stop when spread value >= credit threshold
+    # price_based_stop_points=1.0   → stop when SPX >= short_call + 1 (call) / SPX <= short_put - 1 (put)
+    "price_based_stop_points":           [None, 0.1, 0.25, 0.5, 1.0],
+    "stop_slippage_per_leg":             [0.0, 0.10, 0.20],
+    "early_exit_time":                   [None],
+    # ── All confirmed-locked params ───────────────────────────────────────────
+    "downday_theoretical_put_credit":    [150],    # LOCKED — $1.50
+    "min_put_credit":                    [1.75],   # LOCKED
+    "min_call_credit":                   [1.25],   # LOCKED
+    "put_stop_buffer":                   [100],    # LOCKED
+    "one_sided_entries_enabled":         [True],   # LOCKED
+    "fomc_t1_callonly_enabled":          [False],  # LOCKED
+    "stop_buffer":                       [10],     # LOCKED
+    "target_delta":                      [8.0],    # LOCKED
+    "conditional_e7_enabled":            [True],   # LOCKED
+    "conditional_upday_e6_enabled":      [True],   # LOCKED
+    "conditional_e6_enabled":            [False],  # LOCKED
+    "conditional_upday_e7_enabled":      [False],  # LOCKED
+    "downday_threshold_pct":             [0.35],   # LOCKED — threshold sweep winner
+    "upday_threshold_pct":               [0.60],   # LOCKED — threshold sweep winner
+    "base_entry_downday_callonly_pct":   [0.60],   # LOCKED — threshold sweep winner
+    "upday_theoretical_call_credit":     [0],      # LOCKED
+    "put_only_max_vix":                  [25.0],   # LOCKED
 }
-# 8 × 6 = 48 combinations
+# 5 × 3 = 15 combinations
 
 FULL_GRID = {
-    "put_stop_buffer":            [100, 200, 300, 400, 500, 600, 700, 800, 1000],
-    "min_put_credit":             [1.50, 1.75, 2.00, 2.25, 2.50, 2.75, 3.00],
-    "min_call_credit":            [0.40, 0.50, 0.60, 0.75, 1.00],
-    "one_sided_entries_enabled":  [True, False],
-    "fomc_t1_callonly_enabled":   [True, False],
+    # ── Swept: E6/E7/base on-off + thresholds + credit gate ──────────────────
+    # Whether E7 (13:15 down-day call-only) and E6 (12:45 up-day put-only) fire at all
+    "conditional_e7_enabled":            [True, False],
+    "conditional_upday_e6_enabled":      [True, False],
+    # base_entry_downday_callonly_pct: None = disabled, value = threshold to convert E1-E5
+    "base_entry_downday_callonly_pct":   [None, 0.30, 0.50, 0.60],
+    # Trigger thresholds for E7 and E6
+    "downday_threshold_pct":             [0.20, 0.30, 0.35, 0.50],
+    "upday_threshold_pct":               [0.40, 0.50, 0.60, 0.75],
+    # Credit gate — re-sweeping with price_based_stop=0.1 locked
+    "min_put_credit":                    [1.50, 1.75, 2.25],
+    "min_call_credit":                   [1.00, 1.25],
+    # ── Locked: confirmed by slippage sweep 2026-03-23 ───────────────────────
+    "price_based_stop_points":           [0.1],     # LOCKED — 0.1pt price-based stop (best Sharpe + slippage-robust)
+    # ── Locked: confirmed by theo-put sweep 2026-03-23 ──────────────────────
+    "downday_theoretical_put_credit":    [150],     # LOCKED
+    # ── Locked: confirmed by 630-combo sweep 2026-03-23 ─────────────────────
+    "put_stop_buffer":                   [100],     # LOCKED
+    "one_sided_entries_enabled":         [True],    # LOCKED
+    # ── Locked to current live strategy ─────────────────────────────────────
+    "fomc_t1_callonly_enabled":          [False],   # LOCKED
+    "stop_buffer":                       [10],      # LOCKED
+    "target_delta":                      [8.0],     # LOCKED
+    "conditional_e6_enabled":            [False],   # LOCKED
+    "conditional_upday_e7_enabled":      [False],   # LOCKED
+    "upday_theoretical_call_credit":     [0],       # LOCKED
+    "put_only_max_vix":                  [25.0],    # LOCKED
 }
-# 9 × 7 × 5 × 2 × 2 = 1,260 combinations
+# 2 × 2 × 4 × 4 × 4 × 3 × 2 = 768 combinations
 
 QUICK_GRID = {
-    "put_stop_buffer":            [200, 500, 800],
-    "min_put_credit":             [2.00, 2.50, 3.00],
-    "min_call_credit":            [0.50, 0.60, 0.75],
-    "one_sided_entries_enabled":  [True, False],
-    "fomc_t1_callonly_enabled":   [True, False],
+    # Sanity-check grid — locked params only, spot-check 3 credit combos
+    "min_put_credit":             [1.50, 1.75, 2.25],
+    "min_call_credit":            [0.75, 1.00, 1.25],
+    "put_stop_buffer":            [100],
+    "one_sided_entries_enabled":  [True],
+    "fomc_t1_callonly_enabled":   [False],
 }
-# 3 × 3 × 3 × 2 × 2 = 108 combinations
+# 3 × 3 = 9 combinations
 
 
 # ── Result dataclass ─────────────────────────────────────────────────────────
@@ -151,6 +174,9 @@ class OptCombo:
     base_entry_upday_putonly_pct: Optional[float] = None     # E1-E5 put-only when SPX up >= this %
     movement_entry_pct: Optional[float] = None               # fire next E1-E5 slot when SPX moves >= this % from last entry
     max_vix_entry: Optional[float] = None                    # skip all entries if VIX >= this
+    vix_early_exit_threshold: Optional[float] = None         # apply early_exit_time only when VIX >= this at open
+    price_based_stop_points: Optional[float] = None          # stop when SPX within N pts of short strike (None = credit-based)
+    stop_slippage_per_leg: float = 0.0                       # extra slippage on stop market orders ($ per leg)
 
     # Training metrics
     train_net_pnl: float = 0.0
@@ -322,6 +348,12 @@ def _worker(args: Tuple[dict, date, date, str]) -> dict:
         cfg.movement_entry_pct = combo["movement_entry_pct"]
     if "max_vix_entry" in combo:
         cfg.max_vix_entry = combo["max_vix_entry"]
+    if "vix_early_exit_threshold" in combo:
+        cfg.vix_early_exit_threshold = combo["vix_early_exit_threshold"]
+    if "price_based_stop_points" in combo:
+        cfg.price_based_stop_points = combo["price_based_stop_points"]
+    if "stop_slippage_per_leg" in combo:
+        cfg.stop_slippage_per_leg = combo["stop_slippage_per_leg"]
 
     try:
         # Suppress run_backtest()'s internal print() calls

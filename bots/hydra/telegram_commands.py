@@ -145,6 +145,12 @@ EDITABLE_PARAMS = {
         "type": "times",
         "description": "Entry schedule (HH:MM,...)",
     },
+    "price_stop_pts": {
+        "path": "strategy.price_based_stop_points",
+        "type": "float_or_null",
+        "min": 0.1, "max": 50.0,
+        "description": "Price-based stop: N pts from short strike (null=disabled, uses credit-based stop)",
+    },
 }
 
 
@@ -692,6 +698,19 @@ class TelegramCommandHandler:
                 val = float(value_str)
             except (ValueError, TypeError):
                 raise ValueError(f"Must be a number")
+            if "min" in param_def and val < param_def["min"]:
+                raise ValueError(f"Minimum is {param_def['min']}")
+            if "max" in param_def and val > param_def["max"]:
+                raise ValueError(f"Maximum is {param_def['max']}")
+            return val
+
+        if ptype == "float_or_null":
+            if value_str.lower() in ("null", "none", "off", "0"):
+                return None
+            try:
+                val = float(value_str)
+            except (ValueError, TypeError):
+                raise ValueError("Must be a number, or 'null' to disable")
             if "min" in param_def and val < param_def["min"]:
                 raise ValueError(f"Minimum is {param_def['min']}")
             if "max" in param_def and val > param_def["max"]:
