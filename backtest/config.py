@@ -80,6 +80,7 @@ class BacktestConfig:
     # ── Costs ────────────────────────────────────────────────────────────────
     commission_per_leg: float = 2.50        # $ per leg (Saxo) — $2.50 to open, $2.50 to close; expires worthless = $2.50 only
     contracts: int = 1
+    stop_slippage_per_leg: float = 0.0      # extra slippage on stop-loss market orders ($ per leg, e.g. 0.10 = $10/leg × 100 = $10)
 
     # ── Data / cache ─────────────────────────────────────────────────────────
     cache_dir: str = "backtest/data/cache"
@@ -90,6 +91,22 @@ class BacktestConfig:
     # Positions already stopped are unaffected. Closing commissions apply.
     # None = hold to 4 PM expiry (default, no closing commission).
     early_exit_time: Optional[str] = None  # e.g. "13:00", "14:30", "15:00"
+
+    # ── Price-based stop (alternative to spread-value stop) ──────────────────
+    # If set, stop triggers when SPX reaches within this many points of the
+    # short strike (on the ITM side), instead of using spread-value vs credit.
+    # e.g. 1.0 → stop when SPX >= short_call + 1  (call side)
+    #              stop when SPX <= short_put  - 1  (put side)
+    # None = use standard credit-based stop (current behaviour).
+    price_based_stop_points: Optional[float] = None
+
+    # ── VIX-conditional early exit ────────────────────────────────────────────
+    # If set, early_exit_time only triggers when VIX at open >= this threshold.
+    # On calm days (VIX below threshold) positions hold to 4 PM as normal.
+    # None = always apply early_exit_time regardless of VIX (current behaviour).
+    # Example: vix_early_exit_threshold=20.0, early_exit_time="12:00" means
+    #   "exit at noon only on high-VIX days; hold to 4PM when VIX is calm."
+    vix_early_exit_threshold: Optional[float] = None
 
     # ── Movement-triggered entries (E1-E5) ────────────────────────────────────
     # If set, each base slot fires as soon as SPX moves >= this % in either

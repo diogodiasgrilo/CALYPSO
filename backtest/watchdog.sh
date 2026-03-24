@@ -9,7 +9,7 @@ WATCHDOG_LOG="/tmp/watchdog.log"
 THETA_JAR="/Users/ddias/Desktop/ThetaTerminal/ThetaTerminal.jar"
 THETA_CREDS="/Users/ddias/Desktop/ThetaTerminal/creds.txt"
 REPO_DIR="/Users/ddias/Desktop/CALYPSO/Git Repo"
-TOTAL=1005
+TOTAL=966
 STUCK_THRESHOLD=3600  # seconds — normal mode slow dates can take up to 15min each (3 retries × 5min timeout)
 CHECK_INTERVAL=60     # check every 60 seconds
 

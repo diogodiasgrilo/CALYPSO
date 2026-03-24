@@ -4,7 +4,7 @@
 
 CACHE_DIR="/Users/ddias/Desktop/CALYPSO/Git Repo/backtest/data/cache/options"
 LOG_FILE="/tmp/backtest_download.log"
-TOTAL=1005
+TOTAL=966
 START_TIME=$(date +%s)
 START_COUNT=$(ls "$CACHE_DIR" 2>/dev/null | wc -l | tr -d ' ')
 

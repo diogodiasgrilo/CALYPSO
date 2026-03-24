@@ -253,6 +253,9 @@ def _scan_for_viable_strike(
 
 # ── Per-entry simulation ────────────────────────────────────────────────────
 
+_USE_CFG_EARLY_EXIT = object()  # sentinel: "use cfg.early_exit_time_ms()"
+
+
 def _simulate_entry(
     entry_num: int,
     entry_ms: int,
@@ -266,12 +269,17 @@ def _simulate_entry(
     cfg: BacktestConfig,
     monitor_times: List[int],
     is_upday_conditional: bool = False,  # upday put-only trigger enabled for this slot
+    day_early_exit_ms=_USE_CFG_EARLY_EXIT,  # override from simulate_day for VIX-gated exit
 ) -> EntryResult:
 
     result = EntryResult(entry_num=entry_num, entry_time_ms=entry_ms)
 
     # ── Skip if entry fires at or after early exit time ──────────────────
-    early_ms = cfg.early_exit_time_ms()
+    # day_early_exit_ms overrides cfg when simulate_day applies VIX-gated logic.
+    # _USE_CFG_EARLY_EXIT sentinel means "fall back to config value".
+    early_ms = (cfg.early_exit_time_ms()
+                if day_early_exit_ms is _USE_CFG_EARLY_EXIT
+                else day_early_exit_ms)
     if early_ms and entry_ms >= early_ms:
         result.entry_type = "skipped"
         result.skip_reason = "entry_at_or_after_early_exit"
@@ -553,27 +561,53 @@ def _simulate_entry(
     call_active = result.entry_type in ("full_ic", "call_only")
     put_active = result.entry_type in ("full_ic", "put_only")
 
+    price_stop_pts = getattr(cfg, "price_based_stop_points", None)
+
     # early_ms already computed above (used to skip entries at/after exit time)
     for monitor_ms in monitor_times:
         if monitor_ms <= entry_ms:
             continue  # don't check before entry
 
+        # Get SPX price once per bar when using price-based stops
+        spx_now = _get_index_price(spx_df, monitor_ms) if price_stop_pts is not None else 0.0
+
         # Stop checks: use ask-based close cost (realistic fill price)
+        slip = getattr(cfg, "stop_slippage_per_leg", 0.0) * 2 * 100  # 2 legs × $100 multiplier
         if call_active and not call_stopped:
-            cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
-            if cv > 0 and cv >= result.call_stop:
-                call_stopped = True
-                result.call_outcome = "stopped"
-                result.call_exit_ms = monitor_ms
-                result.call_close_cost = cv
+            if price_stop_pts is not None:
+                if spx_now > 0 and spx_now >= result.short_call + price_stop_pts:
+                    cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                    if cv <= 0:
+                        cv = round((spx_now - result.short_call) * 100, 2)
+                    call_stopped = True
+                    result.call_outcome = "stopped"
+                    result.call_exit_ms = monitor_ms
+                    result.call_close_cost = cv + slip
+            else:
+                cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                if cv > 0 and cv >= result.call_stop:
+                    call_stopped = True
+                    result.call_outcome = "stopped"
+                    result.call_exit_ms = monitor_ms
+                    result.call_close_cost = cv + slip
 
         if put_active and not put_stopped:
-            pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
-            if pv > 0 and pv >= result.put_stop:
-                put_stopped = True
-                result.put_outcome = "stopped"
-                result.put_exit_ms = monitor_ms
-                result.put_close_cost = pv
+            if price_stop_pts is not None:
+                if spx_now > 0 and spx_now <= result.short_put - price_stop_pts:
+                    pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                    if pv <= 0:
+                        pv = round((result.short_put - spx_now) * 100, 2)
+                    put_stopped = True
+                    result.put_outcome = "stopped"
+                    result.put_exit_ms = monitor_ms
+                    result.put_close_cost = pv + slip
+            else:
+                pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                if pv > 0 and pv >= result.put_stop:
+                    put_stopped = True
+                    result.put_outcome = "stopped"
+                    result.put_exit_ms = monitor_ms
+                    result.put_close_cost = pv + slip
 
         # Early exit: close any remaining open sides at this bar
         if early_ms and monitor_ms >= early_ms:
@@ -595,12 +629,39 @@ def _simulate_entry(
             break  # both sides resolved
 
     # ── Settlement (4 PM) ─────────────────────────────────────────────────
+    # Get SPX settlement price from last available bar (represents 4 PM close).
+    # SPX options (0DTE) settle to the closing price of the index.
+    # If spread expires ITM, the intrinsic value is the settlement cost.
+    # No commission at expiry — cash settlement is automatic, no transaction.
+    spx_settle = _get_index_price(spx_df, monitor_times[-1]) if monitor_times else 0.0
+
     if call_active and not call_stopped:
         result.call_outcome = "expired"
-        result.call_close_cost = 0.0
+        if spx_settle > 0 and result.short_call > 0 and spx_settle > result.short_call:
+            itm_amt = min(spx_settle - result.short_call, result.long_call - result.short_call)
+            intrinsic = round(itm_amt * 100, 2)
+            if price_stop_pts is not None:
+                # Price-based stop: intrinsic is the correct cost (no credit-level cap).
+                # Stop should have fired at short_call + price_stop_pts; if settlement is
+                # deeper ITM, the live bot was stopped earlier — intrinsic ≤ spread_width×100.
+                result.call_close_cost = intrinsic
+            else:
+                # Credit-based stop: cap at stop level (live bot would have stopped before expiry).
+                result.call_close_cost = min(intrinsic, result.call_stop)
+        else:
+            result.call_close_cost = 0.0
+
     if put_active and not put_stopped:
         result.put_outcome = "expired"
-        result.put_close_cost = 0.0
+        if spx_settle > 0 and result.short_put > 0 and spx_settle < result.short_put:
+            itm_amt = min(result.short_put - spx_settle, result.short_put - result.long_put)
+            intrinsic = round(itm_amt * 100, 2)
+            if price_stop_pts is not None:
+                result.put_close_cost = intrinsic
+            else:
+                result.put_close_cost = min(intrinsic, result.put_stop)
+        else:
+            result.put_close_cost = 0.0
 
     # ── P&L ───────────────────────────────────────────────────────────────
     # Opening commission: always charged ($2.50/leg × legs placed)
@@ -841,6 +902,22 @@ def simulate_day(
 
     day = DayResult(date=trading_date)
 
+    # ── VIX-conditional early exit: decide effective exit time for today ──
+    # If vix_early_exit_threshold is set, only apply early_exit_time on days
+    # when VIX at the open is >= threshold.  On calm days, hold to 4 PM.
+    vix_threshold = getattr(cfg, "vix_early_exit_threshold", None)
+    if vix_threshold is not None:
+        # Use VIX at 9:45 AM (first bar after open volatility settles) as day VIX
+        open_vix_ms = 9 * 3600000 + 45 * 60000  # 9:45 AM in ms
+        day_vix = _get_index_price(vix_df, open_vix_ms)
+        if day_vix <= 0:
+            # Fallback: first valid VIX bar of the day
+            vix_rows = vix_df[vix_df["price"] > 0]
+            day_vix = float(vix_rows.iloc[0]["price"]) if not vix_rows.empty else 0.0
+        day_early_exit_ms = cfg.early_exit_time_ms() if day_vix >= vix_threshold else None
+    else:
+        day_early_exit_ms = _USE_CFG_EARLY_EXIT  # use cfg as-is (no VIX gate)
+
     # ── Base entries (E1-E5) ─────────────────────────────────────────────
     entry_ms_list = cfg.entry_times_as_ms()
     movement_pct = getattr(cfg, "movement_entry_pct", None)
@@ -860,6 +937,7 @@ def simulate_day(
                 vix_df=vix_df,
                 cfg=cfg,
                 monitor_times=monitor_times,
+                day_early_exit_ms=day_early_exit_ms,
             )
             day.entries.append(res)
     else:
@@ -892,6 +970,7 @@ def simulate_day(
                     vix_df=vix_df,
                     cfg=cfg,
                     monitor_times=monitor_times,
+                    day_early_exit_ms=day_early_exit_ms,
                 )
                 day.entries.append(res)
                 last_ref_spx = bar_spx         # update reference for next slot
@@ -920,6 +999,7 @@ def simulate_day(
             vix_df=vix_df,
             cfg=cfg,
             monitor_times=monitor_times,
+            day_early_exit_ms=day_early_exit_ms,
         )
         day.entries.append(res)
 
