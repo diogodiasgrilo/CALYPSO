@@ -50,12 +50,12 @@ class BacktestConfig:
     min_put_otm_distance: int = 25          # MKT-022: floor for progressive scan (pt)
 
     # ── Spread widths ────────────────────────────────────────────────────────
-    # VM uses fixed 50pt for both sides (VIX-scaling reverted after Feb 10-27 testing)
-    # floor = cap = 50 pins spread at exactly 50pt regardless of VIX
-    spread_vix_multiplier: float = 3.5      # only relevant if min/max differ
-    call_min_spread_width: int = 50
-    put_min_spread_width: int = 50
-    max_spread_width: int = 50
+    # VIX-scaled: formula round(VIX × 3.5 / 5) × 5, floor 25pt, cap 100pt
+    # Validated over 619 real-Greeks days: Sharpe +0.405, P&L +$18,712 vs fixed 50pt
+    spread_vix_multiplier: float = 3.5
+    call_min_spread_width: int = 25
+    put_min_spread_width: int = 25
+    max_spread_width: int = 100
 
     # ── Credit gate (MKT-011) ─────────────────────────────────────────────────
     min_call_credit: float = 0.60           # primary minimum per call side ($)
@@ -149,6 +149,14 @@ class BacktestConfig:
     # Example: 0.50 = exit when net P&L reaches 50 % of collected credit.
     net_return_exit_pct: Optional[float] = None
 
+    # ── Real Greeks mode ─────────────────────────────────────────────────────
+    # When True (strict mode): use actual per-strike delta from ThetaData Greeks
+    # files to determine the 8-delta OTM distance instead of the VIX formula.
+    # Days without a Greeks cache file are SKIPPED entirely (not approximated).
+    # When False (default): use VIX-formula approximation for all days.
+    # Greeks files live in: cache/greeks/SPXW_YYYYMMDD_greeks.parquet
+    use_real_greeks: bool = False
+
     # ── Simulation behaviour ─────────────────────────────────────────────────
     # Interval (ms) between stop checks. 300000 = 5-min (matches data resolution).
     monitor_interval_ms: int = 300000
@@ -213,9 +221,9 @@ def live_config() -> BacktestConfig:
         call_starting_otm_multiplier=3.5,
         put_starting_otm_multiplier=4.0,
         spread_vix_multiplier=3.5,
-        call_min_spread_width=50,
-        put_min_spread_width=50,
-        max_spread_width=50,
+        call_min_spread_width=25,
+        put_min_spread_width=25,
+        max_spread_width=100,
         min_call_credit=1.25,                 # VM: min_viable_credit_per_side=1.25
         min_put_credit=2.25,                  # VM: min_viable_credit_put_side=2.25
         put_credit_floor=2.15,                # VM: dynamic floor = min - $0.10
