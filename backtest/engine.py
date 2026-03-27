@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from .config import BacktestConfig
-from .downloader import load_index_day, load_chain_day, get_spxw_trading_days
+from .downloader import load_index_day, load_chain_day, load_greeks_day, get_spxw_trading_days
 
 
 # ── Data structures ────────────────────────────────────────────────────────
@@ -159,11 +159,16 @@ def _get_spread_close_cost(lookup: Dict, short_strike: float, long_strike: float
     Cost to close a spread (buying back short, selling long).
     Uses ask for short leg and bid for long leg — the realistic fill prices.
     Returns dollars (× 100 multiplier).
+
+    When long_bid == 0 the long is worthless (far OTM, no market bid) but you
+    still need to buy back the short.  Return short_ask * 100 so stop monitoring
+    can fire normally.  Only return 0.0 when short_ask == 0 (no quote at all).
     """
     short_ask = _get_ask(lookup, short_strike, right, ms)
-    long_bid  = _get_bid(lookup, long_strike, right, ms)
-    if short_ask == 0 or long_bid == 0:
+    if short_ask == 0:
         return 0.0
+    long_bid = _get_bid(lookup, long_strike, right, ms)
+    # long_bid == 0 → long is worthless; close cost = just buying back the short
     return max(0.0, (short_ask - long_bid) * 100)
 
 
@@ -206,6 +211,52 @@ def _calc_otm_distance(vix: float, target_delta: float) -> int:
     otm = base_distance_at_vix15 * vix_factor * delta_adjustment
     otm = round(otm / 5) * 5
     return max(25, min(120, int(otm)))
+
+
+def _find_target_delta_otm(
+    greeks_df: pd.DataFrame,
+    spx: float,
+    ms: int,
+    side: str,          # "call" or "put"
+    target_delta: float,  # e.g. 8.0 → looks for |delta| closest to 0.08
+) -> Optional[int]:
+    """
+    Find OTM distance (in points) for the strike whose |delta| is closest
+    to target_delta/100 at the given entry timestamp.
+
+    Returns None if Greeks data is missing or unusable for this side/time.
+    Caller falls back to _calc_otm_distance when None is returned.
+    """
+    right = "C" if side == "call" else "P"
+    target = target_delta / 100.0
+
+    # Find nearest available timestamp in Greeks data
+    available_ms = greeks_df["ms_of_day"].unique()
+    if len(available_ms) == 0:
+        return None
+    nearest_ms = int(available_ms[np.argmin(np.abs(available_ms - ms))])
+
+    # Filter: right side, correct timestamp, OTM strikes only
+    mask = (greeks_df["right"] == right) & (greeks_df["ms_of_day"] == nearest_ms)
+    if side == "call":
+        mask &= greeks_df["strike"] > spx
+    else:
+        mask &= greeks_df["strike"] < spx
+    sub = greeks_df.loc[mask].copy()
+
+    if sub.empty:
+        return None
+
+    # Drop rows with missing/zero delta
+    sub = sub[sub["delta"].notna() & (sub["delta"] != 0)]
+    if sub.empty:
+        return None
+
+    # Find strike with |delta| closest to target
+    sub["delta_dist"] = (sub["delta"].abs() - target).abs()
+    best = sub.loc[sub["delta_dist"].idxmin()]
+    otm = int(round(abs(float(best["strike"]) - spx) / 5) * 5)
+    return max(25, min(120, otm))
 
 
 def _calc_spread_width(vix: float, side: str, cfg: BacktestConfig) -> int:
@@ -270,6 +321,7 @@ def _simulate_entry(
     monitor_times: List[int],
     is_upday_conditional: bool = False,  # upday put-only trigger enabled for this slot
     day_early_exit_ms=_USE_CFG_EARLY_EXIT,  # override from simulate_day for VIX-gated exit
+    greeks_df: Optional[pd.DataFrame] = None,  # real Greeks data (None = use VIX formula)
 ) -> EntryResult:
 
     result = EntryResult(entry_num=entry_num, entry_time_ms=entry_ms)
@@ -394,13 +446,27 @@ def _simulate_entry(
                 force_put_only = True
 
     # ── Strike calculation ───────────────────────────────────────────────
-    otm_dist = _calc_otm_distance(vix, cfg.target_delta)
     call_spread_width = _calc_spread_width(vix, "call", cfg)
     put_spread_width = _calc_spread_width(vix, "put", cfg)
 
-    call_starting_otm = int(round((otm_dist * cfg.call_starting_otm_multiplier) / 5) * 5)
+    # OTM base distance: real delta lookup when Greeks available, else VIX formula
+    if greeks_df is not None and not greeks_df.empty:
+        call_otm_base = _find_target_delta_otm(greeks_df, spx, actual_ms, "call", cfg.target_delta)
+        put_otm_base  = _find_target_delta_otm(greeks_df, spx, actual_ms, "put",  cfg.target_delta)
+        # Fall back to VIX formula per-side if Greeks lookup returned None
+        vix_otm = _calc_otm_distance(vix, cfg.target_delta)
+        if call_otm_base is None:
+            call_otm_base = vix_otm
+        if put_otm_base is None:
+            put_otm_base = vix_otm
+    else:
+        vix_otm = _calc_otm_distance(vix, cfg.target_delta)
+        call_otm_base = vix_otm
+        put_otm_base  = vix_otm
+
+    call_starting_otm = int(round((call_otm_base * cfg.call_starting_otm_multiplier) / 5) * 5)
     call_starting_otm = max(25, min(240, call_starting_otm))
-    put_starting_otm = int(round((otm_dist * cfg.put_starting_otm_multiplier) / 5) * 5)
+    put_starting_otm = int(round((put_otm_base * cfg.put_starting_otm_multiplier) / 5) * 5)
     put_starting_otm = max(25, min(240, put_starting_otm))
 
     result.call_spread_width = call_spread_width
@@ -885,6 +951,13 @@ def simulate_day(
     if chain_df.empty:
         return None
 
+    # Real Greeks mode (strict): skip day entirely if no Greeks file cached
+    greeks_df: Optional[pd.DataFrame] = None
+    if getattr(cfg, "use_real_greeks", False):
+        greeks_df = load_greeks_day(trading_date, cache_dir)
+        if greeks_df.empty:
+            return None  # strict mode — no approximation fallback
+
     spx_df = load_index_day("SPX", trading_date, cache_dir)
     vix_df = load_index_day("VIX", trading_date, cache_dir)
     if spx_df.empty or vix_df.empty:
@@ -937,6 +1010,7 @@ def simulate_day(
                 cfg=cfg,
                 monitor_times=monitor_times,
                 day_early_exit_ms=day_early_exit_ms,
+                greeks_df=greeks_df,
             )
             day.entries.append(res)
     else:
@@ -970,6 +1044,7 @@ def simulate_day(
                     cfg=cfg,
                     monitor_times=monitor_times,
                     day_early_exit_ms=day_early_exit_ms,
+                    greeks_df=greeks_df,
                 )
                 day.entries.append(res)
                 last_ref_spx = bar_spx         # update reference for next slot
@@ -999,6 +1074,7 @@ def simulate_day(
             cfg=cfg,
             monitor_times=monitor_times,
             day_early_exit_ms=day_early_exit_ms,
+            greeks_df=greeks_df,
         )
         day.entries.append(res)
 

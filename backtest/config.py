@@ -50,9 +50,10 @@ class BacktestConfig:
     min_put_otm_distance: int = 25          # MKT-022: floor for progressive scan (pt)
 
     # ── Spread widths ────────────────────────────────────────────────────────
-    # VIX-scaled: formula round(VIX × 3.5 / 5) × 5, floor 25pt, cap 100pt
-    # Validated over 619 real-Greeks days: Sharpe +0.405, P&L +$18,712 vs fixed 50pt
-    spread_vix_multiplier: float = 3.5
+    # VIX-scaled: formula round(VIX × mult / 5) × 5, floor 25pt, cap 100pt
+    # mult=4.0 confirmed optimal after fixing engine bug (long_bid=0 stop skip).
+    # Corrected results vs fixed 50pt: Sharpe +0.45, P&L +$25k, MaxDD -$6.4k
+    spread_vix_multiplier: float = 4.0
     call_min_spread_width: int = 25
     put_min_spread_width: int = 25
     max_spread_width: int = 100
@@ -220,7 +221,7 @@ def live_config() -> BacktestConfig:
         fomc_t1_callonly_enabled=True,
         call_starting_otm_multiplier=3.5,
         put_starting_otm_multiplier=4.0,
-        spread_vix_multiplier=3.5,
+        spread_vix_multiplier=4.0,
         call_min_spread_width=25,
         put_min_spread_width=25,
         max_spread_width=100,
