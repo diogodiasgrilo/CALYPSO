@@ -497,7 +497,7 @@ class HydraStrategy(MEICStrategy):
         self.downday_callonly_enabled = strategy_config.get("downday_callonly_enabled", True)
         self.downday_threshold_pct = float(strategy_config.get("downday_threshold_pct", 0.003))  # 0.3%
         self.downday_theoretical_put_credit = float(strategy_config.get("downday_theoretical_put_credit", 2.50)) * 100  # $250
-        # Base-entry down-day call-only: E1-E5 convert to call-only when SPX drops >= threshold from open.
+        # Base-entry down-day call-only: base entries convert to call-only when SPX drops >= threshold from open.
         # None = disabled (full IC regardless of direction — backtest-confirmed optimal baseline).
         # Set to 0.004 (0.4%) to match backtest-optimized value.
         _base_pct = strategy_config.get("base_entry_downday_callonly_pct", None)
@@ -511,7 +511,7 @@ class HydraStrategy(MEICStrategy):
         if self.base_entry_downday_callonly_pct is not None:
             logger.info(
                 f"  Base-entry down-day call-only: ENABLED "
-                f"(threshold: {self.base_entry_downday_callonly_pct * 100:.1f}% drop from open, applies to E1-E5)"
+                f"(threshold: {self.base_entry_downday_callonly_pct * 100:.1f}% drop from open, applies to base entries)"
             )
         else:
             logger.info("  Base-entry down-day call-only: DISABLED")
@@ -3046,7 +3046,7 @@ class HydraStrategy(MEICStrategy):
                 )
 
                 # Base-entry down-day call-only: evaluate early so we can skip put tightening.
-                # Only applies to E1-E5 (not conditional slots), and not when FOMC T+1 already
+                # Only applies to base entries (not conditional slots), and not when FOMC T+1 already
                 # forces call-only (avoids double-logging).
                 _base_downday_triggered = False
                 if (not is_conditional and not is_fomc_t1
@@ -3141,7 +3141,7 @@ class HydraStrategy(MEICStrategy):
                             return f"Entry #{entry_num} skipped - put credit non-viable (Upday-035)"
 
                     else:
-                        # Base entries (E1-E5): apply down-day call-only filter if triggered
+                        # Base entries: apply down-day call-only filter if triggered
                         if _base_downday_triggered:
                             spx_ref = self.market_data.spx_open  # already set above; re-read for log
                             move_pct = (self.current_price - spx_ref) / spx_ref * 100
@@ -4916,15 +4916,19 @@ class HydraStrategy(MEICStrategy):
         status['ema_long'] = self._last_ema_long
         status['ema_diff_pct'] = self._last_ema_diff_pct
 
-        # MKT-035: SPX vs open % for heartbeat display
+        # SPX vs open % for heartbeat display
         spx_ref = self.market_data.spx_open
         if spx_ref and spx_ref > 0 and self.current_price > 0:
             change_pct = (self.current_price - spx_ref) / spx_ref * 100
             status['spx_open'] = self.market_data.spx_open
             status['spx_high'] = self.market_data.spx_high
             status['spx_vs_open_pct'] = change_pct
-            status['mkt035_threshold'] = -self.downday_threshold_pct * 100
-            status['mkt035_triggered'] = change_pct < -self.downday_threshold_pct * 100
+            # Base-entry down-day call-only status
+            status['base_downday_threshold'] = -(self.base_entry_downday_callonly_pct * 100) if self.base_entry_downday_callonly_pct else None
+            status['base_downday_triggered'] = (
+                self.base_entry_downday_callonly_pct is not None
+                and change_pct <= -(self.base_entry_downday_callonly_pct * 100)
+            )
 
         # MKT-018: Early close status for heartbeat display
         if self.early_close_enabled:
@@ -4997,30 +5001,49 @@ class HydraStrategy(MEICStrategy):
         if self.vix_gate_enabled and self._vix_gate_resolved and self._vix_gate_start_slot > 0:
             lines.insert(0, f"  VIX-shift: slot {self._vix_gate_start_slot}")
 
-        # MKT-035 / Base-Downday: SPX vs open indicator (after trend line, before entries)
+        # SPX vs open indicator (after trend line, before entries)
+        # Shows base entry mode (E1-E{N}) and conditional entry eligibility (E6/E7)
         spx_ref = self.market_data.spx_open
         if spx_ref and spx_ref > 0 and self.current_price > 0:
             change_pct = (self.current_price - spx_ref) / spx_ref * 100
-            e6e7_threshold = -self.downday_threshold_pct * 100
             sign = "+" if change_pct >= 0 else ""
-            # E6/E7 conditional eligibility (MKT-035)
-            e6e7_eligible = change_pct < e6e7_threshold
-            # E1-E5 base-entry down-day call-only
+            base_count = self._base_entry_count
+
+            # Base-entry down-day call-only check
             base_downday_active = (
                 self.base_entry_downday_callonly_pct is not None
-                and change_pct < -(self.base_entry_downday_callonly_pct * 100)
+                and change_pct <= -(self.base_entry_downday_callonly_pct * 100)
             )
             if base_downday_active:
-                triggered = "E1-E5/E6/E7: call-only"
-            elif e6e7_eligible:
-                triggered = "E6/E7 eligible | E1-E5: full IC"
+                base_label = f"E1-E{base_count}: call-only"
             else:
-                triggered = "full IC"
+                base_label = f"E1-E{base_count}: full IC"
+
+            # Conditional entry eligibility
+            cond_parts = []
+            # E6 upday put-only (Upday-035)
+            if self.upday_putonly_enabled:
+                upday_thr = self.upday_threshold_pct * 100
+                if change_pct >= upday_thr:
+                    cond_parts.append(f"E6: put-only ({sign}{change_pct:.2f}% >= +{upday_thr:.2f}%)")
+                else:
+                    cond_parts.append(f"E6: pending (+{upday_thr:.2f}%)")
+            # E7 down-day call-only (MKT-035) — only if enabled
+            if self._conditional_downday_times_set:
+                dd_thr = self.downday_threshold_pct * 100
+                if change_pct <= -dd_thr:
+                    cond_parts.append(f"E7: call-only ({sign}{change_pct:.2f}% <= -{dd_thr:.2f}%)")
+                else:
+                    cond_parts.append(f"E7: pending (-{dd_thr:.2f}%)")
+
+            cond_label = " | ".join(cond_parts) if cond_parts else ""
+            separator = " | " if cond_label else ""
+
             insert_idx = 1 if lines else 0  # After trend line
             lines.insert(insert_idx,
-                f"  Down-day: SPX {sign}{change_pct:.2f}% vs open "
+                f"  {'Down' if change_pct < 0 else 'Up'}-day: SPX {sign}{change_pct:.2f}% vs open "
                 f"({self.current_price:.1f} vs {spx_ref:.1f}) | "
-                f"E6/E7 thr: {e6e7_threshold:.1f}% | {triggered}"
+                f"{base_label}{separator}{cond_label}"
             )
 
         return lines
