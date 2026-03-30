@@ -441,7 +441,19 @@ class HydraStrategy(MEICStrategy):
         # v1.17.0: Lowered to $2.10 — walk-forward backtest optimized.
         # MKT-029 fallback: $2.05, $2.07 floor (dynamic: min - $0.05, min - $0.10)
         self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 2.50) * 100
-        logger.info(f"  Min viable credit - call: ${self.min_viable_credit_per_side / 100:.2f}, put: ${self.min_viable_credit_put_side / 100:.2f}")
+
+        # MKT-029: Configurable credit floors (hard floor after graduated fallback).
+        # If not set, falls back to min - $0.10 (legacy behavior).
+        _call_floor = strategy_config.get("call_credit_floor", None)
+        _put_floor = strategy_config.get("put_credit_floor", None)
+        self.call_credit_floor = float(_call_floor) * 100 if _call_floor is not None else self.min_viable_credit_per_side - 10
+        self.put_credit_floor = float(_put_floor) * 100 if _put_floor is not None else self.min_viable_credit_put_side - 10
+        logger.info(
+            f"  Min viable credit - call: ${self.min_viable_credit_per_side / 100:.2f} "
+            f"(floor: ${self.call_credit_floor / 100:.2f}), "
+            f"put: ${self.min_viable_credit_put_side / 100:.2f} "
+            f"(floor: ${self.put_credit_floor / 100:.2f})"
+        )
 
         # MKT-024: Wider starting OTM multipliers
         # Start strike search at N× the VIX-adjusted distance so MKT-020/022
@@ -2046,16 +2058,18 @@ class HydraStrategy(MEICStrategy):
         call_viable = estimated_call >= call_min
         put_viable = estimated_put >= put_min
 
-        # MKT-029: Graduated call fallback — try min-$0.05, then min-$0.10
-        # Accepts borderline call credits instead of skipping or converting to
-        # put-only. Keeps entries further OTM (wider cushion = safer).
+        # MKT-029: Graduated call fallback — try min-$0.05, then configurable floor.
+        # Floor from config (call_credit_floor, default $0.75) allows accepting lower
+        # credits at far-OTM strikes. Keeps entries wider = safer cushion.
         if not call_viable:
-            for fallback in [call_min - 5, call_min - 10]:
+            call_floor = self.call_credit_floor
+            for fallback in [call_min - 5, call_floor]:
                 if estimated_call >= fallback:
                     call_viable = True
                     logger.info(
                         f"MKT-029: Call credit ${estimated_call / 100:.2f} accepted at "
-                        f"fallback ${fallback / 100:.2f} (primary: ${call_min / 100:.2f})"
+                        f"fallback ${fallback / 100:.2f} (primary: ${call_min / 100:.2f}, "
+                        f"floor: ${call_floor / 100:.2f})"
                     )
                     self._log_safety_event(
                         "MKT-029_CALL_FALLBACK",
@@ -2064,19 +2078,21 @@ class HydraStrategy(MEICStrategy):
                     )
                     break
 
-        # MKT-029: Graduated put fallback — try min-$0.05, then min-$0.10
+        # MKT-029: Graduated put fallback — try min-$0.05, then configurable floor.
         if not put_viable:
-            for fallback in [put_min - 5, put_min - 10]:
+            put_floor = self.put_credit_floor
+            for fallback in [put_min - 5, put_floor]:
                 if estimated_put >= fallback:
                     put_viable = True
                     logger.info(
                         f"MKT-029: Put credit ${estimated_put / 100:.2f} accepted at "
-                        f"fallback ${fallback / 100:.2f} (primary: ${put_min / 100:.2f})"
+                        f"fallback ${fallback / 100:.2f} (primary: ${put_min / 100:.2f}, "
+                        f"floor: ${put_floor / 100:.2f})"
                     )
                     self._log_safety_event(
                         "MKT-029_PUT_FALLBACK",
                         f"Entry #{entry.entry_number}: put ${estimated_put / 100:.2f} "
-                        f"at fallback ${fallback / 100:.2f}"
+                        f"at fallback ${put_floor / 100:.2f}"
                     )
                     break
 
@@ -2318,7 +2334,7 @@ class HydraStrategy(MEICStrategy):
         # Lower thresholds let MKT-020 accept wider (further OTM) strikes with
         # slightly below-target credit instead of tightening to narrow strikes.
         # Wider = better cushion = safer. Fallbacks: min-$0.05, min-$0.10.
-        call_thresholds = [min_credit, min_credit - 5, min_credit - 10]
+        call_thresholds = [min_credit, min_credit - 5, self.call_credit_floor]
         for threshold_idx, threshold in enumerate(call_thresholds):
             for otm_val, short_s, long_s, call_credit in evaluated_candidates:
                 if call_credit >= threshold:
@@ -2513,7 +2529,7 @@ class HydraStrategy(MEICStrategy):
         # Lower thresholds let MKT-022 accept wider (further OTM) strikes with
         # slightly below-target credit instead of tightening to narrow strikes.
         # Wider = better cushion = safer. Fallbacks: min-$0.05, min-$0.10.
-        put_thresholds = [min_credit, min_credit - 5, min_credit - 10]
+        put_thresholds = [min_credit, min_credit - 5, self.put_credit_floor]
         for threshold_idx, threshold in enumerate(put_thresholds):
             for otm_val, short_s, long_s, put_credit in evaluated_candidates:
                 if put_credit >= threshold:
