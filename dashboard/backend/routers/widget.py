@@ -58,8 +58,8 @@ async def get_widget_data():
         else:
             entry_dots.append("pending")
 
-    # Pad to 5 entries
-    while len(entry_dots) < 5:
+    # Pad to 4 entries (3 base + E6)
+    while len(entry_dots) < 4:
         entry_dots.append("pending")
 
     cumulative_pnl = metrics.get("cumulative_pnl", 0) if metrics else 0

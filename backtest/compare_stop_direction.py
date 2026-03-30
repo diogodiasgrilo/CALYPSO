@@ -46,7 +46,7 @@ def base_cfg() -> BacktestConfig:
         min_call_credit=1.25,
         min_put_credit=1.75,
         put_stop_buffer=100.0,
-        stop_buffer=10.0,
+        call_stop_buffer=10.0,
         one_sided_entries_enabled=True,
         put_only_max_vix=25.0,
         stop_slippage_per_leg=0.0,

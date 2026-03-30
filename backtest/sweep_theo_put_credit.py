@@ -4,7 +4,7 @@ Targeted sweep: downday_theoretical_put_credit
 All other parameters locked to optimal from 2026-03-24 768-combo sweep.
 Finds the best theoretical put credit for call-only stop formula.
 
-Stop formula: call_credit + downday_theoretical_put_credit + stop_buffer
+Stop formula: call_credit + downday_theoretical_put_credit + call_stop_buffer
 Higher value = harder to stop out on call-only entries.
 
 Run: python -m backtest.sweep_theo_put_credit
@@ -15,7 +15,7 @@ from datetime import date, datetime as dt
 from pathlib import Path
 from typing import List, Optional
 
-from backtest.config import BacktestConfig
+from backtest.config import BacktestConfig, live_config
 from backtest.engine import run_backtest, DayResult
 
 try:
@@ -35,30 +35,12 @@ THEO_PUT_VALUES = [50, 100, 150, 175, 250, 500, 750, 1000]
 
 
 def base_cfg() -> BacktestConfig:
-    """Optimal config from 2026-03-24 768-combo sweep, all params locked."""
-    return BacktestConfig(
-        start_date=date(2022, 5, 16),
-        end_date=date(2026, 3, 22),
-        entry_times=["10:15", "10:45", "11:15", "11:45", "12:15"],
-        conditional_e6_enabled=False,
-        conditional_e7_enabled=True,
-        conditional_upday_e6_enabled=True,
-        conditional_upday_e7_enabled=False,
-        downday_threshold_pct=0.30,
-        upday_threshold_pct=0.60,
-        base_entry_downday_callonly_pct=0.30,
-        upday_theoretical_call_credit=0,
-        fomc_t1_callonly_enabled=False,
-        min_call_credit=1.25,
-        min_put_credit=1.75,
-        put_stop_buffer=100.0,
-        stop_buffer=10.0,
-        one_sided_entries_enabled=True,
-        put_only_max_vix=25.0,
-        price_based_stop_points=None,   # credit-based stop (confirmed optimal today)
-        stop_slippage_per_leg=0.0,
-        target_delta=8.0,
-    )
+    """Current live_config() — all confirmed optimal params, real Greeks strict mode."""
+    cfg = live_config()
+    cfg.start_date      = date(2022, 5, 16)
+    cfg.end_date        = date(2026, 3, 27)
+    cfg.use_real_greeks = True
+    return cfg
 
 
 def summarise(results: List[DayResult], label: str) -> dict:
@@ -142,7 +124,7 @@ if __name__ == "__main__":
     if _RICH:
         console = Console()
         console.print(f"\n[bold cyan]Sweep: downday_theoretical_put_credit[/]")
-        console.print(f"Stop formula: call_credit + theo_put + stop_buffer")
+        console.print(f"Stop formula: call_credit + theo_put + call_stop_buffer")
         console.print(f"Values ($): {[v/100 for v in THEO_PUT_VALUES]}")
         console.print(f"Period: 2022-05-16 → 2026-03-22  (965 trading days)\n")
 

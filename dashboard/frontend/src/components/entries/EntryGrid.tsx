@@ -9,8 +9,8 @@ export function EntryGrid() {
   const schedule = hydraState?.entry_schedule;
   const showConditional = useShowConditionalEntries();
 
-  // 5 base entry slots (E1-E5)
-  const baseSlots = Array.from({ length: 5 }, (_, i) =>
+  // 4 entry slots (E1-E3 base + E6 conditional)
+  const baseSlots = Array.from({ length: 4 }, (_, i) =>
     entries.find((e) => e.entry_number === i + 1) ?? null
   );
 
@@ -24,8 +24,8 @@ export function EntryGrid() {
       <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
         Entries
       </h3>
-      {/* Base entries: E1-E5 */}
-      <div className="grid grid-cols-5 gap-2 max-lg:grid-cols-3 max-sm:grid-cols-1">
+      {/* Base entries: E1-E3 + E6 conditional */}
+      <div className="grid grid-cols-4 gap-2 max-lg:grid-cols-3 max-sm:grid-cols-1">
         {baseSlots.map((entry, i) =>
           entry ? (
             <EntryCard key={i} entry={entry} />

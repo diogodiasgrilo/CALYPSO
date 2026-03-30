@@ -5,6 +5,7 @@ Downloads and caches:
   - SPX 1-min price (index)
   - VIX 1-min price (index)
   - SPXW 0DTE option chain quotes at 5-min intervals (full chain per day)
+  - SPXW 0DTE option Greeks at 5-min intervals (cache/greeks/ — separate folder)
 
 Data is stored as parquet files in the cache directory.
 Re-running will skip already-cached dates.
@@ -310,6 +311,84 @@ def get_spxw_trading_days(start: date, end: date, cache_dir: Path) -> List[date]
         elif d.weekday() in (0, 2, 4):
             result.append(d)
     return result
+
+
+# ── Greeks data ────────────────────────────────────────────────────────────
+
+def download_greeks_day(expiry: date, cache_dir: Path, fast_mode: bool = False) -> bool:
+    """
+    Download SPXW 0DTE Greeks at 5-min intervals for a given expiry date.
+    Stores: strike, right, ms_of_day, delta, implied_vol
+    Cached to greeks/SPXW_YYYYMMDD_greeks.parquet — separate from chain quotes.
+    Nothing in cache/options/ is touched.
+    """
+    out_path = cache_dir / "greeks" / f"SPXW_{_date_str(expiry)}_greeks.parquet"
+    if out_path.exists() and pd.read_parquet(out_path).shape[0] > 0:
+        return True
+
+    exp_str = _date_str(expiry)
+    retries = 1 if fast_mode else 3
+    read_timeout = 30 if fast_mode else 300
+
+    data = _get("/v2/bulk_hist/option/greeks", {
+        "root": "SPXW",
+        "exp": exp_str,
+        "start_date": exp_str,
+        "end_date": exp_str,
+        "ivl": 300000,   # 5-minute intervals — matches chain quote resolution
+    }, retries=retries, read_timeout=read_timeout)
+
+    if not data or "response" not in data:
+        return False
+
+    rows_raw = data["response"]
+    if not rows_raw:
+        return False
+
+    # Format: [ms_of_day, bid, ask, delta, theta, vega, rho, epsilon,
+    #          lambda, implied_vol, iv_error, ms_of_day2, underlying_price, date]
+    fmt = data["header"]["format"]
+    idx_ms    = fmt.index("ms_of_day")
+    idx_delta = fmt.index("delta")
+    idx_iv    = fmt.index("implied_vol")
+
+    records = []
+    for item in rows_raw:
+        contract = item["contract"]
+        strike = contract["strike"] / 1000  # millionths → points
+        right  = contract["right"]          # "C" or "P"
+        for tick in item["ticks"]:
+            ms    = tick[idx_ms]
+            delta = tick[idx_delta]
+            iv    = tick[idx_iv]
+            if ms < RTH_START_MS or ms > RTH_END_MS:
+                continue
+            if delta == 0.0 and iv == 0.0:
+                continue  # skip empty rows
+            records.append((strike, right, ms, delta, iv))
+
+    if not records:
+        return False
+
+    df = pd.DataFrame(records, columns=["strike", "right", "ms_of_day", "delta", "implied_vol"])
+    df = df.astype({
+        "strike":      "float32",
+        "ms_of_day":   "int32",
+        "delta":       "float32",
+        "implied_vol": "float32",
+    })
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out_path, index=False)
+    return True
+
+
+def load_greeks_day(expiry: date, cache_dir: Path) -> pd.DataFrame:
+    """Load cached SPXW Greeks for a specific date. Returns empty DataFrame if not cached."""
+    path = cache_dir / "greeks" / f"SPXW_{_date_str(expiry)}_greeks.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
 
 
 # ── Master download ─────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-03-19
-**Version:** 1.16.1
+**Last Updated:** 2026-03-29
+**Version:** 1.19.0
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -32,7 +32,7 @@
 
 ### What is HYDRA?
 
-HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — base entries are full iron condors, put-only (when call credit is non-viable AND VIX < 25, via MKT-011 + MKT-032/MKT-039), or call-only (when put credit is non-viable but call viable, via MKT-040; 89% WR, +$46 EV). Conditional entries E6/E7 fire as call-only when SPX drops >= 0.3% below the session open (MKT-035) — base entries E1-E5 are unaffected by down-day status.
+HYDRA is MEIC (Multiple Entry Iron Condors) with a trend-following overlay and a suite of "MKT" rules. Before each entry, it checks EMA 20 vs EMA 40 on SPX 1-minute bars. The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged for analysis but is informational only — base entries are full iron condors, put-only (when call credit is non-viable AND VIX < 15.0, via MKT-011 + MKT-032/MKT-039), or call-only (when put credit is non-viable but call viable, via MKT-040; 89% WR, +$46 EV). Conditional entry E6 fires as put-only when SPX rises >= 0.48% above the session open (Upday-035). E7 is DISABLED.
 
 Key MKT rules include: pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management — developed iteratively from 12 days of live trading data (Feb 10-26, 2026). Early close (MKT-018/023/021) was tested but intentionally disabled — backtest showed hold-to-expiry outperforms.
 
@@ -56,8 +56,8 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 |--------|-----------|---------|
 | Philosophy | Always market-neutral | Always full IC + EMA signal (informational) |
 | Entry type | Always full iron condor | Full IC; put-only if call non-viable (MKT-011); call-only if put non-viable (MKT-040) |
-| Entries per day | 6 | 5 (Entry #6 dropped in v1.6.0 to free margin for wider put spreads) |
-| Stop formula (full IC) | total_credit per side (MEIC+: -$0.10) | total_credit + stop_buffer (default +$0.10, Brian's credit+buffer) |
+| Entries per day | 6 | 3 base + 1 conditional (v1.19.0, was 5+2) |
+| Stop formula (full IC) | total_credit per side (MEIC+: -$0.10) | total_credit + asymmetric buffer (call +$0.35, put +$1.55) |
 | Stop execution | Close both legs (short + long) | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025) |
 | Credit gate | Skip if both non-viable | Call non-viable → put-only; put non-viable → retry tighter puts, then call-only (MKT-040); both → skip |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
@@ -81,7 +81,7 @@ MEIC's breakeven design means a full IC with one side stopped nets ~$0. HYDRA us
 - **One-sided entry in a trending market:** Risky if wrong. But if the trend is correctly identified, the spread is far OTM on the safe side and has a high probability of expiring worthless.
 - **Full IC in a trending market:** The stressed side gets stopped, but the surviving side's credit offsets the loss. Still safe (~$5 loss), but you tie up capital for a near-zero return.
 
-HYDRA's philosophy: **Default to full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds call credit non-viable but put credit viable, place a put-only entry only if VIX < 25.0 (MKT-032/MKT-039). MKT-039 (v1.15.0) changed put-only stop from 2×credit to credit+buffer — the $5.00 put buffer already prevents false stops, making 2× redundant (max loss $750→$500). This tighter stop justified raising the VIX gate from 18→25. At VIX >= 25.0, skip instead (no call hedge in extreme volatility). When put credit non-viable but call viable, place a call-only entry (MKT-040, v1.15.1; 89% WR, +$46 EV). When both non-viable, skip. On down days (SPX drops >= 0.3% below the session open), MKT-035 converts conditional entries (E6/E7) to call-only — 20-day data shows 71% put stop rate on down days vs 7% call stop rate.**
+HYDRA's philosophy: **Default to full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds call credit non-viable but put credit viable, place a put-only entry only if VIX < 15.0 (MKT-032/MKT-039). At VIX >= 15.0, skip instead (no call hedge in volatile conditions). When put credit non-viable but call viable, place a call-only entry (MKT-040, v1.15.1; 89% WR, +$46 EV). When both non-viable, skip. On down days (SPX drops >= 0.57% below the session open), base entries E1-E3 convert to call-only. Conditional entry E6 fires as put-only on up days (SPX rises >= 0.48%, Upday-035). Whipsaw filter skips entries when intraday range > 1.5× expected move.**
 
 ### Evolution Through Live Trading
 
@@ -106,21 +106,18 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 ### Entry Schedule
 
-5 entries per day, spaced 30 minutes apart at :15/:45 marks (19-day MAE analysis: 10% lower adverse excursion than :05/:35). Starting at 10:15 AM (v1.10.3 — matches winning period Feb 10-27).
+3 base entries per day, spaced 30 minutes apart at :15/:45 marks, plus 1 conditional entry. Starting at 10:15 AM. E4/E5 dropped in v1.19.0 (negative EV in walk-forward backtest).
 
-**Current schedule (v1.11.0, MKT-034 disabled):**
+**Current schedule (v1.19.0, walk-forward convergence):**
 
 | Entry | Time (ET) | Type | Notes |
 |-------|-----------|------|-------|
-| 1 | 10:15 | Base | MKT-031 scouting from 10:05 |
+| 1 | 10:15 | Base | Always attempts (full IC or one-sided) |
 | 2 | 10:45 | Base | |
 | 3 | 11:15 | Base | |
-| 4 | 11:45 | Base | |
-| 5 | 12:15 | Base | |
-| 6 | 12:45 | Conditional (MKT-035) | Only fires on down days as call-only |
-| 7 | 13:15 | Conditional (MKT-035) | Only fires on down days as call-only |
+| 6 | 14:00 | Conditional (Upday-035) | Only fires on up days as put-only |
 
-**Conditional entries** only fire when MKT-035 triggers (SPX drops >= 0.3% below the session open). They are always call-only. On non-down days, they are silently skipped before any strike calculation.
+E7 (13:15) is DISABLED. E6 fires as put-only when SPX rises >= 0.48% above session open (Upday-035). On non-up days, E6 is silently skipped.
 
 **Previous schedule (MKT-034 enabled, v1.10.0-1.10.2):**
 
@@ -191,7 +188,7 @@ Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scout
     ┌─────────────────────────────────────────┐
     │  Buy Long Call (protection)             │
     │      ▲                                  │
-    │      │ 50 points width (VIX-adjusted)   │
+    │      │ VIX×5.3 width (25-83pt)          │
     │      ▼                                  │
     │  Sell Short Call (credit)               │
     └─────────────────────────────────────────┘
@@ -205,7 +202,7 @@ Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scout
     ┌─────────────────────────────────────────┐
     │  Sell Short Put (credit)                │
     │      ▲                                  │
-    │      │ 50 points width (VIX-adjusted)   │
+    │      │ VIX×5.3 width (25-83pt)          │
     │      ▼                                  │
     │  Buy Long Put (protection)              │
     └─────────────────────────────────────────┘
@@ -214,13 +211,13 @@ Instead of entering at exactly the scheduled time, HYDRA opens a 10-minute scout
 
 ### Trend Signal (Informational Only — v1.4.0)
 
-The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. For base entries E1-E5, entry type is determined by MKT-011 (credit gate): full IC when both sides viable, put-only when call non-viable AND VIX < 25.0 (MKT-032/MKT-039), call-only when put non-viable but call viable after retrying tighter puts (MKT-040), skip when both non-viable. Conditional entries E6/E7 only fire when MKT-035 triggers (SPX drops >= 0.3% below the session open), always as call-only.
+The EMA signal is calculated before each entry and logged for analysis, but does **not** drive entry type. For base entries E1-E3, entry type is determined by MKT-011 (credit gate): full IC when both sides viable, put-only when call non-viable AND VIX < 15.0 (MKT-032/MKT-039), call-only when put non-viable but call viable after retrying tighter puts (MKT-040), skip when both non-viable. Conditional entry E6 fires as put-only when Upday-035 triggers (SPX rises >= 0.48% above session open). E7 is DISABLED.
 
 | Trend Signal | What Gets Placed | Note |
 |--------------|------------------|------|
-| BULLISH (EMA20 > EMA40 by >= 0.2%) | Full IC, put-only (MKT-011), call-only (MKT-040), or skip (base); call-only (E6/E7 on down days) | Signal logged, not acted on |
-| BEARISH (EMA20 < EMA40 by >= 0.2%) | Full IC, put-only (MKT-011), call-only (MKT-040), or skip (base); call-only (E6/E7 on down days) | Signal logged, not acted on |
-| NEUTRAL (within 0.2%) | Full IC, put-only (MKT-011), call-only (MKT-040), or skip (base); call-only (E6/E7 on down days) | Standard behavior |
+| BULLISH (EMA20 > EMA40 by >= 0.2%) | Full IC, put-only (MKT-011), call-only (MKT-040), or skip (base); put-only (E6 on up days) | Signal logged, not acted on |
+| BEARISH (EMA20 < EMA40 by >= 0.2%) | Full IC, put-only (MKT-011), call-only (MKT-040), or skip (base); put-only (E6 on up days) | Signal logged, not acted on |
+| NEUTRAL (within 0.2%) | Full IC, put-only (MKT-011), call-only (MKT-040), or skip (base); put-only (E6 on up days) | Standard behavior |
 
 **Why trend-driven one-sided entries were removed (v1.4.0):** 12-day analysis (Feb 10-26) showed trend-driven one-sided P&L was -$175 across 23 entries. V-shape reversal days (Feb 17, Feb 26) amplified losses. EMA correctly identifies current direction but cannot predict reversals. **MKT-011 credit-driven put-only entries re-enabled (v1.7.1):** 87.5% WR, +$870 net from 6 qualifying entries — these are credit-driven (call side too cheap) not trend-driven.
 
@@ -331,33 +328,33 @@ Each entry goes through these phases in order:
 
 ```
 17. MKT-020: Call tightening — move short call closer in 5pt steps
-    └── Until credit >= $0.60 (call minimum) or 25pt OTM floor
+    └── Until credit >= $1.35 (call minimum) or 25pt OTM floor
     └── If tightened, re-runs steps 13-16
 18. MKT-022: Put tightening — mirror of MKT-020 for put side
-    └── Same 5pt steps, $2.50 target (put minimum), 25pt floor
+    └── Same 5pt steps, $2.10 target (put minimum), 25pt floor
     └── If tightened, re-runs steps 13-16
 ```
 
-### Phase 6.5: Conditional Entry Trigger (MKT-035, v1.11.0, updated v1.12.2)
+### Phase 6.5: Conditional Entry Trigger (MKT-035 / Upday-035, updated v1.19.0)
 
 ```
-18.5 MKT-035: Check if SPX < session_open × (1 - threshold)
-     ├── Conditional entry (6+) checked FIRST (before strikes)
-     │   ├── NOT down day → SKIP entry immediately (no API calls)
-     │   └── Down day → Force CALL-ONLY, proceed to credit check
-     └── Base entry (1-5): MKT-035 DOES NOT APPLY
-         └── Always continues to MKT-011 credit gate (full IC path)
-         └── The $5.00 put stop buffer provides sufficient protection on down days
+18.5a MKT-035 (down-day): Check if SPX < session_open × (1 - 0.0057)
+      ├── Base entry (1-3): Convert to call-only when down >= 0.57% (base_entry_downday_callonly_pct)
+      └── Conditional entries: E7 DISABLED
+18.5b Upday-035 (up-day): Check if SPX > session_open × (1 + 0.0048)
+      ├── E6 (14:00): Fire as PUT-ONLY when up >= 0.48%
+      └── Base entries (1-3): Unaffected by up-day status
 ```
 
 ### Phase 7: Credit Gate
 
 ```
-19. MKT-011: Estimate credit from live quotes (call >= $0.60, put >= $2.50 with MKT-029 fallback)
-    ├── Conditional entry with MKT-035 triggered → Already handled above (call-only or skip)
+19. MKT-011: Estimate credit from live quotes (call >= $1.35, put >= $2.10 with MKT-029 fallback)
+    ├── Conditional entry with MKT-035/Upday-035 triggered → Already handled above
+    ├── Whipsaw filter: range > 1.5× EM → SKIP entry (v1.19.0)
     ├── Both sides viable → PROCEED with full iron condor
-    ├── Call non-viable, put viable, VIX < 25 → PUT-ONLY entry (MKT-032/MKT-039 allows)
-    ├── Call non-viable, put viable, VIX >= 25 → SKIP entry (MKT-032: no call hedge)
+    ├── Call non-viable, put viable, VIX < 15.0 → PUT-ONLY entry (MKT-032/MKT-039 allows)
+    ├── Call non-viable, put viable, VIX >= 15.0 → SKIP entry (MKT-032: no call hedge)
     ├── Put non-viable, call viable → Retry with tighter put strikes (5pt closer, max 2 retries)
     │   └── Still non-viable after retries → CALL-ONLY entry (MKT-040: 89% WR, +$46 EV)
     ├── Put non-viable, call non-viable → SKIP entry
@@ -407,21 +404,20 @@ otm_distance = clamp(otm_distance, 25, 120)  # Never closer than 25, never wider
 | 20 | 1.33 | 55 pts | ~8 |
 | 25 | 1.67 | 65 pts | ~8 |
 
-### Spread Width (VIX-Adjusted)
+### Spread Width (VIX-Scaled, v1.19.0)
 
-| VIX Range | Spread Width |
-|-----------|-------------|
-| < 15 | 40 pts |
-| 15-20 | 50 pts |
-| 20-25 | 60 pts |
-| 25-30 | 70 pts |
-| > 30 | 80 pts |
+**Continuous formula:** `round(VIX × 5.3 / 5) × 5`, floor 25pt, cap 83pt.
 
-**MKT-028 Asymmetric Floors (v1.6.0):** Put longs cost 7× more than calls due to skew ($0.90 vs $0.15 median). Separate floors: call 60pt (`call_min_spread_width`), put 75pt (`put_min_spread_width`). Wider put spreads push longs further OTM = cheaper. `margin = max(call, put) × $100`, so wider puts don't require wider calls.
+| VIX | Spread Width |
+|-----|-------------|
+| 10 | 55 pts |
+| 15 | 80 pts |
+| 16+ | 83 pts (cap) |
+| < 5 | 25 pts (floor) |
 
-Maximum: 75 pts (`max_spread_width`, margin cap: 5 entries × 75pt × $100 = $37,500 ≤ $39,000).
+**v1.19.0 changes:** `spread_vix_multiplier` raised from 3.5 to 5.3. Floor lowered from 25pt (was 60pt call, 75pt put asymmetric — now unified). Cap raised from 75pt to 83pt. Walk-forward backtest validated over 719 days.
 
-MKT-008 liquidity fallback uses universal `min_spread_width=60` floor. SPX options use 5-point strike increments.
+SPX options use 5-point strike increments.
 
 ### Strike Adjustment Pipeline (Exact Order)
 
@@ -434,12 +430,12 @@ This pipeline prevents Saxo from rejecting orders or merging positions:
 | 3 | MKT-014 | Warn if MKT-013 landed on illiquid strike | MKT-013 can undo MKT-007's liquidity optimization |
 | 4 | Fix #66 | Re-run Fix #44 after MKT-013 | MKT-013 shifts longs too, potentially creating new conflicts |
 | 5 | MKT-015 | Move new long strikes 5pt further OTM if they overlap existing long strikes | Saxo merges same-strike longs, deleting older position ID |
-| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $0.60 minimum (MKT-029 floor $0.50) |
-| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $2.50 minimum (MKT-029 floor $2.40) |
+| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $1.35 minimum (MKT-029 floor $0.75) |
+| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $2.10 minimum (MKT-029 floor $2.07) |
 
 Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
-**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $2.50 (v1.10.4 raised from $1.75 — 20-day data: $2.50-$3.49 bucket = 66.7% survival +$159 EV), calls use $0.60 (v1.10.4 lowered from $0.75 — calls are secondary income, lower min keeps calls further OTM). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
+**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $2.10 (v1.19.0, walk-forward optimized), calls use $1.35 (v1.19.0, walk-forward optimized). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
 
 ---
 
@@ -449,29 +445,29 @@ Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
 MEIC's core insight: **set the stop loss per side equal to total credit collected**. If one side is stopped and the other expires worthless, the loss on the stopped side exactly equals the profit from the surviving side = breakeven.
 
-**HYDRA (v1.10.2+)** uses a credit+buffer approach with **asymmetric buffers**: call stop = total_credit + `stop_buffer` ($0.10), put stop = total_credit + `put_stop_buffer` ($5.00). The wider put buffer ($500 vs $10) avoids 91% of false put stops based on 21-day backtest (+$6,885 NET improvement). If `put_stop_buffer` is not set, falls back to `stop_buffer` for both sides.
+**HYDRA (v1.10.2+)** uses a credit+buffer approach with **asymmetric buffers**: call stop = total_credit + `call_stop_buffer` ($0.35), put stop = total_credit + `put_stop_buffer` ($1.55). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` is not set, falls back to `call_stop_buffer` for both sides.
 
 ### HYDRA Stop Formula
 
 ```
-call_stop = entry.total_credit + stop_buffer         (full IC: call side — $0.10 default)
-put_stop  = entry.total_credit + put_stop_buffer     (full IC: put side — $5.00 default)
-stop_level = credit + put_stop_buffer                 (put-only via MKT-039: tighter stop, $5.00 buffer sufficient)
-stop_level = call_credit + theoretical_put + stop_buffer (call-only via MKT-040: unified with MKT-035/038)
-stop_level = call_credit + theoretical_put + stop_buffer (MKT-035 call-only: theoretical put = $250)
+call_stop = entry.total_credit + call_stop_buffer     (full IC: call side — $0.35 default)
+put_stop  = entry.total_credit + put_stop_buffer      (full IC: put side — $1.55 default)
+stop_level = credit + put_stop_buffer                  (put-only via MKT-039: $1.55 buffer)
+stop_level = call_credit + theoretical_put + call_stop_buffer (call-only via MKT-040: unified with MKT-035/038)
+stop_level = call_credit + theoretical_put + call_stop_buffer (MKT-035 call-only: theoretical put = $260)
 ```
 
-| Entry Type | Stop Formula | Example (C=$125, P=$185) |
+| Entry Type | Stop Formula | Example (C=$135, P=$210) |
 |-----------|-------------|--------------------------|
-| Full IC (call side) | total_credit + stop_buffer | $310 + $10 = $320 |
-| Full IC (put side) | total_credit + put_stop_buffer | $310 + $500 = $810 |
-| Call-only (MKT-035) | call_credit + theo_put + stop_buffer | $125 + $250 + $10 = $385 |
-| Call-only (MKT-040) | call_credit + theo_put + stop_buffer | $125 + $250 + $10 = $385 |
-| Put-only (MKT-039) | credit + put_stop_buffer | $185 + $500 = $685 |
+| Full IC (call side) | total_credit + call_stop_buffer | $345 + $35 = $380 |
+| Full IC (put side) | total_credit + put_stop_buffer | $345 + $155 = $500 |
+| Call-only (MKT-035) | call_credit + theo_put + call_stop_buffer | $135 + $260 + $35 = $430 |
+| Call-only (MKT-040) | call_credit + theo_put + call_stop_buffer | $135 + $260 + $35 = $430 |
+| Put-only (MKT-039) | credit + put_stop_buffer | $210 + $155 = $365 |
 
-**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($0.60 calls, $2.50 puts) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary. Analysis of 6 stops showed ~$825 in savings from tighter stops with zero surviving entries saved by the wider level.
+**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($1.35 calls, $2.10 puts) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary.
 
-**Credit+Buffer approach (v1.10.2+):** Stop = total_credit + buffer. **Asymmetric buffers (v1.12.0):** call side uses `stop_buffer` (default $0.10 × 100 = $10), put side uses `put_stop_buffer` (default $5.00 × 100 = $500). If `put_stop_buffer` not set, falls back to `stop_buffer` for both. The wider put buffer avoids 91% of false put stops (21-day backtest: +$6,885 NET). Replaces the earlier MEIC+ design (stop = credit - $0.15).
+**Credit+Buffer approach (v1.10.2+):** Stop = total_credit + buffer. **Asymmetric buffers:** call side uses `call_stop_buffer` (default $0.35 × 100 = $35), put side uses `put_stop_buffer` (default $1.55 × 100 = $155). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` not set, falls back to `call_stop_buffer` for both. Replaces the earlier MEIC+ design (stop = credit - $0.15).
 
 **Safety floor:** MIN_STOP_LEVEL = $50. If stop_level is below $50 (e.g., due to zero fill price from API sync issues), skip stop monitoring for that side.
 
@@ -545,7 +541,7 @@ When enabled: 75-second confirmation window before executing stop. 20-day backte
 
 ### MKT-038: FOMC T+1 Call-Only Mode
 
-On the day after FOMC announcement (T+1), all entries are forced to call-only spreads. This applies to both base entries (E1-E5) and conditional entries (E6/E7).
+On the day after FOMC announcement (T+1), all entries are forced to call-only spreads. This applies to both base entries (E1-E3) and conditional entries.
 
 **Rationale:** Research on FOMC T+1 days shows:
 - 66.7% of T+1 days are down days
@@ -557,12 +553,15 @@ On the day after FOMC announcement (T+1), all entries are forced to call-only sp
 - T+1 (day after announcement): MKT-038 forces call-only entries
 - T-1 (day before FOMC): No changes — actually favorable for premium selling (69.6% win rate)
 
-**Stop formula:** Same as MKT-035: `call_credit + theoretical $2.50 put + call buffer`
+**Stop formula:** Same as MKT-035: `call_credit + theoretical $2.60 put + call buffer`
 
 **Config:**
 ```json
-"fomc_t1_callonly_enabled": true
+"fomc_t1_callonly_enabled": true,
+"fomc_announcement_skip": false
 ```
+
+**FOMC announcement day (v1.19.0):** `fomc_announcement_skip` changed to `false` — backtest showed trading FOMC days is profitable.
 
 **Implementation:** Uses `is_fomc_t_plus_one()` from `shared/event_calendar.py` to check if yesterday was an FOMC announcement day (day 2). Inserted in `_initiate_entry()` after MKT-035 conditional check and before MKT-011 credit gate.
 
@@ -583,7 +582,7 @@ The main loop checks stops every ~1-2 seconds:
 - **Call side stop:** SPX moves UP toward short call → call spread value increases
 - **Put side stop:** SPX moves DOWN toward short put → put spread value increases
 - **Speed:** 0DTE options have extreme gamma. On Feb 24, Entry #3's call cushion dropped from 64% to 6% in 2 minutes.
-- **Put buffer:** $5.00 put buffer absorbs 91% of false put stops (21-day backtest). Call buffer is $0.10.
+- **Put buffer:** $1.55 put buffer (v1.19.0, walk-forward optimized). Call buffer is $0.35.
 
 ---
 
@@ -678,38 +677,40 @@ Entry #1 → #2 → #3 placed normally
 
 ## MKT Rules Reference
 
-### Active Rules (as of v1.16.1)
+### Active Rules (as of v1.19.0)
 
 | Rule | Name | Added | What It Does |
 |------|------|-------|-------------|
 | MKT-007 | Short Strike Liquidity | v1.0.0 | Move short strikes closer to ATM if illiquid |
 | MKT-008 | Long Wing Liquidity | v1.0.0 | Reduce spread width if long wing illiquid; sets illiquidity flags |
-| MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | 40-80pt spreads based on VIX level |
+| MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | VIX × 5.3, floor 25pt, cap 83pt (v1.19.0) |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
-| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call non-viable → put-only if VIX < 25 (MKT-032/MKT-039), else skip; put non-viable → retry with tighter puts (5pt closer, max 2 retries), then call-only (MKT-040); both non-viable → skip |
+| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call $1.35 (floor $0.75), put $2.10 (floor $2.07). Call non-viable → put-only if VIX < 15.0 (MKT-032/MKT-039), else skip; put non-viable → retry with tighter puts, then call-only (MKT-040); both → skip |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
 | MKT-018 | Early Close on ROC | v1.3.0 | **DISABLED** — Hold-to-expiry outperforms. Close all when ROC >= 3% (if re-enabled) |
-| MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $0.60 |
+| MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $1.35 (floor $0.75) |
 | MKT-021 | Pre-Entry ROC Gate | v1.3.2 | **DISABLED** — Only active when MKT-018 enabled. Skip entries #4/#5 if ROC >= 3% |
-| MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $2.50 |
+| MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $2.10 (floor $2.07) |
 | MKT-023 | Smart Hold Check | v1.3.7 | **DISABLED** — Only active when MKT-018 enabled. Compare close-now vs hold |
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
 | MKT-025 | Short-Only Stop Close | v1.4.3 | **Configurable** (`short_only_stop`, default: false). When true: close SHORT only, long expires. When false: close both legs (default since v1.9.4) |
-| MKT-026 | Min Spread Width Floor | v1.4.5 | Floor raised to 60pt (cheaper longs on low-VIX days) |
-| MKT-027 | VIX-Scaled Spread Width | v1.6.0 | Continuous formula `VIX × 3.5` with per-side floors (MKT-028), cap 75pt |
-| MKT-028 | Asymmetric Spread Widths | v1.6.0 | Put floor 75pt, call floor 60pt (put longs 7× more expensive due to skew; wider = cheaper) |
-| MKT-029 | Graduated Credit Fallback | v1.6.2 | -$0.05, -$0.10 steps below minimum for BOTH calls and puts (call floor $0.50, put floor $2.40). Applied in MKT-011 gate, MKT-020/022 tightening, and MKT-035/038 call-only skip checks. |
+| MKT-026 | Min Spread Width Floor | v1.4.5 | Floor 25pt (v1.19.0, was 60pt) |
+| MKT-027 | VIX-Scaled Spread Width | v1.6.0 | Continuous formula `VIX × 5.3` (v1.19.0, was 3.5), floor 25pt, cap 83pt |
+| MKT-028 | Asymmetric Spread Widths | v1.6.0 | **Unified in v1.19.0** — single formula VIX × 5.3 replaces separate call/put floors |
+| MKT-029 | Graduated Credit Fallback | v1.6.2 | -$0.05, -$0.10 steps below minimum for BOTH calls and puts (call floor $0.75, put floor $2.07). Applied in MKT-011 gate, MKT-020/022 tightening, and MKT-035/038 call-only skip checks. |
 | MKT-031 | Smart Entry Windows | v1.8.0 | 10-min scouting before each entry; 2-parameter scoring (ATR calm + momentum pause); score >= 65 triggers early entry |
-| MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 25.0 (MKT-039 raised from 18, tighter stop makes put-only viable at moderate VIX); at VIX >= 25 skip |
+| MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 15.0 (v1.19.0, lowered from 25); at VIX >= 15.0 skip |
 | MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
 | MKT-034 | VIX-Scaled Entry Time Shifting | v1.10.0 | Shifts 5-entry schedule later on high-VIX days. VIX gate checks E#1 at :14:00/:44:00; floor at 12:14:30 |
-| MKT-035 | Call-Only on Down Days | v1.11.0 | When SPX drops >= 0.3% below the session open, conditional entries (E6/E7 at 12:45, 13:15) fire as call-only. Base entries E1-E5 are unaffected. Stop = call_credit + $250 theo put + buffer. 20-day data: 71% put stop rate on down days vs 7% call stop rate |
-| MKT-036 | Stop Confirmation Timer | v1.12.0 | **DISABLED.** $5.00 put buffer chosen instead. When enabled: 75-second sustained breach before executing stop. Code preserved, configurable. |
-| MKT-038 | FOMC T+1 Call-Only | v1.13.0 | Day after FOMC announcement: force all entries to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call + $2.50 theo put + buffer |
-| MKT-039 | Put-Only Stop Tightening | v1.15.0 | Put-only stop changed from 2×credit+buffer to credit+buffer. $5.00 put buffer already prevents 91% false stops; 2× was redundant (max loss $750→$500). MKT-032 VIX gate raised 18→25. |
-| MKT-040 | Call-Only When Put Non-Viable | v1.15.1 | When put credit below minimum but call viable, place call-only (89% WR, +$46 EV). Stop = call + theo $2.50 put + buffer (unified with MKT-035/038). |
+| MKT-035 | Call-Only on Down Days | v1.11.0 | When SPX drops >= 0.57% (v1.19.0, was 0.3%) below session open, base entries E1-E3 convert to call-only. E7 DISABLED. Stop = call_credit + $260 theo put + buffer |
+| MKT-036 | Stop Confirmation Timer | v1.12.0 | **DISABLED.** Put buffer chosen instead ($1.55 in v1.19.0, was $5.00). When enabled: 75-second sustained breach before executing stop. Code preserved, configurable. |
+| MKT-038 | FOMC T+1 Call-Only | v1.13.0 | Day after FOMC announcement: force all entries to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call + $2.60 theo put + buffer. FOMC skip disabled (v1.19.0). |
+| MKT-039 | Put-Only Stop Tightening | v1.15.0 | Put-only stop = credit + put_stop_buffer ($1.55). MKT-032 VIX gate at 15.0 (v1.19.0). |
+| MKT-040 | Call-Only When Put Non-Viable | v1.15.1 | When put credit below minimum but call viable, place call-only (89% WR, +$46 EV). Stop = call + theo $2.60 put + buffer (unified with MKT-035/038). |
+| Whipsaw | Whipsaw Filter | v1.19.0 | Skip entries when intraday range > 1.5× expected move. High whipsaw = bad for iron condors. |
+| Upday-035 | Up-Day Put-Only | v1.17.0 | E6 (14:00) fires as put-only when SPX rises >= 0.48% above session open. Stop = credit + put_stop_buffer. |
 
 ### Removed Rules
 
@@ -728,7 +729,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-007 | MKT-013 | MKT-007 moves strikes closer (liquid); MKT-013 moves them further (overlap). Can undo each other. |
 | MKT-013 | Fix #44/66 | MKT-013 shifts longs; Fix #66 re-checks for new long-vs-short conflicts. |
 | MKT-024 | MKT-020/022 | MKT-024 sets wider starting OTM; MKT-020/022 scan inward from there. |
-| MKT-020/022 | MKT-011 | Tightening runs first (uses MKT-029 fallbacks); MKT-011 re-validates with fresh quotes and its own MKT-029 fallbacks (call $0.60/$0.50, put $2.50/$2.40). |
+| MKT-020/022 | MKT-011 | Tightening runs first (uses MKT-029 fallbacks); MKT-011 re-validates with fresh quotes and its own MKT-029 fallbacks (call $1.35/$0.75, put $2.10/$2.07). |
 | MKT-021 | MKT-018 | MKT-021 skips entries → satisfies MKT-018 gate → early close fires same cycle. |
 | MKT-018 | MKT-023 | MKT-023 is a sub-check within MKT-018; can override close decision with HOLD. |
 | MKT-025 | Settlement | Short-only close leaves long leg open; settlement auto-cleans orphaned positions. |
@@ -744,7 +745,7 @@ Entry #1 → #2 → #3 placed normally
 | State | Description |
 |-------|-------------|
 | IDLE | No position, waiting for market open |
-| WAITING_FIRST_ENTRY | Market open, waiting for first entry (10:15 AM default; MKT-034 DISABLED, MKT-031 DISABLED) |
+| WAITING_FIRST_ENTRY | Market open, waiting for first entry (10:15 AM; MKT-034 DISABLED, MKT-031 DISABLED) |
 | ENTRY_IN_PROGRESS | Currently placing an entry |
 | MONITORING | Active entries, watching stops + ROC |
 | STOP_TRIGGERED | Processing a stop loss |
@@ -772,9 +773,9 @@ Any → HALTED                         (critical: overnight positions, stale reg
 |-----------|-------|
 | Midnight | `_reset_for_new_day()`: clear daily state, verify stale registry (Fix #82) |
 | 9:30 AM | Market opens, transition to WAITING_FIRST_ENTRY |
-| 10:15 | Entry #1 (MKT-034 VIX time shifting DISABLED, MKT-031 smart entry DISABLED since v1.10.3/v1.10.4) |
-| +30 min | Entry #2-#5 at :15/:45 slots (10:45, 11:15, 11:45, 12:15) |
-| 12:45, 13:15 | Conditional E6/E7 (MKT-035 only — fires as call-only when SPX drops >= 0.3% below the session open) |
+| 10:15 | Entry #1 (MKT-034 VIX time shifting DISABLED, MKT-031 smart entry DISABLED) |
+| 10:45, 11:15 | Entry #2, #3 |
+| 14:00 | Conditional E6 (Upday-035 — fires as put-only when SPX rises >= 0.48% above session open) |
 | Last entry + | MONITORING: stop checks every ~1-2s, heartbeat every 10s. Hold to expiry. |
 | 3:45 PM | Last 15 min, positions expire naturally at settlement |
 | 4:00 PM | Market close, 0DTE options expire/settle |
@@ -884,26 +885,27 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `entry_times` | `["10:15","10:45","11:15","11:45","12:15"]` | Entry schedule (ET). Used when `vix_time_shift.enabled=false`. Ignored when `vix_time_shift.enabled=true` (uses ALL_ENTRY_SLOTS instead) |
+| `entry_times` | `["10:15","10:45","11:15"]` | Entry schedule (ET). 3 base entries (v1.19.0, was 5). |
 | `entry_window_minutes` | `5` | Window around entry time |
 | `spread_width` | `50` | Default spread width (points) |
 | `min_spread_width` | `60` | MKT-008 liquidity fallback floor (universal) |
-| `call_min_spread_width` | `60` | MKT-028: Call spread floor (points) |
-| `put_min_spread_width` | `75` | MKT-028: Put spread floor (put longs 7× more expensive due to skew) |
-| `max_spread_width` | `75` | Maximum spread width (margin cap: 5 × 75pt × $100 = $37,500) |
+| `call_min_spread_width` | `25` | MKT-028: Call spread floor (v1.19.0, was 60) |
+| `put_min_spread_width` | `25` | MKT-028: Put spread floor (v1.19.0, was 75) |
+| `max_spread_width` | `83` | Maximum spread width (v1.19.0, was 75) |
+| `spread_vix_multiplier` | `5.3` | MKT-027: VIX × multiplier for spread width (v1.19.0, was 3.5) |
 | `target_delta` | `8` | Target delta for short strikes |
 | `min_delta` | `5` | Minimum acceptable delta |
 | `max_delta` | `15` | Maximum acceptable delta |
 | `min_credit_per_side` | `1.00` | Credit warning threshold ($/side) |
 | `max_credit_per_side` | `1.75` | Credit warning ceiling ($/side) |
-| `min_viable_credit_per_side` | `0.60` | MKT-011/MKT-020 call minimum (v1.10.4: lowered from $0.75 — calls secondary income, lower keeps them further OTM) |
-| `min_viable_credit_put_side` | `2.50` | MKT-011/MKT-022 put minimum (v1.10.4: raised from $1.75 — $2.50-$3.49 bucket = 66.7% survival +$159 EV) |
+| `min_viable_credit_per_side` | `1.35` | MKT-011/MKT-020 call minimum (v1.19.0: walk-forward optimized, was $0.60) |
+| `min_viable_credit_put_side` | `2.10` | MKT-011/MKT-022 put minimum (v1.19.0: walk-forward optimized, was $2.50) |
 | `call_starting_otm_multiplier` | `3.5` | MKT-024: call starting OTM = base × multiplier (batch API = zero extra cost) |
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: put starting OTM = base × multiplier (put skew = credit viable further OTM) |
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
-| `stop_buffer` | `0.10` | Call stop buffer: call_stop = credit + $0.10 (Brian's approach — extra cushion per stop) |
-| `put_stop_buffer` | `5.00` | Put stop buffer: put_stop = credit + $5.00 (wider — avoids 91% false put stops, 21-day backtest). Falls back to `stop_buffer` if not set. |
+| `call_stop_buffer` | `0.35` | Call stop buffer: call_stop = credit + $0.35 (v1.19.0, renamed from `stop_buffer`, was $0.10) |
+| `put_stop_buffer` | `1.55` | Put stop buffer: put_stop = credit + $1.55 (v1.19.0, walk-forward optimized, was $5.00). Falls back to `call_stop_buffer` if not set. |
 | `max_vix_entry` | `999` | Maximum VIX for new entries. Set to 999 to effectively disable (v1.10.3). **CALYPSO addition** — neither Tammy Chambless nor John Sandvand (ThetaProfits) use a VIX cutoff; both studied VIX correlation and found none. |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |
@@ -913,18 +915,28 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `hold_check_lean_tolerance` | `1.0` | MKT-023 lean threshold (%). Only used when enabled. |
 | `min_entries_before_roc_gate` | `3` | MKT-021: Only active when MKT-018 enabled. |
 | `downday_callonly_enabled` | `true` | MKT-035: Enable call-only entries on down days |
-| `downday_threshold_pct` | `0.003` | MKT-035: SPX must drop this % below the session open to trigger (0.3%) |
-| `downday_theoretical_put_credit` | `2.50` | MKT-035: Theoretical put credit ($) for stop calculation |
-| `conditional_entry_times` | `["12:45","13:15"]` | MKT-035: Extra entries that only fire on down days |
-| `conditional_e6_enabled` | `false` | MKT-035: Enable/disable E6 conditional entry individually. **Currently DISABLED** (2026-03-20) — re-enable after 10+ valid-trigger days accumulate |
-| `conditional_e7_enabled` | `false` | MKT-035: Enable/disable E7 conditional entry individually. **Currently DISABLED** (2026-03-20) — re-enable after 10+ valid-trigger days accumulate |
+| `downday_threshold_pct` | `0.0057` | MKT-035: SPX must drop this % below the session open to trigger (0.57%, v1.19.0 was 0.3%) |
+| `downday_theoretical_put_credit` | `2.60` | MKT-035: Theoretical put credit ($) for stop calculation (v1.19.0, was $2.50) |
+| `base_entry_downday_callonly_pct` | `0.0057` | Base entries E1-E3 convert to call-only when SPX drops >= 0.57% from open |
+| `conditional_entry_times` | `["14:00"]` | Conditional entry times (v1.19.0: E6 at 14:00) |
+| `conditional_e6_enabled` | `false` | MKT-035: E6 down-day call-only. **DISABLED** |
+| `conditional_e7_enabled` | `false` | MKT-035: E7. **DISABLED in v1.19.0** |
+| `conditional_upday_e6_enabled` | `true` | Upday-035: E6 fires as put-only on up days (v1.19.0) |
+| `upday_threshold_pct` | `0.0048` | Upday-035: SPX must rise this % above session open (0.48%, v1.19.0) |
+
+### Whipsaw Filter (`config.whipsaw_filter`, v1.19.0)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Enable/disable whipsaw filter |
+| `threshold` | `1.50` | Skip entry when intraday range > 1.50× expected move |
 
 ### Filters (`config.filters`)
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `fomc_blackout` | `true` | Skip trading on FOMC announcement days |
-| `fomc_announcement_skip` | `true` | MKT-008: Skip all entries on FOMC announcement day. Set `false` to trade normally |
+| `fomc_announcement_skip` | `false` | MKT-008: Skip all entries on FOMC announcement day. **Changed to `false` in v1.19.0** — backtest showed FOMC days are profitable |
 
 ---
 
@@ -938,9 +950,9 @@ EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at
 
 Put premiums are typically 2-7× higher than call premiums at the same delta. This means:
 - MKT-024 starts calls at 3.5× and puts at 4.0× base OTM to give MKT-020/022 room to find optimal strikes
-- MKT-011 uses separate thresholds: calls $0.60 (v1.10.4), puts $2.50 (v1.10.4), with MKT-029 graduated fallback (call floor $0.50, put floor $2.40)
-- MKT-020 call tightening reaches $0.60 easily (or $0.50 at MKT-029 floor) → fewer MKT-011 skips/conversions
-- MKT-022 with $2.50 put minimum forces closer-to-ATM puts into the Week 1 sweet spot (42-65pt OTM)
+- MKT-011 uses separate thresholds: calls $1.35, puts $2.10, with MKT-029 graduated fallback (call floor $0.75, put floor $2.07)
+- MKT-020 call tightening reaches $1.35 (or $0.75 at MKT-029 floor) → fewer MKT-011 skips/conversions
+- MKT-022 with $2.10 put minimum forces closer-to-ATM puts
 - Total_credit stop (shared by both sides) is adequate because MKT-020/022 keeps skew at 1-2x
 
 ### Saxo Position Merging
@@ -959,7 +971,7 @@ Saxo merges positions at the same strike and direction into a single position, d
 
 ### One-Sided Entry Risk
 
-One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/MKT-038/MKT-040) that get stopped lose the full credit plus commission. MKT-039 (v1.15.0) tightened put-only stop from 2×credit to credit+buffer (max loss $750→$500) since $5.00 put buffer prevents false stops. Call-only (MKT-040) uses call + theo $2.50 put + buffer (unified with MKT-035/038). Historical context: trend-driven one-sided entries were removed in v1.4.0, then credit-driven put-only was re-enabled in v1.7.1 and call-only added in v1.15.1.
+One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/MKT-038/MKT-040) that get stopped lose the full credit plus commission. MKT-039 put-only stop = credit + put_stop_buffer ($1.55). Call-only (MKT-040) uses call + theo $2.60 put + call buffer (unified with MKT-035/038). Historical context: trend-driven one-sided entries were removed in v1.4.0, then credit-driven put-only was re-enabled in v1.7.1 and call-only added in v1.15.1.
 
 ---
 
@@ -985,14 +997,14 @@ One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/M
 | `data/hydra_state.json` | Daily state persistence (on VM) |
 | `data/hydra_metrics.json` | Cumulative metrics (on VM) |
 
-### State File Fields (v1.16.1)
+### State File Fields (v1.19.0)
 
 **Top-level fields added:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `entry_schedule.base` | `string[]` | Scheduled base entry times (e.g., `["10:15","10:45","11:15","11:45","12:15"]`) |
-| `entry_schedule.conditional` | `string[]` | Scheduled conditional entry times (e.g., `["12:45","13:15"]`) |
+| `entry_schedule.base` | `string[]` | Scheduled base entry times (e.g., `["10:15","10:45","11:15"]`) |
+| `entry_schedule.conditional` | `string[]` | Scheduled conditional entry times (e.g., `["14:00"]`) |
 
 **Per-entry fields added:**
 
@@ -1000,7 +1012,7 @@ One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/M
 |-------|------|-------------|
 | `skip_reason` | `string` | Human-readable skip reason (empty if not skipped). Set when both sides are skipped. |
 
-### Skip Alert Behavior (v1.16.1)
+### Skip Alert Behavior (v1.16.0)
 
 When an entry is skipped, the bot: (1) records a minimal `HydraIronCondorEntry` with `is_complete=True`, both sides flagged as skipped, and `skip_reason` set, (2) sends a Telegram `ENTRY_SKIPPED` alert (LOW priority, Telegram-only) with the reason and context.
 
@@ -1010,10 +1022,10 @@ When an entry is skipped, the bot: (1) records a minimal `HydraIronCondorEntry` 
 |------|--------|-------|
 | Margin insufficient | `"Insufficient margin"` | No (existing HIGH alert) |
 | MKT-035 not triggered | `"MKT-035: SPX not down enough for conditional entry"` | Yes |
-| MKT-035 call non-viable | `"MKT-035: call credit non-viable ($X.XX < $0.50)"` | Yes |
-| MKT-038 call non-viable | `"MKT-038: call credit non-viable on FOMC T+1 ($X.XX < $0.50)"` | Yes |
+| MKT-035 call non-viable | `"MKT-035: call credit non-viable ($X.XX < $0.75)"` | Yes |
+| MKT-038 call non-viable | `"MKT-038: call credit non-viable on FOMC T+1 ($X.XX < $0.75)"` | Yes |
 | MKT-011 both non-viable | `"MKT-011: both sides below minimum credit (call $X.XX, put $X.XX)"` | Yes |
-| MKT-032 VIX gate | `"MKT-032: VIX X.X too high for put-only (max 25.0)"` | Yes |
+| MKT-032 VIX gate | `"MKT-032: VIX X.X too high for put-only (max 15.0)"` | Yes |
 | MKT-010 one wing illiquid | `"MKT-010: [call/put] wings illiquid"` | Yes |
 | MKT-010 both illiquid | `"MKT-010: both wings illiquid"` | Yes |
 

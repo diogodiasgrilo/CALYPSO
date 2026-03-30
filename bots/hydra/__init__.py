@@ -9,22 +9,30 @@ The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
 but is informational only — base entries are full iron condors or put-only via MKT-011.
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
-MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.50, put floor $2.40).
-MKT-035/MKT-038 call-only entries also use MKT-029 call floor ($0.50).
+MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.07).
+MKT-035/MKT-038 call-only entries also use MKT-029 call floor ($0.75).
 - Both sides viable: Proceed with full iron condor
-- Call non-viable, put viable, VIX < 25: Place put-only entry (MKT-032/MKT-039 VIX gate)
-- Call non-viable, put viable, VIX >= 25: Skip entry (no call hedge in volatile conditions)
+- Call non-viable, put viable, VIX < 15.0: Place put-only entry (MKT-032/MKT-039 VIX gate)
+- Call non-viable, put viable, VIX >= 15.0: Skip entry (no call hedge in volatile conditions)
 - Put non-viable, call viable: Retry with tighter put strikes (5pt closer, max 2 retries), then call-only entry (MKT-040, v1.15.1)
 - Both non-viable: Skip entry entirely
 
-Conditional Entry Trigger (MKT-035 / Upday-035): Only affects conditional entries E6/E7.
-- Base entries E1-E5 always attempt full ICs regardless of down-day/up-day status
-- Conditional down-day entries (MKT-035): only fire when SPX drops >= 0.3% below session open, as call-only
-  Stop = call_credit + theoretical $2.50 put + buffer (not 2× credit)
-- Conditional up-day entries (Upday-035): only fire when SPX rises >= 0.4% above session open, as put-only
-  Stop = put_credit + put_stop_buffer ($5.00); DISABLED on VM by default (conditional_upday_e6/e7_enabled=false)
+Conditional Entry Trigger (MKT-035 / Upday-035):
+- Base entries E1-E3 convert to call-only when SPX drops >= 0.57% below session open
+- Conditional entry E6 (14:00): fires as put-only when SPX rises >= 0.48% above session open (Upday-035)
+  Stop = put_credit + put_stop_buffer ($1.55)
+- E7: DISABLED
 
 Version History:
+- 1.19.0 (2026-03-29): Walk-forward backtest convergence. 3 base entries (was 5) at 10:15, 10:45, 11:15
+  (E4/E5 dropped — negative EV in backtest). E6 upday put-only ENABLED at 14:00 (threshold 0.48%).
+  E7 DISABLED. Spread width: VIX x 5.3, floor 25pt, cap 83pt. Credit gates: call $1.35, put $2.10,
+  call_floor $0.75, put_floor $2.07. Stop buffers: call_stop_buffer $0.35 (renamed from stop_buffer),
+  put_stop_buffer $1.55. FOMC skip FALSE (fomc_announcement_skip=false), T+1 call-only TRUE.
+  Downday threshold 0.57%, theo put $2.60. Upday threshold 0.48%. Max spread width 83pt.
+  NEW: whipsaw filter (whipsaw_filter.enabled=true, threshold 1.50x EM) — skips entries when
+  intraday range exceeds 1.5x expected move (high whipsaw = bad for iron condors).
+  put_only_max_vix lowered to 15.0.
 - 1.17.0 (2026-03-23): Upday-035 conditional up-day put-only entries. Mirror of MKT-035 for bullish days:
   when SPX rises >= upday_threshold_pct (default 0.4%) above session open, conditional slots E6/E7 fire as
   put-only instead of being skipped. Stop = put_credit + put_stop_buffer. Configurable via
@@ -39,12 +47,12 @@ Version History:
 - 1.15.0 (2026-03-16): MKT-039 put-only stop tightening + MKT-032 VIX gate raise. Put-only stop changed from 2×credit+buffer to credit+buffer — $5.00 put buffer already prevents 91% false stops, 2× was redundant (max loss $750→$500). MKT-032 VIX gate raised 18→25 (tighter stop makes put-only viable at moderate VIX). Call-only later unified to call + theo $2.50 put + buffer. All agent SYSTEM_PROMPTs updated to v1.15.0.
 - 1.14.0 (2026-03-15): MKT-038 FOMC T+1 call-only mode. Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call_credit + theoretical $2.50 put + buffer. MKT-036 stop confirmation timer documented as DISABLED (code preserved, $5.00 put buffer is the chosen solution). All agent SYSTEM_PROMPTs updated to v1.13.0.
 - 1.13.0 (2026-03-13): Stop timestamps in state file (call_stop_time/put_stop_time on IronCondorEntry). Dashboard SPX chart now shows red circle stop markers at actual stop time + white price lines for active entry strikes. Negative P&L bar fill fix for stopped entries. MKT-035 scoped to conditional entries only — base entries E1-E5 always attempt full ICs regardless of down-day status ($5.00 put buffer provides sufficient protection). Conditional entries E6/E7 still fire as call-only on down days (SPX < open -0.3%). Threshold reverted to 0.3%.
-- 1.12.1 (2026-03-12): MKT-036 asymmetric put stop buffer ($5.00 put vs $0.10 call). 21-day backtest: $5.00 put buffer avoids 91% of false put stops (+$6,885 NET). Configurable via put_stop_buffer (falls back to stop_buffer if not set). Telegram /set put_stop_buffer support. Full IC alert shows asymmetric stops. Sheets retry logic (3 attempts with 2s delay). HOMER stop matching fix for same-strike entries. Code audit: all docs, agents, config updated.
+- 1.12.1 (2026-03-12): MKT-036 asymmetric put stop buffer ($5.00 put vs $0.10 call). 21-day backtest: $5.00 put buffer avoids 91% of false put stops (+$6,885 NET). Configurable via put_stop_buffer (falls back to call_stop_buffer if not set). Telegram /set put_stop_buffer support. Full IC alert shows asymmetric stops. Sheets retry logic (3 attempts with 2s delay). HOMER stop matching fix for same-strike entries. Code audit: all docs, agents, config updated.
 - 1.12.0 (2026-03-11): MKT-036 stop confirmation timer code deployed. Subsequently DISABLED on VM — $5.00 put buffer chosen as the solution instead. Code preserved, configurable via stop_confirmation_enabled.
 - 1.11.0 (2026-03-11): MKT-035 call-only on down days. When SPX < open -0.3%, place call spread only (no puts). Stop uses theoretical $2.50 put credit instead of 2× call credit. 20-day data: 71% put stop rate on down days vs 7% call stop rate, +$920 improvement. Two conditional entry times (12:45, 13:15) that only fire when MKT-035 triggers. Configurable via downday_callonly_enabled, downday_threshold_pct, downday_theoretical_put_credit, conditional_entry_times.
 - 1.10.4 (2026-03-11): Raise put credit minimum $1.75→$2.50, lower call credit minimum $0.75→$0.60. 20-day data analysis: $2.50-$3.49 put credit bucket = 66.7% survival, +$159 avg EV (best); $2.00-$2.49 = 33.3% survival, -$8 EV (worst); $1.50-$1.99 = 48.3%, +$23 EV. Higher put min forces MKT-022 to scan closer to ATM, landing in Week 1 sweet spot (42-65pt OTM). Lower call min = less MKT-020 tightening = calls stay further OTM. Disable MKT-031 smart entry — enter at scheduled times only.
 - 1.10.3 (2026-03-11): Disable MKT-034 VIX time shifting + remove VIX entry cutoff (max_vix_entry=999). Neither Tammy nor Sandvand use VIX cutoffs. Entry times revert to 10:15 AM start. Spread widths reverted to 50pt. MKT-034 remains configurable.
-- 1.10.2 (2026-03-10): Replace MEIC+ stop formula with credit+buffer (Brian's approach): stop = total_credit + $0.10. Per-side stop level validation fix. Telegram /set updated: stop_buffer replaces meic_plus.
+- 1.10.2 (2026-03-10): Replace MEIC+ stop formula with credit+buffer (Brian's approach): stop = total_credit + $0.10. Per-side stop level validation fix. Telegram /set updated: call_stop_buffer replaces meic_plus.
 - 1.10.1 (2026-03-09): Fix #83: Emergency close improvements for "limit orders only" failures. Fix #83a: Skip closing worthless long legs (bid=$0) during stop loss — prevents cascading 409 errors when Saxo restricts market orders on illiquid deep OTM options. Fix #83b: $0.05 minimum tick fallback in place_emergency_order() when quote returns no valid price. Fix #83c: Cancel zombie pending orders after 409 Conflict before retry. Fix #83d: Removed narrow is_limit_only_period time check (Saxo can restrict at any time, not just 3:45+ PM). Commission tracking now counts only actually-closed legs. Fix #84: Dashboard P&L history updated after settlement (was showing stale pre-settlement snapshot). Strike-not-found log level changed from ERROR to WARNING.
 - 1.10.0 (2026-03-08): MKT-034 VIX-scaled entry time shifting. Entry times shifted to :14:30/:44:30 (30s before :15/:45 marks for execution precision). VIX gate checks at :14:00/:44:00 — blocks E#1 if VIX >= threshold (20/23), shifts schedule to later slots. Floor at 12:14:30 (always enters). MKT-031 early entry integrates with VIX gate. Early close cutoff raised from 12:00 to 12:30 PM. Configurable via `vix_time_shift` config section.
 - 1.9.4 (2026-03-08): Configurable stop close mode via `long_salvage.short_only_stop` (default: false = close both legs). MKT-025/MKT-033 preserved but gated behind flag. Added /clio Telegram command (15 total). Updated all agent prompts (CLIO, APOLLO, HERMES, HOMER) to v1.9.3 parameters.

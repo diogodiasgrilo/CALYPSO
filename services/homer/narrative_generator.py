@@ -27,23 +27,26 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
 
-## HYDRA Domain Knowledge (v1.16.1 — use these exact parameters)
+## HYDRA Domain Knowledge (v1.19.0 — use these exact parameters)
 
-- Entry times: 10:15, 10:45, 11:15, 11:45, 12:15 ET (5 base + up to 2 conditional at 12:45/13:15 on down days, :15/:45 offset, v1.10.3)
+- Entry times: 10:15, 10:45, 11:15 ET (3 base entries). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.48% above open (Upday-035). E7 is DISABLED.
 - Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
-- Spread widths: call floor 60pt, put floor 75pt, cap 75pt (VIX-scaled via MKT-027/028), NOT 5-point wings
-- Min credit thresholds: $0.60 calls, $2.50 puts (MKT-011). MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.50, put floor $2.40). Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
-- Stop formula: Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): call + $2.50 theo put + buffer. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer.
-- Stop confirmation (MKT-036): DISABLED. $5.00 put buffer is the chosen solution instead. Code preserved but dormant.
+- VIX-scaled spread width (MKT-027): formula `round(VIX * 5.3 / 5) * 5`, floor 25pt, cap 83pt
+- Min credit thresholds: $1.35 calls, $2.10 puts (MKT-011). MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.07). Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
+- Stop formula: Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
+- Stop confirmation (MKT-036): DISABLED. Code preserved but dormant.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
-- Down-day filter (MKT-035): Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) fire when SPX drops 0.3% below session high, as call-only.
+- Whipsaw filter: whipsaw_range_skip_mult = 1.50 — skip entry if SPX intraday range > 1.5x expected daily move.
+- Down-day call-only (base entries): E1-E3 convert to call-only when SPX drops >= 0.57% from open.
+- Up-day filter (Upday-035): E6 at 14:00 fires as put-only when SPX rises >= 0.48% above open. E7 is DISABLED.
 - FOMC T+1 call-only (MKT-038): Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
-- FOMC blackout (MKT-008): ALL entries skipped on FOMC announcement day only (Day 1 trades normally).
+- FOMC announcement skip (MKT-008): DISABLED (fomc_announcement_skip=false). HYDRA now trades on FOMC days.
 - 2026 FOMC dates: Jan 27-28, Mar 17-18, Apr 28-29, Jun 16-17, Jul 28-29, Sep 15-16, Oct 27-28, Dec 8-9. Announcement = Day 2. T+1 = day after Day 2.
 - Progressive tightening: MKT-020 (calls) and MKT-022 (puts) scan from wide OTM inward
 - Early close (MKT-018): DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)
-- Base entries are full iron condors or put-only (MKT-011 override). Call-only via MKT-035 conditional entries E6/E7 or MKT-038 FOMC T+1.
+- Base entries are full iron condors, put-only (MKT-011 override), or call-only (down-day >= 0.57% or MKT-038 FOMC T+1).
 - EMA 20/40 trend signal is informational only (logged but doesn't drive entry type)
+- Account: $35K margin, 1 contract per entry
 
 ## Tone
 

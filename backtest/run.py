@@ -69,11 +69,13 @@ def parse_args():
     p.add_argument("--put-credit-floor", type=float, default=None, help="Put credit hard floor ($)")
     p.add_argument("--put-only-max-vix", type=float, default=None, help="Max VIX for put-only entries")
 
-    p.add_argument("--stop-buffer", type=float, default=None, help="Call stop buffer in $ (e.g. 10)")
+    p.add_argument("--call-stop-buffer", type=float, default=None, help="Call stop buffer in $ (e.g. 10)")
     p.add_argument("--put-stop-buffer", type=float, default=None, help="Put stop buffer in $ (e.g. 500)")
 
     p.add_argument("--target-delta", type=float, default=None, help="Target delta for OTM distance")
     p.add_argument("--contracts", type=int, default=1, help="Number of contracts")
+    p.add_argument("--real-greeks", action="store_true",
+                   help="Use real delta from ThetaData Greeks files (strict: skips days without cache)")
 
     return p.parse_args()
 
@@ -118,13 +120,15 @@ def build_config(args) -> BacktestConfig:
     if args.put_only_max_vix is not None:
         cfg.put_only_max_vix = args.put_only_max_vix
 
-    if args.stop_buffer is not None:
-        cfg.stop_buffer = args.stop_buffer
+    if args.call_stop_buffer is not None:
+        cfg.call_stop_buffer = args.call_stop_buffer
     if args.put_stop_buffer is not None:
         cfg.put_stop_buffer = args.put_stop_buffer
 
     if args.target_delta is not None:
         cfg.target_delta = args.target_delta
+    if args.real_greeks:
+        cfg.use_real_greeks = True
 
     cfg.contracts = args.contracts
     return cfg
@@ -187,7 +191,7 @@ def main():
         download_all(start, end, fast_mode=args.fast)
         if not args.compare and not any([
             args.entry_times, args.e6, args.e7,
-            args.stop_buffer, args.put_stop_buffer,
+            args.call_stop_buffer, args.put_stop_buffer,
         ]):
             return  # download only
 

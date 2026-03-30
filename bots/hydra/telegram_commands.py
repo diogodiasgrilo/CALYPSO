@@ -87,8 +87,8 @@ EDITABLE_PARAMS = {
         "min": 1, "max": 5,
         "description": "Contracts per entry",
     },
-    "stop_buffer": {
-        "path": "strategy.stop_buffer",
+    "call_stop_buffer": {
+        "path": "strategy.call_stop_buffer",
         "type": "float",
         "min": 0.00, "max": 1.00,
         "unit": "$",
@@ -100,6 +100,13 @@ EDITABLE_PARAMS = {
         "min": 0.00, "max": 10.00,
         "unit": "$",
         "description": "Put stop buffer (wider — avoids false put stops)",
+    },
+    "whipsaw": {
+        "path": "strategy.whipsaw_range_skip_mult",
+        "type": "float",
+        "min": 0.5, "max": 5.0,
+        "unit": "×EM",
+        "description": "Anti-whipsaw filter (skip if range > X × expected move, null=OFF)",
     },
     "smart_entry": {
         "path": "smart_entry.enabled",

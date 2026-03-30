@@ -36,13 +36,14 @@ except ImportError:
 DOWNDAY_VALUES: List[Optional[float]] = [None, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00]
 
 START_DATE = date(2022, 5, 16)
-END_DATE   = date(2026, 3, 22)
+END_DATE   = date(2026, 3, 27)
 
 
 def base_cfg(pct: Optional[float]) -> object:
     cfg = live_config()
-    cfg.start_date = START_DATE
-    cfg.end_date   = END_DATE
+    cfg.start_date      = START_DATE
+    cfg.end_date        = END_DATE
+    cfg.use_real_greeks = True
     cfg.base_entry_downday_callonly_pct = pct
     return cfg
 

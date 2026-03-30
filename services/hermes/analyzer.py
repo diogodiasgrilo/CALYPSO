@@ -22,23 +22,26 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.16.1)
+## HYDRA Strategy Parameters (v1.19.0)
 
-- **5 base + up to 2 conditional entries (7 max)** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3). Conditional entries (12:45, 13:15) only fire on down days (MKT-035) as call-only.
+- **3 base entries + 1 conditional (4 max)** at 10:15, 10:45, 11:15 ET. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.48% above open (Upday-035). E7 is DISABLED.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
-- **Asymmetric spread widths (MKT-028):** call floor 60pt, put floor 75pt, cap 75pt
+- **VIX-scaled spread width (MKT-027):** Continuous formula `round(VIX * 5.3 / 5) * 5`, floor 25pt, cap 83pt.
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
-- **Min credit thresholds (MKT-011):** $0.60/side for calls, $2.50/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.50, put floor $2.40). MKT-035/038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
-- **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): call + $2.50 theo put + buffer. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
-- **Stop confirmation (MKT-036):** DISABLED. $5.00 put buffer is the chosen solution instead. Code preserved but dormant.
+- **Min credit thresholds (MKT-011):** $1.35/side for calls, $2.10/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.07). MKT-038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
+- **Stop formula:** Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
+- **Stop confirmation (MKT-036):** DISABLED. Code preserved but dormant.
 - **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
-- **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below session high, as call-only.
+- **Whipsaw filter:** whipsaw_range_skip_mult = 1.50 — skip entry if SPX intraday range > 1.5x expected daily move.
+- **Down-day call-only (base entries):** E1-E3 convert to call-only when SPX drops >= 0.57% from open (`base_entry_downday_callonly_pct: 0.0057`).
+- **Up-day filter (Upday-035):** E6 at 14:00 fires as put-only when SPX rises >= 0.48% above open. E7 is DISABLED.
 - **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
 - **FOMC Day 1 (MKT-008):** Day 1 of FOMC meeting trades NORMALLY — no restrictions, no blackout, no special rules. This is CORRECT behavior. Do NOT flag entries on Day 1 as violations.
-- **FOMC Day 2 / Announcement day (MKT-008):** By default, all entries are skipped (blackout). HOWEVER, this is configurable via `fomc_announcement_skip` in HYDRA's config. Check `cheat_sheet.fomc_announcement_skip`:
-  - If `true` (default): Day 2 is a blackout. Entries placed = enforcement failure.
-  - If `false`: The user has DELIBERATELY disabled the FOMC blackout. Trading on Day 2 is an intentional user decision, NOT a violation. Do NOT flag it as a rule breach. Treat it as a normal trading day.
+- **FOMC Day 2 / Announcement day (MKT-008):** `fomc_announcement_skip` is FALSE — HYDRA now trades on FOMC announcement days. Check `cheat_sheet.fomc_announcement_skip`:
+  - If `true`: Day 2 is a blackout. Entries placed = enforcement failure.
+  - If `false` (current default): The user has DELIBERATELY disabled the FOMC blackout. Trading on Day 2 is an intentional user decision, NOT a violation. Do NOT flag it as a rule breach. Treat it as a normal trading day.
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
+- **Account:** $35K margin, 1 contract per entry
 
 ## 2026 FOMC Calendar (GROUND TRUTH — use these dates, do NOT guess)
 
@@ -60,7 +63,7 @@ CRITICAL: Day 2 blackout is CONFIGURABLE. Always check `cheat_sheet.fomc_announc
 ## Entry Skip Pattern
 
 Entry #1 (10:15) typically has the RICHEST premium. Earlier entries almost NEVER skip.
-Entry #5 (12:15, the last regular entry) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
+Entry #3 (11:15, the last base entry) is most likely to see MKT-011 skips as premium decays.
 The call side is almost always the reason for skips (premium decays faster on calls).
 
 ## Analysis Framework
@@ -91,7 +94,7 @@ End with a summary block in <summary> tags for Telegram. The summary MUST use ON
 <summary>
 {net_pnl} net | {clean_entries} clean, {entries_with_stops} stopped ({call_stops}C/{put_stops}P) | Day {day_number}
 Best #{best_num} ({best_outcome}), Worst #{worst_num} ({worst_outcome})
-Stops: {stop_side_pattern} | VIX {vix_open}→{vix_low} | {placed}/{total_attempted} placed
+Stops: {stop_side_pattern} | VIX {vix_open}→{vix_low} | {placed}/{total_scheduled} placed
 {winning_days}W-{losing_days}L cumul {cumulative_pnl} | Streak: {streak}
 Salvage: {long_salvage_count} longs sold for +${long_salvage_revenue} (omit line if 0)
 {one_sentence_narrative_insight — the WHY behind today's result}

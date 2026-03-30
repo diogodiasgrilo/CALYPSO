@@ -1,6 +1,6 @@
 # HERMES v1.1.0 — Daily Execution Quality Analyst
 
-**Last Updated:** 2026-03-18
+**Last Updated:** 2026-03-29
 
 Runs at 5:00 PM ET on weekdays via systemd timer. Pre-computes a cheat sheet of all arithmetic (counts, P&L, streaks), sends it to Claude for narrative analysis, saves a report, and sends a summary alert.
 
@@ -10,7 +10,7 @@ Runs at 5:00 PM ET on weekdays via systemd timer. Pre-computes a cheat sheet of 
 
 - **Pre-computed cheat sheet** prevents Claude arithmetic errors (e.g., "5 stopped legs: 4C/2P" when 4+2=6)
 - **Narrative-focused analysis** — explains WHY, not just WHAT (story of the day, market context)
-- **Updated strategy params** for HYDRA v1.6.0 (5 entries, asymmetric spreads, 3.5×/4.0× OTM)
+- **Updated strategy params** for HYDRA v1.19.0 (3 base entries, VIX-scaled spreads 25-83pt, 3.5x/4.0x OTM)
 - **Cumulative context** — win/lose streak, avg win/loss, day number
 - **Apollo accuracy assessment** — did pre-market risk level match actual outcome?
 - **Trimmed state file** — strips UICs, position IDs to save tokens

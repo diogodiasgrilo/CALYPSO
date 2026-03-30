@@ -17,27 +17,27 @@
         "_comment_vix": "VIX spot for volatility filtering",
         "vix_spot_uic": 10606,
 
-        "_comment_entry_times": "Entry times in HH:MM format (US Eastern). 5 entries at :15/:45 offset (19-day MAE analysis: :15/:45 has 10% lower adverse excursion than :05/:35). Starting at 10:15 AM (winning period Feb 10-27 started at 10:05). MKT-031 smart entry scouting starts 10min before each time. Only used when vix_time_shift.enabled=false.",
-        "entry_times": ["10:15", "10:45", "11:15", "11:45", "12:15"],
+        "_comment_entry_times": "Entry times in HH:MM format (US Eastern). 3 base entries at :15/:45 offset. Starting at 10:15 AM. MKT-031 smart entry scouting starts 10min before each time. Only used when vix_time_shift.enabled=false.",
+        "entry_times": ["10:15", "10:45", "11:15"],
         "entry_window_minutes": 5,
 
-        "_comment_spread": "MKT-028: Asymmetric spread widths. Put floor 75pt (put longs 7x more expensive due to skew, wider = cheaper). Call floor 60pt. Max 75pt = margin cap (5 entries x 75pt x $100 = $37,500 <= $39,000). min_spread_width=60 is MKT-008 liquidity fallback floor",
-        "spread_width": 50,
-        "min_spread_width": 60,
-        "call_min_spread_width": 60,
-        "put_min_spread_width": 75,
-        "max_spread_width": 75,
+        "_comment_spread": "MKT-027: VIX-scaled spread widths. Formula: round(VIX × spread_vix_multiplier / 5) × 5, floor call_min/put_min, cap max_spread_width. min_spread_width is MKT-008 liquidity fallback floor.",
+        "spread_vix_multiplier": 5.3,
+        "min_spread_width": 25,
+        "call_min_spread_width": 25,
+        "put_min_spread_width": 25,
+        "max_spread_width": 83,
 
         "_comment_credit": "Credit targets per side (call spread OR put spread)",
         "min_credit_per_side": 1.00,
         "max_credit_per_side": 1.75,
         "credit_balance_tolerance": 0.25,
 
-        "_comment_credit_gate": "MKT-011: Credit gate thresholds. Calls $0.60, puts $2.50 (v1.10.4: 20-day data — $2.50-$3.49 bucket = 66.7% surv, +$159 EV vs $1.50-$1.99 = 48.3% surv, +$23 EV. Higher min forces MKT-022 closer to ATM into Week 1 sweet spot 42-65pt OTM). MKT-029 fallback: -$0.05, -$0.10. MKT-032/MKT-039: put-only only when VIX < put_only_max_vix (raised 18→25 in v1.15.0). MKT-040: call-only when put non-viable (89% WR, +$46 EV)",
+        "_comment_credit_gate": "MKT-011: Credit gate thresholds. Calls $1.35, puts $2.10 (walk-forward backtest optimized). MKT-029 fallback: -$0.05, -$0.10 (call floor $0.75, put floor $2.07). MKT-032/MKT-039: put-only only when VIX < put_only_max_vix. MKT-040: call-only when put non-viable (89% WR, +$46 EV)",
         "one_sided_entries_enabled": true,
-        "put_only_max_vix": 25.0,
-        "min_viable_credit_per_side": 0.60,
-        "min_viable_credit_put_side": 2.50,
+        "put_only_max_vix": 15.0,
+        "min_viable_credit_per_side": 1.35,
+        "min_viable_credit_put_side": 2.10,
 
         "_comment_tightening": "MKT-020/MKT-022: OTM floors for progressive tightening (points). MKT-024: starting OTM multipliers (3.5x/4.0x = wider scan, batch API so zero extra cost). Put higher because put skew = credit viable further out",
         "min_call_otm_distance": 25,
@@ -50,27 +50,35 @@
         "min_delta": 5,
         "max_delta": 15,
 
-        "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses stop_buffer ($0.10). Put uses put_stop_buffer ($5.00 — wider buffer avoids 91% false put stops, 21-day backtest: +$6,885 NET). If put_stop_buffer not set, falls back to stop_buffer for both sides. Only used when price_based_stop_points is null.",
-        "stop_buffer": 0.10,
-        "put_stop_buffer": 5.00,
+        "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses call_stop_buffer ($0.35). Put uses put_stop_buffer ($1.55). If put_stop_buffer not set, falls back to call_stop_buffer for both sides. Only used when price_based_stop_points is null.",
+        "call_stop_buffer": 0.35,
+        "put_stop_buffer": 1.55,
 
         "_comment_price_stop": "Price-based stop (replaces credit-based stop when set). Triggers when SPX reaches within N pts of the short strike: call side stops when SPX >= short_call - N, put side stops when SPX <= short_put + N. Applies to ALL entry types (full IC, call-only, put-only). Walk-forward backtest: 0.1pt gives Sharpe 2.098 vs credit-based 2.075, slippage-robust. Set to null to use credit-based stop.",
         "price_based_stop_points": null,
+
+        "_comment_whipsaw": "Anti-whipsaw filter: skip entry if SPX intraday range (high-low) > mult × expected daily move. Expected move = SPX × VIX / 100 / sqrt(252). Set to null to disable. 1.5 = skip when range exceeds 1.5× expected move (backtest optimal 2026-03-29).",
+        "whipsaw_range_skip_mult": 1.50,
 
         "_comment_risk": "Risk management settings. max_vix_entry: CALYPSO addition (neither Tammy nor Sandvand use VIX cutoffs). Set high to effectively disable.",
         "max_vix_entry": 999,
         "contracts_per_entry": 1,
 
-        "_comment_downday": "MKT-035: Conditional entry trigger (E6/E7 only). Base entries E1-E5 always attempt full ICs regardless of down-day status. When SPX drops 0.3% below session high, conditional entries fire as call-only. Stop uses theoretical $2.50 put credit + buffer.",
+        "_comment_downday": "MKT-035: Conditional entry trigger (E6 only at 14:00). Base entries E1-E3 always attempt full ICs regardless of day direction. When SPX drops >= threshold below session open, base entries convert to call-only. Stop uses theoretical $2.60 put credit + buffer.",
         "downday_callonly_enabled": true,
-        "downday_threshold_pct": 0.003,
-        "downday_theoretical_put_credit": 2.50,
-        "conditional_entry_times": ["12:45", "13:15"],
+        "downday_threshold_pct": 0.0057,
+        "downday_theoretical_put_credit": 2.60,
+        "conditional_entry_times": ["14:00"],
+        "conditional_e7_enabled": false,
+        "conditional_upday_e6_enabled": true,
+        "upday_threshold_pct": 0.0048,
+        "base_entry_downday_callonly_pct": 0.0057,
 
-        "_comment_fomc_t1": "MKT-038: Call-only entries on T+1 after FOMC announcement. Research: T+1 is 66.7% down days, 23% more volatile. Forces call-only spreads to avoid put-side exposure.",
+        "_comment_fomc": "MKT-038: Call-only entries on T+1 after FOMC announcement. fomc_announcement_skip: skip ALL entries on FOMC day (false = trade normally on FOMC day itself).",
         "fomc_t1_callonly_enabled": true,
+        "fomc_announcement_skip": false,
 
-        "_comment_stop_confirmation": "MKT-036: Sustained breach confirmation. INTENTIONALLY DISABLED — $5.00 put buffer (put_stop_buffer) is the chosen solution instead. Code preserved but dormant. When enabled: requires stop condition to persist for N seconds before closing.",
+        "_comment_stop_confirmation": "MKT-036: Sustained breach confirmation. INTENTIONALLY DISABLED — put buffer (put_stop_buffer) is the chosen solution instead. Code preserved but dormant. When enabled: requires stop condition to persist for N seconds before closing.",
         "stop_confirmation_enabled": false,
         "stop_confirmation_seconds": 75,
 
@@ -104,7 +112,7 @@
         "momentum_threshold_pct": 0.05
     },
     "vix_time_shift": {
-        "_comment": "MKT-034: VIX-scaled entry time shifting. DISABLED (v1.10.3): Neither Tammy nor Sandvand use VIX-based time shifting. When enabled, shifts 5-entry schedule later on high-VIX days. When disabled, uses strategy.entry_times instead.",
+        "_comment": "MKT-034: VIX-scaled entry time shifting. DISABLED (v1.10.3): Neither Tammy nor Sandvand use VIX-based time shifting. When enabled, shifts entry schedule later on high-VIX days. When disabled, uses strategy.entry_times instead.",
         "enabled": false,
         "medium_vix_threshold": 20.0,
         "high_vix_threshold": 23.0

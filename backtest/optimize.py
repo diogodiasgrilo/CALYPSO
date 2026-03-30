@@ -84,7 +84,7 @@ XL_GRID = {
     "put_stop_buffer":                   [100],    # LOCKED
     "one_sided_entries_enabled":         [True],   # LOCKED
     "fomc_t1_callonly_enabled":          [False],  # LOCKED
-    "stop_buffer":                       [10],     # LOCKED
+    "call_stop_buffer":                  [10],     # LOCKED
     "target_delta":                      [8.0],    # LOCKED
     "conditional_e7_enabled":            [True],   # LOCKED
     "conditional_upday_e6_enabled":      [True],   # LOCKED
@@ -120,7 +120,7 @@ FULL_GRID = {
     "one_sided_entries_enabled":         [True],    # LOCKED
     # ── Locked to current live strategy ─────────────────────────────────────
     "fomc_t1_callonly_enabled":          [False],   # LOCKED
-    "stop_buffer":                       [10],      # LOCKED
+    "call_stop_buffer":                  [10],      # LOCKED
     "target_delta":                      [8.0],     # LOCKED
     "conditional_e6_enabled":            [False],   # LOCKED
     "conditional_upday_e7_enabled":      [False],   # LOCKED
@@ -153,7 +153,7 @@ class OptCombo:
     min_call_credit: float
     one_sided_entries_enabled: bool
     fomc_t1_callonly_enabled: bool = True   # legacy field; XL grid fixes at True
-    stop_buffer: float = 10.0               # call-side stop buffer
+    call_stop_buffer: float = 10.0            # call-side stop buffer
     entry_schedule: str = "current"         # entry time preset name
     early_exit_time: Optional[str] = None   # HH:MM or None
     put_only_max_vix: float = 25.0          # VIX ceiling for put-only entries
@@ -306,8 +306,8 @@ def _worker(args: Tuple[dict, date, date, str]) -> dict:
     cfg.fomc_t1_callonly_enabled = combo.get("fomc_t1_callonly_enabled", False)
 
     # XL grid parameters (optional — not present in QUICK/FULL grids)
-    if "stop_buffer" in combo:
-        cfg.stop_buffer = combo["stop_buffer"]
+    if "call_stop_buffer" in combo:
+        cfg.call_stop_buffer = combo["call_stop_buffer"]
     if "entry_schedule" in combo:
         cfg.entry_times = ENTRY_SCHEDULES[combo["entry_schedule"]]
     if "early_exit_time" in combo:
@@ -575,7 +575,7 @@ def _make_dashboard(
         stops = r.get("train_stop_rate", 0)
 
         buf = f"${r.get('put_stop_buffer', 0)/100:.2g}"
-        cbuf = f"${r.get('stop_buffer', 10)/100:.2f}"
+        cbuf = f"${r.get('call_stop_buffer', 10)/100:.2f}"
         put_min = r.get("min_put_credit", 0)
         call_min = r.get("min_call_credit", 0)
         one_s = "Y" if r.get("one_sided_entries_enabled", False) else "N"
@@ -633,7 +633,7 @@ def build_opt_combos(raw_results: List[dict]) -> List[OptCombo]:
             min_call_credit=r["min_call_credit"],
             one_sided_entries_enabled=r["one_sided_entries_enabled"],
             fomc_t1_callonly_enabled=r.get("fomc_t1_callonly_enabled", True),
-            stop_buffer=r.get("stop_buffer", 10.0),
+            call_stop_buffer=r.get("call_stop_buffer", 10.0),
             entry_schedule=r.get("entry_schedule", "current"),
             early_exit_time=r.get("early_exit_time", None),
             put_only_max_vix=r.get("put_only_max_vix", 25.0),
@@ -678,7 +678,7 @@ def print_training_table(combos: List[OptCombo], top_n: int = 20):
     # Detect if XL grid params are present
     has_xl = any(
         c.entry_schedule != "current" or c.early_exit_time is not None
-        or c.stop_buffer != 10.0 or c.net_return_exit_pct is not None
+        or c.call_stop_buffer != 10.0 or c.net_return_exit_pct is not None
         or c.callside_min_upday_pct is not None
         or c.base_entry_downday_callonly_pct is not None
         or c.base_entry_upday_putonly_pct is not None
@@ -699,7 +699,7 @@ def print_training_table(combos: List[OptCombo], top_n: int = 20):
         print(f"  {'-'*168}")
         for rank, c in enumerate(combos[:top_n], 1):
             buf_str  = f"${c.put_stop_buffer/100:.2g}"
-            cbuf_str = f"${c.stop_buffer/100:.2f}"
+            cbuf_str = f"${c.call_stop_buffer/100:.2f}"
             one_sided = "Yes" if c.one_sided_entries_enabled else "No"
             exit_str  = c.early_exit_time or "4:00PM"
             nret_str  = f"{c.net_return_exit_pct:.0%}" if c.net_return_exit_pct else "off"
@@ -785,8 +785,8 @@ def print_best_config(best: OptCombo):
     print(f"{'='*60}")
     print(f"  put_stop_buffer:           ${best.put_stop_buffer/100:.2g}  "
           f"(config value: {best.put_stop_buffer})")
-    print(f"  stop_buffer (calls):       ${best.stop_buffer/100:.2f}  "
-          f"(config value: {best.stop_buffer})")
+    print(f"  call_stop_buffer:          ${best.call_stop_buffer/100:.2f}  "
+          f"(config value: {best.call_stop_buffer})")
     print(f"  min_put_credit:            ${best.min_put_credit:.2f}")
     print(f"  min_call_credit:           ${best.min_call_credit:.2f}")
     print(f"  one_sided_entries_enabled:  {best.one_sided_entries_enabled}")
@@ -859,7 +859,7 @@ def run_validation(
             "min_call_credit": c.min_call_credit,
             "one_sided_entries_enabled": c.one_sided_entries_enabled,
             "fomc_t1_callonly_enabled": c.fomc_t1_callonly_enabled,
-            "stop_buffer": c.stop_buffer,
+            "call_stop_buffer": c.call_stop_buffer,
             "entry_schedule": c.entry_schedule,
             "early_exit_time": c.early_exit_time,
         }

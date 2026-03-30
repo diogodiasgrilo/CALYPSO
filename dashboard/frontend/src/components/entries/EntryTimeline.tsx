@@ -4,12 +4,11 @@ import { statusColor, colors } from "../../lib/tradingColors";
 import type { EntryStatus } from "../shared/StatusBadge";
 import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 
-// Base entries: 5 scheduled at :15/:45 starting 10:15 AM ET
-const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15", "11:45", "12:15"];
-// Conditional entries: E6 (12:45) fires put-only when SPX rises ≥ 0.4% from open (Upday-035)
-//                      E7 (13:15) fires call-only when SPX drops ≥ 0.3% from open (MKT-035)
+// Base entries: 3 scheduled at :15/:45 starting 10:15 AM ET (E1-E3)
+const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15"];
+// Conditional entries: E6 (14:00) fires put-only when SPX rises ≥ 0.4% from open (Upday-035)
 // Hidden when all conditional flags are disabled in bot config
-const CONDITIONAL_ENTRY_TIMES = ["12:45", "13:15"];
+const CONDITIONAL_ENTRY_TIMES = ["14:00"];
 
 const TIMELINE_START = 9.5 * 60; // 9:30 in minutes
 const TIMELINE_END = 16 * 60; // 16:00 in minutes
@@ -57,7 +56,7 @@ export function EntryTimeline() {
             16:00
           </span>
 
-          {/* Base entry dots (E1-E5) */}
+          {/* Base entry dots (E1-E3) */}
           {BASE_ENTRY_TIMES.map((time, i) => {
             const minutes = timeToMinutes(time);
             const pct = ((minutes - TIMELINE_START) / TIMELINE_RANGE) * 100;

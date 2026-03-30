@@ -16,22 +16,24 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (v1.16.1 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.19.0 — DO NOT hallucinate)
 
-- **5 base + up to 2 conditional entries (7 max)** at 10:15, 10:45, 11:15, 11:45, 12:15 ET (:15/:45 offset from MAE analysis, v1.10.3 — matches winning period Feb 10-27). Conditional entries (12:45, 13:15) fire as call-only on down days (MKT-035) or as put-only on up days (Upday-035); both DISABLED on VM by default.
+- **3 base entries + 1 conditional (4 max)** at 10:15, 10:45, 11:15 ET. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.48% above open (Upday-035). E7 is DISABLED.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
-- **VIX-scaled entry time shifting (MKT-034):** DISABLED (v1.10.3). Neither Tammy nor Sandvand use VIX-based time shifting.
-- **Spread width:** Fixed 50pt for all legs (reverted from MKT-027/028 asymmetric/VIX-scaled widths in v1.10.3 — winning period Feb 10-27 used flat 50pt). MKT-028 floors (60pt call, 75pt put) are NOT active. All legs use 50pt spreads — this is correct and expected.
+- **VIX-scaled entry time shifting (MKT-034):** DISABLED (v1.10.3).
+- **VIX-scaled spread width (MKT-027):** Continuous formula `round(VIX * 5.3 / 5) * 5`, floor 25pt, cap 83pt.
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
-- **Min credit thresholds (MKT-011):** $0.60/side for calls, $2.50/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.50, put floor $2.40). MKT-035/038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 25 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
-- **Stop formula:** Asymmetric buffers — call: total_credit + $0.10, put: total_credit + $5.00. MKT-040 call-only (put non-viable): call + $2.50 theo put + buffer. Put-only (MKT-039): credit + $5.00. MKT-035/038 call-only: call + $2.50 theo put + buffer. Put buffer wider to avoid false put stops (21-day backtest: 91% avoided).
-- **Stop confirmation (MKT-036):** DISABLED. $5.00 put buffer is the chosen solution instead. Code preserved but dormant.
+- **Min credit thresholds (MKT-011):** $1.35/side for calls, $2.10/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.07). MKT-038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
+- **Stop formula:** Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
+- **Stop confirmation (MKT-036):** DISABLED. Code preserved but dormant.
 - **Stop close:** both legs closed via market order (default; configurable short_only_stop for MKT-025 mode)
-- **Down-day filter (MKT-035):** Only affects conditional entries E6/E7. Base entries E1-E5 always attempt full ICs regardless of down-day status. Conditional entries (12:45, 13:15) only fire when SPX drops 0.3% below session open, as call-only. DISABLED on VM (conditional_e6_enabled=false, conditional_e7_enabled=false).
-- **Up-day filter (Upday-035):** Mirror of MKT-035 — conditional entries (12:45, 13:15) fire as put-only when SPX rises 0.4% above session open. DISABLED on VM by default (conditional_upday_e6_enabled=false, conditional_upday_e7_enabled=false).
+- **Whipsaw filter:** whipsaw_range_skip_mult = 1.50 — skip entry if SPX intraday range > 1.5x expected daily move.
+- **Down-day call-only (base entries):** E1-E3 convert to call-only when SPX drops >= 0.57% from open (`base_entry_downday_callonly_pct: 0.0057`).
+- **Up-day filter (Upday-035):** E6 at 14:00 fires as put-only when SPX rises >= 0.48% above open. E7 is DISABLED.
 - **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
-- **FOMC blackout (MKT-008):** ALL entries skipped on FOMC announcement day only (Day 1 trades normally).
+- **FOMC announcement skip (MKT-008):** DISABLED (fomc_announcement_skip=false). HYDRA now trades on FOMC days. Day 1 trades normally.
 - **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
+- **Account:** $35K margin, 1 contract per entry
 
 ## 2026 FOMC Calendar (GROUND TRUTH — use these dates, do NOT guess)
 
@@ -51,7 +53,7 @@ CRITICAL: Cross-reference today's date against this table. If today is NOT liste
 ## Entry Skip Pattern (CRITICAL — do not get this backwards)
 
 Entry #1 (10:15) has the RICHEST premium and BEST liquidity. It almost NEVER skips.
-Entry #5 (12:15, the last regular entry) accounts for ~80% of all MKT-011 skips. Entry #4 is second most.
+Entry #3 (11:15, the last base entry) is most likely to see MKT-011 skips as premium decays.
 The call side is almost always the reason for skips (premium decays faster on calls).
 
 Do NOT say "entries #1 and #2 carry the highest skip probability" — that is factually wrong.
@@ -62,15 +64,15 @@ Assign a risk level for today's trading:
 
 **GREEN** — Normal conditions, expect standard HYDRA performance
 - VIX 12-20, no major events, SPX in normal range
-- HYDRA should run all 5 entries with standard parameters
+- HYDRA should run all 3 base entries with standard parameters
 
 **YELLOW** — Elevated caution, possible wider spreads or fewer fills
 - VIX 20-25, minor economic data, pre-FOMC positioning
-- HYDRA may see MKT-011 skips on later entries (4/5) or wider tightening
+- HYDRA may see MKT-011 skip on Entry #3 or wider tightening
 
 **RED** — High risk, significant market-moving events
-- VIX > 25, FOMC announcement day, major economic surprise
-- HYDRA may skip multiple late entries or see stops on early entries
+- VIX > 25, major economic surprise
+- HYDRA may skip entries or see stops on early entries
 
 ## Output Format
 
@@ -94,7 +96,7 @@ IMPORTANT: HYDRA is a FULLY AUTOMATED bot — it makes all decisions algorithmic
 Do NOT say things like "consider pushing strikes wider" or "HYDRA should be prepared to skip."
 HYDRA's MKT-020/022/011/013/035/038 rules handle all of this automatically.
 Instead, PREDICT what HYDRA will likely do: "Expect MKT-020 to tighten calls inward"
-or "MKT-011 may skip Entry #5 if call premium decays below $0.60."
+or "MKT-011 may skip Entry #3 if call premium decays below $1.35."
 
 Your briefing is for the HUMAN OPERATOR who monitors the bot — tell them what to EXPECT
 from the bot's automated behavior, not what the bot should "consider doing."

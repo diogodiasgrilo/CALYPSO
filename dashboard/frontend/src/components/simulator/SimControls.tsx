@@ -1,7 +1,7 @@
 import { colors } from "../../lib/tradingColors";
 
 export interface SimParamsState {
-  stop_buffer: number;
+  call_stop_buffer: number;
   put_stop_buffer: number;
   min_credit_call: number;
   min_credit_put: number;
@@ -13,12 +13,12 @@ export interface SimParamsState {
 }
 
 export const DEFAULT_PARAMS: SimParamsState = {
-  stop_buffer: 0.10,
-  put_stop_buffer: 5.00,
-  min_credit_call: 60.0,
-  min_credit_put: 250.0,
+  call_stop_buffer: 0.35,
+  put_stop_buffer: 1.55,
+  min_credit_call: 135.0,
+  min_credit_put: 210.0,
   put_only_max_vix: 25.0,
-  max_entries: 5,
+  max_entries: 3,
   commission_per_leg: 2.50,
   conditional_entries: true,
   downday_threshold_pct: 0.003,
@@ -28,19 +28,19 @@ const PRESETS: Record<string, { label: string; params: Partial<SimParamsState> }
   current: { label: "Current", params: { ...DEFAULT_PARAMS } },
   conservative: {
     label: "Conservative",
-    params: { put_stop_buffer: 7.0, min_credit_put: 300, max_entries: 4 },
+    params: { put_stop_buffer: 3.0, min_credit_put: 300, max_entries: 2 },
   },
   aggressive: {
     label: "Aggressive",
-    params: { put_stop_buffer: 3.0, min_credit_put: 200, min_credit_call: 40 },
+    params: { put_stop_buffer: 1.0, min_credit_put: 180, min_credit_call: 100 },
   },
   tight_stops: {
     label: "Tight Stops",
-    params: { stop_buffer: 0.05, put_stop_buffer: 2.5 },
+    params: { call_stop_buffer: 0.15, put_stop_buffer: 0.75 },
   },
   wide_stops: {
     label: "Wide Stops",
-    params: { stop_buffer: 0.25, put_stop_buffer: 8.0 },
+    params: { call_stop_buffer: 0.60, put_stop_buffer: 3.0 },
   },
 };
 
@@ -156,11 +156,11 @@ export function SimControls({ params, onChange, onRun, loading }: SimControlsPro
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
         <ParamSlider
           label="Call Stop Buffer"
-          value={params.stop_buffer}
+          value={params.call_stop_buffer}
           min={0} max={2} step={0.05}
           format={(v) => `$${v.toFixed(2)}`}
-          onChange={(v) => update("stop_buffer", v)}
-          isModified={isModified("stop_buffer")}
+          onChange={(v) => update("call_stop_buffer", v)}
+          isModified={isModified("call_stop_buffer")}
         />
         <ParamSlider
           label="Put Stop Buffer"

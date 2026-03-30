@@ -8,7 +8,7 @@ Claude for narrative analysis, saves a report, and sends a summary alert.
 v1.1.0 Changes:
     - Pre-computed cheat sheet prevents Claude arithmetic errors
     - Narrative-focused analysis (story of the day, not just numbers)
-    - Updated strategy params for HYDRA v1.8.0 (5 entries shifted +1hr, MKT-031 smart entry, asymmetric spreads)
+    - Updated strategy params for HYDRA v1.19.0 (3 base entries, VIX-scaled spreads 25-83pt)
     - Cumulative context (win/lose streak, averages, day number)
     - Apollo accuracy assessment
     - Trimmed state file to save tokens (strip UICs, position IDs)
@@ -33,5 +33,5 @@ Files:
     deploy/hermes.service               systemd oneshot service
     deploy/hermes.timer                 systemd timer (5 PM ET weekdays)
 
-Last Updated: 2026-03-04
+Last Updated: 2026-03-29
 """

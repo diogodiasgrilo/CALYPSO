@@ -145,3 +145,5 @@ MANIFEST
 # Dashboard frontend — override Python/data rules for source files
 !dashboard/frontend/src/lib/
 !dashboard/frontend/src/components/logs/
+backtest/results/
+backtest/results/sweep_logs/

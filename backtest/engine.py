@@ -25,7 +25,25 @@ import numpy as np
 import pandas as pd
 
 from .config import BacktestConfig
-from .downloader import load_index_day, load_chain_day, load_greeks_day, get_spxw_trading_days
+from .downloader import load_index_day, get_spxw_trading_days
+
+
+def _load_chain(expiry: date, opts_dir: Path) -> pd.DataFrame:
+    """Load chain data from a specific directory (supports 5min/1min folders)."""
+    from .downloader import _date_str
+    path = opts_dir / f"SPXW_{_date_str(expiry)}.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
+def _load_greeks(expiry: date, grk_dir: Path) -> pd.DataFrame:
+    """Load Greeks data from a specific directory (supports 5min/1min folders)."""
+    from .downloader import _date_str
+    path = grk_dir / f"SPXW_{_date_str(expiry)}_greeks.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
 
 
 # ── Data structures ────────────────────────────────────────────────────────
@@ -430,7 +448,20 @@ def _simulate_entry(
     # callside_min_upday_pct is a simpler legacy check (up-only); superseded
     # by the combined base_entry_*_pct params when those are set.
     if not force_put_only and not force_call_only and spx_open > 0:
-        move_pct = (spx - spx_open) / spx_open * 100  # positive = up, negative = down
+        # Base entry reference: "open" (default) or "high" (intraday high from open to entry)
+        base_ref = getattr(cfg, "base_entry_downday_reference", "open")
+        if base_ref == "high":
+            mask = (
+                (spx_df["ms_of_day"] >= market_open_ms) &
+                (spx_df["ms_of_day"] <= entry_ms) &
+                (spx_df["price"] > 0)
+            )
+            base_ref_price = float(spx_df.loc[mask, "price"].max()) if mask.any() else spx_open
+            if base_ref_price <= 0:
+                base_ref_price = spx_open
+        else:
+            base_ref_price = spx_open
+        move_pct = (spx - base_ref_price) / base_ref_price * 100  # positive = up, negative = down
 
         down_thresh = getattr(cfg, "base_entry_downday_callonly_pct", None)
         up_thresh   = getattr(cfg, "base_entry_upday_putonly_pct", None)
@@ -494,6 +525,18 @@ def _simulate_entry(
             call_starting_otm, cfg.min_call_otm_distance,
             cfg.min_call_credit * 100, actual_ms
         )
+        # Call tightening retries (mirror of MKT-040 for put side)
+        if call_short is None and getattr(cfg, 'call_tighten_retries', 0) > 0:
+            call_starting_otm_retry = call_starting_otm
+            for _ in range(cfg.call_tighten_retries):
+                call_starting_otm_retry = max(cfg.min_call_otm_distance, call_starting_otm_retry - cfg.call_tighten_step)
+                call_short, call_long, call_credit = _scan_for_viable_strike(
+                    lookup, spx_rounded, "call", call_spread_width,
+                    call_starting_otm_retry, cfg.min_call_otm_distance,
+                    cfg.min_call_credit * 100, actual_ms
+                )
+                if call_short is not None:
+                    break
         # With MKT-029 fallback (graduated floor)
         if call_short is None and cfg.call_credit_floor > 0:
             call_short, call_long, call_credit = _scan_for_viable_strike(
@@ -559,7 +602,7 @@ def _simulate_entry(
             return result
         result.entry_type = "call_only"
         # For call-only stop: call_credit + theoretical_put + buffer
-        call_stop = call_credit + cfg.downday_theoretical_put_credit + cfg.stop_buffer
+        call_stop = call_credit + cfg.downday_theoretical_put_credit + cfg.call_stop_buffer
         call_stop = max(call_stop, cfg.min_stop_level)
         result.short_call = call_short
         result.long_call = call_long
@@ -570,7 +613,7 @@ def _simulate_entry(
     elif call_short is not None and put_short is not None:
         result.entry_type = "full_ic"
         total_credit = call_credit + put_credit
-        call_stop = total_credit + cfg.stop_buffer
+        call_stop = total_credit + cfg.call_stop_buffer
         put_stop = total_credit + cfg.put_stop_buffer
         call_stop = max(call_stop, cfg.min_stop_level)
         put_stop = max(put_stop, cfg.min_stop_level)
@@ -605,7 +648,7 @@ def _simulate_entry(
             result.entry_type = "skipped"
             result.skip_reason = "one_sided_disabled_put_non_viable"
             return result
-        call_stop = call_credit + cfg.downday_theoretical_put_credit + cfg.stop_buffer
+        call_stop = call_credit + cfg.downday_theoretical_put_credit + cfg.call_stop_buffer
         call_stop = max(call_stop, cfg.min_stop_level)
         result.entry_type = "call_only"
         result.skip_reason = "mkt-040"
@@ -640,39 +683,43 @@ def _simulate_entry(
 
         # Stop checks: use ask-based close cost (realistic fill price)
         slip = getattr(cfg, "stop_slippage_per_leg", 0.0) * 2 * 100  # 2 legs × $100 multiplier
+        # Spread value cap: close cost can't exceed spread width × 100
+        cap_at_stop = getattr(cfg, "spread_value_cap_at_stop", False)
+        call_cap = result.call_spread_width * 100 if cap_at_stop else float('inf')
+        put_cap = result.put_spread_width * 100 if cap_at_stop else float('inf')
         if call_active and not call_stopped:
             if price_stop_pts is not None:
                 if spx_now > 0 and spx_now >= result.short_call - (price_stop_pts if price_stop_inward else -price_stop_pts):
                     cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
-                    if cv > 0:  # only stop if we have a real quote — cv=0 means no data
+                    if cv > 0:
                         call_stopped = True
                         result.call_outcome = "stopped"
                         result.call_exit_ms = monitor_ms
-                        result.call_close_cost = cv + slip
+                        result.call_close_cost = min(cv + slip, call_cap)
             else:
                 cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
                 if cv > 0 and cv >= result.call_stop:
                     call_stopped = True
                     result.call_outcome = "stopped"
                     result.call_exit_ms = monitor_ms
-                    result.call_close_cost = cv + slip
+                    result.call_close_cost = min(cv + slip, call_cap)
 
         if put_active and not put_stopped:
             if price_stop_pts is not None:
                 if spx_now > 0 and spx_now <= result.short_put + (price_stop_pts if price_stop_inward else -price_stop_pts):
                     pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
-                    if pv > 0:  # only stop if we have a real quote — pv=0 means no data
+                    if pv > 0:
                         put_stopped = True
                         result.put_outcome = "stopped"
                         result.put_exit_ms = monitor_ms
-                        result.put_close_cost = pv + slip
+                        result.put_close_cost = min(pv + slip, put_cap)
             else:
                 pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
                 if pv > 0 and pv >= result.put_stop:
                     put_stopped = True
                     result.put_outcome = "stopped"
                     result.put_exit_ms = monitor_ms
-                    result.put_close_cost = pv + slip
+                    result.put_close_cost = min(pv + slip, put_cap)
 
         # Early exit: close any remaining open sides at this bar
         if early_ms and monitor_ms >= early_ms:
@@ -946,15 +993,23 @@ def simulate_day(
     fomc_t1_dates: set,
 ) -> Optional[DayResult]:
 
-    # Load data
-    chain_df = load_chain_day(trading_date, cache_dir)
+    # Load data — use 1-min or 5-min subfolder based on config
+    resolution = getattr(cfg, "data_resolution", "5min")
+    if resolution == "1min":
+        opts_dir = cache_dir / "options_1min"
+        grk_dir = cache_dir / "greeks_1min"
+    else:
+        opts_dir = cache_dir / "options"
+        grk_dir = cache_dir / "greeks"
+
+    chain_df = _load_chain(trading_date, opts_dir)
     if chain_df.empty:
         return None
 
     # Real Greeks mode (strict): skip day entirely if no Greeks file cached
     greeks_df: Optional[pd.DataFrame] = None
     if getattr(cfg, "use_real_greeks", False):
-        greeks_df = load_greeks_day(trading_date, cache_dir)
+        greeks_df = _load_greeks(trading_date, grk_dir)
         if greeks_df.empty:
             return None  # strict mode — no approximation fallback
 
@@ -990,6 +1045,75 @@ def simulate_day(
     else:
         day_early_exit_ms = _USE_CFG_EARLY_EXIT  # use cfg as-is (no VIX gate)
 
+    # ── Protection gate helpers ──────────────────────────────────────────
+    daily_loss_limit = getattr(cfg, "daily_loss_limit", None)
+    vix_spike_pts = getattr(cfg, "vix_spike_skip_points", None)
+    whipsaw_mult = getattr(cfg, "whipsaw_range_skip_mult", None)
+    market_open_ms = 9 * 3600000 + 30 * 60000  # 9:30 AM
+
+    # VIX at open for spike detection
+    vix_at_open = _get_index_price(vix_df, market_open_ms + 15 * 60000)  # 9:45 AM
+    if vix_at_open <= 0:
+        vix_rows = vix_df[vix_df["price"] > 0]
+        vix_at_open = float(vix_rows.iloc[0]["price"]) if not vix_rows.empty else 0.0
+
+    # Expected daily move for whipsaw filter
+    expected_move = spx_open * (vix_at_open / 100) / (252 ** 0.5) if spx_open > 0 and vix_at_open > 0 else 0
+
+    def _should_skip_entry(entry_ms: int) -> Optional[str]:
+        """Check protection gates. Returns skip reason or None."""
+        # Daily loss limit — ONLY count REALIZED losses (entries stopped BEFORE this entry time).
+        # Entries still open at entry_ms have unknown outcomes — no lookahead bias.
+        if daily_loss_limit is not None:
+            realized_pnl = 0.0
+            for e in day.entries:
+                if e.entry_type == "skipped":
+                    continue
+                # Check if this entry is fully resolved before current entry_ms
+                call_resolved = (e.call_outcome == "stopped" and e.call_exit_ms > 0 and e.call_exit_ms < entry_ms)
+                put_resolved = (e.put_outcome == "stopped" and e.put_exit_ms > 0 and e.put_exit_ms < entry_ms)
+                call_active = e.entry_type in ("full_ic", "call_only")
+                put_active = e.entry_type in ("full_ic", "put_only")
+
+                # Only count P&L from sides that are DONE (stopped before now)
+                # Sides still open or expired later are unknown at this point
+                if call_active and call_resolved:
+                    realized_pnl += e.call_credit - e.call_close_cost
+                if put_active and put_resolved:
+                    realized_pnl += e.put_credit - e.put_close_cost
+                # Commission: count opening commission for all placed entries,
+                # closing commission only for sides stopped before now
+                if e.entry_type != "skipped":
+                    legs_placed = 2 if e.entry_type in ("call_only", "put_only") else 4
+                    legs_closed = 0
+                    if call_active and call_resolved: legs_closed += 2
+                    if put_active and put_resolved: legs_closed += 2
+                    realized_pnl -= (legs_placed + legs_closed) * getattr(cfg, "commission_per_leg", 2.50) * getattr(cfg, "contracts", 1)
+
+            if realized_pnl <= daily_loss_limit:
+                return f"daily_loss_limit (realized {realized_pnl:.0f} <= {daily_loss_limit:.0f})"
+
+        # VIX spike gate
+        if vix_spike_pts is not None:
+            vix_now = _get_index_price(vix_df, entry_ms)
+            if vix_now > 0 and vix_at_open > 0 and (vix_now - vix_at_open) >= vix_spike_pts:
+                return f"vix_spike ({vix_now:.1f} vs open {vix_at_open:.1f}, +{vix_now-vix_at_open:.1f}pts)"
+
+        # Anti-whipsaw filter
+        if whipsaw_mult is not None and expected_move > 0:
+            mask = (
+                (spx_df["ms_of_day"] >= market_open_ms) &
+                (spx_df["ms_of_day"] <= entry_ms) &
+                (spx_df["price"] > 0)
+            )
+            if mask.any():
+                prices = spx_df.loc[mask, "price"]
+                intraday_range = float(prices.max()) - float(prices.min())
+                if intraday_range > whipsaw_mult * expected_move:
+                    return f"whipsaw (range={intraday_range:.0f} > {whipsaw_mult}×EM={whipsaw_mult*expected_move:.0f})"
+
+        return None
+
     # ── Base entries (E1-E5) ─────────────────────────────────────────────
     entry_ms_list = cfg.entry_times_as_ms()
     movement_pct = getattr(cfg, "movement_entry_pct", None)
@@ -997,6 +1121,12 @@ def simulate_day(
     if movement_pct is None:
         # Standard time-based entries
         for i, entry_ms in enumerate(entry_ms_list, 1):
+            skip_reason = _should_skip_entry(entry_ms)
+            if skip_reason:
+                skip_res = EntryResult(entry_num=i, entry_time_ms=entry_ms,
+                                       entry_type="skipped", skip_reason=skip_reason)
+                day.entries.append(skip_res)
+                continue
             res = _simulate_entry(
                 entry_num=i,
                 entry_ms=entry_ms,
@@ -1060,6 +1190,12 @@ def simulate_day(
     for i, (cond_ms, down_en, up_en) in enumerate(zip(cond_times, cond_down, cond_up), 6):
         if not down_en and not up_en:
             continue
+        skip_reason = _should_skip_entry(cond_ms)
+        if skip_reason:
+            skip_res = EntryResult(entry_num=i, entry_time_ms=cond_ms,
+                                   entry_type="skipped", skip_reason=skip_reason)
+            day.entries.append(skip_res)
+            continue
         res = _simulate_entry(
             entry_num=i,
             entry_ms=cond_ms,
@@ -1093,8 +1229,9 @@ def run_backtest(cfg: BacktestConfig, verbose: bool = True) -> List[DayResult]:
     cache_dir = Path(cfg.cache_dir)
     trading_days = get_spxw_trading_days(cfg.start_date, cfg.end_date, cache_dir)
 
-    # Build FOMC T+1 date set
+    # Build FOMC date sets (announcement days + T+1 days)
     fomc_t1_dates = set(cfg.fomc_t1_dates)
+    fomc_announcement_dates = set()
     try:
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -1102,6 +1239,7 @@ def run_backtest(cfg: BacktestConfig, verbose: bool = True) -> List[DayResult]:
         years = range(cfg.start_date.year, cfg.end_date.year + 1)
         for fomc_date in [d for yr in years for d in get_fomc_announcement_dates(yr)]:
             if isinstance(fomc_date, date):
+                fomc_announcement_dates.add(fomc_date)
                 t1 = fomc_date + timedelta(days=1)
                 # Skip weekends
                 if t1.weekday() < 5:
@@ -1115,6 +1253,9 @@ def run_backtest(cfg: BacktestConfig, verbose: bool = True) -> List[DayResult]:
         print(f"\nRunning backtest: {cfg.start_date} → {cfg.end_date} ({n_total} days)\n")
 
     for i, d in enumerate(trading_days, 1):
+        # FOMC announcement day skip (MKT-008)
+        if getattr(cfg, "fomc_announcement_skip", False) and d in fomc_announcement_dates:
+            continue
         day_result = simulate_day(d, cfg, cache_dir, fomc_t1_dates)
         if day_result is None:
             continue

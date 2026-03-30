@@ -15,12 +15,12 @@ engine = SimulatorEngine(db_reader)
 
 class SimRequest(BaseModel):
     """Request body for running a simulation."""
-    stop_buffer: float = Field(default=0.10, ge=0, le=5.0)
-    put_stop_buffer: float = Field(default=5.00, ge=0, le=20.0)
-    min_credit_call: float = Field(default=60.0, ge=0, le=500.0)
-    min_credit_put: float = Field(default=250.0, ge=0, le=1000.0)
+    call_stop_buffer: float = Field(default=0.35, ge=0, le=5.0)
+    put_stop_buffer: float = Field(default=1.55, ge=0, le=20.0)
+    min_credit_call: float = Field(default=135.0, ge=0, le=500.0)
+    min_credit_put: float = Field(default=210.0, ge=0, le=1000.0)
     put_only_max_vix: float = Field(default=25.0, ge=10.0, le=50.0)
-    max_entries: int = Field(default=5, ge=1, le=7)
+    max_entries: int = Field(default=3, ge=1, le=7)
     commission_per_leg: float = Field(default=2.50, ge=0, le=10.0)
     conditional_entries: bool = True
     downday_threshold_pct: float = Field(default=0.003, ge=0.001, le=0.02)
@@ -36,12 +36,12 @@ async def get_status():
 async def get_defaults():
     """Current production config values (baseline)."""
     return {
-        "stop_buffer": 0.10,
-        "put_stop_buffer": 5.00,
-        "min_credit_call": 60.0,
-        "min_credit_put": 250.0,
+        "call_stop_buffer": 0.35,
+        "put_stop_buffer": 1.55,
+        "min_credit_call": 135.0,
+        "min_credit_put": 210.0,
         "put_only_max_vix": 25.0,
-        "max_entries": 5,
+        "max_entries": 3,
         "commission_per_leg": 2.50,
         "conditional_entries": True,
         "downday_threshold_pct": 0.003,
@@ -52,7 +52,7 @@ async def get_defaults():
 async def run_simulation(req: SimRequest):
     """Run simulation with given parameters."""
     params = SimParams(
-        stop_buffer=req.stop_buffer,
+        call_stop_buffer=req.call_stop_buffer,
         put_stop_buffer=req.put_stop_buffer,
         min_credit_call=req.min_credit_call,
         min_credit_put=req.min_credit_put,

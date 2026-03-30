@@ -36,13 +36,14 @@ except ImportError:
 UPDAY_VALUES: List[Optional[float]] = [None, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00, 1.50]
 
 START_DATE = date(2022, 5, 16)
-END_DATE   = date(2026, 3, 22)
+END_DATE   = date(2026, 3, 27)
 
 
 def base_cfg(pct: Optional[float]):
     cfg = live_config()
-    cfg.start_date = START_DATE
-    cfg.end_date   = END_DATE
+    cfg.start_date      = START_DATE
+    cfg.end_date        = END_DATE
+    cfg.use_real_greeks = True
     if pct is None:
         cfg.conditional_upday_e6_enabled = False
         cfg.upday_threshold_pct = 0.60  # irrelevant when disabled

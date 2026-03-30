@@ -40,7 +40,7 @@ def old_config() -> BacktestConfig:
         min_call_credit=1.25,
         min_put_credit=2.25,               # old VM value
         put_stop_buffer=100.0,
-        stop_buffer=10.0,
+        call_stop_buffer=10.0,
         one_sided_entries_enabled=True,
         put_only_max_vix=25.0,
         price_based_stop_points=None,      # credit-based stop
@@ -67,7 +67,7 @@ def new_config() -> BacktestConfig:
         min_call_credit=1.25,
         min_put_credit=1.75,               # new (backtest optimal)
         put_stop_buffer=100.0,
-        stop_buffer=10.0,
+        call_stop_buffer=10.0,
         one_sided_entries_enabled=True,
         put_only_max_vix=25.0,
         price_based_stop_points=0.1,       # new price-based stop
