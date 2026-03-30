@@ -9,13 +9,15 @@ export function EntryGrid() {
   const schedule = hydraState?.entry_schedule;
   const showConditional = useShowConditionalEntries();
 
-  // 4 entry slots (E1-E3 base + E6 conditional)
-  const baseSlots = Array.from({ length: 4 }, (_, i) =>
+  // Base entry slots — count from state schedule (default 3: E1-E3)
+  const baseCount = schedule?.base?.length ?? 3;
+  const baseSlots = Array.from({ length: baseCount }, (_, i) =>
     entries.find((e) => e.entry_number === i + 1) ?? null
   );
 
-  // 2 conditional entry slots (E6: upday put-only, E7: downday call-only)
-  const conditionalSlots = Array.from({ length: 2 }, (_, i) =>
+  // Conditional entry slots — only show slots that have scheduled times (E7 disabled = not in schedule)
+  const condCount = schedule?.conditional?.length ?? 0;
+  const conditionalSlots = Array.from({ length: condCount }, (_, i) =>
     entries.find((e) => e.entry_number === 6 + i) ?? null
   );
 
@@ -24,8 +26,8 @@ export function EntryGrid() {
       <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
         Entries
       </h3>
-      {/* Base entries: E1-E3 + E6 conditional */}
-      <div className="grid grid-cols-4 gap-2 max-lg:grid-cols-3 max-sm:grid-cols-1">
+      {/* Base entries — grid adapts to count from schedule */}
+      <div className={`grid gap-2 max-sm:grid-cols-1 ${baseCount <= 3 ? "grid-cols-3" : "grid-cols-4 max-lg:grid-cols-3"}`}>
         {baseSlots.map((entry, i) =>
           entry ? (
             <EntryCard key={i} entry={entry} />
@@ -39,13 +41,13 @@ export function EntryGrid() {
         )}
       </div>
 
-      {/* Conditional entries: E6 (upday put-only) + E7 (downday call-only) — hidden when all disabled */}
-      {showConditional && (
+      {/* Conditional entries — only shows slots from schedule (E7 disabled = hidden) */}
+      {showConditional && condCount > 0 && (
         <div className="mt-2">
           <span className="text-[10px] text-text-dim uppercase tracking-wider">
-            Conditional (E6: up-day ↑ put-only · E7: down-day ↓ call-only)
+            Conditional (E6: up-day ↑ put-only{condCount > 1 ? " · E7: down-day ↓ call-only" : ""})
           </span>
-          <div className="grid grid-cols-5 gap-2 max-lg:grid-cols-3 max-sm:grid-cols-1 mt-1">
+          <div className={`grid gap-2 max-sm:grid-cols-1 mt-1 ${condCount === 1 ? "grid-cols-3" : "grid-cols-5 max-lg:grid-cols-3"}`}>
             {conditionalSlots.map((entry, i) =>
               entry ? (
                 <EntryCard key={`cond-${i}`} entry={entry} isConditional />
