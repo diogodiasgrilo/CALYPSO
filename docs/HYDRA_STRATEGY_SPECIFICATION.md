@@ -406,7 +406,7 @@ otm_distance = clamp(otm_distance, 25, 120)  # Never closer than 25, never wider
 
 ### Spread Width (VIX-Scaled, v1.19.0)
 
-**Continuous formula:** `round(VIX × 5.3 / 5) × 5`, floor 25pt, cap 83pt.
+**Continuous formula:** `round(VIX × 5.3 / 5) × 5`, floor 25pt, cap 85pt.
 
 | VIX | Spread Width |
 |-----|-------------|
@@ -683,7 +683,7 @@ Entry #1 → #2 → #3 placed normally
 |------|------|-------|-------------|
 | MKT-007 | Short Strike Liquidity | v1.0.0 | Move short strikes closer to ATM if illiquid |
 | MKT-008 | Long Wing Liquidity | v1.0.0 | Reduce spread width if long wing illiquid; sets illiquidity flags |
-| MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | VIX × 5.3, floor 25pt, cap 83pt (v1.19.0) |
+| MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | VIX × 5.3, floor 25pt, cap 85pt (v1.19.0) |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
 | MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call $1.35 (floor $0.75), put $2.10 (floor $2.07). Call non-viable → put-only if VIX < 15.0 (MKT-032/MKT-039), else skip; put non-viable → retry with tighter puts, then call-only (MKT-040); both → skip |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
@@ -697,7 +697,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
 | MKT-025 | Short-Only Stop Close | v1.4.3 | **Configurable** (`short_only_stop`, default: false). When true: close SHORT only, long expires. When false: close both legs (default since v1.9.4) |
 | MKT-026 | Min Spread Width Floor | v1.4.5 | Floor 25pt (v1.19.0, was 60pt) |
-| MKT-027 | VIX-Scaled Spread Width | v1.6.0 | Continuous formula `VIX × 5.3` (v1.19.0, was 3.5), floor 25pt, cap 83pt |
+| MKT-027 | VIX-Scaled Spread Width | v1.6.0 | Continuous formula `VIX × 5.3` (v1.19.0, was 3.5), floor 25pt, cap 85pt |
 | MKT-028 | Asymmetric Spread Widths | v1.6.0 | **Unified in v1.19.0** — single formula VIX × 5.3 replaces separate call/put floors |
 | MKT-029 | Graduated Credit Fallback | v1.6.2 | -$0.05, -$0.10 steps below minimum for BOTH calls and puts (call floor $0.75, put floor $2.07). Applied in MKT-011 gate, MKT-020/022 tightening, and MKT-035/038 call-only skip checks. |
 | MKT-031 | Smart Entry Windows | v1.8.0 | 10-min scouting before each entry; 2-parameter scoring (ATR calm + momentum pause); score >= 65 triggers early entry |
@@ -891,7 +891,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `min_spread_width` | `60` | MKT-008 liquidity fallback floor (universal) |
 | `call_min_spread_width` | `25` | MKT-028: Call spread floor (v1.19.0, was 60) |
 | `put_min_spread_width` | `25` | MKT-028: Put spread floor (v1.19.0, was 75) |
-| `max_spread_width` | `83` | Maximum spread width (v1.19.0, was 75) |
+| `max_spread_width` | `85` | Maximum spread width (v1.19.0, must be multiple of 5 for Saxo strikes) |
 | `spread_vix_multiplier` | `5.3` | MKT-027: VIX × multiplier for spread width (v1.19.0, was 3.5) |
 | `target_delta` | `8` | Target delta for short strikes |
 | `min_delta` | `5` | Minimum acceptable delta |
@@ -915,7 +915,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `hold_check_lean_tolerance` | `1.0` | MKT-023 lean threshold (%). Only used when enabled. |
 | `min_entries_before_roc_gate` | `3` | MKT-021: Only active when MKT-018 enabled. |
 | `downday_callonly_enabled` | `true` | MKT-035: Enable call-only entries on down days |
-| `downday_threshold_pct` | `0.0057` | MKT-035: SPX must drop this % below the session open to trigger (0.57%, v1.19.0 was 0.3%) |
+| `downday_threshold_pct` | `0.003` | MKT-035: SPX must drop this % below the session open to trigger E6/E7 conditional (0.3%). E7 DISABLED. |
 | `downday_theoretical_put_credit` | `2.60` | MKT-035: Theoretical put credit ($) for stop calculation (v1.19.0, was $2.50) |
 | `base_entry_downday_callonly_pct` | `0.0057` | Base entries E1-E3 convert to call-only when SPX drops >= 0.57% from open |
 | `conditional_entry_times` | `["14:00"]` | Conditional entry times (v1.19.0: E6 at 14:00) |

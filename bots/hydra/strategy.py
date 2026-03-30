@@ -267,7 +267,7 @@ class HydraStrategy(MEICStrategy):
         # Must be set BEFORE super().__init__() because recovery uses it
         # Config stores in per-contract dollars ($0.10), multiply by 100 for total dollars ($10)
         strategy_cfg = config.get("strategy", {})
-        self.call_stop_buffer = strategy_cfg.get("call_stop_buffer", 0.10) * 100
+        self.call_stop_buffer = strategy_cfg.get("call_stop_buffer", 0.35) * 100
         # MKT-036: Asymmetric put stop buffer (wider buffer avoids false put stops)
         # If not set, falls back to call_stop_buffer for both sides
         put_buf = strategy_cfg.get("put_stop_buffer", None)
@@ -292,9 +292,9 @@ class HydraStrategy(MEICStrategy):
 
         # MKT-035: downday_theoretical_put_credit must be set BEFORE super().__init__()
         # because recovery (_reconstruct_entry_from_positions) uses it to compute call-only
-        # stop levels. Without this, the getattr fallback at line ~7361 uses $2.50 instead
-        # of the configured value (e.g. $2.60).
-        self.downday_theoretical_put_credit = float(strategy_cfg.get("downday_theoretical_put_credit", 2.50)) * 100
+        # stop levels. Without this, the getattr fallback in recovery uses $2.60 instead
+        # of the configured value.
+        self.downday_theoretical_put_credit = float(strategy_cfg.get("downday_theoretical_put_credit", 2.60)) * 100
 
         # MKT-035: _conditional_entry_times must be set BEFORE super().__init__()
         # because _parse_entry_times() (called from super) references it
@@ -424,7 +424,7 @@ class HydraStrategy(MEICStrategy):
         # entries skipped (no call hedge in high volatility). MKT-039 (v1.15.0) raised
         # from 18→25 and changed put-only stop from 2×credit to credit+buffer. The $1.55
         # put buffer prevents false stops; 2× multiplier was redundant.
-        self.put_only_max_vix = float(strategy_config.get("put_only_max_vix", 25.0))
+        self.put_only_max_vix = float(strategy_config.get("put_only_max_vix", 15.0))
         if self.one_sided_entries_enabled:
             logger.info(f"  One-sided entries: ENABLED (put-only allowed when VIX < {self.put_only_max_vix})")
         else:
@@ -435,12 +435,12 @@ class HydraStrategy(MEICStrategy):
         # lower min = less MKT-020 tightening = calls stay further OTM = safer.
         # Week 1 data: most entries at VIX<18 were put-only because calls can't produce
         # viable credit even at 43pt OTM. Don't force calls closer to ATM.
-        self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 0.60) * 100
+        self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 1.35) * 100
 
         # Separate put minimum credit
         # v1.17.0: Lowered to $2.10 — walk-forward backtest optimized.
         # MKT-029 fallback: $2.05, $2.07 floor (dynamic: min - $0.05, min - $0.10)
-        self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 2.50) * 100
+        self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 2.10) * 100
 
         # MKT-029: Configurable credit floors (hard floor after graduated fallback).
         # If not set, falls back to min - $0.10 (legacy behavior).
@@ -465,7 +465,7 @@ class HydraStrategy(MEICStrategy):
         # MKT-027: VIX-scaled spread width (continuous formula replaces step function)
         # Pushes long legs further OTM on high-VIX days → cheaper longs → higher net credit → more stop cushion
         self.spread_vix_multiplier = float(strategy_config.get("spread_vix_multiplier", 3.5))
-        self.max_spread_width = int(strategy_config.get("max_spread_width", 75))
+        self.max_spread_width = int(strategy_config.get("max_spread_width", 85))
 
         # MKT-028: Asymmetric spread widths — put longs cost 7× more than calls due to skew.
         # Wider put spreads push longs further OTM = cheaper.
@@ -508,7 +508,7 @@ class HydraStrategy(MEICStrategy):
         # Note: _conditional_entry_times and _base_entry_count are set BEFORE super().__init__()
         self.downday_callonly_enabled = strategy_config.get("downday_callonly_enabled", True)
         self.downday_threshold_pct = float(strategy_config.get("downday_threshold_pct", 0.003))  # 0.3%
-        self.downday_theoretical_put_credit = float(strategy_config.get("downday_theoretical_put_credit", 2.50)) * 100  # $250
+        self.downday_theoretical_put_credit = float(strategy_config.get("downday_theoretical_put_credit", 2.60)) * 100  # $260
         # Base-entry down-day call-only: base entries convert to call-only when SPX drops >= threshold from open.
         # None = disabled (full IC regardless of direction — backtest-confirmed optimal baseline).
         # Set to 0.004 (0.4%) to match backtest-optimized value.
@@ -2058,12 +2058,14 @@ class HydraStrategy(MEICStrategy):
         call_viable = estimated_call >= call_min
         put_viable = estimated_put >= put_min
 
-        # MKT-029: Graduated call fallback — try min-$0.05, then configurable floor.
+        # MKT-029: Graduated call fallback — try min-$0.05 (if above floor), then floor.
         # Floor from config (call_credit_floor, default $0.75) allows accepting lower
         # credits at far-OTM strikes. Keeps entries wider = safer cushion.
         if not call_viable:
             call_floor = self.call_credit_floor
-            for fallback in [call_min - 5, call_floor]:
+            # Only include intermediate step (min-$0.05) if it's above the floor
+            call_fallbacks = [f for f in [call_min - 5] if f > call_floor] + [call_floor]
+            for fallback in call_fallbacks:
                 if estimated_call >= fallback:
                     call_viable = True
                     logger.info(
@@ -2078,10 +2080,12 @@ class HydraStrategy(MEICStrategy):
                     )
                     break
 
-        # MKT-029: Graduated put fallback — try min-$0.05, then configurable floor.
+        # MKT-029: Graduated put fallback — try min-$0.05 (if above floor), then floor.
         if not put_viable:
             put_floor = self.put_credit_floor
-            for fallback in [put_min - 5, put_floor]:
+            # Only include intermediate step (min-$0.05) if it's above the floor
+            put_fallbacks = [f for f in [put_min - 5] if f > put_floor] + [put_floor]
+            for fallback in put_fallbacks:
                 if estimated_put >= fallback:
                     put_viable = True
                     logger.info(
@@ -3099,11 +3103,11 @@ class HydraStrategy(MEICStrategy):
                             f"placing CALL spread only"
                         )
 
-                        # Still check call credit viability (with MKT-029 fallback: min-$0.10)
+                        # Still check call credit viability (with MKT-029 configurable floor)
                         # NOTE: do NOT zero put strikes yet — _estimate_entry_credit needs real
                         # strike values to look up UICs (zeroing causes estimation to fail → skip)
                         _, _, est_call, _ = self._check_credit_gate(entry)
-                        call_floor = self.min_viable_credit_per_side - 10  # MKT-029 hard floor
+                        call_floor = self.call_credit_floor  # MKT-029 configurable floor ($0.75)
                         if est_call < call_floor:
                             logger.info(
                                 f"MKT-035: Entry #{entry_num} call credit "
@@ -3135,9 +3139,9 @@ class HydraStrategy(MEICStrategy):
                             f"placing PUT spread only"
                         )
 
-                        # Check put credit viability (MKT-029 floor: min-$0.10)
+                        # Check put credit viability (MKT-029 configurable floor)
                         _, _, _, est_put = self._check_credit_gate(entry)
-                        put_floor = self.min_viable_credit_put_side - 10  # MKT-029 hard floor
+                        put_floor = self.put_credit_floor  # MKT-029 configurable floor ($2.07)
                         if est_put < put_floor:
                             logger.info(
                                 f"Upday-035: Entry #{entry_num} put credit "
@@ -3173,9 +3177,9 @@ class HydraStrategy(MEICStrategy):
                                 f"placing CALL spread only"
                             )
 
-                            # Check call credit viability (MKT-029 floor: min-$0.10)
+                            # Check call credit viability (MKT-029 configurable floor)
                             _, _, est_call, _ = self._check_credit_gate(entry)
-                            call_floor = self.min_viable_credit_per_side - 10
+                            call_floor = self.call_credit_floor  # MKT-029 configurable floor ($0.75)
                             if est_call < call_floor:
                                 logger.info(
                                     f"Base-Downday: Entry #{entry_num} call credit "
@@ -3207,9 +3211,9 @@ class HydraStrategy(MEICStrategy):
                         f"placing CALL spread only"
                     )
 
-                    # Check call credit viability (with MKT-029 fallback: min-$0.10)
+                    # Check call credit viability (MKT-029 configurable floor)
                     _, _, est_call, _ = self._check_credit_gate(entry)
-                    call_floor = self.min_viable_credit_per_side - 10  # MKT-029 hard floor
+                    call_floor = self.call_credit_floor  # MKT-029 configurable floor ($0.75)
                     if est_call < call_floor:
                         logger.info(
                             f"MKT-038: Entry #{entry_num} call credit "
@@ -7539,8 +7543,8 @@ class HydraStrategy(MEICStrategy):
 
             # All call-only entries: call_credit + theoretical_put + buffer
             # Use getattr with default — recovery may run before HYDRA config is loaded
-            theoretical_put = getattr(self, 'downday_theoretical_put_credit', 250.0)
-            call_stop_buffer = getattr(self, 'call_stop_buffer', 10.0)
+            theoretical_put = getattr(self, 'downday_theoretical_put_credit', 260.0)
+            call_stop_buffer = getattr(self, 'call_stop_buffer', 35.0)
             base_stop = credit + theoretical_put
             override = getattr(entry, 'override_reason', None) or "mkt-040"
             logger.info(

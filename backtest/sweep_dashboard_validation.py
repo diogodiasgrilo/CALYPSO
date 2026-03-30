@@ -87,7 +87,7 @@ JITTER_PARAMS = [
     ("base_entry_downday_callonly_pct", 0.57, 0.10),
     ("spread_vix_multiplier", 5.3, 0.10),
     ("upday_threshold_pct", 0.48, 0.10),
-    ("max_spread_width", 83, 0.10),
+    ("max_spread_width", 85, 0.10),
     ("whipsaw_range_skip_mult", 1.50, 0.10),
 ]
 

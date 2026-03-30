@@ -26,7 +26,7 @@ Conditional Entry Trigger (MKT-035 / Upday-035):
 Version History:
 - 1.19.0 (2026-03-29): Walk-forward backtest convergence. 3 base entries (was 5) at 10:15, 10:45, 11:15
   (E4/E5 dropped — negative EV in backtest). E6 upday put-only ENABLED at 14:00 (threshold 0.48%).
-  E7 DISABLED. Spread width: VIX x 5.3, floor 25pt, cap 83pt. Credit gates: call $1.35, put $2.10,
+  E7 DISABLED. Spread width: VIX x 5.3, floor 25pt, cap 85pt. Credit gates: call $1.35, put $2.10,
   call_floor $0.75, put_floor $2.07. Stop buffers: call_stop_buffer $0.35 (renamed from stop_buffer),
   put_stop_buffer $1.55. FOMC skip FALSE (fomc_announcement_skip=false), T+1 call-only TRUE.
   Downday threshold 0.57%, theo put $2.60. Upday threshold 0.48%. Max spread width 83pt.
