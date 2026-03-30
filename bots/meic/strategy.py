@@ -2456,15 +2456,21 @@ class MEICStrategy:
                 short_call_uic = self._get_option_uic(entry.short_call_strike, "Call", expiry)
                 long_call_uic = self._get_option_uic(entry.long_call_strike, "Call", expiry)
                 if not short_call_uic or not long_call_uic:
+                    # Call UICs missing — if this is a full IC, put estimation can still
+                    # proceed so MKT-032/039 can convert to put-only
                     if need_put:
-                        logger.warning("Could not get UICs for call legs - skipping credit estimation")
+                        logger.warning(
+                            "Could not get UICs for call legs — will estimate put side only"
+                        )
+                        # Don't return yet — let put estimation run below
+                    else:
+                        # Call-only: call UICs missing = can't estimate
+                        logger.warning("Could not get UICs for call legs")
                         return (0.0, 0.0)
-                    # Call-only: call UICs missing = can't estimate
-                    logger.warning("Could not get UICs for call legs")
-                    return (0.0, 0.0)
-                short_call_quote = self.client.get_quote(short_call_uic, asset_type="StockIndexOption")
-                long_call_quote = self.client.get_quote(long_call_uic, asset_type="StockIndexOption")
-                estimated_call_credit = (get_mid(short_call_quote) - get_mid(long_call_quote)) * 100
+                else:
+                    short_call_quote = self.client.get_quote(short_call_uic, asset_type="StockIndexOption")
+                    long_call_quote = self.client.get_quote(long_call_uic, asset_type="StockIndexOption")
+                    estimated_call_credit = (get_mid(short_call_quote) - get_mid(long_call_quote)) * 100
 
             # Get UICs and quotes for put side
             estimated_put_credit = 0.0
@@ -2472,10 +2478,15 @@ class MEICStrategy:
                 short_put_uic = self._get_option_uic(entry.short_put_strike, "Put", expiry)
                 long_put_uic = self._get_option_uic(entry.long_put_strike, "Put", expiry)
                 if not short_put_uic or not long_put_uic:
-                    if need_call:
-                        logger.warning("Could not get UICs for put legs - skipping credit estimation")
-                        return (0.0, 0.0)
-                    # Put-only: put UICs missing = can't estimate
+                    if need_call and estimated_call_credit > 0:
+                        # Full IC but put UICs missing — return call estimate so MKT-040
+                        # can convert to call-only instead of failing entirely
+                        logger.warning(
+                            f"Could not get UICs for put legs (strikes too far OTM?) — "
+                            f"returning call estimate only (${estimated_call_credit/100:.2f})"
+                        )
+                        return (estimated_call_credit, 0.0)
+                    # Either put-only entry or call also failed — can't estimate
                     logger.warning("Could not get UICs for put legs")
                     return (0.0, 0.0)
                 short_put_quote = self.client.get_quote(short_put_uic, asset_type="StockIndexOption")
