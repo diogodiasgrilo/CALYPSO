@@ -5014,10 +5014,11 @@ class HydraStrategy(MEICStrategy):
                 self.base_entry_downday_callonly_pct is not None
                 and change_pct <= -(self.base_entry_downday_callonly_pct * 100)
             )
+            base_thr = self.base_entry_downday_callonly_pct * 100 if self.base_entry_downday_callonly_pct else 0
             if base_downday_active:
-                base_label = f"E1-E{base_count}: call-only"
+                base_label = f"E1-E{base_count}: call-only (>{base_thr:.2f}% drop)"
             else:
-                base_label = f"E1-E{base_count}: full IC"
+                base_label = f"E1-E{base_count}: full IC (<{base_thr:.2f}% drop)"
 
             # Conditional entry eligibility
             cond_parts = []

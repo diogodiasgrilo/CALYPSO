@@ -2484,10 +2484,8 @@ class MEICStrategy:
 
             logger.debug(
                 f"Credit estimation for Entry #{entry.entry_number}: "
-                f"Call spread ${estimated_call_credit:.2f} "
-                f"(short ${short_call_mid:.2f} - long ${long_call_mid:.2f}), "
-                f"Put spread ${estimated_put_credit:.2f} "
-                f"(short ${short_put_mid:.2f} - long ${long_put_mid:.2f})"
+                f"Call spread ${estimated_call_credit:.2f}, "
+                f"Put spread ${estimated_put_credit:.2f}"
             )
 
             return (estimated_call_credit, estimated_put_credit)
