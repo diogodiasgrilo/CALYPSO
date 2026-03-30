@@ -2432,21 +2432,12 @@ class MEICStrategy:
             return (0.0, 0.0)
 
         try:
-            # Get UICs for all options
-            short_call_uic = self._get_option_uic(entry.short_call_strike, "Call", expiry)
-            long_call_uic = self._get_option_uic(entry.long_call_strike, "Call", expiry)
-            short_put_uic = self._get_option_uic(entry.short_put_strike, "Put", expiry)
-            long_put_uic = self._get_option_uic(entry.long_put_strike, "Put", expiry)
-
-            if not all([short_call_uic, long_call_uic, short_put_uic, long_put_uic]):
-                logger.warning("Could not get UICs for all legs - skipping credit estimation")
-                return (0.0, 0.0)
-
-            # Get quotes for all options
-            short_call_quote = self.client.get_quote(short_call_uic, asset_type="StockIndexOption")
-            long_call_quote = self.client.get_quote(long_call_uic, asset_type="StockIndexOption")
-            short_put_quote = self.client.get_quote(short_put_uic, asset_type="StockIndexOption")
-            long_put_quote = self.client.get_quote(long_put_uic, asset_type="StockIndexOption")
+            # Determine which sides to estimate based on entry type overrides.
+            # When call_only=True (base-downday, MKT-035, MKT-038), skip put UICs entirely
+            # — put strikes may be too far OTM for Saxo's chain (e.g. 315pts at VIX 30).
+            # When put_only=True (Upday-035), skip call UICs.
+            need_call = not getattr(entry, "put_only", False)
+            need_put = not getattr(entry, "call_only", False)
 
             def get_mid(quote) -> float:
                 """Extract mid price from quote."""
@@ -2459,15 +2450,37 @@ class MEICStrategy:
                     return (bid + ask) / 2
                 return 0.0
 
-            short_call_mid = get_mid(short_call_quote)
-            long_call_mid = get_mid(long_call_quote)
-            short_put_mid = get_mid(short_put_quote)
-            long_put_mid = get_mid(long_put_quote)
+            # Get UICs and quotes for call side
+            estimated_call_credit = 0.0
+            if need_call:
+                short_call_uic = self._get_option_uic(entry.short_call_strike, "Call", expiry)
+                long_call_uic = self._get_option_uic(entry.long_call_strike, "Call", expiry)
+                if not short_call_uic or not long_call_uic:
+                    if need_put:
+                        logger.warning("Could not get UICs for call legs - skipping credit estimation")
+                        return (0.0, 0.0)
+                    # Call-only: call UICs missing = can't estimate
+                    logger.warning("Could not get UICs for call legs")
+                    return (0.0, 0.0)
+                short_call_quote = self.client.get_quote(short_call_uic, asset_type="StockIndexOption")
+                long_call_quote = self.client.get_quote(long_call_uic, asset_type="StockIndexOption")
+                estimated_call_credit = (get_mid(short_call_quote) - get_mid(long_call_quote)) * 100
 
-            # Estimated net credit per side (in total dollars, × 100 multiplier)
-            # Credit = short - long (we collect on short, pay on long)
-            estimated_call_credit = (short_call_mid - long_call_mid) * 100
-            estimated_put_credit = (short_put_mid - long_put_mid) * 100
+            # Get UICs and quotes for put side
+            estimated_put_credit = 0.0
+            if need_put:
+                short_put_uic = self._get_option_uic(entry.short_put_strike, "Put", expiry)
+                long_put_uic = self._get_option_uic(entry.long_put_strike, "Put", expiry)
+                if not short_put_uic or not long_put_uic:
+                    if need_call:
+                        logger.warning("Could not get UICs for put legs - skipping credit estimation")
+                        return (0.0, 0.0)
+                    # Put-only: put UICs missing = can't estimate
+                    logger.warning("Could not get UICs for put legs")
+                    return (0.0, 0.0)
+                short_put_quote = self.client.get_quote(short_put_uic, asset_type="StockIndexOption")
+                long_put_quote = self.client.get_quote(long_put_uic, asset_type="StockIndexOption")
+                estimated_put_credit = (get_mid(short_put_quote) - get_mid(long_put_quote)) * 100
 
             logger.debug(
                 f"Credit estimation for Entry #{entry.entry_number}: "
