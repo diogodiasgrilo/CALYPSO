@@ -257,7 +257,7 @@ def live_config() -> BacktestConfig:
         spread_vix_multiplier=5.3,            # 2D joint sweep optimal (5.3×/83pt, Sharpe 2.881, 0% breach)
         call_min_spread_width=25,
         put_min_spread_width=25,
-        max_spread_width=83,                  # 2D joint sweep optimal (tied #1 at 2.881, ZERO $35K breaches)
+        max_spread_width=85,                  # 2D joint sweep optimal was 83, rounded to 85 (must be multiple of 5 for Saxo strikes)
         min_call_credit=1.35,                 # convergence round 4 (was $1.30, +0.097 Sharpe)
         min_put_credit=2.10,                  # convergence round 4 (was $2.13, +0.127 Sharpe)
         call_credit_floor=0.75,               # 1-min edge sweep optimal 2026-03-28 (was $0.85, Sharpe 1.988)
