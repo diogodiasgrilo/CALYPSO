@@ -15,10 +15,11 @@ export function EntryGrid() {
     entries.find((e) => e.entry_number === i + 1) ?? null
   );
 
-  // Conditional entry slots — only show slots that have scheduled times (E7 disabled = not in schedule)
+  // Conditional entry slots — entry numbers start after base count (not hardcoded 6)
+  // VIX regime can cap base entries (e.g., 2 instead of 3), shifting conditional numbers
   const condCount = schedule?.conditional?.length ?? 0;
   const conditionalSlots = Array.from({ length: condCount }, (_, i) =>
-    entries.find((e) => e.entry_number === 6 + i) ?? null
+    entries.find((e) => e.entry_number === baseCount + 1 + i) ?? null
   );
 
   return (
@@ -54,7 +55,7 @@ export function EntryGrid() {
               ) : (
                 <PendingSlot
                   key={`cond-${i}`}
-                  entryNum={6 + i}
+                  entryNum={baseCount + 1 + i}
                   scheduledTime={schedule?.conditional?.[i]}
                   isConditional
                 />
@@ -102,7 +103,7 @@ function PendingSlot({
   const label = past
     ? isConditional ? "not triggered" : "window passed"
     : isConditional
-      ? (entryNum === 6 ? "put only · scheduled" : "call only · scheduled")
+      ? "conditional · scheduled"
       : "scheduled";
 
   return (

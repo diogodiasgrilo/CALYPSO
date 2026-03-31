@@ -37,6 +37,12 @@ export function EntryTimeline() {
   const { hydraState } = useHydraStore();
   const entries = hydraState?.entries ?? [];
   const showConditional = useShowConditionalEntries();
+  const schedule = hydraState?.entry_schedule;
+
+  // Read times from state schedule (falls back to hardcoded if no schedule)
+  const baseTimes = schedule?.base ?? BASE_ENTRY_TIMES;
+  const condTimes = schedule?.conditional ?? CONDITIONAL_ENTRY_TIMES;
+  const baseCount = baseTimes.length;
 
   return (
     <div>
@@ -56,8 +62,8 @@ export function EntryTimeline() {
             16:00
           </span>
 
-          {/* Base entry dots (E1-E3) */}
-          {BASE_ENTRY_TIMES.map((time, i) => {
+          {/* Base entry dots — read from state schedule */}
+          {baseTimes.map((time, i) => {
             const minutes = timeToMinutes(time);
             const pct = ((minutes - TIMELINE_START) / TIMELINE_RANGE) * 100;
             const entryNum = i + 1;
@@ -87,11 +93,11 @@ export function EntryTimeline() {
             );
           })}
 
-          {/* Conditional entry dots (E6-E7) — hidden when disabled in config */}
-          {showConditional && CONDITIONAL_ENTRY_TIMES.map((time, i) => {
+          {/* Conditional entry dots — entry numbers follow base count dynamically */}
+          {showConditional && condTimes.map((time, i) => {
             const minutes = timeToMinutes(time);
             const pct = ((minutes - TIMELINE_START) / TIMELINE_RANGE) * 100;
-            const entryNum = 6 + i;
+            const entryNum = baseCount + 1 + i;
             const entry = entries.find((e) => e.entry_number === entryNum);
             const status = getStatus(entry);
             const color = statusColor(status);
@@ -112,7 +118,7 @@ export function EntryTimeline() {
                     backgroundColor: isPending ? "transparent" : color,
                     border: `2px ${isPending ? "dashed" : "solid"} ${isPending ? colors.textDim : color}`,
                   }}
-                  title={`E${entryNum} ${time} — ${entryNum === 6 ? "Upday-035 put-only" : "MKT-035 call-only"} — ${status}`}
+                  title={`E${entryNum} ${time} — conditional — ${status}`}
                 />
                 <span className="text-[9px] mt-1" style={{ color: isPending ? colors.textDim : colors.textSecondary }}>
                   {time}
