@@ -829,6 +829,23 @@ class HydraStrategy(MEICStrategy):
             logger.info(f"HYDRA early close schedule: {[t.strftime('%H:%M:%S') for t in self.entry_times]}")
 
     # =========================================================================
+    # SKIP WEEKDAYS — override idle state to respect DAILY_COMPLETE on restart
+    # =========================================================================
+
+    def _handle_idle_state(self) -> str:
+        """Override: prevent trading on skip days even after restart."""
+        result = super()._handle_idle_state()
+        # If base class transitioned to WAITING_FIRST_ENTRY, check skip days
+        if self.state == MEICState.WAITING_FIRST_ENTRY and self.skip_weekdays:
+            today_dow = get_us_market_time().weekday()
+            if today_dow in self.skip_weekdays:
+                day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+                logger.info(f"Skip weekday: {day_names.get(today_dow, str(today_dow))} — overriding to DAILY_COMPLETE")
+                self.state = MEICState.DAILY_COMPLETE
+                return "Skip day — no trading today"
+        return result
+
+    # =========================================================================
     # ENTRY GATING (MKT-021 + MKT-031)
     # =========================================================================
 
