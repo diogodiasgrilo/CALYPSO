@@ -843,6 +843,9 @@ class HydraStrategy(MEICStrategy):
         conditions (post-spike calm + momentum pause). If score >= threshold,
         enter early. Otherwise, enter at scheduled time as usual.
         """
+        # Apply VIX regime overrides once per day (after VIX is known)
+        self._apply_vix_regime_overrides()
+
         # MKT-021: Pre-entry ROC gate (only when MKT-018 early close is enabled)
         if self._roc_gate_triggered:
             return False
@@ -968,9 +971,6 @@ class HydraStrategy(MEICStrategy):
         loop calls base _is_entry_time() which checks 11:15 <= 11:07 → False →
         retries abort immediately.
         """
-        # Apply VIX regime overrides once per day (after VIX is known)
-        self._apply_vix_regime_overrides()
-
         if not self.smart_entry_enabled:
             return super()._is_entry_time()
         if self._next_entry_index >= len(self.entry_times):
