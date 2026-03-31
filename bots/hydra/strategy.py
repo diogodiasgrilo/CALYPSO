@@ -345,6 +345,11 @@ class HydraStrategy(MEICStrategy):
         if self.whipsaw_range_skip_mult is not None:
             logger.info(f"  Anti-whipsaw filter: ENABLED — skip entry if range > {self.whipsaw_range_skip_mult}× expected move")
 
+        # Day-of-week max entries: MUST be set BEFORE super().__init__() because
+        # _parse_entry_times() (called from super) references it
+        _dow_max_raw = strategy_cfg.get("dow_max_entries", {})
+        self.dow_max_entries = {int(k): int(v) for k, v in _dow_max_raw.items()} if _dow_max_raw else {}
+
         # Dashboard: server-side P&L history (persists across page refreshes / clients)
         # Each element: {"time": "HH:MM", "pnl": float}
         # Accumulated each heartbeat, one point per minute, reset daily
@@ -558,6 +563,33 @@ class HydraStrategy(MEICStrategy):
             f"  Stop confirmation (MKT-036): {'ENABLED' if self.stop_confirmation_enabled else 'DISABLED'} "
             f"({self.stop_confirmation_seconds}s window)"
         )
+
+        # Skip weekdays: don't trade on specific days (0=Mon..4=Fri)
+        self.skip_weekdays = strategy_config.get("skip_weekdays", [])
+        if self.skip_weekdays:
+            day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+            skip_names = [day_names.get(d, str(d)) for d in self.skip_weekdays]
+            logger.info(f"  Skip weekdays: {', '.join(skip_names)}")
+
+        # Day-of-week max entries logging (initialized before super().__init__)
+        if self.dow_max_entries:
+            day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+            caps = [f"{day_names.get(d, str(d))}={v}e" for d, v in self.dow_max_entries.items()]
+            logger.info(f"  Day-of-week entry caps: {', '.join(caps)}")
+
+        # VIX regime: override parameters based on VIX at open
+        _vix_regime = strategy_config.get("vix_regime", {})
+        self.vix_regime_enabled = _vix_regime.get("enabled", False)
+        self.vix_regime_breakpoints = _vix_regime.get("breakpoints", [14.0, 20.0, 30.0])
+        self.vix_regime_max_entries = _vix_regime.get("max_entries", [None, None, None, None])
+        self.vix_regime_put_stop_buffer = _vix_regime.get("put_stop_buffer", [None, None, None, None])
+        self.vix_regime_call_stop_buffer = _vix_regime.get("call_stop_buffer", [None, None, None, None])
+        self._vix_regime_applied = False  # set True after first application
+        if self.vix_regime_enabled:
+            logger.info(
+                f"  VIX regime: ENABLED — breakpoints {self.vix_regime_breakpoints}, "
+                f"max_entries {self.vix_regime_max_entries}"
+            )
 
         # MKT-031: Scouting state (in-memory, no persistence needed)
         self._scouting_active = False
@@ -776,6 +808,16 @@ class HydraStrategy(MEICStrategy):
             cond_str = ", ".join(t.strftime('%H:%M') for t in self._conditional_entry_times)
             logger.info(f"MKT-035: {len(self._conditional_entry_times)} conditional entries appended: [{cond_str}]")
 
+        # Day-of-week max entries cap (e.g., Fri=2e)
+        if self.dow_max_entries:
+            today_dow = get_us_market_time().weekday()
+            dow_cap = self.dow_max_entries.get(today_dow)
+            if dow_cap is not None and self._base_entry_count > dow_cap:
+                self.entry_times = self.entry_times[:dow_cap] + self.entry_times[self._base_entry_count:]
+                self._base_entry_count = dow_cap
+                day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+                logger.info(f"  DoW cap: {day_names.get(today_dow, str(today_dow))} capped to {dow_cap} base entries")
+
         if is_early_close_day():
             early_cutoff = dt_time(12, 30)  # Allows entries up to 12:15 (12:14:30 with MKT-034 offset)
             first_entry = self.entry_times[0] if self.entry_times else dt_time(10, 15)
@@ -926,6 +968,9 @@ class HydraStrategy(MEICStrategy):
         loop calls base _is_entry_time() which checks 11:15 <= 11:07 → False →
         retries abort immediately.
         """
+        # Apply VIX regime overrides once per day (after VIX is known)
+        self._apply_vix_regime_overrides()
+
         if not self.smart_entry_enabled:
             return super()._is_entry_time()
         if self._next_entry_index >= len(self.entry_times):
@@ -7064,10 +7109,62 @@ class HydraStrategy(MEICStrategy):
         # POS-004: Reset settlement reconciliation flag for new day
         self._settlement_reconciliation_complete = False
 
-        self.state = MEICState.IDLE
+        # Skip weekdays: if today is a skip day, go straight to DAILY_COMPLETE
+        today_dow = get_us_market_time().weekday()
+        if today_dow in self.skip_weekdays:
+            day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+            logger.info(f"Skip weekday: {day_names.get(today_dow, str(today_dow))} — no trading today")
+            self.state = MEICState.DAILY_COMPLETE
+        else:
+            self.state = MEICState.IDLE
+
+        # VIX regime: reset applied flag so it re-applies with today's VIX
+        self._vix_regime_applied = False
 
         # Save clean state to disk
         self._save_state_to_disk()
+
+    def _apply_vix_regime_overrides(self):
+        """Apply VIX regime parameter overrides based on current VIX level."""
+        if not self.vix_regime_enabled or self._vix_regime_applied:
+            return
+        if self.current_vix <= 0:
+            return  # VIX not available yet
+
+        vix = self.current_vix
+        # Determine regime bin
+        regime = len(self.vix_regime_breakpoints)  # default: above all breakpoints
+        for i, bp in enumerate(self.vix_regime_breakpoints):
+            if vix < bp:
+                regime = i
+                break
+
+        # Apply max_entries cap
+        max_entries = self.vix_regime_max_entries
+        if regime < len(max_entries) and max_entries[regime] is not None:
+            cap = max_entries[regime]
+            if self._base_entry_count > cap:
+                # Truncate base entries, keep conditional entries
+                base_times = self.entry_times[:self._base_entry_count]
+                cond_times = self.entry_times[self._base_entry_count:]
+                self.entry_times = base_times[:cap] + cond_times
+                self._base_entry_count = cap
+                logger.info(f"VIX regime: VIX={vix:.1f}, regime={regime}, capped to {cap} base entries")
+
+        # Apply stop buffer overrides (config values are per-contract dollars, multiply by 100)
+        psb = self.vix_regime_put_stop_buffer
+        if regime < len(psb) and psb[regime] is not None:
+            old = self.put_stop_buffer
+            self.put_stop_buffer = psb[regime] * 100
+            logger.info(f"VIX regime: put_stop_buffer ${old/100:.2f} → ${self.put_stop_buffer/100:.2f}")
+        csb = self.vix_regime_call_stop_buffer
+        if regime < len(csb) and csb[regime] is not None:
+            old = self.call_stop_buffer
+            self.call_stop_buffer = csb[regime] * 100
+            logger.info(f"VIX regime: call_stop_buffer ${old/100:.2f} → ${self.call_stop_buffer/100:.2f}")
+
+        self._vix_regime_applied = True
+        logger.info(f"VIX regime applied: VIX={vix:.1f}, regime={regime}/{len(self.vix_regime_breakpoints)}")
 
     def _process_expired_credits(self) -> float:
         """

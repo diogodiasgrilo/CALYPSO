@@ -6,7 +6,7 @@ Change values to run what-if scenarios against historical data.
 """
 from dataclasses import dataclass, field
 from datetime import date, time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -58,7 +58,7 @@ class BacktestConfig:
     spread_vix_multiplier: float = 4.0
     call_min_spread_width: int = 25
     put_min_spread_width: int = 25
-    max_spread_width: int = 100
+    max_spread_width: int = 110
 
     # ── Credit gate (MKT-011) ─────────────────────────────────────────────────
     min_call_credit: float = 0.60           # primary minimum per call side ($)
@@ -176,6 +176,42 @@ class BacktestConfig:
     # None = disabled. Example: 1.5 = skip if range > 1.5× expected daily move.
     whipsaw_range_skip_mult: Optional[float] = 1.50  # 1-min fine-grain optimal 2026-03-29 (Sharpe 3.282)
 
+    # ── VIX-regime adaptive parameters ──────────────────────────────────────
+    # Override parameters based on VIX at open.  breakpoints define thresholds;
+    # override lists have len(breakpoints)+1 entries (one per regime bin).
+    # None in an override list = use the base config value for that regime.
+    # Regime bins: [<bp[0]], [bp[0]..bp[1]), [bp[1]..bp[2]), [>=bp[-1]]
+    vix_regime_enabled: bool = False
+    vix_regime_breakpoints: List[float] = field(default_factory=lambda: [14.0, 20.0, 30.0])
+    vix_regime_max_entries: List[Optional[int]] = field(default_factory=lambda: [None, None, None, None])
+    vix_regime_put_stop_buffer: List[Optional[float]] = field(default_factory=lambda: [None, None, None, None])
+    vix_regime_call_stop_buffer: List[Optional[float]] = field(default_factory=lambda: [None, None, None, None])
+    vix_regime_min_put_credit: List[Optional[float]] = field(default_factory=lambda: [None, None, None, None])
+    vix_regime_min_call_credit: List[Optional[float]] = field(default_factory=lambda: [None, None, None, None])
+
+    # ── Day-of-week filter ──────────────────────────────────────────────────
+    # skip_weekdays: skip these days entirely (0=Mon .. 4=Fri).
+    # dow_max_entries: cap base entry count per weekday, e.g. {0: 2} = max 2 Mon.
+    skip_weekdays: List[int] = field(default_factory=list)
+    dow_max_entries: Dict[int, int] = field(default_factory=dict)
+
+    # ── Replacement entries after stops ─────────────────────────────────────
+    # After a side is stopped, re-enter the same side further OTM.
+    replacement_entry_enabled: bool = False
+    replacement_entry_max_per_day: int = 2          # max replacements per day
+    replacement_entry_delay_minutes: int = 5        # wait N min after stop
+    replacement_entry_extra_otm: int = 10           # place N pts further OTM
+    replacement_entry_cutoff: str = "14:00"         # no re-entry after this time
+
+    # ── Trailing stop / profit lock ─────────────────────────────────────────
+    # When a side's spread value (cost-to-close) decays to trigger_decay × credit,
+    # tighten that side's stop to credit + trailing buffer (instead of original buffer).
+    # Lower buffer = tighter stop = locks in more profit but risks early stop-out.
+    trailing_stop_enabled: bool = False
+    trailing_stop_trigger_decay: float = 0.50       # trigger at 50% of per-side credit
+    trailing_stop_call_buffer: float = 10.0         # $ — tightened call stop buffer (vs base $35)
+    trailing_stop_put_buffer: float = 50.0          # $ — tightened put stop buffer (vs base $155)
+
     # ── Real Greeks mode ─────────────────────────────────────────────────────
     # When True (strict mode): use actual per-strike delta from ThetaData Greeks
     # files to determine the 8-delta OTM distance instead of the VIX formula.
@@ -224,6 +260,15 @@ class BacktestConfig:
             result.append((h * 3600 + m * 60) * 1000)
         return result
 
+    def replacement_cutoff_ms(self) -> int:
+        """Convert replacement_entry_cutoff to ms-of-day."""
+        h, m = map(int, self.replacement_entry_cutoff.split(":"))
+        return (h * 3600 + m * 60) * 1000
+
+    def replacement_delay_ms(self) -> int:
+        """Convert replacement_entry_delay_minutes to ms."""
+        return self.replacement_entry_delay_minutes * 60 * 1000
+
 
 # ── Preset configs ────────────────────────────────────────────────────────────
 
@@ -250,18 +295,18 @@ def live_config() -> BacktestConfig:
         conditional_upday_e6_enabled=True,    # ENABLED on 1-min (2026-03-28: Sharpe 2.003 vs 1.988 OFF, MaxDD $7,855)
         conditional_upday_e7_enabled=False,
         downday_threshold_pct=0.3,
-        upday_threshold_pct=0.48,             # 1-min fine-grain optimal 2026-03-29 (was 0.60%, Sharpe 2.361)
+        upday_threshold_pct=0.20,             # reconvergence 2026-03-31 (was 0.48%, Sharpe 2.360)
         fomc_t1_callonly_enabled=True,
         call_starting_otm_multiplier=3.5,
         put_starting_otm_multiplier=4.0,
-        spread_vix_multiplier=5.3,            # 2D joint sweep optimal (5.3×/83pt, Sharpe 2.881, 0% breach)
+        spread_vix_multiplier=6.0,            # reconvergence 2026-03-31 (was 5.3, Sharpe 2.360)
         call_min_spread_width=25,
         put_min_spread_width=25,
-        max_spread_width=85,                  # 2D joint sweep optimal was 83, rounded to 85 (must be multiple of 5 for Saxo strikes)
+        max_spread_width=110,                 # fine-grain sweep optimal: plateau 110-200 all ~2.28-2.38 Sharpe, pick min (least margin)
         min_call_credit=1.35,                 # convergence round 4 (was $1.30, +0.097 Sharpe)
         min_put_credit=2.10,                  # convergence round 4 (was $2.13, +0.127 Sharpe)
         call_credit_floor=0.75,               # 1-min edge sweep optimal 2026-03-28 (was $0.85, Sharpe 1.988)
-        put_credit_floor=2.07,                # convergence round 4 (was $1.98, +0.031 Sharpe)
+        put_credit_floor=2.00,                # reconvergence 2026-03-31 (was $2.07, Sharpe 2.360)
         call_stop_buffer=35.0,                # $0.35 × 100, convergence round 4 (was $0.26, +0.056 Sharpe)
         put_stop_buffer=155.0,                # $1.55 × 100, 1-min confirmed 2026-03-28
         one_sided_entries_enabled=True,
@@ -270,7 +315,7 @@ def live_config() -> BacktestConfig:
         downday_theoretical_put_credit=260.0, # $2.60 × 100, convergence round 4 (was $2.90, +0.029 Sharpe)
         base_entry_downday_callonly_pct=0.57, # 1-min fine-grain optimal 2026-03-29 (was 0.60%, Sharpe 2.371)
         fomc_announcement_skip=False,       # 1-min test: skip costs -$5,855 P&L, -0.096 Sharpe (2026-03-29)
-        whipsaw_range_skip_mult=1.50,       # 1-min fine-grain optimal 2026-03-29 (Sharpe 3.282)
+        whipsaw_range_skip_mult=1.75,       # reconvergence 2026-03-31 (was 1.50, Sharpe 2.360)
     )
 
 

@@ -16,6 +16,7 @@ Simulates HYDRA's exact entry logic against historical ThetaData:
 from __future__ import annotations
 
 import math
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -340,6 +341,8 @@ def _simulate_entry(
     is_upday_conditional: bool = False,  # upday put-only trigger enabled for this slot
     day_early_exit_ms=_USE_CFG_EARLY_EXIT,  # override from simulate_day for VIX-gated exit
     greeks_df: Optional[pd.DataFrame] = None,  # real Greeks data (None = use VIX formula)
+    force_entry_type: Optional[str] = None,  # "call_only"|"put_only" for replacement entries
+    extra_min_otm: int = 0,  # added to min OTM distances (replacement entries)
 ) -> EntryResult:
 
     result = EntryResult(entry_num=entry_num, entry_time_ms=entry_ms)
@@ -386,7 +389,16 @@ def _simulate_entry(
     force_put_only = False
     market_open_ms = 34_200_000  # 9:30 AM ET in ms
 
-    if is_fomc_t1 and cfg.fomc_t1_callonly_enabled:
+    # ── Forced entry type (replacement entries bypass all directional logic)
+    if force_entry_type == "call_only":
+        force_call_only = True
+        result.entry_type = "call_only"
+        result.skip_reason = "replacement"
+    elif force_entry_type == "put_only":
+        force_put_only = True
+        result.entry_type = "put_only"
+        result.skip_reason = "replacement"
+    elif is_fomc_t1 and cfg.fomc_t1_callonly_enabled:
         force_call_only = True
         result.entry_type = "call_only"
         result.skip_reason = "mkt-038"
@@ -503,6 +515,10 @@ def _simulate_entry(
     result.call_spread_width = call_spread_width
     result.put_spread_width = put_spread_width
 
+    # Effective min OTM distances (increased for replacement entries)
+    eff_min_call = cfg.min_call_otm_distance + extra_min_otm
+    eff_min_put = cfg.min_put_otm_distance + extra_min_otm
+
     # ── Credit gate + progressive tightening (MKT-011/020/022) ──────────
     call_short = call_long = None
     call_credit = 0.0
@@ -514,7 +530,7 @@ def _simulate_entry(
         put_starting_otm_original = put_starting_otm
         put_short, put_long, put_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "put", put_spread_width,
-            put_starting_otm, cfg.min_put_otm_distance,
+            put_starting_otm, eff_min_put,
             cfg.put_credit_floor * 100, actual_ms
         )
 
@@ -522,17 +538,17 @@ def _simulate_entry(
         # Scan for viable call strike
         call_short, call_long, call_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "call", call_spread_width,
-            call_starting_otm, cfg.min_call_otm_distance,
+            call_starting_otm, eff_min_call,
             cfg.min_call_credit * 100, actual_ms
         )
         # Call tightening retries (mirror of MKT-040 for put side)
         if call_short is None and getattr(cfg, 'call_tighten_retries', 0) > 0:
             call_starting_otm_retry = call_starting_otm
             for _ in range(cfg.call_tighten_retries):
-                call_starting_otm_retry = max(cfg.min_call_otm_distance, call_starting_otm_retry - cfg.call_tighten_step)
+                call_starting_otm_retry = max(eff_min_call, call_starting_otm_retry - cfg.call_tighten_step)
                 call_short, call_long, call_credit = _scan_for_viable_strike(
                     lookup, spx_rounded, "call", call_spread_width,
-                    call_starting_otm_retry, cfg.min_call_otm_distance,
+                    call_starting_otm_retry, eff_min_call,
                     cfg.min_call_credit * 100, actual_ms
                 )
                 if call_short is not None:
@@ -541,7 +557,7 @@ def _simulate_entry(
         if call_short is None and cfg.call_credit_floor > 0:
             call_short, call_long, call_credit = _scan_for_viable_strike(
                 lookup, spx_rounded, "call", call_spread_width,
-                call_starting_otm, cfg.min_call_otm_distance,
+                call_starting_otm, eff_min_call,
                 cfg.call_credit_floor * 100, actual_ms
             )
 
@@ -549,16 +565,16 @@ def _simulate_entry(
         put_starting_otm_original = put_starting_otm
         put_short, put_long, put_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "put", put_spread_width,
-            put_starting_otm, cfg.min_put_otm_distance,
+            put_starting_otm, eff_min_put,
             cfg.min_put_credit * 100, actual_ms
         )
         # MKT-040: put non-viable → tighten retries (5pt closer each time) before calling it call-only
         if put_short is None:
             for _ in range(cfg.put_tighten_retries):
-                put_starting_otm = max(cfg.min_put_otm_distance, put_starting_otm - cfg.put_tighten_step)
+                put_starting_otm = max(eff_min_put, put_starting_otm - cfg.put_tighten_step)
                 put_short, put_long, put_credit = _scan_for_viable_strike(
                     lookup, spx_rounded, "put", put_spread_width,
-                    put_starting_otm, cfg.min_put_otm_distance,
+                    put_starting_otm, eff_min_put,
                     cfg.min_put_credit * 100, actual_ms
                 )
                 if put_short is not None:
@@ -567,7 +583,7 @@ def _simulate_entry(
         if put_short is None and cfg.put_credit_floor > 0:
             put_short, put_long, put_credit = _scan_for_viable_strike(
                 lookup, spx_rounded, "put", put_spread_width,
-                put_starting_otm_original, cfg.min_put_otm_distance,
+                put_starting_otm_original, eff_min_put,
                 cfg.put_credit_floor * 100, actual_ms
             )
 
@@ -575,7 +591,7 @@ def _simulate_entry(
         # Forced call-only — only scan call side
         call_short, call_long, call_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "call", call_spread_width,
-            call_starting_otm, cfg.min_call_otm_distance,
+            call_starting_otm, eff_min_call,
             cfg.call_credit_floor * 100, actual_ms
         )
 
@@ -673,6 +689,14 @@ def _simulate_entry(
     price_stop_pts = getattr(cfg, "price_based_stop_points", None)
     price_stop_inward = getattr(cfg, "price_stop_inward", True)
 
+    # Trailing stop state (only for credit-based stops)
+    _trailing_en = getattr(cfg, "trailing_stop_enabled", False) and price_stop_pts is None
+    _trailing_trig = getattr(cfg, "trailing_stop_trigger_decay", 0.50)
+    _trail_call_buf = getattr(cfg, "trailing_stop_call_buffer", 10.0)
+    _trail_put_buf = getattr(cfg, "trailing_stop_put_buffer", 50.0)
+    _call_trail = False  # has call trailing been triggered?
+    _put_trail = False   # has put trailing been triggered?
+
     # early_ms already computed above (used to skip entries at/after exit time)
     for monitor_ms in monitor_times:
         if monitor_ms <= entry_ms:
@@ -682,7 +706,7 @@ def _simulate_entry(
         spx_now = _get_index_price(spx_df, monitor_ms) if price_stop_pts is not None else 0.0
 
         # Stop checks: use ask-based close cost (realistic fill price)
-        slip = getattr(cfg, "stop_slippage_per_leg", 0.0) * 2 * 100  # 2 legs × $100 multiplier
+        slip = getattr(cfg, "stop_slippage_per_leg", 0.0) * 2  # 2 legs, value already in dollars
         # Spread value cap: close cost can't exceed spread width × 100
         cap_at_stop = getattr(cfg, "spread_value_cap_at_stop", False)
         call_cap = result.call_spread_width * 100 if cap_at_stop else float('inf')
@@ -698,6 +722,16 @@ def _simulate_entry(
                         result.call_close_cost = min(cv + slip, call_cap)
             else:
                 cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                # ── Trailing stop: tighten call side when decay threshold reached
+                if _trailing_en and not _call_trail and cv > 0 and result.call_credit > 0:
+                    if cv <= result.call_credit * _trailing_trig:
+                        _call_trail = True
+                        if result.entry_type == "full_ic":
+                            result.call_stop = (result.call_credit + result.put_credit) + _trail_call_buf
+                        else:  # call_only
+                            result.call_stop = result.call_credit + cfg.downday_theoretical_put_credit + _trail_call_buf
+                        result.call_stop = max(result.call_stop, cfg.min_stop_level)
+                # ── Stop check (may use tightened level)
                 if cv > 0 and cv >= result.call_stop:
                     call_stopped = True
                     result.call_outcome = "stopped"
@@ -715,6 +749,16 @@ def _simulate_entry(
                         result.put_close_cost = min(pv + slip, put_cap)
             else:
                 pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                # ── Trailing stop: tighten put side when decay threshold reached
+                if _trailing_en and not _put_trail and pv > 0 and result.put_credit > 0:
+                    if pv <= result.put_credit * _trailing_trig:
+                        _put_trail = True
+                        if result.entry_type == "full_ic":
+                            result.put_stop = (result.call_credit + result.put_credit) + _trail_put_buf
+                        else:  # put_only
+                            result.put_stop = result.put_credit + getattr(cfg, "upday_theoretical_call_credit", 0.0) + _trail_put_buf
+                        result.put_stop = max(result.put_stop, cfg.min_stop_level)
+                # ── Stop check (may use tightened level)
                 if pv > 0 and pv >= result.put_stop:
                     put_stopped = True
                     result.put_outcome = "stopped"
@@ -984,6 +1028,104 @@ def _apply_return_threshold(
     return entries
 
 
+# ── VIX regime helpers ─────────────────────────────────────────────────────
+
+def _get_vix_regime(vix: float, breakpoints: List[float]) -> int:
+    """Return regime index: 0 = below first bp, len(breakpoints) = above last."""
+    for i, bp in enumerate(breakpoints):
+        if vix < bp:
+            return i
+    return len(breakpoints)
+
+
+def _apply_vix_regime(cfg: BacktestConfig, vix: float) -> BacktestConfig:
+    """Return a copy of cfg with VIX-regime overrides applied. No-op if disabled."""
+    if not getattr(cfg, "vix_regime_enabled", False):
+        return cfg
+
+    breakpoints = cfg.vix_regime_breakpoints
+    regime = _get_vix_regime(vix, breakpoints)
+    day_cfg = deepcopy(cfg)  # deepcopy to avoid shared List mutation across days
+
+    _overrides = {
+        "put_stop_buffer":  getattr(cfg, "vix_regime_put_stop_buffer", []),
+        "call_stop_buffer": getattr(cfg, "vix_regime_call_stop_buffer", []),
+        "min_put_credit":   getattr(cfg, "vix_regime_min_put_credit", []),
+        "min_call_credit":  getattr(cfg, "vix_regime_min_call_credit", []),
+    }
+    for attr, values in _overrides.items():
+        if regime < len(values) and values[regime] is not None:
+            setattr(day_cfg, attr, values[regime])
+
+    return day_cfg
+
+
+# ── Replacement entry generator ────────────────────────────────────────────
+
+def _generate_replacements(
+    entries: List[EntryResult],
+    cfg: BacktestConfig,
+    chain_df: pd.DataFrame,
+    lookup: Dict,
+    spx_df: pd.DataFrame,
+    vix_df: pd.DataFrame,
+    monitor_times: List[int],
+    spx_open: float,
+    is_fomc_t1: bool,
+    day_early_exit_ms,
+    greeks_df: Optional[pd.DataFrame],
+) -> List[EntryResult]:
+    """Generate replacement entries for sides that were stopped before the cutoff."""
+    max_repl = cfg.replacement_entry_max_per_day
+    delay_ms = cfg.replacement_delay_ms()
+    extra_otm = cfg.replacement_entry_extra_otm
+    cutoff_ms = cfg.replacement_cutoff_ms()
+
+    # Collect all stopped sides before cutoff, sorted by stop time
+    stopped: List[Tuple[str, int, int]] = []  # (force_type, stop_ms, orig_entry_num)
+    for e in entries:
+        if e.entry_type == "skipped":
+            continue
+        if e.entry_type in ("full_ic", "call_only") and e.call_outcome == "stopped":
+            if e.call_exit_ms > 0 and e.call_exit_ms < cutoff_ms:
+                stopped.append(("call_only", e.call_exit_ms, e.entry_num))
+        if e.entry_type in ("full_ic", "put_only") and e.put_outcome == "stopped":
+            if e.put_exit_ms > 0 and e.put_exit_ms < cutoff_ms:
+                stopped.append(("put_only", e.put_exit_ms, e.entry_num))
+
+    stopped.sort(key=lambda x: x[1])
+
+    replacements: List[EntryResult] = []
+    for force_type, stop_ms, orig_num in stopped:
+        if len(replacements) >= max_repl:
+            break
+        repl_ms = stop_ms + delay_ms
+        if repl_ms >= cutoff_ms:
+            continue
+
+        res = _simulate_entry(
+            entry_num=20 + orig_num,
+            entry_ms=repl_ms,
+            is_conditional=False,
+            is_fomc_t1=is_fomc_t1,
+            spx_open=spx_open,
+            chain_df=chain_df,
+            lookup=lookup,
+            spx_df=spx_df,
+            vix_df=vix_df,
+            cfg=cfg,
+            monitor_times=monitor_times,
+            day_early_exit_ms=day_early_exit_ms,
+            greeks_df=greeks_df,
+            force_entry_type=force_type,
+            extra_min_otm=extra_otm,
+        )
+        if res.entry_type != "skipped":
+            replacements.append(res)
+
+    return replacements
+
+
 # ── Per-day simulation ─────────────────────────────────────────────────────
 
 def simulate_day(
@@ -992,6 +1134,10 @@ def simulate_day(
     cache_dir: Path,
     fomc_t1_dates: set,
 ) -> Optional[DayResult]:
+
+    # ── Day-of-week filter (skip before loading any data) ─────────────
+    if trading_date.weekday() in getattr(cfg, "skip_weekdays", []):
+        return None
 
     # Load data — use 1-min or 5-min subfolder based on config
     resolution = getattr(cfg, "data_resolution", "5min")
@@ -1046,9 +1192,6 @@ def simulate_day(
         day_early_exit_ms = _USE_CFG_EARLY_EXIT  # use cfg as-is (no VIX gate)
 
     # ── Protection gate helpers ──────────────────────────────────────────
-    daily_loss_limit = getattr(cfg, "daily_loss_limit", None)
-    vix_spike_pts = getattr(cfg, "vix_spike_skip_points", None)
-    whipsaw_mult = getattr(cfg, "whipsaw_range_skip_mult", None)
     market_open_ms = 9 * 3600000 + 30 * 60000  # 9:30 AM
 
     # VIX at open for spike detection
@@ -1059,6 +1202,13 @@ def simulate_day(
 
     # Expected daily move for whipsaw filter
     expected_move = spx_open * (vix_at_open / 100) / (252 ** 0.5) if spx_open > 0 and vix_at_open > 0 else 0
+
+    # ── VIX regime: apply per-regime config overrides ─────────────────
+    cfg = _apply_vix_regime(cfg, vix_at_open)
+    # Re-read protection params from (possibly overridden) cfg
+    daily_loss_limit = getattr(cfg, "daily_loss_limit", None)
+    vix_spike_pts = getattr(cfg, "vix_spike_skip_points", None)
+    whipsaw_mult = getattr(cfg, "whipsaw_range_skip_mult", None)
 
     def _should_skip_entry(entry_ms: int) -> Optional[str]:
         """Check protection gates. Returns skip reason or None."""
@@ -1116,6 +1266,20 @@ def simulate_day(
 
     # ── Base entries (E1-E5) ─────────────────────────────────────────────
     entry_ms_list = cfg.entry_times_as_ms()
+
+    # ── Max entries cap (VIX regime + day-of-week) ────────────────────
+    _max_e = len(entry_ms_list)
+    if getattr(cfg, "vix_regime_enabled", False):
+        _regime = _get_vix_regime(vix_at_open, cfg.vix_regime_breakpoints)
+        _rm = cfg.vix_regime_max_entries
+        if _regime < len(_rm) and _rm[_regime] is not None:
+            _max_e = min(_max_e, _rm[_regime])
+    _dow_max = getattr(cfg, "dow_max_entries", {}).get(trading_date.weekday())
+    if _dow_max is not None:
+        _max_e = min(_max_e, _dow_max)
+    if _max_e < len(entry_ms_list):
+        entry_ms_list = entry_ms_list[:_max_e]
+
     movement_pct = getattr(cfg, "movement_entry_pct", None)
 
     if movement_pct is None:
@@ -1214,6 +1378,14 @@ def simulate_day(
         )
         day.entries.append(res)
 
+    # ── Replacement entries (re-enter after early stops) ──────────────
+    if getattr(cfg, "replacement_entry_enabled", False):
+        replacements = _generate_replacements(
+            day.entries, cfg, chain_df, lookup, spx_df, vix_df,
+            monitor_times, spx_open, is_fomc_t1, day_early_exit_ms, greeks_df,
+        )
+        day.entries.extend(replacements)
+
     # ── Net-return threshold exit (post-processing pass) ─────────────────
     if getattr(cfg, "net_return_exit_pct", None):
         day.entries = _apply_return_threshold(
@@ -1241,9 +1413,10 @@ def run_backtest(cfg: BacktestConfig, verbose: bool = True) -> List[DayResult]:
             if isinstance(fomc_date, date):
                 fomc_announcement_dates.add(fomc_date)
                 t1 = fomc_date + timedelta(days=1)
-                # Skip weekends
-                if t1.weekday() < 5:
-                    fomc_t1_dates.add(t1)
+                # Skip weekends (if FOMC on Friday, T+1 = Monday)
+                while t1.weekday() >= 5:
+                    t1 += timedelta(days=1)
+                fomc_t1_dates.add(t1)
     except ImportError:
         pass  # Use whatever was in cfg
 
