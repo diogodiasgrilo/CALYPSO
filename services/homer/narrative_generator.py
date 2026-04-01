@@ -29,16 +29,17 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 
 ## HYDRA Domain Knowledge (v1.19.0 — use these exact parameters)
 
-- Entry times: 10:15, 10:45, 11:15 ET (3 base entries). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.48% above open (Upday-035). E7 is DISABLED.
+- VIX regime adjusts entries: 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
+- Entry times: 10:15, 10:45, 11:15 ET (3 base entries). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
 - Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
-- VIX-scaled spread width (MKT-027): formula `round(VIX * 5.3 / 5) * 5`, floor 25pt, cap 85pt
-- Min credit thresholds: $1.35 calls, $2.10 puts (MKT-011). MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.07). Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
+- VIX-scaled spread width (MKT-027): formula `round(VIX * 6.0 / 5) * 5`, floor 25pt, cap 110pt
+- Min credit thresholds: $2.00 calls, $2.75 puts (MKT-011). MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
 - Stop formula: Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
 - Stop confirmation (MKT-036): DISABLED. Code preserved but dormant.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
-- Whipsaw filter: whipsaw_range_skip_mult = 1.50 — skip entry if SPX intraday range > 1.5x expected daily move.
+- Whipsaw filter: whipsaw_range_skip_mult = 1.75 — skip entry if SPX intraday range > 1.75x expected daily move.
 - Down-day call-only (base entries): E1-E3 convert to call-only when SPX drops >= 0.57% from open.
-- Up-day filter (Upday-035): E6 at 14:00 fires as put-only when SPX rises >= 0.48% above open. E7 is DISABLED.
+- Up-day filter (Upday-035): E6 at 14:00 fires as put-only when SPX rises >= 0.25% above open. E7 is DISABLED.
 - FOMC T+1 call-only (MKT-038): Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
 - FOMC announcement skip (MKT-008): DISABLED (fomc_announcement_skip=false). HYDRA now trades on FOMC days.
 - 2026 FOMC dates: Jan 27-28, Mar 17-18, Apr 28-29, Jun 16-17, Jul 28-29, Sep 15-16, Oct 27-28, Dec 8-9. Announcement = Day 2. T+1 = day after Day 2.

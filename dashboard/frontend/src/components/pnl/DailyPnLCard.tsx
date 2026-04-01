@@ -77,8 +77,10 @@ export function DailyPnLCard() {
   const avgCredit = comparisons?.avg_credit ?? 0;
   const avgStops = comparisons?.avg_stops ?? 0;
 
-  const baseEntries = entries.filter((e) => e.entry_number <= 5).length;
-  const conditionalEntries = entries.filter((e) => e.entry_number >= 6).length;
+  const schedule = hydraState?.entry_schedule;
+  const baseCount = schedule?.base?.length ?? 3;
+  const baseEntries = entries.filter((e) => e.entry_number <= baseCount).length;
+  const conditionalEntries = entries.filter((e) => e.entry_number > baseCount).length;
 
   return (
     <div className="space-y-3">

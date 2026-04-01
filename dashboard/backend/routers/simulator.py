@@ -17,8 +17,8 @@ class SimRequest(BaseModel):
     """Request body for running a simulation."""
     call_stop_buffer: float = Field(default=0.35, ge=0, le=5.0)
     put_stop_buffer: float = Field(default=1.55, ge=0, le=20.0)
-    min_credit_call: float = Field(default=135.0, ge=0, le=500.0)
-    min_credit_put: float = Field(default=210.0, ge=0, le=1000.0)
+    min_credit_call: float = Field(default=200.0, ge=0, le=500.0)
+    min_credit_put: float = Field(default=275.0, ge=0, le=1000.0)
     put_only_max_vix: float = Field(default=25.0, ge=10.0, le=50.0)
     max_entries: int = Field(default=3, ge=1, le=7)
     commission_per_leg: float = Field(default=2.50, ge=0, le=10.0)
@@ -38,8 +38,8 @@ async def get_defaults():
     return {
         "call_stop_buffer": 0.35,
         "put_stop_buffer": 1.55,
-        "min_credit_call": 135.0,
-        "min_credit_put": 210.0,
+        "min_credit_call": 200.0,
+        "min_credit_put": 275.0,
         "put_only_max_vix": 25.0,
         "max_entries": 3,
         "commission_per_leg": 2.50,

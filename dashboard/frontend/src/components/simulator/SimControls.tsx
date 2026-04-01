@@ -15,8 +15,8 @@ export interface SimParamsState {
 export const DEFAULT_PARAMS: SimParamsState = {
   call_stop_buffer: 0.35,
   put_stop_buffer: 1.55,
-  min_credit_call: 135.0,
-  min_credit_put: 210.0,
+  min_credit_call: 200.0,
+  min_credit_put: 275.0,
   put_only_max_vix: 25.0,
   max_entries: 3,
   commission_per_leg: 2.50,

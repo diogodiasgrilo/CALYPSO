@@ -24,17 +24,18 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 
 ## HYDRA Strategy Parameters (v1.19.0)
 
-- **3 base entries + 1 conditional (4 max)** at 10:15, 10:45, 11:15 ET. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.48% above open (Upday-035). E7 is DISABLED.
+- **VIX regime adjusts entries:** 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
+- **3 base entries + 1 conditional (4 max)** at 10:15, 10:45, 11:15 ET. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
-- **VIX-scaled spread width (MKT-027):** Continuous formula `round(VIX * 5.3 / 5) * 5`, floor 25pt, cap 85pt.
+- **VIX-scaled spread width (MKT-027):** Continuous formula `round(VIX * 6.0 / 5) * 5`, floor 25pt, cap 110pt.
 - **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
-- **Min credit thresholds (MKT-011):** $1.35/side for calls, $2.10/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.07). MKT-038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
+- **Min credit thresholds (MKT-011):** $2.00/side for calls, $2.75/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). MKT-038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
 - **Stop formula:** Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
 - **Stop confirmation (MKT-036):** DISABLED. Code preserved but dormant.
 - **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
-- **Whipsaw filter:** whipsaw_range_skip_mult = 1.50 — skip entry if SPX intraday range > 1.5x expected daily move.
+- **Whipsaw filter:** whipsaw_range_skip_mult = 1.75 — skip entry if SPX intraday range > 1.75x expected daily move.
 - **Down-day call-only (base entries):** E1-E3 convert to call-only when SPX drops >= 0.57% from open (`base_entry_downday_callonly_pct: 0.0057`).
-- **Up-day filter (Upday-035):** E6 at 14:00 fires as put-only when SPX rises >= 0.48% above open. E7 is DISABLED.
+- **Up-day filter (Upday-035):** E6 at 14:00 fires as put-only when SPX rises >= 0.25% above open. E7 is DISABLED.
 - **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
 - **FOMC Day 1 (MKT-008):** Day 1 of FOMC meeting trades NORMALLY — no restrictions, no blackout, no special rules. This is CORRECT behavior. Do NOT flag entries on Day 1 as violations.
 - **FOMC Day 2 / Announcement day (MKT-008):** `fomc_announcement_skip` is FALSE — HYDRA now trades on FOMC announcement days. Check `cheat_sheet.fomc_announcement_skip`:

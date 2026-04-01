@@ -9,7 +9,7 @@ The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
 but is informational only — base entries are full iron condors or put-only via MKT-011.
 
 Credit Gate (MKT-011): Before placing orders, estimates credit from quotes.
-MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.07).
+MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00).
 MKT-035/MKT-038 call-only entries also use MKT-029 call floor ($0.75).
 - Both sides viable: Proceed with full iron condor
 - Call non-viable, put viable, VIX < 15.0: Place put-only entry (MKT-032/MKT-039 VIX gate)
@@ -19,22 +19,22 @@ MKT-035/MKT-038 call-only entries also use MKT-029 call floor ($0.75).
 
 Conditional Entry Trigger (MKT-035 / Upday-035):
 - Base entries E1-E3 convert to call-only when SPX drops >= 0.57% below session open
-- Conditional entry E6 (14:00): fires as put-only when SPX rises >= 0.48% above session open (Upday-035)
+- Conditional entry E6 (14:00): fires as put-only when SPX rises >= 0.25% above session open (Upday-035)
   Stop = put_credit + put_stop_buffer ($1.55)
 - E7: DISABLED
 
 Version History:
 - 1.19.0 (2026-03-29): Walk-forward backtest convergence. 3 base entries (was 5) at 10:15, 10:45, 11:15
-  (E4/E5 dropped — negative EV in backtest). E6 upday put-only ENABLED at 14:00 (threshold 0.48%).
-  E7 DISABLED. Spread width: VIX x 5.3, floor 25pt, cap 85pt. Credit gates: call $1.35, put $2.10,
-  call_floor $0.75, put_floor $2.07. Stop buffers: call_stop_buffer $0.35 (renamed from stop_buffer),
+  (E4/E5 dropped — negative EV in backtest). E6 upday put-only ENABLED at 14:00 (threshold 0.25%).
+  E7 DISABLED. Spread width: VIX x 6.0, floor 25pt, cap 110pt. Credit gates: call $2.00, put $2.75,
+  call_floor $0.75, put_floor $2.00. Stop buffers: call_stop_buffer $0.35 (renamed from stop_buffer),
   put_stop_buffer $1.55. FOMC skip FALSE (fomc_announcement_skip=false), T+1 call-only TRUE.
-  Downday threshold 0.57%, theo put $2.60. Upday threshold 0.48%. Max spread width 83pt.
-  NEW: whipsaw filter (whipsaw_filter.enabled=true, threshold 1.50x EM) — skips entries when
-  intraday range exceeds 1.5x expected move (high whipsaw = bad for iron condors).
+  Downday threshold 0.57%, theo put $2.60. Upday threshold 0.25%. Max spread width 110pt.
+  NEW: whipsaw filter (whipsaw_filter.enabled=true, threshold 1.75x EM) — skips entries when
+  intraday range exceeds 1.75x expected move (high whipsaw = bad for iron condors).
   put_only_max_vix lowered to 15.0.
 - 1.17.0 (2026-03-23): Upday-035 conditional up-day put-only entries. Mirror of MKT-035 for bullish days:
-  when SPX rises >= upday_threshold_pct (default 0.4%) above session open, conditional slots E6/E7 fire as
+  when SPX rises >= upday_threshold_pct (default 0.25%) above session open, conditional slots E6/E7 fire as
   put-only instead of being skipped. Stop = put_credit + put_stop_buffer. Configurable via
   conditional_upday_e6_enabled / conditional_upday_e7_enabled / upday_threshold_pct / upday_reference.
   DISABLED on VM by default. Dashboard EntryCard shows "Upday-035" label for override_reason="upday-035".

@@ -28,14 +28,14 @@ class SimParams:
     """Simulator input parameters — the config knobs."""
     call_stop_buffer: float = 0.35       # call-side buffer ($/contract)
     put_stop_buffer: float = 1.55       # put-side buffer ($/contract)
-    min_credit_call: float = 135.0      # call credit gate ($ total)
-    min_credit_put: float = 210.0       # put credit gate ($ total)
+    min_credit_call: float = 200.0      # call credit gate ($ total)
+    min_credit_put: float = 275.0       # put credit gate ($ total)
     put_only_max_vix: float = 25.0      # MKT-032 VIX gate for put-only
     max_entries: int = 3                # max base entries per day
     commission_per_leg: float = 2.50    # per-leg commission
     conditional_entries: bool = True     # E6/E7 enabled
     downday_threshold_pct: float = 0.003  # MKT-035 downday threshold (0.3%)
-    upday_threshold_pct: float = 0.004    # Upday-035 threshold (0.4%)
+    upday_threshold_pct: float = 0.0025   # Upday-035 threshold (0.25%)
 
 
 @dataclass
@@ -295,7 +295,9 @@ class SimulatorEngine:
                 actual_stop_count += 1
 
             # --- Filter 1: max entries ---
-            is_conditional = enum > 5
+            # Conditional entries: entry time >= 13:00 (afternoon slots are conditional)
+            entry_time = entry.get("entry_time", "")
+            is_conditional = entry_time >= "13:00" if entry_time else enum > 5
             if is_conditional and not params.conditional_entries:
                 sim_entries.append(SimEntryResult(
                     entry_number=enum, actual_type=etype, simulated_type="skipped",

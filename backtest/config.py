@@ -295,7 +295,7 @@ def live_config() -> BacktestConfig:
         conditional_upday_e6_enabled=True,    # ENABLED on 1-min (2026-03-28: Sharpe 2.003 vs 1.988 OFF, MaxDD $7,855)
         conditional_upday_e7_enabled=False,
         downday_threshold_pct=0.3,
-        upday_threshold_pct=0.20,             # reconvergence 2026-03-31 (was 0.48%, Sharpe 2.360)
+        upday_threshold_pct=0.25,             # re-swept with $2.00/$2.75 gates: 0.25% best Sharpe (2.445)
         fomc_t1_callonly_enabled=True,
         call_starting_otm_multiplier=3.5,
         put_starting_otm_multiplier=4.0,

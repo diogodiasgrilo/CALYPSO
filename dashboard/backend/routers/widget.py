@@ -58,8 +58,11 @@ async def get_widget_data():
         else:
             entry_dots.append("pending")
 
-    # Pad to 4 entries (3 base + E6)
-    while len(entry_dots) < 4:
+    # Pad to scheduled entry count (base + conditional, read from state)
+    schedule = state.get("entry_schedule", {})
+    total_scheduled = len(schedule.get("base", [])) + len(schedule.get("conditional", []))
+    pad_to = max(total_scheduled, 3)  # at least 3
+    while len(entry_dots) < pad_to:
         entry_dots.append("pending")
 
     cumulative_pnl = metrics.get("cumulative_pnl", 0) if metrics else 0
