@@ -303,8 +303,8 @@ def live_config() -> BacktestConfig:
         call_min_spread_width=25,
         put_min_spread_width=25,
         max_spread_width=110,                 # fine-grain sweep optimal: plateau 110-200 all ~2.28-2.38 Sharpe, pick min (least margin)
-        min_call_credit=1.35,                 # convergence round 4 (was $1.30, +0.097 Sharpe)
-        min_put_credit=2.10,                  # convergence round 4 (was $2.13, +0.127 Sharpe)
+        min_call_credit=2.00,                 # re-swept with VIX regime: +$7,696 P&L vs $1.35 (Sharpe 2.436)
+        min_put_credit=2.75,                  # re-swept with VIX regime: best MaxDD $6,115, Win 52.9%
         call_credit_floor=0.75,               # 1-min edge sweep optimal 2026-03-28 (was $0.85, Sharpe 1.988)
         put_credit_floor=2.00,                # reconvergence 2026-03-31 (was $2.07, Sharpe 2.360)
         call_stop_buffer=35.0,                # $0.35 × 100, convergence round 4 (was $0.26, +0.056 Sharpe)

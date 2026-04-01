@@ -5211,7 +5211,12 @@ class HydraStrategy(MEICStrategy):
             else:
                 icon = "🟢"  # All opened sides active or expired/skipped (good)
 
-            # Strikes line
+            # Strikes line — show "SKIP" for sides that weren't placed
+            call_strike_str = (
+                "SKIP"
+                if call_skipped
+                else f"{entry.short_call_strike:.0f}/{entry.long_call_strike:.0f}"
+            )
             put_strike_str = (
                 "SKIP"
                 if put_skipped
@@ -5220,7 +5225,7 @@ class HydraStrategy(MEICStrategy):
             lines.append("")
             lines.append(
                 f"{icon} #{entry.entry_number} "
-                f"C:{entry.short_call_strike:.0f}/{entry.long_call_strike:.0f} "
+                f"C:{call_strike_str} "
                 f"P:{put_strike_str}"
             )
 
