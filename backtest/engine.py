@@ -16,7 +16,7 @@ Simulates HYDRA's exact entry logic against historical ThetaData:
 from __future__ import annotations
 
 import math
-from copy import copy, deepcopy
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -1312,7 +1312,6 @@ def simulate_day(
         # from the previous entry's SPX price.  Scheduled time is a hard fallback.
         last_ref_spx = spx_open
         next_slot = 0
-        fired_at_ms = {}  # slot_idx → actual bar_ms when fired
 
         for bar_ms in monitor_times:
             if next_slot >= len(entry_ms_list):
@@ -1324,7 +1323,14 @@ def simulate_day(
             move_pct = (abs(bar_spx - last_ref_spx) / last_ref_spx * 100
                         if last_ref_spx > 0 else 0.0)
             if bar_ms >= scheduled_ms or move_pct >= movement_pct:
-                fired_at_ms[next_slot] = bar_ms
+                # Check protection gates (daily loss limit, VIX spike, whipsaw)
+                skip_reason = _should_skip_entry(bar_ms)
+                if skip_reason:
+                    skip_res = EntryResult(entry_num=next_slot + 1, entry_time_ms=bar_ms,
+                                           entry_type="skipped", skip_reason=skip_reason)
+                    day.entries.append(skip_res)
+                    next_slot += 1
+                    continue
                 res = _simulate_entry(
                     entry_num=next_slot + 1,
                     entry_ms=bar_ms,           # actual trigger time (may be earlier than scheduled)

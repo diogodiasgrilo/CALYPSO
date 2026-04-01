@@ -584,6 +584,8 @@ class HydraStrategy(MEICStrategy):
         self.vix_regime_max_entries = _vix_regime.get("max_entries", [None, None, None, None])
         self.vix_regime_put_stop_buffer = _vix_regime.get("put_stop_buffer", [None, None, None, None])
         self.vix_regime_call_stop_buffer = _vix_regime.get("call_stop_buffer", [None, None, None, None])
+        self.vix_regime_min_call_credit = _vix_regime.get("min_call_credit", [None, None, None, None])
+        self.vix_regime_min_put_credit = _vix_regime.get("min_put_credit", [None, None, None, None])
         self._vix_regime_applied = False  # set True after first application
         if self.vix_regime_enabled:
             logger.info(
@@ -7184,6 +7186,18 @@ class HydraStrategy(MEICStrategy):
             old = self.call_stop_buffer
             self.call_stop_buffer = csb[regime] * 100
             logger.info(f"VIX regime: call_stop_buffer ${old/100:.2f} → ${self.call_stop_buffer/100:.2f}")
+
+        # Apply credit gate overrides (values are per-contract dollars, no multiplication needed)
+        mcc = self.vix_regime_min_call_credit
+        if regime < len(mcc) and mcc[regime] is not None:
+            old = self.min_viable_credit_per_side
+            self.min_viable_credit_per_side = mcc[regime]
+            logger.info(f"VIX regime: min_call_credit ${old:.2f} → ${self.min_viable_credit_per_side:.2f}")
+        mpc = self.vix_regime_min_put_credit
+        if regime < len(mpc) and mpc[regime] is not None:
+            old = self.min_viable_credit_put_side
+            self.min_viable_credit_put_side = mpc[regime]
+            logger.info(f"VIX regime: min_put_credit ${old:.2f} → ${self.min_viable_credit_put_side:.2f}")
 
         self._vix_regime_applied = True
         logger.info(f"VIX regime applied: VIX={vix:.1f}, regime={regime}/{len(self.vix_regime_breakpoints)}")
