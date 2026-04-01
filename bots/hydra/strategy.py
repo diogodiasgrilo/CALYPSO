@@ -541,7 +541,7 @@ class HydraStrategy(MEICStrategy):
         self.upday_reference = strategy_config.get("upday_reference", "open")
         logger.info(
             f"  Up day filter: {'ENABLED' if self.upday_putonly_enabled else 'DISABLED'} "
-            f"(threshold: +{self.upday_threshold_pct * 100:.1f}%, "
+            f"(threshold: +{self.upday_threshold_pct * 100:.2f}%, "
             f"reference: {self.upday_reference}, "
             f"upday slots: {len(self._conditional_upday_entry_times)})"
         )
