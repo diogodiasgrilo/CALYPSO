@@ -85,7 +85,7 @@ class BacktestConfig:
     # ── Costs ────────────────────────────────────────────────────────────────
     commission_per_leg: float = 2.50        # $ per leg (Saxo) — $2.50 to open, $2.50 to close; expires worthless = $2.50 only
     contracts: int = 1
-    stop_slippage_per_leg: float = 0.0      # extra slippage on stop-loss market orders ($ per leg, e.g. 0.10 = $10/leg × 100 = $10)
+    stop_slippage_per_leg: float = 5.0      # $0.05/leg slippage on stop-loss market orders (based on Mar 31 live data)
 
     # ── Data / cache ─────────────────────────────────────────────────────────
     cache_dir: str = "backtest/data/cache"
