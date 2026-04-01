@@ -158,6 +158,26 @@ class BacktestConfig:
     # Example: 0.50 = exit when net P&L reaches 50 % of collected credit.
     net_return_exit_pct: Optional[float] = None
 
+    # ── Fixed-dollar profit target exit ───────────────────────────────────────
+    # If set, close ALL surviving open positions when the day's hypothetical
+    # net P&L (if we closed everything right now) >= this dollar amount.
+    # Entries scheduled after the exit bar are skipped.  Closing commissions apply.
+    # None = disabled.  Example: 300.0 = exit when net P&L >= $300.
+    net_pnl_exit_dollars: Optional[float] = None
+
+    # ── Range-consumption exit ────────────────────────────────────────────────
+    # If set, close ALL surviving open positions when intraday SPX range
+    # (high - low since open) exceeds this fraction of the daily expected move
+    # (VIX-based: SPX × VIX/100 / sqrt(252)).  Entries scheduled after the
+    # exit bar are skipped.  Closing commissions apply.
+    # None = disabled (hold to 4 PM or until stopped).
+    # Example: 0.75 = exit when range > 75% of expected move.
+    range_exit_pct: Optional[float] = None
+    # Optional: only apply range exit after this time (HH:MM ET).
+    # Before this time, range consumption is ignored.
+    # None = check from market open onward.
+    range_exit_after: Optional[str] = None  # e.g. "11:00"
+
     # ── Protection features ───────────────────────────────────────────────────
     # Daily loss limit: skip remaining entries if day's realized P&L <= this.
     # None = disabled. Example: -1000 = stop entering after -$1000 loss.
