@@ -583,7 +583,7 @@ class HydraStrategy(MEICStrategy):
             logger.info(f"  Calm entry (MKT-043): DISABLED")
 
         # MKT-042: Time-decaying stop buffer — wider stops early, normal after decay period.
-        # Backtest: x1.75 2.0h = Sharpe 2.157, +$10,485 P&L over 938 days.
+        # Backtest: x2.10 2.0h = Sharpe 2.157, +$10,485 P&L over 938 days.
         self.buffer_decay_start_mult = strategy_config.get("buffer_decay_start_mult", None)
         self.buffer_decay_hours = strategy_config.get("buffer_decay_hours", None)
         if self.buffer_decay_start_mult is not None and self.buffer_decay_hours is not None:

@@ -31,7 +31,7 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 - **Min credit thresholds (MKT-011):** $2.00/side for calls, $2.75/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). MKT-038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
 - **Stop formula:** Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
 - **Stop confirmation (MKT-036):** DISABLED. Code preserved but dormant.
-- **Buffer decay (MKT-042):** Stop buffer starts at 1.75× normal, linearly decays to 1× over 2 hours. Wider stops early (premium rich, noisy), normal later.
+- **Buffer decay (MKT-042):** Stop buffer starts at 2.10× normal, linearly decays to 1× over 2 hours. Wider stops early (premium rich, noisy), normal later.
 - **Cushion recovery exit (MKT-041):** DISABLED (buffer+cushion interfere). Code preserved but dormant.
 - **Calm entry filter (MKT-043):** Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries.
 - **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.

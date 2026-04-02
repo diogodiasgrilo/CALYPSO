@@ -83,7 +83,7 @@
         "cushion_recovery_pct": null,
 
         "_comment_buffer_decay": "MKT-042: Time-decaying stop buffer. Starts at start_mult × normal buffer, linearly decays to 1× over decay_hours. Wider stops early (premium rich), normal later. Set start_mult to 1.0 or null to disable.",
-        "buffer_decay_start_mult": 1.75,
+        "buffer_decay_start_mult": 2.10,
         "buffer_decay_hours": 2.0,
 
         "_comment_calm_entry": "MKT-043: Calm entry filter. Delays entry up to max_delay_min when SPX moved > threshold_pts in last lookback_min minutes. Prevents entering during sharp spikes. Set threshold_pts to null to disable.",

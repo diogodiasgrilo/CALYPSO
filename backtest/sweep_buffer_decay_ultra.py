@@ -1,12 +1,8 @@
 """
-Test all combinations of the three winning features:
-  1. Buffer decay (x1.75, 2.0h)
-  2. Cushion recovery (N96 R67)
-  3. Calm entry (L3 T15 D5)
+Ultra fine-grain around x2.1/2.0h winner.
+Mult 1.9-2.3 (step 0.05) × Hours 1.5-2.5 (step 0.25), all with calm entry.
 
-8 configs: baseline + each solo + each pair + all three.
-
-Run: python -m backtest.sweep_combined_features
+Run: python -m backtest.sweep_buffer_decay_ultra
 """
 import multiprocessing as mp
 import os
@@ -62,57 +58,32 @@ def _base():
     cfg.vix_regime_max_entries = [2, None, None, 1]
     cfg.vix_regime_put_stop_buffer = [125.0, None, None, None]
     cfg.vix_regime_call_stop_buffer = [None, None, None, None]
-    return cfg
-
-
-def _add_buffer_decay(cfg):
-    cfg.buffer_decay_start_mult = 2.10
-    cfg.buffer_decay_hours = 2.0
-
-def _add_cushion_recovery(cfg):
-    cfg.cushion_nearstop_pct = 0.96
-    cfg.cushion_recovery_pct = 0.67
-
-def _add_calm_entry(cfg):
     cfg.calm_entry_lookback_min = 3
     cfg.calm_entry_threshold_pts = 15.0
     cfg.calm_entry_max_delay_min = 5
+    return cfg
 
 
 def main():
     configs = []
 
-    # 0. Baseline
-    configs.append(("Baseline", _base()))
+    # Baseline (calm only)
+    configs.append(("Calm only", _base()))
 
-    # 1. Solo features
-    c = _base(); _add_buffer_decay(c)
-    configs.append(("BufferDecay only", c))
-
-    c = _base(); _add_cushion_recovery(c)
-    configs.append(("CushionRecov only", c))
-
-    c = _base(); _add_calm_entry(c)
-    configs.append(("CalmEntry only", c))
-
-    # 2. Pairs
-    c = _base(); _add_buffer_decay(c); _add_cushion_recovery(c)
-    configs.append(("Buffer + Cushion", c))
-
-    c = _base(); _add_buffer_decay(c); _add_calm_entry(c)
-    configs.append(("Buffer + Calm", c))
-
-    c = _base(); _add_cushion_recovery(c); _add_calm_entry(c)
-    configs.append(("Cushion + Calm", c))
-
-    # 3. All three
-    c = _base(); _add_buffer_decay(c); _add_cushion_recovery(c); _add_calm_entry(c)
-    configs.append(("ALL THREE", c))
+    # Ultra fine: mult 1.90-2.30 (step 0.05) × hours 1.50-2.75 (step 0.25)
+    for mult_x100 in range(190, 235, 5):  # 1.90, 1.95, 2.00, ..., 2.30
+        mult = mult_x100 / 100.0
+        for hours_x100 in range(150, 300, 25):  # 1.50, 1.75, 2.00, 2.25, 2.50, 2.75
+            hours = hours_x100 / 100.0
+            cfg = _base()
+            cfg.buffer_decay_start_mult = mult
+            cfg.buffer_decay_hours = hours
+            configs.append((f"x{mult:.2f} {hours:.2f}h", cfg))
 
     n = len(configs)
     tasks = [(i, label, cfg) for i, (label, cfg) in enumerate(configs)]
-    print(f"Combined features test: {n} configs, {N_WORKERS} workers\n", flush=True)
-    hdr = (f"{'Strategy':<22s}  {'P&L':>10s}  {'Δ P&L':>8s}  {'Sharpe':>7s}  {'MaxDD':>8s}  "
+    print(f"Ultra fine-grain: {n} configs, {N_WORKERS} workers\n", flush=True)
+    hdr = (f"{'Strategy':<16s}  {'P&L':>10s}  {'Sharpe':>7s}  {'MaxDD':>8s}  "
            f"{'Win%':>5s}  {'AvgWin':>7s}  {'AvgLoss':>8s}")
     print(hdr)
     print("─" * len(hdr), flush=True)
@@ -121,15 +92,27 @@ def main():
     with mp.Pool(N_WORKERS, maxtasksperchild=4) as pool:
         for res in pool.imap_unordered(_run_one, tasks):
             idx, label, m = res
+            marker = " ◄" if "Calm" in label else ""
+            print(f"  [{idx+1:2d}/{n}] {label:<14s}  ${m['total_pnl']:>+9,.0f}  {m['sharpe']:>7.3f}  "
+                  f"${m['max_dd']:>7,.0f}  {m['win_rate']:>5.1f}%  "
+                  f"${m['avg_win']:>6,.0f}  ${m['avg_loss']:>7,.0f}{marker}", flush=True)
             results.append(res)
 
     results.sort(key=lambda x: x[2]["sharpe"], reverse=True)
-    baseline = next((m for _, l, m in results if "Baseline" in l), None)
+    baseline = next((m for _, l, m in results if "Calm" in l), None)
+
+    print()
+    print("=" * 100)
+    print("ALL RESULTS SORTED BY SHARPE (with calm entry)")
+    print("=" * 100)
+    print(f"{'Strategy':<16s}  {'P&L':>10s}  {'Δ P&L':>8s}  {'Sharpe':>7s}  {'MaxDD':>8s}  "
+          f"{'Win%':>5s}  {'AvgWin':>7s}  {'AvgLoss':>8s}")
+    print("─" * 100)
 
     for _, label, m in results:
-        marker = " ◄ BASE" if "Baseline" in label else ""
+        marker = " ◄ BASE" if "Calm" in label else ""
         delta = m["total_pnl"] - baseline["total_pnl"] if baseline else 0
-        print(f"{label:<22s}  ${m['total_pnl']:>+9,.0f}  {delta:>+7,.0f}  {m['sharpe']:>7.3f}  "
+        print(f"{label:<16s}  ${m['total_pnl']:>+9,.0f}  {delta:>+7,.0f}  {m['sharpe']:>7.3f}  "
               f"${m['max_dd']:>7,.0f}  {m['win_rate']:>5.1f}%  "
               f"${m['avg_win']:>6,.0f}  ${m['avg_loss']:>7,.0f}{marker}", flush=True)
 
