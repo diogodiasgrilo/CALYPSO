@@ -568,6 +568,32 @@ class HydraStrategy(MEICStrategy):
             f"({self.stop_confirmation_seconds}s window)"
         )
 
+        # MKT-043: Calm entry filter — delay entry when SPX is moving fast.
+        # Backtest: L3 T15 D5 = Sharpe 2.153, +$2,040 P&L over 938 days.
+        self.calm_entry_lookback_min = strategy_config.get("calm_entry_lookback_min", None)
+        self.calm_entry_threshold_pts = strategy_config.get("calm_entry_threshold_pts", None)
+        self.calm_entry_max_delay_min = strategy_config.get("calm_entry_max_delay_min", None)
+        if self.calm_entry_lookback_min is not None:
+            logger.info(
+                f"  Calm entry (MKT-043): ENABLED "
+                f"(lookback {self.calm_entry_lookback_min}min, threshold {self.calm_entry_threshold_pts}pt, "
+                f"max delay {self.calm_entry_max_delay_min}min)"
+            )
+        else:
+            logger.info(f"  Calm entry (MKT-043): DISABLED")
+
+        # MKT-042: Time-decaying stop buffer — wider stops early, normal after decay period.
+        # Backtest: x1.75 2.0h = Sharpe 2.157, +$10,485 P&L over 938 days.
+        self.buffer_decay_start_mult = strategy_config.get("buffer_decay_start_mult", None)
+        self.buffer_decay_hours = strategy_config.get("buffer_decay_hours", None)
+        if self.buffer_decay_start_mult is not None and self.buffer_decay_hours is not None:
+            logger.info(
+                f"  Buffer decay (MKT-042): ENABLED "
+                f"(start {self.buffer_decay_start_mult:.2f}×, decay to 1× over {self.buffer_decay_hours:.1f}h)"
+            )
+        else:
+            logger.info(f"  Buffer decay (MKT-042): DISABLED")
+
         # MKT-041: Cushion recovery exit — close side that nearly stopped then recovered.
         # When spread_value reaches >= nearstop_pct × stop_level (danger zone) then
         # drops back to <= recovery_pct × stop_level, close that side.
@@ -3014,6 +3040,18 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.debug(f"DataRecorder daily summary failed: {e}")
 
+    def _get_spx_price_minutes_ago(self, minutes: int) -> float:
+        """Get SPX price from approximately N minutes ago using heartbeat price history."""
+        target_time = datetime.now() - timedelta(minutes=minutes)
+        best_price = 0.0
+        best_diff = float('inf')
+        for ts, price in self.market_data.price_history:
+            diff = abs((ts - target_time).total_seconds())
+            if diff < best_diff:
+                best_diff = diff
+                best_price = price
+        return best_price if best_diff < minutes * 60 * 2 else 0.0  # reject if too far off
+
     # OVERRIDE: Entry initiation with trend detection
     # =========================================================================
 
@@ -3032,6 +3070,54 @@ class HydraStrategy(MEICStrategy):
         """
         entry_num = self._next_entry_index + 1
         logger.info(f"HYDRA: Initiating Entry #{entry_num} of {len(self.entry_times)}")
+
+        # MKT-043: Calm entry filter — delay if SPX moving fast.
+        # CRITICAL: refresh prices and check stops during delay to avoid
+        # blocking stop monitoring (audit Bug #3).
+        if (self.calm_entry_lookback_min is not None
+                and self.calm_entry_threshold_pts is not None
+                and self.calm_entry_max_delay_min is not None):
+            import time as _time
+            max_delay_sec = self.calm_entry_max_delay_min * 60
+            waited = 0
+            _first_log = True
+            while waited <= max_delay_sec:
+                # Refresh prices so current_price and price_history stay fresh
+                self._update_market_data()
+                spx_now = self.current_price
+                past_price = self._get_spx_price_minutes_ago(self.calm_entry_lookback_min)
+                if spx_now > 0 and past_price > 0:
+                    move = abs(spx_now - past_price)
+                    if move <= self.calm_entry_threshold_pts:
+                        if waited > 0:
+                            logger.info(
+                                f"MKT-043 E#{entry_num}: Market calmed after {waited}s delay "
+                                f"(move {move:.1f}pt <= {self.calm_entry_threshold_pts}pt threshold)"
+                            )
+                        break  # calm enough, proceed
+                    else:
+                        if _first_log:
+                            logger.info(
+                                f"MKT-043 E#{entry_num}: SPX moving fast ({move:.1f}pt in {self.calm_entry_lookback_min}min "
+                                f"> {self.calm_entry_threshold_pts}pt), waiting for calm..."
+                            )
+                            _first_log = False
+                else:
+                    break  # no price data, proceed anyway
+                # Check stops for ALL active entries during the wait (Bug #3 fix)
+                stop_result = self._check_stop_losses()
+                if stop_result:
+                    logger.warning(f"MKT-043 E#{entry_num}: Stop triggered during calm wait: {stop_result}")
+                # Check if entry window is still open
+                if not self._is_entry_time():
+                    logger.info(f"MKT-043 E#{entry_num}: Entry window expired during calm wait")
+                    break
+                _time.sleep(10)
+                waited += 10
+            else:
+                logger.info(
+                    f"MKT-043 E#{entry_num}: Max delay {self.calm_entry_max_delay_min}min reached, entering anyway"
+                )
 
         # Check trend signal (or reuse if recent)
         if self.recheck_each_entry or self._current_trend is None:
@@ -4778,6 +4864,7 @@ class HydraStrategy(MEICStrategy):
     def _check_stop_with_confirmation(self, entry, side: str, spread_value: float, stop_level: float) -> Optional[str]:
         """
         MKT-036: Check stop with confirmation timer.
+        MKT-042: Time-decaying buffer — wider stop early, normal after decay_hours.
 
         Instead of executing immediately when spread_value >= stop_level,
         requires the breach to persist for stop_confirmation_seconds (default 75s).
@@ -4785,6 +4872,20 @@ class HydraStrategy(MEICStrategy):
 
         Returns stop result string if stop executed, or None.
         """
+        # MKT-042: Apply time-decaying buffer — widen stop early in position's life
+        if (self.buffer_decay_start_mult is not None
+                and self.buffer_decay_hours is not None
+                and self.buffer_decay_hours > 0
+                and self.buffer_decay_start_mult > 1.0
+                and hasattr(entry, 'entry_time') and entry.entry_time is not None):
+            elapsed_h = (get_us_market_time() - entry.entry_time).total_seconds() / 3600
+            decay_factor = max(0.0, 1.0 - elapsed_h / self.buffer_decay_hours)
+            if decay_factor > 0:
+                # Add extra buffer that decays linearly to zero
+                buf = self.call_stop_buffer if side == "call" else self.put_stop_buffer
+                extra = buf * (self.buffer_decay_start_mult - 1) * decay_factor
+                stop_level = stop_level + extra
+
         if spread_value >= stop_level:
             if not self.stop_confirmation_enabled:
                 return self._execute_stop_loss(entry, side)

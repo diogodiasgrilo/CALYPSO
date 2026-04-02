@@ -191,6 +191,24 @@ class BacktestConfig:
     #    None = disabled.
     entry_exit_time_since_open_base: Optional[float] = None  # e.g. 0.50
 
+    # ── Calm entry filter ─────────────────────────────────────────────────────
+    # At scheduled entry time, check if SPX moved > threshold points in the last
+    # N minutes.  If so, delay entry by 1 minute and re-check.  Repeat until
+    # calm or max delay reached, then enter anyway.
+    # None = disabled (enter at exact scheduled time).
+    calm_entry_lookback_min: Optional[int] = None      # e.g. 3 (check last 3 minutes)
+    calm_entry_threshold_pts: Optional[float] = None   # e.g. 10.0 (SPX points)
+    calm_entry_max_delay_min: Optional[int] = None     # e.g. 10 (max wait in minutes)
+
+    # ── Time-decaying stop buffer ─────────────────────────────────────────────
+    # Start with wider stop buffers at entry, linearly decay to normal (config)
+    # buffer over N hours.  After decay period, buffer = normal config value.
+    # Formula: buffer(t) = normal + (normal * (multiplier - 1)) * max(0, 1 - elapsed_hours / decay_hours)
+    # None = disabled (use fixed buffer from config).
+    # Example: multiplier=2.0, decay_hours=3 → starts at 2× buffer, reaches 1× after 3h.
+    buffer_decay_start_mult: Optional[float] = None    # e.g. 2.0 (start at 2× normal buffer)
+    buffer_decay_hours: Optional[float] = None         # e.g. 3.0 (reach normal buffer after 3h)
+
     # ── Cushion recovery exit (per-entry, per-side) ───────────────────────────
     # Close a side when it nearly hits its stop level but then recovers.
     # Logic: if spread_value reaches >= nearstop_pct × stop_level (danger zone),

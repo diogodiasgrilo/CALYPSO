@@ -707,6 +707,16 @@ def _simulate_entry(
     _etc_base = getattr(cfg, "entry_exit_time_to_close_base", None)
     _eso_base = getattr(cfg, "entry_exit_time_since_open_base", None)
 
+    # Time-decaying buffer: pre-compute constants outside loop
+    _buf_mult = getattr(cfg, "buffer_decay_start_mult", None)
+    _buf_decay_hours = getattr(cfg, "buffer_decay_hours", None)
+    _buf_decay_enabled = (_buf_mult is not None and _buf_decay_hours is not None
+                          and _buf_decay_hours > 0 and _buf_mult > 1.0)
+    _orig_call_stop = result.call_stop
+    _orig_put_stop = result.put_stop
+    _buf_call_extra = cfg.call_stop_buffer * (_buf_mult - 1) if _buf_decay_enabled else 0
+    _buf_put_extra = cfg.put_stop_buffer * (_buf_mult - 1) if _buf_decay_enabled else 0
+
     # early_ms already computed above (used to skip entries at/after exit time)
     for monitor_ms in monitor_times:
         if monitor_ms <= entry_ms:
@@ -717,6 +727,17 @@ def _simulate_entry(
 
         # Stop checks: use ask-based close cost (realistic fill price)
         slip = getattr(cfg, "stop_slippage_per_leg", 0.0) * 2  # 2 legs, value already in dollars
+
+        # ── Time-decaying buffer: widen stop early in position's life ──────
+        if _buf_decay_enabled:
+            elapsed_h = (monitor_ms - entry_ms) / 3600000
+            decay_factor = max(0.0, 1.0 - elapsed_h / _buf_decay_hours)
+            # Only widen if trailing stop hasn't tightened this side
+            if not _call_trail:
+                result.call_stop = _orig_call_stop + _buf_call_extra * decay_factor
+            if not _put_trail:
+                result.put_stop = _orig_put_stop + _buf_put_extra * decay_factor
+
         # Spread value cap: close cost can't exceed spread width × 100
         cap_at_stop = getattr(cfg, "spread_value_cap_at_stop", False)
         call_cap = result.call_spread_width * 100 if cap_at_stop else float('inf')
@@ -1507,6 +1528,30 @@ def simulate_day(
 
         return None
 
+    # ── Calm entry filter: delay entry if SPX moving too fast ────────────
+    _calm_lookback = getattr(cfg, "calm_entry_lookback_min", None)
+    _calm_thresh = getattr(cfg, "calm_entry_threshold_pts", None)
+    _calm_max_delay = getattr(cfg, "calm_entry_max_delay_min", None)
+
+    def _apply_calm_delay(scheduled_ms: int) -> int:
+        """If SPX is moving fast, delay entry until it calms (or max delay)."""
+        if _calm_lookback is None or _calm_thresh is None or _calm_max_delay is None:
+            return scheduled_ms
+        lookback_ms = _calm_lookback * 60 * 1000
+        one_min_ms = 60 * 1000
+        for delay_min in range(_calm_max_delay + 1):
+            check_ms = scheduled_ms + delay_min * one_min_ms
+            past_ms = check_ms - lookback_ms
+            spx_now = _get_index_price(spx_df, check_ms)
+            spx_past = _get_index_price(spx_df, past_ms)
+            if spx_now <= 0 or spx_past <= 0:
+                return check_ms  # no data, enter now
+            move = abs(spx_now - spx_past)
+            if move <= _calm_thresh:
+                return check_ms  # calm enough
+        # Max delay reached, enter anyway
+        return scheduled_ms + _calm_max_delay * one_min_ms
+
     # ── Base entries (E1-E5) ─────────────────────────────────────────────
     entry_ms_list = cfg.entry_times_as_ms()
 
@@ -1528,15 +1573,17 @@ def simulate_day(
     if movement_pct is None:
         # Standard time-based entries
         for i, entry_ms in enumerate(entry_ms_list, 1):
-            skip_reason = _should_skip_entry(entry_ms)
+            # Apply calm entry delay if configured
+            actual_entry_ms = _apply_calm_delay(entry_ms)
+            skip_reason = _should_skip_entry(actual_entry_ms)
             if skip_reason:
-                skip_res = EntryResult(entry_num=i, entry_time_ms=entry_ms,
+                skip_res = EntryResult(entry_num=i, entry_time_ms=actual_entry_ms,
                                        entry_type="skipped", skip_reason=skip_reason)
                 day.entries.append(skip_res)
                 continue
             res = _simulate_entry(
                 entry_num=i,
-                entry_ms=entry_ms,
+                entry_ms=actual_entry_ms,
                 is_conditional=False,
                 is_fomc_t1=is_fomc_t1,
                 spx_open=spx_open,
@@ -1603,15 +1650,17 @@ def simulate_day(
     for i, (cond_ms, down_en, up_en) in enumerate(zip(cond_times, cond_down, cond_up), 6):
         if not down_en and not up_en:
             continue
-        skip_reason = _should_skip_entry(cond_ms)
+        # Apply calm entry delay to conditional entries too
+        actual_cond_ms = _apply_calm_delay(cond_ms)
+        skip_reason = _should_skip_entry(actual_cond_ms)
         if skip_reason:
-            skip_res = EntryResult(entry_num=i, entry_time_ms=cond_ms,
+            skip_res = EntryResult(entry_num=i, entry_time_ms=actual_cond_ms,
                                    entry_type="skipped", skip_reason=skip_reason)
             day.entries.append(skip_res)
             continue
         res = _simulate_entry(
             entry_num=i,
-            entry_ms=cond_ms,
+            entry_ms=actual_cond_ms,
             is_conditional=down_en,
             is_upday_conditional=up_en,
             is_fomc_t1=is_fomc_t1,
