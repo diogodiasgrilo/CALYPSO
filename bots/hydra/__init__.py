@@ -24,6 +24,10 @@ Conditional Entry Trigger (MKT-035 / Upday-035):
 - E7: DISABLED
 
 Version History:
+- 1.21.0 (2026-04-01): MKT-041 Cushion Recovery Exit. Closes individual IC sides when they nearly hit
+  their stop (>= 96% of stop level) then recover (<= 67% of stop level). Backtest: Sharpe 2.182 vs 2.094
+  baseline over 938 days, fires on ~101 days (10.8%). Config: cushion_nearstop_pct (default null/disabled),
+  cushion_recovery_pct (default null/disabled). Both in strategy section.
 - 1.19.0 (2026-03-29): Walk-forward backtest convergence. 3 base entries (was 5) at 10:15, 10:45, 11:15
   (E4/E5 dropped — negative EV in backtest). E6 upday put-only ENABLED at 14:00 (threshold 0.25%).
   E7 DISABLED. Spread width: VIX x 6.0, floor 25pt, cap 110pt. Credit gates: call $2.00, put $2.75,

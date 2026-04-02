@@ -171,6 +171,10 @@ class HydraIronCondorEntry(IronCondorEntry):
     # Skip tracking: human-readable reason when entry is fully skipped (both sides)
     skip_reason: str = ""  # e.g. "MKT-011: both sides below minimum credit"
 
+    # MKT-041: Cushion recovery exit — close side that nearly stopped then recovered
+    call_hit_danger: bool = False   # True if call spread_value reached >= nearstop_pct × stop_level
+    put_hit_danger: bool = False    # True if put spread_value reached >= nearstop_pct × stop_level
+
     @property
     def is_one_sided(self) -> bool:
         """True if only one side was placed (not a full IC)."""
@@ -563,6 +567,21 @@ class HydraStrategy(MEICStrategy):
             f"  Stop confirmation (MKT-036): {'ENABLED' if self.stop_confirmation_enabled else 'DISABLED'} "
             f"({self.stop_confirmation_seconds}s window)"
         )
+
+        # MKT-041: Cushion recovery exit — close side that nearly stopped then recovered.
+        # When spread_value reaches >= nearstop_pct × stop_level (danger zone) then
+        # drops back to <= recovery_pct × stop_level, close that side.
+        # Backtest: N96 R67 = Sharpe 2.182 vs 2.094 baseline (938 days, 1-min data).
+        self.cushion_nearstop_pct = strategy_config.get("cushion_nearstop_pct", None)
+        self.cushion_recovery_pct = strategy_config.get("cushion_recovery_pct", None)
+        if self.cushion_nearstop_pct is not None and self.cushion_recovery_pct is not None:
+            logger.info(
+                f"  Cushion recovery (MKT-041): ENABLED "
+                f"(danger >= {self.cushion_nearstop_pct:.0%} of stop, "
+                f"close at <= {self.cushion_recovery_pct:.0%} of stop)"
+            )
+        else:
+            logger.info(f"  Cushion recovery (MKT-041): DISABLED")
 
         # Skip weekdays: don't trade on specific days (0=Mon..4=Fri)
         self.skip_weekdays = strategy_config.get("skip_weekdays", [])
@@ -4873,6 +4892,10 @@ class HydraStrategy(MEICStrategy):
                     result = self._check_stop_with_confirmation(entry, "call", entry.call_spread_value, entry.call_side_stop)
                     if result:
                         return result
+                    # MKT-041: Cushion recovery check (only if stop didn't fire)
+                    result = self._check_cushion_recovery(entry, "call", entry.call_spread_value, entry.call_side_stop)
+                    if result:
+                        return result
 
             elif is_hydra_entry and entry.put_only:
                 # Only check put side
@@ -4903,6 +4926,10 @@ class HydraStrategy(MEICStrategy):
                         logger.error(f"SAFETY: Invalid put stop ${entry.put_side_stop:.2f}")
                         continue
                     result = self._check_stop_with_confirmation(entry, "put", entry.put_spread_value, entry.put_side_stop)
+                    if result:
+                        return result
+                    # MKT-041: Cushion recovery check (only if stop didn't fire)
+                    result = self._check_cushion_recovery(entry, "put", entry.put_spread_value, entry.put_side_stop)
                     if result:
                         return result
 
@@ -4941,6 +4968,10 @@ class HydraStrategy(MEICStrategy):
                             result = self._check_stop_with_confirmation(entry, "call", entry.call_spread_value, entry.call_side_stop)
                             if result:
                                 return result
+                            # MKT-041: Cushion recovery check
+                            result = self._check_cushion_recovery(entry, "call", entry.call_spread_value, entry.call_side_stop)
+                            if result:
+                                return result
 
                 if not put_done:
                     if price_stop_pts is not None:
@@ -4963,6 +4994,64 @@ class HydraStrategy(MEICStrategy):
                             result = self._check_stop_with_confirmation(entry, "put", entry.put_spread_value, entry.put_side_stop)
                             if result:
                                 return result
+                            # MKT-041: Cushion recovery check
+                            result = self._check_cushion_recovery(entry, "put", entry.put_spread_value, entry.put_side_stop)
+                            if result:
+                                return result
+
+        return None
+
+    def _check_cushion_recovery(self, entry: HydraIronCondorEntry, side: str,
+                                 spread_value: float, stop_level: float) -> Optional[str]:
+        """
+        MKT-041: Cushion recovery exit — close a side that nearly stopped then recovered.
+
+        If spread_value reaches >= nearstop_pct × stop_level (danger zone), set a flag.
+        If the flag is set AND spread_value drops to <= recovery_pct × stop_level, close it.
+
+        Returns:
+            str describing close action, or None
+        """
+        if self.cushion_nearstop_pct is None or self.cushion_recovery_pct is None:
+            return None
+        if stop_level <= 0 or spread_value <= 0:
+            return None
+
+        ratio = spread_value / stop_level
+
+        # Track danger zone entry
+        if side == "call":
+            if ratio >= self.cushion_nearstop_pct:
+                if not entry.call_hit_danger:
+                    entry.call_hit_danger = True
+                    logger.info(
+                        f"MKT-041 E#{entry.entry_number} call DANGER: "
+                        f"spread_value ${spread_value:.0f} = {ratio:.1%} of stop ${stop_level:.0f}"
+                    )
+            # Check recovery (only if previously in danger)
+            if entry.call_hit_danger and ratio <= self.cushion_recovery_pct:
+                logger.warning(
+                    f"MKT-041 E#{entry.entry_number} call RECOVERY EXIT: "
+                    f"spread_value ${spread_value:.0f} = {ratio:.1%} of stop ${stop_level:.0f} "
+                    f"(recovered from danger zone >= {self.cushion_nearstop_pct:.0%})"
+                )
+                return self._execute_stop_loss(entry, "call")
+        else:  # put
+            if ratio >= self.cushion_nearstop_pct:
+                if not entry.put_hit_danger:
+                    entry.put_hit_danger = True
+                    logger.info(
+                        f"MKT-041 E#{entry.entry_number} put DANGER: "
+                        f"spread_value ${spread_value:.0f} = {ratio:.1%} of stop ${stop_level:.0f}"
+                    )
+            # Check recovery
+            if entry.put_hit_danger and ratio <= self.cushion_recovery_pct:
+                logger.warning(
+                    f"MKT-041 E#{entry.entry_number} put RECOVERY EXIT: "
+                    f"spread_value ${spread_value:.0f} = {ratio:.1%} of stop ${stop_level:.0f} "
+                    f"(recovered from danger zone >= {self.cushion_nearstop_pct:.0%})"
+                )
+                return self._execute_stop_loss(entry, "put")
 
         return None
 
@@ -6808,6 +6897,9 @@ class HydraStrategy(MEICStrategy):
                     "put_breach_time": entry.put_breach_time.isoformat() if getattr(entry, 'put_breach_time', None) else None,
                     "call_breach_count": getattr(entry, 'call_breach_count', 0),
                     "put_breach_count": getattr(entry, 'put_breach_count', 0),
+                    # MKT-041: Cushion recovery danger flags
+                    "call_hit_danger": getattr(entry, 'call_hit_danger', False),
+                    "put_hit_danger": getattr(entry, 'put_hit_danger', False),
                     # Dashboard: live spread values for cushion display
                     "call_spread_value": entry.call_spread_value if not entry.call_side_stopped else 0,
                     "put_spread_value": entry.put_spread_value if not entry.put_side_stopped else 0,
@@ -8019,6 +8111,9 @@ class HydraStrategy(MEICStrategy):
                 # MKT-036: Restore breach counts (NOT breach_time — conservative reset on restart)
                 restored_entry.call_breach_count = entry_data.get("call_breach_count", 0)
                 restored_entry.put_breach_count = entry_data.get("put_breach_count", 0)
+                # MKT-041: Restore cushion recovery danger flags
+                restored_entry.call_hit_danger = entry_data.get("call_hit_danger", False)
+                restored_entry.put_hit_danger = entry_data.get("put_hit_danger", False)
                 # Restore stop timestamps (for dashboard stop markers)
                 restored_entry.call_stop_time = entry_data.get("call_stop_time", "")
                 restored_entry.put_stop_time = entry_data.get("put_stop_time", "")
@@ -8285,6 +8380,9 @@ class HydraStrategy(MEICStrategy):
                                         # MKT-036: Breach counts (NOT breach_time — reset on restart)
                                         "call_breach_count": entry_data.get("call_breach_count", 0),
                                         "put_breach_count": entry_data.get("put_breach_count", 0),
+                                        # MKT-041: Cushion recovery danger flags
+                                        "call_hit_danger": entry_data.get("call_hit_danger", False),
+                                        "put_hit_danger": entry_data.get("put_hit_danger", False),
                                         # Stop timestamps (for dashboard stop markers)
                                         "call_stop_time": entry_data.get("call_stop_time", ""),
                                         "put_stop_time": entry_data.get("put_stop_time", ""),
@@ -8375,6 +8473,9 @@ class HydraStrategy(MEICStrategy):
                     # Restore stop timestamps (for dashboard stop markers)
                     entry.call_stop_time = saved.get("call_stop_time", "")
                     entry.put_stop_time = saved.get("put_stop_time", "")
+                    # MKT-041: Restore cushion recovery danger flags
+                    entry.call_hit_danger = saved.get("call_hit_danger", False)
+                    entry.put_hit_danger = saved.get("put_hit_danger", False)
 
                     # Restore entry_time and fill prices (for /entry display)
                     entry_time_str = saved.get("entry_time")
@@ -8512,6 +8613,9 @@ class HydraStrategy(MEICStrategy):
                     # MKT-036: Restore breach counts (NOT breach_time — conservative reset on restart)
                     stopped_entry.call_breach_count = stopped_entry_data.get("call_breach_count", 0)
                     stopped_entry.put_breach_count = stopped_entry_data.get("put_breach_count", 0)
+                    # MKT-041: Restore cushion recovery danger flags
+                    stopped_entry.call_hit_danger = stopped_entry_data.get("call_hit_danger", False)
+                    stopped_entry.put_hit_danger = stopped_entry_data.get("put_hit_danger", False)
                     # Fill prices (for /entry display after restart)
                     stopped_entry.short_call_fill_price = stopped_entry_data.get("short_call_fill_price", 0)
                     stopped_entry.long_call_fill_price = stopped_entry_data.get("long_call_fill_price", 0)

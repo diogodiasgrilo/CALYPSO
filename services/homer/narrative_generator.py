@@ -36,6 +36,7 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 - Min credit thresholds: $2.00 calls, $2.75 puts (MKT-011). MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
 - Stop formula: Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
 - Stop confirmation (MKT-036): DISABLED. Code preserved but dormant.
+- Cushion recovery exit (MKT-041): Disabled by default (config keys null). When enabled: closes IC side that reaches >= 96% of stop then recovers to <= 67%. Backtest Sharpe 2.182 vs 2.094 baseline.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
 - Whipsaw filter: whipsaw_range_skip_mult = 1.75 — skip entry if SPX intraday range > 1.75x expected daily move.
 - Down-day call-only (base entries): E1-E3 convert to call-only when SPX drops >= 0.57% from open.

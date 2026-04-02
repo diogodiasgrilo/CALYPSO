@@ -78,6 +78,10 @@
         "fomc_t1_callonly_enabled": true,
         "fomc_announcement_skip": false,
 
+        "_comment_cushion_recovery": "MKT-041: Cushion Recovery Exit. Closes IC side that nearly hits stop then recovers. Set both to non-null to enable. nearstop_pct = fraction of stop level to trigger near-stop state (e.g., 0.96 = 96%). recovery_pct = fraction of stop level to trigger recovery close (e.g., 0.67 = 67%). Backtest: Sharpe 2.182 vs 2.094 baseline over 938 days.",
+        "cushion_nearstop_pct": null,
+        "cushion_recovery_pct": null,
+
         "_comment_stop_confirmation": "MKT-036: Sustained breach confirmation. INTENTIONALLY DISABLED — put buffer (put_stop_buffer) is the chosen solution instead. Code preserved but dormant. When enabled: requires stop condition to persist for N seconds before closing.",
         "stop_confirmation_enabled": false,
         "stop_confirmation_seconds": 75,

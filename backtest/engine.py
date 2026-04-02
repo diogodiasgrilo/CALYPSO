@@ -697,6 +697,16 @@ def _simulate_entry(
     _call_trail = False  # has call trailing been triggered?
     _put_trail = False   # has put trailing been triggered?
 
+    # Cushion recovery tracking
+    _cush_near = getattr(cfg, "cushion_nearstop_pct", None)
+    _cush_recv = getattr(cfg, "cushion_recovery_pct", None)
+    _call_hit_danger = False
+    _put_hit_danger = False
+
+    # Per-entry time-scaled exit config (read once, not per bar)
+    _etc_base = getattr(cfg, "entry_exit_time_to_close_base", None)
+    _eso_base = getattr(cfg, "entry_exit_time_since_open_base", None)
+
     # early_ms already computed above (used to skip entries at/after exit time)
     for monitor_ms in monitor_times:
         if monitor_ms <= entry_ms:
@@ -764,6 +774,75 @@ def _simulate_entry(
                     result.put_outcome = "stopped"
                     result.put_exit_ms = monitor_ms
                     result.put_close_cost = min(pv + slip, put_cap)
+
+        # ── Cushion recovery exit: close side that nearly stopped then recovered
+        if _cush_near is not None and _cush_recv is not None:
+            # Call side
+            if call_active and not call_stopped and result.call_stop > 0:
+                _cv_cush = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                if _cv_cush > 0:
+                    _call_ratio = _cv_cush / result.call_stop
+                    if _call_ratio >= _cush_near:
+                        _call_hit_danger = True
+                    if _call_hit_danger and _call_ratio <= _cush_recv:
+                        call_stopped = True
+                        result.call_outcome = "early_exit"
+                        result.call_exit_ms = monitor_ms
+                        result.call_close_cost = _cv_cush + slip
+            # Put side
+            if put_active and not put_stopped and result.put_stop > 0:
+                _pv_cush = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                if _pv_cush > 0:
+                    _put_ratio = _pv_cush / result.put_stop
+                    if _put_ratio >= _cush_near:
+                        _put_hit_danger = True
+                    if _put_hit_danger and _put_ratio <= _cush_recv:
+                        put_stopped = True
+                        result.put_outcome = "early_exit"
+                        result.put_exit_ms = monitor_ms
+                        result.put_close_cost = _pv_cush + slip
+
+        # ── Per-entry time-scaled exit: close this entry's sides if captured
+        #    enough credit relative to time remaining (or time open) ──────
+        if (_etc_base is not None or _eso_base is not None):
+            _mkt_close_ms = 16 * 3600 * 1000
+            for _side, _credit, _stopped, _cv_func, _strike_s, _strike_l, _right in [
+                ("call", result.call_credit, call_stopped,
+                 lambda ms: _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", ms),
+                 result.short_call, result.long_call, "C"),
+                ("put", result.put_credit, put_stopped,
+                 lambda ms: _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", ms),
+                 result.short_put, result.long_put, "P"),
+            ]:
+                _side_active = (_side == "call" and call_active) or (_side == "put" and put_active)
+                if not _side_active or _stopped or _credit <= 0:
+                    continue
+                _sv = _cv_func(monitor_ms)
+                if _sv <= 0:
+                    continue
+                _captured = (_credit - _sv) / _credit
+                _should_exit = False
+                if _etc_base is not None:
+                    _hrs_left = max(0.25, (_mkt_close_ms - monitor_ms) / 3600000)
+                    _thresh = _etc_base / math.sqrt(_hrs_left / 6.5)
+                    if _captured >= _thresh:
+                        _should_exit = True
+                if not _should_exit and _eso_base is not None:
+                    _hrs_open = max(0.0167, (monitor_ms - entry_ms) / 3600000)  # min 1 min
+                    _thresh = _eso_base * math.sqrt(_hrs_open / 6.5)
+                    if _captured >= _thresh:
+                        _should_exit = True
+                if _should_exit:
+                    if _side == "call":
+                        call_stopped = True
+                        result.call_outcome = "early_exit"
+                        result.call_exit_ms = monitor_ms
+                        result.call_close_cost = _sv + slip
+                    else:
+                        put_stopped = True
+                        result.put_outcome = "early_exit"
+                        result.put_exit_ms = monitor_ms
+                        result.put_close_cost = _sv + slip
 
         # Early exit: close any remaining open sides at this bar
         if early_ms and monitor_ms >= early_ms:
@@ -877,7 +956,11 @@ def _apply_return_threshold(
       - Closing legs: charged for "stopped" and "early_exit", not for expiry
     """
     threshold = getattr(cfg, "net_return_exit_pct", None)
-    if threshold is None or threshold <= 0:
+    dollar_target = getattr(cfg, "net_pnl_exit_dollars", None)
+    time_scaled_base = getattr(cfg, "time_scaled_return_base", None)
+    if ((threshold is None or threshold <= 0)
+            and dollar_target is None
+            and time_scaled_base is None):
         return entries
 
     placed = [e for e in entries if e.entry_type != "skipped"]
@@ -948,7 +1031,31 @@ def _apply_return_threshold(
             )
             total_net_pnl += gross * cfg.contracts - commission
 
-        if total_credit > 0 and total_net_pnl / total_credit >= threshold:
+        # Check percentage threshold
+        pct_hit = (threshold is not None and threshold > 0
+                   and total_credit > 0
+                   and total_net_pnl / total_credit >= threshold)
+        # Check fixed-dollar threshold
+        dollar_hit = (dollar_target is not None
+                      and total_net_pnl >= dollar_target)
+        # Check time-scaled return threshold (uses time_scaled_base from outer scope)
+        time_scaled_hit = False
+        if (time_scaled_base is not None and total_credit > 0):
+            market_close_ms = 16 * 3600 * 1000  # 4:00 PM
+            hours_left = max(0.25, (market_close_ms - bar_ms) / 3600000)
+            # base / sqrt(hours_left / 6.5) → lower early, higher late
+            dynamic_threshold = time_scaled_base / math.sqrt(hours_left / 6.5)
+            captured_pct = total_net_pnl / total_credit
+            if captured_pct >= dynamic_threshold:
+                time_scaled_hit = True
+        if pct_hit or dollar_hit or time_scaled_hit:
+            # Track which condition triggered for skip_reason
+            if pct_hit:
+                _exit_reason = f"net_return_threshold_{threshold:.0%}"
+            elif dollar_hit:
+                _exit_reason = f"net_pnl_target_${dollar_target:.0f}"
+            else:
+                _exit_reason = "time_scaled_exit"
             exit_ms = bar_ms
             break
 
@@ -966,7 +1073,7 @@ def _apply_return_threshold(
         # Entries that would have been placed at or after exit_ms: skip them
         if e.entry_time_ms >= exit_ms:
             e.entry_type      = "skipped"
-            e.skip_reason     = f"net_return_threshold_{threshold:.0%}"
+            e.skip_reason     = _exit_reason
             e.short_call      = e.long_call = e.short_put = e.long_put = 0.0
             e.call_credit     = e.put_credit  = 0.0
             e.call_stop       = e.put_stop    = 0.0
@@ -1024,6 +1131,142 @@ def _apply_return_threshold(
         e.gross_pnl = gross * cfg.contracts
         e.commission = commission
         e.net_pnl   = e.gross_pnl - commission
+
+    return entries
+
+
+# ── Range-consumption exit (post-processing) ─��────────────────────────────
+
+def _apply_range_exit(
+    entries: List[EntryResult],
+    lookup: Dict,
+    monitor_times: List[int],
+    cfg: "BacktestConfig",
+    spx_df: pd.DataFrame,
+    expected_move: float,
+) -> List[EntryResult]:
+    """Close all surviving positions when SPX intraday range exceeds a
+    fraction of the daily expected move.
+
+    Works identically to _apply_return_threshold but uses range / EM as
+    the trigger condition instead of net_return / credit.
+    """
+    range_pct = getattr(cfg, "range_exit_pct", None)
+    if range_pct is None or range_pct <= 0 or expected_move <= 0:
+        return entries
+
+    placed = [e for e in entries if e.entry_type != "skipped"]
+    if not placed:
+        return entries
+
+    market_open_ms = 9 * 3600000 + 30 * 60000  # 9:30 AM
+
+    # Optional: only check after a specific time
+    range_after_str = getattr(cfg, "range_exit_after", None)
+    range_after_ms = None
+    if range_after_str:
+        h, m = map(int, range_after_str.split(":"))
+        range_after_ms = (h * 3600 + m * 60) * 1000
+
+    exit_ms: Optional[int] = None
+
+    # Phase 1: find first bar where range exceeds threshold
+    for bar_ms in monitor_times:
+        if range_after_ms is not None and bar_ms < range_after_ms:
+            continue
+        # Must have at least one entry placed before this bar
+        active = [e for e in placed if e.entry_time_ms < bar_ms]
+        if not active:
+            continue
+
+        # Compute intraday range up to this bar
+        mask = (
+            (spx_df["ms_of_day"] >= market_open_ms) &
+            (spx_df["ms_of_day"] <= bar_ms) &
+            (spx_df["price"] > 0)
+        )
+        if not mask.any():
+            continue
+        prices = spx_df.loc[mask, "price"]
+        intraday_range = float(prices.max()) - float(prices.min())
+        range_ratio = intraday_range / expected_move
+
+        if range_ratio >= range_pct:
+            exit_ms = bar_ms
+            break
+
+    if exit_ms is None:
+        return entries  # threshold never reached
+
+    # Phase 2: post-process — close surviving sides, skip future entries
+    for e in entries:
+        if e.entry_type == "skipped":
+            continue
+
+        call_active = e.entry_type in ("full_ic", "call_only")
+        put_active  = e.entry_type in ("full_ic", "put_only")
+
+        # Entries placed at or after exit_ms: skip
+        if e.entry_time_ms >= exit_ms:
+            e.entry_type      = "skipped"
+            e.skip_reason     = f"range_exit_{range_pct:.0%}"
+            e.short_call = e.long_call = e.short_put = e.long_put = 0.0
+            e.call_credit = e.put_credit = 0.0
+            e.call_stop = e.put_stop = 0.0
+            e.call_outcome = e.put_outcome = ""
+            e.call_close_cost = e.put_close_cost = 0.0
+            e.gross_pnl = e.commission = e.net_pnl = 0.0
+            continue
+
+        # Entries placed before exit_ms: close surviving sides
+        legs_placed = (2 if call_active else 0) + (2 if put_active else 0)
+        gross       = 0.0
+        legs_closed = 0
+
+        if call_active:
+            resolved_before = (
+                e.call_outcome in ("stopped", "early_exit")
+                and e.call_exit_ms > 0
+                and e.call_exit_ms <= exit_ms
+            )
+            if resolved_before:
+                gross += e.call_credit - e.call_close_cost
+                legs_closed += 2
+            else:
+                cv = _get_spread_close_cost(
+                    lookup, e.short_call, e.long_call, "C", exit_ms
+                )
+                e.call_outcome    = "early_exit"
+                e.call_exit_ms    = exit_ms
+                e.call_close_cost = cv
+                gross += e.call_credit - cv
+                legs_closed += 2
+
+        if put_active:
+            resolved_before = (
+                e.put_outcome in ("stopped", "early_exit")
+                and e.put_exit_ms > 0
+                and e.put_exit_ms <= exit_ms
+            )
+            if resolved_before:
+                gross += e.put_credit - e.put_close_cost
+                legs_closed += 2
+            else:
+                pv = _get_spread_close_cost(
+                    lookup, e.short_put, e.long_put, "P", exit_ms
+                )
+                e.put_outcome    = "early_exit"
+                e.put_exit_ms    = exit_ms
+                e.put_close_cost = pv
+                gross += e.put_credit - pv
+                legs_closed += 2
+
+        commission = (
+            cfg.commission_per_leg * (legs_placed + legs_closed) * cfg.contracts
+        )
+        e.gross_pnl  = gross * cfg.contracts
+        e.commission  = commission
+        e.net_pnl     = e.gross_pnl - commission
 
     return entries
 
@@ -1393,9 +1636,17 @@ def simulate_day(
         day.entries.extend(replacements)
 
     # ── Net-return threshold exit (post-processing pass) ─────────────────
-    if getattr(cfg, "net_return_exit_pct", None):
+    if (getattr(cfg, "net_return_exit_pct", None) is not None
+            or getattr(cfg, "net_pnl_exit_dollars", None) is not None
+            or getattr(cfg, "time_scaled_return_base", None) is not None):
         day.entries = _apply_return_threshold(
             day.entries, lookup, monitor_times, cfg
+        )
+
+    # ── Range-consumption exit (post-processing pass) ─────────────────
+    if getattr(cfg, "range_exit_pct", None):
+        day.entries = _apply_range_exit(
+            day.entries, lookup, monitor_times, cfg, spx_df, expected_move
         )
 
     return day

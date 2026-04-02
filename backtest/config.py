@@ -165,6 +165,41 @@ class BacktestConfig:
     # None = disabled.  Example: 300.0 = exit when net P&L >= $300.
     net_pnl_exit_dollars: Optional[float] = None
 
+    # ── Time-scaled return exit ───────────────────────────────────────────────
+    # Dynamic profit target: required capture % INCREASES as time remaining
+    # decreases.  Formula: exit when captured_pct >= base / sqrt(hours_left/6.5)
+    # Early in day: sqrt is large → threshold is LOW → easy to trigger (take early gains)
+    # Late in day: sqrt is small → threshold is HIGH → hard to trigger (let theta work)
+    # None = disabled.
+    # Example: time_scaled_return_base=0.30 means ~30% required at midday,
+    #   ~21% at 11 AM (4.5h left), ~42% at 2 PM (2h left), ~95% at 3:45 PM.
+    time_scaled_return_base: Optional[float] = None  # e.g. 0.30 (30%)
+
+    # ── Per-entry time-scaled exit ────────────────────────────────────────────
+    # Close individual entry sides when that entry's captured % of credit
+    # exceeds a dynamic threshold based on time.
+    # Two modes (set one, leave other None):
+    #
+    # A) Time-to-close: threshold = base / sqrt(hours_to_4PM / 6.5)
+    #    Lower threshold early → take early gains; higher late → let theta work
+    #    None = disabled.
+    entry_exit_time_to_close_base: Optional[float] = None  # e.g. 0.50
+    #
+    # B) Time-since-open: threshold = base * sqrt(hours_open / 6.5)
+    #    Lower threshold when just opened; higher the longer it's been open.
+    #    Catches entries that decayed unusually fast relative to their age.
+    #    None = disabled.
+    entry_exit_time_since_open_base: Optional[float] = None  # e.g. 0.50
+
+    # ── Cushion recovery exit (per-entry, per-side) ───────────────────────────
+    # Close a side when it nearly hits its stop level but then recovers.
+    # Logic: if spread_value reaches >= nearstop_pct × stop_level (danger zone),
+    # then drops back to <= recovery_pct × stop_level, close that side.
+    # Captures "near-miss" patterns where the position survived but may breach again.
+    # None = disabled.
+    cushion_nearstop_pct: Optional[float] = None   # e.g. 0.85 = danger at 85% of stop
+    cushion_recovery_pct: Optional[float] = None   # e.g. 0.60 = close when recovers to 60% of stop
+
     # ── Range-consumption exit ────────────────────────────────────────────────
     # If set, close ALL surviving open positions when intraday SPX range
     # (high - low since open) exceeds this fraction of the daily expected move

@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-03-29
-**Version:** 1.19.0
+**Last Updated:** 2026-04-01
+**Version:** 1.21.0
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -541,6 +541,28 @@ MKT-036 stop confirmation timer is **intentionally disabled**. The $5.00 put buf
 
 When enabled: 75-second confirmation window before executing stop. 20-day backtest: 17 false stops avoided ($2,870 saved), 1 real stop missed ($85).
 
+### MKT-041: Cushion Recovery Exit
+
+Closes individual IC sides when they nearly hit their stop level then recover. This captures premium from sides that were in danger but pulled back, rather than leaving them exposed to a second breach.
+
+**Trigger conditions (per side):**
+1. Side reaches >= `cushion_nearstop_pct` (default 96%) of its stop level (near-stop state)
+2. Side subsequently recovers to <= `cushion_recovery_pct` (default 67%) of its stop level
+
+When both conditions are met in sequence, the side is closed at current market price.
+
+**Backtest results (938 days):**
+- Sharpe: 2.182 vs 2.094 baseline (hold-to-expiry)
+- Fires on ~101 days (10.8% of trading days)
+
+**Config:**
+```json
+"cushion_nearstop_pct": null,
+"cushion_recovery_pct": null
+```
+
+Both keys default to `null` (disabled). Set to decimal fractions (e.g., `0.96` and `0.67`) to enable.
+
 ### MKT-038: FOMC T+1 Call-Only Mode
 
 On the day after FOMC announcement (T+1), all entries are forced to call-only spreads. This applies to both base entries (E1-E3) and conditional entries.
@@ -711,6 +733,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-038 | FOMC T+1 Call-Only | v1.13.0 | Day after FOMC announcement: force all entries to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call + $2.60 theo put + buffer. FOMC skip disabled (v1.19.0). |
 | MKT-039 | Put-Only Stop Tightening | v1.15.0 | Put-only stop = credit + put_stop_buffer ($1.55). MKT-032 VIX gate at 15.0 (v1.19.0). |
 | MKT-040 | Call-Only When Put Non-Viable | v1.15.1 | When put credit below minimum but call viable, place call-only (89% WR, +$46 EV). Stop = call + theo $2.60 put + buffer (unified with MKT-035/038). |
+| MKT-041 | Cushion Recovery Exit | v1.21.0 | **Disabled by default** (`cushion_nearstop_pct`/`cushion_recovery_pct` = null). When enabled: closes IC side that reaches >= 96% of stop then recovers to <= 67%. Sharpe 2.182 vs 2.094 baseline (938 days). |
 | Whipsaw | Whipsaw Filter | v1.19.0 | Skip entries when intraday range > 1.75× expected move. High whipsaw = bad for iron condors. |
 | Upday-035 | Up-Day Put-Only | v1.17.0 | E6 (14:00) fires as put-only when SPX rises >= 0.25% above session open. Stop = credit + put_stop_buffer. |
 
