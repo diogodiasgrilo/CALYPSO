@@ -78,9 +78,18 @@
         "fomc_t1_callonly_enabled": true,
         "fomc_announcement_skip": false,
 
-        "_comment_cushion_recovery": "MKT-041: Cushion Recovery Exit. Closes IC side that nearly hits stop then recovers. Set both to non-null to enable. nearstop_pct = fraction of stop level to trigger near-stop state (e.g., 0.96 = 96%). recovery_pct = fraction of stop level to trigger recovery close (e.g., 0.67 = 67%). Backtest: Sharpe 2.182 vs 2.094 baseline over 938 days.",
+        "_comment_cushion_recovery": "MKT-041: Cushion Recovery Exit. DISABLED (buffer+cushion interfere). Set both to non-null to enable. nearstop_pct = fraction of stop level to trigger near-stop state (e.g., 0.96 = 96%). recovery_pct = fraction of stop level to trigger recovery close (e.g., 0.67 = 67%).",
         "cushion_nearstop_pct": null,
         "cushion_recovery_pct": null,
+
+        "_comment_buffer_decay": "MKT-042: Time-decaying stop buffer. Starts at start_mult × normal buffer, linearly decays to 1× over decay_hours. Wider stops early (premium rich), normal later. Set start_mult to 1.0 or null to disable.",
+        "buffer_decay_start_mult": 1.75,
+        "buffer_decay_hours": 2.0,
+
+        "_comment_calm_entry": "MKT-043: Calm entry filter. Delays entry up to max_delay_min when SPX moved > threshold_pts in last lookback_min minutes. Prevents entering during sharp spikes. Set threshold_pts to null to disable.",
+        "calm_entry_lookback_min": 3,
+        "calm_entry_threshold_pts": 15.0,
+        "calm_entry_max_delay_min": 5,
 
         "_comment_stop_confirmation": "MKT-036: Sustained breach confirmation. INTENTIONALLY DISABLED — put buffer (put_stop_buffer) is the chosen solution instead. Code preserved but dormant. When enabled: requires stop condition to persist for N seconds before closing.",
         "stop_confirmation_enabled": false,

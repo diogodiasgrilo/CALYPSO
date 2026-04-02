@@ -469,7 +469,7 @@ stop_level = call_credit + theoretical_put + call_stop_buffer (MKT-035 call-only
 
 **Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($2.00 calls, $2.75 puts) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary.
 
-**Credit+Buffer approach (v1.10.2+):** Stop = total_credit + buffer. **Asymmetric buffers:** call side uses `call_stop_buffer` (default $0.35 × 100 = $35), put side uses `put_stop_buffer` (default $1.55 × 100 = $155). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` not set, falls back to `call_stop_buffer` for both. Replaces the earlier MEIC+ design (stop = credit - $0.15).
+**Credit+Buffer approach (v1.10.2+):** Stop = total_credit + buffer. **Asymmetric buffers:** call side uses `call_stop_buffer` (default $0.35 × 100 = $35), put side uses `put_stop_buffer` (default $1.55 × 100 = $155). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` not set, falls back to `call_stop_buffer` for both. Replaces the earlier MEIC+ design (stop = credit - $0.15). **MKT-042 buffer decay (v1.22.0):** Buffers start at 1.75× and decay linearly to 1× over 2 hours — see MKT-042 section below.
 
 **Safety floor:** MIN_STOP_LEVEL = $50. If stop_level is below $50 (e.g., due to zero fill price from API sync issues), skip stop monitoring for that side.
 
@@ -562,6 +562,49 @@ When both conditions are met in sequence, the side is closed at current market p
 ```
 
 Both keys default to `null` (disabled). Set to decimal fractions (e.g., `0.96` and `0.67`) to enable.
+
+**Status:** DISABLED on VM (v1.22.0). Buffer decay (MKT-042) and cushion recovery interfere — wider early buffers push the near-stop threshold further out, causing premature recovery closes. Use one or the other, not both.
+
+### MKT-042: Buffer Decay (v1.22.0)
+
+Time-decaying stop buffer that starts wider and narrows to normal over a configurable period. Early in the trade, premium is rich and market moves are noisier — wider buffers avoid false stops. As theta decays, the normal buffer suffices.
+
+**Formula:**
+```
+minutes_since_entry = (now - entry_time).total_seconds() / 60
+decay_minutes = buffer_decay_hours * 60
+decay_factor = max(1.0, buffer_decay_start_mult - (buffer_decay_start_mult - 1.0) * min(1.0, minutes_since_entry / decay_minutes))
+effective_call_buffer = call_stop_buffer * decay_factor
+effective_put_buffer = put_stop_buffer * decay_factor
+```
+
+**Example (defaults: 1.75× start, 2h decay):**
+- At entry: call buffer = $0.35 × 1.75 = $0.6125, put buffer = $1.55 × 1.75 = $2.7125
+- After 1h: call buffer = $0.35 × 1.375 = $0.4813, put buffer = $1.55 × 1.375 = $2.1313
+- After 2h+: call buffer = $0.35 × 1.0 = $0.35, put buffer = $1.55 × 1.0 = $1.55
+
+**Config:**
+```json
+"buffer_decay_start_mult": 1.75,
+"buffer_decay_hours": 2.0
+```
+
+Set `buffer_decay_start_mult` to `1.0` or `null` to disable (buffers remain constant).
+
+### MKT-043: Calm Entry Filter (v1.22.0)
+
+Delays entry when SPX has moved sharply in the recent lookback window. Sharp spikes inflate premium attractively but often reverse, leading to immediate stop-outs. The filter waits for the spike to settle before entering.
+
+**Trigger:** If SPX moved more than `calm_entry_threshold_pts` points (high-low range) in the last `calm_entry_lookback_min` minutes, delay entry. Re-checks every ~30 seconds up to `calm_entry_max_delay_min` minutes. If still not calm after max delay, enters anyway (failsafe — never skips an entry entirely).
+
+**Config:**
+```json
+"calm_entry_lookback_min": 3,
+"calm_entry_threshold_pts": 15.0,
+"calm_entry_max_delay_min": 5
+```
+
+Set `calm_entry_threshold_pts` to `null` to disable.
 
 ### MKT-038: FOMC T+1 Call-Only Mode
 
@@ -733,7 +776,9 @@ Entry #1 → #2 → #3 placed normally
 | MKT-038 | FOMC T+1 Call-Only | v1.13.0 | Day after FOMC announcement: force all entries to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call + $2.60 theo put + buffer. FOMC skip disabled (v1.19.0). |
 | MKT-039 | Put-Only Stop Tightening | v1.15.0 | Put-only stop = credit + put_stop_buffer ($1.55). MKT-032 VIX gate at 15.0 (v1.19.0). |
 | MKT-040 | Call-Only When Put Non-Viable | v1.15.1 | When put credit below minimum but call viable, place call-only (89% WR, +$46 EV). Stop = call + theo $2.60 put + buffer (unified with MKT-035/038). |
-| MKT-041 | Cushion Recovery Exit | v1.21.0 | **Disabled by default** (`cushion_nearstop_pct`/`cushion_recovery_pct` = null). When enabled: closes IC side that reaches >= 96% of stop then recovers to <= 67%. Sharpe 2.182 vs 2.094 baseline (938 days). |
+| MKT-041 | Cushion Recovery Exit | v1.21.0 | **DISABLED** (buffer+cushion interfere). When enabled: closes IC side that reaches >= 96% of stop then recovers to <= 67%. Sharpe 2.182 vs 2.094 baseline (938 days). |
+| MKT-042 | Buffer Decay | v1.22.0 | Time-decaying stop buffer: starts at 1.75× normal buffer, linearly decays to 1× over 2h. Wider stops early, normal later. Config: `buffer_decay_start_mult`, `buffer_decay_hours`. |
+| MKT-043 | Calm Entry Filter | v1.22.0 | Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries. Config: `calm_entry_lookback_min`, `calm_entry_threshold_pts`, `calm_entry_max_delay_min`. |
 | Whipsaw | Whipsaw Filter | v1.19.0 | Skip entries when intraday range > 1.75× expected move. High whipsaw = bad for iron condors. |
 | Upday-035 | Up-Day Put-Only | v1.17.0 | E6 (14:00) fires as put-only when SPX rises >= 0.25% above session open. Stop = credit + put_stop_buffer. |
 
@@ -931,6 +976,11 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
 | `call_stop_buffer` | `0.35` | Call stop buffer: call_stop = credit + $0.35 (v1.19.0, renamed from `stop_buffer`, was $0.10) |
 | `put_stop_buffer` | `1.55` | Put stop buffer: put_stop = credit + $1.55 (v1.19.0, walk-forward optimized, was $5.00). Falls back to `call_stop_buffer` if not set. |
+| `buffer_decay_start_mult` | `1.75` | MKT-042: buffer starts at 1.75× normal, decays to 1× (set 1.0 or null to disable) |
+| `buffer_decay_hours` | `2.0` | MKT-042: hours to decay from start_mult to 1× |
+| `calm_entry_lookback_min` | `3` | MKT-043: lookback window (minutes) for SPX range check |
+| `calm_entry_threshold_pts` | `15.0` | MKT-043: SPX move threshold (points) to trigger delay (null=disabled) |
+| `calm_entry_max_delay_min` | `5` | MKT-043: max delay (minutes) when spike detected |
 | `max_vix_entry` | `999` | Maximum VIX for new entries. Set to 999 to effectively disable (v1.10.3). **CALYPSO addition** — neither Tammy Chambless nor John Sandvand (ThetaProfits) use a VIX cutoff; both studied VIX correlation and found none. |
 | `contracts_per_entry` | `1` | Contracts per entry |
 | `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |

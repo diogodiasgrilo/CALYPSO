@@ -16,7 +16,7 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (v1.19.0 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.22.0 — DO NOT hallucinate)
 
 - **VIX regime adjusts entries:** 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
 - **3 base entries + 1 conditional (4 max)** at 10:15, 10:45, 11:15 ET. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
@@ -27,7 +27,9 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - **Min credit thresholds (MKT-011):** $2.00/side for calls, $2.75/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). MKT-038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
 - **Stop formula:** Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
 - **Stop confirmation (MKT-036):** DISABLED. Code preserved but dormant.
-- **Cushion recovery exit (MKT-041):** Disabled by default (config keys null). When enabled: closes IC side that reaches >= 96% of stop level then recovers to <= 67%. Backtest Sharpe 2.182 vs 2.094 baseline.
+- **Buffer decay (MKT-042):** Stop buffer starts at 1.75× normal, linearly decays to 1× over 2 hours. Wider stops early (premium rich, noisy), normal later.
+- **Cushion recovery exit (MKT-041):** DISABLED (buffer+cushion interfere). Code preserved but dormant.
+- **Calm entry filter (MKT-043):** Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries.
 - **Stop close:** both legs closed via market order (default; configurable short_only_stop for MKT-025 mode)
 - **Whipsaw filter:** whipsaw_range_skip_mult = 1.75 — skip entry if SPX intraday range > 1.75x expected daily move.
 - **Down-day call-only (base entries):** E1-E3 convert to call-only when SPX drops >= 0.57% from open (`base_entry_downday_callonly_pct: 0.0057`).

@@ -24,6 +24,13 @@ Conditional Entry Trigger (MKT-035 / Upday-035):
 - E7: DISABLED
 
 Version History:
+- 1.22.0 (2026-04-02): MKT-042 Buffer Decay + MKT-043 Calm Entry. MKT-042: time-decaying stop buffer —
+  starts at buffer_decay_start_mult × normal buffer (default 1.75×), linearly decays to 1× over
+  buffer_decay_hours (default 2.0h). Wider stops early when premium is rich, normal later. MKT-043:
+  calm entry filter — delays entry up to calm_entry_max_delay_min (default 5 min) when SPX moved
+  > calm_entry_threshold_pts (default 15.0 pts) in last calm_entry_lookback_min (default 3 min).
+  MKT-041 Cushion Recovery DISABLED (buffer+cushion interfere; cushion_nearstop_pct/cushion_recovery_pct
+  set to null on VM).
 - 1.21.0 (2026-04-01): MKT-041 Cushion Recovery Exit. Closes individual IC sides when they nearly hit
   their stop (>= 96% of stop level) then recover (<= 67% of stop level). Backtest: Sharpe 2.182 vs 2.094
   baseline over 938 days, fires on ~101 days (10.8%). Config: cushion_nearstop_pct (default null/disabled),

@@ -27,7 +27,7 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
 
-## HYDRA Domain Knowledge (v1.19.0 — use these exact parameters)
+## HYDRA Domain Knowledge (v1.22.0 — use these exact parameters)
 
 - VIX regime adjusts entries: 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
 - Entry times: 10:15, 10:45, 11:15 ET (3 base entries). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
@@ -36,7 +36,9 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 - Min credit thresholds: $2.00 calls, $2.75 puts (MKT-011). MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
 - Stop formula: Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
 - Stop confirmation (MKT-036): DISABLED. Code preserved but dormant.
-- Cushion recovery exit (MKT-041): Disabled by default (config keys null). When enabled: closes IC side that reaches >= 96% of stop then recovers to <= 67%. Backtest Sharpe 2.182 vs 2.094 baseline.
+- Buffer decay (MKT-042): Stop buffer starts at 1.75× normal, linearly decays to 1× over 2 hours. Wider stops early, normal later.
+- Cushion recovery exit (MKT-041): DISABLED (buffer+cushion interfere). Code preserved but dormant.
+- Calm entry filter (MKT-043): Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries.
 - Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
 - Whipsaw filter: whipsaw_range_skip_mult = 1.75 — skip entry if SPX intraday range > 1.75x expected daily move.
 - Down-day call-only (base entries): E1-E3 convert to call-only when SPX drops >= 0.57% from open.
@@ -145,7 +147,7 @@ Focus on:
 - Notable entry outcomes (which survived, which stopped, why)
 - Stop patterns (timing, clustering, which sides)
 - Credit quality and VIX impact on spread widths
-- MKT rule behavior (credit gate MKT-011, tightening MKT-020/022, down-day MKT-035, FOMC T+1 MKT-038)
+- MKT rule behavior (credit gate MKT-011, tightening MKT-020/022, down-day MKT-035, FOMC T+1 MKT-038, buffer decay MKT-042, calm entry MKT-043)
 - Anything unusual or noteworthy about this specific day
 
 Output format:

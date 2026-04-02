@@ -158,6 +158,34 @@ EDITABLE_PARAMS = {
         "min": 0.1, "max": 50.0,
         "description": "Price-based stop: N pts from short strike (null=disabled, uses credit-based stop)",
     },
+    "buffer_decay_mult": {
+        "path": "strategy.buffer_decay_start_mult",
+        "type": "float",
+        "min": 1.0, "max": 3.0,
+        "unit": "×",
+        "description": "MKT-042: buffer decay start multiplier (1.0=disabled)",
+    },
+    "buffer_decay_hours": {
+        "path": "strategy.buffer_decay_hours",
+        "type": "float",
+        "min": 0.5, "max": 6.0,
+        "unit": "h",
+        "description": "MKT-042: hours to decay from start_mult to 1×",
+    },
+    "calm_threshold": {
+        "path": "strategy.calm_entry_threshold_pts",
+        "type": "float",
+        "min": 5.0, "max": 50.0,
+        "unit": "pts",
+        "description": "MKT-043: SPX move threshold to trigger delay (null=disabled)",
+    },
+    "calm_delay": {
+        "path": "strategy.calm_entry_max_delay_min",
+        "type": "int",
+        "min": 1, "max": 15,
+        "unit": "min",
+        "description": "MKT-043: max entry delay when SPX spike detected",
+    },
 }
 
 

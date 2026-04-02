@@ -3042,7 +3042,7 @@ class HydraStrategy(MEICStrategy):
 
     def _get_spx_price_minutes_ago(self, minutes: int) -> float:
         """Get SPX price from approximately N minutes ago using heartbeat price history."""
-        target_time = datetime.now() - timedelta(minutes=minutes)
+        target_time = get_us_market_time() - timedelta(minutes=minutes)
         best_price = 0.0
         best_diff = float('inf')
         for ts, price in self.market_data.price_history:
@@ -4879,7 +4879,7 @@ class HydraStrategy(MEICStrategy):
                 and self.buffer_decay_start_mult > 1.0
                 and hasattr(entry, 'entry_time') and entry.entry_time is not None):
             elapsed_h = (get_us_market_time() - entry.entry_time).total_seconds() / 3600
-            decay_factor = max(0.0, 1.0 - elapsed_h / self.buffer_decay_hours)
+            decay_factor = max(0.0, min(1.0, 1.0 - elapsed_h / self.buffer_decay_hours))
             if decay_factor > 0:
                 # Add extra buffer that decays linearly to zero
                 buf = self.call_stop_buffer if side == "call" else self.put_stop_buffer
