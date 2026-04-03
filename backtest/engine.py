@@ -707,15 +707,28 @@ def _simulate_entry(
     _etc_base = getattr(cfg, "entry_exit_time_to_close_base", None)
     _eso_base = getattr(cfg, "entry_exit_time_since_open_base", None)
 
-    # Time-decaying buffer: pre-compute constants outside loop
-    _buf_mult = getattr(cfg, "buffer_decay_start_mult", None)
-    _buf_decay_hours = getattr(cfg, "buffer_decay_hours", None)
-    _buf_decay_enabled = (_buf_mult is not None and _buf_decay_hours is not None
-                          and _buf_decay_hours > 0 and _buf_mult > 1.0)
+    # Time-decaying buffer: pre-compute constants outside loop (per-side overrides)
+    _buf_call_mult = getattr(cfg, "buffer_decay_call_mult", None)
+    if _buf_call_mult is None:
+        _buf_call_mult = getattr(cfg, "buffer_decay_start_mult", None)
+    _buf_call_hours = getattr(cfg, "buffer_decay_call_hours", None)
+    if _buf_call_hours is None:
+        _buf_call_hours = getattr(cfg, "buffer_decay_hours", None)
+    _buf_put_mult = getattr(cfg, "buffer_decay_put_mult", None)
+    if _buf_put_mult is None:
+        _buf_put_mult = getattr(cfg, "buffer_decay_start_mult", None)
+    _buf_put_hours = getattr(cfg, "buffer_decay_put_hours", None)
+    if _buf_put_hours is None:
+        _buf_put_hours = getattr(cfg, "buffer_decay_hours", None)
+    _buf_call_decay_en = (_buf_call_mult is not None and _buf_call_hours is not None
+                          and _buf_call_hours > 0 and _buf_call_mult > 1.0)
+    _buf_put_decay_en = (_buf_put_mult is not None and _buf_put_hours is not None
+                         and _buf_put_hours > 0 and _buf_put_mult > 1.0)
+    _buf_decay_enabled = _buf_call_decay_en or _buf_put_decay_en
     _orig_call_stop = result.call_stop
     _orig_put_stop = result.put_stop
-    _buf_call_extra = cfg.call_stop_buffer * (_buf_mult - 1) if _buf_decay_enabled else 0
-    _buf_put_extra = cfg.put_stop_buffer * (_buf_mult - 1) if _buf_decay_enabled else 0
+    _buf_call_extra = cfg.call_stop_buffer * (_buf_call_mult - 1) if _buf_call_decay_en else 0
+    _buf_put_extra = cfg.put_stop_buffer * (_buf_put_mult - 1) if _buf_put_decay_en else 0
 
     # early_ms already computed above (used to skip entries at/after exit time)
     for monitor_ms in monitor_times:
@@ -731,12 +744,13 @@ def _simulate_entry(
         # ── Time-decaying buffer: widen stop early in position's life ──────
         if _buf_decay_enabled:
             elapsed_h = (monitor_ms - entry_ms) / 3600000
-            decay_factor = max(0.0, 1.0 - elapsed_h / _buf_decay_hours)
-            # Only widen if trailing stop hasn't tightened this side
-            if not _call_trail:
-                result.call_stop = _orig_call_stop + _buf_call_extra * decay_factor
-            if not _put_trail:
-                result.put_stop = _orig_put_stop + _buf_put_extra * decay_factor
+            # Per-side decay factors (different hours allowed)
+            if not _call_trail and _buf_call_decay_en:
+                call_decay = max(0.0, min(1.0, 1.0 - elapsed_h / _buf_call_hours))
+                result.call_stop = _orig_call_stop + _buf_call_extra * call_decay
+            if not _put_trail and _buf_put_decay_en:
+                put_decay = max(0.0, min(1.0, 1.0 - elapsed_h / _buf_put_hours))
+                result.put_stop = _orig_put_stop + _buf_put_extra * put_decay
 
         # Spread value cap: close cost can't exceed spread width × 100
         cap_at_stop = getattr(cfg, "spread_value_cap_at_stop", False)

@@ -26,7 +26,7 @@ OUTPUT_DIR = Path("backtest/results/final_report")
 
 
 def final_config() -> "BacktestConfig":
-    """The fully validated final config with VIX regime."""
+    """The fully validated final config with VIX regime + MKT-042/043."""
     cfg = live_config()
     cfg.use_real_greeks = True
     cfg.data_resolution = "1min"
@@ -35,8 +35,17 @@ def final_config() -> "BacktestConfig":
     cfg.vix_regime_enabled = True
     cfg.vix_regime_breakpoints = [14.0, 20.0, 30.0]
     cfg.vix_regime_max_entries = [2, None, None, 1]
-    cfg.vix_regime_put_stop_buffer = [1.25, None, None, None]
+    cfg.vix_regime_put_stop_buffer = [125.0, None, None, None]
     cfg.vix_regime_call_stop_buffer = [None, None, None, None]
+    cfg.vix_regime_min_call_credit = [None, 1.35, None, None]
+    cfg.vix_regime_min_put_credit = [None, 2.10, None, None]
+    # MKT-042: Buffer decay (x2.10, 2.0h) — optimal from ultra fine-grain sweep
+    cfg.buffer_decay_start_mult = 2.10
+    cfg.buffer_decay_hours = 2.0
+    # MKT-043: Calm entry (L3/T15/D5) — delay entry during fast SPX moves
+    cfg.calm_entry_lookback_min = 3
+    cfg.calm_entry_threshold_pts = 15.0
+    cfg.calm_entry_max_delay_min = 5
     return cfg
 
 
@@ -313,6 +322,21 @@ def phase2_report(results: List[DayResult], cfg):
             w.writerow(["VIX Breakpoints", str(cfg.vix_regime_breakpoints)])
             w.writerow(["VIX Max Entries", str(cfg.vix_regime_max_entries)])
             w.writerow(["VIX Put Buffer Override", str(cfg.vix_regime_put_stop_buffer)])
+        # MKT-042: Buffer decay
+        bd_mult = getattr(cfg, "buffer_decay_start_mult", None)
+        bd_hours = getattr(cfg, "buffer_decay_hours", None)
+        if bd_mult and bd_hours:
+            w.writerow(["Buffer Decay (MKT-042)", f"{bd_mult:.2f}x over {bd_hours:.1f}h", "Wider stops early, decay to normal"])
+        else:
+            w.writerow(["Buffer Decay (MKT-042)", "OFF"])
+        # MKT-043: Calm entry
+        cl = getattr(cfg, "calm_entry_lookback_min", None)
+        ct = getattr(cfg, "calm_entry_threshold_pts", None)
+        cd = getattr(cfg, "calm_entry_max_delay_min", None)
+        if cl and ct and cd:
+            w.writerow(["Calm Entry (MKT-043)", f"L{cl} T{ct:.0f} D{cd}", "Delay entry during fast SPX moves"])
+        else:
+            w.writerow(["Calm Entry (MKT-043)", "OFF"])
     print(f"  ✓ {path}")
 
     # ── Report 3: Yearly ──────────────────────────────────────────────

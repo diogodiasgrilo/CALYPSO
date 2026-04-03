@@ -208,6 +208,11 @@ class BacktestConfig:
     # Example: multiplier=2.0, decay_hours=3 → starts at 2× buffer, reaches 1× after 3h.
     buffer_decay_start_mult: Optional[float] = None    # e.g. 2.0 (start at 2× normal buffer)
     buffer_decay_hours: Optional[float] = None         # e.g. 3.0 (reach normal buffer after 3h)
+    # Per-side overrides (if set, override the shared values for that side):
+    buffer_decay_call_mult: Optional[float] = None     # e.g. 1.5 (call-specific start multiplier)
+    buffer_decay_call_hours: Optional[float] = None    # e.g. 1.0 (call-specific decay hours)
+    buffer_decay_put_mult: Optional[float] = None      # e.g. 3.0 (put-specific start multiplier)
+    buffer_decay_put_hours: Optional[float] = None     # e.g. 3.0 (put-specific decay hours)
 
     # ── Cushion recovery exit (per-entry, per-side) ───────────────────────────
     # Close a side when it nearly hits its stop level but then recovers.
