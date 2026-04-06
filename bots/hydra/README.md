@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.19.0 | **Last Updated:** 2026-03-29
+**Version:** 1.22.1 | **Last Updated:** 2026-04-06
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -18,7 +18,7 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 
 ### Entry Schedule (3 base + 1 conditional entry)
 
-**Current schedule (v1.19.0 — walk-forward backtest convergence):**
+**Current schedule (v1.19.0+ — walk-forward backtest convergence):**
 
 | Entry | Time (ET) | Type | Notes |
 |-------|-----------|------|-------|
@@ -210,6 +210,56 @@ Skips entries when intraday range exceeds a threshold relative to the expected m
 | `whipsaw_filter.enabled` | `true` | Enable/disable whipsaw filter |
 | `whipsaw_filter.threshold` | `1.75` | Skip entry when intraday range > 1.75× expected move |
 
+### VIX Regime Adaptive (v1.20.0)
+
+Adjusts entries and buffers based on VIX at open. Uses a 4-zone breakpoint system:
+
+| Zone | VIX Range | Max Entries | Put Buffer Override |
+|------|-----------|-------------|---------------------|
+| 0 | < 14 | 2 | $1.25 |
+| 1 | 14-20 | 3 (default) | $1.55 (default) |
+| 2 | 20-30 | 3 (default) | $1.55 (default) |
+| 3 | >= 30 | 1 | $1.55 (default) |
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `vix_regime.enabled` | `true` | Enable/disable VIX regime adaptive |
+| `vix_regime.breakpoints` | `[14, 20, 30]` | VIX zone boundaries |
+| `vix_regime.max_entries` | `[2, null, null, 1]` | Max entries per zone (null = use default) |
+| `vix_regime.put_stop_buffer` | `[1.25, null, null, null]` | Put buffer override per zone |
+
+### Buffer Decay (MKT-042) — v1.22.0
+
+Time-decaying stop buffer that starts wider and linearly decays to 1× over a configurable period. Provides wider stops early when premium is rich and moves are noisy, normal stops later as theta decays.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `buffer_decay_start_mult` | `2.10` | Starting multiplier (2.10× = buffer is 2.10× normal at entry time) |
+| `buffer_decay_hours` | `2.0` | Hours to decay from start_mult to 1× |
+
+Set `buffer_decay_start_mult` to `1.0` or `null` to disable.
+
+### Calm Entry Filter (MKT-043) — v1.22.0
+
+Delays entry when SPX moved sharply in the recent lookback window. Prevents entering during spikes that inflate premium but reverse quickly.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `calm_entry_lookback_min` | `3` | Lookback window in minutes |
+| `calm_entry_threshold_pts` | `15.0` | SPX movement threshold (points) |
+| `calm_entry_max_delay_min` | `5` | Maximum delay before entering anyway |
+
+Set `calm_entry_threshold_pts` to `null` to disable.
+
+### Cushion Recovery Exit (MKT-041) — v1.21.0, DISABLED
+
+Closes individual IC sides when they nearly hit their stop then recover. **DISABLED** because buffer decay (MKT-042) and the put buffer ($1.55) interfere — the wider buffer already prevents false stops that MKT-041 was designed to catch.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `cushion_nearstop_pct` | `null` | Fraction of stop level to trigger near-stop (e.g., 0.96). null = disabled. |
+| `cushion_recovery_pct` | `null` | Fraction of stop level to trigger recovery close (e.g., 0.67). null = disabled. |
+
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
 Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-021) are **intentionally disabled**. Backtest analysis showed no ROC-based early close configuration beats hold-to-expiry for this strategy. The code is preserved but dormant — set `early_close_enabled: true` in config to re-enable. See `docs/HYDRA_EARLY_CLOSE_ANALYSIS.md` for the full analysis.
@@ -278,6 +328,9 @@ sudo journalctl -u hydra -f
 | Trend signal | None | EMA 20/40 (informational only) |
 | Smart entry | None | MKT-031 10-min scouting windows (DISABLED) |
 | Whipsaw filter | None | Skip entries when range > 1.75× expected move (v1.19.0) |
+| VIX regime | None | Adaptive entries/buffers based on VIX at open (v1.20.0) |
+| Buffer decay | None | MKT-042: 2.10× buffer at entry, decays to 1× over 2h (v1.22.0) |
+| Calm entry | None | MKT-043: delays entry up to 5min on sharp SPX moves (v1.22.0) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
 | Stop formula | total_credit - $0.10 | total_credit + asymmetric buffer (call $0.35, put $1.55). MKT-036 timer DISABLED. |
 | FOMC handling | Skip announcement day | Trade FOMC days (fomc_skip=false) + T+1 call-only (MKT-038) |
@@ -323,6 +376,11 @@ bots/hydra/
 
 ## Version History
 
+- **1.22.1** (2026-04-02): MKT-042 buffer decay optimal: 2.10× start, 2h decay. Docs audit for MKT-041/042/043.
+- **1.22.0** (2026-04-02): MKT-042 Buffer Decay + MKT-043 Calm Entry. Buffer decay: starts at 2.10× normal buffer, linearly decays to 1× over 2h. Calm entry: delays entry up to 5min when SPX moved >15pt in 3min.
+- **1.21.0** (2026-03-31): MKT-041 Cushion Recovery Exit (DISABLED — buffer+cushion interfere). Backtest infrastructure for sweep analysis.
+- **1.20.1** (2026-03-31): Full reconvergence audit. Tighter credit gates (call $2.00, put $2.75). Config template sync.
+- **1.20.0** (2026-03-30): Reconvergence + skip_weekdays, VIX regime adaptive, dow_max_entries. VIX regime: breakpoints [14,20,30], adaptive entries/buffers per zone.
 - **1.19.0** (2026-03-29): Walk-forward backtest convergence. 3 base entries at 10:15, 10:45, 11:15 (E4/E5 dropped — negative EV). E6 upday put-only ENABLED at 14:00 (threshold 0.25%). E7 DISABLED. Spread width: VIX × 6.0, floor 25pt, cap 110pt. Credit gates: call $2.00, put $2.75, call_floor $0.75, put_floor $2.00. Stop buffers: call_stop_buffer $0.35, put_stop_buffer $1.55. FOMC skip FALSE, T+1 call-only TRUE. Downday threshold 0.57%, theo put $2.60. Upday threshold 0.25%. Whipsaw filter 1.75× EM. put_only_max_vix 15.0.
 - **1.16.1** (2026-03-19): MKT-029 graduated call fallback in credit gate. Calls now have graduated fallback like puts: $0.60→$0.55→$0.50. MKT-035/MKT-038 call-only skip checks lowered from $0.60 to $0.50 floor. Fixed stale comments ($0.75→$0.60, $1.75→$2.50). All agent prompts updated.
 - **1.16.0** (2026-03-16): Skip alerts + dashboard improvements. Telegram ENTRY_SKIPPED alerts at all 8 skip paths with detailed reasons. Skipped entries persisted in state file with `skip_reason` field. `entry_schedule` (base + conditional times) added to state file. Dashboard: mobile-responsive header, pending cards show scheduled times, skipped cards show reason. HERMES trimmed state includes `entry_schedule` + `skip_reason`.

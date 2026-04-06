@@ -60,8 +60,8 @@ export function PositionHeatmap() {
           {/* Entries */}
           {activeEntries.map((e, i) => {
             const y = i * 28 + 4;
-            const putCushion = computeCushion(e.put_spread_value ?? 0, e.put_side_stop);
-            const callCushion = computeCushion(e.call_spread_value ?? 0, e.call_side_stop);
+            const putCushion = computeCushion(e.put_spread_value ?? 0, e.effective_put_stop ?? e.put_side_stop);
+            const callCushion = computeCushion(e.call_spread_value ?? 0, e.effective_call_stop ?? e.call_side_stop);
             const hasPut = e.short_put_strike > 0 && !e.put_side_stopped && !e.put_side_skipped;
             const hasCall = e.short_call_strike > 0 && !e.call_side_stopped && !e.call_side_skipped;
 

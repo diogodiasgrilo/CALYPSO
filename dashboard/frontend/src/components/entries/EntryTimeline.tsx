@@ -6,7 +6,7 @@ import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 
 // Base entries: 3 scheduled at :15/:45 starting 10:15 AM ET (E1-E3)
 const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15"];
-// Conditional entries: E6 (14:00) fires put-only when SPX rises ≥ 0.4% from open (Upday-035)
+// Conditional entries: E6 (14:00) fires put-only when SPX rises ≥ 0.25% from open (Upday-035)
 // Hidden when all conditional flags are disabled in bot config
 const CONDITIONAL_ENTRY_TIMES = ["14:00"];
 

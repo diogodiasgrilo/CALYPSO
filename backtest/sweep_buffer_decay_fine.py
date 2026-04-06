@@ -1,5 +1,5 @@
 """
-Fine-grain buffer decay sweep around x1.75/2.0h winner, WITH calm entry enabled
+Fine-grain buffer decay sweep around x2.10/2.0h winner, WITH calm entry enabled
 (since that's the deployed combo).
 
 Run: python -m backtest.sweep_buffer_decay_fine

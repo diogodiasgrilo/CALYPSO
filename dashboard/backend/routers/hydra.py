@@ -36,7 +36,7 @@ async def get_bot_config():
             "conditional_upday_e6_enabled": strategy.get("conditional_upday_e6_enabled", False),
             "conditional_upday_e7_enabled": strategy.get("conditional_upday_e7_enabled", False),
             "downday_threshold_pct": strategy.get("downday_threshold_pct", 0.003),
-            "upday_threshold_pct": strategy.get("upday_threshold_pct", 0.004),
+            "upday_threshold_pct": strategy.get("upday_threshold_pct", 0.0025),
         }
     except Exception as e:
         logger.warning(f"Could not read bot config ({config_path}): {e}")
@@ -46,7 +46,7 @@ async def get_bot_config():
             "conditional_upday_e6_enabled": False,
             "conditional_upday_e7_enabled": False,
             "downday_threshold_pct": 0.003,
-            "upday_threshold_pct": 0.004,
+            "upday_threshold_pct": 0.0025,
         }
 
 

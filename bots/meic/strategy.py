@@ -6368,14 +6368,17 @@ class MEICStrategy:
             call_value = entry.call_spread_value if not entry.call_side_stopped else 0
             put_value = entry.put_spread_value if not entry.put_side_stopped else 0
 
-            # Calculate distance to stop levels (as percentage of stop)
-            # Cushion = (stop_level - current_value) / stop_level * 100
+            # Calculate distance to stop levels (as percentage of effective stop)
+            # Uses _get_effective_stop_level() which HYDRA overrides to apply MKT-042 buffer decay
+            # Cushion = (effective_stop - current_value) / effective_stop * 100
             # When value=0 (options worthless): cushion = 100%
-            # When value=stop_level: cushion = 0% (stop triggered)
-            call_dist = entry.call_side_stop - call_value if not entry.call_side_stopped else 0
-            put_dist = entry.put_side_stop - put_value if not entry.put_side_stopped else 0
-            call_pct = (call_dist / entry.call_side_stop * 100) if entry.call_side_stop > 0 else 0
-            put_pct = (put_dist / entry.put_side_stop * 100) if entry.put_side_stop > 0 else 0
+            # When value=effective_stop: cushion = 0% (stop triggered)
+            eff_call_stop = self._get_effective_stop_level(entry, "call") if not entry.call_side_stopped else 0
+            eff_put_stop = self._get_effective_stop_level(entry, "put") if not entry.put_side_stopped else 0
+            call_dist = eff_call_stop - call_value if not entry.call_side_stopped else 0
+            put_dist = eff_put_stop - put_value if not entry.put_side_stopped else 0
+            call_pct = (call_dist / eff_call_stop * 100) if eff_call_stop > 0 else 0
+            put_pct = (put_dist / eff_put_stop * 100) if eff_put_stop > 0 else 0
 
             # Status indicators
             # Fix #49: Show SKIPPED for one-sided entries that never opened a side
@@ -6496,6 +6499,11 @@ class MEICStrategy:
         except Exception:
             pass
         return None
+
+    def _get_effective_stop_level(self, entry: IronCondorEntry, side: str) -> float:
+        """Return effective stop level for display. Base class returns static value.
+        HYDRA overrides this to apply MKT-042 buffer decay."""
+        return getattr(entry, f'{side}_side_stop', 0)
 
     def _get_saxo_pnl_for_entry(self, entry: IronCondorEntry, positions: Optional[List] = None) -> float:
         """
@@ -7022,9 +7030,11 @@ class MEICStrategy:
                     # Credits
                     "call_spread_credit": entry.call_spread_credit,
                     "put_spread_credit": entry.put_spread_credit,
-                    # Stops
+                    # Stops (base + effective with MKT-042 decay applied)
                     "call_side_stop": entry.call_side_stop,
                     "put_side_stop": entry.put_side_stop,
+                    "effective_call_stop": self._get_effective_stop_level(entry, "call"),
+                    "effective_put_stop": self._get_effective_stop_level(entry, "put"),
                     # Status
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,

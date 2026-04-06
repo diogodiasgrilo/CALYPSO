@@ -17,7 +17,7 @@ const DEFAULT_CONFIG: BotConfig = {
   conditional_upday_e6_enabled: false,
   conditional_upday_e7_enabled: false,
   downday_threshold_pct: 0.003,
-  upday_threshold_pct: 0.004,
+  upday_threshold_pct: 0.0025,
 };
 
 let _cachedConfig: BotConfig | null = null;

@@ -17,7 +17,7 @@ export const DEFAULT_PARAMS: SimParamsState = {
   put_stop_buffer: 1.55,
   min_credit_call: 200.0,
   min_credit_put: 275.0,
-  put_only_max_vix: 25.0,
+  put_only_max_vix: 15.0,
   max_entries: 3,
   commission_per_leg: 2.50,
   conditional_entries: true,

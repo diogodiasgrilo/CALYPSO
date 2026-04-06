@@ -30,7 +30,7 @@ class SimParams:
     put_stop_buffer: float = 1.55       # put-side buffer ($/contract)
     min_credit_call: float = 200.0      # call credit gate ($ total)
     min_credit_put: float = 275.0       # put credit gate ($ total)
-    put_only_max_vix: float = 25.0      # MKT-032 VIX gate for put-only
+    put_only_max_vix: float = 15.0      # MKT-032 VIX gate for put-only
     max_entries: int = 3                # max base entries per day
     commission_per_leg: float = 2.50    # per-leg commission
     conditional_entries: bool = True     # E6/E7 enabled
@@ -584,8 +584,8 @@ class SimulatorEngine:
         elif entry_type == "Put Spread":
             return (None, put_credit + put_buffer)
         elif entry_type == "Call Spread":
-            # call_credit + theoretical $2.50 put + call buffer
-            return (call_credit + 250 + call_buffer, None)
+            # call_credit + theoretical $2.60 put + call buffer
+            return (call_credit + 260 + call_buffer, None)
         return (None, None)
 
     def _calc_actual_entry_pnl(

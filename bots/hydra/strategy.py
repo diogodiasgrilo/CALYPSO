@@ -303,8 +303,8 @@ class HydraStrategy(MEICStrategy):
         # MKT-035: _conditional_entry_times must be set BEFORE super().__init__()
         # because _parse_entry_times() (called from super) references it
         conditional_strs = strategy_cfg.get("conditional_entry_times", [])
-        e6_enabled = strategy_cfg.get("conditional_e6_enabled", True)
-        e7_enabled = strategy_cfg.get("conditional_e7_enabled", True)
+        e6_enabled = strategy_cfg.get("conditional_e6_enabled", False)
+        e7_enabled = strategy_cfg.get("conditional_e7_enabled", False)
         all_conditional = [
             dt_time(int(p[0]), int(p[1]))
             for p in (t.split(":") for t in conditional_strs)
@@ -430,9 +430,8 @@ class HydraStrategy(MEICStrategy):
         self.one_sided_entries_enabled = strategy_config.get("one_sided_entries_enabled", True)
 
         # MKT-032/MKT-039: VIX cutoff for put-only entries — at VIX >= threshold, put-only
-        # entries skipped (no call hedge in high volatility). MKT-039 (v1.15.0) raised
-        # from 18→25 and changed put-only stop from 2×credit to credit+buffer. The $1.55
-        # put buffer prevents false stops; 2× multiplier was redundant.
+        # entries skipped (no call hedge in high volatility). Default 15.0 — put-only
+        # stop uses credit+buffer ($1.55 put buffer prevents false stops).
         self.put_only_max_vix = float(strategy_config.get("put_only_max_vix", 15.0))
         if self.one_sided_entries_enabled:
             logger.info(f"  One-sided entries: ENABLED (put-only allowed when VIX < {self.put_only_max_vix})")
@@ -467,27 +466,27 @@ class HydraStrategy(MEICStrategy):
         # MKT-024: Wider starting OTM multipliers
         # Start strike search at N× the VIX-adjusted distance so MKT-020/022
         # scan a wider range. Gives more breathing room on volatile days.
-        self.call_starting_otm_multiplier = float(strategy_config.get("call_starting_otm_multiplier", 2.0))
-        self.put_starting_otm_multiplier = float(strategy_config.get("put_starting_otm_multiplier", 2.0))
+        self.call_starting_otm_multiplier = float(strategy_config.get("call_starting_otm_multiplier", 3.5))
+        self.put_starting_otm_multiplier = float(strategy_config.get("put_starting_otm_multiplier", 4.0))
         logger.info(f"  Starting OTM multipliers (MKT-024): call ×{self.call_starting_otm_multiplier}, put ×{self.put_starting_otm_multiplier}")
 
         # MKT-027: VIX-scaled spread width (continuous formula replaces step function)
         # Pushes long legs further OTM on high-VIX days → cheaper longs → higher net credit → more stop cushion
-        self.spread_vix_multiplier = float(strategy_config.get("spread_vix_multiplier", 3.5))
-        self.max_spread_width = int(strategy_config.get("max_spread_width", 85))
+        self.spread_vix_multiplier = float(strategy_config.get("spread_vix_multiplier", 6.0))
+        self.max_spread_width = int(strategy_config.get("max_spread_width", 110))
 
         # MKT-028: Asymmetric spread widths — put longs cost 7× more than calls due to skew.
         # Wider put spreads push longs further OTM = cheaper.
         # margin = max(call_width, put_width), so wider puts don't require wider calls.
-        self.call_min_spread_width = int(strategy_config.get("call_min_spread_width", 60))
-        self.put_min_spread_width = int(strategy_config.get("put_min_spread_width", 60))
+        self.call_min_spread_width = int(strategy_config.get("call_min_spread_width", 25))
+        self.put_min_spread_width = int(strategy_config.get("put_min_spread_width", 25))
         logger.info(f"  Spread width (MKT-027/028): VIX × {self.spread_vix_multiplier}, "
                     f"call floor={self.call_min_spread_width}pt, put floor={self.put_min_spread_width}pt, "
                     f"cap={self.max_spread_width}pt")
 
         # MKT-031: Smart entry windows (top-level config, same as trend_filter)
         smart_entry = config.get("smart_entry", {})
-        self.smart_entry_enabled = smart_entry.get("enabled", True)
+        self.smart_entry_enabled = smart_entry.get("enabled", False)
         self.scout_window_minutes = smart_entry.get("window_minutes", DEFAULT_SCOUT_WINDOW_MINUTES)
         self.scout_score_threshold = smart_entry.get("score_threshold", DEFAULT_SCOUT_SCORE_THRESHOLD)
         self.scout_momentum_threshold = smart_entry.get("momentum_threshold_pct", 0.05)
@@ -541,7 +540,7 @@ class HydraStrategy(MEICStrategy):
             strategy_config.get("conditional_upday_e6_enabled", False) or
             strategy_config.get("conditional_upday_e7_enabled", False)
         )
-        self.upday_threshold_pct = float(strategy_config.get("upday_threshold_pct", 0.004))  # 0.4%
+        self.upday_threshold_pct = float(strategy_config.get("upday_threshold_pct", 0.0025))  # 0.25%
         self.upday_reference = strategy_config.get("upday_reference", "open")
         logger.info(
             f"  Up day filter: {'ENABLED' if self.upday_putonly_enabled else 'DISABLED'} "
@@ -2205,7 +2204,7 @@ class HydraStrategy(MEICStrategy):
                     self._log_safety_event(
                         "MKT-029_PUT_FALLBACK",
                         f"Entry #{entry.entry_number}: put ${estimated_put / 100:.2f} "
-                        f"at fallback ${put_floor / 100:.2f}"
+                        f"at fallback ${fallback / 100:.2f}"
                     )
                     break
 
@@ -4623,7 +4622,7 @@ class HydraStrategy(MEICStrategy):
                 credit = MIN_STOP_LEVEL
 
             # All call-only entries use theoretical put for stop calculation:
-            # stop = call_credit + theoretical_put ($250) + buffer
+            # stop = call_credit + theoretical_put ($260) + buffer
             # This applies to MKT-035 (conditional), MKT-038 (FOMC T+1),
             # and MKT-040 (put non-viable) — consistent formula for all.
             theoretical_put = self.downday_theoretical_put_credit
@@ -4684,6 +4683,16 @@ class HydraStrategy(MEICStrategy):
                 logger.info(
                     f"Stop level for full IC: ${call_stop_level:.2f} per side "
                     f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f} + buffer ${self.call_stop_buffer:.2f})"
+                )
+            # MKT-042: Log initial decayed stop levels if buffer decay is active
+            if (self.buffer_decay_start_mult is not None
+                    and self.buffer_decay_start_mult > 1.0
+                    and self.buffer_decay_hours is not None):
+                eff_call = self._get_effective_stop_level(entry, "call")
+                eff_put = self._get_effective_stop_level(entry, "put")
+                logger.info(
+                    f"MKT-042: Buffer decay ACTIVE — effective stops: call=${eff_call:.2f}, put=${eff_put:.2f} "
+                    f"({self.buffer_decay_start_mult:.2f}× decaying to 1× over {self.buffer_decay_hours:.1f}h)"
                 )
 
     # =========================================================================
@@ -4858,6 +4867,30 @@ class HydraStrategy(MEICStrategy):
             entry.long_put_price = initial_short_price * decay_factor * 0.3
 
     # =========================================================================
+    # MKT-042: Effective stop level with buffer decay
+    # =========================================================================
+
+    def _get_effective_stop_level(self, entry, side: str) -> float:
+        """Return effective stop level with MKT-042 buffer decay applied.
+        Used by heartbeat and Telegram for accurate cushion display."""
+        base_stop = getattr(entry, f'{side}_side_stop', 0)
+        if (self.buffer_decay_start_mult is not None
+                and self.buffer_decay_hours is not None
+                and self.buffer_decay_hours > 0
+                and self.buffer_decay_start_mult > 1.0
+                and hasattr(entry, 'entry_time') and entry.entry_time is not None):
+            try:
+                elapsed_h = (get_us_market_time() - entry.entry_time).total_seconds() / 3600
+            except (TypeError, AttributeError):
+                # entry_time may be a string after state file restore
+                return base_stop
+            decay_factor = max(0.0, min(1.0, 1.0 - elapsed_h / self.buffer_decay_hours))
+            if decay_factor > 0:
+                buf = self.call_stop_buffer if side == "call" else self.put_stop_buffer
+                extra = buf * (self.buffer_decay_start_mult - 1) * decay_factor
+                return base_stop + extra
+        return base_stop
+
     # MKT-036: Stop confirmation timer helper
     # =========================================================================
 
@@ -4872,19 +4905,8 @@ class HydraStrategy(MEICStrategy):
 
         Returns stop result string if stop executed, or None.
         """
-        # MKT-042: Apply time-decaying buffer — widen stop early in position's life
-        if (self.buffer_decay_start_mult is not None
-                and self.buffer_decay_hours is not None
-                and self.buffer_decay_hours > 0
-                and self.buffer_decay_start_mult > 1.0
-                and hasattr(entry, 'entry_time') and entry.entry_time is not None):
-            elapsed_h = (get_us_market_time() - entry.entry_time).total_seconds() / 3600
-            decay_factor = max(0.0, min(1.0, 1.0 - elapsed_h / self.buffer_decay_hours))
-            if decay_factor > 0:
-                # Add extra buffer that decays linearly to zero
-                buf = self.call_stop_buffer if side == "call" else self.put_stop_buffer
-                extra = buf * (self.buffer_decay_start_mult - 1) * decay_factor
-                stop_level = stop_level + extra
+        # MKT-042: Apply time-decaying buffer via shared helper
+        stop_level = self._get_effective_stop_level(entry, side)
 
         if spread_value >= stop_level:
             if not self.stop_confirmation_enabled:
@@ -5444,7 +5466,8 @@ class HydraStrategy(MEICStrategy):
                 elapsed = (datetime.now() - entry.call_breach_time).total_seconds()
                 call_str = f"⏳{elapsed:.0f}s"
             else:
-                call_pct = ((entry.call_side_stop - call_value) / entry.call_side_stop * 100) if entry.call_side_stop > 0 else 0
+                eff_call = self._get_effective_stop_level(entry, "call")
+                call_pct = ((eff_call - call_value) / eff_call * 100) if eff_call > 0 else 0
                 call_str = f"{call_pct:.0f}%"
 
             if put_skipped:
@@ -5462,7 +5485,8 @@ class HydraStrategy(MEICStrategy):
                 elapsed = (datetime.now() - entry.put_breach_time).total_seconds()
                 put_str = f"⏳{elapsed:.0f}s"
             else:
-                put_pct = ((entry.put_side_stop - put_value) / entry.put_side_stop * 100) if entry.put_side_stop > 0 else 0
+                eff_put = self._get_effective_stop_level(entry, "put")
+                put_pct = ((eff_put - put_value) / eff_put * 100) if eff_put > 0 else 0
                 put_str = f"{put_pct:.0f}%"
 
             lines.append(
@@ -6164,7 +6188,8 @@ class HydraStrategy(MEICStrategy):
             skipped = getattr(entry, f'{side}_side_skipped', False)
             stopped = getattr(entry, f'{side}_side_stopped', False)
             expired = getattr(entry, f'{side}_side_expired', False)
-            stop_level = getattr(entry, f'{side}_side_stop', 0)
+            base_stop = getattr(entry, f'{side}_side_stop', 0)
+            eff_stop = self._get_effective_stop_level(entry, side)
             spread_value = getattr(entry, f'{side}_spread_value', 0)
 
             if skipped:
@@ -6176,12 +6201,13 @@ class HydraStrategy(MEICStrategy):
                     salvage_rev = getattr(entry, f'{side}_long_sold_revenue', 0)
                     lines.append(f"{label}: STOPPED + LONG SALVAGED +${salvage_rev:.0f}")
                 else:
-                    lines.append(f"{label}: STOPPED (stop @ ${stop_level:.0f})")
+                    lines.append(f"{label}: STOPPED (stop @ ${base_stop:.0f})")
             elif expired:
                 lines.append(f"{label}: EXPIRED")
-            elif stop_level > 0:
-                cushion = (stop_level - spread_value) / stop_level * 100 if stop_level > 0 else 0
-                lines.append(f"{label}: {cushion:.0f}% cushion (stop @ ${stop_level:.0f})")
+            elif eff_stop > 0:
+                cushion = (eff_stop - spread_value) / eff_stop * 100 if eff_stop > 0 else 0
+                decay_tag = f" [decay→${eff_stop:.0f}]" if eff_stop > base_stop + 1 else ""
+                lines.append(f"{label}: {cushion:.0f}% cushion (stop @ ${base_stop:.0f}{decay_tag})")
             else:
                 lines.append(f"{label}: \u2014")
 
@@ -6695,7 +6721,8 @@ class HydraStrategy(MEICStrategy):
                         current_value = entry.call_spread_value if entry.call_spread_value else 0
                         pnl = entry.call_spread_credit - current_value
 
-                    stop_level = entry.call_side_stop if entry.call_side_stop else 0
+                    eff_stop = self._get_effective_stop_level(entry, "call")
+                    stop_level = eff_stop if eff_stop else 0
                     distance = stop_level - current_value if status == "ACTIVE" and stop_level > 0 else 0
                     spread_width = abs(entry.long_call_strike - entry.short_call_strike) if entry.long_call_strike else 0
 
@@ -6735,7 +6762,8 @@ class HydraStrategy(MEICStrategy):
                         current_value = entry.put_spread_value if entry.put_spread_value else 0
                         pnl = entry.put_spread_credit - current_value
 
-                    stop_level = entry.put_side_stop if entry.put_side_stop else 0
+                    eff_stop = self._get_effective_stop_level(entry, "put")
+                    stop_level = eff_stop if eff_stop else 0
                     distance = stop_level - current_value if status == "ACTIVE" and stop_level > 0 else 0
                     spread_width = abs(entry.short_put_strike - entry.long_put_strike) if entry.long_put_strike else 0
 
@@ -7380,17 +7408,19 @@ class HydraStrategy(MEICStrategy):
             self.call_stop_buffer = csb[regime] * 100
             logger.info(f"VIX regime: call_stop_buffer ${old/100:.2f} → ${self.call_stop_buffer/100:.2f}")
 
-        # Apply credit gate overrides (values are per-contract dollars, no multiplication needed)
+        # Apply credit gate overrides (config values are per-contract dollars, multiply by 100)
         mcc = self.vix_regime_min_call_credit
         if regime < len(mcc) and mcc[regime] is not None:
             old = self.min_viable_credit_per_side
-            self.min_viable_credit_per_side = mcc[regime]
-            logger.info(f"VIX regime: min_call_credit ${old:.2f} → ${self.min_viable_credit_per_side:.2f}")
+            self.min_viable_credit_per_side = mcc[regime] * 100
+            self.call_credit_floor = self.min_viable_credit_per_side - 10
+            logger.info(f"VIX regime: min_call_credit ${old/100:.2f} → ${self.min_viable_credit_per_side/100:.2f}")
         mpc = self.vix_regime_min_put_credit
         if regime < len(mpc) and mpc[regime] is not None:
             old = self.min_viable_credit_put_side
-            self.min_viable_credit_put_side = mpc[regime]
-            logger.info(f"VIX regime: min_put_credit ${old:.2f} → ${self.min_viable_credit_put_side:.2f}")
+            self.min_viable_credit_put_side = mpc[regime] * 100
+            self.put_credit_floor = self.min_viable_credit_put_side - 10
+            logger.info(f"VIX regime: min_put_credit ${old/100:.2f} → ${self.min_viable_credit_put_side/100:.2f}")
 
         self._vix_regime_applied = True
         logger.info(f"VIX regime applied: VIX={vix:.1f}, regime={regime}/{len(self.vix_regime_breakpoints)}")

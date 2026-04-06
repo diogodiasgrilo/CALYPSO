@@ -106,7 +106,7 @@ export function DailyPnLCard() {
         {/* Stat grid — 4 columns, centered */}
         <div className="grid grid-cols-4 gap-1 pt-3 border-t border-border-dim">
           <StatCell label="Entries">
-            {baseEntries}/5
+            {baseEntries}/{baseCount}
             {conditionalEntries > 0 && (
               <span className="text-text-dim text-xs">+{conditionalEntries}</span>
             )}

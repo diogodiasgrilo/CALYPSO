@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-04-01
-**Version:** 1.21.0
+**Last Updated:** 2026-04-06
+**Version:** 1.22.1
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -997,7 +997,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `conditional_e6_enabled` | `false` | MKT-035: E6 down-day call-only. **DISABLED** |
 | `conditional_e7_enabled` | `false` | MKT-035: E7. **DISABLED in v1.19.0** |
 | `conditional_upday_e6_enabled` | `true` | Upday-035: E6 fires as put-only on up days (v1.19.0) |
-| `upday_threshold_pct` | `0.002` | Upday-035: SPX must rise this % above session open (0.20%, v1.19.0) |
+| `upday_threshold_pct` | `0.0025` | Upday-035: SPX must rise this % above session open (0.25%, v1.20.1) |
 
 ### Whipsaw Filter (`config.whipsaw_filter`, v1.19.0)
 
@@ -1006,22 +1006,26 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `enabled` | `true` | Enable/disable whipsaw filter |
 | `threshold` | `1.75` | Skip entry when intraday range > 1.75× expected move |
 
-### VIX Regime (`config.vix_regime`)
+### VIX Regime (`config.vix_regime`, v1.20.0)
 
-VIX regime controls dynamic behavior adjustments based on current VIX level. When enabled, the bot adapts entry count and skip behavior to market volatility conditions.
+VIX regime uses a 4-zone breakpoint system. Arrays are per-zone; `null` means use the default value.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `enabled` | `false` | Enable/disable VIX regime adjustments |
-| `low_threshold` | `14.0` | VIX below this = low regime (calm markets) |
-| `high_threshold` | `22.0` | VIX above this = high regime (elevated volatility) |
-| `high_max_entries` | `2` | Max entries in high VIX regime (reduce exposure) |
+| `enabled` | `true` | Enable/disable VIX regime adjustments |
+| `breakpoints` | `[14, 20, 30]` | VIX zone boundaries (creates 4 zones) |
+| `max_entries` | `[2, null, null, 1]` | Max entries per zone (null = use default 3) |
+| `put_stop_buffer` | `[1.25, null, null, null]` | Put buffer override per zone (null = use default $1.55) |
+| `call_stop_buffer` | `[null, null, null, null]` | Call buffer override per zone (null = use default $0.35) |
+| `min_call_credit` | `[null, null, null, null]` | Call credit gate override per zone |
+| `min_put_credit` | `[null, null, null, null]` | Put credit gate override per zone |
 
-| VIX Regime | VIX Range | Behavior |
-|------------|-----------|----------|
-| Low | < 14 | Normal entries, wider OTM, higher premium capture |
-| Medium | 14-22 | Normal entries, standard parameters |
-| High | > 22 | Reduced entries (max 2), wider spreads, more conservative |
+| Zone | VIX Range | Max Entries | Put Buffer |
+|------|-----------|-------------|------------|
+| 0 | < 14 | 2 | $1.25 |
+| 1 | 14-20 | 3 (default) | $1.55 (default) |
+| 2 | 20-30 | 3 (default) | $1.55 (default) |
+| 3 | >= 30 | 1 | $1.55 (default) |
 
 ### Skip Weekdays (`config.skip_weekdays`)
 

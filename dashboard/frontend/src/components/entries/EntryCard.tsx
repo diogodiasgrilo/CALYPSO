@@ -158,8 +158,8 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
       : currentPnl !== 0 ? 100 : 0;
 
   // Use bot's actual cushion: (stop_level - spread_value) / stop_level
-  const callCushion = computeCushion(entry.call_spread_value ?? 0, entry.call_side_stop);
-  const putCushion = computeCushion(entry.put_spread_value ?? 0, entry.put_side_stop);
+  const callCushion = computeCushion(entry.call_spread_value ?? 0, entry.effective_call_stop ?? entry.call_side_stop);
+  const putCushion = computeCushion(entry.put_spread_value ?? 0, entry.effective_put_stop ?? entry.put_side_stop);
 
   // Trend signal badge — show override reason if it drove the entry type
   const trendLabel =

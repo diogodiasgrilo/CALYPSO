@@ -24,6 +24,12 @@ Conditional Entry Trigger (MKT-035 / Upday-035):
 - E7: DISABLED
 
 Version History:
+- 1.22.2 (2026-04-06): Full codebase audit. Fixed VIX regime credit gate ×100 bug, dangerous code defaults
+  (spread widths 60→25, smart_entry True→False, conditional entries True→False). Heartbeat and Telegram
+  cushion display now uses MKT-042 effective stop level (was showing base level, not decayed). Buffer decay
+  logged at entry time and shown as [decay→$X] tag in Telegram /snapshot. Config template synced to VM values.
+  Dashboard: DailyPnLCard /5→/{baseCount}, simulator put_only_max_vix 25→15, theo put $2.50→$2.60,
+  upday_threshold_pct 0.004→0.0025. All docs updated.
 - 1.22.0 (2026-04-02): MKT-042 Buffer Decay + MKT-043 Calm Entry. MKT-042: time-decaying stop buffer —
   starts at buffer_decay_start_mult × normal buffer (default 2.10×), linearly decays to 1× over
   buffer_decay_hours (default 2.0h). Wider stops early when premium is rich, normal later. MKT-043:
