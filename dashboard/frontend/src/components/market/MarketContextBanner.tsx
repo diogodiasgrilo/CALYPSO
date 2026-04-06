@@ -354,11 +354,11 @@ export function OffDaySummaryCards() {
               </div>
               <div className="flex justify-between">
                 <span className="text-text-secondary">SPX Range</span>
-                <span className="text-text-primary">{lastDay.day_range.toFixed(0)}pt</span>
+                <span className="text-text-primary">{(lastDay.day_range ?? 0).toFixed(0)}pt</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-text-secondary">VIX</span>
-                <span className="text-text-primary">{lastDay.vix_close.toFixed(1)}</span>
+                <span className="text-text-primary">{(lastDay.vix_close ?? 0).toFixed(1)}</span>
               </div>
             </div>
 
@@ -374,7 +374,7 @@ export function OffDaySummaryCards() {
                     >
                       <div className="text-[9px] text-text-dim">E{e.entry_number}</div>
                       <div className="text-[10px] font-semibold" style={{ color: pnlColor(e.pnl) }}>
-                        {e.pnl > 0 ? "+" : ""}{e.pnl.toFixed(0)}
+                        {(e.pnl ?? 0) > 0 ? "+" : ""}{(e.pnl ?? 0).toFixed(0)}
                       </div>
                     </div>
                   ))}
@@ -447,7 +447,7 @@ export function OffDaySummaryCards() {
                   >
                     <div className="text-[9px] text-text-dim">{d.day_of_week.slice(0, 3)}</div>
                     <div className="text-[10px] font-semibold" style={{ color: pnlColor(d.net_pnl) }}>
-                      {d.net_pnl > 0 ? "+" : ""}{d.net_pnl.toFixed(0)}
+                      {(d.net_pnl ?? 0) > 0 ? "+" : ""}{(d.net_pnl ?? 0).toFixed(0)}
                     </div>
                   </div>
                 ))}
