@@ -544,8 +544,8 @@ CALYPSO has 5 autonomous agents that run on schedules via systemd timers. All us
 | Agent | Service Name | Schedule | Purpose |
 |-------|-------------|----------|---------|
 | APOLLO | `apollo.service` | 8:30 AM ET weekdays | Pre-market scout (overnight news, VIX, expected move) |
-| HERMES | `hermes.service` | 5:00 PM ET weekdays | Daily execution quality analyst (post-market) |
-| HOMER | `homer.service` | 5:30 PM ET weekdays | Automated HYDRA Trading Journal writer |
+| HERMES | `hermes.service` | 7:00 PM ET weekdays | Daily execution quality analyst (post-settlement) |
+| HOMER | `homer.service` | 7:30 PM ET weekdays | Automated HYDRA Trading Journal writer |
 | CLIO | `clio.service` | Saturday 9:00 AM ET | Weekly strategy analyst (aggregates + deep analysis) |
 | ARGUS | `argus.service` | Every 15 min | Health monitor (bot process, API, token status) |
 
@@ -582,7 +582,7 @@ services/homer/
   journal_updater.py    Applies updates section-by-section
   narrative_generator.py Claude API for observations/assessments
 deploy/homer.service    systemd oneshot service
-deploy/homer.timer      systemd timer (5:30 PM ET weekdays)
+deploy/homer.timer      systemd timer (7:30 PM ET weekdays)
 intel/homer/            Backups + logs
 data/backtesting.db     SQLite database with market ticks, OHLC, trades
 ```
@@ -1293,7 +1293,7 @@ SCRIPT
 11. **HYDRA bot:** Running in LIVE mode (v1.22.0, deployed 2026-04-02) - ONLY active trading bot - 3 base entries at 10:15, 10:45, 11:15 AM ET (E7 downday call-only DISABLED, E6 upday put-only ENABLED at 14:00 with 0.25% threshold, Upday-035) (MKT-034 VIX time shifting DISABLED) + MKT-031 smart entry DISABLED (v1.10.4 — enter at scheduled times only) + Upday-035 conditional entry (E6 at 14:00 fires put-only when SPX rises >= 0.25% above open) + anti-whipsaw filter (`whipsaw_range_skip_mult: 1.75`) + VIX regime adaptive (breakpoints [14,20,30]: VIX<14=2 entries+$1.25 put buffer, VIX 14-30=3 entries normal, VIX>=30=1 entry) + base-entry down-day call-only: E1-E3 convert to call-only when SPX drops >= 0.57% from open (`base_entry_downday_callonly_pct: 0.0057`) + EMA 20/40 trend signal (informational only) + wider starting OTM 3.5x/4.0x multiplier (MKT-024) + VIX-scaled spread width 25-110pt (MKT-027, floor=25 cap=110 mult=6.0) + credit gate: call $2.00, put $2.75 with MKT-029 graduated fallback for both sides (call floor $0.75, put floor $2.00) (MKT-011) + put-only entries when call non-viable AND VIX < 15 (MKT-032/MKT-039) + call-only entries when put non-viable (MKT-040, 89% WR) + VIX entry cutoff disabled (max_vix_entry=999) + early close DISABLED (MKT-018) + stop = total_credit + asymmetric buffer (call $0.35, put $1.55) with MKT-042 buffer decay (2.10x early, linear to 1x over 2h), MKT-036 confirmation timer DISABLED, MKT-041 cushion recovery DISABLED (buffer+cushion interfere), MKT-043 calm entry filter (delays entry up to 5min when SPX >15pt move in 3min), MKT-039 put-only stop: credit + $1.55 put buffer, MKT-040 call-only stop: call + $2.60 theo put + call buffer, MKT-038: call + $2.60 theo put + call buffer + MKT-038 FOMC T+1 call-only (all entries forced call-only day after FOMC announcement) + FOMC announcement skip DISABLED + configurable stop close mode (default: both legs) + progressive OTM tightening (MKT-020/MKT-022) + 15 Telegram commands + skip alerts: Telegram ENTRY_SKIPPED at all 8 skip paths with detailed reasons (v1.16.0) + state file: `entry_schedule` (base+conditional times), `skip_reason` per entry + `skip_weekdays` and `dow_max_entries` day-of-week config keys (disabled by default) + dashboard: mobile-responsive header, pending cards with scheduled times, skipped cards with reason + backtesting: 1-minute data resolution, Sharpe 3.282 (realistic live 2.684)
 12. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
 13. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
-14. **HOMER agent:** Runs at 5:30 PM ET weekdays — auto-updates HYDRA Trading Journal with new trading days, commits + pushes, sends Telegram alert
+14. **HOMER agent:** Runs at 7:30 PM ET weekdays — auto-updates HYDRA Trading Journal with new trading days, commits + pushes, sends Telegram alert
 
 ---
 

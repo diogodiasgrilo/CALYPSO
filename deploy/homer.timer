@@ -1,9 +1,9 @@
 [Unit]
-Description=Calypso HOMER Daily Journal Update Timer (5:30 PM ET weekdays)
+Description=Calypso HOMER Daily Journal Update Timer (7:30 PM ET weekdays, post-settlement)
 Documentation=https://github.com/calypso-trading/calypso
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 19:30:00 America/New_York
 Persistent=false
 AccuracySec=60s
 

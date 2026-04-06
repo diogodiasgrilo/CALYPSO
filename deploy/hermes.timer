@@ -1,9 +1,9 @@
 [Unit]
-Description=Calypso HERMES Daily Analysis Timer (5 PM ET weekdays)
+Description=Calypso HERMES Daily Analysis Timer (7 PM ET weekdays, post-settlement)
 Documentation=https://github.com/calypso-trading/calypso
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 17:00:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 19:00:00 America/New_York
 Persistent=false
 AccuracySec=60s
 
