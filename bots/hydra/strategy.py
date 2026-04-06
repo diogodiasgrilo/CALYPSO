@@ -6925,14 +6925,16 @@ class HydraStrategy(MEICStrategy):
                 # MKT-036: Stop confirmation avoided counter
                 "stops_avoided_mkt036": self.daily_state.stops_avoided_mkt036,
                 # MKT-018: Early close state
-                "early_close_triggered": self._early_close_triggered,
-                "early_close_time": self._early_close_time.isoformat() if self._early_close_time else None,
-                "early_close_pnl": self._early_close_pnl,
+                # getattr: these are set post-super().__init__(); state save during
+                # base-class recovery may fire before they exist.
+                "early_close_triggered": getattr(self, '_early_close_triggered', False),
+                "early_close_time": getattr(self, '_early_close_time', None) and self._early_close_time.isoformat() if getattr(self, '_early_close_time', None) else None,
+                "early_close_pnl": getattr(self, '_early_close_pnl', None),
                 # MKT-021: Pre-entry ROC gate state
-                "roc_gate_triggered": self._roc_gate_triggered,
+                "roc_gate_triggered": getattr(self, '_roc_gate_triggered', False),
                 # MKT-034: VIX gate state
-                "vix_gate_resolved": self._vix_gate_resolved,
-                "vix_gate_start_slot": self._vix_gate_start_slot,
+                "vix_gate_resolved": getattr(self, '_vix_gate_resolved', False),
+                "vix_gate_start_slot": getattr(self, '_vix_gate_start_slot', 0),
                 # Dashboard: entry schedule for pending slot display
                 "entry_schedule": {
                     "base": [t.strftime('%H:%M') for t in self.entry_times[:self._base_entry_count]],
@@ -6942,7 +6944,7 @@ class HydraStrategy(MEICStrategy):
                 # getattr: fomc_t1_callonly_enabled is set post-super(); if state save is
                 # triggered during base-class recovery it may not exist yet.
                 "fomc_t1_callonly_enabled": getattr(self, 'fomc_t1_callonly_enabled', True),
-                "downday_callonly_enabled": self.downday_callonly_enabled,
+                "downday_callonly_enabled": getattr(self, 'downday_callonly_enabled', True),
                 "entries": []
             }
 
