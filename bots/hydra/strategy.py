@@ -6973,9 +6973,11 @@ class HydraStrategy(MEICStrategy):
                     # Credits
                     "call_spread_credit": entry.call_spread_credit,
                     "put_spread_credit": entry.put_spread_credit,
-                    # Stops
+                    # Stops (base + effective with MKT-042 decay applied)
                     "call_side_stop": entry.call_side_stop,
                     "put_side_stop": entry.put_side_stop,
+                    "effective_call_stop": self._get_effective_stop_level(entry, "call"),
+                    "effective_put_stop": self._get_effective_stop_level(entry, "put"),
                     # Actual stop debit (for dashboard per-entry P&L accuracy)
                     "actual_call_stop_debit": entry.actual_call_stop_debit,
                     "actual_put_stop_debit": entry.actual_put_stop_debit,
