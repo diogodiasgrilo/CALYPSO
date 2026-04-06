@@ -138,7 +138,30 @@ class Broadcaster:
         if await self.db_reader.is_available():
             comparisons = await self.db_reader.get_comparison_stats()
 
-        return {
+        # After market close, augment metrics with today's live P&L
+        # so late-connecting clients see updated Cumulative + Performance
+        from dashboard.backend.services.market_status import is_after_market_close
+        performance_pnls = None
+        if is_after_market_close() and metrics:
+            today_pnl = self.live_state.get_today_net_pnl()
+            if today_pnl is not None:
+                today = get_today_et()
+                if metrics.get("last_updated") != today:
+                    metrics = dict(metrics)
+                    metrics["cumulative_pnl"] = metrics.get("cumulative_pnl", 0) + today_pnl
+                    if today_pnl >= 0:
+                        metrics["winning_days"] = metrics.get("winning_days", 0) + 1
+                    else:
+                        metrics["losing_days"] = metrics.get("losing_days", 0) + 1
+
+                # Build performance P&L array with today included
+                pnls = await self.db_reader.get_daily_pnls()
+                summaries = await self.db_reader.get_daily_summaries(limit=1)
+                if not summaries or summaries[0].get("date") != today:
+                    pnls = list(pnls) + [today_pnl]
+                performance_pnls = pnls
+
+        snapshot = {
             "type": "snapshot",
             "state": state,
             "metrics": metrics,
@@ -150,6 +173,9 @@ class Broadcaster:
             "today_ohlc": ohlc,
             "clients": self.manager.client_count,
         }
+        if performance_pnls is not None:
+            snapshot["performance_pnls"] = performance_pnls
+        return snapshot
 
     # -- Polling loops --
 
@@ -190,15 +216,61 @@ class Broadcaster:
             await asyncio.sleep(settings.state_poll_interval)
 
     async def _poll_metrics(self) -> None:
-        """Poll hydra_metrics.json for changes."""
+        """Poll hydra_metrics.json for changes.
+
+        After market close, augments cumulative metrics with today's live P&L
+        (before the bot writes hydra_metrics.json) and pushes performance data
+        so the dashboard updates immediately at 4:00 PM ET.
+        """
+        from dashboard.backend.services.market_status import is_after_market_close
+        _sent_today_augmented = False
+
         while True:
             try:
                 data = self.metrics_reader.read_if_changed()
                 if data is not None:
+                    # When metrics file updates (bot wrote it), reset flag for next day
+                    _sent_today_augmented = False
                     await self.manager.broadcast({
                         "type": "metrics_update",
                         "data": data,
                     })
+
+                # After market close, augment metrics with today's live P&L
+                # so Cumulative + Performance update before bot writes metrics file
+                if is_after_market_close() and not _sent_today_augmented:
+                    today_pnl = self.live_state.get_today_net_pnl()
+                    if today_pnl is not None:
+                        _sent_today_augmented = True
+
+                        # Augment cumulative metrics with today's P&L
+                        base_metrics = self.metrics_reader.read_latest() or {}
+                        if base_metrics:
+                            today = get_today_et()
+                            # Only augment if metrics file hasn't been updated for today yet
+                            if base_metrics.get("last_updated") != today:
+                                augmented = dict(base_metrics)
+                                augmented["cumulative_pnl"] = base_metrics.get("cumulative_pnl", 0) + today_pnl
+                                if today_pnl >= 0:
+                                    augmented["winning_days"] = base_metrics.get("winning_days", 0) + 1
+                                else:
+                                    augmented["losing_days"] = base_metrics.get("losing_days", 0) + 1
+                                await self.manager.broadcast({
+                                    "type": "metrics_update",
+                                    "data": augmented,
+                                })
+
+                        # Push performance data (daily P&L array + today)
+                        pnls = await self.db_reader.get_daily_pnls()
+                        today = get_today_et()
+                        summaries = await self.db_reader.get_daily_summaries(limit=1)
+                        if not summaries or summaries[0].get("date") != today:
+                            pnls = list(pnls) + [today_pnl]
+                        await self.manager.broadcast({
+                            "type": "performance_update",
+                            "data": {"count": len(pnls), "daily_pnls": pnls},
+                        })
+
             except asyncio.CancelledError:
                 return
             except Exception as e:

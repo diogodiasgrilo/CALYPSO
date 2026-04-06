@@ -21,7 +21,7 @@ from backtest.config import live_config
 from backtest.engine import run_backtest, DayResult
 
 START_DATE = date(2022, 5, 16)
-END_DATE = date(2026, 3, 27)
+END_DATE = date(2026, 4, 4)
 OUTPUT_DIR = Path("backtest/results/final_report")
 
 

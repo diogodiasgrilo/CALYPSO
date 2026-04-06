@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useHydraStore } from "../../store/hydraStore";
 import {
   sharpeRatio,
   sortinoRatio,
@@ -32,6 +33,7 @@ function MetricCard({ label, value, color }: MetricCardProps) {
 export function PerformanceMetrics() {
   const [dailyPnls, setDailyPnls] = useState<number[] | null>(null);
   const [error, setError] = useState(false);
+  const performancePnls = useHydraStore((s) => s.performancePnls);
 
   useEffect(() => {
     fetch("/api/metrics/performance")
@@ -46,19 +48,22 @@ export function PerformanceMetrics() {
       .catch(() => setError(true));
   }, []);
 
+  // Use WebSocket-pushed data (after market close) if available, otherwise API data
+  const effectivePnls = performancePnls ?? dailyPnls;
+
   // useMemo MUST be called unconditionally (Rules of Hooks — no hooks after early returns)
   const stats = useMemo(() => {
-    if (!dailyPnls || dailyPnls.length < 2) return null;
+    if (!effectivePnls || effectivePnls.length < 2) return null;
     return {
-      sharpe: sharpeRatio(dailyPnls),
-      sortino: sortinoRatio(dailyPnls),
-      dd: maxDrawdown(dailyPnls),
-      calmar: calmarRatio(dailyPnls),
-      pf: profitFactor(dailyPnls),
-      exp: expectancy(dailyPnls),
-      wlRatio: avgWinLossRatio(dailyPnls),
+      sharpe: sharpeRatio(effectivePnls),
+      sortino: sortinoRatio(effectivePnls),
+      dd: maxDrawdown(effectivePnls),
+      calmar: calmarRatio(effectivePnls),
+      pf: profitFactor(effectivePnls),
+      exp: expectancy(effectivePnls),
+      wlRatio: avgWinLossRatio(effectivePnls),
     };
-  }, [dailyPnls]);
+  }, [effectivePnls]);
 
   if (error) {
     return (

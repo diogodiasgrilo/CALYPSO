@@ -24,6 +24,7 @@ export function useWebSocket() {
     applyStopEvents,
     applyAgentsUpdate,
     applyComparisons,
+    applyPerformanceUpdate,
     addToast,
     setClientCount,
   } = useHydraStore();
@@ -100,6 +101,9 @@ export function useWebSocket() {
           case "agents_update":
             applyAgentsUpdate(msg.data);
             break;
+          case "performance_update":
+            if (msg.data?.daily_pnls) applyPerformanceUpdate(msg.data.daily_pnls);
+            break;
           case "heartbeat":
             if (msg.clients != null) setClientCount(msg.clients);
             // Respond with pong to keep alive
@@ -135,6 +139,7 @@ export function useWebSocket() {
     applyStopEvents,
     applyAgentsUpdate,
     applyComparisons,
+    applyPerformanceUpdate,
     addToast,
     setClientCount,
     resetHeartbeatTimer,

@@ -202,6 +202,9 @@ interface DashboardStore {
   // Comparison statistics (averages from historical data)
   comparisons: ComparisonStats | null;
 
+  // Performance daily P&L array (pushed by WebSocket after market close)
+  performancePnls: number[] | null;
+
   // Toast notifications
   toasts: Toast[];
 
@@ -220,6 +223,7 @@ interface DashboardStore {
   applyStopEvents: (events: StopEvent[]) => void;
   applyAgentsUpdate: (agents: AgentInfo[]) => void;
   applyComparisons: (data: ComparisonStats) => void;
+  applyPerformanceUpdate: (pnls: number[]) => void;
   addToast: (toast: Omit<Toast, "id" | "timestamp">) => void;
   removeToast: (id: string) => void;
   setClientCount: (count: number) => void;
@@ -240,6 +244,7 @@ export const useHydraStore = create<DashboardStore>()(
     stopEvents: [],
     agentStatus: [],
     comparisons: null,
+    performancePnls: null,
     toasts: [],
     showStrikes: false,
     muted: false,
@@ -269,6 +274,7 @@ export const useHydraStore = create<DashboardStore>()(
         }
         if (data.agents) s.agentStatus = data.agents as AgentInfo[];
         if (data.comparisons) s.comparisons = data.comparisons as ComparisonStats;
+        if (data.performance_pnls) s.performancePnls = data.performance_pnls as number[];
         if (data.clients) s.clientCount = data.clients as number;
       }),
 
@@ -329,6 +335,11 @@ export const useHydraStore = create<DashboardStore>()(
     applyComparisons: (data) =>
       set((s) => {
         s.comparisons = data;
+      }),
+
+    applyPerformanceUpdate: (pnls) =>
+      set((s) => {
+        s.performancePnls = pnls;
       }),
 
     addToast: (toast) =>
