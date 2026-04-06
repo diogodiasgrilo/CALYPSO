@@ -104,6 +104,9 @@ export function useWebSocket() {
           case "performance_update":
             if (msg.data?.daily_pnls) applyPerformanceUpdate(msg.data.daily_pnls);
             break;
+          case "comparisons_update":
+            applyComparisons(msg.data);
+            break;
           case "heartbeat":
             if (msg.clients != null) setClientCount(msg.clients);
             // Respond with pong to keep alive

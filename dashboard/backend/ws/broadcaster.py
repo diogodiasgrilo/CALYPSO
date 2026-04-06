@@ -138,6 +138,28 @@ class Broadcaster:
         if await self.db_reader.is_available():
             comparisons = await self.db_reader.get_comparison_stats()
 
+        # After market close, augment comparisons with today's data
+        from dashboard.backend.services.market_status import is_after_market_close as _is_amc
+        if _is_amc() and comparisons and self.live_state:
+            today_summary = self.live_state.get_today_summary()
+            today_entries = self.live_state.get_today_entries()
+            if today_summary:
+                n = comparisons.get("total_days", 0)
+                today_pnl = today_summary.get("net_pnl", 0)
+                today_entries_count = today_summary.get("entries_placed", 0)
+                today_stops = today_summary.get("entries_stopped", 0)
+                today_credit = sum(e.get("total_credit", 0) for e in (today_entries or []))
+                if n > 0:
+                    comparisons = dict(comparisons)
+                    comparisons["avg_pnl"] = ((comparisons.get("avg_pnl") or 0) * n + today_pnl) / (n + 1)
+                    comparisons["avg_entries"] = ((comparisons.get("avg_entries") or 0) * n + today_entries_count) / (n + 1)
+                    comparisons["avg_stops"] = ((comparisons.get("avg_stops") or 0) * n + today_stops) / (n + 1)
+                    if comparisons.get("avg_credit") is not None:
+                        comparisons["avg_credit"] = (comparisons["avg_credit"] * n + today_credit) / (n + 1)
+                    comparisons["best_day"] = max(comparisons.get("best_day") or 0, today_pnl)
+                    comparisons["worst_day"] = min(comparisons.get("worst_day") or 0, today_pnl)
+                    comparisons["total_days"] = n + 1
+
         # After market close, augment metrics with today's live P&L
         # so late-connecting clients see updated Cumulative + Performance
         from dashboard.backend.services.market_status import is_after_market_close
@@ -270,6 +292,31 @@ class Broadcaster:
                             "type": "performance_update",
                             "data": {"count": len(pnls), "daily_pnls": pnls},
                         })
+
+                        # Push augmented comparisons (avg P&L, avg stops, etc.)
+                        comparisons = await self.db_reader.get_comparison_stats()
+                        if comparisons:
+                            today_summary = self.live_state.get_today_summary()
+                            today_entries = self.live_state.get_today_entries()
+                            if today_summary:
+                                n = comparisons.get("total_days", 0)
+                                if n > 0:
+                                    comparisons = dict(comparisons)
+                                    tp = today_summary.get("net_pnl", 0)
+                                    te = today_summary.get("entries_placed", 0)
+                                    ts = today_summary.get("entries_stopped", 0)
+                                    tc = sum(e.get("total_credit", 0) for e in (today_entries or []))
+                                    comparisons["avg_pnl"] = ((comparisons.get("avg_pnl") or 0) * n + tp) / (n + 1)
+                                    comparisons["avg_entries"] = ((comparisons.get("avg_entries") or 0) * n + te) / (n + 1)
+                                    comparisons["avg_stops"] = ((comparisons.get("avg_stops") or 0) * n + ts) / (n + 1)
+                                    if comparisons.get("avg_credit") is not None:
+                                        comparisons["avg_credit"] = (comparisons["avg_credit"] * n + tc) / (n + 1)
+                                    comparisons["best_day"] = max(comparisons.get("best_day") or 0, tp)
+                                    comparisons["total_days"] = n + 1
+                                    await self.manager.broadcast({
+                                        "type": "comparisons_update",
+                                        "data": comparisons,
+                                    })
 
             except asyncio.CancelledError:
                 return
