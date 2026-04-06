@@ -212,16 +212,16 @@ class LiveStateProvider:
         return result
 
     def get_today_net_pnl(self) -> Optional[float]:
-        """Get today's net P&L for performance metrics."""
-        state = self._get_today_state()
-        if not state:
+        """Get today's net P&L for performance metrics.
+
+        After market close (4 PM ET), includes unrealized credits from active
+        entries that will expire worthless (0DTE). This matches the logic in
+        get_today_summary() so Performance and Cumulative show consistent data.
+        """
+        summary = self.get_today_summary()
+        if summary is None:
             return None
-        entries = state.get("entries", [])
-        if not entries:
-            return None
-        gross = state.get("total_realized_pnl", 0)
-        commission = state.get("total_commission", 0)
-        return gross - commission
+        return summary.get("net_pnl", 0)
 
     def get_today_replay_pnl(self) -> list[dict]:
         """Build replay P&L curve from pnl_history in state file."""
