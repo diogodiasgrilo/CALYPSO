@@ -6971,6 +6971,7 @@ class HydraStrategy(MEICStrategy):
                     "short_put_uic": entry.short_put_uic,
                     "long_put_uic": entry.long_put_uic,
                     # Credits
+                    "total_credit": entry.total_credit,
                     "call_spread_credit": entry.call_spread_credit,
                     "put_spread_credit": entry.put_spread_credit,
                     # Stops (base + effective with MKT-042 decay applied)
