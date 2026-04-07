@@ -12,12 +12,24 @@ import {
 import { useHydraStore, type HydraEntry } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
 
-/** Parse ET timestamp → epoch seconds (Lightweight Charts renders as-if-UTC → shows ET labels). */
-function parseET(ts: string): number {
+/** Parse ET timestamp → epoch seconds (Lightweight Charts renders as-if-UTC → shows ET labels).
+ *  Handles full ISO ("2026-04-07T12:03:01-04:00"), datetime ("2026-04-07 12:03:01"),
+ *  and time-only ("12:03:08") formats. Time-only uses today's date. */
+function parseET(ts: string, fallbackDate?: string): number {
+  // Full date+time: "2026-04-07T12:03:01..." or "2026-04-07 12:03:01"
   const m = ts.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
-  if (!m) return 0;
-  const utcDate = new Date(`${m[1]}T${m[2]}Z`);
-  return isNaN(utcDate.getTime()) ? 0 : utcDate.getTime() / 1000;
+  if (m) {
+    const utcDate = new Date(`${m[1]}T${m[2]}Z`);
+    return isNaN(utcDate.getTime()) ? 0 : utcDate.getTime() / 1000;
+  }
+  // Time-only: "12:03:08" — use fallbackDate or today
+  const t = ts.match(/^(\d{2}:\d{2}:\d{2})/);
+  if (t) {
+    const dateStr = fallbackDate || new Date().toISOString().slice(0, 10);
+    const utcDate = new Date(`${dateStr}T${t[1]}Z`);
+    return isNaN(utcDate.getTime()) ? 0 : utcDate.getTime() / 1000;
+  }
+  return 0;
 }
 
 /** Stable hash of entry fields relevant to markers/price lines. */
@@ -32,12 +44,15 @@ export function SPXChart() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const priceLinesRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]>[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const markersRef = useRef<any>(null);
   const prevEntriesHashRef = useRef("");
   const prevStopCountRef = useRef(0);
   const prevShowStrikesRef = useRef(false);
 
   const todayOHLC = useHydraStore((s) => s.todayOHLC);
   const hydraEntries = useHydraStore((s) => s.hydraState?.entries);
+  const stateDate = useHydraStore((s) => s.hydraState?.date);
   const stopEvents = useHydraStore((s) => s.stopEvents);
   const showStrikes = useHydraStore((s) => s.showStrikes);
   const toggleStrikes = useHydraStore((s) => s.toggleStrikes);
@@ -155,11 +170,11 @@ export function SPXChart() {
         text: `E${e.entry_number}`,
       }));
 
-    // Build stop markers
+    // Build stop markers (stop_time may be time-only "12:03:08" from DB)
     const stopMarkers = stopEvents
       .filter((s) => s.stop_time)
       .map((s) => ({
-        time: parseET(s.stop_time) as Time,
+        time: parseET(s.stop_time, stateDate) as Time,
         position: "belowBar" as const,
         color: colors.loss,
         shape: "circle" as const,
@@ -171,9 +186,11 @@ export function SPXChart() {
       (a, b) => (a.time as number) - (b.time as number)
     );
 
-    if (allMarkers.length > 0) {
-      createSeriesMarkers(candleSeriesRef.current, allMarkers);
-    }
+    // Detach previous markers before creating new ones (LWC v5 stacking fix)
+    markersRef.current?.detach();
+    markersRef.current = allMarkers.length > 0
+      ? createSeriesMarkers(candleSeriesRef.current, allMarkers)
+      : null;
 
     // Update price lines
     const series = candleSeriesRef.current;

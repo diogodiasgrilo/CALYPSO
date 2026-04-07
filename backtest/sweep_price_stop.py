@@ -21,10 +21,11 @@ from backtest.config import live_config, BacktestConfig
 from backtest.engine import run_backtest, DayResult
 
 START_DATE = date(2022, 5, 16)
-END_DATE   = date(2026, 3, 27)
+END_DATE   = date(2026, 4, 4)
 
 # None = credit-based (live). Floats = price-based stop points.
-STOP_VALUES: List[Optional[float]] = [None, 0.0, 0.3, 0.5, 1.0, 2.0, 3.0, 5.0]
+# Wide range: 0.1 (touch strike) to 40 (trigger 40pt before strike)
+STOP_VALUES: List[Optional[float]] = [None, 0.1, 5, 10, 15, 20, 25, 30, 35, 40]
 
 
 def build_cfg(stop_pts: Optional[float]) -> BacktestConfig:
@@ -32,8 +33,11 @@ def build_cfg(stop_pts: Optional[float]) -> BacktestConfig:
     cfg.start_date             = START_DATE
     cfg.end_date               = END_DATE
     cfg.use_real_greeks        = True
+    cfg.data_resolution        = "1min"
     cfg.price_based_stop_points = stop_pts
     cfg.price_stop_inward      = True  # matches live bot direction
+    # Keep all current features: buffer decay, calm entry, VIX regime
+    # (already set by live_config())
     return cfg
 
 
@@ -82,14 +86,24 @@ METRICS = [
 ]
 
 
+def _run_one(v):
+    """Worker function for parallel execution."""
+    label = "credit" if v is None else f"{v:.1f}pt"
+    results = run_backtest(build_cfg(v), verbose=False)
+    return summarise(results, label)
+
+
 if __name__ == "__main__":
-    all_stats = []
+    import multiprocessing as mp
+    import os
+
+    N_WORKERS = min(8, os.cpu_count() or 4)
     print(f"Sweep: price_based_stop_points  |  Values: {STOP_VALUES}  |  Real Greeks | {START_DATE} → {END_DATE}")
-    for v in STOP_VALUES:
-        label = "credit" if v is None else f"{v:.1f}pt"
-        print(f"  Running price_stop = {label}...")
-        results = run_backtest(build_cfg(v), verbose=False)
-        all_stats.append(summarise(results, label))
+    print(f"Workers: {N_WORKERS} | Configs: {len(STOP_VALUES)}")
+
+    with mp.Pool(N_WORKERS, maxtasksperchild=2) as pool:
+        all_stats = pool.map(_run_one, STOP_VALUES)
+    print(f"\nAll {len(all_stats)} configs complete.")
 
     col_w = 10
     header = f"  {'Metric':<22}"

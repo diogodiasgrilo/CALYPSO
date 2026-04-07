@@ -75,6 +75,8 @@ export function DayDetailChart({
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const markersRef = useRef<any>(null);
 
   // Create chart on mount
   useEffect(() => {
@@ -202,9 +204,11 @@ export function DayDetailChart({
       (a, b) => (a.time as number) - (b.time as number)
     );
 
-    if (allMarkers.length > 0) {
-      createSeriesMarkers(candleSeriesRef.current, allMarkers);
-    }
+    // Detach previous markers before creating new ones (LWC v5 stacking fix)
+    markersRef.current?.detach();
+    markersRef.current = allMarkers.length > 0
+      ? createSeriesMarkers(candleSeriesRef.current, allMarkers)
+      : null;
 
     // Fit full day
     chartRef.current?.timeScale().fitContent();
