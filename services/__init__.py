@@ -15,8 +15,8 @@ Services:
 Agents (Claude-powered):
 ------------------------
 - apollo: Morning Scout — pre-market briefing with risk level (8:30 AM ET weekdays)
-- hermes: Daily Execution Quality Analyst — post-market report (5:00 PM ET weekdays)
-- homer: Automated HYDRA Trading Journal Writer (5:30 PM ET weekdays)
+- hermes: Daily Execution Quality Analyst — post-market report (7:00 PM ET weekdays)
+- homer: Automated HYDRA Trading Journal Writer (7:30 PM ET weekdays)
 - clio: Weekly Strategy Analyst (Saturday 9:00 AM ET)
 - argus: Health Monitor — bot process, API, token status (every 15 min)
 

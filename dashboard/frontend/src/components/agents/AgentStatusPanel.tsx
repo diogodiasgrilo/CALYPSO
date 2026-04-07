@@ -4,8 +4,8 @@ import { colors } from "../../lib/tradingColors";
 
 const AGENT_SCHEDULE: Record<string, string> = {
   apollo: "8:30 AM",
-  hermes: "5:00 PM",
-  homer: "5:30 PM",
+  hermes: "7:00 PM",
+  homer: "7:30 PM",
   clio: "Sat 9:00 AM",
   argus: "Every 15m",
 };

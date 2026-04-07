@@ -1,7 +1,7 @@
 """
 HERMES v1.1.0 — Daily Execution Quality Analyst for CALYPSO
 
-Runs at 5:00 PM ET on weekdays via systemd timer. Collects the day's trading data,
+Runs at 7:00 PM ET on weekdays via systemd timer. Collects the day's trading data,
 pre-computes a cheat sheet of all arithmetic (counts, P&L, streaks), sends it to
 Claude for narrative analysis, saves a report, and sends a summary alert.
 
@@ -31,7 +31,7 @@ Files:
     services/hermes/data_collector.py   Gathers data + compute_cheat_sheet()
     services/hermes/analyzer.py         Builds prompt, calls Claude
     deploy/hermes.service               systemd oneshot service
-    deploy/hermes.timer                 systemd timer (5 PM ET weekdays)
+    deploy/hermes.timer                 systemd timer (7 PM ET weekdays)
 
 Last Updated: 2026-03-29
 """

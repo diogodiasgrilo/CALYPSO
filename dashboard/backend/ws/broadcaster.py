@@ -312,6 +312,7 @@ class Broadcaster:
                                     if comparisons.get("avg_credit") is not None:
                                         comparisons["avg_credit"] = (comparisons["avg_credit"] * n + tc) / (n + 1)
                                     comparisons["best_day"] = max(comparisons.get("best_day") or 0, tp)
+                                    comparisons["worst_day"] = min(comparisons.get("worst_day") or 0, tp)
                                     comparisons["total_days"] = n + 1
                                     await self.manager.broadcast({
                                         "type": "comparisons_update",

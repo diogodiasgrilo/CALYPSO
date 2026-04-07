@@ -3,7 +3,7 @@ HOMER — Automated HYDRA Trading Journal Writer for CALYPSO
 
 Named after Homer, the writer of the Odyssey.
 
-Runs at 5:30 PM ET on weekdays via systemd timer. Detects missing trading days
+Runs at 7:30 PM ET on weekdays via systemd timer. Detects missing trading days
 in the HYDRA Trading Journal, gathers data from all sources, and updates all
 journal sections automatically. Commits and pushes changes to git.
 
@@ -41,7 +41,7 @@ Files:
     services/homer/journal_updater.py    Applies updates section-by-section
     services/homer/narrative_generator.py Claude API for observations/assessments
     deploy/homer.service                 systemd oneshot service
-    deploy/homer.timer                   systemd timer (5:30 PM ET weekdays)
+    deploy/homer.timer                   systemd timer (7:30 PM ET weekdays)
 
 Last Updated: 2026-03-12
 """

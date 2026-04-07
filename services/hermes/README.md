@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-03-29
 
-Runs at 5:00 PM ET on weekdays via systemd timer. Pre-computes a cheat sheet of all arithmetic (counts, P&L, streaks), sends it to Claude for narrative analysis, saves a report, and sends a summary alert.
+Runs at 7:00 PM ET on weekdays via systemd timer. Pre-computes a cheat sheet of all arithmetic (counts, P&L, streaks), sends it to Claude for narrative analysis, saves a report, and sends a summary alert.
 
 ---
 
@@ -52,7 +52,7 @@ Runs at 5:00 PM ET on weekdays via systemd timer. Pre-computes a cheat sheet of 
 | `services/hermes/data_collector.py` | Reads data sources + `compute_cheat_sheet()` (pre-computes all arithmetic) |
 | `services/hermes/analyzer.py` | Builds prompt (cheat sheet first), calls Claude, extracts summary |
 | `deploy/hermes.service` | systemd oneshot service |
-| `deploy/hermes.timer` | systemd timer (5 PM ET weekdays) |
+| `deploy/hermes.timer` | systemd timer (7 PM ET weekdays) |
 
 ## Commands
 

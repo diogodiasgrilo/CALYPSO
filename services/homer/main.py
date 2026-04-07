@@ -2,7 +2,7 @@
 """
 HOMER — Automated HYDRA Trading Journal Writer
 
-Runs at 5:30 PM ET on weekdays. Detects missing trading days in the journal,
+Runs at 7:30 PM ET on weekdays. Detects missing trading days in the journal,
 gathers data, and updates all sections automatically.
 
 Also populates the backtesting SQLite database with market ticks, OHLC bars,

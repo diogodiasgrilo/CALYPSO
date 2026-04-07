@@ -2,7 +2,7 @@
 """
 HERMES — Daily Execution Quality Analyst
 
-Runs at 5:00 PM ET on weekdays. Collects today's trading data,
+Runs at 7:00 PM ET on weekdays. Collects today's trading data,
 sends it to Claude for analysis, saves a report, and sends a summary alert.
 
 Usage:
