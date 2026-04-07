@@ -7976,11 +7976,15 @@ class MEICStrategy:
         if not PNL_SANITY_CHECK_ENABLED:
             return True
 
-        # Calculate max possible P&L based on entries completed
-        # Each IC can make at most MAX_PNL_PER_IC and lose at most MIN_PNL_PER_IC
-        # Fix #52: Multiply by contracts_per_entry for multi-contract support
+        # Calculate max possible P&L: use actual total credit collected (known from entries)
+        # as the true ceiling, with 10% buffer for rounding. Falls back to MAX_PNL_PER_IC
+        # per entry if no credit data available.
         num_entries = max(1, self.daily_state.entries_completed)
-        max_possible = MAX_PNL_PER_IC * num_entries * self.contracts_per_entry
+        actual_credit = getattr(self.daily_state, 'total_credit_received', 0) or 0
+        if actual_credit > 0:
+            max_possible = actual_credit * 1.1  # 10% buffer above collected credit
+        else:
+            max_possible = MAX_PNL_PER_IC * num_entries * self.contracts_per_entry
         min_possible = MIN_PNL_PER_IC * num_entries * self.contracts_per_entry
 
         # Check for NaN or infinity
