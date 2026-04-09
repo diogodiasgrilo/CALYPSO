@@ -7646,7 +7646,81 @@ class HydraStrategy(MEICStrategy):
                 f"POS-004: Updated total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f}"
             )
 
+        # Fix #87: Verify expired P&L against Saxo's actual settlement values.
+        # _process_expired_credits assumes full credit kept (ClosePrice=$0), but
+        # options near ATM can settle at non-zero values. Query Saxo's historical
+        # closedpositions report for actual P&L and correct if different.
+        if not self.dry_run:
+            self._verify_settlement_pnl_from_saxo()
+
         return total_expired_credit
+
+    def _verify_settlement_pnl_from_saxo(self):
+        """
+        Fix #87: Verify total P&L against Saxo's closedpositions report.
+
+        The bot calculates P&L from: stop close costs + assumed expired credits.
+        But expired options may settle at non-zero (near-ATM at settlement).
+        Saxo's /cs/v1/reports/closedPositions has actual PnLAccountCurrency
+        for every closed position including settlements.
+
+        If Saxo's total differs from our calculated total, apply a correction
+        to total_realized_pnl. This runs once at settlement time.
+        """
+        try:
+            from shared.market_hours import get_us_market_time
+            today = get_us_market_time().strftime("%Y-%m-%d")
+
+            response = self.client._make_request(
+                "GET",
+                f"/cs/v1/reports/closedPositions/{self.client.client_key}/{today}/{today}",
+                timeout=10
+            )
+
+            if not response or "Data" not in response:
+                logger.warning("Fix #87: Could not fetch closedpositions report — using assumed P&L")
+                return
+
+            # PnLAccountCurrency = NET P&L per position (includes commission)
+            # Sum = total net P&L for the day from Saxo's perspective
+            saxo_net_pnl = 0.0
+            positions_found = 0
+            for cp in response["Data"]:
+                pnl = cp.get("PnLAccountCurrency", 0) or 0
+                saxo_net_pnl += pnl
+                positions_found += 1
+
+            if positions_found == 0:
+                logger.info("Fix #87: No closed positions in Saxo report — skipping verification")
+                return
+
+            # Our net P&L = total_realized_pnl (gross) - total_commission
+            our_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
+
+            diff = saxo_net_pnl - our_net_pnl
+            if abs(diff) < 1.0:
+                logger.info(
+                    f"Fix #87: P&L verified — Saxo ${saxo_net_pnl:.2f} net matches "
+                    f"bot ${our_net_pnl:.2f} net ({positions_found} positions)"
+                )
+                return
+
+            # Apply correction to total_realized_pnl (gross).
+            # Since diff = saxo_net - our_net, and our_net = gross - commission,
+            # corrected_gross = gross + diff, so corrected_net = gross + diff - commission = saxo_net.
+            logger.warning(
+                f"Fix #87: P&L CORRECTION — Saxo reports ${saxo_net_pnl:.2f} net, "
+                f"bot calculated ${our_net_pnl:.2f} net (diff: ${diff:+.2f}). "
+                f"Adjusting total_realized_pnl by ${diff:+.2f}"
+            )
+            self.daily_state.total_realized_pnl += diff
+            logger.info(
+                f"Fix #87: Corrected total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f} "
+                f"(net after commission: ${self.daily_state.total_realized_pnl - self.daily_state.total_commission:.2f})"
+            )
+
+        except Exception as e:
+            logger.warning(f"Fix #87: Settlement P&L verification failed: {e} — using assumed P&L")
 
     def _reconcile_positions(self):
         """Override: After base reconciliation, detect manually closed longs.
