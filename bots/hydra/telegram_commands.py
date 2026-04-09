@@ -23,7 +23,7 @@ Supported commands:
 
 Security: Only responds to messages from the configured chat_id.
 
-Version: 2.1.0 (2026-03-08)
+Version: 2.2.0 (2026-04-09)
 """
 
 import fcntl
@@ -72,8 +72,8 @@ EDITABLE_PARAMS = {
     "max_vix": {
         "path": "strategy.max_vix_entry",
         "type": "float",
-        "min": 15, "max": 50,
-        "description": "Max VIX for entry",
+        "min": 15, "max": 999,
+        "description": "Max VIX for entry (999 = disabled)",
     },
     "put_only_max_vix": {
         "path": "strategy.put_only_max_vix",

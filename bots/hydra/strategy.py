@@ -77,13 +77,14 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.16.1"
+HYDRA_VERSION = "1.22.3"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
 DEFAULT_SCOUT_SCORE_THRESHOLD = 65
 
-# MKT-034: VIX-scaled entry time shifting
+# MKT-034: VIX-scaled entry time shifting (DISABLED since v1.10.3 — code preserved)
+# When enabled via vix_time_shift.enabled, these slots replace config entry_times.
 ALL_ENTRY_SLOTS = [
     dt_time(11, 14, 30),  # Slot 0: VIX < 20 start
     dt_time(11, 44, 30),  # Slot 1: VIX 20-23 start
@@ -93,8 +94,8 @@ ALL_ENTRY_SLOTS = [
     dt_time(13, 44, 30),  # Slot 5
     dt_time(14, 14, 30),  # Slot 6
 ]
-VIX_GATE_CHECK_SECONDS_BEFORE = 30  # Check VIX 30s before entry (:14:00 for :14:30 entry)
-VIX_GATE_FLOOR_SLOT = 2  # Index into ALL_ENTRY_SLOTS that always enters (12:14:30)
+VIX_GATE_CHECK_SECONDS_BEFORE = 30  # Check VIX 30s before entry
+VIX_GATE_FLOOR_SLOT = 2  # Index into ALL_ENTRY_SLOTS that always enters
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -205,19 +206,26 @@ class HydraStrategy(MEICStrategy):
 
     Key Features (HYDRA specific, beyond base MEIC):
     - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
-    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $1.35, put min $2.10
-      Call non-viable → put-only entry (v1.7.1). Put non-viable → call-only entry (MKT-040).
-    - Progressive Call Tightening (MKT-020): Moves short call closer to ATM for viable credit
-    - Progressive Put Tightening (MKT-022): Moves short put closer to ATM for viable credit
-    - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms. Code preserved but dormant.
-    - Smart Hold Check (MKT-023): Only active when MKT-018 enabled (currently disabled)
-    - Pre-Entry ROC Gate (MKT-021): Only active when MKT-018 enabled (currently disabled)
-    - Stop formula: total_credit (original Tammy Chambless MEIC rule)
+    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $2.00, put min $2.75
+      MKT-029 graduated fallback (call floor $0.75, put floor $2.00).
+      Call non-viable → put-only entry (MKT-032/MKT-039, VIX < 15).
+      Put non-viable → call-only entry (MKT-040, 89% WR).
+    - Progressive Call Tightening (MKT-020): Scans from 3.5x OTM inward for viable credit
+    - Progressive Put Tightening (MKT-022): Scans from 4.0x OTM inward for viable credit
+    - VIX-Scaled Spread Width (MKT-027): round(VIX × 6.0 / 5) × 5, floor 25pt, cap 110pt
+    - Buffer Decay (MKT-042): Stop buffer starts at 2.10x, decays to 1x over 2.0 hours
+    - Calm Entry (MKT-043): Delays entry up to 5min when SPX >15pt move in 3min
+    - Anti-Whipsaw: Skips entries when intraday range > 1.75x expected move
+    - VIX Regime: Adapts entries/buffers based on VIX at open (breakpoints [14, 20, 30])
+    - Down-Day Call-Only: E1-E3 convert to call-only when SPX drops >= 0.57% from open
+    - FOMC T+1 (MKT-038): All entries forced call-only day after FOMC announcement
+    - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms.
+    - Stop formula: total_credit + asymmetric buffer (call $0.35, put $1.55)
 
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.10.0 (2026-03-08)
+    Version: 1.22.3 (2026-04-09)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -393,7 +401,7 @@ class HydraStrategy(MEICStrategy):
         # See docs/HYDRA_EARLY_CLOSE_ANALYSIS.md for full analysis.
         strategy_config = config.get("strategy", {})
         self.early_close_enabled = bool(strategy_config.get("early_close_enabled", False))
-        self.early_close_roc_threshold = float(strategy_config.get("early_close_roc_threshold", 0.02))
+        self.early_close_roc_threshold = float(strategy_config.get("early_close_roc_threshold", 0.03))
         self.early_close_cost_per_position = float(strategy_config.get("early_close_cost_per_position", 5.00))
         self._early_close_triggered = False
         self._early_close_time = None   # ET datetime when early close triggered
@@ -438,17 +446,15 @@ class HydraStrategy(MEICStrategy):
         else:
             logger.info(f"  One-sided entries: DISABLED (skip if either side non-viable)")
 
-        # Override min credit from base class $0.50 to $1.35 for HYDRA
-        # v1.17.0: Raised to $1.35 — walk-forward backtest optimized. Calls are secondary income (put skew),
-        # lower min = less MKT-020 tightening = calls stay further OTM = safer.
-        # Week 1 data: most entries at VIX<18 were put-only because calls can't produce
-        # viable credit even at 43pt OTM. Don't force calls closer to ATM.
-        self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 1.35) * 100
+        # Override min credit from base class $0.50 for HYDRA
+        # v1.19.0: Walk-forward backtest optimized: call $2.00, put $2.75.
+        # Higher put min forces MKT-022 to scan closer to ATM, landing in sweet spot (42-65pt OTM).
+        self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 2.0) * 100
 
         # Separate put minimum credit
-        # v1.17.0: Lowered to $2.10 — walk-forward backtest optimized.
-        # MKT-029 fallback: $2.05, $2.07 floor (dynamic: min - $0.05, min - $0.10)
-        self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 2.10) * 100
+        # v1.19.0: Walk-forward backtest optimized at $2.75.
+        # MKT-029 graduated fallback: -$0.05, -$0.10 (call floor $0.75, put floor $2.00)
+        self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 2.75) * 100
 
         # MKT-029: Configurable credit floors (hard floor after graduated fallback).
         # If not set, falls back to min - $0.10 (legacy behavior).
@@ -687,8 +693,8 @@ class HydraStrategy(MEICStrategy):
         above the minimum credit threshold.
 
         This gives puts more breathing room on volatile days (put skew means
-        $2.10 credit is found much further OTM) while calls still tighten
-        to reach $1.35 ($0.75 with MKT-029 fallback floor).
+        $2.75 credit is found much further OTM) while calls still tighten
+        to reach $2.00 ($0.75 with MKT-029 fallback floor).
 
         Args:
             entry: HydraIronCondorEntry to populate with strikes
@@ -840,9 +846,9 @@ class HydraStrategy(MEICStrategy):
                     for p in (t.split(":") for t in entry_time_strs)
                 ]
             else:
+                # Fallback: 3 base entries (v1.19.0 walk-forward optimized)
                 self.entry_times = [
-                    dt_time(11, 15), dt_time(11, 45), dt_time(12, 15),
-                    dt_time(12, 45), dt_time(13, 15)
+                    dt_time(10, 15), dt_time(10, 45), dt_time(11, 15)
                 ]
 
         # MKT-035: Record base entry count before appending conditional entries
@@ -2159,8 +2165,8 @@ class HydraStrategy(MEICStrategy):
             )
             return ("proceed", False, 0.0, 0.0)  # estimation_worked = False
 
-        # Separate thresholds: calls use min_viable_credit_per_side ($1.35),
-        # puts use min_viable_credit_put_side ($2.10)
+        # Separate thresholds: calls use min_viable_credit_per_side ($2.00),
+        # puts use min_viable_credit_put_side ($2.75)
         call_min = self.min_viable_credit_per_side
         put_min = self.min_viable_credit_put_side
         call_viable = estimated_call >= call_min
@@ -2332,7 +2338,7 @@ class HydraStrategy(MEICStrategy):
 
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_call_otm_distance
-        min_credit = self.min_viable_credit_per_side  # In cents (e.g., 135 for $1.35)
+        min_credit = self.min_viable_credit_per_side  # In cents (e.g., 200 for $2.00)
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
 
         initial_short_call = entry.short_call_strike
@@ -2511,7 +2517,7 @@ class HydraStrategy(MEICStrategy):
         to ATM in 5pt steps until credit >= minimum or OTM floor is reached.
 
         Uses put-specific minimum credit (min_viable_credit_put_side, default
-        $2.10) — walk-forward backtest optimized.
+        $2.75) — walk-forward backtest optimized.
 
         Uses batch quote API for efficiency: 1 chain fetch + 1 batch quote
         regardless of how many candidate strikes are evaluated.
@@ -3780,7 +3786,7 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # PUT-ONLY ENTRY EXECUTION (v1.7.1 — MKT-011 re-enablement)
     # =========================================================================
-    # When call credit is non-viable (< $1.35 with MKT-029 floor $0.75), place only the put
+    # When call credit is non-viable (< $2.00 with MKT-029 floor $0.75), place only the put
     # spread. Data from Feb 10 - Mar 2: 87.5% win rate, +$870 net from
     # 6 qualifying entries.
     #
@@ -4188,6 +4194,17 @@ class HydraStrategy(MEICStrategy):
                         logger.info(f"MKT-025: No immediate fill price for {leg_name}, will use deferred lookup")
                         if order_id:
                             deferred_legs.append((order_id, uic, leg_name))
+
+        # Fix #86: Clear SHORT position IDs and UICs for the stopped side.
+        # MKT-025 only closes the short — long stays open for settlement.
+        # Only clear the short ID/UIC so reconciliation doesn't flag it as "missing".
+        # Long position ID/UIC stay intact for MKT-033 salvage and settlement.
+        if side == "call":
+            entry.short_call_position_id = None
+            entry.short_call_uic = 0
+        else:
+            entry.short_put_position_id = None
+            entry.short_put_uic = 0
 
         # Calculate net loss
         # MKT-025: close_cost is SHORT only. credit_received is NET of long cost.
@@ -4602,12 +4619,12 @@ class HydraStrategy(MEICStrategy):
         """
         Calculate stop loss levels for trend-following entries.
 
-        - Full IC: stop = total_credit (original Tammy Chambless MEIC rule)
-        - One-sided (legacy, kept for recovery): stop = 2 × single_side_credit
+        - Full IC: stop = total_credit + buffer (call $0.35, put $1.55)
+        - Put-only (MKT-039): credit + put_stop_buffer ($1.55)
+        - Call-only (MKT-040): call_credit + theo $2.60 put + call_stop_buffer ($0.35)
 
-        MKT-020/MKT-022 progressive tightening + credit minimums ($1.35 calls,
-        $2.10 puts) reduced skew from 3-7x to 1-3x. Lower call min (v1.7.2) preserves
-        natural put skew asymmetry for better call cushion (68% vs 61.5%).
+        MKT-020/MKT-022 progressive tightening + credit minimums ($2.00 calls,
+        $2.75 puts) reduced skew from 3-7x to 1-3x.
 
         Args:
             entry: HydraIronCondorEntry to calculate stops for
@@ -4659,9 +4676,9 @@ class HydraStrategy(MEICStrategy):
             logger.info(f"Stop level for put spread: ${stop_level:.2f} (credit ${credit:.2f} + buffer ${self.put_stop_buffer:.2f})")
 
         else:
-            # Full IC — original Tammy Chambless MEIC rule: stop = total_credit
-            # MKT-019 (2× max credit) removed in v1.4.0: MKT-020/MKT-022 tightening
-            # + credit minimums ($1.35 calls, $2.10 puts) keep skew manageable.
+            # Full IC — stop = total_credit + asymmetric buffer (call $0.35, put $1.55)
+            # MKT-020/MKT-022 tightening + credit minimums ($2.00 calls, $2.75 puts)
+            # keep skew manageable.
             total_credit = entry.total_credit
 
             if total_credit < MIN_STOP_LEVEL:

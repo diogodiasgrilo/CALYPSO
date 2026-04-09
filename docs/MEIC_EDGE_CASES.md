@@ -220,7 +220,7 @@ This document catalogs all identified edge cases and potential failure scenarios
 | **Expected Handling** | Reconciliation detects discrepancy. Position Registry shows 4 positions, Saxo shows 2. Log warning, update registry. |
 | **Risk Level** | ✅ LOW |
 | **Implementation** | `_check_hourly_reconciliation()` runs every 60 minutes, compares expected vs actual. `_handle_missing_positions()` updates state. See strategy.py:861-950 |
-| **Resolution** | Hourly reconciliation detects missing positions, sends alert, updates entry state. |
+| **Resolution** | Hourly reconciliation detects missing positions, sends alert, updates entry state. Fix #86 (2026-04-09): Positions closed by the bot's own stop loss now have their IDs cleared immediately, so POS-003 only fires for genuinely unexpected missing positions (manual trades, assignment, etc.) — not false positives after every stop. |
 
 ### 3.4 Position Registry Conflicts With Saxo
 | | |

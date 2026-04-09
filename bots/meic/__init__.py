@@ -19,6 +19,7 @@ Strategy Details:
 - Stop loss: Total credit per side (MEIC+ subtracts configurable amount)
 
 Version History:
+- 1.3.3 (2026-04-09): Fix #86 — Clear position IDs and UICs on entry object after stop loss to prevent false POS-003 "Position Mismatch Detected" alerts. Registry was already cleaned by _close_position_with_retry but entry object held stale IDs.
 - 1.3.2 (2026-03-09): Fix #83a: Skip closing worthless long legs (bid=$0) during stop loss — deep OTM longs expire worthless on 0DTE, no point trying market orders. Accurate commission tracking (count only legs actually closed). Fix #83d: Removed narrow is_limit_only_period time check. Strike-not-found log level ERROR→WARNING.
 - 1.3.1 (2026-03-07): Actual stop debit tracking — actual_call_stop_debit/actual_put_stop_debit fields record real market order cost for per-entry P&L accuracy. Serialization and all restoration paths updated.
 - 1.3.0 (2026-02-19): Batch quote API for stop loss monitoring (7x rate limit reduction), Fix #80 Sheets resize

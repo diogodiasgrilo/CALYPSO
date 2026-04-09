@@ -1,11 +1,10 @@
 import { useState, useCallback } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
-import { LayoutDashboard, CalendarDays, BarChart3, FlaskConical } from "lucide-react";
+import { LayoutDashboard, CalendarDays, BarChart3 } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
 import { Dashboard } from "./pages/Dashboard";
 import { History } from "./pages/History";
 import { Analytics } from "./pages/Analytics";
-import { Simulator } from "./pages/Simulator";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { CommandPalette } from "./components/shared/CommandPalette";
 import { ToastContainer } from "./components/shared/ToastContainer";
@@ -33,10 +32,6 @@ function NavTabs() {
         <BarChart3 size={14} />
         Analytics
       </NavLink>
-      <NavLink to="/simulator" className={linkClass}>
-        <FlaskConical size={14} />
-        Simulator
-      </NavLink>
     </nav>
   );
 }
@@ -59,7 +54,6 @@ function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/history" element={<History />} />
           <Route path="/analytics" element={<Analytics />} />
-          <Route path="/simulator" element={<Simulator />} />
         </Routes>
       </div>
       <CommandPalette open={cmdPaletteOpen} onClose={() => setCmdPaletteOpen(false)} />

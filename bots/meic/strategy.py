@@ -3927,6 +3927,25 @@ class MEICStrategy:
             # Fall through to theoretical P&L path below, then spawn background
             # thread to correct P&L with actual fill prices (~10s later).
 
+        # Fix #86: Clear position IDs and UICs for the stopped side immediately
+        # after closing. Without this, all_position_ids still returns the closed
+        # positions' IDs, and the hourly POS-003 reconciliation sees them as
+        # "missing from Saxo" → fires a false "Position Mismatch Detected" HIGH
+        # alert every time a stop occurs. The registry is already cleaned up by
+        # _close_position_with_retry, but the entry object still held stale IDs.
+        # UICs are also cleared to avoid unnecessary price fetches in
+        # _batch_update_entry_prices (Fix #29 pattern).
+        if side == "call":
+            entry.short_call_position_id = None
+            entry.long_call_position_id = None
+            entry.short_call_uic = 0
+            entry.long_call_uic = 0
+        else:
+            entry.short_put_position_id = None
+            entry.long_put_position_id = None
+            entry.short_put_uic = 0
+            entry.long_put_uic = 0
+
         # Calculate actual net loss
         # FIX #42 (2026-02-05): Use actual close cost when available
         # Net loss = (cost to buy back short - proceeds from selling long) - credit received

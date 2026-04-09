@@ -21,7 +21,7 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 5. **HYDRA is a FULLY AUTOMATED bot** — it makes all decisions algorithmically via its MKT rules. Recommendations should be phrased as potential parameter changes (e.g., "consider raising MKT-011 call minimum from $1.75 to $2.00"), NOT as human trading advice (e.g., "the trader should be more cautious").
 6. **Do NOT repeat generic trading wisdom.** Learnings must be specific to THIS week's data. "Volatility affects premium" is not a learning. "VIX above 22 caused 3 of 4 MKT-011 skips this week, all on call side at 13:15 entries" is a learning.
 
-## HYDRA Strategy Parameters (v1.22.0 — DO NOT hallucinate)
+## HYDRA Strategy Parameters (v1.22.3 — DO NOT hallucinate)
 
 - **VIX regime adjusts entries:** 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
 - **3 base entries + 1 conditional (4 max)** at 10:15, 10:45, 11:15 ET. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.

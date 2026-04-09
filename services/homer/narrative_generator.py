@@ -27,7 +27,7 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
 
-## HYDRA Domain Knowledge (v1.22.0 — use these exact parameters)
+## HYDRA Domain Knowledge (v1.22.3 — use these exact parameters)
 
 - VIX regime adjusts entries: 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
 - Entry times: 10:15, 10:45, 11:15 ET (3 base entries). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.

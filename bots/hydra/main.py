@@ -3,18 +3,17 @@
 main.py - HYDRA 0DTE Trading Bot Entry Point
 
 HYDRA: Multi-entry iron condor bot with credit gates, progressive OTM tightening,
-smart entry windows (MKT-031), and VIX-scaled entry time shifting (MKT-034).
-Based on Tammy Chambless's MEIC strategy with EMA-based trend detection
-(informational) and advanced risk controls.
+VIX regime adaptation, and buffer decay stops. Based on Tammy Chambless's MEIC
+strategy with EMA-based trend detection (informational) and advanced risk controls.
 
 Strategy Summary:
 -----------------
-1. 5 scheduled iron condor entries per day (VIX-scaled, :14:30/:44:30 ET)
+1. 3 base entries at 10:15, 10:45, 11:15 ET + conditional E6 at 14:00 (upday put-only)
 2. EMA 20/40 trend signal logged per entry (informational only)
-3. Credit gate validates minimum credit before each entry
-4. Progressive OTM tightening finds optimal strikes
+3. Credit gate validates minimum credit before each entry (call $2.00, put $2.75)
+4. Progressive OTM tightening finds optimal strikes (MKT-020/MKT-022)
 5. Hold-to-expiry (MKT-018 early close intentionally disabled)
-6. Short-only stop loss (longs expire at settlement)
+6. Stop loss closes both legs (total_credit + asymmetric buffer: call $0.35, put $1.55)
 
 Usage:
 ------
@@ -140,11 +139,11 @@ def print_banner():
     ║         ══════════════════════                                ║
     ║                                                               ║
     ║         Multi-Entry Iron Condors (SPX 0DTE)                   ║
-    ║         5 Entries | Credit Gates | VIX-Scaled                  ║
+    ║         3 Entries | Credit Gates | Buffer Decay                ║
     ║                                                               ║
-    ║         :14:30/:44:30 (VIX-scaled start)                      ║
+    ║         10:15 / 10:45 / 11:15 ET + E6 14:00                  ║
     ║                                                               ║
-    ║         Version: 1.10.0                                       ║
+    ║         Version: 1.22.3                                       ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
@@ -221,7 +220,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     except Exception as e:
         trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
 
-    # Initialize Telegram command handler (14 commands)
+    # Initialize Telegram command handler (15 commands)
     from bots.hydra.telegram_commands import TelegramCommandHandler
     telegram_cmd_handler = TelegramCommandHandler()
     try:

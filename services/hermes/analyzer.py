@@ -22,7 +22,7 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.22.0)
+## HYDRA Strategy Parameters (v1.22.3)
 
 - **VIX regime adjusts entries:** 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
 - **3 base entries + 1 conditional (4 max)** at 10:15, 10:45, 11:15 ET. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.

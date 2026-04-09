@@ -24,6 +24,11 @@ Conditional Entry Trigger (MKT-035 / Upday-035):
 - E7: DISABLED
 
 Version History:
+- 1.22.3 (2026-04-09): Fix #86 — Clear position IDs and UICs on entry object after stop loss.
+  Without this, POS-003 hourly reconciliation finds closed positions as "missing from Saxo" and
+  fires false "Position Mismatch Detected" HIGH alerts on Telegram after every stop. Base MEIC
+  path clears both legs (both closed). MKT-025 path clears only short ID/UIC (long stays for
+  settlement/MKT-033 salvage).
 - 1.22.2 (2026-04-06): Full codebase audit. Fixed VIX regime credit gate ×100 bug, dangerous code defaults
   (spread widths 60→25, smart_entry True→False, conditional entries True→False). Heartbeat and Telegram
   cushion display now uses MKT-042 effective stop level (was showing base level, not decayed). Buffer decay
