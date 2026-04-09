@@ -2314,6 +2314,77 @@ class HydraStrategy(MEICStrategy):
                 )
                 return ("skip", True, estimated_call, estimated_put)
 
+    @staticmethod
+    def _snap_to_chain_strike(target: float, uic_map: dict, max_snap: int = 15) -> tuple:
+        """
+        Find the nearest available strike in the option chain.
+
+        Saxo's 0DTE chain uses 5pt intervals near ATM but switches to 25pt
+        intervals far OTM (above ~130pt). MKT-020/MKT-022 build candidates at
+        5pt steps, so many far-OTM strikes don't exist. This snaps to the
+        nearest chain strike within max_snap points.
+
+        Args:
+            target: Desired strike price
+            uic_map: {strike: uic} mapping from option chain
+            max_snap: Maximum points to snap (default 15 — half of 25pt spacing)
+
+        Returns:
+            (actual_strike, uic) if found within tolerance, (None, None) otherwise
+        """
+        if target in uic_map:
+            return target, uic_map[target]
+
+        best_strike = None
+        best_dist = max_snap + 1
+        for strike in uic_map:
+            dist = abs(strike - target)
+            if dist < best_dist:
+                best_dist = dist
+                best_strike = strike
+
+        if best_strike is not None and best_dist <= max_snap:
+            return best_strike, uic_map[best_strike]
+
+        return None, None
+
+    @staticmethod
+    def _snap_long_for_spread(short_strike: float, target_width: int,
+                              uic_map: dict, is_call: bool) -> tuple:
+        """
+        Find the best long leg strike that gives a spread width closest to target.
+
+        After snapping the short leg, the long leg must also exist in the chain
+        AND produce a spread width close to the target (±15pt tolerance).
+        For calls: long = short + width. For puts: long = short - width.
+
+        Args:
+            short_strike: The snapped short strike
+            target_width: Desired spread width (e.g., 110)
+            uic_map: {strike: uic} mapping from option chain
+            is_call: True for calls (long > short), False for puts (long < short)
+
+        Returns:
+            (actual_strike, uic) if found, (None, None) otherwise
+        """
+        ideal_long = short_strike + target_width if is_call else short_strike - target_width
+
+        best_strike = None
+        best_dist = 16  # Max tolerance: 15pt
+        for strike in uic_map:
+            dist = abs(strike - ideal_long)
+            if dist < best_dist:
+                # Ensure spread is at least min_width (don't snap to tiny spreads)
+                actual_width = abs(strike - short_strike)
+                if actual_width >= target_width - 15:  # Allow slightly narrower
+                    best_dist = dist
+                    best_strike = strike
+
+        if best_strike is not None:
+            return best_strike, uic_map[best_strike]
+
+        return None, None
+
     def _apply_progressive_call_tightening(self, entry: HydraIronCondorEntry) -> bool:
         """
         MKT-020: Progressive call OTM tightening for full IC entries.
@@ -2390,12 +2461,29 @@ class HydraStrategy(MEICStrategy):
             if put_call == "Call":
                 call_uic_map[strike] = opt.get("Uic")
 
-        # Collect UICs for all candidate strikes
+        # Collect UICs for all candidate strikes, snapping to nearest chain
+        # strike when exact 5pt increments don't exist (Saxo uses 25pt spacing
+        # far OTM — e.g., 6900, 6925, 6950 instead of every 5pt).
         candidate_uics = []  # [(otm, short_s, long_s, short_uic, long_uic), ...]
         all_uics = []
+        seen_pairs = set()  # Avoid duplicate pairs after snapping
         for otm_val, short_s, long_s in candidates:
-            short_uic = call_uic_map.get(short_s)
-            long_uic = call_uic_map.get(long_s)
+            actual_short, short_uic = self._snap_to_chain_strike(short_s, call_uic_map)
+            if actual_short is not None:
+                short_s = actual_short
+                otm_val = int(short_s - spx)  # Recalculate actual OTM distance
+                # Find long leg that preserves spread width closest to target
+                actual_long, long_uic = self._snap_long_for_spread(
+                    short_s, spread_width, call_uic_map, is_call=True
+                )
+            else:
+                actual_long, long_uic = None, None
+            if actual_long is not None:
+                long_s = actual_long
+            pair_key = (short_s, long_s)
+            if pair_key in seen_pairs:
+                continue  # Skip duplicate after snapping
+            seen_pairs.add(pair_key)
             candidate_uics.append((otm_val, short_s, long_s, short_uic, long_uic))
             if short_uic:
                 all_uics.append(short_uic)
@@ -2486,6 +2574,18 @@ class HydraStrategy(MEICStrategy):
                         self._adjust_for_same_strike_overlap(entry)
                         self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
                         self._adjust_for_long_strike_overlap(entry)
+
+                        # MKT-044: Re-snap after overlap adjustments. The 5pt
+                        # shifts can push strikes off the chain in far-OTM zones
+                        # where Saxo uses 25pt intervals.
+                        sc_snap, _ = self._snap_to_chain_strike(entry.short_call_strike, call_uic_map)
+                        lc_snap, _ = self._snap_long_for_spread(
+                            sc_snap or entry.short_call_strike, spread_width, call_uic_map, is_call=True
+                        )
+                        if sc_snap:
+                            entry.short_call_strike = sc_snap
+                        if lc_snap:
+                            entry.long_call_strike = lc_snap
                         return True
                     else:
                         # Current OTM already viable — no tightening needed
@@ -2585,12 +2685,29 @@ class HydraStrategy(MEICStrategy):
             if put_call == "Put":
                 put_uic_map[strike] = opt.get("Uic")
 
-        # Collect UICs for all candidate strikes
+        # Collect UICs for all candidate strikes, snapping to nearest chain
+        # strike when exact 5pt increments don't exist (Saxo uses 25pt spacing
+        # far OTM — same issue as MKT-020 calls).
         candidate_uics = []  # [(otm, short_s, long_s, short_uic, long_uic), ...]
         all_uics = []
+        seen_pairs = set()  # Avoid duplicate pairs after snapping
         for otm_val, short_s, long_s in candidates:
-            short_uic = put_uic_map.get(short_s)
-            long_uic = put_uic_map.get(long_s)
+            actual_short, short_uic = self._snap_to_chain_strike(short_s, put_uic_map)
+            if actual_short is not None:
+                short_s = actual_short
+                otm_val = int(spx - short_s)  # Recalculate actual OTM distance
+                # Find long leg that preserves spread width closest to target
+                actual_long, long_uic = self._snap_long_for_spread(
+                    short_s, spread_width, put_uic_map, is_call=False
+                )
+            else:
+                actual_long, long_uic = None, None
+            if actual_long is not None:
+                long_s = actual_long
+            pair_key = (short_s, long_s)
+            if pair_key in seen_pairs:
+                continue  # Skip duplicate after snapping
+            seen_pairs.add(pair_key)
             candidate_uics.append((otm_val, short_s, long_s, short_uic, long_uic))
             if short_uic:
                 all_uics.append(short_uic)
@@ -2681,6 +2798,16 @@ class HydraStrategy(MEICStrategy):
                         self._adjust_for_same_strike_overlap(entry)
                         self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
                         self._adjust_for_long_strike_overlap(entry)
+
+                        # MKT-044: Re-snap after overlap adjustments (same as MKT-020)
+                        sp_snap, _ = self._snap_to_chain_strike(entry.short_put_strike, put_uic_map)
+                        lp_snap, _ = self._snap_long_for_spread(
+                            sp_snap or entry.short_put_strike, spread_width, put_uic_map, is_call=False
+                        )
+                        if sp_snap:
+                            entry.short_put_strike = sp_snap
+                        if lp_snap:
+                            entry.long_put_strike = lp_snap
                         return True
                     else:
                         # Current OTM already viable — no tightening needed
