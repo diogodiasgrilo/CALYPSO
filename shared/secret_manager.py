@@ -207,8 +207,9 @@ def update_secret(secret_name: str, secret_value: str) -> bool:
     """
     Update a secret in Secret Manager (for token refresh).
 
-    Creates a new version of the secret with the updated value.
-    The old version is automatically disabled.
+    Creates a new version of the secret with the updated value,
+    then destroys the previous version to avoid accumulating billable
+    versions ($0.06/version/month). Only the latest version is needed.
 
     Args:
         secret_name: Name of the secret to update
@@ -232,6 +233,19 @@ def update_secret(secret_name: str, secret_value: str) -> bool:
         client = secretmanager.SecretManagerServiceClient()
         parent = f"projects/{project_id}/secrets/{secret_name}"
 
+        # Get the current latest version number BEFORE adding new one
+        # so we can destroy it after the new version is confirmed
+        previous_version = None
+        try:
+            latest = client.access_secret_version(
+                request={"name": f"{parent}/versions/latest"},
+                timeout=10
+            )
+            # Extract version number from name: "projects/.../secrets/.../versions/8261"
+            previous_version = latest.name
+        except Exception:
+            pass  # First version or access error — skip cleanup
+
         # Add new version with updated value
         response = client.add_secret_version(
             request={
@@ -242,6 +256,22 @@ def update_secret(secret_name: str, secret_value: str) -> bool:
         )
 
         logger.info(f"Secret {secret_name} updated successfully: {response.name}")
+
+        # Destroy the previous version to avoid billing accumulation.
+        # Secret Manager charges $0.06/version/month for active versions.
+        # Token Keeper creates ~103 versions/day — without cleanup this
+        # costs ~$500/month (Fix: 2026-04-09, was costing $120 in 9 days).
+        if previous_version and previous_version != response.name:
+            try:
+                client.destroy_secret_version(
+                    request={"name": previous_version},
+                    timeout=10
+                )
+                logger.debug(f"Destroyed previous version: {previous_version}")
+            except Exception as e:
+                # Non-fatal: new version is already active, old one just costs money
+                logger.warning(f"Failed to destroy previous version {previous_version}: {e}")
+
         return True
 
     except ImportError:
