@@ -7673,8 +7673,7 @@ class HydraStrategy(MEICStrategy):
 
             response = self.client._make_request(
                 "GET",
-                f"/cs/v1/reports/closedPositions/{self.client.client_key}/{today}/{today}",
-                timeout=10
+                f"/cs/v1/reports/closedPositions/{self.client.client_key}/{today}/{today}"
             )
 
             if not response or "Data" not in response:
