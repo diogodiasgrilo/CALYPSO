@@ -351,20 +351,25 @@ class BacktestConfig:
 # ── Preset configs ────────────────────────────────────────────────────────────
 
 def live_config() -> BacktestConfig:
-    """HYDRA optimized parameters (converged 2026-03-29, 1-min data, 933 days).
+    """HYDRA optimized parameters (converged 2026-03-29, 1-min data, Sharpe 2.684 live realistic).
 
-    Confirmed optimal values (2026-03-27 full sweep — real Greeks, honest engine, 902 days):
-      - entry_times: 3 entries at 30min [10:15, 10:45, 11:15]  (Sharpe 1.452, best of 94 combos tested)
-        Peak margin $30K — fits $35K account with zero breach days (5 entries breached 41%)
-      - spread_vix_multiplier: 4.0  (Sharpe 1.098 vs 0.643 fixed-50pt)
-      - call_stop_buffer: 20.0  ($0.20, Sharpe 1.220 vs 1.170 at $0.10)
-      - conditional_e7_enabled: False  (baseline Sharpe 1.164 vs 1.098 with E7+E6up ON)
-      - conditional_upday_e6_enabled: False  (E6/E7 hurt Sharpe AND P&L)
-      - base_entry_downday_callonly_pct: 0.60  (Sharpe 1.098, best among 8 values)
-      - downday_theoretical_put_credit: 150.0  ($1.50, Sharpe 1.125 vs 1.098 at $1.75)
-      - min_call_credit: 1.25  (Sharpe 1.160, confirmed optimal among 7 values)
-      - min_put_credit: 2.25  (Sharpe 1.160, confirmed optimal among 7 values)
-      - price_based_stop_points: None  (credit-based stop, confirmed 2026-03-24)
+    Confirmed optimal values (2026-03-28/31 final sweep — 1-min data, Greek calculation verified, 938 days):
+      - entry_times: 3 entries at 30min [10:15, 10:45, 11:15]  (Sharpe 2.371 on 1-min, peak margin $30K, zero breach)
+      - conditional_upday_e6_enabled: True  (E6 at 14:00 put-only: Sharpe 2.003 vs 1.988 OFF)
+      - conditional_e7_enabled: False  (E7 down-day call-only disabled: E7+E6 hurt Sharpe by -0.066)
+      - spread_vix_multiplier: 6.0  (reconvergence round final, Sharpe 2.360)
+      - call_stop_buffer: 35.0  ($0.35 × 100, convergence round 4, +0.056 Sharpe vs $0.26)
+      - put_stop_buffer: 155.0  ($1.55 × 100, 1-min confirmed, prevents 91% false stops)
+      - min_call_credit: 2.00  (re-swept with VIX regime, +$7,696 P&L vs $1.35)
+      - min_put_credit: 2.75  (re-swept with VIX regime, MaxDD $6,115, Win 52.9%)
+      - call_credit_floor: 0.75  (1-min edge sweep, Sharpe 1.988)
+      - put_credit_floor: 2.00  (reconvergence round final, Sharpe 2.360)
+      - base_entry_downday_callonly_pct: 0.57  (0.57% decline from open, 1-min fine-grain, Sharpe 2.371)
+      - downday_threshold_pct: 0.003  (0.3% rise from open for downday detection)
+      - upday_threshold_pct: 0.0025  (0.25% rise from open for E6 upday trigger)
+      - put_only_max_vix: 15.0  (1-min retest, Sharpe 2.042 vs 25.0 old baseline)
+      - whipsaw_range_skip_mult: 1.75  (reconvergence round final, Sharpe 2.360)
+      - price_based_stop_points: None  (credit-based stop: total_credit + buffer, confirmed 1-min)
     """
     return BacktestConfig(
         entry_times=["10:15", "10:45", "11:15"],  # 3 entries, 30min interval (sweep optimal 2026-03-27, was 5 entries)
@@ -372,8 +377,8 @@ def live_config() -> BacktestConfig:
         conditional_e7_enabled=False,         # DISABLED (2026-03-27 sweep: baseline beats E7+E6up by +0.066 Sharpe)
         conditional_upday_e6_enabled=True,    # ENABLED on 1-min (2026-03-28: Sharpe 2.003 vs 1.988 OFF, MaxDD $7,855)
         conditional_upday_e7_enabled=False,
-        downday_threshold_pct=0.3,
-        upday_threshold_pct=0.25,             # re-swept with $2.00/$2.75 gates: 0.25% best Sharpe (2.445)
+        downday_threshold_pct=0.003,
+        upday_threshold_pct=0.0025,           # re-swept with $2.00/$2.75 gates: 0.25% best Sharpe (2.445)
         fomc_t1_callonly_enabled=True,
         call_starting_otm_multiplier=3.5,
         put_starting_otm_multiplier=4.0,

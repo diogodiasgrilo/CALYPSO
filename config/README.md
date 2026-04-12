@@ -215,36 +215,42 @@ cp config.example.json config.json
 
     "call_starting_otm_multiplier": 3.5,
     "put_starting_otm_multiplier": 4.0,
-    "min_spread_width": 60,
-    "put_min_spread_width": 75,
-    "max_spread_width": 75,
-    "spread_vix_multiplier": 3.5,
+    "call_min_spread_width": 25,
+    "put_min_spread_width": 25,
+    "max_spread_width": 110,
+    "spread_vix_multiplier": 6.0,
 
-    "min_viable_credit_per_side": 0.75,
-    "min_viable_credit_put_side": 1.75,
+    "min_call_credit": 2.00,
+    "min_put_credit": 2.75,
+    "call_credit_floor": 0.75,
+    "put_credit_floor": 2.00,
+    "call_stop_buffer": 0.35,
+    "put_stop_buffer": 1.55,
 
     "early_close_enabled": false,
-    "early_close_roc_threshold": 0.03,
-    "pre_entry_roc_gate_enabled": true,
-    "pre_entry_roc_min_entries": 3
+    "early_close_roc_threshold": 0.03
   }
 }
 ```
 
-**Key HYDRA config params:**
+**Key HYDRA config params (v1.22.3, 2026-04-12):**
 | Key | Default | Description |
 |-----|---------|-------------|
+| `entry_times_et` | ["10:15", "10:45", "11:15"] | 3 base entries at 30-min intervals (E6 upday at 14:00 if enabled) |
 | `call_starting_otm_multiplier` | 3.5 | MKT-024: Starting OTM distance for calls (× VIX-adjusted delta) |
 | `put_starting_otm_multiplier` | 4.0 | MKT-024: Starting OTM distance for puts (wider due to put skew) |
-| `min_spread_width` | 60 | MKT-026: Call spread floor (points) |
-| `put_min_spread_width` | 75 | MKT-028: Put spread floor (wider = cheaper longs due to skew) |
-| `max_spread_width` | 75 | MKT-027: Spread cap for margin (5 × 75pt × $100 = $37,500) |
-| `spread_vix_multiplier` | 3.5 | MKT-027: VIX-scaled formula: `round(VIX × 3.5 / 5) × 5` |
-| `min_viable_credit_per_side` | 0.75 | MKT-011: Call credit gate ($0.75 minimum, see HYDRA_CREDIT_CUSHION_ANALYSIS.md) |
-| `min_viable_credit_put_side` | 1.75 | MKT-011: Put credit gate ($1.75 minimum, Tammy's range) |
-| `early_close_enabled` | false | MKT-018: Intentionally disabled (hold-to-expiry outperforms) |
-| `early_close_roc_threshold` | 0.03 | MKT-018: ROC threshold (only used when early_close_enabled=true) |
-| `stop_commission_buffer` | 0.15 | MEIC+: Stop = credit - $0.15 (covers commission for true breakeven) |
+| `call_min_spread_width` | 25 | MKT-027: Call spread floor (points) |
+| `put_min_spread_width` | 25 | MKT-027: Put spread floor (points) |
+| `max_spread_width` | 110 | MKT-027: Spread cap for margin (5 × 110pt × $100 = $55,000) |
+| `spread_vix_multiplier` | 6.0 | MKT-027: VIX-scaled formula: `round(VIX × 6.0 / 5) × 5`, floor 25, cap 110 |
+| `min_call_credit` | 2.00 | MKT-011: Call credit gate ($2.00 per spread, fallback $0.75) |
+| `min_put_credit` | 2.75 | MKT-011: Put credit gate ($2.75 per spread, fallback $2.00) |
+| `call_credit_floor` | 0.75 | MKT-029: Graduated fallback floor for call credit |
+| `put_credit_floor` | 2.00 | MKT-029: Graduated fallback floor for put credit |
+| `call_stop_buffer` | 0.35 | Asymmetric stop buffer for calls ($0.35 per contract, × 100 in config) |
+| `put_stop_buffer` | 1.55 | Asymmetric stop buffer for puts ($1.55 per contract, × 100 in config) |
+| `early_close_enabled` | false | MKT-018: Intentionally disabled (hold-to-expiry outperforms on 1-min data) |
+| `early_close_roc_threshold` | 0.03 | MKT-018: ROC threshold (only used when MKT-018 enabled) |
 
 ---
 
