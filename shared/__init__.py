@@ -17,7 +17,7 @@ This package contains common utilities used by all trading strategies:
 - sheets_reader: Read-only Google Sheets access for agents (SheetsReader)
 - claude_client: Thin Claude API wrapper for agents (get_anthropic_client, ask_claude)
 
-Last Updated: 2026-03-15 (Added is_fomc_t_plus_one for MKT-038)
+Last Updated: 2026-04-12 (Fix #86/#87 position ID clearing + settlement P&L verification)
 
 ALERT SYSTEM (2026-01-26)
 ================================================================================

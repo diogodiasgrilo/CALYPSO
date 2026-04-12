@@ -318,5 +318,5 @@ This software trades with real money. Use at your own risk. Past performance doe
 
 ---
 
-**Version:** 3.8.0
-**Last Updated:** 2026-03-03
+**Version:** 3.9.0
+**Last Updated:** 2026-04-12
