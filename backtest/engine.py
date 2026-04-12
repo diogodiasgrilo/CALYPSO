@@ -1719,7 +1719,8 @@ def simulate_day(
 
 def run_backtest(cfg: BacktestConfig, verbose: bool = True) -> List[DayResult]:
     cache_dir = Path(cfg.cache_dir)
-    trading_days = get_spxw_trading_days(cfg.start_date, cfg.end_date, cache_dir)
+    resolution = getattr(cfg, "data_resolution", "5min")
+    trading_days = get_spxw_trading_days(cfg.start_date, cfg.end_date, cache_dir, resolution)
 
     # Build FOMC date sets (announcement days + T+1 days)
     fomc_t1_dates = set(cfg.fomc_t1_dates)

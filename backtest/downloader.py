@@ -279,13 +279,20 @@ def get_trading_days(start: date, end: date, cache_dir: Path) -> List[date]:
     return result
 
 
-def get_spxw_trading_days(start: date, end: date, cache_dir: Path) -> List[date]:
+def get_spxw_trading_days(start: date, end: date, cache_dir: Path, data_resolution: str = "5min") -> List[date]:
     """
     Return trading days where SPXW 0DTE data is available in the local cache.
-    Reads the options/ directory — no network calls, works offline.
+    Reads the options/ or options_1min/ directory based on data_resolution — no network calls, works offline.
     Falls back to calendar-based list if cache is empty.
     """
-    options_dir = Path(cache_dir) / "options"
+    # Select directory based on data resolution
+    if data_resolution == "1min":
+        options_dir = Path(cache_dir) / "options_1min"
+    elif data_resolution == "5sec":
+        options_dir = Path(cache_dir) / "options_5sec"
+    else:
+        options_dir = Path(cache_dir) / "options"
+
     cached_dates = set()
     if options_dir.exists():
         for f in options_dir.glob("SPXW_*.parquet"):
@@ -301,7 +308,7 @@ def get_spxw_trading_days(start: date, end: date, cache_dir: Path) -> List[date]
         return sorted(cached_dates)
 
     # Fallback: calendar-based (no cache yet)
-    print("  Warning: no cached SPXW files found — using calendar fallback")
+    print("  Warning: no cached SPXW files found in {0} — using calendar fallback".format(options_dir))
     DAILY_START = date(2022, 5, 16)
     all_days = get_trading_days(start, end, cache_dir)
     result = []
