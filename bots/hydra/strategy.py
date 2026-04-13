@@ -7577,17 +7577,20 @@ class HydraStrategy(MEICStrategy):
                 regime = i
                 break
 
-        # Apply max_entries cap
+        # Apply max_entries cap — keeps LATEST entries (drops earliest)
+        # Data (Feb-Apr 2026): E#1 (10:15) has worst performance at 22% WR,
+        # E#3 (11:15) has best at 42% WR. Dropping from front preserves best slot.
         max_entries = self.vix_regime_max_entries
         if regime < len(max_entries) and max_entries[regime] is not None:
             cap = max_entries[regime]
             if self._base_entry_count > cap:
                 # Truncate base entries, keep conditional entries
+                # Keep LAST `cap` base times (drops earlier entries which underperform)
                 base_times = self.entry_times[:self._base_entry_count]
                 cond_times = self.entry_times[self._base_entry_count:]
-                self.entry_times = base_times[:cap] + cond_times
+                self.entry_times = base_times[-cap:] + cond_times
                 self._base_entry_count = cap
-                logger.info(f"VIX regime: VIX={vix:.1f}, regime={regime}, capped to {cap} base entries")
+                logger.info(f"VIX regime: VIX={vix:.1f}, regime={regime}, capped to {cap} base entries (dropped earliest)")
 
         # Apply stop buffer overrides (config values are per-contract dollars, multiply by 100)
         psb = self.vix_regime_put_stop_buffer
