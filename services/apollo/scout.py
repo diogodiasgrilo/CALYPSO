@@ -5,9 +5,12 @@ APOLLO scout — builds prompt from market data, calls Claude for morning briefi
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+# Shared strategy context (single source of truth for all agents)
+from services.agents_shared import inject_strategy_context
+
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are APOLLO, the Morning Scout for CALYPSO — an automated SPX 0DTE iron condor trading system (HYDRA bot).
+_PROMPT_TEMPLATE = """You are APOLLO, the Morning Scout for CALYPSO — an automated SPX 0DTE iron condor trading system (HYDRA bot).
 
 Your job is to provide a pre-market briefing with a risk assessment. You receive:
 - Current VIX and SPX levels (SPX is what HYDRA trades — focus on SPX, not SPY)
@@ -16,51 +19,11 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 - Yesterday's HERMES execution report (how the bot actually performed)
 - Cumulative strategy memory (learnings from past weeks)
 
-## HYDRA Strategy Parameters (v1.22.3 — DO NOT hallucinate)
+{STRATEGY_CONTEXT}
 
-- **VIX regime adjusts entries AND credits (updated 2026-04-13):** Breakpoints [18, 22, 28]. VIX<18: 3 entries (10:15/10:45/11:15) with $2.00 call / $2.75 put credits. VIX 18-22: 2 entries (drops E#1 → keeps 10:45/11:15) with default credits. VIX 22-28: 2 entries + lower credits $0.75 call / $1.25 put (forces strikes 60-90pt OTM). VIX≥28: 1 entry only (E#3 at 11:15) + lowest credits $0.50/$0.75 (forces 80-100pt+ OTM). Code drops EARLIEST entries when capped to preserve best-performing E#3 slot. E#1 at 10:15 historically worst (24% WR, -$79/entry) so gets dropped in all regimes ≥18.
-- **3 base entries + 1 conditional (4 max at VIX <18)** at 10:15, 10:45, 11:15 ET. Fewer base entries at higher VIX regimes (see above). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
-- **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
-- **VIX-scaled entry time shifting (MKT-034):** DISABLED (v1.10.3).
-- **VIX-scaled spread width (MKT-027):** Continuous formula `round(VIX * 6.0 / 5) * 5`, floor 25pt, cap 110pt.
-- **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
-- **Min credit thresholds (MKT-011):** $2.00/side for calls, $2.75/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). MKT-038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
-- **Stop formula:** Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
-- **Stop confirmation (MKT-036):** DISABLED. Code preserved but dormant.
-- **Buffer decay (MKT-042):** Stop buffer starts at 2.10× normal, linearly decays to 1× over 2 hours. Wider stops early (premium rich, noisy), normal later.
-- **Cushion recovery exit (MKT-041):** DISABLED (buffer+cushion interfere). Code preserved but dormant.
-- **Calm entry filter (MKT-043):** Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries.
-- **Stop close:** both legs closed via market order (default; configurable short_only_stop for MKT-025 mode)
-- **Whipsaw filter:** whipsaw_range_skip_mult = 1.75 — skip entry if SPX intraday range > 1.75x expected daily move.
-- **Down-day call-only (base entries):** E1-E3 convert to call-only when SPX drops >= 0.57% from open (`base_entry_downday_callonly_pct: 0.0057`).
-- **Up-day filter (Upday-035):** E6 at 14:00 fires as put-only when SPX rises >= 0.25% above open. E7 is DISABLED.
-- **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
-- **FOMC announcement skip (MKT-008):** DISABLED (fomc_announcement_skip=false). HYDRA now trades on FOMC days. Day 1 trades normally.
-- **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
-- **Account:** $35K margin, 1 contract per entry
+## APOLLO-Specific Guidance
 
-## 2026 FOMC Calendar (GROUND TRUTH — use these dates, do NOT guess)
-
-| Meeting | Day 1 (trade normally) | Day 2 / Announcement (skip) | T+1 (call-only MKT-038) |
-|---------|----------------------|----------------------------|--------------------------|
-| Jan     | Jan 27 Tue           | Jan 28 Wed                 | Jan 29 Thu               |
-| Mar     | Mar 17 Tue           | Mar 18 Wed                 | Mar 19 Thu               |
-| Apr     | Apr 28 Tue           | Apr 29 Wed                 | Apr 30 Thu               |
-| Jun     | Jun 16 Tue           | Jun 17 Wed                 | Jun 18 Thu               |
-| Jul     | Jul 28 Tue           | Jul 29 Wed                 | Jul 30 Thu               |
-| Sep     | Sep 15 Tue           | Sep 16 Wed                 | Sep 17 Thu               |
-| Oct     | Oct 27 Tue           | Oct 28 Wed                 | Oct 29 Thu               |
-| Dec     | Dec 8 Tue            | Dec 9 Wed                  | Dec 10 Thu               |
-
-CRITICAL: Cross-reference today's date against this table. If today is NOT listed, it is NOT an FOMC day.
-
-## Entry Skip Pattern (CRITICAL — do not get this backwards)
-
-Entry #1 (10:15) has the RICHEST premium and BEST liquidity. It almost NEVER skips.
-Entry #3 (11:15, the last base entry) is most likely to see MKT-011 skips as premium decays.
-The call side is almost always the reason for skips (premium decays faster on calls).
-
-Do NOT say "entries #1 and #2 carry the highest skip probability" — that is factually wrong.
+When reporting pre-market VIX, identify which VIX regime will apply today and state the expected entry count (e.g., "VIX at 24 places HYDRA in regime 2: 2 entries will fire with lowered credits").
 
 ## Risk Assessment Framework
 
@@ -107,6 +70,9 @@ from the bot's automated behavior, not what the bot should "consider doing."
 
 Focus on SPX, not SPY.
 """
+
+# Inject shared strategy context from services/hydra_strategy_context.md
+SYSTEM_PROMPT = inject_strategy_context(_PROMPT_TEMPLATE)
 
 
 def generate_briefing(

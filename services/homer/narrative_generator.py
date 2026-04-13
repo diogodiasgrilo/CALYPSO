@@ -13,9 +13,12 @@ Best Practice Compliance:
 import logging
 from typing import Any, Dict
 
+# Shared strategy context (single source of truth for all agents)
+from services.agents_shared import inject_strategy_context
+
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are HOMER, the automated trading journal writer for the HYDRA bot.
+_PROMPT_TEMPLATE = """You are HOMER, the automated trading journal writer for the HYDRA bot.
 HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all decisions algorithmically.
 
 ## CRITICAL RULES — Read These First
@@ -27,36 +30,15 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
 
-## HYDRA Domain Knowledge (v1.22.3 — use these exact parameters)
-
-- VIX regime adjusts entries AND credits (updated 2026-04-13): Breakpoints [18, 22, 28]. VIX<18: 3 entries with $2.00 call / $2.75 put credits. VIX 18-22: 2 entries (drops E#1 → keeps 10:45/11:15) with default credits. VIX 22-28: 2 entries + lower credits $0.75 call / $1.25 put (forces strikes 60-90pt OTM). VIX≥28: 1 entry only (E#3 at 11:15) + lowest credits $0.50/$0.75 (forces 80-100pt+ OTM). When explaining days with fewer than 3 base entries, identify whether drop was due to VIX regime (check vix_open), skip_reason, or an error. Do NOT describe missing E#1 as a bug on VIX≥18 days — it's by design. E#1 has historical 24% WR and -$79/entry avg.
-- NEW v7 table `shadow_entries`: logs what OTM-based selection would have chosen at each entry for retroactive counterfactual analysis. Shadow OTM targets by regime: [50, 65, 85, 120]pt. Observation only, does NOT affect trading. When relevant, you can reference shadow vs actual to assess strike selection quality.
-- Entry times: 10:15, 10:45, 11:15 ET (3 base entries at VIX<18; fewer at higher VIX regimes). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
-- Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
-- VIX-scaled spread width (MKT-027): formula `round(VIX * 6.0 / 5) * 5`, floor 25pt, cap 110pt
-- Min credit thresholds: $2.00 calls, $2.75 puts (MKT-011). MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
-- Stop formula: Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
-- Stop confirmation (MKT-036): DISABLED. Code preserved but dormant.
-- Buffer decay (MKT-042): Stop buffer starts at 2.10× normal, linearly decays to 1× over 2 hours. Wider stops early, normal later.
-- Cushion recovery exit (MKT-041): DISABLED (buffer+cushion interfere). Code preserved but dormant.
-- Calm entry filter (MKT-043): Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries.
-- Stop close: BOTH LEGS closed via market order (default mode; configurable short_only_stop for MKT-025)
-- Whipsaw filter: whipsaw_range_skip_mult = 1.75 — skip entry if SPX intraday range > 1.75x expected daily move.
-- Down-day call-only (base entries): E1-E3 convert to call-only when SPX drops >= 0.57% from open.
-- Up-day filter (Upday-035): E6 at 14:00 fires as put-only when SPX rises >= 0.25% above open. E7 is DISABLED.
-- FOMC T+1 call-only (MKT-038): Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
-- FOMC announcement skip (MKT-008): DISABLED (fomc_announcement_skip=false). HYDRA now trades on FOMC days.
-- 2026 FOMC dates: Jan 27-28, Mar 17-18, Apr 28-29, Jun 16-17, Jul 28-29, Sep 15-16, Oct 27-28, Dec 8-9. Announcement = Day 2. T+1 = day after Day 2.
-- Progressive tightening: MKT-020 (calls) and MKT-022 (puts) scan from wide OTM inward
-- Early close (MKT-018): DISABLED (backtest showed hold-to-expiry beats all ROC thresholds)
-- Base entries are full iron condors, put-only (MKT-011 override), or call-only (down-day >= 0.57% or MKT-038 FOMC T+1).
-- EMA 20/40 trend signal is informational only (logged but doesn't drive entry type)
-- Account: $35K margin, 1 contract per entry
+{STRATEGY_CONTEXT}
 
 ## Tone
 
 Analytical, concise, factual. Write like a professional trading journal — no emojis, no speculation.
 Focus on what happened and why it matters for understanding HYDRA's behavior."""
+
+# Inject shared strategy context from services/hydra_strategy_context.md
+SYSTEM_PROMPT = inject_strategy_context(_PROMPT_TEMPLATE)
 
 
 def generate_day_narratives(

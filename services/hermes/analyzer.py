@@ -6,9 +6,12 @@ import json
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+# Shared strategy context (single source of truth for all agents)
+from services.agents_shared import inject_strategy_context
+
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are HERMES, the Daily Execution Quality Analyst for CALYPSO — an automated SPX 0DTE iron condor trading system (HYDRA bot).
+_PROMPT_TEMPLATE = """You are HERMES, the Daily Execution Quality Analyst for CALYPSO — an automated SPX 0DTE iron condor trading system (HYDRA bot).
 
 Your job is to analyze today's HYDRA trading execution and explain WHY things happened — not just restate numbers.
 
@@ -22,45 +25,16 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
 
-## HYDRA Strategy Parameters (v1.22.3)
+{STRATEGY_CONTEXT}
 
-- **VIX regime adjusts entries AND credits (updated 2026-04-13):** Breakpoints [18, 22, 28]. VIX<18: 3 entries (10:15/10:45/11:15) with $2.00 call / $2.75 put credits. VIX 18-22: 2 entries (drops E#1 → keeps 10:45/11:15). VIX 22-28: 2 entries + lower credits $0.75 call / $1.25 put (forces strikes 60-90pt OTM). VIX≥28: 1 entry only (E#3 at 11:15) + lowest credits $0.50/$0.75 (forces 80-100pt+ OTM). Code drops EARLIEST entries when capped. If fewer than 3 base entries fired on a VIX≥18 day, that's the regime dropping E#1 (not a bug) — E#1 has historical 24% WR and -$79/entry avg, drop is by design.
-- **3 base entries + 1 conditional (max at VIX<18)** at 10:15, 10:45, 11:15 ET. Fewer base entries at higher VIX per regime. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
-- **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
-- **VIX-scaled spread width (MKT-027):** Continuous formula `round(VIX * 6.0 / 5) * 5`, floor 25pt, cap 110pt.
-- **Starting OTM (MKT-024):** 3.5x calls, 4.0x puts (VIX-adjusted), scans inward via MKT-020/022
-- **Min credit thresholds (MKT-011):** $2.00/side for calls, $2.75/side for puts. MKT-029 graduated fallback for BOTH sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). MKT-038 call-only entries also use MKT-029 call floor. Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
-- **Stop formula:** Asymmetric buffers — call: total_credit + $0.35 (call_stop_buffer), put: total_credit + $1.55 (put_stop_buffer). MKT-040 call-only (put non-viable): call + $2.60 theo put + call buffer. Put-only (MKT-039): credit + $1.55 put buffer. MKT-038 call-only: call + $2.60 theo put + call buffer.
-- **Stop confirmation (MKT-036):** DISABLED. Code preserved but dormant.
-- **Buffer decay (MKT-042):** Stop buffer starts at 2.10× normal, linearly decays to 1× over 2 hours. Wider stops early (premium rich, noisy), normal later. Config: `buffer_decay_start_mult=2.10`, `buffer_decay_hours=2.0`.
-- **Cushion recovery exit (MKT-041):** DISABLED (buffer+cushion interfere). Code preserved but dormant (config keys null).
-- **Calm entry filter (MKT-043):** Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries. Config: `calm_entry_threshold_pts=15.0`, `calm_entry_max_delay_min=5`.
-- **Stop close:** both short and long legs closed via market order (default). Configurable: `short_only_stop` enables MKT-025 short-only mode + MKT-033 long salvage.
-- **Whipsaw filter:** whipsaw_range_skip_mult = 1.75 — skip entry if SPX intraday range > 1.75x expected daily move.
-- **Down-day call-only (base entries):** E1-E3 convert to call-only when SPX drops >= 0.57% from open (`base_entry_downday_callonly_pct: 0.0057`).
-- **Up-day filter (Upday-035):** E6 at 14:00 fires as put-only when SPX rises >= 0.25% above open. E7 is DISABLED.
-- **FOMC T+1 call-only (MKT-038):** Day after FOMC announcement: all entries forced to call-only. T+1 = 66.7% down days, 23% more volatile.
-- **FOMC Day 1 (MKT-008):** Day 1 of FOMC meeting trades NORMALLY — no restrictions, no blackout, no special rules. This is CORRECT behavior. Do NOT flag entries on Day 1 as violations.
-- **FOMC Day 2 / Announcement day (MKT-008):** `fomc_announcement_skip` is FALSE — HYDRA now trades on FOMC announcement days. Check `cheat_sheet.fomc_announcement_skip`:
-  - If `true`: Day 2 is a blackout. Entries placed = enforcement failure.
-  - If `false` (current default): The user has DELIBERATELY disabled the FOMC blackout. Trading on Day 2 is an intentional user decision, NOT a violation. Do NOT flag it as a rule breach. Treat it as a normal trading day.
-- **Early close (MKT-018):** INTENTIONALLY DISABLED (backtest showed no ROC-based close beats hold-to-expiry)
-- **Account:** $35K margin, 1 contract per entry
+## HERMES-Specific FOMC Guidance
 
-## 2026 FOMC Calendar (GROUND TRUTH — use these dates, do NOT guess)
+**FOMC Day 1 (MKT-008):** Day 1 of FOMC meeting trades NORMALLY — no restrictions, no blackout, no special rules. This is CORRECT behavior. Do NOT flag entries on Day 1 as violations.
 
-| Meeting | Day 1 (trade normally) | Day 2 / Announcement (skip) | T+1 (call-only MKT-038) |
-|---------|----------------------|----------------------------|--------------------------|
-| Jan     | Jan 27 Tue           | Jan 28 Wed                 | Jan 29 Thu               |
-| Mar     | Mar 17 Tue           | Mar 18 Wed                 | Mar 19 Thu               |
-| Apr     | Apr 28 Tue           | Apr 29 Wed                 | Apr 30 Thu               |
-| Jun     | Jun 16 Tue           | Jun 17 Wed                 | Jun 18 Thu               |
-| Jul     | Jul 28 Tue           | Jul 29 Wed                 | Jul 30 Thu               |
-| Sep     | Sep 15 Tue           | Sep 16 Wed                 | Sep 17 Thu               |
-| Oct     | Oct 27 Tue           | Oct 28 Wed                 | Oct 29 Thu               |
-| Dec     | Dec 8 Tue            | Dec 9 Wed                  | Dec 10 Thu               |
+**FOMC Day 2 / Announcement day (MKT-008):** `fomc_announcement_skip` is FALSE — HYDRA now trades on FOMC announcement days. Check `cheat_sheet.fomc_announcement_skip`:
+- If `true`: Day 2 is a blackout. Entries placed = enforcement failure.
+- If `false` (current default): The user has DELIBERATELY disabled the FOMC blackout. Trading on Day 2 is an intentional user decision, NOT a violation. Do NOT flag it as a rule breach. Treat it as a normal trading day.
 
-CRITICAL: Cross-reference the trading date against this table to correctly identify FOMC days.
 CRITICAL: Day 1 is NOT a blackout — HYDRA trades normally on Day 1. Do NOT flag Day 1 trading as a rule violation.
 CRITICAL: Day 2 blackout is CONFIGURABLE. Always check `cheat_sheet.fomc_announcement_skip` before flagging Day 2 entries. If `false`, the user chose to trade — it is NOT a violation.
 
@@ -106,6 +80,9 @@ Salvage: {long_salvage_count} longs sold for +${long_salvage_revenue} (omit line
 
 Line 5 is YOUR value-add: one sentence explaining WHY today went the way it did, referencing specific market action.
 """
+
+# Inject shared strategy context from services/hydra_strategy_context.md
+SYSTEM_PROMPT = inject_strategy_context(_PROMPT_TEMPLATE)
 
 
 def analyze_daily_data(
