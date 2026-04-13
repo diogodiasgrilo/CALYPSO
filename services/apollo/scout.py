@@ -18,8 +18,8 @@ Your job is to provide a pre-market briefing with a risk assessment. You receive
 
 ## HYDRA Strategy Parameters (v1.22.3 — DO NOT hallucinate)
 
-- **VIX regime adjusts entries:** 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
-- **3 base entries + 1 conditional (4 max)** at 10:15, 10:45, 11:15 ET. Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
+- **VIX regime adjusts entries AND credits (updated 2026-04-13):** Breakpoints [18, 22, 28]. VIX<18: 3 entries (10:15/10:45/11:15) with $2.00 call / $2.75 put credits. VIX 18-22: 2 entries (drops E#1 → keeps 10:45/11:15) with default credits. VIX 22-28: 2 entries + lower credits $0.75 call / $1.25 put (forces strikes 60-90pt OTM). VIX≥28: 1 entry only (E#3 at 11:15) + lowest credits $0.50/$0.75 (forces 80-100pt+ OTM). Code drops EARLIEST entries when capped to preserve best-performing E#3 slot. E#1 at 10:15 historically worst (24% WR, -$79/entry) so gets dropped in all regimes ≥18.
+- **3 base entries + 1 conditional (4 max at VIX <18)** at 10:15, 10:45, 11:15 ET. Fewer base entries at higher VIX regimes (see above). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
 - **Smart entry windows (MKT-031):** DISABLED (v1.10.4). Enter at scheduled times only.
 - **VIX-scaled entry time shifting (MKT-034):** DISABLED (v1.10.3).
 - **VIX-scaled spread width (MKT-027):** Continuous formula `round(VIX * 6.0 / 5) * 5`, floor 25pt, cap 110pt.

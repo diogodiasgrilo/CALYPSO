@@ -29,8 +29,9 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 
 ## HYDRA Domain Knowledge (v1.22.3 — use these exact parameters)
 
-- VIX regime adjusts entries: 2 entries when VIX<14, 3 entries VIX 14-30, 1 entry VIX>30, $1.25 put buffer at VIX<14.
-- Entry times: 10:15, 10:45, 11:15 ET (3 base entries). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
+- VIX regime adjusts entries AND credits (updated 2026-04-13): Breakpoints [18, 22, 28]. VIX<18: 3 entries with $2.00 call / $2.75 put credits. VIX 18-22: 2 entries (drops E#1 → keeps 10:45/11:15) with default credits. VIX 22-28: 2 entries + lower credits $0.75 call / $1.25 put (forces strikes 60-90pt OTM). VIX≥28: 1 entry only (E#3 at 11:15) + lowest credits $0.50/$0.75 (forces 80-100pt+ OTM). When explaining days with fewer than 3 base entries, identify whether drop was due to VIX regime (check vix_open), skip_reason, or an error. Do NOT describe missing E#1 as a bug on VIX≥18 days — it's by design. E#1 has historical 24% WR and -$79/entry avg.
+- NEW v7 table `shadow_entries`: logs what OTM-based selection would have chosen at each entry for retroactive counterfactual analysis. Shadow OTM targets by regime: [50, 65, 85, 120]pt. Observation only, does NOT affect trading. When relevant, you can reference shadow vs actual to assess strike selection quality.
+- Entry times: 10:15, 10:45, 11:15 ET (3 base entries at VIX<18; fewer at higher VIX regimes). Conditional E6 at 14:00 fires as up-day put-only when SPX rises >= 0.25% above open (Upday-035). E7 is DISABLED.
 - Smart entry windows (MKT-031): DISABLED (v1.10.4). Enter at scheduled times only.
 - VIX-scaled spread width (MKT-027): formula `round(VIX * 6.0 / 5) * 5`, floor 25pt, cap 110pt
 - Min credit thresholds: $2.00 calls, $2.75 puts (MKT-011). MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). Put-only when call non-viable AND VIX < 15 (MKT-032/MKT-039). Call-only when put non-viable (MKT-040, 89% WR).
