@@ -516,13 +516,25 @@ class BacktestingDB:
             return cursor.rowcount
 
     def insert_spread_snapshots(self, snapshots: List[Dict[str, Any]]) -> int:
-        """Insert per-entry spread value snapshots. Returns rows inserted."""
+        """Insert per-entry spread value snapshots (v6 schema). Returns rows inserted.
+
+        Accepts dicts with any subset of the v6 fields:
+            timestamp, entry_number, call_spread_value, put_spread_value,
+            short_call_price, long_call_price, short_put_price, long_put_price,
+            short_call_bid, short_call_ask, long_call_bid, long_call_ask,
+            short_put_bid, short_put_ask, long_put_bid, long_put_ask
+        Missing fields default to NULL. Backwards compatible with v5-style dicts
+        (only timestamp, entry_number, call_spread_value, put_spread_value).
+        """
         if not snapshots:
             return 0
         sql = """
             INSERT OR IGNORE INTO spread_snapshots
-            (timestamp, entry_number, call_spread_value, put_spread_value)
-            VALUES (?, ?, ?, ?)
+            (timestamp, entry_number, call_spread_value, put_spread_value,
+             short_call_price, long_call_price, short_put_price, long_put_price,
+             short_call_bid, short_call_ask, long_call_bid, long_call_ask,
+             short_put_bid, short_put_ask, long_put_bid, long_put_ask)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         rows = [
             (
@@ -530,6 +542,18 @@ class BacktestingDB:
                 s["entry_number"],
                 s.get("call_spread_value"),
                 s.get("put_spread_value"),
+                s.get("short_call_price"),
+                s.get("long_call_price"),
+                s.get("short_put_price"),
+                s.get("long_put_price"),
+                s.get("short_call_bid"),
+                s.get("short_call_ask"),
+                s.get("long_call_bid"),
+                s.get("long_call_ask"),
+                s.get("short_put_bid"),
+                s.get("short_put_ask"),
+                s.get("long_put_bid"),
+                s.get("long_put_ask"),
             )
             for s in snapshots
         ]
