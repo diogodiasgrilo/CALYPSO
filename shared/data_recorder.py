@@ -14,6 +14,9 @@ Safety guarantees:
 
 Schema v5 adds: individual leg prices, Greeks, bid-ask width, slippage,
 margin, execution quality, MAE/MFE, skipped entries, economic events.
+
+Schema v6 adds: per-leg Saxo bid/ask in spread_snapshots (~10s resolution)
+for ThetaData-vs-Saxo backtest calibration.
 """
 
 import json
@@ -25,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # ============================================================================
 # Schema Migration SQL
@@ -73,6 +76,20 @@ MIGRATION_V5_SQL = [
     "ALTER TABLE daily_summaries ADD COLUMN economic_events TEXT",
     "ALTER TABLE daily_summaries ADD COLUMN config_version TEXT",
     "ALTER TABLE daily_summaries ADD COLUMN opex_week INTEGER DEFAULT 0",
+]
+
+# v6 migrations: bid/ask capture for backtest calibration
+# Enables comparing ThetaData's aggregated OPRA quotes to Saxo's single-broker
+# quotes. Each leg's (bid, ask) captured during monitoring (~10s resolution).
+MIGRATION_V6_SQL = [
+    "ALTER TABLE spread_snapshots ADD COLUMN short_call_bid REAL",
+    "ALTER TABLE spread_snapshots ADD COLUMN short_call_ask REAL",
+    "ALTER TABLE spread_snapshots ADD COLUMN long_call_bid REAL",
+    "ALTER TABLE spread_snapshots ADD COLUMN long_call_ask REAL",
+    "ALTER TABLE spread_snapshots ADD COLUMN short_put_bid REAL",
+    "ALTER TABLE spread_snapshots ADD COLUMN short_put_ask REAL",
+    "ALTER TABLE spread_snapshots ADD COLUMN long_put_bid REAL",
+    "ALTER TABLE spread_snapshots ADD COLUMN long_put_ask REAL",
 ]
 
 # New tables for v5
@@ -150,8 +167,9 @@ class DataRecorder:
     # ========================================================================
 
     def ensure_schema(self) -> bool:
-        """Run schema migration v4 → v5 (additive ALTER TABLE only).
+        """Run schema migrations up to current SCHEMA_VERSION (additive ALTER TABLE only).
 
+        Applies v5 migrations if current_version < 5, then v6 if < 6.
         Safe to call multiple times — duplicate column errors are silently ignored.
         Also creates base tables if they don't exist (fresh database scenario).
         """
@@ -214,7 +232,13 @@ class DataRecorder:
                 conn.executescript(CREATE_INDEXES_SQL)
 
                 # Add new columns (catch duplicate column errors)
-                for sql in MIGRATION_V5_SQL:
+                migration_sql = []
+                if current_version < 5:
+                    migration_sql += MIGRATION_V5_SQL
+                if current_version < 6:
+                    migration_sql += MIGRATION_V6_SQL
+
+                for sql in migration_sql:
                     try:
                         conn.execute(sql)
                     except sqlite3.OperationalError as e:
@@ -266,10 +290,14 @@ class DataRecorder:
         timestamp: str,
         snapshots: List[Dict[str, Any]],
     ) -> bool:
-        """Write spread_snapshots with individual leg price columns.
+        """Write spread_snapshots with individual leg price + bid/ask columns (v6).
 
-        Each dict: {entry_number, call_spread_value, put_spread_value,
-                    short_call_price, long_call_price, short_put_price, long_put_price}
+        Each dict may include:
+            entry_number, call_spread_value, put_spread_value,
+            short_call_price, long_call_price, short_put_price, long_put_price,
+            short_call_bid, short_call_ask, long_call_bid, long_call_ask,
+            short_put_bid, short_put_ask, long_put_bid, long_put_ask
+        Missing fields default to NULL. Safe to call with v5-style dicts.
         """
         if not snapshots:
             return True
@@ -279,8 +307,10 @@ class DataRecorder:
                 conn.executemany(
                     """INSERT OR IGNORE INTO spread_snapshots
                     (timestamp, entry_number, call_spread_value, put_spread_value,
-                     short_call_price, long_call_price, short_put_price, long_put_price)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                     short_call_price, long_call_price, short_put_price, long_put_price,
+                     short_call_bid, short_call_ask, long_call_bid, long_call_ask,
+                     short_put_bid, short_put_ask, long_put_bid, long_put_ask)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     [
                         (
                             timestamp,
@@ -291,6 +321,14 @@ class DataRecorder:
                             s.get("long_call_price"),
                             s.get("short_put_price"),
                             s.get("long_put_price"),
+                            s.get("short_call_bid"),
+                            s.get("short_call_ask"),
+                            s.get("long_call_bid"),
+                            s.get("long_call_ask"),
+                            s.get("short_put_bid"),
+                            s.get("short_put_ask"),
+                            s.get("long_put_bid"),
+                            s.get("long_put_ask"),
                         )
                         for s in snapshots
                     ],

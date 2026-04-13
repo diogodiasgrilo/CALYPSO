@@ -2930,7 +2930,7 @@ class HydraStrategy(MEICStrategy):
                 csv = entry.call_spread_value if not call_done else 0
                 psv = entry.put_spread_value if not put_done else 0
                 if csv > 0 or psv > 0:
-                    snapshots.append({
+                    snap = {
                         "entry_number": entry.entry_number,
                         "call_spread_value": csv if csv > 0 else None,
                         "put_spread_value": psv if psv > 0 else None,
@@ -2938,7 +2938,19 @@ class HydraStrategy(MEICStrategy):
                         "long_call_price": entry.long_call_price if not call_done else None,
                         "short_put_price": entry.short_put_price if not put_done else None,
                         "long_put_price": entry.long_put_price if not put_done else None,
-                    })
+                    }
+                    # v6: capture raw bid/ask for backtest calibration (ThetaData vs Saxo)
+                    if not call_done:
+                        snap["short_call_bid"] = getattr(entry, "short_call_bid", None)
+                        snap["short_call_ask"] = getattr(entry, "short_call_ask", None)
+                        snap["long_call_bid"] = getattr(entry, "long_call_bid", None)
+                        snap["long_call_ask"] = getattr(entry, "long_call_ask", None)
+                    if not put_done:
+                        snap["short_put_bid"] = getattr(entry, "short_put_bid", None)
+                        snap["short_put_ask"] = getattr(entry, "short_put_ask", None)
+                        snap["long_put_bid"] = getattr(entry, "long_put_bid", None)
+                        snap["long_put_ask"] = getattr(entry, "long_put_ask", None)
+                    snapshots.append(snap)
 
             if snapshots:
                 self._data_recorder.record_spread_snapshots(
@@ -4950,14 +4962,14 @@ class HydraStrategy(MEICStrategy):
 
     def _batch_update_entry_prices(self):
         """
-        Override parent to handle Hydra one-sided entry simulation in dry-run.
+        Override parent to handle Hydra one-sided entry simulation in dry-run
+        AND capture Saxo bid/ask for backtest calibration (schema v6).
 
-        In live mode, the parent's batch approach works correctly for one-sided
-        entries because it only collects non-zero UICs (one-sided entries have
-        UIC=0 for the non-placed side).
+        In live mode: duplicate parent's batch logic but preserve bid/ask on
+        each entry as transient attributes (short_call_bid, short_call_ask, etc.).
+        These get written to spread_snapshots by _record_heartbeat_to_db.
 
-        In dry-run mode, we need to use _simulate_hydra_entry_prices() for
-        one-sided entries instead of the parent's _simulate_entry_prices().
+        In dry-run mode: use _simulate_hydra_entry_prices() for one-sided entries.
         """
         if self.dry_run:
             for entry in self.daily_state.active_entries:
@@ -4967,8 +4979,40 @@ class HydraStrategy(MEICStrategy):
                     continue
                 self._simulate_hydra_entry_prices(entry)
             return
-        # Live mode: parent's batch handles one-sided entries naturally
-        super()._batch_update_entry_prices()
+
+        # Live mode: collect UICs + targets (mirror of parent logic)
+        uic_map = {}  # UIC -> list of (entry, leg_name)
+        for entry in self.daily_state.active_entries:
+            if entry.call_side_stopped and entry.put_side_stopped:
+                continue
+            for leg in ("short_call", "long_call", "short_put", "long_put"):
+                uic = getattr(entry, f"{leg}_uic", 0)
+                if uic:
+                    uic_map.setdefault(uic, []).append((entry, leg))
+
+        if not uic_map:
+            return
+
+        quotes = self.client.get_quotes_batch(
+            list(uic_map.keys()), asset_type="StockIndexOption"
+        )
+
+        # Distribute prices + preserve bid/ask as transient attributes
+        for uic, targets in uic_map.items():
+            quote = quotes.get(uic)
+            mid_price = self._extract_mid_price(quote) or 0
+            # Extract raw bid/ask for calibration capture (v6 schema)
+            bid = None
+            ask = None
+            if quote and "Quote" in quote:
+                q = quote["Quote"]
+                bid = q.get("Bid") or None
+                ask = q.get("Ask") or None
+            for entry, leg in targets:
+                setattr(entry, f"{leg}_price", mid_price)
+                # Transient bid/ask — written to spread_snapshots each tick
+                setattr(entry, f"{leg}_bid", bid)
+                setattr(entry, f"{leg}_ask", ask)
 
     def _simulate_hydra_entry_prices(self, entry: IronCondorEntry):
         """

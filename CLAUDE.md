@@ -588,15 +588,18 @@ data/backtesting.db     SQLite database with market ticks, OHLC, trades
 ```
 
 **Backtesting Database** (`data/backtesting.db`):
-SQLite database populated daily by HOMER after journal update. Stores heartbeat snapshots, 1-minute OHLC bars, trade entries, stop events, and daily summaries. Used for backtesting analysis (e.g., entry timing optimization).
+SQLite database populated live by HYDRA (`DataRecorder`) and backfilled by HOMER. Stores heartbeat snapshots, 1-minute OHLC bars, trade entries, stop events, daily summaries, per-entry spread snapshots, skipped entries, and MAE/MFE. Current schema version: **v6** (bid/ask capture for backtest calibration).
 
 | Table | Content | ~Rows/Day |
 |-------|---------|-----------|
 | `market_ticks` | Heartbeat snapshots (~11s intervals: SPX, VIX, trend, state) | ~1,500 |
 | `market_ohlc_1min` | 1-min OHLC bars computed from ticks | ~390 |
-| `trade_entries` | Iron condor entries (strikes, credits, signals, OTM distances) | ~5 |
-| `trade_stops` | Stop loss events (debit, P&L, trigger level) | 0-5 |
+| `trade_entries` | Iron condor entries (strikes, credits, signals, OTM distances, Greeks, bid-ask width, slippage, margin) | ~3 |
+| `trade_stops` | Stop loss events (debit, P&L, trigger level, quoted mid, slippage, salvage) | 0-3 |
 | `daily_summaries` | End-of-day totals (SPX OHLC, VIX, P&L, entry/stop counts) | 1 |
+| `spread_snapshots` | Per-entry cost-to-close every ~10s during monitoring. v5 adds individual leg mid prices; v6 adds Saxo bid/ask per leg for ThetaData-vs-Saxo calibration | ~3,000 |
+| `skipped_entries` | Counterfactual tracking of entries rejected by MKT-011 (theoretical strikes + credit) | 0-3 |
+| `entry_mae_mfe` | Max Adverse / Max Favorable Excursion per entry side (cushion_min_pct) | 0-6 |
 | `schema_info` | Schema version tracking for migrations | — |
 
 ```sql
@@ -1346,7 +1349,7 @@ SCRIPT
 | `docs/VM_COMMANDS.md` | VM administration commands |
 | `.claude/settings.local.json` | Full command reference (also readable)
 
-### Key Lessons Learned (Updated 2026-02-08)
+### Key Lessons Learned (Updated 2026-04-13)
 
 These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
 
@@ -1491,3 +1494,5 @@ These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:
 70. **Pre-Entry Margin Check Was a No-Op — Wrong Saxo Field Names (Fix #85, 2026-03-16)** - `_check_buying_power()` (ORDER-004) never actually validated margin. The code checked for field names `["AvailableMargin", "CashAvailable", "MarginAvailable", "NetEquityForMargin"]` in the Saxo `/port/v1/balances` response. The first three DON'T EXIST in Saxo's API. The fourth (`NetEquityForMargin`) exists but represents TOTAL equity (~$39,854), not AVAILABLE margin (~$22,354). Since total equity always exceeds $5,000, the check always passed — even when margin was nearly exhausted. Live VM diagnostic confirmed the correct Saxo field names: `MarginAvailableForTrading` ($22,354.67 = actual available margin), `SpendingPower` (same value), `CashAvailableForTrading`, `MarginUsedByCurrentPositions` (-$17,500 = margin locked by positions), `MarginUtilizationPct` (43.91%). Solution: Updated field priority to `["MarginAvailableForTrading", "SpendingPower", "CashAvailableForTrading", "NetEquityForMargin"]`. Added margin snapshot logging (available, used, utilization%, account total) at each entry. Also discovered `_is_daily_loss_limit_reached()` uses `get_account_info()` which returns NO financial data — falls back to hardcoded $50K default. Not fixed because HYDRA overrides to always return False (MKT-016/017 removed). (Cost: ORDER-004 margin gate was non-functional for all 23+ trading days — no incident because account had sufficient margin at 1 contract, but would have been dangerous at 2+ contracts)
 
 71. **Stop Loss Leaves Stale Position IDs on Entry — False "Position Mismatch" Alerts (Fix #86, 2026-04-09)** - After every stop loss, the hourly POS-003 reconciliation fired a false "Position Mismatch Detected" HIGH alert on Telegram. Root cause: `_execute_stop_loss()` closed positions via `_close_position_with_retry()` (which unregistered them from the Position Registry), but did NOT clear the position IDs on the entry object (`entry.short_call_position_id`, etc.). The `all_position_ids` property still returned the closed IDs, so POS-003 reconciliation saw them as "expected" but missing from Saxo. `_handle_missing_positions()` cleaned them up AFTER the alert fired. Solution: Clear both position IDs and UICs for the stopped side immediately after closing in `_execute_stop_loss()`. Base MEIC path (both legs closed): clears all 4 fields. HYDRA MKT-025 path (short-only stop): clears only short position_id and short UIC — long stays intact for settlement/MKT-033 salvage. (Cost: False CRITICAL_INTERVENTION Telegram alerts after every stop loss — 3 alerts on Apr 8 alone)
+
+72. **ThetaData Backtest Is Systematically Optimistic vs Live Saxo (2026-04-13)** - Full 38-day backtest (Feb 10 - Apr 10) showed backtest +$8,895 vs live -$1,490 — a $10,385 gap. Recent apples-to-apples days (Apr 1-10, same 3-entry config): backtest +$2,105 vs live +$715 (~3x optimism, live earns ~34% of backtest). Two root causes: (a) ThetaData uses aggregated OPRA feeds with tight spreads; Saxo is a single-broker retail feed with wider spreads, especially during volatility. Apr 8 Entry #1 put stopped in live at 10:56:48 when Saxo cost-to-close spiked >$957, but ThetaData max was $845 ($100-175 gap). (b) ThetaData strike grid has gaps (e.g., 6780 → 6790 missing 6785) and phantom-low bids that MKT-011 accepts but Saxo rejects. Solution: Added `entry_slippage_per_leg` and `broker_spread_markup` config options (default 0.0) for calibration. Schema v6 adds 8 bid/ask columns to `spread_snapshots` so HYDRA captures Saxo quotes every ~10s for future calibration. Also fixed 3 data quality bugs in backtest engine (missing long strike = free long, phantom bid guard, forced one-sided entries skipping primary credit threshold). Remaining gap after fixes is ~$940/week — accept as inherent limit of ThetaData-based backtesting; use for relative strategy comparison, not absolute P&L prediction. **Rough rule**: expected live P&L ≈ 34% of backtest (or backtest − ~$200/day). (Cost: Prevention — understanding the calibration factor prevents overconfidence in backtest claims)

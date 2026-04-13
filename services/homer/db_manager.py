@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS market_ticks (
@@ -144,6 +144,14 @@ CREATE TABLE IF NOT EXISTS spread_snapshots (
     long_call_price REAL,
     short_put_price REAL,
     long_put_price REAL,
+    short_call_bid REAL,
+    short_call_ask REAL,
+    long_call_bid REAL,
+    long_call_ask REAL,
+    short_put_bid REAL,
+    short_put_ask REAL,
+    long_put_bid REAL,
+    long_put_ask REAL,
     PRIMARY KEY (timestamp, entry_number)
 );
 
@@ -313,6 +321,25 @@ class BacktestingDB:
                     pass  # Column already exists
             # New tables created by CREATE_TABLES_SQL above
             logger.info("DB migrated to schema v5 (DataRecorder enrichment columns)")
+
+        if current < 6:
+            # v6: bid/ask capture in spread_snapshots for backtest calibration
+            v6_alters = [
+                "ALTER TABLE spread_snapshots ADD COLUMN short_call_bid REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN short_call_ask REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN long_call_bid REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN long_call_ask REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN short_put_bid REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN short_put_ask REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN long_put_bid REAL",
+                "ALTER TABLE spread_snapshots ADD COLUMN long_put_ask REAL",
+            ]
+            for sql in v6_alters:
+                try:
+                    conn.execute(sql)
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+            logger.info("DB migrated to schema v6 (bid/ask capture for calibration)")
 
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode."""
