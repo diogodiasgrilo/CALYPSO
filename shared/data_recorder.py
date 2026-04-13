@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # ============================================================================
 # Schema Migration SQL
@@ -91,6 +91,50 @@ MIGRATION_V6_SQL = [
     "ALTER TABLE spread_snapshots ADD COLUMN long_put_bid REAL",
     "ALTER TABLE spread_snapshots ADD COLUMN long_put_ask REAL",
 ]
+
+# v7: shadow entries table — records what OTM-based selection WOULD have chosen
+# at each entry attempt, for retroactive comparison vs credit-based selection.
+# Pure observation — does not affect trading behavior.
+CREATE_SHADOW_ENTRIES_SQL = """
+CREATE TABLE IF NOT EXISTS shadow_entries (
+    date TEXT NOT NULL,
+    entry_number INTEGER NOT NULL,
+    entry_time TEXT,
+    spx_at_entry REAL,
+    vix_at_entry REAL,
+    vix_regime INTEGER,
+
+    -- OTM targets for this regime (what we'd aim for)
+    shadow_call_otm_target REAL,
+    shadow_put_otm_target REAL,
+
+    -- Calculated shadow strikes (where OTM-based would place)
+    shadow_short_call_strike REAL,
+    shadow_long_call_strike REAL,
+    shadow_short_put_strike REAL,
+    shadow_long_put_strike REAL,
+    shadow_spread_width REAL,
+
+    -- Actual entry data for comparison (NULL if skipped)
+    actual_short_call_strike REAL,
+    actual_short_put_strike REAL,
+    actual_otm_distance_call REAL,
+    actual_otm_distance_put REAL,
+    actual_call_credit REAL,
+    actual_put_credit REAL,
+    actual_entry_type TEXT,
+
+    -- Outcome (filled in later if analysis wants)
+    is_skipped INTEGER DEFAULT 0,
+    skip_reason TEXT,
+
+    PRIMARY KEY (date, entry_number)
+);
+"""
+
+CREATE_SHADOW_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_shadow_date ON shadow_entries(date);
+"""
 
 # New tables for v5
 CREATE_SKIPPED_ENTRIES_SQL = """
@@ -230,6 +274,9 @@ class DataRecorder:
                 conn.executescript(CREATE_SKIPPED_ENTRIES_SQL)
                 conn.executescript(CREATE_MAE_MFE_SQL)
                 conn.executescript(CREATE_INDEXES_SQL)
+                if current_version < 7:
+                    conn.executescript(CREATE_SHADOW_ENTRIES_SQL)
+                    conn.executescript(CREATE_SHADOW_INDEX_SQL)
 
                 # Add new columns (catch duplicate column errors)
                 migration_sql = []
@@ -438,6 +485,45 @@ class DataRecorder:
                 conn.commit()
 
         return self._safe_write("record_skipped_entry", _write)
+
+    # ========================================================================
+    # Shadow Entry Writes (v7 — OTM-based selection counterfactual, observation only)
+    # ========================================================================
+
+    def record_shadow_entry(self, shadow_data: Dict[str, Any]) -> bool:
+        """Write a single shadow_entries row — what OTM-based selection would pick.
+
+        Purpose: record counterfactual strike selection (fixed-OTM-per-regime) for
+        retroactive analysis vs actual credit-based selection. Pure observation —
+        does NOT affect trading behavior.
+
+        shadow_data must include 'date' and 'entry_number' as primary key.
+        """
+        def _write():
+            cols = [
+                "date", "entry_number", "entry_time",
+                "spx_at_entry", "vix_at_entry", "vix_regime",
+                "shadow_call_otm_target", "shadow_put_otm_target",
+                "shadow_short_call_strike", "shadow_long_call_strike",
+                "shadow_short_put_strike", "shadow_long_put_strike",
+                "shadow_spread_width",
+                "actual_short_call_strike", "actual_short_put_strike",
+                "actual_otm_distance_call", "actual_otm_distance_put",
+                "actual_call_credit", "actual_put_credit", "actual_entry_type",
+                "is_skipped", "skip_reason",
+            ]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_names = ", ".join(cols)
+            values = tuple(shadow_data.get(c) for c in cols)
+
+            with self._connect() as conn:
+                conn.execute(
+                    f"INSERT OR IGNORE INTO shadow_entries ({col_names}) VALUES ({placeholders})",
+                    values,
+                )
+                conn.commit()
+
+        return self._safe_write("record_shadow_entry", _write)
 
     # ========================================================================
     # Settlement Writes (once per day after 4 PM)

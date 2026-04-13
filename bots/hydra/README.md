@@ -210,23 +210,28 @@ Skips entries when intraday range exceeds a threshold relative to the expected m
 | `whipsaw_filter.enabled` | `true` | Enable/disable whipsaw filter |
 | `whipsaw_filter.threshold` | `1.75` | Skip entry when intraday range > 1.75× expected move |
 
-### VIX Regime Adaptive (v1.20.0)
+### VIX Regime Adaptive (updated 2026-04-13)
 
-Adjusts entries and buffers based on VIX at open. Uses a 4-zone breakpoint system:
+Adjusts entries AND credit thresholds based on VIX at open. Uses a 4-zone breakpoint system. When `max_entries` caps below base count, drops EARLIEST entries (keeps best-performing E#3 at 11:15).
 
-| Zone | VIX Range | Max Entries | Put Buffer Override |
-|------|-----------|-------------|---------------------|
-| 0 | < 14 | 2 | $1.25 |
-| 1 | 14-20 | 3 (default) | $1.55 (default) |
-| 2 | 20-30 | 3 (default) | $1.55 (default) |
-| 3 | >= 30 | 1 | $1.55 (default) |
+| Zone | VIX Range | Max Entries | Entries Kept | Call Min | Put Min | Typical OTM |
+|------|-----------|-------------|--------------|----------|---------|-------------|
+| 0 | < 18 | 3 (default) | E#1, E#2, E#3 | $2.00 (default) | $2.75 (default) | 40-60pt |
+| 1 | 18-22 | 2 | E#2, E#3 | $2.00 (default) | $2.75 (default) | 40-60pt |
+| 2 | 22-28 | 2 | E#2, E#3 | $0.75 | $1.25 | 60-90pt |
+| 3 | >= 28 | 1 | E#3 only | $0.50 | $0.75 | 80-100pt+ |
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `vix_regime.enabled` | `true` | Enable/disable VIX regime adaptive |
-| `vix_regime.breakpoints` | `[14, 20, 30]` | VIX zone boundaries |
-| `vix_regime.max_entries` | `[2, null, null, 1]` | Max entries per zone (null = use default) |
-| `vix_regime.put_stop_buffer` | `[1.25, null, null, null]` | Put buffer override per zone |
+| `vix_regime.breakpoints` | `[18.0, 22.0, 28.0]` | VIX zone boundaries |
+| `vix_regime.max_entries` | `[null, 2, 2, 1]` | Max entries per zone (null = use default). Drops EARLIEST when capped. |
+| `vix_regime.min_call_credit` | `[null, null, 0.75, 0.50]` | Per-zone call credit threshold (null = use default $2.00) |
+| `vix_regime.min_put_credit` | `[null, null, 1.25, 0.75]` | Per-zone put credit threshold (null = use default $2.75) |
+| `vix_regime.shadow_call_otm` | `[50.0, 65.0, 85.0, 120.0]` | v7: OTM target (pt) for shadow_entries logging (observation only, no trading effect) |
+| `vix_regime.shadow_put_otm` | `[50.0, 65.0, 85.0, 120.0]` | v7: OTM target (pt) for shadow_entries logging |
+| `vix_regime.put_stop_buffer` | `[null, null, null, null]` | Per-zone put buffer override (null = use default $1.75) |
+| `vix_regime.call_stop_buffer` | `[null, null, null, null]` | Per-zone call buffer override (null = use default $0.75) |
 
 ### Buffer Decay (MKT-042) — v1.22.0
 

@@ -134,14 +134,16 @@
         "high_vix_threshold": 23.0
     },
     "vix_regime": {
-        "_comment": "VIX Regime Adaptive: adjusts entries and buffers based on VIX at open. Breakpoints define zone boundaries. Arrays are per-zone [VIX<14, 14-20, 20-30, >=30]. null = use default. Disable with enabled: false.",
+        "_comment": "VIX Regime Adaptive (updated 2026-04-13): adjusts entries and credit thresholds based on VIX at open. Breakpoints [18, 22, 28] define 4 zones. Arrays are per-zone [VIX<18, 18-22, 22-28, >=28]. null = use default. Disable with enabled: false. When max_entries caps below base count, drops EARLIEST entries (keeps best-performing E#3 at 11:15). shadow_call_otm and shadow_put_otm set OTM targets (pt) for v7 shadow_entries logging — observation only, does not affect trading.",
         "enabled": true,
-        "breakpoints": [14, 20, 30],
-        "max_entries": [2, null, null, 1],
-        "put_stop_buffer": [1.25, null, null, null],
+        "breakpoints": [18.0, 22.0, 28.0],
+        "max_entries": [null, 2, 2, 1],
+        "put_stop_buffer": [null, null, null, null],
         "call_stop_buffer": [null, null, null, null],
-        "min_call_credit": [null, null, null, null],
-        "min_put_credit": [null, null, null, null]
+        "min_call_credit": [null, null, 0.75, 0.50],
+        "min_put_credit": [null, null, 1.25, 0.75],
+        "shadow_call_otm": [50.0, 65.0, 85.0, 120.0],
+        "shadow_put_otm": [50.0, 65.0, 85.0, 120.0]
     },
     "long_salvage": {
         "_comment": "MKT-025/033: short_only_stop=false closes both legs on stop (default). true enables short-only stop + long salvage.",

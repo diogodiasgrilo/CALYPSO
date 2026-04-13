@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS market_ticks (
@@ -186,6 +186,32 @@ CREATE TABLE IF NOT EXISTS entry_mae_mfe (
     PRIMARY KEY (date, entry_number, side)
 );
 
+CREATE TABLE IF NOT EXISTS shadow_entries (
+    date TEXT NOT NULL,
+    entry_number INTEGER NOT NULL,
+    entry_time TEXT,
+    spx_at_entry REAL,
+    vix_at_entry REAL,
+    vix_regime INTEGER,
+    shadow_call_otm_target REAL,
+    shadow_put_otm_target REAL,
+    shadow_short_call_strike REAL,
+    shadow_long_call_strike REAL,
+    shadow_short_put_strike REAL,
+    shadow_long_put_strike REAL,
+    shadow_spread_width REAL,
+    actual_short_call_strike REAL,
+    actual_short_put_strike REAL,
+    actual_otm_distance_call REAL,
+    actual_otm_distance_put REAL,
+    actual_call_credit REAL,
+    actual_put_credit REAL,
+    actual_entry_type TEXT,
+    is_skipped INTEGER DEFAULT 0,
+    skip_reason TEXT,
+    PRIMARY KEY (date, entry_number)
+);
+
 CREATE INDEX IF NOT EXISTS idx_ticks_date ON market_ticks(substr(timestamp, 1, 10));
 CREATE INDEX IF NOT EXISTS idx_ohlc_date ON market_ohlc_1min(substr(timestamp, 1, 10));
 CREATE INDEX IF NOT EXISTS idx_entries_date ON trade_entries(date);
@@ -340,6 +366,17 @@ class BacktestingDB:
                 except sqlite3.OperationalError:
                     pass  # Column already exists
             logger.info("DB migrated to schema v6 (bid/ask capture for calibration)")
+
+        if current < 7:
+            # v7: shadow_entries table for OTM-based selection counterfactual
+            # Created by CREATE_TABLES_SQL above, add index for date queries
+            try:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_shadow_date ON shadow_entries(date)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            logger.info("DB migrated to schema v7 (shadow_entries table)")
 
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode."""

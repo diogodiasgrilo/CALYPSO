@@ -216,7 +216,9 @@ class HydraStrategy(MEICStrategy):
     - Buffer Decay (MKT-042): Stop buffer starts at 2.10x, decays to 1x over 2.0 hours
     - Calm Entry (MKT-043): Delays entry up to 5min when SPX >15pt move in 3min
     - Anti-Whipsaw: Skips entries when intraday range > 1.75x expected move
-    - VIX Regime: Adapts entries/buffers based on VIX at open (breakpoints [14, 20, 30])
+    - VIX Regime: Adapts entries/credits based on VIX at open (breakpoints [18, 22, 28] — updated 2026-04-13)
+      VIX<18: 3 entries normal. VIX 18-22: drop E#1. VIX 22-28: drop E#1 + lower credits ($0.75/$1.25).
+      VIX>=28: E#3 only + lowest credits ($0.50/$0.75). Code drops EARLIEST entries (keeps best slot).
     - Down-Day Call-Only: E1-E3 convert to call-only when SPX drops >= 0.57% from open
     - FOMC T+1 (MKT-038): All entries forced call-only day after FOMC announcement
     - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms.
@@ -630,12 +632,15 @@ class HydraStrategy(MEICStrategy):
         # VIX regime: override parameters based on VIX at open
         _vix_regime = strategy_config.get("vix_regime", {})
         self.vix_regime_enabled = _vix_regime.get("enabled", False)
-        self.vix_regime_breakpoints = _vix_regime.get("breakpoints", [14.0, 20.0, 30.0])
+        self.vix_regime_breakpoints = _vix_regime.get("breakpoints", [18.0, 22.0, 28.0])
         self.vix_regime_max_entries = _vix_regime.get("max_entries", [None, None, None, None])
         self.vix_regime_put_stop_buffer = _vix_regime.get("put_stop_buffer", [None, None, None, None])
         self.vix_regime_call_stop_buffer = _vix_regime.get("call_stop_buffer", [None, None, None, None])
         self.vix_regime_min_call_credit = _vix_regime.get("min_call_credit", [None, None, None, None])
         self.vix_regime_min_put_credit = _vix_regime.get("min_put_credit", [None, None, None, None])
+        # v7: Shadow OTM targets per regime (observation only — does not affect trading)
+        self.shadow_call_otm_targets = _vix_regime.get("shadow_call_otm", self._DEFAULT_SHADOW_CALL_OTM)
+        self.shadow_put_otm_targets = _vix_regime.get("shadow_put_otm", self._DEFAULT_SHADOW_PUT_OTM)
         self._vix_regime_applied = False  # set True after first application
         if self.vix_regime_enabled:
             logger.info(
@@ -2873,6 +2878,14 @@ class HydraStrategy(MEICStrategy):
             except Exception:
                 pass
 
+            # Shadow logging (v7): record what OTM-based selection would have chosen
+            self._record_shadow_entry(
+                entry_num=entry_num,
+                actual_entry=None,
+                is_skipped=True,
+                skip_reason=skip_reason,
+            )
+
         if not send_alert:
             return
 
@@ -2958,6 +2971,123 @@ class HydraStrategy(MEICStrategy):
                 )
         except Exception as e:
             logger.debug(f"DataRecorder heartbeat failed: {e}")
+
+    # ========================================================================
+    # Shadow Logging (v7) — records what OTM-based selection WOULD have chosen
+    # Pure observation — does NOT affect trading behavior.
+    # ========================================================================
+
+    # Default OTM targets per VIX regime (same ordering as vix_regime_breakpoints)
+    # Based on live data: 80-100pt OTM had 7% stop rate at VIX 25-28
+    _DEFAULT_SHADOW_CALL_OTM = [50.0, 65.0, 85.0, 120.0]
+    _DEFAULT_SHADOW_PUT_OTM = [50.0, 65.0, 85.0, 120.0]
+
+    def _compute_shadow_otm_targets(self):
+        """Determine current VIX regime and return (call_otm, put_otm) targets.
+
+        Returns (None, None) if regime cannot be determined.
+        """
+        if not self.vix_regime_enabled or self.current_vix <= 0:
+            return None, None, None
+
+        vix = self.current_vix
+        regime = len(self.vix_regime_breakpoints)
+        for i, bp in enumerate(self.vix_regime_breakpoints):
+            if vix < bp:
+                regime = i
+                break
+
+        # Read from config if provided, else fall back to defaults
+        call_targets = getattr(self, 'shadow_call_otm_targets', self._DEFAULT_SHADOW_CALL_OTM)
+        put_targets = getattr(self, 'shadow_put_otm_targets', self._DEFAULT_SHADOW_PUT_OTM)
+
+        if regime >= len(call_targets) or regime >= len(put_targets):
+            return None, None, regime
+
+        return call_targets[regime], put_targets[regime], regime
+
+    def _record_shadow_entry(self, entry_num: int, actual_entry=None,
+                              is_skipped: bool = False, skip_reason: str = None):
+        """Write a shadow_entries row — what OTM-based selection would place.
+
+        Called alongside actual entry recording. Wrapped in try/except so
+        failures do NOT affect trading. Uses current SPX/VIX to compute
+        shadow strikes based on vix_regime bucket.
+        """
+        if not self._data_recorder:
+            return
+        try:
+            call_otm, put_otm, regime = self._compute_shadow_otm_targets()
+            if call_otm is None or put_otm is None:
+                return  # regime undetermined — skip logging
+
+            spx = self.current_price
+            if spx <= 0:
+                return
+
+            # Calculate shadow strikes — round to nearest 5pt (SPX option increment)
+            shadow_sc = round((spx + call_otm) / 5) * 5
+            shadow_sp = round((spx - put_otm) / 5) * 5
+
+            # Spread width: use current bot's VIX-adjusted width (MKT-027)
+            try:
+                call_spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
+                put_spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
+                spread_width = max(call_spread_width, put_spread_width)  # for logging
+            except Exception:
+                call_spread_width = 50.0
+                put_spread_width = 50.0
+                spread_width = 50.0
+
+            shadow_lc = shadow_sc + call_spread_width
+            shadow_lp = shadow_sp - put_spread_width
+
+            from shared.market_hours import get_us_market_time
+            now = get_us_market_time()
+
+            # Extract actual entry data if available
+            actual_data = {}
+            if actual_entry is not None:
+                actual_data = {
+                    "actual_short_call_strike": getattr(actual_entry, 'short_call_strike', None),
+                    "actual_short_put_strike": getattr(actual_entry, 'short_put_strike', None),
+                    "actual_otm_distance_call": (
+                        actual_entry.short_call_strike - spx
+                        if getattr(actual_entry, 'short_call_strike', 0) else None
+                    ),
+                    "actual_otm_distance_put": (
+                        spx - actual_entry.short_put_strike
+                        if getattr(actual_entry, 'short_put_strike', 0) else None
+                    ),
+                    "actual_call_credit": getattr(actual_entry, 'call_spread_credit', None),
+                    "actual_put_credit": getattr(actual_entry, 'put_spread_credit', None),
+                    "actual_entry_type": (
+                        "call_only" if getattr(actual_entry, 'call_only', False)
+                        else "put_only" if getattr(actual_entry, 'put_only', False)
+                        else "full_ic"
+                    ),
+                }
+
+            self._data_recorder.record_shadow_entry({
+                "date": now.strftime('%Y-%m-%d'),
+                "entry_number": entry_num,
+                "entry_time": now.strftime('%Y-%m-%d %H:%M:%S'),
+                "spx_at_entry": spx,
+                "vix_at_entry": self.current_vix,
+                "vix_regime": regime,
+                "shadow_call_otm_target": call_otm,
+                "shadow_put_otm_target": put_otm,
+                "shadow_short_call_strike": shadow_sc,
+                "shadow_long_call_strike": shadow_lc,
+                "shadow_short_put_strike": shadow_sp,
+                "shadow_long_put_strike": shadow_lp,
+                "shadow_spread_width": spread_width,
+                "is_skipped": 1 if is_skipped else 0,
+                "skip_reason": skip_reason,
+                **actual_data,
+            })
+        except Exception as e:
+            logger.debug(f"Shadow entry logging failed (non-critical): {e}")
 
     def _record_entry_to_db(self, entry):
         """Record entry data to SQLite with execution quality metrics.
@@ -3066,6 +3196,14 @@ class HydraStrategy(MEICStrategy):
 
             thread = threading.Thread(target=_fetch_and_update_greeks, daemon=True)
             thread.start()
+
+            # Shadow logging (v7): record what OTM-based selection would have chosen
+            self._record_shadow_entry(
+                entry_num=entry.entry_number,
+                actual_entry=entry,
+                is_skipped=False,
+                skip_reason=None,
+            )
 
         except Exception as e:
             logger.debug(f"DataRecorder entry write failed: {e}")
