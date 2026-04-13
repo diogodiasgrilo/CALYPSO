@@ -87,6 +87,9 @@ class BacktestConfig:
     contracts: int = 1
     stop_slippage_per_leg: float = 5.0      # $0.05/leg slippage on stop-loss market orders (based on Mar 31 live data)
     entry_slippage_per_leg: float = 0.0     # $/leg slippage on entry fills (conservative credit estimate for MKT-011 gate)
+    broker_spread_markup: float = 0.0       # $/leg markup for Saxo wider spreads vs ThetaData during monitoring
+                                             # Adds to short_ask, subtracts from long_bid when computing cost-to-close
+                                             # Simulates retail broker spread characteristics (Saxo > OPRA aggregate)
 
     # ── Data / cache ─────────────────────────────────────────────────────────
     cache_dir: str = "backtest/data/cache"

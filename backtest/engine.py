@@ -197,7 +197,8 @@ def _get_spread_open_credit(lookup: Dict, short_strike: float, long_strike: floa
 
 
 def _get_spread_close_cost(lookup: Dict, short_strike: float, long_strike: float,
-                            right: str, ms: int) -> float:
+                            right: str, ms: int,
+                            broker_spread_markup: float = 0.0) -> float:
     """
     Cost to close a spread (buying back short, selling long).
     Uses ask for short leg and bid for long leg — the realistic fill prices.
@@ -206,13 +207,21 @@ def _get_spread_close_cost(lookup: Dict, short_strike: float, long_strike: float
     When long_bid == 0 the long is worthless (far OTM, no market bid) but you
     still need to buy back the short.  Return short_ask * 100 so stop monitoring
     can fire normally.  Only return 0.0 when short_ask == 0 (no quote at all).
+
+    broker_spread_markup: dollars per leg to simulate Saxo's wider spreads vs
+    ThetaData's aggregated OPRA feeds. ADDED to short_ask (we pay more to buy
+    back), SUBTRACTED from long_bid (we receive less selling). Default 0.0
+    (no markup, pure ThetaData prices).
     """
     short_ask = _get_ask(lookup, short_strike, right, ms)
     if short_ask == 0:
         return 0.0
     long_bid = _get_bid(lookup, long_strike, right, ms)
+    # Apply broker markup: wider effective spread on both legs
+    short_ask_adj = short_ask + broker_spread_markup
+    long_bid_adj = max(0.0, long_bid - broker_spread_markup)
     # long_bid == 0 → long is worthless; close cost = just buying back the short
-    return max(0.0, (short_ask - long_bid) * 100)
+    return max(0.0, (short_ask_adj - long_bid_adj) * 100)
 
 
 def _nearest_ms(chain_df: pd.DataFrame, target_ms: int) -> int:
@@ -806,14 +815,14 @@ def _simulate_entry(
         if call_active and not call_stopped:
             if price_stop_pts is not None:
                 if spx_now > 0 and spx_now >= result.short_call - (price_stop_pts if price_stop_inward else -price_stop_pts):
-                    cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                    cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms, cfg.broker_spread_markup)
                     if cv > 0:
                         call_stopped = True
                         result.call_outcome = "stopped"
                         result.call_exit_ms = monitor_ms
                         result.call_close_cost = min(cv + slip, call_cap)
             else:
-                cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms, cfg.broker_spread_markup)
                 # ── Trailing stop: tighten call side when decay threshold reached
                 if _trailing_en and not _call_trail and cv > 0 and result.call_credit > 0:
                     if cv <= result.call_credit * _trailing_trig:
@@ -833,14 +842,14 @@ def _simulate_entry(
         if put_active and not put_stopped:
             if price_stop_pts is not None:
                 if spx_now > 0 and spx_now <= result.short_put + (price_stop_pts if price_stop_inward else -price_stop_pts):
-                    pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                    pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms, cfg.broker_spread_markup)
                     if pv > 0:
                         put_stopped = True
                         result.put_outcome = "stopped"
                         result.put_exit_ms = monitor_ms
                         result.put_close_cost = min(pv + slip, put_cap)
             else:
-                pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms, cfg.broker_spread_markup)
                 # ── Trailing stop: tighten put side when decay threshold reached
                 if _trailing_en and not _put_trail and pv > 0 and result.put_credit > 0:
                     if pv <= result.put_credit * _trailing_trig:
@@ -861,7 +870,7 @@ def _simulate_entry(
         if _cush_near is not None and _cush_recv is not None:
             # Call side
             if call_active and not call_stopped and result.call_stop > 0:
-                _cv_cush = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                _cv_cush = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms, cfg.broker_spread_markup)
                 if _cv_cush > 0:
                     _call_ratio = _cv_cush / result.call_stop
                     if _call_ratio >= _cush_near:
@@ -873,7 +882,7 @@ def _simulate_entry(
                         result.call_close_cost = _cv_cush + slip
             # Put side
             if put_active and not put_stopped and result.put_stop > 0:
-                _pv_cush = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                _pv_cush = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms, cfg.broker_spread_markup)
                 if _pv_cush > 0:
                     _put_ratio = _pv_cush / result.put_stop
                     if _put_ratio >= _cush_near:
@@ -890,10 +899,10 @@ def _simulate_entry(
             _mkt_close_ms = 16 * 3600 * 1000
             for _side, _credit, _stopped, _cv_func, _strike_s, _strike_l, _right in [
                 ("call", result.call_credit, call_stopped,
-                 lambda ms: _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", ms),
+                 lambda ms: _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", ms, cfg.broker_spread_markup),
                  result.short_call, result.long_call, "C"),
                 ("put", result.put_credit, put_stopped,
-                 lambda ms: _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", ms),
+                 lambda ms: _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", ms, cfg.broker_spread_markup),
                  result.short_put, result.long_put, "P"),
             ]:
                 _side_active = (_side == "call" and call_active) or (_side == "put" and put_active)
@@ -929,13 +938,13 @@ def _simulate_entry(
         # Early exit: close any remaining open sides at this bar
         if early_ms and monitor_ms >= early_ms:
             if call_active and not call_stopped:
-                cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms)
+                cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms, cfg.broker_spread_markup)
                 result.call_outcome = "early_exit"
                 result.call_exit_ms = monitor_ms
                 result.call_close_cost = cv  # 0.0 if quote missing (treated as worthless)
                 call_stopped = True
             if put_active and not put_stopped:
-                pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms)
+                pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms, cfg.broker_spread_markup)
                 result.put_outcome = "early_exit"
                 result.put_exit_ms = monitor_ms
                 result.put_close_cost = pv
@@ -1087,7 +1096,7 @@ def _apply_return_threshold(
                 else:
                     # Still open (outcome may be "expired" — that's at 4 PM, not yet)
                     cv = _get_spread_close_cost(
-                        lookup, e.short_call, e.long_call, "C", bar_ms
+                        lookup, e.short_call, e.long_call, "C", bar_ms, cfg.broker_spread_markup
                     )
                     gross += e.call_credit - cv
                     hyp_close_legs += 2
@@ -1103,7 +1112,7 @@ def _apply_return_threshold(
                     hyp_close_legs += 2
                 else:
                     pv = _get_spread_close_cost(
-                        lookup, e.short_put, e.long_put, "P", bar_ms
+                        lookup, e.short_put, e.long_put, "P", bar_ms, cfg.broker_spread_markup
                     )
                     gross += e.put_credit - pv
                     hyp_close_legs += 2
@@ -1180,7 +1189,7 @@ def _apply_return_threshold(
                 legs_closed += 2
             else:
                 cv = _get_spread_close_cost(
-                    lookup, e.short_call, e.long_call, "C", exit_ms
+                    lookup, e.short_call, e.long_call, "C", exit_ms, cfg.broker_spread_markup
                 )
                 e.call_outcome    = "early_exit"
                 e.call_exit_ms    = exit_ms
@@ -1199,7 +1208,7 @@ def _apply_return_threshold(
                 legs_closed += 2
             else:
                 pv = _get_spread_close_cost(
-                    lookup, e.short_put, e.long_put, "P", exit_ms
+                    lookup, e.short_put, e.long_put, "P", exit_ms, cfg.broker_spread_markup
                 )
                 e.put_outcome    = "early_exit"
                 e.put_exit_ms    = exit_ms
@@ -1316,7 +1325,7 @@ def _apply_range_exit(
                 legs_closed += 2
             else:
                 cv = _get_spread_close_cost(
-                    lookup, e.short_call, e.long_call, "C", exit_ms
+                    lookup, e.short_call, e.long_call, "C", exit_ms, cfg.broker_spread_markup
                 )
                 e.call_outcome    = "early_exit"
                 e.call_exit_ms    = exit_ms
@@ -1335,7 +1344,7 @@ def _apply_range_exit(
                 legs_closed += 2
             else:
                 pv = _get_spread_close_cost(
-                    lookup, e.short_put, e.long_put, "P", exit_ms
+                    lookup, e.short_put, e.long_put, "P", exit_ms, cfg.broker_spread_markup
                 )
                 e.put_outcome    = "early_exit"
                 e.put_exit_ms    = exit_ms
