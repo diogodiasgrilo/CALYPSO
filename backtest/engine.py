@@ -156,19 +156,43 @@ def _get_ask(lookup: Dict, strike: float, right: str, ms: int) -> float:
     return ask
 
 
+def _strike_exists(lookup: Dict, strike: float, right: str, ms: int) -> bool:
+    """Check if a strike actually has a quote entry in the chain (not just missing)."""
+    return (strike, right, ms) in lookup
+
+
 def _get_spread_open_credit(lookup: Dict, short_strike: float, long_strike: float,
                              right: str, ms: int) -> float:
     """
     Credit received when opening a spread (selling short, buying long).
     Uses bid for short leg and ask for long leg — the realistic fill prices.
     Returns dollars (× 100 multiplier).
-    Long ask of 0 is allowed (deep OTM long is essentially free).
+
+    Data quality gates:
+    - Short leg must have a bid > 0 (otherwise no credit possible)
+    - Long leg MUST exist in the chain (missing strike ≠ "free long")
+      This prevents ThetaData gappy-strike bug where LC assumed cost $0.
+    - Short leg bid-ask spread must be reasonable (tight spread = real market)
     """
-    short_bid = _get_bid(lookup, short_strike, right, ms)
+    # Short leg validation
+    if not _strike_exists(lookup, short_strike, right, ms):
+        return 0.0
+    short_val = lookup[(short_strike, right, ms)]
+    short_bid, short_ask, _ = short_val
     if short_bid == 0:
         return 0.0  # no bid on short → can't collect credit
+
+    # Phantom bid guard: if bid-ask spread is suspiciously wide relative to bid,
+    # the quote is unreliable. Reject if spread > bid (100% relative spread)
+    if short_ask > 0 and (short_ask - short_bid) > short_bid:
+        return 0.0
+
+    # Long leg validation: strike MUST exist in chain
+    # (Prevents "gappy strike" bug where missing strike = free long)
+    if not _strike_exists(lookup, long_strike, right, ms):
+        return 0.0
     long_ask = _get_ask(lookup, long_strike, right, ms)
-    # long_ask == 0 is fine: deep OTM long costs nothing
+
     return max(0.0, (short_bid - long_ask) * 100)
 
 
@@ -536,12 +560,19 @@ def _simulate_entry(
 
     if force_put_only:
         # Forced put-only (upday conditional) — only scan put side
+        # Primary: try min_put_credit first; fallback: MKT-029 floor
         put_starting_otm_original = put_starting_otm
         put_short, put_long, put_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "put", put_spread_width,
             put_starting_otm, eff_min_put,
-            cfg.put_credit_floor * 100, actual_ms, cfg
+            cfg.min_put_credit * 100, actual_ms, cfg
         )
+        if put_short is None and cfg.put_credit_floor > 0:
+            put_short, put_long, put_credit = _scan_for_viable_strike(
+                lookup, spx_rounded, "put", put_spread_width,
+                put_starting_otm_original, eff_min_put,
+                cfg.put_credit_floor * 100, actual_ms, cfg
+            )
 
     elif not force_call_only:
         # Scan for viable call strike
@@ -598,11 +629,18 @@ def _simulate_entry(
 
     elif force_call_only:
         # Forced call-only — only scan call side
+        # Primary: try min_call_credit first; fallback: MKT-029 floor
         call_short, call_long, call_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "call", call_spread_width,
             call_starting_otm, eff_min_call,
-            cfg.call_credit_floor * 100, actual_ms, cfg
+            cfg.min_call_credit * 100, actual_ms, cfg
         )
+        if call_short is None and cfg.call_credit_floor > 0:
+            call_short, call_long, call_credit = _scan_for_viable_strike(
+                lookup, spx_rounded, "call", call_spread_width,
+                call_starting_otm, eff_min_call,
+                cfg.call_credit_floor * 100, actual_ms, cfg
+            )
 
     # ── Determine entry type based on what's viable ───────────────────────
     if force_put_only:
