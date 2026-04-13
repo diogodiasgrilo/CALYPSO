@@ -297,11 +297,15 @@ def _scan_for_viable_strike(
     min_otm: int,
     min_credit: float,   # in dollars
     ms: int,
+    cfg: BacktestConfig = None,
 ) -> Tuple[Optional[float], Optional[float], float]:
     """
     MKT-020/022: Progressive OTM tightening.
     Scan from starting_otm inward in 5pt steps until credit >= min_credit.
     Returns (short_strike, long_strike, credit_dollars) or (None, None, 0).
+
+    With entry_slippage_per_leg: apply conservative slippage to credit before viability check,
+    but return original credit for P&L calculation.
     """
     right = "C" if side == "call" else "P"
     otm = starting_otm
@@ -314,8 +318,13 @@ def _scan_for_viable_strike(
             long_s = short_s - spread_width
 
         credit = _get_spread_open_credit(lookup, short_s, long_s, right, ms)
-        if credit >= min_credit:
-            return short_s, long_s, credit
+
+        # Apply entry slippage adjustment for viability check only
+        slip_adj = (getattr(cfg, "entry_slippage_per_leg", 0.0) * 2) if cfg else 0.0
+        credit_adj = max(0.0, credit - slip_adj)
+
+        if credit_adj >= min_credit:
+            return short_s, long_s, credit  # Return ORIGINAL credit for P&L
         otm -= 5
 
     return None, None, 0.0
@@ -438,11 +447,11 @@ def _simulate_entry(
             rise_pct = 0.0
 
         # ── Decide which trigger fires (down-day takes priority) ──────────
-        if is_conditional and drop_pct >= cfg.downday_threshold_pct:
+        if is_conditional and drop_pct >= cfg.downday_threshold_pct * 100:
             force_call_only = True
             result.entry_type = "call_only"
             result.skip_reason = "mkt-035"
-        elif is_upday_conditional and rise_pct >= getattr(cfg, "upday_threshold_pct", 0.3):
+        elif is_upday_conditional and rise_pct >= getattr(cfg, "upday_threshold_pct", 0.0025) * 100:
             force_put_only = True
             result.entry_type = "put_only"
             result.skip_reason = "upday-035"
@@ -531,7 +540,7 @@ def _simulate_entry(
         put_short, put_long, put_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "put", put_spread_width,
             put_starting_otm, eff_min_put,
-            cfg.put_credit_floor * 100, actual_ms
+            cfg.put_credit_floor * 100, actual_ms, cfg
         )
 
     elif not force_call_only:
@@ -539,7 +548,7 @@ def _simulate_entry(
         call_short, call_long, call_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "call", call_spread_width,
             call_starting_otm, eff_min_call,
-            cfg.min_call_credit * 100, actual_ms
+            cfg.min_call_credit * 100, actual_ms, cfg
         )
         # Call tightening retries (mirror of MKT-040 for put side)
         if call_short is None and getattr(cfg, 'call_tighten_retries', 0) > 0:
@@ -549,7 +558,7 @@ def _simulate_entry(
                 call_short, call_long, call_credit = _scan_for_viable_strike(
                     lookup, spx_rounded, "call", call_spread_width,
                     call_starting_otm_retry, eff_min_call,
-                    cfg.min_call_credit * 100, actual_ms
+                    cfg.min_call_credit * 100, actual_ms, cfg
                 )
                 if call_short is not None:
                     break
@@ -558,7 +567,7 @@ def _simulate_entry(
             call_short, call_long, call_credit = _scan_for_viable_strike(
                 lookup, spx_rounded, "call", call_spread_width,
                 call_starting_otm, eff_min_call,
-                cfg.call_credit_floor * 100, actual_ms
+                cfg.call_credit_floor * 100, actual_ms, cfg
             )
 
         # Scan for viable put strike
@@ -566,7 +575,7 @@ def _simulate_entry(
         put_short, put_long, put_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "put", put_spread_width,
             put_starting_otm, eff_min_put,
-            cfg.min_put_credit * 100, actual_ms
+            cfg.min_put_credit * 100, actual_ms, cfg
         )
         # MKT-040: put non-viable → tighten retries (5pt closer each time) before calling it call-only
         if put_short is None:
@@ -575,7 +584,7 @@ def _simulate_entry(
                 put_short, put_long, put_credit = _scan_for_viable_strike(
                     lookup, spx_rounded, "put", put_spread_width,
                     put_starting_otm, eff_min_put,
-                    cfg.min_put_credit * 100, actual_ms
+                    cfg.min_put_credit * 100, actual_ms, cfg
                 )
                 if put_short is not None:
                     break
@@ -584,7 +593,7 @@ def _simulate_entry(
             put_short, put_long, put_credit = _scan_for_viable_strike(
                 lookup, spx_rounded, "put", put_spread_width,
                 put_starting_otm_original, eff_min_put,
-                cfg.put_credit_floor * 100, actual_ms
+                cfg.put_credit_floor * 100, actual_ms, cfg
             )
 
     elif force_call_only:
@@ -592,7 +601,7 @@ def _simulate_entry(
         call_short, call_long, call_credit = _scan_for_viable_strike(
             lookup, spx_rounded, "call", call_spread_width,
             call_starting_otm, eff_min_call,
-            cfg.call_credit_floor * 100, actual_ms
+            cfg.call_credit_floor * 100, actual_ms, cfg
         )
 
     # ── Determine entry type based on what's viable ───────────────────────

@@ -86,6 +86,7 @@ class BacktestConfig:
     commission_per_leg: float = 2.50        # $ per leg (Saxo) — $2.50 to open, $2.50 to close; expires worthless = $2.50 only
     contracts: int = 1
     stop_slippage_per_leg: float = 5.0      # $0.05/leg slippage on stop-loss market orders (based on Mar 31 live data)
+    entry_slippage_per_leg: float = 0.0     # $/leg slippage on entry fills (conservative credit estimate for MKT-011 gate)
 
     # ── Data / cache ─────────────────────────────────────────────────────────
     cache_dir: str = "backtest/data/cache"
@@ -351,21 +352,24 @@ class BacktestConfig:
 # ── Preset configs ────────────────────────────────────────────────────────────
 
 def live_config() -> BacktestConfig:
-    """HYDRA optimized parameters (converged 2026-03-29, 1-min data, Sharpe 2.684 live realistic).
+    """HYDRA optimized parameters (converged 2026-04-13, 1-min data, Sharpe 2.684 live realistic).
 
-    Confirmed optimal values (2026-03-28/31 final sweep — 1-min data, Greek calculation verified, 938 days):
+    Configuration synced with VM as of 2026-04-13. Key parameters:
       - entry_times: 3 entries at 30min [10:15, 10:45, 11:15]  (Sharpe 2.371 on 1-min, peak margin $30K, zero breach)
       - conditional_upday_e6_enabled: True  (E6 at 14:00 put-only: Sharpe 2.003 vs 1.988 OFF)
       - conditional_e7_enabled: False  (E7 down-day call-only disabled: E7+E6 hurt Sharpe by -0.066)
       - spread_vix_multiplier: 6.0  (reconvergence round final, Sharpe 2.360)
-      - call_stop_buffer: 35.0  ($0.35 × 100, convergence round 4, +0.056 Sharpe vs $0.26)
-      - put_stop_buffer: 155.0  ($1.55 × 100, 1-min confirmed, prevents 91% false stops)
+      - call_stop_buffer: 75.0  ($0.75 × 100, updated 2026-04-13 to match VM config)
+      - put_stop_buffer: 175.0  ($1.75 × 100, updated 2026-04-13 to match VM config)
+      - buffer_decay: 2.5× starting multiplier, decays to 1× over 4 hours (enabled 2026-04-13)
+      - calm_entry: 3min lookback, 15pt threshold, 5min max delay (enabled 2026-04-13)
+      - vix_regime: Breakpoints [14, 20, 30] with max_entries [2, null, null, 1] (enabled 2026-04-13)
       - min_call_credit: 2.00  (re-swept with VIX regime, +$7,696 P&L vs $1.35)
       - min_put_credit: 2.75  (re-swept with VIX regime, MaxDD $6,115, Win 52.9%)
       - call_credit_floor: 0.75  (1-min edge sweep, Sharpe 1.988)
       - put_credit_floor: 2.00  (reconvergence round final, Sharpe 2.360)
       - base_entry_downday_callonly_pct: 0.57  (0.57% decline from open, 1-min fine-grain, Sharpe 2.371)
-      - downday_threshold_pct: 0.003  (0.3% rise from open for downday detection)
+      - downday_threshold_pct: 0.003  (0.3% drop from open for downday detection)
       - upday_threshold_pct: 0.0025  (0.25% rise from open for E6 upday trigger)
       - put_only_max_vix: 15.0  (1-min retest, Sharpe 2.042 vs 25.0 old baseline)
       - whipsaw_range_skip_mult: 1.75  (reconvergence round final, Sharpe 2.360)
@@ -390,8 +394,8 @@ def live_config() -> BacktestConfig:
         min_put_credit=2.75,                  # re-swept with VIX regime: best MaxDD $6,115, Win 52.9%
         call_credit_floor=0.75,               # 1-min edge sweep optimal 2026-03-28 (was $0.85, Sharpe 1.988)
         put_credit_floor=2.00,                # reconvergence 2026-03-31 (was $2.07, Sharpe 2.360)
-        call_stop_buffer=35.0,                # $0.35 × 100, convergence round 4 (was $0.26, +0.056 Sharpe)
-        put_stop_buffer=155.0,                # $1.55 × 100, 1-min confirmed 2026-03-28
+        call_stop_buffer=75.0,                # $0.75 × 100, updated 2026-04-13 to match VM config (was 35.0/$0.35)
+        put_stop_buffer=175.0,                # $1.75 × 100, updated 2026-04-13 to match VM config (was 155.0/$1.55)
         one_sided_entries_enabled=True,
         put_only_max_vix=15.0,                # 1-min retest optimal 2026-03-28 (was 25.0, Sharpe 2.042)
         price_based_stop_points=None,         # credit-based stop (confirmed on 1-min)
@@ -399,6 +403,14 @@ def live_config() -> BacktestConfig:
         base_entry_downday_callonly_pct=0.57, # 1-min fine-grain optimal 2026-03-29 (was 0.60%, Sharpe 2.371)
         fomc_announcement_skip=False,       # 1-min test: skip costs -$5,855 P&L, -0.096 Sharpe (2026-03-29)
         whipsaw_range_skip_mult=1.75,       # reconvergence 2026-03-31 (was 1.50, Sharpe 2.360)
+        buffer_decay_start_mult=2.5,        # updated 2026-04-13: start at 2.5× normal buffer, decay over 4h
+        buffer_decay_hours=4.0,             # updated 2026-04-13: reach normal buffer after 4 hours
+        calm_entry_lookback_min=3,          # updated 2026-04-13: check last 3 minutes for large moves
+        calm_entry_threshold_pts=15.0,      # updated 2026-04-13: 15pt threshold for SPX movement
+        calm_entry_max_delay_min=5,         # updated 2026-04-13: max 5min delay before entering anyway
+        vix_regime_enabled=True,            # updated 2026-04-13: enable VIX regime caps on entry count
+        vix_regime_breakpoints=[14.0, 20.0, 30.0],  # updated 2026-04-13: VIX regime breakpoints
+        vix_regime_max_entries=[2, None, None, 1],  # updated 2026-04-13: max entries [VIX<14, 14-20, 20-30, >=30]
     )
 
 
