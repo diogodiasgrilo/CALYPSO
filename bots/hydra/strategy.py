@@ -3197,16 +3197,19 @@ class HydraStrategy(MEICStrategy):
             thread = threading.Thread(target=_fetch_and_update_greeks, daemon=True)
             thread.start()
 
-            # Shadow logging (v7): record what OTM-based selection would have chosen
-            self._record_shadow_entry(
-                entry_num=entry.entry_number,
-                actual_entry=entry,
-                is_skipped=False,
-                skip_reason=None,
-            )
-
         except Exception as e:
             logger.debug(f"DataRecorder entry write failed: {e}")
+
+        # Shadow logging (v7): record what OTM-based selection would have chosen.
+        # MUST be OUTSIDE the outer try/except above — if record_entry() or the Greeks
+        # thread spawn fails, we still want the shadow entry recorded. _record_shadow_entry
+        # has its own try/except for safety.
+        self._record_shadow_entry(
+            entry_num=entry.entry_number,
+            actual_entry=entry,
+            is_skipped=False,
+            skip_reason=None,
+        )
 
     def _record_stop_to_db(self, entry, side: str, stop_level: float,
                            actual_close_cost: float):
