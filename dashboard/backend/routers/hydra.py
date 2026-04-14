@@ -24,7 +24,13 @@ db_reader = BacktestingDBReader(settings.backtesting_db)
 
 @router.get("/bot-config")
 async def get_bot_config():
-    """Read E6/E7 enabled flags from bot config file."""
+    """Read E6/E7 enabled flags + canonical entry schedule from bot config file.
+
+    `entry_times` / `conditional_entry_times` are the canonical (pre-VIX-cap)
+    slot schedule — the dashboard uses these to label entries with stable
+    canonical numbers (E1=first base slot, E2=second, …) even when the VIX
+    regime cap drops early entries at runtime.
+    """
     config_path = settings.calypso_root / "bots/hydra/config/config.json"
     try:
         with open(config_path) as f:
@@ -37,6 +43,8 @@ async def get_bot_config():
             "conditional_upday_e7_enabled": strategy.get("conditional_upday_e7_enabled", False),
             "downday_threshold_pct": strategy.get("downday_threshold_pct", 0.003),
             "upday_threshold_pct": strategy.get("upday_threshold_pct", 0.0025),
+            "entry_times": strategy.get("entry_times", []),
+            "conditional_entry_times": strategy.get("conditional_entry_times", []),
         }
     except Exception as e:
         logger.warning(f"Could not read bot config ({config_path}): {e}")
@@ -47,6 +55,8 @@ async def get_bot_config():
             "conditional_upday_e7_enabled": False,
             "downday_threshold_pct": 0.003,
             "upday_threshold_pct": 0.0025,
+            "entry_times": [],
+            "conditional_entry_times": [],
         }
 
 

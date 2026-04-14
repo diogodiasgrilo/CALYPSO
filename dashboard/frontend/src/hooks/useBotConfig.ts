@@ -9,6 +9,10 @@ interface BotConfig {
   conditional_upday_e7_enabled: boolean;
   downday_threshold_pct: number;
   upday_threshold_pct: number;
+  /** Canonical base entry times (pre-VIX-cap). E1 = entry_times[0], E2 = entry_times[1], … */
+  entry_times: string[];
+  /** Canonical conditional entry times. E{entry_times.length + 1 + i}. */
+  conditional_entry_times: string[];
 }
 
 const DEFAULT_CONFIG: BotConfig = {
@@ -18,6 +22,8 @@ const DEFAULT_CONFIG: BotConfig = {
   conditional_upday_e7_enabled: false,
   downday_threshold_pct: 0.003,
   upday_threshold_pct: 0.0025,
+  entry_times: [],
+  conditional_entry_times: [],
 };
 
 let _cachedConfig: BotConfig | null = null;

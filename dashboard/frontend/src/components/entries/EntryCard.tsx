@@ -10,6 +10,9 @@ interface EntryCardProps {
   entry: HydraEntry;
   /** Conditional entries (E6/E7) get distinct visual styling */
   isConditional?: boolean;
+  /** Override the "E{n}" label (e.g. canonical slot number when VIX regime
+   * renumbers entries at runtime). Falls back to `entry.entry_number` when omitted. */
+  label?: string;
 }
 
 function getEntryStatus(e: HydraEntry): {
@@ -109,9 +112,10 @@ function computeEntryPnl(e: HydraEntry) {
   return { currentPnl, maxProfit };
 }
 
-export function EntryCard({ entry, isConditional }: EntryCardProps) {
+export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
   const { status, stoppedSide } = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
+  const displayLabel = label ?? `E${entry.entry_number}`;
 
   // Fully-skipped entry: minimal card with reason (guard handles legacy data without skip_reason)
   if (status === "skipped") {
@@ -129,7 +133,7 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
       >
         <div className="flex items-center justify-between mb-2">
           <span className="text-text-dim font-semibold text-sm">
-            E{entry.entry_number}
+            {displayLabel}
           </span>
           <StatusBadge status="skipped" />
         </div>
@@ -208,7 +212,7 @@ export function EntryCard({ entry, isConditional }: EntryCardProps) {
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <span className="text-text-primary font-semibold text-sm">
-            E{entry.entry_number}
+            {displayLabel}
           </span>
           {trendLabel && (
             <span className="text-[10px] px-1 py-0.5 rounded bg-bg-elevated text-text-secondary">
