@@ -52,7 +52,7 @@ For each section, FIRST quote the relevant numbers from the data, THEN interpret
 ### Part 3: Strategy Recommendations
 - Each recommendation MUST cite specific data points from this week
 - Include confidence level (LOW/MEDIUM/HIGH) with reasoning
-- Expected impact must be quantified from available data (e.g., "would have saved ~$X based on this week's entry #5 data")
+- Expected impact must be quantified from available data (e.g., "would have saved ~$X based on this week's entry #3 data")
 - If you cannot support a recommendation with data, do NOT include it
 
 ### Part 4: New Learnings for Strategy Memory

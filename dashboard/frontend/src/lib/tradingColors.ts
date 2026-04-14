@@ -32,11 +32,11 @@ export function pnlColor(value: number): string {
   return colors.textSecondary;
 }
 
-/** VIX level color coding. */
+/** VIX level color coding. Aligns with HYDRA VIX regime breakpoints [18, 22, 28]. */
 export function vixColor(vix: number): string {
-  if (vix < 15) return colors.profit;
-  if (vix < 20) return colors.warning;
-  if (vix < 25) return "#f0883e"; // orange
+  if (vix < 18) return colors.profit;
+  if (vix < 22) return colors.warning;
+  if (vix < 28) return "#f0883e"; // orange
   return colors.loss;
 }
 

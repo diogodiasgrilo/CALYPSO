@@ -1006,26 +1006,31 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `enabled` | `true` | Enable/disable whipsaw filter |
 | `threshold` | `1.75` | Skip entry when intraday range > 1.75× expected move |
 
-### VIX Regime (`config.vix_regime`, v1.20.0)
+### VIX Regime (`config.vix_regime`, v1.20.0 → breakpoints updated 2026-04-13)
 
 VIX regime uses a 4-zone breakpoint system. Arrays are per-zone; `null` means use the default value.
+
+Breakpoints were updated from `[14, 20, 30]` to `[18.0, 22.0, 28.0]` on 2026-04-13 after
+per-entry analysis of 37 days revealed Entry #1 (10:15) underperforms at all VIX ≥ 18
+(24% WR, -$79/entry). The cap code now drops the EARLIEST entries (preserves best-performing
+E#3 at 11:15) — see `strategy.py` near line 7721.
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | Enable/disable VIX regime adjustments |
-| `breakpoints` | `[14, 20, 30]` | VIX zone boundaries (creates 4 zones) |
-| `max_entries` | `[2, null, null, 1]` | Max entries per zone (null = use default 3) |
-| `put_stop_buffer` | `[1.25, null, null, null]` | Put buffer override per zone (null = use default $1.55) |
+| `breakpoints` | `[18.0, 22.0, 28.0]` | VIX zone boundaries (creates 4 zones) |
+| `max_entries` | `[null, 2, 2, 1]` | Max entries per zone (null = use default 3) |
+| `put_stop_buffer` | `[null, null, null, null]` | Put buffer override per zone (null = use default $1.55) |
 | `call_stop_buffer` | `[null, null, null, null]` | Call buffer override per zone (null = use default $0.35) |
-| `min_call_credit` | `[null, null, null, null]` | Call credit gate override per zone |
-| `min_put_credit` | `[null, null, null, null]` | Put credit gate override per zone |
+| `min_call_credit` | `[null, null, 0.75, 0.50]` | Call credit gate override per zone |
+| `min_put_credit` | `[null, null, 1.25, 0.75]` | Put credit gate override per zone |
 
-| Zone | VIX Range | Max Entries | Put Buffer |
-|------|-----------|-------------|------------|
-| 0 | < 14 | 2 | $1.25 |
-| 1 | 14-20 | 3 (default) | $1.55 (default) |
-| 2 | 20-30 | 3 (default) | $1.55 (default) |
-| 3 | >= 30 | 1 | $1.55 (default) |
+| Zone | VIX Range | Max Entries | Credit Thresholds (call / put) | Intent |
+|------|-----------|-------------|--------------------------------|--------|
+| 0 | < 18    | 3 (default) | defaults ($2.00 / $2.75)       | Calm market — all 3 base entries |
+| 1 | 18-22   | 2           | defaults ($2.00 / $2.75)       | Drop E#1 (auto-skip earliest) |
+| 2 | 22-28   | 2           | $0.75 / $1.25                  | Drop E#1 + lower credits force 60-90pt OTM |
+| 3 | >= 28   | 1           | $0.50 / $0.75                  | E#3 only + lowest credits force 80-100pt OTM |
 
 ### Skip Weekdays (`config.skip_weekdays`)
 
@@ -1045,6 +1050,43 @@ VIX regime uses a 4-zone breakpoint system. Arrays are per-zone; `null` means us
 |-----|---------|-------------|
 | `fomc_blackout` | `true` | Skip trading on FOMC announcement days |
 | `fomc_announcement_skip` | `false` | MKT-008: Skip all entries on FOMC announcement day. **Changed to `false` in v1.19.0** — backtest showed FOMC days are profitable |
+
+---
+
+## Backtesting Database (`data/backtesting.db`)
+
+SQLite database populated live by HYDRA's `DataRecorder` and backfilled by HOMER.
+Current schema version: **v7** (2026-04-13).
+
+| Table | Content |
+|-------|---------|
+| `market_ticks` | Heartbeat snapshots (~11s intervals: SPX, VIX, trend, state) |
+| `market_ohlc_1min` | 1-min OHLC bars computed from ticks |
+| `trade_entries` | Iron condor entries (strikes, credits, signals, OTM distances, Greeks, bid-ask width, slippage, margin) |
+| `trade_stops` | Stop loss events (debit, P&L, trigger level, quoted mid, slippage, salvage) |
+| `daily_summaries` | End-of-day totals (SPX OHLC, VIX, P&L, entry/stop counts) |
+| `spread_snapshots` | Per-entry cost-to-close every ~10s during monitoring; v5 adds individual leg mid prices; v6 adds Saxo bid/ask per leg for ThetaData-vs-Saxo calibration |
+| `skipped_entries` | Counterfactual tracking of entries rejected by MKT-011 (theoretical strikes + credit) |
+| `entry_mae_mfe` | Max Adverse / Max Favorable Excursion per entry side |
+| `shadow_entries` | **v7**: Shadow strikes that OTM-based selection WOULD have placed, recorded alongside actual credit-based entries. Observation only, zero trading behavior change. Used to compare credit-based vs OTM-based selection after sufficient data accumulates. |
+| `schema_info` | Schema version tracking for migrations |
+
+### Schema v7 — Shadow Entry Logging
+
+For each actual entry (and each skipped entry), HYDRA also records what strikes an
+OTM-based selection strategy would have chosen for the same entry slot. Shadow
+strikes use per-VIX-regime OTM targets (`shadow_call_otm_targets`,
+`shadow_put_otm_targets` config keys) rather than scanning for credit. This is
+pure observation — no order placement, no config coupling.
+
+`shadow_entries` rows include: shadow strikes (short_call / long_call / short_put / long_put),
+VIX regime bucket, SPX/VIX at entry, spread width, and the ACTUAL entry's strikes/credits
+for side-by-side comparison. After 2-4 weeks of data, analyzable via `scripts/pot_strike_recommender.py`
+or direct SQLite queries.
+
+Fix 2026-04-14: `_record_shadow_entry()` is called OUTSIDE the main `_record_entry_to_db()`
+try/except so that a failure in the primary DB write, Greeks thread spawn, or bid-ask
+quote fetch does not silently drop the shadow entry.
 
 ---
 

@@ -381,6 +381,7 @@ bots/hydra/
 
 ## Version History
 
+- **1.23.0** (2026-04-13): VIX regime reconvergence + Schema v7 shadow entry logging. Breakpoints updated `[14, 20, 30]` → `[18.0, 22.0, 28.0]` after per-entry analysis showed Entry #1 (10:15) underperforms at all VIX ≥ 18 (24% WR, -$79/entry). `max_entries` reshaped `[2, null, null, 1]` → `[null, 2, 2, 1]` (drops E#1 at VIX ≥ 18). Per-regime credit thresholds added at VIX ≥ 22 ($0.75 call / $1.25 put at zone 2, $0.50 / $0.75 at zone 3) to force strikes 60-100pt OTM. Code fix near `strategy.py:7721` — VIX regime cap now drops EARLIEST entries (preserves best-performing E#3 at 11:15), previously dropped latest. New `shadow_entries` SQLite table records what OTM-based strike selection WOULD have chosen alongside actual credit-based selection (observation only). Fix 2026-04-14: `_record_shadow_entry()` moved outside main DB-write try/except so shadow data survives upstream failures. Config-audit library + backtest-vs-live calibration scripts added under `scripts/`.
 - **1.22.1** (2026-04-02): MKT-042 buffer decay optimal: 2.10× start, 2h decay. Docs audit for MKT-041/042/043.
 - **1.22.0** (2026-04-02): MKT-042 Buffer Decay + MKT-043 Calm Entry. Buffer decay: starts at 2.10× normal buffer, linearly decays to 1× over 2h. Calm entry: delays entry up to 5min when SPX moved >15pt in 3min.
 - **1.21.0** (2026-03-31): MKT-041 Cushion Recovery Exit (DISABLED — buffer+cushion interfere). Backtest infrastructure for sweep analysis.
