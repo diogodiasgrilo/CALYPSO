@@ -52,9 +52,9 @@
         "min_delta": 5,
         "max_delta": 15,
 
-        "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses call_stop_buffer ($0.35). Put uses put_stop_buffer ($1.55). If put_stop_buffer not set, falls back to call_stop_buffer for both sides. Only used when price_based_stop_points is null.",
-        "call_stop_buffer": 0.35,
-        "put_stop_buffer": 1.55,
+        "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses call_stop_buffer ($0.75). Put uses put_stop_buffer ($1.75). If put_stop_buffer not set, falls back to call_stop_buffer for both sides. Only used when price_based_stop_points is null. MKT-046 (10s anti-spike filter) applies when MKT-036 is disabled.",
+        "call_stop_buffer": 0.75,
+        "put_stop_buffer": 1.75,
 
         "_comment_price_stop": "Price-based stop (replaces credit-based stop when set). Triggers when SPX reaches within N pts of the short strike: call side stops when SPX >= short_call - N, put side stops when SPX <= short_put + N. Applies to ALL entry types (full IC, call-only, put-only). Walk-forward backtest: 0.1pt gives Sharpe 2.098 vs credit-based 2.075, slippage-robust. Set to null to use credit-based stop.",
         "price_based_stop_points": null,
@@ -86,8 +86,8 @@
         "cushion_recovery_pct": null,
 
         "_comment_buffer_decay": "MKT-042: Time-decaying stop buffer. Starts at start_mult × normal buffer, linearly decays to 1× over decay_hours. Wider stops early (premium rich), normal later. Set start_mult to 1.0 or null to disable.",
-        "buffer_decay_start_mult": 2.10,
-        "buffer_decay_hours": 2.0,
+        "buffer_decay_start_mult": 2.50,
+        "buffer_decay_hours": 4.0,
 
         "_comment_calm_entry": "MKT-043: Calm entry filter. Delays entry up to max_delay_min when SPX moved > threshold_pts in last lookback_min minutes. Prevents entering during sharp spikes. Set threshold_pts to null to disable.",
         "calm_entry_lookback_min": 3,

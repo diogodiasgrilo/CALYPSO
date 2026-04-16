@@ -82,7 +82,7 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 - Call-only (MKT-035/038/040): `call_credit + $2.60 theoretical_put + call_stop_buffer`
 - Put-only (MKT-039, E6): `put_credit + put_stop_buffer`
 
-**Buffer decay (MKT-042):** Applied to above formulas. Effective buffer starts at 2.5× normal at entry, linearly decays to 1× over 4 hours.
+**Buffer decay (MKT-042):** Applied to above formulas. Effective buffer starts at 2.50× normal at entry, linearly decays to 1× over 4 hours.
 
 **Close mode:** Both legs closed via market order (default). Configurable `short_only_stop` for MKT-025 short-only close + MKT-033 long salvage.
 

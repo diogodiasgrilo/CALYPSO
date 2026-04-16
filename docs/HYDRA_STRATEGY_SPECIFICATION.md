@@ -57,7 +57,7 @@ Key MKT rules include: pre-entry credit validation, progressive OTM tightening, 
 | Philosophy | Always market-neutral | Always full IC + EMA signal (informational) |
 | Entry type | Always full iron condor | Full IC; put-only if call non-viable (MKT-011); call-only if put non-viable (MKT-040) |
 | Entries per day | 6 | 3 base + 1 conditional (v1.19.0, was 5+2) |
-| Stop formula (full IC) | total_credit per side (MEIC+: -$0.10) | total_credit + asymmetric buffer (call +$0.35, put +$1.55) |
+| Stop formula (full IC) | total_credit per side (MEIC+: -$0.10) | total_credit + asymmetric buffer (call +$0.75, put +$1.75) |
 | Stop execution | Close both legs (short + long) | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025) |
 | Credit gate | Skip if both non-viable | Call non-viable → put-only; put non-viable → retry tighter puts, then call-only (MKT-040); both → skip |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
@@ -447,29 +447,29 @@ Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
 MEIC's core insight: **set the stop loss per side equal to total credit collected**. If one side is stopped and the other expires worthless, the loss on the stopped side exactly equals the profit from the surviving side = breakeven.
 
-**HYDRA (v1.10.2+)** uses a credit+buffer approach with **asymmetric buffers**: call stop = total_credit + `call_stop_buffer` ($0.35), put stop = total_credit + `put_stop_buffer` ($1.55). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` is not set, falls back to `call_stop_buffer` for both sides.
+**HYDRA (v1.10.2+)** uses a credit+buffer approach with **asymmetric buffers**: call stop = total_credit + `call_stop_buffer` ($0.75), put stop = total_credit + `put_stop_buffer` ($1.75). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` is not set, falls back to `call_stop_buffer` for both sides.
 
 ### HYDRA Stop Formula
 
 ```
-call_stop = entry.total_credit + call_stop_buffer     (full IC: call side — $0.35 default)
-put_stop  = entry.total_credit + put_stop_buffer      (full IC: put side — $1.55 default)
-stop_level = credit + put_stop_buffer                  (put-only via MKT-039: $1.55 buffer)
+call_stop = entry.total_credit + call_stop_buffer     (full IC: call side — $0.75 default)
+put_stop  = entry.total_credit + put_stop_buffer      (full IC: put side — $1.75 default)
+stop_level = credit + put_stop_buffer                  (put-only via MKT-039: $1.75 buffer)
 stop_level = call_credit + theoretical_put + call_stop_buffer (call-only via MKT-040: unified with MKT-035/038)
 stop_level = call_credit + theoretical_put + call_stop_buffer (MKT-035 call-only: theoretical put = $260)
 ```
 
 | Entry Type | Stop Formula | Example (C=$135, P=$210) |
 |-----------|-------------|--------------------------|
-| Full IC (call side) | total_credit + call_stop_buffer | $345 + $35 = $380 |
-| Full IC (put side) | total_credit + put_stop_buffer | $345 + $155 = $500 |
-| Call-only (MKT-035) | call_credit + theo_put + call_stop_buffer | $135 + $260 + $35 = $430 |
-| Call-only (MKT-040) | call_credit + theo_put + call_stop_buffer | $135 + $260 + $35 = $430 |
-| Put-only (MKT-039) | credit + put_stop_buffer | $210 + $155 = $365 |
+| Full IC (call side) | total_credit + call_stop_buffer | $345 + $75 = $420 |
+| Full IC (put side) | total_credit + put_stop_buffer | $345 + $175 = $520 |
+| Call-only (MKT-035) | call_credit + theo_put + call_stop_buffer | $135 + $260 + $75 = $470 |
+| Call-only (MKT-040) | call_credit + theo_put + call_stop_buffer | $135 + $260 + $75 = $470 |
+| Put-only (MKT-039) | credit + put_stop_buffer | $210 + $175 = $385 |
 
 **Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + per-side credit minimums (VIX-regime-dependent) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary.
 
-**Credit+Buffer approach (v1.10.2+):** Stop = total_credit + buffer. **Asymmetric buffers:** call side uses `call_stop_buffer` (default $0.35 × 100 = $35), put side uses `put_stop_buffer` (default $1.55 × 100 = $155). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` not set, falls back to `call_stop_buffer` for both. Replaces the earlier MEIC+ design (stop = credit - $0.15). **MKT-042 buffer decay (v1.22.0):** Buffers start at 2.10× and decay linearly to 1× over 2 hours — see MKT-042 section below.
+**Credit+Buffer approach (v1.10.2+):** Stop = total_credit + buffer. **Asymmetric buffers:** call side uses `call_stop_buffer` (default $0.75 × 100 = $75), put side uses `put_stop_buffer` (default $1.75 × 100 = $175). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` not set, falls back to `call_stop_buffer` for both. Replaces the earlier MEIC+ design (stop = credit - $0.15). **MKT-042 buffer decay (v1.22.0):** Buffers start at 2.50× and decay linearly to 1× over 4 hours — see MKT-042 section below.
 
 **Safety floor:** MIN_STOP_LEVEL = $50. If stop_level is below $50 (e.g., due to zero fill price from API sync issues), skip stop monitoring for that side.
 
@@ -578,15 +578,15 @@ effective_call_buffer = call_stop_buffer * decay_factor
 effective_put_buffer = put_stop_buffer * decay_factor
 ```
 
-**Example (defaults: 2.10× start, 2h decay):**
-- At entry: call buffer = $0.35 × 2.10 = $0.735, put buffer = $1.55 × 2.10 = $3.255
-- After 1h: call buffer = $0.35 × 1.55 = $0.5425, put buffer = $1.55 × 1.55 = $2.4025
-- After 2h+: call buffer = $0.35 × 1.0 = $0.35, put buffer = $1.55 × 1.0 = $1.55
+**Example (defaults: 2.50× start, 4h decay):**
+- At entry: call buffer = $0.75 × 2.50 = $1.875, put buffer = $1.75 × 2.50 = $4.375
+- After 2h: call buffer = $0.75 × 1.75 = $1.3125, put buffer = $1.75 × 1.75 = $3.0625
+- After 4h+: call buffer = $0.75 × 1.0 = $0.75, put buffer = $1.75 × 1.0 = $1.75
 
 **Config:**
 ```json
-"buffer_decay_start_mult": 2.10,
-"buffer_decay_hours": 2.0
+"buffer_decay_start_mult": 2.50,
+"buffer_decay_hours": 4.0
 ```
 
 Set `buffer_decay_start_mult` to `1.0` or `null` to disable (buffers remain constant).
@@ -649,7 +649,7 @@ The main loop checks stops every ~1-2 seconds:
 - **Call side stop:** SPX moves UP toward short call → call spread value increases
 - **Put side stop:** SPX moves DOWN toward short put → put spread value increases
 - **Speed:** 0DTE options have extreme gamma. On Feb 24, Entry #3's call cushion dropped from 64% to 6% in 2 minutes.
-- **Put buffer:** $1.55 put buffer (v1.19.0, walk-forward optimized). Call buffer is $0.35.
+- **Put buffer:** $1.75 put buffer (v1.23.0, walk-forward optimized). Call buffer is $0.75.
 
 ---
 
@@ -772,16 +772,16 @@ Entry #1 → #2 → #3 placed normally
 | MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
 | MKT-034 | VIX-Scaled Entry Time Shifting | v1.10.0 | Shifts 5-entry schedule later on high-VIX days. VIX gate checks E#1 at :14:00/:44:00; floor at 12:14:30 |
 | MKT-035 | Call-Only on Down Days | v1.11.0 | When SPX drops >= 0.57% (v1.19.0, was 0.3%) below session open, base entries E1-E3 convert to call-only. E7 DISABLED. Stop = call_credit + $260 theo put + buffer |
-| MKT-036 | Stop Confirmation Timer | v1.12.0 | **DISABLED.** Put buffer chosen instead ($1.55 in v1.19.0, was $5.00). When enabled: 75-second sustained breach before executing stop. Code preserved, configurable. |
+| MKT-036 | Stop Confirmation Timer | v1.12.0 | **DISABLED.** Put buffer chosen instead ($1.75 in v1.23.0, was $5.00). When enabled: 75-second sustained breach before executing stop. Code preserved, configurable. |
 | MKT-038 | FOMC T+1 Call-Only | v1.13.0 | Day after FOMC announcement: force all entries to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call + $2.60 theo put + buffer. FOMC skip disabled (v1.19.0). |
-| MKT-039 | Put-Only Stop Tightening | v1.15.0 | Put-only stop = credit + put_stop_buffer ($1.55). MKT-032 VIX gate at 15.0 (v1.19.0). |
+| MKT-039 | Put-Only Stop Tightening | v1.15.0 | Put-only stop = credit + put_stop_buffer ($1.75). MKT-032 VIX gate at 15.0 (v1.19.0). |
 | MKT-040 | Call-Only When Put Non-Viable | v1.15.1 | When put credit below minimum but call viable, place call-only (89% WR, +$46 EV). Stop = call + theo $2.60 put + buffer (unified with MKT-035/038). |
 | MKT-041 | Cushion Recovery Exit | v1.21.0 | **DISABLED** (buffer+cushion interfere). When enabled: closes IC side that reaches >= 96% of stop then recovers to <= 67%. Sharpe 2.182 vs 2.094 baseline (938 days). |
-| MKT-042 | Buffer Decay | v1.22.0 | Time-decaying stop buffer: starts at 2.10× normal buffer, linearly decays to 1× over 2h. Wider stops early, normal later. Config: `buffer_decay_start_mult`, `buffer_decay_hours`. |
+| MKT-042 | Buffer Decay | v1.22.0 | Time-decaying stop buffer: starts at 2.50× normal buffer, linearly decays to 1× over 4h. Wider stops early, normal later. Config: `buffer_decay_start_mult`, `buffer_decay_hours`. |
 | MKT-043 | Calm Entry Filter | v1.22.0 | Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries. Config: `calm_entry_lookback_min`, `calm_entry_threshold_pts`, `calm_entry_max_delay_min`. |
 | MKT-044 | Post-Overlap Chain Re-Snap | v1.23.0 | After MKT-013/015 overlap adjustments inside MKT-020/022, re-snap BOTH call and put sides to the actual option chain. Prevents cross-side contamination from 5pt shifts landing on non-existent strikes. |
 | MKT-045 | Final Chain Strike Snap | v1.23.0 | After all tightening + overlap adjustments, snap all 4 strikes to nearest actual Saxo chain strike (max 25pt tolerance). Re-runs overlap checks once after snapping. Prevents entries from using strikes that don't exist in the 0DTE chain (far OTM uses 10-25pt intervals, not 5pt). |
-| MKT-046 | Stop Confirmation Timer | v1.23.0 | Requires stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price (confirmed cause of 80% of false call stops). On first breach, starts timer + logs full bid/ask detail. If spread recovers below trigger before 10s, timer resets and stop is avoided. |
+| MKT-046 | Stop Anti-Spike Filter | v1.23.0 | Requires stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price (confirmed cause of 80% of false call stops). On first breach, starts timer + logs full bid/ask detail. If spread recovers below trigger before 10s, timer resets and stop is avoided. |
 | Whipsaw | Whipsaw Filter | v1.19.0 | Skip entries when intraday range > 1.75× expected move. High whipsaw = bad for iron condors. |
 | Upday-035 | Up-Day Put-Only | v1.17.0 | E6 (14:00) fires as put-only when SPX rises >= 0.25% above session open. Stop = credit + put_stop_buffer. |
 
@@ -979,10 +979,10 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: put starting OTM = base × multiplier (put skew = credit viable further OTM) |
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
 | `min_put_otm_distance` | `25` | MKT-022 OTM floor for put tightening (points) |
-| `call_stop_buffer` | `0.35` | Call stop buffer: call_stop = credit + $0.35 (v1.19.0, renamed from `stop_buffer`, was $0.10) |
-| `put_stop_buffer` | `1.55` | Put stop buffer: put_stop = credit + $1.55 (v1.19.0, walk-forward optimized, was $5.00). Falls back to `call_stop_buffer` if not set. |
-| `buffer_decay_start_mult` | `2.10` | MKT-042: buffer starts at 2.10× normal, decays to 1× (set 1.0 or null to disable) |
-| `buffer_decay_hours` | `2.0` | MKT-042: hours to decay from start_mult to 1× |
+| `call_stop_buffer` | `0.75` | Call stop buffer: call_stop = credit + $0.75 (v1.23.0, was $0.35 in v1.19.0) |
+| `put_stop_buffer` | `1.75` | Put stop buffer: put_stop = credit + $1.75 (v1.23.0, was $1.55 in v1.19.0). Falls back to `call_stop_buffer` if not set. |
+| `buffer_decay_start_mult` | `2.50` | MKT-042: buffer starts at 2.50× normal, decays to 1× (set 1.0 or null to disable) |
+| `buffer_decay_hours` | `4.0` | MKT-042: hours to decay from start_mult to 1× |
 | `calm_entry_lookback_min` | `3` | MKT-043: lookback window (minutes) for SPX range check |
 | `calm_entry_threshold_pts` | `15.0` | MKT-043: SPX move threshold (points) to trigger delay (null=disabled) |
 | `calm_entry_max_delay_min` | `5` | MKT-043: max delay (minutes) when spike detected |
@@ -1132,7 +1132,7 @@ Saxo merges positions at the same strike and direction into a single position, d
 
 ### One-Sided Entry Risk
 
-One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/MKT-038/MKT-040) that get stopped lose the full credit plus commission. MKT-039 put-only stop = credit + put_stop_buffer ($1.55). Call-only (MKT-040) uses call + theo $2.60 put + call buffer (unified with MKT-035/038). Historical context: trend-driven one-sided entries were removed in v1.4.0, then credit-driven put-only was re-enabled in v1.7.1 and call-only added in v1.15.1.
+One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/MKT-038/MKT-040) that get stopped lose the full credit plus commission. MKT-039 put-only stop = credit + put_stop_buffer ($1.75). Call-only (MKT-040) uses call + theo $2.60 put + call buffer (unified with MKT-035/038). Historical context: trend-driven one-sided entries were removed in v1.4.0, then credit-driven put-only was re-enabled in v1.7.1 and call-only added in v1.15.1.
 
 ---
 

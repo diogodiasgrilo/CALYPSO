@@ -108,6 +108,56 @@ Shows:
 
 ---
 
+## HYDRA Analysis & Investigation Scripts
+
+Investigation and analysis scripts created during live trading. Run on VM against `data/backtesting.db`.
+
+| Script | Purpose |
+|--------|---------|
+| `credit_breakeven_analysis.py` | Per-side P&L by credit bucket — calculates breakeven credit at each VIX regime |
+| `call_stop_buffer_analysis.py` | Simulates P&L at different call/put buffer levels (what-if analysis) |
+| `call_buffer_snapshot_analysis.py` | Uses spread_snapshots to verify if stopped calls would have recovered at wider buffer |
+| `ask_spike_evidence.py` | Compares last snapshot bid/ask to actual stop fill price — detects ask spikes |
+| `stop_trigger_investigation.py` | For each call stop, checks if SPX later reached the strike (wider buffer impact) |
+| `apr15_spx_check.py` | April 15 investigation: SPX price trajectory around E#1 stop |
+| `apr15_bidask_analysis.py` | April 15 investigation: bid/ask spread data around stop trigger |
+| `expected_value_strike.py` | Expected value analysis at different strike distances |
+
+## HYDRA Strategy Research Scripts
+
+Research scripts for MKT rule development and strategy parameter optimization.
+
+| Script | Purpose |
+|--------|---------|
+| `probability_of_touching.py` | Empirical Probability-of-Touching (POT) framework for strike selection |
+| `pot_strike_recommender.py` | POT-based strike recommendations vs credit-based |
+| `backtest_pot_vs_hydra.py` | Compare POT strategy vs actual HYDRA production |
+| `analyze_base_downday.py` | Analysis of base-entry down-day call-only performance |
+| `analyze_e6_alternatives.py` | E6 conditional entry alternative threshold analysis |
+| `early_close_backtest.py` | MKT-018 early close ROC threshold backtest |
+| `early_close_roc_backtest.py` | Detailed ROC-based early close analysis |
+| `mkt035_corrected_analysis.py` | MKT-035 down-day threshold analysis |
+| `mkt036_timer_analysis.py` | MKT-036 stop confirmation timer analysis |
+| `mkt036_solutions_backtest.py` | Compare MKT-036 solutions (timer vs buffer) |
+| `mkt036_buffer_plus_timer_backtest.py` | Combined buffer + timer backtest |
+| `mkt037_dynamic_entry_backtest.py` | MKT-037 dynamic entry analysis |
+| `config_audit_lib.py` | Library for auditing config values across VM and template |
+| `audit_all_configs.py` | Sweep all config keys and compare VM vs template |
+
+## Utility & Maintenance Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `fix_state_entry2.py` | One-time state file fix utility |
+| `backfill_journal_credits.py` | Backfill missing credit data in HYDRA trading journal |
+| `temp_mae_analysis.py` | Temporary MAE/MFE analysis |
+| `test_batch_quotes.py` | Test batch quote API call |
+| `test_config_audit_lib.py` | Test config audit library |
+| `test_premarket_prices.py` | Test pre-market price availability |
+| `test_trend_detection.py` | Test EMA trend detection logic |
+
+---
+
 ## Running Scripts
 
 All scripts should be run from the repository root:

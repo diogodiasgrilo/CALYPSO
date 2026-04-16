@@ -20,7 +20,7 @@ bots/
 ├── meic/config/                 # Legacy (replaced by HYDRA)
 │   ├── config.json
 │   └── config.example.json
-└── hydra/config/                # LIVE — HYDRA v1.6.0
+└── hydra/config/                # LIVE — HYDRA v1.23.0
     ├── config.json
     └── config.example.json
 
@@ -182,7 +182,7 @@ cp config.example.json config.json
 
 ### MEIC (Multiple Entry Iron Condors) Strategy — STOPPED
 
-> **Note:** MEIC has been replaced by HYDRA (v1.6.0) as of 2026-02-28. Config remains for reference.
+> **Note:** MEIC has been replaced by HYDRA (v1.23.0) as of 2026-02-28. Config remains for reference.
 
 ```json
 {
@@ -199,7 +199,7 @@ cp config.example.json config.json
 }
 ```
 
-### HYDRA (Trend Following MEIC) Strategy — LIVE (v1.6.0)
+### HYDRA (Trend Following MEIC) Strategy — LIVE (v1.23.0)
 
 ```json
 {

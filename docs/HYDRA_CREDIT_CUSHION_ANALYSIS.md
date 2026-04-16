@@ -1,5 +1,7 @@
 # HYDRA Credit Cushion Analysis
 
+**HISTORICAL REFERENCE ONLY** — This analysis uses HYDRA v1.7.1 stop formula (credit − $15). Current v1.23.0 uses credit + asymmetric buffers ($0.75 call / $1.75 put). Cushion calculations below are NOT applicable to the current version. See docs/HYDRA_STRATEGY_SPECIFICATION.md for current stop formula.
+
 **Date**: 2026-03-03
 **Version**: v1.7.1 → v1.7.2 (credit minimum change)
 **Status**: Analysis complete, recommendation implemented

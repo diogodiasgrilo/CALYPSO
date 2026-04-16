@@ -227,7 +227,7 @@ class HydraStrategy(MEICStrategy):
     - Down-Day Call-Only: E1-E3 convert to call-only when SPX drops >= 0.57% from open
     - FOMC T+1 (MKT-038): All entries forced call-only day after FOMC announcement
     - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms.
-    - Stop formula: total_credit + asymmetric buffer (call $0.35, put $1.55)
+    - Stop formula: total_credit + asymmetric buffer (call $0.75, put $1.75)
 
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
@@ -286,7 +286,7 @@ class HydraStrategy(MEICStrategy):
         # Must be set BEFORE super().__init__() because recovery uses it
         # Config stores in per-contract dollars ($0.10), multiply by 100 for total dollars ($10)
         strategy_cfg = config.get("strategy", {})
-        self.call_stop_buffer = strategy_cfg.get("call_stop_buffer", 0.35) * 100
+        self.call_stop_buffer = strategy_cfg.get("call_stop_buffer", 0.75) * 100
         # MKT-036: Asymmetric put stop buffer (wider buffer avoids false put stops)
         # If not set, falls back to call_stop_buffer for both sides
         put_buf = strategy_cfg.get("put_stop_buffer", None)
@@ -446,7 +446,7 @@ class HydraStrategy(MEICStrategy):
 
         # MKT-032/MKT-039: VIX cutoff for put-only entries — at VIX >= threshold, put-only
         # entries skipped (no call hedge in high volatility). Default 15.0 — put-only
-        # stop uses credit+buffer ($1.55 put buffer prevents false stops).
+        # stop uses credit+buffer ($1.75 put buffer prevents false stops).
         self.put_only_max_vix = float(strategy_config.get("put_only_max_vix", 15.0))
         if self.one_sided_entries_enabled:
             logger.info(f"  One-sided entries: ENABLED (put-only allowed when VIX < {self.put_only_max_vix})")
@@ -574,7 +574,7 @@ class HydraStrategy(MEICStrategy):
         )
 
         # MKT-036: Stop confirmation timer — INTENTIONALLY DISABLED.
-        # $1.55 put buffer (put_stop_buffer) is the chosen solution instead.
+        # $1.75 put buffer (put_stop_buffer) is the chosen solution instead.
         # Code preserved but dormant. When enabled: requires stop to persist N seconds.
         self.stop_confirmation_enabled = strategy_config.get("stop_confirmation_enabled", False)
         self.stop_confirmation_seconds = int(strategy_config.get("stop_confirmation_seconds", 75))
@@ -2256,7 +2256,7 @@ class HydraStrategy(MEICStrategy):
         if not call_viable:
             # MKT-032/MKT-039: VIX gate for put-only entries
             # At VIX >= threshold, put-only skipped (no call hedge in volatile conditions).
-            # At VIX < threshold, put-only viable (credit + $1.55 buffer prevents false stops).
+            # At VIX < threshold, put-only viable (credit + $1.75 buffer prevents false stops).
             vix_allows_put_only = self.current_vix < self.put_only_max_vix
             if self.one_sided_entries_enabled and vix_allows_put_only:
                 # Call non-viable, put viable, VIX calm → put-only entry (v1.7.1)
@@ -5082,9 +5082,9 @@ class HydraStrategy(MEICStrategy):
         """
         Calculate stop loss levels for trend-following entries.
 
-        - Full IC: stop = total_credit + buffer (call $0.35, put $1.55)
-        - Put-only (MKT-039): credit + put_stop_buffer ($1.55)
-        - Call-only (MKT-040): call_credit + theo $2.60 put + call_stop_buffer ($0.35)
+        - Full IC: stop = total_credit + buffer (call $0.75, put $1.75)
+        - Put-only (MKT-039): credit + put_stop_buffer ($1.75)
+        - Call-only (MKT-040): call_credit + theo $2.60 put + call_stop_buffer ($0.75)
 
         MKT-020/MKT-022 progressive tightening + regime-dependent credit minimums
         reduced skew from 3-7x to 1-3x.
@@ -5127,8 +5127,8 @@ class HydraStrategy(MEICStrategy):
                 logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
                 credit = MIN_STOP_LEVEL
 
-            # MKT-039: Put-only stop = credit + $1.55 buffer (same pattern as full IC puts).
-            # The $1.55 put buffer prevents false stops (walk-forward optimized); the old
+            # MKT-039: Put-only stop = credit + $1.75 buffer (same pattern as full IC puts).
+            # The $1.75 put buffer prevents false stops (walk-forward optimized); the old
             # 2× multiplier was redundant and inflated max loss.
             # Note: Call-only legacy keeps 2× because call buffer is only $0.10.
             base_stop = credit
@@ -8530,7 +8530,7 @@ class HydraStrategy(MEICStrategy):
 
         # One-sided entry stop levels (must match _calculate_stop_levels_hydra behavior).
         # Call-only: call_credit + theoretical_put ($250) + buffer (consistent for all call-only types).
-        # Put-only: credit + $1.55 buffer (MKT-039 — $1.55 buffer prevents false stops, walk-forward optimized).
+        # Put-only: credit + $1.75 buffer (MKT-039 — $1.75 buffer prevents false stops, walk-forward optimized).
         if entry.call_only:
             credit = entry.call_spread_credit
             if credit < MIN_STOP_LEVEL:
@@ -8567,7 +8567,7 @@ class HydraStrategy(MEICStrategy):
                 )
                 credit = MIN_STOP_LEVEL
 
-            # MKT-039: Put-only stop = credit + $1.55 buffer (matches _calculate_stop_levels_hydra)
+            # MKT-039: Put-only stop = credit + $1.75 buffer (matches _calculate_stop_levels_hydra)
             base_stop = credit
             stop_level = base_stop + self.put_stop_buffer
 

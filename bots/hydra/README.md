@@ -46,7 +46,7 @@ Before each scheduled entry, a 10-minute scouting window opens. Market condition
 
 **MKT-035 (down-day call-only):** When SPX drops >= 0.57% below session open, conditional entries fire as call-only. Base entries E1-E3 convert to call-only on down days via `base_entry_downday_callonly_pct: 0.0057`. E7 is DISABLED.
 
-**Upday-035 (up-day put-only):** When SPX rises >= 0.25% above session open, E6 (14:00) fires as put-only. Stop = put_credit + put_stop_buffer ($1.55).
+**Upday-035 (up-day put-only):** When SPX rises >= 0.25% above session open, E6 (14:00) fires as put-only. Stop = put_credit + put_stop_buffer ($1.75).
 
 Base entries (#1-3) are unaffected by conditional triggers — they always attempt full ICs (or one-sided via MKT-011).
 
@@ -182,7 +182,7 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 
 ### Stop Confirmation Timer (MKT-036) — INTENTIONALLY DISABLED
 
-MKT-036 stop confirmation timer is **intentionally disabled**. The $5.00 put buffer (`put_stop_buffer`) is the chosen solution for false stops instead. Code preserved but dormant — set `stop_confirmation_enabled: true` to re-enable.
+MKT-036 stop confirmation timer is **intentionally disabled**. The $1.75 put buffer (`put_stop_buffer`) is the chosen solution for false stops instead. Code preserved but dormant — set `stop_confirmation_enabled: true` to re-enable.
 
 When enabled: 75-second confirmation window before executing stop. 20-day backtest: 17 false stops avoided ($2,870 saved), 1 real stop missed ($85).
 
@@ -190,8 +190,8 @@ When enabled: 75-second confirmation window before executing stop. 20-day backte
 |---------|---------|-------------|
 | `stop_confirmation_enabled` | `false` | Enable/disable MKT-036 stop confirmation timer (DISABLED) |
 | `stop_confirmation_seconds` | `75` | Duration (seconds) breach must sustain before executing stop |
-| `call_stop_buffer` | `0.35` | Call stop buffer: call_stop = credit + $0.35 (v1.19.0, renamed from `stop_buffer`) |
-| `put_stop_buffer` | `1.55` | Put stop buffer: put_stop = credit + $1.55 (v1.19.0, walk-forward optimized). Falls back to `call_stop_buffer` if not set. |
+| `call_stop_buffer` | `0.75` | Call stop buffer: call_stop = credit + $0.75 (v1.23.0, was $0.35 in v1.19.0) |
+| `put_stop_buffer` | `1.75` | Put stop buffer: put_stop = credit + $1.75 (v1.23.0, was $1.55 in v1.19.0). Falls back to `call_stop_buffer` if not set. |
 
 ### FOMC T+1 Call-Only (MKT-038)
 
@@ -243,8 +243,8 @@ Time-decaying stop buffer that starts wider and linearly decays to 1× over a co
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `buffer_decay_start_mult` | `2.10` | Starting multiplier (2.10× = buffer is 2.10× normal at entry time) |
-| `buffer_decay_hours` | `2.0` | Hours to decay from start_mult to 1× |
+| `buffer_decay_start_mult` | `2.50` | Starting multiplier (2.50× = buffer is 2.50× normal at entry time) |
+| `buffer_decay_hours` | `4.0` | Hours to decay from start_mult to 1× |
 
 Set `buffer_decay_start_mult` to `1.0` or `null` to disable.
 
@@ -262,7 +262,7 @@ Set `calm_entry_threshold_pts` to `null` to disable.
 
 ### Cushion Recovery Exit (MKT-041) — v1.21.0, DISABLED
 
-Closes individual IC sides when they nearly hit their stop then recover. **DISABLED** because buffer decay (MKT-042) and the put buffer ($1.55) interfere — the wider buffer already prevents false stops that MKT-041 was designed to catch.
+Closes individual IC sides when they nearly hit their stop then recover. **DISABLED** because buffer decay (MKT-042) and the put buffer ($1.75) interfere — the wider buffer already prevents false stops that MKT-041 was designed to catch.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -348,10 +348,10 @@ sudo journalctl -u hydra -f
 | Smart entry | None | MKT-031 10-min scouting windows (DISABLED) |
 | Whipsaw filter | None | Skip entries when range > 1.75× expected move (v1.19.0) |
 | VIX regime | None | Adaptive entries/buffers based on VIX at open (v1.20.0) |
-| Buffer decay | None | MKT-042: 2.10× buffer at entry, decays to 1× over 2h (v1.22.0) |
+| Buffer decay | None | MKT-042: 2.50× buffer at entry, decays to 1× over 4h (v1.22.0) |
 | Calm entry | None | MKT-043: delays entry up to 5min on sharp SPX moves (v1.22.0) |
 | Profit management | Hold to expiration | Hold to expiration (MKT-018 early close disabled) |
-| Stop formula | total_credit - $0.10 | total_credit + asymmetric buffer (call $0.35, put $1.55). MKT-036 timer DISABLED. |
+| Stop formula | total_credit - $0.10 | total_credit + asymmetric buffer (call $0.75, put $1.75). MKT-036 timer DISABLED. |
 | FOMC handling | Skip announcement day | Trade FOMC days (fomc_skip=false) + T+1 call-only (MKT-038) |
 | Stop execution | Close both legs | Close both legs (default) or SHORT only when `short_only_stop: true` (MKT-025 + MKT-033) |
 
