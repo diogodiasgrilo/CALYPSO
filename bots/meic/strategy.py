@@ -3785,8 +3785,12 @@ class MEICStrategy:
         for uic, targets in uic_map.items():
             quote = quotes.get(uic)
             mid_price = self._extract_mid_price(quote) or 0
+            bid = quote["Quote"].get("Bid", 0) if quote and "Quote" in quote else 0
+            ask = quote["Quote"].get("Ask", 0) if quote and "Quote" in quote else 0
             for entry, leg in targets:
                 setattr(entry, f"{leg}_price", mid_price)
+                setattr(entry, f"{leg}_bid", bid or 0)
+                setattr(entry, f"{leg}_ask", ask or 0)
 
     def _extract_mid_price(self, quote: Optional[Dict]) -> Optional[float]:
         """Extract mid price from quote for option pricing."""

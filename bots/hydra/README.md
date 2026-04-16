@@ -52,20 +52,22 @@ Base entries (#1-3) are unaffected by conditional triggers — they always attem
 
 ### Credit Gate (MKT-011)
 
-Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. Separate thresholds for calls ($2.00) and puts ($2.75), with MKT-029 graduated fallback for both sides: -$0.05, -$0.10 (call floor $0.75, put floor $2.00). For conditional entries, MKT-035/Upday-035 runs first. MKT-035 and MKT-038 call-only entries also use the MKT-029 call floor ($0.75).
+Before placing any orders, HYDRA estimates the expected credit by fetching option quotes. **Effective thresholds are VIX-regime-dependent** (see the VIX Regime Adaptive section below for the live values — currently $1.00 / $1.25 at VIX<18, scaling down to $0.30 / $0.40 at VIX≥28). When the VIX regime is active, `call_credit_floor` / `put_credit_floor` are overwritten to `min_credit − $0.10` (MKT-029 graduated fallback steps −$0.05, −$0.10 down to that floor). MKT-035 / Upday-035 / MKT-038 one-sided entries use the same active floor.
+
+The table below shows the DECISION LOGIC. Replace `call_min` / `put_min` / `call_floor` / `put_floor` with the active regime values:
 
 | Condition | Call Credit | Put Credit | VIX | Action |
 |-----------|-------------|------------|-----|--------|
-| Conditional entry (MKT-035) | >= $0.75 (MKT-029 floor) | N/A | Any | Place call-only entry |
-| Conditional entry (MKT-035) | < $0.75 | N/A | Any | Skip entry |
-| Conditional entry (Upday-035) | N/A | >= $2.00 (MKT-029 floor) | Any | Place put-only entry |
-| FOMC T+1 (MKT-038) | >= $0.75 (MKT-029 floor) | N/A | Any | Place call-only entry |
-| FOMC T+1 (MKT-038) | < $0.75 | N/A | Any | Skip entry |
-| Base entry | >= $2.00 ($0.75 w/ MKT-029) | >= $2.75 ($2.00 w/ MKT-029) | Any | Proceed with full iron condor |
-| Normal | < $0.75 | >= $2.00 | < 15.0 | Place put-only entry (MKT-032/MKT-039 allows) |
-| Normal | < $0.75 | >= $2.00 | >= 15.0 | Skip entry (MKT-032: no call hedge in volatile conditions) |
-| Normal | >= $2.00 ($0.75 w/ MKT-029) | < $2.00 | Any | Retry with tighter put strikes (5pt, max 2 retries), then call-only (MKT-040: 89% WR) |
-| Normal | < $0.75 | < $2.00 | Any | Skip entry |
+| Conditional entry (MKT-035) | >= call_floor | N/A | Any | Place call-only entry |
+| Conditional entry (MKT-035) | < call_floor | N/A | Any | Skip entry |
+| Conditional entry (Upday-035) | N/A | >= put_floor | Any | Place put-only entry |
+| FOMC T+1 (MKT-038) | >= call_floor | N/A | Any | Place call-only entry |
+| FOMC T+1 (MKT-038) | < call_floor | N/A | Any | Skip entry |
+| Base entry | >= call_min (call_floor w/ MKT-029) | >= put_min (put_floor w/ MKT-029) | Any | Proceed with full iron condor |
+| Normal | < call_floor | >= put_floor | < 15.0 | Place put-only entry (MKT-032/MKT-039 allows) |
+| Normal | < call_floor | >= put_floor | >= 15.0 | Skip entry (MKT-032: no call hedge in volatile conditions) |
+| Normal | >= call_min (call_floor w/ MKT-029) | < put_floor | Any | Retry with tighter put strikes (5pt, max 2 retries), then call-only (MKT-040: 89% WR) |
+| Normal | < call_floor | < put_floor | Any | Skip entry |
 
 ### Illiquidity Fallback (MKT-010)
 
@@ -77,7 +79,7 @@ Calls start at 3.5× and puts at 4.0× the VIX-adjusted OTM distance (asymmetric
 
 ### Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts)
 
-From the MKT-024 starting distance, progressively moves the short strike closer to ATM in 5pt steps until credit meets the minimum ($2.00 for calls, $2.75 for puts — with MKT-029 fallback floors $0.75/$2.00) or a 25pt OTM floor is reached.
+From the MKT-024 starting distance, progressively moves the short strike closer to ATM in 5pt steps until credit meets the active regime minimum (see VIX Regime Adaptive below — with MKT-029 fallback down to `min_credit − $0.10`) or a 25pt OTM floor is reached.
 
 ```
 Flow: MKT-024 (wider start) → MKT-020 (calls) → MKT-022 (puts) → MKT-011 credit gate
@@ -210,28 +212,30 @@ Skips entries when intraday range exceeds a threshold relative to the expected m
 | `whipsaw_filter.enabled` | `true` | Enable/disable whipsaw filter |
 | `whipsaw_filter.threshold` | `1.75` | Skip entry when intraday range > 1.75× expected move |
 
-### VIX Regime Adaptive (updated 2026-04-13)
+### VIX Regime Adaptive (updated 2026-04-14)
 
-Adjusts entries AND credit thresholds based on VIX at open. Uses a 4-zone breakpoint system. When `max_entries` caps below base count, drops EARLIEST entries (keeps best-performing E#3 at 11:15).
+Adjusts entries AND credit thresholds based on VIX at open. Uses a 4-zone breakpoint system. When `max_entries` caps below base count, drops EARLIEST entries (keeps best-performing E#3 at 11:15). **All regime credit slots are now filled, so the base `min_viable_credit_per_side` / `min_viable_credit_put_side` are effectively dead — the regime always overrides.**
 
-| Zone | VIX Range | Max Entries | Entries Kept | Call Min | Put Min | Typical OTM |
-|------|-----------|-------------|--------------|----------|---------|-------------|
-| 0 | < 18 | 3 (default) | E#1, E#2, E#3 | $2.00 (default) | $2.75 (default) | 40-60pt |
-| 1 | 18-22 | 2 | E#2, E#3 | $2.00 (default) | $2.75 (default) | 40-60pt |
-| 2 | 22-28 | 2 | E#2, E#3 | $0.75 | $1.25 | 60-90pt |
-| 3 | >= 28 | 1 | E#3 only | $0.50 | $0.75 | 80-100pt+ |
+| Zone | VIX Range | Max Entries | Entries Kept | Call Min | Put Min | Effective Call Floor | Effective Put Floor |
+|------|-----------|-------------|--------------|----------|---------|----------------------|---------------------|
+| 0 | < 18 | 3 (default) | E#1, E#2, E#3 | $1.00 | $1.25 | $0.90 | $1.15 |
+| 1 | 18-22 | 2 | E#2, E#3 | $0.50 | $0.75 | $0.40 | $0.65 |
+| 2 | 22-28 | 2 | E#2, E#3 | $0.30 | $0.50 | $0.20 | $0.40 |
+| 3 | >= 28 | 1 | E#3 only | $0.30 | $0.40 | $0.20 | $0.30 |
 
-| Setting | Default | Description |
-|---------|---------|-------------|
+When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed as `min_credit − $0.10`; the top-level `call_credit_floor` ($0.20) and `put_credit_floor` ($0.30) in config only apply if the regime is disabled.
+
+| Setting | Live VM Value | Description |
+|---------|---------------|-------------|
 | `vix_regime.enabled` | `true` | Enable/disable VIX regime adaptive |
 | `vix_regime.breakpoints` | `[18.0, 22.0, 28.0]` | VIX zone boundaries |
-| `vix_regime.max_entries` | `[null, 2, 2, 1]` | Max entries per zone (null = use default). Drops EARLIEST when capped. |
-| `vix_regime.min_call_credit` | `[null, null, 0.75, 0.50]` | Per-zone call credit threshold (null = use default $2.00) |
-| `vix_regime.min_put_credit` | `[null, null, 1.25, 0.75]` | Per-zone put credit threshold (null = use default $2.75) |
-| `vix_regime.shadow_call_otm` | `[50.0, 65.0, 85.0, 120.0]` | v7: OTM target (pt) for shadow_entries logging (observation only, no trading effect) |
-| `vix_regime.shadow_put_otm` | `[50.0, 65.0, 85.0, 120.0]` | v7: OTM target (pt) for shadow_entries logging |
-| `vix_regime.put_stop_buffer` | `[null, null, null, null]` | Per-zone put buffer override (null = use default $1.75) |
-| `vix_regime.call_stop_buffer` | `[null, null, null, null]` | Per-zone call buffer override (null = use default $0.75) |
+| `vix_regime.max_entries` | `[null, 2, 2, 1]` | Max entries per zone (null = use default 3). Drops EARLIEST when capped. |
+| `vix_regime.min_call_credit` | `[1.00, 0.50, 0.30, 0.30]` | Per-zone call credit threshold |
+| `vix_regime.min_put_credit` | `[1.25, 0.75, 0.50, 0.40]` | Per-zone put credit threshold |
+| `vix_regime.shadow_call_otm` | `[40.0, 50.0, 75.0, 75.0]` | v7: OTM target (pt) for shadow_entries logging (observation only, no trading effect) |
+| `vix_regime.shadow_put_otm` | `[50.0, 75.0, 110.0, 90.0]` | v7: OTM target (pt) for shadow_entries logging |
+| `vix_regime.put_stop_buffer` | `[null, null, null, null]` | Per-zone put buffer override (null = use base `put_stop_buffer`) |
+| `vix_regime.call_stop_buffer` | `[null, null, null, null]` | Per-zone call buffer override (null = use base `call_stop_buffer`) |
 
 ### Buffer Decay (MKT-042) — v1.22.0
 
@@ -265,6 +269,14 @@ Closes individual IC sides when they nearly hit their stop then recover. **DISAB
 | `cushion_nearstop_pct` | `null` | Fraction of stop level to trigger near-stop (e.g., 0.96). null = disabled. |
 | `cushion_recovery_pct` | `null` | Fraction of stop level to trigger recovery close (e.g., 0.67). null = disabled. |
 
+### Chain Strike Snapping (MKT-045) — v1.23.0
+
+After MKT-020/MKT-022 tightening and overlap adjustments (MKT-013/015, Fix #44/#66), snaps all 4 strikes to the nearest actual Saxo chain strike (max 25pt tolerance). Saxo's 0DTE chain uses 5pt intervals near ATM but switches to 10-25pt intervals far OTM — overlap adjustments that blindly add 5pt can land on non-existent strikes. Re-runs overlap checks once after snapping. MKT-044 (inside MKT-020/022) also snaps both sides after overlap re-runs.
+
+### Stop Anti-Spike Filter (MKT-046) — v1.23.0
+
+When MKT-036 is disabled (current config), requires stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price without a real underlying move. On first breach, logs full bid/ask detail (`STOP-DETAIL`). If spread recovers within 10s, stop is avoided and logged as `MKT-046_FALSE_STOP_AVOIDED`. When MKT-036 is enabled, its longer timer (75s) takes precedence.
+
 ### Early Close on ROC (MKT-018/023/021) — INTENTIONALLY DISABLED
 
 Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-021) are **intentionally disabled**. Backtest analysis showed no ROC-based early close configuration beats hold-to-expiry for this strategy. The code is preserved but dormant — set `early_close_enabled: true` in config to re-enable. See `docs/HYDRA_EARLY_CLOSE_ANALYSIS.md` for the full analysis.
@@ -273,8 +285,10 @@ Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-0
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `min_viable_credit_per_side` | `2.00` | MKT-011/MKT-020: Call minimum credit (v1.19.0: raised from $0.60 — walk-forward optimized) |
-| `min_viable_credit_put_side` | `2.75` | MKT-011/MKT-022: Put minimum credit (v1.19.0: lowered from $2.50 — walk-forward optimized) |
+| `min_viable_credit_per_side` | `2.00` | MKT-011/MKT-020: Call minimum credit — **base fallback only**, overridden by `vix_regime.min_call_credit` at every VIX level in live config |
+| `min_viable_credit_put_side` | `2.75` | MKT-011/MKT-022: Put minimum credit — **base fallback only**, overridden by `vix_regime.min_put_credit` at every VIX level in live config |
+| `call_credit_floor` | `0.20` | MKT-029 fallback floor for calls when VIX regime disabled. When regime is active, floor is recomputed as `min_call_credit − $0.10`. |
+| `put_credit_floor` | `0.30` | MKT-029 fallback floor for puts when VIX regime disabled. When regime is active, floor is recomputed as `min_put_credit − $0.10`. |
 | `put_only_max_vix` | `15.0` | MKT-032/MKT-039: Max VIX for put-only entries (skip instead when VIX >= threshold). Lowered 25→15 in v1.19.0. |
 | `call_starting_otm_multiplier` | `3.5` | MKT-024: Call starting OTM = base × multiplier |
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: Put starting OTM = base × multiplier (higher due to put skew) |
@@ -329,7 +343,7 @@ sudo journalctl -u hydra -f
 | Entries per day | 6 | 3 base + 1 conditional (v1.19.0, was 5+2) |
 | Starting OTM | VIX-adjusted | 3.5× calls, 4.0× puts (MKT-024), then tightened |
 | Spread widths | 50pt fixed | VIX × 6.0, floor 25pt, cap 110pt (MKT-027 v1.19.0) |
-| Credit minimums | $0.50/side | $2.00 calls, $2.75 puts (MKT-029 floors: $0.75/$2.00) |
+| Credit minimums | $0.50/side | VIX-regime-dependent (see VIX Regime Adaptive table): $1.00 / $1.25 at VIX<18 down to $0.30 / $0.40 at VIX≥28 |
 | Trend signal | None | EMA 20/40 (informational only) |
 | Smart entry | None | MKT-031 10-min scouting windows (DISABLED) |
 | Whipsaw filter | None | Skip entries when range > 1.75× expected move (v1.19.0) |
@@ -343,7 +357,7 @@ sudo journalctl -u hydra -f
 
 ## Risk Considerations
 
-1. **Skip rate**: Stricter credit gates (call $2.00, put $2.75) may skip more entries
+1. **Skip rate**: VIX-regime-dependent credit gates may skip entries when quotes can't reach the active minimum (see VIX Regime Adaptive for live thresholds)
 2. **Trend reversal risk**: EMA is a lagging indicator; sudden reversals may not be detected immediately
 3. **Hold-to-expiry**: All positions held until settlement (MKT-018 early close intentionally disabled — backtest showed hold outperforms)
 

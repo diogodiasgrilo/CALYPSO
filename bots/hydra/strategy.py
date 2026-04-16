@@ -206,9 +206,11 @@ class HydraStrategy(MEICStrategy):
 
     Key Features (HYDRA specific, beyond base MEIC):
     - EMA Trend Signal: Informational only (logged/stored, never drives entry type)
-    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders, call min $2.00, put min $2.75
-      MKT-029 graduated fallback (call floor $0.75, put floor $2.00).
-      Call non-viable → put-only entry (MKT-032/MKT-039, VIX < 15).
+    - Credit Gate (MKT-011): Estimates credit BEFORE placing orders. Thresholds are
+      VIX-regime-dependent (see VIX Regime below); base min_viable_credit_per_side ($2.00)
+      and min_viable_credit_put_side ($2.75) are overridden by vix_regime.min_call_credit /
+      min_put_credit at every VIX level in live config. MKT-029 graduated fallback to
+      min_credit - $0.10. Call non-viable → put-only entry (MKT-032/MKT-039, VIX < 15).
       Put non-viable → call-only entry (MKT-040, 89% WR).
     - Progressive Call Tightening (MKT-020): Scans from 3.5x OTM inward for viable credit
     - Progressive Put Tightening (MKT-022): Scans from 4.0x OTM inward for viable credit
@@ -216,9 +218,12 @@ class HydraStrategy(MEICStrategy):
     - Buffer Decay (MKT-042): Stop buffer starts at 2.10x, decays to 1x over 2.0 hours
     - Calm Entry (MKT-043): Delays entry up to 5min when SPX >15pt move in 3min
     - Anti-Whipsaw: Skips entries when intraday range > 1.75x expected move
-    - VIX Regime: Adapts entries/credits based on VIX at open (breakpoints [18, 22, 28] — updated 2026-04-13)
-      VIX<18: 3 entries normal. VIX 18-22: drop E#1. VIX 22-28: drop E#1 + lower credits ($0.75/$1.25).
-      VIX>=28: E#3 only + lowest credits ($0.50/$0.75). Code drops EARLIEST entries (keeps best slot).
+    - VIX Regime: Adapts entries/credits based on VIX at open (breakpoints [18, 22, 28],
+      tuned 2026-04-14). Live VM values: min_call_credit [1.00, 0.50, 0.30, 0.30],
+      min_put_credit [1.25, 0.75, 0.50, 0.40], max_entries [null, 2, 2, 1].
+      VIX<18: 3 entries ($1.00/$1.25). VIX 18-22: drop E#1 ($0.50/$0.75).
+      VIX 22-28: drop E#1 ($0.30/$0.50). VIX>=28: E#3 only ($0.30/$0.40).
+      Floors are regime-dependent (= min_credit - $0.10). Code drops EARLIEST entries.
     - Down-Day Call-Only: E1-E3 convert to call-only when SPX drops >= 0.57% from open
     - FOMC T+1 (MKT-038): All entries forced call-only day after FOMC announcement
     - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms.
@@ -448,18 +453,21 @@ class HydraStrategy(MEICStrategy):
         else:
             logger.info(f"  One-sided entries: DISABLED (skip if either side non-viable)")
 
-        # Override min credit from base class $0.50 for HYDRA
-        # v1.19.0: Walk-forward backtest optimized: call $2.00, put $2.75.
-        # Higher put min forces MKT-022 to scan closer to ATM, landing in sweet spot (42-65pt OTM).
+        # Override min credit from base class $0.50 for HYDRA.
+        # NOTE: These base values are effectively dead when vix_regime is enabled and all
+        # regime slots are filled (live config as of 2026-04-14). _apply_vix_regime_overrides()
+        # overwrites these with vix_regime.min_call_credit / min_put_credit per VIX zone.
+        # They are retained as a safety fallback if vix_regime.enabled=false.
         self.min_viable_credit_per_side = strategy_config.get("min_viable_credit_per_side", 2.0) * 100
 
-        # Separate put minimum credit
-        # v1.19.0: Walk-forward backtest optimized at $2.75.
-        # MKT-029 graduated fallback: -$0.05, -$0.10 (call floor $0.75, put floor $2.00)
+        # Separate put minimum credit (same caveat as above — overridden by VIX regime).
         self.min_viable_credit_put_side = strategy_config.get("min_viable_credit_put_side", 2.75) * 100
 
         # MKT-029: Configurable credit floors (hard floor after graduated fallback).
         # If not set, falls back to min - $0.10 (legacy behavior).
+        # NOTE: When vix_regime applies, _apply_vix_regime_overrides() recomputes these as
+        # min_credit - $0.10 per regime, so the top-level values are only used if the
+        # regime is disabled.
         _call_floor = strategy_config.get("call_credit_floor", None)
         _put_floor = strategy_config.get("put_credit_floor", None)
         self.call_credit_floor = float(_call_floor) * 100 if _call_floor is not None else self.min_viable_credit_per_side - 10
@@ -698,8 +706,10 @@ class HydraStrategy(MEICStrategy):
         above the minimum credit threshold.
 
         This gives puts more breathing room on volatile days (put skew means
-        $2.75 credit is found much further OTM) while calls still tighten
-        to reach $2.00 ($0.75 with MKT-029 fallback floor).
+        put credit is found much further OTM) while calls still tighten to
+        reach the active regime call minimum (with MKT-029 fallback to
+        min_credit - $0.10). Credit thresholds are VIX-regime-dependent —
+        see _apply_vix_regime_overrides().
 
         Args:
             entry: HydraIronCondorEntry to populate with strikes
@@ -2170,16 +2180,18 @@ class HydraStrategy(MEICStrategy):
             )
             return ("proceed", False, 0.0, 0.0)  # estimation_worked = False
 
-        # Separate thresholds: calls use min_viable_credit_per_side ($2.00),
-        # puts use min_viable_credit_put_side ($2.75)
+        # Separate thresholds: calls use min_viable_credit_per_side, puts use
+        # min_viable_credit_put_side. Both are VIX-regime-dependent in live config —
+        # see _apply_vix_regime_overrides(); base values ($2.00 / $2.75) act only as
+        # safety fallbacks if vix_regime.enabled=false.
         call_min = self.min_viable_credit_per_side
         put_min = self.min_viable_credit_put_side
         call_viable = estimated_call >= call_min
         put_viable = estimated_put >= put_min
 
         # MKT-029: Graduated call fallback — try min-$0.05 (if above floor), then floor.
-        # Floor from config (call_credit_floor, default $0.75) allows accepting lower
-        # credits at far-OTM strikes. Keeps entries wider = safer cushion.
+        # Floor comes from self.call_credit_floor (regime-overwritten to min - $0.10 when
+        # vix_regime is active; else from config call_credit_floor, default $0.20).
         if not call_viable:
             call_floor = self.call_credit_floor
             # Only include intermediate step (min-$0.05) if it's above the floor
@@ -2390,6 +2402,121 @@ class HydraStrategy(MEICStrategy):
 
         return None, None
 
+    def _snap_entry_strikes_to_chain(self, entry: HydraIronCondorEntry) -> bool:
+        """
+        MKT-045: Final strike validation — snap all 4 strikes to the actual
+        Saxo option chain after overlap adjustments (MKT-013/015, Fix #44/#66).
+
+        Overlap adjustments use hardcoded 5pt offsets that may land on strikes
+        that don't exist in Saxo's chain (far OTM uses 10-25pt intervals).
+        This method snaps to the nearest actual strike, re-checks overlaps,
+        and repeats once if needed.
+
+        Returns True if any strike was adjusted.
+        """
+        call_map = getattr(entry, '_call_uic_map', None)
+        put_map = getattr(entry, '_put_uic_map', None)
+
+        if not call_map and not put_map:
+            expiry = self._get_todays_expiry()
+            if not expiry:
+                return False
+            try:
+                chain_resp = self.client.get_option_chain(
+                    option_root_id=self.option_root_uic,
+                    expiry_dates=[expiry]
+                )
+            except Exception as e:
+                logger.warning(f"MKT-045: Option chain fetch failed: {e}")
+                return False
+            if not chain_resp:
+                return False
+            option_space = chain_resp.get("OptionSpace", [])
+            if not option_space:
+                return False
+            specific_options = option_space[0].get("SpecificOptions", [])
+            call_map = {}
+            put_map = {}
+            for opt in specific_options:
+                strike = opt.get("StrikePrice", 0)
+                pc = opt.get("PutCall", "")
+                if pc == "Call":
+                    call_map[strike] = opt.get("Uic")
+                elif pc == "Put":
+                    put_map[strike] = opt.get("Uic")
+            entry._call_uic_map = call_map
+            entry._put_uic_map = put_map
+
+        any_changed = False
+        for iteration in range(2):
+            changed_this_round = False
+
+            if call_map and entry.short_call_strike:
+                call_spread = int(entry.long_call_strike - entry.short_call_strike)
+                sc_snap, _ = self._snap_to_chain_strike(
+                    entry.short_call_strike, call_map, max_snap=25
+                )
+                if sc_snap and sc_snap != entry.short_call_strike:
+                    logger.info(
+                        f"MKT-045: Entry #{entry.entry_number} short call "
+                        f"{entry.short_call_strike} → {sc_snap} (chain snap)"
+                    )
+                    entry.short_call_strike = sc_snap
+                    changed_this_round = True
+                if sc_snap:
+                    lc_snap, _ = self._snap_long_for_spread(
+                        sc_snap, call_spread, call_map, is_call=True
+                    )
+                    if lc_snap and lc_snap != entry.long_call_strike:
+                        logger.info(
+                            f"MKT-045: Entry #{entry.entry_number} long call "
+                            f"{entry.long_call_strike} → {lc_snap} (chain snap)"
+                        )
+                        entry.long_call_strike = lc_snap
+                        changed_this_round = True
+
+            if put_map and entry.short_put_strike:
+                put_spread = int(entry.short_put_strike - entry.long_put_strike)
+                sp_snap, _ = self._snap_to_chain_strike(
+                    entry.short_put_strike, put_map, max_snap=25
+                )
+                if sp_snap and sp_snap != entry.short_put_strike:
+                    logger.info(
+                        f"MKT-045: Entry #{entry.entry_number} short put "
+                        f"{entry.short_put_strike} → {sp_snap} (chain snap)"
+                    )
+                    entry.short_put_strike = sp_snap
+                    changed_this_round = True
+                if sp_snap:
+                    lp_snap, _ = self._snap_long_for_spread(
+                        sp_snap, put_spread, put_map, is_call=False
+                    )
+                    if lp_snap and lp_snap != entry.long_put_strike:
+                        logger.info(
+                            f"MKT-045: Entry #{entry.entry_number} long put "
+                            f"{entry.long_put_strike} → {lp_snap} (chain snap)"
+                        )
+                        entry.long_put_strike = lp_snap
+                        changed_this_round = True
+
+            if not changed_this_round:
+                break
+
+            any_changed = True
+            if iteration == 0:
+                self._adjust_for_strike_conflicts(entry)
+                self._adjust_for_same_strike_overlap(entry)
+                self._adjust_for_strike_conflicts(entry)
+                self._adjust_for_long_strike_overlap(entry)
+
+        if any_changed:
+            self._log_safety_event(
+                "MKT-045_CHAIN_SNAP",
+                f"Entry #{entry.entry_number}: strikes snapped to chain"
+            )
+
+        return any_changed
+
     def _apply_progressive_call_tightening(self, entry: HydraIronCondorEntry) -> bool:
         """
         MKT-020: Progressive call OTM tightening for full IC entries.
@@ -2414,7 +2541,7 @@ class HydraStrategy(MEICStrategy):
 
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_call_otm_distance
-        min_credit = self.min_viable_credit_per_side  # In cents (e.g., 200 for $2.00)
+        min_credit = self.min_viable_credit_per_side  # In cents; VIX-regime-overridden
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
 
         initial_short_call = entry.short_call_strike
@@ -2465,6 +2592,8 @@ class HydraStrategy(MEICStrategy):
             put_call = opt.get("PutCall", "")
             if put_call == "Call":
                 call_uic_map[strike] = opt.get("Uic")
+
+        entry._call_uic_map = call_uic_map
 
         # Collect UICs for all candidate strikes, snapping to nearest chain
         # strike when exact 5pt increments don't exist (Saxo uses 25pt spacing
@@ -2580,9 +2709,10 @@ class HydraStrategy(MEICStrategy):
                         self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
                         self._adjust_for_long_strike_overlap(entry)
 
-                        # MKT-044: Re-snap after overlap adjustments. The 5pt
-                        # shifts can push strikes off the chain in far-OTM zones
-                        # where Saxo uses 25pt intervals.
+                        # MKT-044: Re-snap BOTH sides after overlap adjustments.
+                        # The 5pt shifts can push strikes off the chain in far-OTM
+                        # zones where Saxo uses 25pt intervals. Overlap re-runs
+                        # above can shift put side too (cross-side contamination).
                         sc_snap, _ = self._snap_to_chain_strike(entry.short_call_strike, call_uic_map)
                         lc_snap, _ = self._snap_long_for_spread(
                             sc_snap or entry.short_call_strike, spread_width, call_uic_map, is_call=True
@@ -2591,6 +2721,18 @@ class HydraStrategy(MEICStrategy):
                             entry.short_call_strike = sc_snap
                         if lc_snap:
                             entry.long_call_strike = lc_snap
+                        put_map = getattr(entry, '_put_uic_map', None)
+                        if put_map:
+                            put_sw = int(entry.short_put_strike - entry.long_put_strike)
+                            sp_snap, _ = self._snap_to_chain_strike(entry.short_put_strike, put_map)
+                            if sp_snap and sp_snap != entry.short_put_strike:
+                                entry.short_put_strike = sp_snap
+                            if sp_snap:
+                                lp_snap, _ = self._snap_long_for_spread(
+                                    sp_snap, put_sw, put_map, is_call=False
+                                )
+                                if lp_snap:
+                                    entry.long_put_strike = lp_snap
                         return True
                     else:
                         # Current OTM already viable — no tightening needed
@@ -2621,8 +2763,9 @@ class HydraStrategy(MEICStrategy):
         When initial put credit is below minimum, moves the short put closer
         to ATM in 5pt steps until credit >= minimum or OTM floor is reached.
 
-        Uses put-specific minimum credit (min_viable_credit_put_side, default
-        $2.75) — walk-forward backtest optimized.
+        Uses put-specific minimum credit (self.min_viable_credit_put_side) —
+        VIX-regime-dependent in live config (overridden per zone by
+        vix_regime.min_put_credit); base $2.75 is a fallback.
 
         Uses batch quote API for efficiency: 1 chain fetch + 1 batch quote
         regardless of how many candidate strikes are evaluated.
@@ -2638,7 +2781,7 @@ class HydraStrategy(MEICStrategy):
 
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_put_otm_distance
-        min_credit = self.min_viable_credit_put_side  # Put-specific: $210 for $2.10
+        min_credit = self.min_viable_credit_put_side  # Put-specific; VIX-regime-overridden
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
 
         initial_short_put = entry.short_put_strike
@@ -2689,6 +2832,8 @@ class HydraStrategy(MEICStrategy):
             put_call = opt.get("PutCall", "")
             if put_call == "Put":
                 put_uic_map[strike] = opt.get("Uic")
+
+        entry._put_uic_map = put_uic_map
 
         # Collect UICs for all candidate strikes, snapping to nearest chain
         # strike when exact 5pt increments don't exist (Saxo uses 25pt spacing
@@ -2804,7 +2949,9 @@ class HydraStrategy(MEICStrategy):
                         self._adjust_for_strike_conflicts(entry)  # Fix #66 re-run
                         self._adjust_for_long_strike_overlap(entry)
 
-                        # MKT-044: Re-snap after overlap adjustments (same as MKT-020)
+                        # MKT-044: Re-snap BOTH sides after overlap adjustments.
+                        # Cross-side contamination: overlap re-runs can shift call
+                        # side too, undoing MKT-020's prior snap.
                         sp_snap, _ = self._snap_to_chain_strike(entry.short_put_strike, put_uic_map)
                         lp_snap, _ = self._snap_long_for_spread(
                             sp_snap or entry.short_put_strike, spread_width, put_uic_map, is_call=False
@@ -2813,6 +2960,18 @@ class HydraStrategy(MEICStrategy):
                             entry.short_put_strike = sp_snap
                         if lp_snap:
                             entry.long_put_strike = lp_snap
+                        call_map = getattr(entry, '_call_uic_map', None)
+                        if call_map:
+                            call_sw = int(entry.long_call_strike - entry.short_call_strike)
+                            sc_snap, _ = self._snap_to_chain_strike(entry.short_call_strike, call_map)
+                            if sc_snap and sc_snap != entry.short_call_strike:
+                                entry.short_call_strike = sc_snap
+                            if sc_snap:
+                                lc_snap, _ = self._snap_long_for_spread(
+                                    sc_snap, call_sw, call_map, is_call=True
+                                )
+                                if lc_snap:
+                                    entry.long_call_strike = lc_snap
                         return True
                     else:
                         # Current OTM already viable — no tightening needed
@@ -2841,7 +3000,8 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
 
     def _record_skipped_entry(self, entry_num: int, skip_reason: str,
-                              alert_details: str = "", send_alert: bool = True):
+                              alert_details: str = "", send_alert: bool = True,
+                              est_call: float = 0.0, est_put: float = 0.0):
         """
         Record a skipped entry in daily_state.entries and optionally send Telegram alert.
 
@@ -2854,6 +3014,8 @@ class HydraStrategy(MEICStrategy):
             skip_reason: Human-readable skip reason (e.g. "MKT-011: both sides below minimum credit")
             alert_details: Additional context for the Telegram message (estimated credits, VIX, etc.)
             send_alert: Whether to send a Telegram alert (False when caller sends its own alert)
+            est_call: Estimated call credit in cents (0 if not available)
+            est_put: Estimated put credit in cents (0 if not available)
         """
         now = get_us_market_time()
         skipped = HydraIronCondorEntry(entry_number=entry_num)
@@ -2862,6 +3024,8 @@ class HydraStrategy(MEICStrategy):
         skipped.put_side_skipped = True
         skipped.skip_reason = skip_reason
         skipped.entry_time = now
+        skipped.call_spread_credit = est_call
+        skipped.put_spread_credit = est_put
         self.daily_state.entries.append(skipped)
 
         # Record skip to SQLite (before alert guard — must run even when send_alert=False)
@@ -2874,6 +3038,8 @@ class HydraStrategy(MEICStrategy):
                     "skip_reason": skip_reason,
                     "spx_at_skip": self.current_price,
                     "vix_at_skip": self.current_vix,
+                    "estimated_call_credit": est_call / 100 if est_call else None,
+                    "estimated_put_credit": est_put / 100 if est_put else None,
                 })
             except Exception:
                 pass
@@ -3543,6 +3709,11 @@ class HydraStrategy(MEICStrategy):
                         # Upday put-only: DO apply put tightening (we're placing the put side)
                         self._apply_progressive_put_tightening(entry)
 
+                    # MKT-045: Final snap — ensure all strikes exist in Saxo's chain.
+                    # Overlap adjustments inside MKT-020/MKT-022 use hardcoded 5pt
+                    # offsets that can land on non-existent far-OTM strikes.
+                    self._snap_entry_strikes_to_chain(entry)
+
                 if not self.dry_run:
                     if is_conditional and _downday_triggered:
                         # Conditional entry: down day confirmed → force call-only (MKT-035)
@@ -3561,7 +3732,7 @@ class HydraStrategy(MEICStrategy):
                         # NOTE: do NOT zero put strikes yet — _estimate_entry_credit needs real
                         # strike values to look up UICs (zeroing causes estimation to fail → skip)
                         _, _, est_call, _ = self._check_credit_gate(entry)
-                        call_floor = self.call_credit_floor  # MKT-029 configurable floor ($0.75)
+                        call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                         if est_call < call_floor:
                             logger.info(
                                 f"MKT-035: Entry #{entry_num} call credit "
@@ -3576,7 +3747,8 @@ class HydraStrategy(MEICStrategy):
                             self._record_skipped_entry(
                                 entry_num,
                                 f"MKT-035: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})"
+                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                                est_call=est_call
                             )
                             return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
 
@@ -3595,7 +3767,7 @@ class HydraStrategy(MEICStrategy):
 
                         # Check put credit viability (MKT-029 configurable floor)
                         _, _, _, est_put = self._check_credit_gate(entry)
-                        put_floor = self.put_credit_floor  # MKT-029 configurable floor ($2.07)
+                        put_floor = self.put_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                         if est_put < put_floor:
                             logger.info(
                                 f"Upday-035: Entry #{entry_num} put credit "
@@ -3610,7 +3782,8 @@ class HydraStrategy(MEICStrategy):
                             self._record_skipped_entry(
                                 entry_num,
                                 f"Upday-035: put credit non-viable (${est_put / 100:.2f} < ${put_floor / 100:.2f})",
-                                f"• Put est: ${est_put / 100:.2f} (floor ${put_floor / 100:.2f}, primary ${self.min_viable_credit_put_side / 100:.2f})"
+                                f"• Put est: ${est_put / 100:.2f} (floor ${put_floor / 100:.2f}, primary ${self.min_viable_credit_put_side / 100:.2f})",
+                                est_put=est_put
                             )
                             return f"Entry #{entry_num} skipped - put credit non-viable (Upday-035)"
 
@@ -3633,7 +3806,7 @@ class HydraStrategy(MEICStrategy):
 
                             # Check call credit viability (MKT-029 configurable floor)
                             _, _, est_call, _ = self._check_credit_gate(entry)
-                            call_floor = self.call_credit_floor  # MKT-029 configurable floor ($0.75)
+                            call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                             if est_call < call_floor:
                                 logger.info(
                                     f"Base-Downday: Entry #{entry_num} call credit "
@@ -3648,7 +3821,8 @@ class HydraStrategy(MEICStrategy):
                                 self._record_skipped_entry(
                                     entry_num,
                                     f"Base-Downday: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                                    f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})"
+                                    f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                                    est_call=est_call
                                 )
                                 return f"Entry #{entry_num} skipped - call credit non-viable (Base-Downday)"
 
@@ -3667,7 +3841,7 @@ class HydraStrategy(MEICStrategy):
 
                     # Check call credit viability (MKT-029 configurable floor)
                     _, _, est_call, _ = self._check_credit_gate(entry)
-                    call_floor = self.call_credit_floor  # MKT-029 configurable floor ($0.75)
+                    call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                     if est_call < call_floor:
                         logger.info(
                             f"MKT-038: Entry #{entry_num} call credit "
@@ -3682,7 +3856,8 @@ class HydraStrategy(MEICStrategy):
                         self._record_skipped_entry(
                             entry_num,
                             f"MKT-038: call credit non-viable on FOMC T+1 (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})"
+                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                            est_call=est_call
                         )
                         return f"Entry #{entry_num} skipped - call credit non-viable (MKT-038)"
 
@@ -3707,15 +3882,23 @@ class HydraStrategy(MEICStrategy):
                                 f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})"
                             )
                         elif self.current_vix and self.current_vix >= self.put_only_max_vix:
-                            skip_reason = f"MKT-032: VIX {self.current_vix:.1f} too high for put-only (max {self.put_only_max_vix:.1f})"
-                            skip_details = f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for put-only)"
+                            skip_reason = (
+                                f"MKT-032: call non-viable (${est_call / 100:.2f}), "
+                                f"VIX {self.current_vix:.1f} too high for put-only (max {self.put_only_max_vix:.1f})"
+                            )
+                            skip_details = (
+                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
+                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})\n"
+                                f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for put-only fallback)"
+                            )
                         else:
                             skip_reason = f"MKT-011: credit gate skip (call ${est_call / 100:.2f}, put ${est_put / 100:.2f})"
                             skip_details = (
                                 f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
                                 f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})"
                             )
-                        self._record_skipped_entry(entry_num, skip_reason, skip_details)
+                        self._record_skipped_entry(entry_num, skip_reason, skip_details,
+                                                    est_call=est_call, est_put=est_put)
                         return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
                     elif gate_result == "call_only":
                         # MKT-011 retry: Before converting to call-only, try tightening
@@ -4066,7 +4249,7 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # PUT-ONLY ENTRY EXECUTION (v1.7.1 — MKT-011 re-enablement)
     # =========================================================================
-    # When call credit is non-viable (< $2.00 with MKT-029 floor $0.75), place only the put
+    # When call credit is non-viable (< active regime call_floor via MKT-029), place only the put
     # spread. Data from Feb 10 - Mar 2: 87.5% win rate, +$870 net from
     # 6 qualifying entries.
     #
@@ -4903,8 +5086,8 @@ class HydraStrategy(MEICStrategy):
         - Put-only (MKT-039): credit + put_stop_buffer ($1.55)
         - Call-only (MKT-040): call_credit + theo $2.60 put + call_stop_buffer ($0.35)
 
-        MKT-020/MKT-022 progressive tightening + credit minimums ($2.00 calls,
-        $2.75 puts) reduced skew from 3-7x to 1-3x.
+        MKT-020/MKT-022 progressive tightening + regime-dependent credit minimums
+        reduced skew from 3-7x to 1-3x.
 
         Args:
             entry: HydraIronCondorEntry to calculate stops for
@@ -4956,9 +5139,9 @@ class HydraStrategy(MEICStrategy):
             logger.info(f"Stop level for put spread: ${stop_level:.2f} (credit ${credit:.2f} + buffer ${self.put_stop_buffer:.2f})")
 
         else:
-            # Full IC — stop = total_credit + asymmetric buffer (call $0.35, put $1.55)
-            # MKT-020/MKT-022 tightening + credit minimums ($2.00 calls, $2.75 puts)
-            # keep skew manageable.
+            # Full IC — stop = total_credit + asymmetric buffer (call_stop_buffer,
+            # put_stop_buffer). MKT-020/MKT-022 tightening + regime-dependent credit
+            # minimums keep skew manageable.
             total_credit = entry.total_credit
 
             if total_credit < MIN_STOP_LEVEL:
@@ -5223,48 +5406,99 @@ class HydraStrategy(MEICStrategy):
     # MKT-036: Stop confirmation timer helper
     # =========================================================================
 
+    def _log_stop_detail(self, entry, side: str, spread_value: float, stop_level: float, event: str):
+        """Enhanced stop logging with bid/ask detail for diagnosing false stops."""
+        sc_bid = getattr(entry, "short_call_bid", None)
+        sc_ask = getattr(entry, "short_call_ask", None)
+        lc_bid = getattr(entry, "long_call_bid", None)
+        lc_ask = getattr(entry, "long_call_ask", None)
+        sp_bid = getattr(entry, "short_put_bid", None)
+        sp_ask = getattr(entry, "short_put_ask", None)
+        lp_bid = getattr(entry, "long_put_bid", None)
+        lp_ask = getattr(entry, "long_put_ask", None)
+
+        if side == "call":
+            if sc_bid is not None and sc_ask is not None:
+                detail = (
+                    f"SC bid={sc_bid:.2f}/ask={sc_ask:.2f} "
+                    f"LC bid={lc_bid or 0:.2f}/ask={lc_ask or 0:.2f}"
+                )
+            else:
+                detail = "no bid/ask data"
+            ask_sv = ((sc_ask or 0) - (lc_bid or 0)) * 100
+            bid_sv = ((sc_bid or 0) - (lc_ask or 0)) * 100
+        else:
+            if sp_bid is not None and sp_ask is not None:
+                detail = (
+                    f"SP bid={sp_bid:.2f}/ask={sp_ask:.2f} "
+                    f"LP bid={lp_bid or 0:.2f}/ask={lp_ask or 0:.2f}"
+                )
+            else:
+                detail = "no bid/ask data"
+            ask_sv = ((sp_ask or 0) - (lp_bid or 0)) * 100
+            bid_sv = ((sp_bid or 0) - (lp_ask or 0)) * 100
+
+        logger.warning(
+            f"STOP-DETAIL [{event}]: E#{entry.entry_number} {side} | "
+            f"SV=${spread_value:.0f} vs trigger=${stop_level:.0f} | "
+            f"mid_sv=${spread_value:.0f} ask_sv=${ask_sv:.0f} bid_sv=${bid_sv:.0f} | "
+            f"{detail}"
+        )
+
     def _check_stop_with_confirmation(self, entry, side: str, spread_value: float, stop_level: float) -> Optional[str]:
         """
-        MKT-036: Check stop with confirmation timer.
+        MKT-036: Check stop with confirmation timer (when enabled).
         MKT-042: Time-decaying buffer — wider stop early, normal after decay_hours.
+        MKT-046: Two-consecutive-breach filter (when MKT-036 disabled).
 
-        Instead of executing immediately when spread_value >= stop_level,
-        requires the breach to persist for stop_confirmation_seconds (default 75s).
-        If spread recovers below stop level during the window, timer resets.
+        When MKT-036 is disabled, MKT-046 requires the breach to persist for
+        two consecutive heartbeat cycles (2-5 seconds) before executing. This
+        filters momentary bid/ask spikes that inflate mid-price without a real
+        underlying move — confirmed as the cause of 80% of false call stops.
 
         Returns stop result string if stop executed, or None.
         """
         # MKT-042: Apply time-decaying buffer via shared helper
         stop_level = self._get_effective_stop_level(entry, side)
 
-        if spread_value >= stop_level:
-            if not self.stop_confirmation_enabled:
-                return self._execute_stop_loss(entry, side)
+        # MKT-046 minimum confirmation time (seconds). Breach must persist for
+        # at least this long before executing. Filters momentary bid/ask spikes
+        # that inflate mid-price (confirmed cause of 80% of false call stops).
+        # 10s is conservative: longer than any observed spike, shorter than a
+        # real trend move toward the strike.
+        MKT046_MIN_CONFIRM_SECONDS = 10
 
+        if spread_value >= stop_level:
             breach_time = getattr(entry, f'{side}_breach_time', None)
             now = datetime.now()
 
             if breach_time is None:
                 # First breach — start timer
                 setattr(entry, f'{side}_breach_time', now)
+                self._log_stop_detail(entry, side, spread_value, stop_level, "FIRST_BREACH")
+                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else MKT046_MIN_CONFIRM_SECONDS
                 logger.info(
-                    f"MKT-036: Entry #{entry.entry_number} {side} breached stop "
+                    f"MKT-046: E#{entry.entry_number} {side} breached stop "
                     f"(SV=${spread_value:.0f} >= ${stop_level:.0f}), "
-                    f"confirming {self.stop_confirmation_seconds}s..."
+                    f"confirming {confirm_secs}s..."
                 )
-                self._save_state_to_disk()  # Save ONCE on first breach
             else:
                 elapsed = (now - breach_time).total_seconds()
-                if elapsed >= self.stop_confirmation_seconds:
-                    # Confirmed — execute stop
+                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else MKT046_MIN_CONFIRM_SECONDS
+                if elapsed >= confirm_secs:
+                    # Confirmed — breach persisted long enough
+                    self._log_stop_detail(entry, side, spread_value, stop_level, "CONFIRMED")
                     logger.info(
-                        f"MKT-036: Entry #{entry.entry_number} {side} CONFIRMED "
-                        f"after {elapsed:.0f}s"
+                        f"MKT-046: E#{entry.entry_number} {side} CONFIRMED "
+                        f"after {elapsed:.0f}s (threshold {confirm_secs}s)"
                     )
+                    setattr(entry, f'{side}_breach_time', None)
                     return self._execute_stop_loss(entry, side)
-                # else: still confirming — NO disk I/O, just wait for next heartbeat
+                else:
+                    self._log_stop_detail(entry, side, spread_value, stop_level,
+                                          f"CONFIRMING ({elapsed:.0f}s/{confirm_secs}s)")
         else:
-            # Spread recovered below stop level — reset timer if active
+            # Spread recovered below stop level — reset timer
             breach_time = getattr(entry, f'{side}_breach_time', None)
             if breach_time is not None:
                 elapsed = (datetime.now() - breach_time).total_seconds()
@@ -5272,14 +5506,13 @@ class HydraStrategy(MEICStrategy):
                 setattr(entry, f'{side}_breach_count', count)
                 setattr(entry, f'{side}_breach_time', None)
                 self.daily_state.stops_avoided_mkt036 += 1
+                self._log_stop_detail(entry, side, spread_value, stop_level, "RECOVERED")
                 logger.info(
-                    f"MKT-036: Entry #{entry.entry_number} {side} RECOVERED after {elapsed:.0f}s "
+                    f"MKT-046: E#{entry.entry_number} {side} RECOVERED after {elapsed:.0f}s "
                     f"(breach #{count}, SV=${spread_value:.0f} < ${stop_level:.0f})"
                 )
-                self._save_state_to_disk()  # Save ONCE on recovery
-                # Log recovery to Sheets
                 self._log_safety_event(
-                    event_type="MKT-036_RECOVERY",
+                    event_type="MKT-046_FALSE_STOP_AVOIDED",
                     details=(
                         f"Entry #{entry.entry_number} {side}: recovered after {elapsed:.0f}s | "
                         f"SV: ${spread_value:.0f} < ${stop_level:.0f} | Breach #{count}"

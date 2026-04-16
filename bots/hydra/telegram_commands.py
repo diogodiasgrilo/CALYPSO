@@ -60,14 +60,14 @@ EDITABLE_PARAMS = {
         "type": "float",
         "min": 0.25, "max": 3.00,
         "unit": "$",
-        "description": "Min call credit per side",
+        "description": "Min call credit per side (BASE fallback — overridden by vix_regime.min_call_credit per zone in live config)",
     },
     "min_credit_put": {
         "path": "strategy.min_viable_credit_put_side",
         "type": "float",
         "min": 0.50, "max": 5.00,
         "unit": "$",
-        "description": "Min put credit per side",
+        "description": "Min put credit per side (BASE fallback — overridden by vix_regime.min_put_credit per zone in live config)",
     },
     "max_vix": {
         "path": "strategy.max_vix_entry",

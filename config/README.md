@@ -220,12 +220,20 @@ cp config.example.json config.json
     "max_spread_width": 110,
     "spread_vix_multiplier": 6.0,
 
-    "min_call_credit": 2.00,
-    "min_put_credit": 2.75,
-    "call_credit_floor": 0.75,
-    "put_credit_floor": 2.00,
-    "call_stop_buffer": 0.35,
-    "put_stop_buffer": 1.55,
+    "min_viable_credit_per_side": 2.00,
+    "min_viable_credit_put_side": 2.75,
+    "call_credit_floor": 0.20,
+    "put_credit_floor": 0.30,
+    "call_stop_buffer": 0.75,
+    "put_stop_buffer": 1.75,
+
+    "vix_regime": {
+      "enabled": true,
+      "breakpoints": [18.0, 22.0, 28.0],
+      "max_entries": [null, 2, 2, 1],
+      "min_call_credit": [1.00, 0.50, 0.30, 0.30],
+      "min_put_credit": [1.25, 0.75, 0.50, 0.40]
+    },
 
     "early_close_enabled": false,
     "early_close_roc_threshold": 0.03
@@ -243,12 +251,17 @@ cp config.example.json config.json
 | `put_min_spread_width` | 25 | MKT-027: Put spread floor (points) |
 | `max_spread_width` | 110 | MKT-027: Spread cap for margin (5 × 110pt × $100 = $55,000) |
 | `spread_vix_multiplier` | 6.0 | MKT-027: VIX-scaled formula: `round(VIX × 6.0 / 5) × 5`, floor 25, cap 110 |
-| `min_call_credit` | 2.00 | MKT-011: Call credit gate ($2.00 per spread, fallback $0.75) |
-| `min_put_credit` | 2.75 | MKT-011: Put credit gate ($2.75 per spread, fallback $2.00) |
-| `call_credit_floor` | 0.75 | MKT-029: Graduated fallback floor for call credit |
-| `put_credit_floor` | 2.00 | MKT-029: Graduated fallback floor for put credit |
-| `call_stop_buffer` | 0.35 | Asymmetric stop buffer for calls ($0.35 per contract, × 100 in config) |
-| `put_stop_buffer` | 1.55 | Asymmetric stop buffer for puts ($1.55 per contract, × 100 in config) |
+| `min_viable_credit_per_side` | 2.00 | MKT-011 call credit gate — **base fallback only**; overridden by `vix_regime.min_call_credit` at every VIX level in live config |
+| `min_viable_credit_put_side` | 2.75 | MKT-011 put credit gate — **base fallback only**; overridden by `vix_regime.min_put_credit` at every VIX level in live config |
+| `call_credit_floor` | 0.20 | MKT-029 fallback floor for calls (only used if `vix_regime.enabled=false`; regime overwrites to `min_call_credit − $0.10`) |
+| `put_credit_floor` | 0.30 | MKT-029 fallback floor for puts (only used if `vix_regime.enabled=false`; regime overwrites to `min_put_credit − $0.10`) |
+| `call_stop_buffer` | 0.75 | Asymmetric stop buffer for calls ($0.75 per contract, × 100 in code) |
+| `put_stop_buffer` | 1.75 | Asymmetric stop buffer for puts ($1.75 per contract, × 100 in code) |
+| `vix_regime.enabled` | true | Enable VIX-adaptive entries/credits |
+| `vix_regime.breakpoints` | [18.0, 22.0, 28.0] | VIX zone boundaries (4 zones) |
+| `vix_regime.max_entries` | [null, 2, 2, 1] | Max entries per zone (null = default 3; drops EARLIEST when capped) |
+| `vix_regime.min_call_credit` | [1.00, 0.50, 0.30, 0.30] | Call credit gate per zone (live VM; all slots filled) |
+| `vix_regime.min_put_credit` | [1.25, 0.75, 0.50, 0.40] | Put credit gate per zone (live VM; all slots filled) |
 | `early_close_enabled` | false | MKT-018: Intentionally disabled (hold-to-expiry outperforms on 1-min data) |
 | `early_close_roc_threshold` | 0.03 | MKT-018: ROC threshold (only used when MKT-018 enabled) |
 

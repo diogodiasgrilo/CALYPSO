@@ -140,6 +140,20 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
         <div className="text-xs text-text-secondary mb-1">
           {entry.entry_time ? formatTime(entry.entry_time) : "--:--"}
         </div>
+        {(entry.call_spread_credit > 0 || entry.put_spread_credit > 0) && (
+          <div className="flex gap-3 text-[10px] mt-1 mb-1">
+            {entry.call_spread_credit > 0 && (
+              <span className="text-text-secondary">
+                Call: <span className="text-loss">${(entry.call_spread_credit / 100).toFixed(2)}</span>
+              </span>
+            )}
+            {entry.put_spread_credit > 0 && (
+              <span className="text-text-secondary">
+                Put: <span className="text-loss">${(entry.put_spread_credit / 100).toFixed(2)}</span>
+              </span>
+            )}
+          </div>
+        )}
         {entry.skip_reason && (
           <div className="text-[10px] text-text-dim leading-tight">
             {entry.skip_reason}

@@ -23,30 +23,32 @@ This file is the single source of truth for HYDRA strategy parameters across all
 
 ---
 
-## VIX Regime Adaptive (updated 2026-04-13)
+## VIX Regime Adaptive (tuned 2026-04-14)
 
-**Breakpoints:** `[18.0, 22.0, 28.0]` — creates 4 regimes
+**Breakpoints:** `[18.0, 22.0, 28.0]` — creates 4 regimes. All regime credit slots are now filled (previously zones 0 & 1 were null), so the base `min_viable_credit_per_side` ($2.00) and `min_viable_credit_put_side` ($2.75) are effectively dead.
 
-| Regime | VIX Range | Entries | Slots Kept | Call Min | Put Min | Expected OTM |
-|--------|-----------|---------|------------|----------|---------|--------------|
-| 0 | <18 (calm) | 3 | 10:15, 10:45, 11:15 | $2.00 | $2.75 | 40-60pt |
-| 1 | 18-22 | **2** | **10:45, 11:15** (drops E#1) | $2.00 | $2.75 | 40-60pt |
-| 2 | 22-28 | **2** | **10:45, 11:15** (drops E#1) | **$0.75** | **$1.25** | **60-90pt** |
-| 3 | ≥28 (extreme) | **1** | **11:15 only** (E#3) | **$0.50** | **$0.75** | **80-100pt+** |
+| Regime | VIX Range | Entries | Slots Kept | Call Min | Put Min | Effective Floors (call / put) |
+|--------|-----------|---------|------------|----------|---------|-------------------------------|
+| 0 | <18 (calm) | 3 | 10:15, 10:45, 11:15 | **$1.00** | **$1.25** | $0.90 / $1.15 |
+| 1 | 18-22 | **2** | **10:45, 11:15** (drops E#1) | **$0.50** | **$0.75** | $0.40 / $0.65 |
+| 2 | 22-28 | **2** | **10:45, 11:15** (drops E#1) | **$0.30** | **$0.50** | $0.20 / $0.40 |
+| 3 | ≥28 (extreme) | **1** | **11:15 only** (E#3) | **$0.30** | **$0.40** | $0.20 / $0.30 |
 
-**Code behavior:** When max_entries caps below base count, drops EARLIEST entries (keeps best-performing E#3 slot). Was previously the opposite (kept earliest) — fixed 2026-04-13 at `strategy.py:7588`.
+When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed to `min_credit − $0.10`; the config-level floors ($0.20 / $0.30) are only used if `vix_regime.enabled = false`.
 
-**Shadow OTM targets** (per regime, for v7 shadow_entries observation): `[50, 65, 85, 120]`pt each side.
+**Code behavior:** When max_entries caps below base count, drops EARLIEST entries (keeps best-performing E#3 slot). Was previously the opposite (kept earliest) — fixed 2026-04-13 in `strategy.py::_apply_vix_regime_overrides()`.
+
+**Shadow OTM targets** (per regime, for v7 shadow_entries observation): call `[40, 50, 75, 75]`pt, put `[50, 75, 110, 90]`pt.
 
 ---
 
 ## Core MKT Rules — ACTIVE
 
-- **MKT-011:** Credit gate — primary thresholds from VIX regime above; skip entry if below
+- **MKT-011:** Credit gate — thresholds come from VIX regime above at every VIX level; skip entry if below
 - **MKT-020/022:** Progressive OTM tightening — scans 5pt inward until credit met (floor: 25pt OTM)
 - **MKT-024:** Starting OTM 3.5× call, 4.0× put (VIX-adjusted distance)
 - **MKT-027:** Spread width `round(VIX × 6.0 / 5) × 5`, 25-110pt range
-- **MKT-029:** Graduated fallback — call floor $0.75, put floor $2.00 (at VIX<22 defaults; VIX regime overrides at VIX≥22 via `min_call_credit` / `min_put_credit`)
+- **MKT-029:** Graduated fallback — floor = `min_credit − $0.10` (regime-dependent; e.g. at VIX<18: $0.90 call / $1.15 put)
 - **MKT-032/MKT-039:** Put-only when call non-viable AND VIX <15 (`put_only_max_vix: 15.0`)
 - **MKT-040:** Call-only fallback when put non-viable (with retries then theoretical put buffer), 89% WR
 - **MKT-038:** FOMC T+1 call-only (day after FOMC announcement forced call-only)
@@ -55,6 +57,8 @@ This file is the single source of truth for HYDRA strategy parameters across all
 - **Base-downday call-only:** E1-E3 convert to call-only when SPX drops ≥0.57% from open (`base_entry_downday_callonly_pct: 0.0057`)
 - **Upday-035 (E6):** Put-only at 14:00 when SPX rises ≥0.25% above open (`upday_threshold_pct: 0.0025`)
 - **Whipsaw filter:** Skip entry if intraday range > 1.75× expected move (`whipsaw_range_skip_mult: 1.75`)
+- **MKT-045:** Chain strike snap — after all overlap adjustments, snaps strikes to actual Saxo chain (far OTM uses 10-25pt intervals, not 5pt)
+- **MKT-046:** Stop anti-spike filter — breach must persist 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price. Logs full bid/ask on every breach event (`STOP-DETAIL`).
 
 ## Core MKT Rules — DISABLED (code preserved but dormant)
 
@@ -62,7 +66,7 @@ This file is the single source of truth for HYDRA strategy parameters across all
 - **MKT-018:** Early close (hold-to-expiry outperforms per backtest)
 - **MKT-031:** Smart entry windows (enter at scheduled times only, no scouting)
 - **MKT-034:** VIX time shifting (disabled 2026-03-05)
-- **MKT-036:** Stop confirmation timer (replaced by wider put_stop_buffer)
+- **MKT-036:** Stop confirmation timer 75s (MKT-046's 10s timer active instead)
 - **MKT-041:** Cushion recovery exit (interferes with buffer decay)
 - **E7 conditional:** Down-day call-only E7 disabled (E6 only)
 
@@ -132,15 +136,16 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 
 ---
 
-## Recent Changes (2026-04-13 deployment)
+## Recent Changes (2026-04-13 / 2026-04-14 deployments)
 
-1. **VIX regime breakpoints:** `[14, 20, 30]` → `[18, 22, 28]`
-2. **`max_entries` per regime:** `[2, null, null, 1]` → `[null, 2, 2, 1]` (drops E#1 at VIX≥18)
-3. **Added per-regime credit thresholds:** `min_call_credit: [null, null, 0.75, 0.50]`, `min_put_credit: [null, null, 1.25, 0.75]`
-4. **Code fix (strategy.py:7588):** When capping, drops EARLIEST entries (was LAST)
-5. **Added schema v7 `shadow_entries` table:** OTM-based counterfactual logging
-6. **Schema v6 bid/ask capture in `spread_snapshots`:** Saxo quotes per leg during monitoring
-7. **Fixed Haiku-introduced threshold unit bug:** `downday_threshold_pct` (0.3 vs 0.003) in backtest engine
+1. **VIX regime breakpoints:** `[14, 20, 30]` → `[18, 22, 28]` (2026-04-13)
+2. **`max_entries` per regime:** `[2, null, null, 1]` → `[null, 2, 2, 1]` (drops E#1 at VIX≥18, 2026-04-13)
+3. **Per-regime credit thresholds (2026-04-13 initial → 2026-04-14 tuned):** `min_call_credit: [null, null, 0.75, 0.50]` → **`[1.00, 0.50, 0.30, 0.30]`**; `min_put_credit: [null, null, 1.25, 0.75]` → **`[1.25, 0.75, 0.50, 0.40]`**. All slots now filled — base $2.00 / $2.75 are effectively dead.
+4. **Credit floors:** `call_credit_floor: 0.75` → **`0.20`**, `put_credit_floor: 2.00` → **`0.30`** (but when regime is active, floor = `min_credit − $0.10`).
+5. **Code fix (strategy.py `_apply_vix_regime_overrides()`):** When capping, drops EARLIEST entries (was LAST)
+6. **Added schema v7 `shadow_entries` table:** OTM-based counterfactual logging
+7. **Schema v6 bid/ask capture in `spread_snapshots`:** Saxo quotes per leg during monitoring
+8. **Fixed Haiku-introduced threshold unit bug:** `downday_threshold_pct` (0.3 vs 0.003) in backtest engine
 
 ---
 

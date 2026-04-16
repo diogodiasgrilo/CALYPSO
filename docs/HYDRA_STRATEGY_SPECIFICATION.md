@@ -328,10 +328,10 @@ Each entry goes through these phases in order:
 
 ```
 17. MKT-020: Call tightening — move short call closer in 5pt steps
-    └── Until credit >= $2.00 (call minimum) or 25pt OTM floor
+    └── Until credit >= active regime call minimum (VIX-regime-dependent) or 25pt OTM floor
     └── If tightened, re-runs steps 13-16
 18. MKT-022: Put tightening — mirror of MKT-020 for put side
-    └── Same 5pt steps, $2.75 target (put minimum), 25pt floor
+    └── Same 5pt steps, active regime put minimum as target, 25pt floor
     └── If tightened, re-runs steps 13-16
 ```
 
@@ -349,7 +349,7 @@ Each entry goes through these phases in order:
 ### Phase 7: Credit Gate
 
 ```
-19. MKT-011: Estimate credit from live quotes (call >= $2.00, put >= $2.75 with MKT-029 fallback)
+19. MKT-011: Estimate credit from live quotes (thresholds are VIX-regime-dependent; see VIX Regime section — MKT-029 fallback to `min_credit − $0.10`)
     ├── Conditional entry with MKT-035/Upday-035 triggered → Already handled above
     ├── Whipsaw filter: range > 1.75× EM → SKIP entry (v1.19.0)
     ├── Both sides viable → PROCEED with full iron condor
@@ -432,12 +432,12 @@ This pipeline prevents Saxo from rejecting orders or merging positions:
 | 3 | MKT-014 | Warn if MKT-013 landed on illiquid strike | MKT-013 can undo MKT-007's liquidity optimization |
 | 4 | Fix #66 | Re-run Fix #44 after MKT-013 | MKT-013 shifts longs too, potentially creating new conflicts |
 | 5 | MKT-015 | Move new long strikes 5pt further OTM if they overlap existing long strikes | Saxo merges same-strike longs, deleting older position ID |
-| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above $2.00 minimum (MKT-029 floor $0.75) |
-| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above $2.75 minimum (MKT-029 floor $2.00) |
+| 6 | MKT-020 | Tighten call OTM from MKT-024 starting distance | Get call credit above active regime call minimum (MKT-029 floor = min − $0.10) |
+| 7 | MKT-022 | Tighten put OTM from MKT-024 starting distance | Get put credit above active regime put minimum (MKT-029 floor = min − $0.10) |
 
 Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
-**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the minimum credit threshold. Puts use $2.75 (v1.19.0, walk-forward optimized), calls use $2.00 (v1.19.0, walk-forward optimized). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
+**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the active regime credit minimum (see VIX Regime section — base $2.00 / $2.75 are now dead, overridden by the regime at every VIX level). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
 
 ---
 
@@ -467,7 +467,7 @@ stop_level = call_credit + theoretical_put + call_stop_buffer (MKT-035 call-only
 | Call-only (MKT-040) | call_credit + theo_put + call_stop_buffer | $135 + $260 + $35 = $430 |
 | Put-only (MKT-039) | credit + put_stop_buffer | $210 + $155 = $365 |
 
-**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + credit minimums ($2.00 calls, $2.75 puts) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary.
+**Note:** MKT-019 (virtual equal credit stop: `2 × max(call, put)`) was removed in v1.4.0. MKT-020/MKT-022 progressive tightening + per-side credit minimums (VIX-regime-dependent) reduced credit skew from 3-7x to 1-3x, making the wider stop unnecessary.
 
 **Credit+Buffer approach (v1.10.2+):** Stop = total_credit + buffer. **Asymmetric buffers:** call side uses `call_stop_buffer` (default $0.35 × 100 = $35), put side uses `put_stop_buffer` (default $1.55 × 100 = $155). Walk-forward optimized in v1.19.0 (was $0.10/$5.00). If `put_stop_buffer` not set, falls back to `call_stop_buffer` for both. Replaces the earlier MEIC+ design (stop = credit - $0.15). **MKT-042 buffer decay (v1.22.0):** Buffers start at 2.10× and decay linearly to 1× over 2 hours — see MKT-042 section below.
 
@@ -752,21 +752,21 @@ Entry #1 → #2 → #3 placed normally
 | MKT-008 | Long Wing Liquidity | v1.0.0 | Reduce spread width if long wing illiquid; sets illiquidity flags |
 | MKT-009 | VIX-Adjusted Spread Width | v1.0.0 | VIX × 6.0, floor 25pt, cap 110pt (v1.19.0) |
 | MKT-010 | Illiquidity Fallback | v1.1.0 | Fallback when MKT-011 can't get quotes; uses illiquidity flags |
-| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call $2.00 (floor $0.75), put $2.75 (floor $2.00). Call non-viable → put-only if VIX < 15.0 (MKT-032/MKT-039), else skip; put non-viable → retry with tighter puts, then call-only (MKT-040); both → skip |
+| MKT-011 | Credit Gate | v1.1.0 | Estimate credit pre-entry; call/put thresholds are VIX-regime-dependent (see VIX Regime section), MKT-029 floor = `min_credit − $0.10`. Call non-viable → put-only if VIX < 15.0 (MKT-032/MKT-039), else skip; put non-viable → retry with tighter puts, then call-only (MKT-040); both → skip |
 | MKT-013 | Short-Short Overlap | v1.1.4 | Prevent new short strikes from matching existing shorts |
 | MKT-014 | Post-Overlap Liquidity Warning | v1.1.5 | Warn if MKT-013 adjustment landed on illiquid strike |
 | MKT-015 | Long-Long Overlap | v1.2.2 | Prevent new long strikes from matching existing longs |
 | MKT-018 | Early Close on ROC | v1.3.0 | **DISABLED** — Hold-to-expiry outperforms. Close all when ROC >= 3% (if re-enabled) |
-| MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= $2.00 (floor $0.75) |
+| MKT-020 | Progressive Call Tightening | v1.3.1 | Move short call closer in 5pt steps until credit >= active regime call minimum (floor = min − $0.10) |
 | MKT-021 | Pre-Entry ROC Gate | v1.3.2 | **DISABLED** — Only active when MKT-018 enabled. Skip entries #4/#5 if ROC >= 3% |
-| MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= $2.75 (floor $2.00) |
+| MKT-022 | Progressive Put Tightening | v1.3.5 | Move short put closer in 5pt steps until credit >= active regime put minimum (floor = min − $0.10) |
 | MKT-023 | Smart Hold Check | v1.3.7 | **DISABLED** — Only active when MKT-018 enabled. Compare close-now vs hold |
 | MKT-024 | Wider Starting OTM | v1.4.1 | Start calls at 3.5× and puts at 4.0× VIX-adjusted distance; MKT-020/022 scan inward (v1.6.0: upgraded from 2×) |
 | MKT-025 | Short-Only Stop Close | v1.4.3 | **Configurable** (`short_only_stop`, default: false). When true: close SHORT only, long expires. When false: close both legs (default since v1.9.4) |
 | MKT-026 | Min Spread Width Floor | v1.4.5 | Floor 25pt (v1.19.0, was 60pt) |
 | MKT-027 | VIX-Scaled Spread Width | v1.6.0 | Continuous formula `VIX × 6.0` (v1.19.0, was 3.5), floor 25pt, cap 110pt |
 | MKT-028 | Asymmetric Spread Widths | v1.6.0 | **Unified in v1.19.0** — single formula VIX × 6.0 replaces separate call/put floors |
-| MKT-029 | Graduated Credit Fallback | v1.6.2 | -$0.05, -$0.10 steps below minimum for BOTH calls and puts (call floor $0.75, put floor $2.00). Applied in MKT-011 gate, MKT-020/022 tightening, and MKT-035/038 call-only skip checks. |
+| MKT-029 | Graduated Credit Fallback | v1.6.2 | -$0.05, -$0.10 steps below minimum for BOTH calls and puts. Floor = `min_credit − $0.10` (regime-dependent). Applied in MKT-011 gate, MKT-020/022 tightening, and MKT-035/038 call-only skip checks. |
 | MKT-031 | Smart Entry Windows | v1.8.0 | 10-min scouting before each entry; 2-parameter scoring (ATR calm + momentum pause); score >= 65 triggers early entry |
 | MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 15.0 (v1.19.0, lowered from 25); at VIX >= 15.0 skip |
 | MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
@@ -779,6 +779,9 @@ Entry #1 → #2 → #3 placed normally
 | MKT-041 | Cushion Recovery Exit | v1.21.0 | **DISABLED** (buffer+cushion interfere). When enabled: closes IC side that reaches >= 96% of stop then recovers to <= 67%. Sharpe 2.182 vs 2.094 baseline (938 days). |
 | MKT-042 | Buffer Decay | v1.22.0 | Time-decaying stop buffer: starts at 2.10× normal buffer, linearly decays to 1× over 2h. Wider stops early, normal later. Config: `buffer_decay_start_mult`, `buffer_decay_hours`. |
 | MKT-043 | Calm Entry Filter | v1.22.0 | Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries. Config: `calm_entry_lookback_min`, `calm_entry_threshold_pts`, `calm_entry_max_delay_min`. |
+| MKT-044 | Post-Overlap Chain Re-Snap | v1.23.0 | After MKT-013/015 overlap adjustments inside MKT-020/022, re-snap BOTH call and put sides to the actual option chain. Prevents cross-side contamination from 5pt shifts landing on non-existent strikes. |
+| MKT-045 | Final Chain Strike Snap | v1.23.0 | After all tightening + overlap adjustments, snap all 4 strikes to nearest actual Saxo chain strike (max 25pt tolerance). Re-runs overlap checks once after snapping. Prevents entries from using strikes that don't exist in the 0DTE chain (far OTM uses 10-25pt intervals, not 5pt). |
+| MKT-046 | Stop Confirmation Timer | v1.23.0 | Requires stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price (confirmed cause of 80% of false call stops). On first breach, starts timer + logs full bid/ask detail. If spread recovers below trigger before 10s, timer resets and stop is avoided. |
 | Whipsaw | Whipsaw Filter | v1.19.0 | Skip entries when intraday range > 1.75× expected move. High whipsaw = bad for iron condors. |
 | Upday-035 | Up-Day Put-Only | v1.17.0 | E6 (14:00) fires as put-only when SPX rises >= 0.25% above session open. Stop = credit + put_stop_buffer. |
 
@@ -799,7 +802,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-007 | MKT-013 | MKT-007 moves strikes closer (liquid); MKT-013 moves them further (overlap). Can undo each other. |
 | MKT-013 | Fix #44/66 | MKT-013 shifts longs; Fix #66 re-checks for new long-vs-short conflicts. |
 | MKT-024 | MKT-020/022 | MKT-024 sets wider starting OTM; MKT-020/022 scan inward from there. |
-| MKT-020/022 | MKT-011 | Tightening runs first (uses MKT-029 fallbacks); MKT-011 re-validates with fresh quotes and its own MKT-029 fallbacks (call $2.00/$0.75, put $2.75/$2.00). |
+| MKT-020/022 | MKT-011 | Tightening runs first (uses MKT-029 fallbacks); MKT-011 re-validates with fresh quotes and its own MKT-029 fallbacks (thresholds and floors regime-dependent, see VIX Regime section). |
 | MKT-021 | MKT-018 | MKT-021 skips entries → satisfies MKT-018 gate → early close fires same cycle. |
 | MKT-018 | MKT-023 | MKT-023 is a sub-check within MKT-018; can override close decision with HOLD. |
 | MKT-025 | Settlement | Short-only close leaves long leg open; settlement auto-cleans orphaned positions. |
@@ -968,8 +971,10 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `max_delta` | `15` | Maximum acceptable delta |
 | `min_credit_per_side` | `1.00` | Credit warning threshold ($/side) |
 | `max_credit_per_side` | `1.75` | Credit warning ceiling ($/side) |
-| `min_viable_credit_per_side` | `2.00` | MKT-011/MKT-020 call minimum (v1.19.0: walk-forward optimized, was $0.60) |
-| `min_viable_credit_put_side` | `2.75` | MKT-011/MKT-022 put minimum (v1.19.0: walk-forward optimized, was $2.50) |
+| `min_viable_credit_per_side` | `2.00` | MKT-011/MKT-020 call minimum — **base fallback only**, overridden by `vix_regime.min_call_credit` at every VIX level in live config |
+| `min_viable_credit_put_side` | `2.75` | MKT-011/MKT-022 put minimum — **base fallback only**, overridden by `vix_regime.min_put_credit` at every VIX level in live config |
+| `call_credit_floor` | `0.20` | MKT-029 fallback floor for calls (applies only when `vix_regime.enabled = false`; regime overwrites to `min_call_credit − $0.10`) |
+| `put_credit_floor` | `0.30` | MKT-029 fallback floor for puts (applies only when `vix_regime.enabled = false`; regime overwrites to `min_put_credit − $0.10`) |
 | `call_starting_otm_multiplier` | `3.5` | MKT-024: call starting OTM = base × multiplier (batch API = zero extra cost) |
 | `put_starting_otm_multiplier` | `4.0` | MKT-024: put starting OTM = base × multiplier (put skew = credit viable further OTM) |
 | `min_call_otm_distance` | `25` | MKT-020 OTM floor for call tightening (points) |
@@ -1006,31 +1011,37 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `enabled` | `true` | Enable/disable whipsaw filter |
 | `threshold` | `1.75` | Skip entry when intraday range > 1.75× expected move |
 
-### VIX Regime (`config.vix_regime`, v1.20.0 → breakpoints updated 2026-04-13)
+### VIX Regime (`config.vix_regime`, v1.20.0 → tuned 2026-04-14)
 
-VIX regime uses a 4-zone breakpoint system. Arrays are per-zone; `null` means use the default value.
+VIX regime uses a 4-zone breakpoint system. Arrays are per-zone; `null` means use the base default.
 
-Breakpoints were updated from `[14, 20, 30]` to `[18.0, 22.0, 28.0]` on 2026-04-13 after
-per-entry analysis of 37 days revealed Entry #1 (10:15) underperforms at all VIX ≥ 18
-(24% WR, -$79/entry). The cap code now drops the EARLIEST entries (preserves best-performing
-E#3 at 11:15) — see `strategy.py` near line 7721.
+Breakpoints were updated from `[14, 20, 30]` to `[18.0, 22.0, 28.0]` on 2026-04-13, then all
+regime credit slots were filled on 2026-04-14 (previously only zones 2 & 3 had overrides).
+The cap code drops the EARLIEST entries (preserves best-performing E#3 at 11:15) — see
+`strategy.py::_apply_vix_regime_overrides()`.
 
-| Key | Default | Description |
-|-----|---------|-------------|
+**Important:** Because every regime slot for `min_call_credit` / `min_put_credit` is now filled,
+the base `min_viable_credit_per_side` ($2.00) and `min_viable_credit_put_side` ($2.75) are
+effectively dead — the regime always overrides. Likewise, when the regime applies,
+`call_credit_floor` / `put_credit_floor` are recomputed as `min_credit − $0.10`, so the
+top-level $0.20 / $0.30 floors only apply if `enabled: false`.
+
+| Key | Live VM Value | Description |
+|-----|---------------|-------------|
 | `enabled` | `true` | Enable/disable VIX regime adjustments |
 | `breakpoints` | `[18.0, 22.0, 28.0]` | VIX zone boundaries (creates 4 zones) |
 | `max_entries` | `[null, 2, 2, 1]` | Max entries per zone (null = use default 3) |
-| `put_stop_buffer` | `[null, null, null, null]` | Put buffer override per zone (null = use default $1.55) |
-| `call_stop_buffer` | `[null, null, null, null]` | Call buffer override per zone (null = use default $0.35) |
-| `min_call_credit` | `[null, null, 0.75, 0.50]` | Call credit gate override per zone |
-| `min_put_credit` | `[null, null, 1.25, 0.75]` | Put credit gate override per zone |
+| `put_stop_buffer` | `[null, null, null, null]` | Put buffer override per zone (null = use base `put_stop_buffer`) |
+| `call_stop_buffer` | `[null, null, null, null]` | Call buffer override per zone (null = use base `call_stop_buffer`) |
+| `min_call_credit` | `[1.00, 0.50, 0.30, 0.30]` | Call credit gate per zone |
+| `min_put_credit` | `[1.25, 0.75, 0.50, 0.40]` | Put credit gate per zone |
 
-| Zone | VIX Range | Max Entries | Credit Thresholds (call / put) | Intent |
-|------|-----------|-------------|--------------------------------|--------|
-| 0 | < 18    | 3 (default) | defaults ($2.00 / $2.75)       | Calm market — all 3 base entries |
-| 1 | 18-22   | 2           | defaults ($2.00 / $2.75)       | Drop E#1 (auto-skip earliest) |
-| 2 | 22-28   | 2           | $0.75 / $1.25                  | Drop E#1 + lower credits force 60-90pt OTM |
-| 3 | >= 28   | 1           | $0.50 / $0.75                  | E#3 only + lowest credits force 80-100pt OTM |
+| Zone | VIX Range | Max Entries | Credit Thresholds (call / put) | Effective Floors (call / put) | Intent |
+|------|-----------|-------------|--------------------------------|-------------------------------|--------|
+| 0 | < 18    | 3 (default) | $1.00 / $1.25 | $0.90 / $1.15 | Calm market — all 3 base entries |
+| 1 | 18-22   | 2           | $0.50 / $0.75 | $0.40 / $0.65 | Drop E#1 (auto-skip earliest) |
+| 2 | 22-28   | 2           | $0.30 / $0.50 | $0.20 / $0.40 | Drop E#1 + lower credits force further OTM |
+| 3 | >= 28   | 1           | $0.30 / $0.40 | $0.20 / $0.30 | E#3 only + lowest credits force max OTM |
 
 ### Skip Weekdays (`config.skip_weekdays`)
 
@@ -1100,9 +1111,9 @@ EMAs are lagging indicators. On Feb 17, a V-shaped reversal generated BEARISH at
 
 Put premiums are typically 2-7× higher than call premiums at the same delta. This means:
 - MKT-024 starts calls at 3.5× and puts at 4.0× base OTM to give MKT-020/022 room to find optimal strikes
-- MKT-011 uses separate thresholds: calls $2.00, puts $2.75, with MKT-029 graduated fallback (call floor $0.75, put floor $2.00)
-- MKT-020 call tightening reaches $2.00 (or $0.75 at MKT-029 floor) → fewer MKT-011 skips/conversions
-- MKT-022 with $2.75 put minimum forces closer-to-ATM puts
+- MKT-011 uses separate thresholds: VIX-regime-dependent call / put minimums (see VIX Regime section), with MKT-029 graduated fallback to `min_credit − $0.10`
+- MKT-020 call tightening reaches the active regime call minimum → fewer MKT-011 skips/conversions
+- MKT-022 with the active regime put minimum forces closer-to-ATM puts
 - Total_credit stop (shared by both sides) is adequate because MKT-020/022 keeps skew at 1-2x
 
 ### Saxo Position Merging
@@ -1172,8 +1183,8 @@ When an entry is skipped, the bot: (1) records a minimal `HydraIronCondorEntry` 
 |------|--------|-------|
 | Margin insufficient | `"Insufficient margin"` | No (existing HIGH alert) |
 | MKT-035 not triggered | `"MKT-035: SPX not down enough for conditional entry"` | Yes |
-| MKT-035 call non-viable | `"MKT-035: call credit non-viable ($X.XX < $0.75)"` | Yes |
-| MKT-038 call non-viable | `"MKT-038: call credit non-viable on FOMC T+1 ($X.XX < $0.75)"` | Yes |
+| MKT-035 call non-viable | `"MKT-035: call credit non-viable ($X.XX < $FLOOR)"` (floor = active regime call floor, e.g. $0.90 at VIX<18) | Yes |
+| MKT-038 call non-viable | `"MKT-038: call credit non-viable on FOMC T+1 ($X.XX < $FLOOR)"` (floor = active regime call floor) | Yes |
 | MKT-011 both non-viable | `"MKT-011: both sides below minimum credit (call $X.XX, put $X.XX)"` | Yes |
 | MKT-032 VIX gate | `"MKT-032: VIX X.X too high for put-only (max 15.0)"` | Yes |
 | MKT-010 one wing illiquid | `"MKT-010: [call/put] wings illiquid"` | Yes |
