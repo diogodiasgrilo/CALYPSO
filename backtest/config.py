@@ -34,9 +34,10 @@ class BacktestConfig:
     # ── Conditional Downday-035 entries (NEW 2026-04-19) ─────────────────────
     # Mirror of Upday-035 for down days. OR'd with legacy conditional_e6_enabled for back-compat.
     # Threshold is SEPARATE from downday_threshold_pct so heartbeat/legacy display doesn't change.
+    # Default matches upday_threshold_pct convention: fraction (0.0025 = 0.25%) — engine applies * 100.
     conditional_downday_e6_enabled: bool = False
     conditional_downday_e7_enabled: bool = False
-    conditional_downday_threshold_pct: float = 0.25  # 0.25% drop (matches up-day)
+    conditional_downday_threshold_pct: float = 0.0025  # 0.25% drop (matches up-day convention)
 
     # ── Conditional E6/E7 up-day put-only entries ────────────────────────────
     # Fire as put-only when SPX rises >= upday_threshold_pct above reference
