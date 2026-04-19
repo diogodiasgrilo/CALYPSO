@@ -81,6 +81,7 @@ def baseline_cfg():
         base_entry_downday_callonly_pct=None,
         fomc_announcement_skip=False,    # DON'T skip — measure actual P&L
         fomc_t1_callonly_enabled=False,  # DON'T force call-only — measure normal trading
+        fomc_t1_skip_enabled=False,      # DON'T skip T+1 — need to measure its actual P&L for comparison
     )
 
 

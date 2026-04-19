@@ -110,6 +110,7 @@ def shared_cfg():
         conditional_e6_enabled=False,
         conditional_e7_enabled=False,
         base_entry_downday_callonly_pct=None,   # just disabled live
+        fomc_t1_skip_enabled=False,             # DISABLE skip so MKT-038 A/B is comparable (see 2026-04-19 change)
     )
 
 
