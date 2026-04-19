@@ -4,7 +4,9 @@ import { statusColor, colors } from "../../lib/tradingColors";
 import type { EntryStatus } from "../shared/StatusBadge";
 import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 
-// Base entries: 3 scheduled at :15/:45 starting 10:15 AM ET (E1-E3)
+// Canonical base entry slots: E1=10:15, E2=10:45, E3=11:15.
+// As of 2026-04-17, E#1 (10:15) is dropped at ALL VIX levels (max_entries [2,2,2,1]).
+// Dashboard still shows all 3 canonical slots; dropped slots display "dropped by VIX regime".
 const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15"];
 // Conditional entries: E6 (14:00) fires put-only when SPX rises ≥ 0.25% from open (Upday-035)
 // Hidden when all conditional flags are disabled in bot config

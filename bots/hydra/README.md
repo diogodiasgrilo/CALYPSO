@@ -218,7 +218,7 @@ Adjusts entries AND credit thresholds based on VIX at open. Uses a 4-zone breakp
 
 | Zone | VIX Range | Max Entries | Entries Kept | Call Min | Put Min | Effective Call Floor | Effective Put Floor |
 |------|-----------|-------------|--------------|----------|---------|----------------------|---------------------|
-| 0 | < 18 | 3 (default) | E#1, E#2, E#3 | $1.00 | $1.25 | $0.90 | $1.15 |
+| 0 | < 18 | 2 | E#2, E#3 | $1.00 | $1.25 | $0.90 | $1.15 |
 | 1 | 18-22 | 2 | E#2, E#3 | $0.50 | $0.75 | $0.40 | $0.65 |
 | 2 | 22-28 | 2 | E#2, E#3 | $0.30 | $0.50 | $0.20 | $0.40 |
 | 3 | >= 28 | 1 | E#3 only | $0.30 | $0.40 | $0.20 | $0.30 |
@@ -229,7 +229,7 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 |---------|---------------|-------------|
 | `vix_regime.enabled` | `true` | Enable/disable VIX regime adaptive |
 | `vix_regime.breakpoints` | `[18.0, 22.0, 28.0]` | VIX zone boundaries |
-| `vix_regime.max_entries` | `[null, 2, 2, 1]` | Max entries per zone (null = use default 3). Drops EARLIEST when capped. |
+| `vix_regime.max_entries` | `[2, 2, 2, 1]` | Max entries per zone. As of 2026-04-17, E#1 (10:15) is dropped at ALL VIX levels. Drops EARLIEST when capped. |
 | `vix_regime.min_call_credit` | `[1.00, 0.50, 0.30, 0.30]` | Per-zone call credit threshold |
 | `vix_regime.min_put_credit` | `[1.25, 0.75, 0.50, 0.40]` | Per-zone put credit threshold |
 | `vix_regime.shadow_call_otm` | `[40.0, 50.0, 75.0, 75.0]` | v7: OTM target (pt) for shadow_entries logging (observation only, no trading effect) |

@@ -82,7 +82,7 @@ const TAB_LABELS: Record<AnalyticsTab, string> = {
 
 const SCHEDULED_SLOTS = [
   615, 645, 675, 840,
-]; // 10:15,10:45,11:15,14:00 (E1-E3 base + E6 conditional)
+]; // 10:15,10:45,11:15,14:00 (canonical slots; E#1 dropped at all VIX levels since 2026-04-17)
 
 const SLOT_LABELS: Record<number, string> = {
   615: "10:15", 645: "10:45", 675: "11:15", 840: "14:00",

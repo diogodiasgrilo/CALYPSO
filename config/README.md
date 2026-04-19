@@ -230,7 +230,7 @@ cp config.example.json config.json
     "vix_regime": {
       "enabled": true,
       "breakpoints": [18.0, 22.0, 28.0],
-      "max_entries": [null, 2, 2, 1],
+      "max_entries": [2, 2, 2, 1],
       "min_call_credit": [1.00, 0.50, 0.30, 0.30],
       "min_put_credit": [1.25, 0.75, 0.50, 0.40]
     },
@@ -259,7 +259,7 @@ cp config.example.json config.json
 | `put_stop_buffer` | 1.75 | Asymmetric stop buffer for puts ($1.75 per contract, × 100 in code) |
 | `vix_regime.enabled` | true | Enable VIX-adaptive entries/credits |
 | `vix_regime.breakpoints` | [18.0, 22.0, 28.0] | VIX zone boundaries (4 zones) |
-| `vix_regime.max_entries` | [null, 2, 2, 1] | Max entries per zone (null = default 3; drops EARLIEST when capped) |
+| `vix_regime.max_entries` | [2, 2, 2, 1] | Max entries per zone. As of 2026-04-17, E#1 (10:15) is dropped at ALL VIX levels. Drops EARLIEST when capped. |
 | `vix_regime.min_call_credit` | [1.00, 0.50, 0.30, 0.30] | Call credit gate per zone (live VM; all slots filled) |
 | `vix_regime.min_put_credit` | [1.25, 0.75, 0.50, 0.40] | Put credit gate per zone (live VM; all slots filled) |
 | `early_close_enabled` | false | MKT-018: Intentionally disabled (hold-to-expiry outperforms on 1-min data) |

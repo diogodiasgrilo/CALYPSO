@@ -1030,7 +1030,7 @@ top-level $0.20 / $0.30 floors only apply if `enabled: false`.
 |-----|---------------|-------------|
 | `enabled` | `true` | Enable/disable VIX regime adjustments |
 | `breakpoints` | `[18.0, 22.0, 28.0]` | VIX zone boundaries (creates 4 zones) |
-| `max_entries` | `[null, 2, 2, 1]` | Max entries per zone (null = use default 3) |
+| `max_entries` | `[2, 2, 2, 1]` | Max entries per zone. E#1 (10:15) dropped at ALL VIX levels as of 2026-04-17. |
 | `put_stop_buffer` | `[null, null, null, null]` | Put buffer override per zone (null = use base `put_stop_buffer`) |
 | `call_stop_buffer` | `[null, null, null, null]` | Call buffer override per zone (null = use base `call_stop_buffer`) |
 | `min_call_credit` | `[1.00, 0.50, 0.30, 0.30]` | Call credit gate per zone |
@@ -1038,7 +1038,7 @@ top-level $0.20 / $0.30 floors only apply if `enabled: false`.
 
 | Zone | VIX Range | Max Entries | Credit Thresholds (call / put) | Effective Floors (call / put) | Intent |
 |------|-----------|-------------|--------------------------------|-------------------------------|--------|
-| 0 | < 18    | 3 (default) | $1.00 / $1.25 | $0.90 / $1.15 | Calm market — all 3 base entries |
+| 0 | < 18    | 2           | $1.00 / $1.25 | $0.90 / $1.15 | E#1 dropped (2026-04-17) — was worst slot at all VIX levels |
 | 1 | 18-22   | 2           | $0.50 / $0.75 | $0.40 / $0.65 | Drop E#1 (auto-skip earliest) |
 | 2 | 22-28   | 2           | $0.30 / $0.50 | $0.20 / $0.40 | Drop E#1 + lower credits force further OTM |
 | 3 | >= 28   | 1           | $0.30 / $0.40 | $0.20 / $0.30 | E#3 only + lowest credits force max OTM |

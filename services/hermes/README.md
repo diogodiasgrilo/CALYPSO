@@ -10,7 +10,7 @@ Runs at 7:00 PM ET on weekdays via systemd timer. Pre-computes a cheat sheet of 
 
 - **Pre-computed cheat sheet** prevents Claude arithmetic errors (e.g., "5 stopped legs: 4C/2P" when 4+2=6)
 - **Narrative-focused analysis** — explains WHY, not just WHAT (story of the day, market context)
-- **Updated strategy params** for HYDRA v1.19.0 (3 base entries, VIX-scaled spreads 25-83pt, 3.5x/4.0x OTM)
+- **Updated strategy params** for HYDRA v1.23.0 (2 base entries E#2+E#3 at all VIX levels — E#1 dropped 2026-04-17; VIX-scaled spreads 25-110pt, 3.5x/4.0x OTM)
 - **Cumulative context** — win/lose streak, avg win/loss, day number
 - **Apollo accuracy assessment** — did pre-market risk level match actual outcome?
 - **Trimmed state file** — strips UICs, position IDs to save tokens

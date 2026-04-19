@@ -78,6 +78,7 @@ export function DailyPnLCard() {
   const avgStops = comparisons?.avg_stops ?? 0;
 
   const schedule = hydraState?.entry_schedule;
+  // Fallback to 3 if schedule unavailable (VIX regime may cap this — E#1 dropped at all VIX levels since 2026-04-17).
   const baseCount = schedule?.base?.length ?? 3;
   const baseEntries = entries.filter((e) => e.entry_number <= baseCount).length;
   const conditionalEntries = entries.filter((e) => e.entry_number > baseCount).length;

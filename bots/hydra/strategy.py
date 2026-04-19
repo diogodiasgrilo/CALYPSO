@@ -219,10 +219,11 @@ class HydraStrategy(MEICStrategy):
     - Calm Entry (MKT-043): Delays entry up to 5min when SPX >15pt move in 3min
     - Anti-Whipsaw: Skips entries when intraday range > 1.75x expected move
     - VIX Regime: Adapts entries/credits based on VIX at open (breakpoints [18, 22, 28],
-      tuned 2026-04-14). Live VM values: min_call_credit [1.00, 0.50, 0.30, 0.30],
-      min_put_credit [1.25, 0.75, 0.50, 0.40], max_entries [null, 2, 2, 1].
-      VIX<18: 3 entries ($1.00/$1.25). VIX 18-22: drop E#1 ($0.50/$0.75).
-      VIX 22-28: drop E#1 ($0.30/$0.50). VIX>=28: E#3 only ($0.30/$0.40).
+      tuned 2026-04-17). Live VM values: min_call_credit [1.00, 0.50, 0.30, 0.30],
+      min_put_credit [1.25, 0.75, 0.50, 0.40], max_entries [2, 2, 2, 1].
+      E#1 (10:15) is dropped at ALL VIX levels (was worst slot: 24% WR, -$79/entry).
+      VIX<18: E#2+E#3 ($1.00/$1.25). VIX 18-22: E#2+E#3 ($0.50/$0.75).
+      VIX 22-28: E#2+E#3 ($0.30/$0.50). VIX>=28: E#3 only ($0.30/$0.40).
       Floors are regime-dependent (= min_credit - $0.10). Code drops EARLIEST entries.
     - Down-Day Call-Only: E1-E3 convert to call-only when SPX drops >= 0.57% from open
     - FOMC T+1 (MKT-038): All entries forced call-only day after FOMC announcement

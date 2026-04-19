@@ -40,10 +40,10 @@ CRITICAL: Day 2 blackout is CONFIGURABLE. Always check `cheat_sheet.fomc_announc
 
 ## Entry Skip Pattern
 
-Entry #1 (10:15) is AUTO-DROPPED at VIX ≥ 18 by the VIX regime cap (breakpoints [18, 22, 28],
-max_entries [null, 2, 2, 1]). Per-entry analysis of 37 days showed E#1 is the worst-performing
-slot (24% WR, -$79/entry avg) — morning directional uncertainty. If you see "0 entries placed"
-or only E#2/E#3 on a VIX ≥ 18 day, that is INTENDED behavior, not a skip to flag.
+Entry #1 (10:15) is AUTO-DROPPED at ALL VIX LEVELS by the VIX regime cap (breakpoints [18, 22, 28],
+max_entries [2, 2, 2, 1], changed 2026-04-17). Per-entry analysis of 37 days showed E#1 is the
+worst-performing slot (24% WR, -$79/entry avg) — morning directional uncertainty. If you see
+"0 entries placed" or only E#2/E#3, that is INTENDED behavior, not a skip to flag.
 Entry #3 (11:15) is the best-performing slot (42% WR) and is preserved at all VIX levels.
 MKT-011 credit-gate skips (cheat_sheet.entries_skipped) tend to cluster on the call side
 (premium decays faster on calls).

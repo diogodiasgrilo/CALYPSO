@@ -17,19 +17,19 @@ This file is the single source of truth for HYDRA strategy parameters across all
 **E7:** DISABLED
 
 **Historical per-slot performance (37 reliable days, Feb 10 - Apr 10, 2026):**
-- E#1 (10:15): 24% WR, -$79/entry — **WORST** (auto-dropped at VIX ≥18)
+- E#1 (10:15): 24% WR, -$79/entry — **WORST** (auto-dropped at ALL VIX levels as of 2026-04-17)
 - E#2 (10:45): 35% WR, -$39/entry
 - E#3 (11:15): 42% WR, -$14/entry — **BEST** slot (preserved at all VIX levels)
 
 ---
 
-## VIX Regime Adaptive (tuned 2026-04-14)
+## VIX Regime Adaptive (tuned 2026-04-17)
 
-**Breakpoints:** `[18.0, 22.0, 28.0]` — creates 4 regimes. All regime credit slots are now filled (previously zones 0 & 1 were null), so the base `min_viable_credit_per_side` ($2.00) and `min_viable_credit_put_side` ($2.75) are effectively dead.
+**Breakpoints:** `[18.0, 22.0, 28.0]` — creates 4 regimes. All regime credit slots are now filled (previously zones 0 & 1 were null), so the base `min_viable_credit_per_side` ($2.00) and `min_viable_credit_put_side` ($2.75) are effectively dead. **E#1 (10:15) is now dropped at ALL VIX levels** (max_entries `[2, 2, 2, 1]`, changed 2026-04-17).
 
 | Regime | VIX Range | Entries | Slots Kept | Call Min | Put Min | Effective Floors (call / put) |
 |--------|-----------|---------|------------|----------|---------|-------------------------------|
-| 0 | <18 (calm) | 3 | 10:15, 10:45, 11:15 | **$1.00** | **$1.25** | $0.90 / $1.15 |
+| 0 | <18 (calm) | **2** | **10:45, 11:15** (drops E#1) | **$1.00** | **$1.25** | $0.90 / $1.15 |
 | 1 | 18-22 | **2** | **10:45, 11:15** (drops E#1) | **$0.50** | **$0.75** | $0.40 / $0.65 |
 | 2 | 22-28 | **2** | **10:45, 11:15** (drops E#1) | **$0.30** | **$0.50** | $0.20 / $0.40 |
 | 3 | ≥28 (extreme) | **1** | **11:15 only** (E#3) | **$0.30** | **$0.40** | $0.20 / $0.30 |
@@ -136,16 +136,19 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 
 ---
 
-## Recent Changes (2026-04-13 / 2026-04-14 deployments)
+## Recent Changes (2026-04-13 through 2026-04-19 deployments)
 
 1. **VIX regime breakpoints:** `[14, 20, 30]` → `[18, 22, 28]` (2026-04-13)
-2. **`max_entries` per regime:** `[2, null, null, 1]` → `[null, 2, 2, 1]` (drops E#1 at VIX≥18, 2026-04-13)
+2. **`max_entries` per regime:** `[2, null, null, 1]` → `[null, 2, 2, 1]` (drops E#1 at VIX≥18, 2026-04-13) → **`[2, 2, 2, 1]` (drops E#1 at ALL VIX levels, 2026-04-17)**. Reason: E#1 analysis showed 24% WR, -$79/entry avg — worst slot at every VIX regime. At VIX<18 specifically: 80-100% stop rate in recent data.
 3. **Per-regime credit thresholds (2026-04-13 initial → 2026-04-14 tuned):** `min_call_credit: [null, null, 0.75, 0.50]` → **`[1.00, 0.50, 0.30, 0.30]`**; `min_put_credit: [null, null, 1.25, 0.75]` → **`[1.25, 0.75, 0.50, 0.40]`**. All slots now filled — base $2.00 / $2.75 are effectively dead.
 4. **Credit floors:** `call_credit_floor: 0.75` → **`0.20`**, `put_credit_floor: 2.00` → **`0.30`** (but when regime is active, floor = `min_credit − $0.10`).
-5. **Code fix (strategy.py `_apply_vix_regime_overrides()`):** When capping, drops EARLIEST entries (was LAST)
-6. **Added schema v7 `shadow_entries` table:** OTM-based counterfactual logging
-7. **Schema v6 bid/ask capture in `spread_snapshots`:** Saxo quotes per leg during monitoring
-8. **Fixed Haiku-introduced threshold unit bug:** `downday_threshold_pct` (0.3 vs 0.003) in backtest engine
+5. **Stop buffers (2026-04-14 tuning carried forward):** `call_stop_buffer: 0.75` (was 0.35), `put_stop_buffer: 1.75` (was 1.55). Buffer decay `start_mult 2.50` over `4.0 hours` (was 2.10 / 2h).
+6. **MKT-045 chain strike snapping (2026-04-17):** After overlap adjustments (MKT-013/015, Fix #44/#66), snaps all 4 strikes to nearest actual Saxo chain strike (max 25pt tolerance). Far-OTM 0DTE strikes use 10-25pt intervals, not 5pt. Prevents entries being skipped due to non-existent strikes.
+7. **MKT-046 stop anti-spike filter (2026-04-17):** When MKT-036 is disabled, requires stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price. Verified April 17 filtered 1 false stop on E#1 before executing confirmed stop.
+8. **Code fix (strategy.py `_apply_vix_regime_overrides()`):** When capping, drops EARLIEST entries (was LAST)
+9. **Added schema v7 `shadow_entries` table:** OTM-based counterfactual logging
+10. **Schema v6 bid/ask capture in `spread_snapshots`:** Saxo quotes per leg during monitoring
+11. **Fixed Haiku-introduced threshold unit bug:** `downday_threshold_pct` (0.3 vs 0.003) in backtest engine
 
 ---
 

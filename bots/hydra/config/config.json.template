@@ -137,7 +137,7 @@
         "_comment": "VIX Regime Adaptive (tuned 2026-04-14): adjusts entries and credit thresholds based on VIX at open. Breakpoints [18, 22, 28] define 4 zones. Arrays are per-zone [VIX<18, 18-22, 22-28, >=28]. null = use default (falls back to strategy.min_viable_credit_per_side / min_viable_credit_put_side). Disable with enabled: false. All credit slots are now filled, so the base min_viable_credit_per_side / min_viable_credit_put_side are effectively dead. When max_entries caps below base count, drops EARLIEST entries (keeps best-performing E#3 at 11:15). When this override runs, call_credit_floor / put_credit_floor are recomputed as min_credit - $0.10 for the active regime. shadow_call_otm and shadow_put_otm set OTM targets (pt) for v7 shadow_entries logging — observation only, does not affect trading.",
         "enabled": true,
         "breakpoints": [18.0, 22.0, 28.0],
-        "max_entries": [null, 2, 2, 1],
+        "max_entries": [2, 2, 2, 1],
         "put_stop_buffer": [null, null, null, null],
         "call_stop_buffer": [null, null, null, null],
         "min_call_credit": [1.00, 0.50, 0.30, 0.30],

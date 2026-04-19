@@ -29,7 +29,8 @@ async def get_bot_config():
     `entry_times` / `conditional_entry_times` are the canonical (pre-VIX-cap)
     slot schedule — the dashboard uses these to label entries with stable
     canonical numbers (E1=first base slot, E2=second, …) even when the VIX
-    regime cap drops early entries at runtime.
+    regime cap drops entries at runtime. As of 2026-04-17, E#1 (10:15) is
+    dropped at ALL VIX levels per config max_entries: [2, 2, 2, 1].
     """
     config_path = settings.calypso_root / "bots/hydra/config/config.json"
     try:
