@@ -51,7 +51,8 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 - **MKT-029:** Graduated fallback — floor = `min_credit − $0.10` (regime-dependent; e.g. at VIX<18: $0.90 call / $1.15 put)
 - **MKT-032/MKT-039:** Put-only when call non-viable AND VIX <15 (`put_only_max_vix: 15.0`)
 - **MKT-040:** Call-only fallback when put non-viable (with retries then theoretical put buffer), 89% WR
-- **MKT-038:** FOMC T+1 call-only (day after FOMC announcement forced call-only)
+- **FOMC T+1 BLACKOUT (2026-04-19):** Skip ALL entries on the day after an FOMC announcement. `fomc_t1_skip_enabled: true` on VM. Supersedes MKT-038 call-only (which was negative EV per A/B backtest). Next T+1: Apr 30.
+- **MKT-038:** DISABLED — FOMC T+1 call-only force. Was forcing call-only on T+1; A/B backtest showed −$425 over 9 T+1 days vs trade-normal. Code preserved as fallback if `fomc_t1_skip_enabled` is disabled.
 - **MKT-042:** Buffer decay — starts at 2.5× normal, linearly decays to 1× over 4 hours
 - **MKT-043:** Calm entry filter — delays entry up to 5min if SPX moved >15pt in last 3min
 - **Base-downday call-only:** DISABLED (`base_entry_downday_callonly_pct: null`). Removed 2026-04-19 after A/B threshold sweep showed negative EV at all values 0.57%-1.20% over Feb-Apr 2026 (incl. multiple sustained sell-offs). Base entries E2/E3 now always attempt full ICs; MKT-011/MKT-040 handle put-uninvestable days.
@@ -91,9 +92,12 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 
 ## 2026 FOMC Calendar
 
-HYDRA trades on FOMC Day 1 (as of v1.14.0+). Day 2 (announcement) is skipped (MKT-008 trading halt). T+1 forced call-only (MKT-038).
+HYDRA's FOMC handling (updated 2026-04-19 after A/B backtest over 2025-01 → 2026-04):
+- **Day 1**: trade normally (+$430 over 10 days in backtest — don't skip)
+- **Day 2** (announcement, 2 PM): trade normally (+$230 over 10 days — coin flip with slight positive tilt)
+- **T+1** (day after): **SKIP ALL ENTRIES** (skipping = $0 vs trade-normal −$900 vs MKT-038 ON −$1,325)
 
-| Meeting | Day 1 (trade) | Day 2 / Announcement (skip) | T+1 (call-only MKT-038) |
+| Meeting | Day 1 (TRADE) | Day 2 / Announcement (TRADE) | T+1 (SKIP — blackout) |
 |---------|---------------|----------------------------|-------------------------|
 | Jan | Jan 27 Tue | Jan 28 Wed | Jan 29 Thu |
 | Mar | Mar 17 Tue | Mar 18 Wed | Mar 19 Thu |
@@ -150,6 +154,7 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 9. **Added schema v7 `shadow_entries` table:** OTM-based counterfactual logging
 10. **Downday-035 conditional E6 (2026-04-19):** Mirror of Upday-035 for down days. When SPX drops ≥0.25% below open at 14:00, fires call-only spread (config `conditional_downday_e6_enabled: true`, `conditional_downday_threshold_pct: 0.0025`). Backtest (Feb 10 - Apr 10): 11 triggers, 91% WR, +$1,295 P&L delta vs Upday-only baseline. Override reason: `downday-035`.
 11. **Base-entry down-day call-only DISABLED (2026-04-19):** `base_entry_downday_callonly_pct: null`. A/B threshold sweep (0.57% / 0.70% / 0.80% / 1.00% / 1.20%) over Feb 10 - Apr 10 2026 — a period with 19/42 days ≥0.57% intraday drop, worst single day −1.88%, worst 3-day −3.78%, cumulative −2.25% — showed negative EV at every threshold. Mechanism: mean-reverting drops forfeit put-side profit; continuing drops stop the call side too (so conversion doesn't actually limit risk). MKT-040 + MKT-011 credit gate handle put-uninvestable cases more surgically.
+12. **FOMC T+1 BLACKOUT / MKT-038 DISABLED (2026-04-19):** `fomc_t1_skip_enabled: true`, `fomc_t1_callonly_enabled: false`. A/B backtest over 2025-01 → 2026-04 (9 T+1 days, using VM-matching config with E#1 drop, [18,22,28] VIX regime, regime credit floors): trade-normal = −$900, MKT-038 ON (call-only force) = −$1,325, skip entirely = $0. Day 1 and Day 2 backtest showed both are winners (trade normally), so T+1 is the only FOMC day that flips to skip. Also caught a **stale backtest config bug**: `live_config()` had `vix_regime_breakpoints=[14,20,30]` and `max_entries=[2,None,None,1]` (outdated) — fixed to match VM. Prior MKT-038 backtest returned +$940 false-positive; corrected to −$425.
 12. **Schema v6 bid/ask capture in `spread_snapshots`:** Saxo quotes per leg during monitoring
 13. **Fixed Haiku-introduced threshold unit bug:** `downday_threshold_pct` (0.3 vs 0.003) in backtest engine
 

@@ -1815,6 +1815,10 @@ def run_backtest(cfg: BacktestConfig, verbose: bool = True) -> List[DayResult]:
         # FOMC announcement day skip (MKT-008)
         if getattr(cfg, "fomc_announcement_skip", False) and d in fomc_announcement_dates:
             continue
+        # FOMC T+1 blackout (added 2026-04-19): skip day after announcement entirely.
+        # A/B backtest showed +$900 vs trade-normal, +$1,325 vs MKT-038 call-only.
+        if getattr(cfg, "fomc_t1_skip_enabled", False) and d in fomc_t1_dates:
+            continue
         day_result = simulate_day(d, cfg, cache_dir, fomc_t1_dates)
         if day_result is None:
             continue

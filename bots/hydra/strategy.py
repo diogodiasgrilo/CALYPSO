@@ -609,6 +609,19 @@ class HydraStrategy(MEICStrategy):
             f"  FOMC T+1 filter (MKT-038): {'ENABLED' if self.fomc_t1_callonly_enabled else 'DISABLED'}"
         )
 
+        # T+1 blackout (added 2026-04-19): skip ALL entries on day after FOMC
+        # announcement. A/B backtest over 2025-01 → 2026-04 (9 T+1 days) showed
+        # MKT-038 (call-only force) loses -$425 vs trade-normal; skipping
+        # entirely saves +$900 vs trade-normal and +$1,325 vs MKT-038 ON.
+        # Mechanism: T+1 is bearish on average (~66% down days) but the 33%
+        # up days crush call-only. Neither direction-agnostic strategy wins,
+        # so don't trade at all. Takes precedence over MKT-038 when enabled.
+        self.fomc_t1_skip_enabled = strategy_config.get("fomc_t1_skip_enabled", False)
+        logger.info(
+            f"  FOMC T+1 skip: {'ENABLED' if self.fomc_t1_skip_enabled else 'DISABLED'}"
+            f"{'  (takes precedence over MKT-038)' if self.fomc_t1_skip_enabled else ''}"
+        )
+
         # MKT-036: Stop confirmation timer — INTENTIONALLY DISABLED.
         # $1.75 put buffer (put_stop_buffer) is the chosen solution instead.
         # Code preserved but dormant. When enabled: requires stop to persist N seconds.
@@ -3682,6 +3695,22 @@ class HydraStrategy(MEICStrategy):
             self._log_safety_event("WHIPSAW_SKIP", f"Entry #{entry_num}: {whipsaw_reason}")
             return f"Entry #{entry_num} skipped - {whipsaw_reason}"
 
+        # FOMC T+1 blackout (2026-04-19): skip ALL entries on the day after an
+        # FOMC announcement. Backtest over 2025-01 → 2026-04 (9 T+1 days):
+        #   trade normal (full IC):  -$900
+        #   MKT-038 ON (call-only):  -$1,325
+        #   skip entirely:            $0        → +$900 vs normal, +$1,325 vs MKT-038
+        # Skip takes precedence over MKT-038 (call-only force).
+        if (self.fomc_t1_skip_enabled and not self.dry_run
+                and is_fomc_t_plus_one()):
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            skip_reason = "FOMC T+1 blackout — skipping entry (A/B backtest: +$900 vs trade-normal, +$1,325 vs MKT-038)"
+            self._record_skipped_entry(entry_num, skip_reason, send_alert=True)
+            self._log_safety_event("FOMC_T1_SKIP", f"Entry #{entry_num}: T+1 blackout active")
+            logger.info(f"FOMC T+1 skip: Entry #{entry_num} skipped — day after FOMC announcement")
+            return f"Entry #{entry_num} skipped - FOMC T+1 blackout"
+
         self._entry_in_progress = True
         self.state = MEICState.ENTRY_IN_PROGRESS
 
@@ -6483,7 +6512,12 @@ class HydraStrategy(MEICStrategy):
             elif is_fomc_meeting_day():
                 fomc = "Day 1 (no announcement, normal trading)"
             elif is_fomc_t_plus_one():
-                fomc = "T+1 (call-only MKT-038)"
+                if self.fomc_t1_skip_enabled:
+                    fomc = "T+1 (BLACKOUT — entries skipped)"
+                elif self.fomc_t1_callonly_enabled:
+                    fomc = "T+1 (call-only MKT-038)"
+                else:
+                    fomc = "T+1 (trading normally)"
             else:
                 fomc = "No"
         except Exception:
@@ -7052,6 +7086,16 @@ class HydraStrategy(MEICStrategy):
                 f"Downday-035: {'ENABLED' if self.downday_callonly_conditional_enabled else 'DISABLED'} "
                 f"(call-only at -{dn_thr:.2f}%, slots: {dn_slots})",
             ])
+
+        # FOMC handling (2026-04-19): T+1 blackout + Day 2 + MKT-038 fallback
+        day2_skip = self.strategy_config.get("fomc_announcement_skip", False)
+        lines.extend([
+            "",
+            "\u2501\u2501\u2501 FOMC handling \u2501\u2501\u2501",
+            f"Day 2 (announcement): {'SKIP' if day2_skip else 'TRADE'}",
+            f"T+1 (day after): "
+            f"{'BLACKOUT — skip all entries' if self.fomc_t1_skip_enabled else ('MKT-038 call-only' if self.fomc_t1_callonly_enabled else 'TRADE NORMALLY')}",
+        ])
 
         # MKT-036: Stop confirmation timer
         lines.extend([

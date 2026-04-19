@@ -49,6 +49,10 @@ class BacktestConfig:
     # ── FOMC T+1 call-only (MKT-038) ─────────────────────────────────────────
     # On the day after FOMC, force all entries to call-only
     fomc_t1_callonly_enabled: bool = True
+    # FOMC T+1 blackout (added 2026-04-19): skip entries entirely on T+1.
+    # Takes precedence over MKT-038 when enabled. A/B sweep 2025-01→2026-04
+    # showed +$900 vs trade-normal, +$1,325 vs MKT-038 over 9 T+1 days.
+    fomc_t1_skip_enabled: bool = False
     # Skip ALL entries on FOMC announcement day (MKT-008)
     fomc_announcement_skip: bool = False  # 1-min test: skip costs -$5,855 P&L, -0.096 Sharpe (2026-03-29)
 
@@ -394,7 +398,8 @@ def live_config() -> BacktestConfig:
         conditional_upday_e7_enabled=False,
         downday_threshold_pct=0.003,
         upday_threshold_pct=0.0025,           # re-swept with $2.00/$2.75 gates: 0.25% best Sharpe (2.445)
-        fomc_t1_callonly_enabled=True,
+        fomc_t1_callonly_enabled=False,  # DISABLED 2026-04-19 — subsumed by T+1 blackout (negative EV anyway)
+        fomc_t1_skip_enabled=True,       # ENABLED 2026-04-19 — skip T+1 entirely, +$1,325 vs MKT-038 over 15 months
         call_starting_otm_multiplier=3.5,
         put_starting_otm_multiplier=4.0,
         spread_vix_multiplier=6.0,            # reconvergence 2026-03-31 (was 5.3, Sharpe 2.360)
@@ -411,7 +416,7 @@ def live_config() -> BacktestConfig:
         put_only_max_vix=15.0,                # 1-min retest optimal 2026-03-28 (was 25.0, Sharpe 2.042)
         price_based_stop_points=None,         # credit-based stop (confirmed on 1-min)
         downday_theoretical_put_credit=260.0, # $2.60 × 100, convergence round 4 (was $2.90, +0.029 Sharpe)
-        base_entry_downday_callonly_pct=0.57, # 1-min fine-grain optimal 2026-03-29 (was 0.60%, Sharpe 2.371)
+        base_entry_downday_callonly_pct=None, # DISABLED 2026-04-19 — A/B sweep showed negative EV at all thresholds 0.57-1.20%
         fomc_announcement_skip=False,       # 1-min test: skip costs -$5,855 P&L, -0.096 Sharpe (2026-03-29)
         whipsaw_range_skip_mult=1.75,       # reconvergence 2026-03-31 (was 1.50, Sharpe 2.360)
         buffer_decay_start_mult=2.5,        # updated 2026-04-13: start at 2.5× normal buffer, decay over 4h
@@ -420,8 +425,12 @@ def live_config() -> BacktestConfig:
         calm_entry_threshold_pts=15.0,      # updated 2026-04-13: 15pt threshold for SPX movement
         calm_entry_max_delay_min=5,         # updated 2026-04-13: max 5min delay before entering anyway
         vix_regime_enabled=True,            # updated 2026-04-13: enable VIX regime caps on entry count
-        vix_regime_breakpoints=[14.0, 20.0, 30.0],  # updated 2026-04-13: VIX regime breakpoints
-        vix_regime_max_entries=[2, None, None, 1],  # updated 2026-04-13: max entries [VIX<14, 14-20, 20-30, >=30]
+        vix_regime_breakpoints=[18.0, 22.0, 28.0],  # updated 2026-04-17: VM VIX regime breakpoints [18, 22, 28]
+        vix_regime_max_entries=[2, 2, 2, 1],        # updated 2026-04-17: drops E#1 at ALL VIX levels
+        vix_regime_min_call_credit=[1.0, 0.5, 0.3, 0.3],   # updated 2026-04-17: per-zone call credit floors matching VM
+        vix_regime_min_put_credit=[1.25, 0.75, 0.5, 0.4],  # updated 2026-04-17: per-zone put credit floors matching VM
+        conditional_downday_e6_enabled=True,                # added 2026-04-19: Downday-035 E6 call-only on down days
+        conditional_downday_threshold_pct=0.0025,           # added 2026-04-19: 0.25% fraction (engine does *100)
     )
 
 

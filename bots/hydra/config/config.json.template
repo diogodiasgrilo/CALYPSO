@@ -80,8 +80,9 @@
         "upday_threshold_pct": 0.0025,
         "base_entry_downday_callonly_pct": null,
 
-        "_comment_fomc": "MKT-038: Call-only entries on T+1 after FOMC announcement. fomc_announcement_skip: skip ALL entries on FOMC day (false = trade normally on FOMC day itself).",
-        "fomc_t1_callonly_enabled": true,
+        "_comment_fomc": "FOMC day handling. fomc_t1_skip_enabled (2026-04-19): skip ALL entries on T+1 (day after announcement) — supersedes MKT-038 call-only which was negative EV. A/B backtest over 15 months / 9 T+1 days: skip saves +$900 vs trade-normal, +$1,325 vs MKT-038 ON. MKT-038 (fomc_t1_callonly_enabled) preserved as fallback if skip is disabled. fomc_announcement_skip: skip ALL entries on the FOMC announcement day itself (false = trade normally — A/B showed Day 2 is near coin-flip, slight positive tilt).",
+        "fomc_t1_skip_enabled": true,
+        "fomc_t1_callonly_enabled": false,
         "fomc_announcement_skip": false,
 
         "_comment_cushion_recovery": "MKT-041: Cushion Recovery Exit. DISABLED (buffer+cushion interfere). Set both to non-null to enable. nearstop_pct = fraction of stop level to trigger near-stop state (e.g., 0.96 = 96%). recovery_pct = fraction of stop level to trigger recovery close (e.g., 0.67 = 67%).",

@@ -208,6 +208,21 @@ EDITABLE_PARAMS = {
         "min": 0.0005, "max": 0.02,
         "description": "Downday-035: SPX drop threshold (fraction, e.g. 0.0025 = 0.25%)",
     },
+    "fomc_t1_skip": {
+        "path": "strategy.fomc_t1_skip_enabled",
+        "type": "bool",
+        "description": "FOMC T+1 blackout (2026-04-19): skip all entries on day after FOMC",
+    },
+    "fomc_t1_callonly": {
+        "path": "strategy.fomc_t1_callonly_enabled",
+        "type": "bool",
+        "description": "MKT-038: force call-only on FOMC T+1 (fallback — superseded by fomc_t1_skip)",
+    },
+    "fomc_day2_skip": {
+        "path": "strategy.fomc_announcement_skip",
+        "type": "bool",
+        "description": "FOMC Day 2 blackout: skip entries on announcement day (currently OFF — coin flip + slight positive edge)",
+    },
 }
 
 
