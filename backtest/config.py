@@ -21,15 +21,22 @@ class BacktestConfig:
         "10:15", "10:45", "11:15", "11:45", "12:15"
     ])
 
-    # ── Conditional E6/E7 entries (MKT-035) ─────────────────────────────────
+    # ── Conditional E6/E7 entries (legacy MKT-035) ───────────────────────────
     # Fire as call-only when SPX drops >= downday_threshold_pct below session open
     conditional_e6_enabled: bool = False
     conditional_e7_enabled: bool = False
     conditional_entry_times: List[str] = field(default_factory=lambda: ["14:00", "13:15"])
-    downday_threshold_pct: float = 0.3       # 0.3% drop triggers conditional entries
+    downday_threshold_pct: float = 0.3       # 0.3% drop triggers conditional entries (LEGACY)
     downday_reference: str = "open"          # reference price for threshold: "open" or "high"
     downday_theoretical_put_credit: float = 175.0   # $1.75 × 100 — used in call-only stop (sweep optimal 2026-03-24)
     upday_theoretical_call_credit: float = 0.0   # added to put-only stop level (mirrors downday_theoretical_put_credit)
+
+    # ── Conditional Downday-035 entries (NEW 2026-04-19) ─────────────────────
+    # Mirror of Upday-035 for down days. OR'd with legacy conditional_e6_enabled for back-compat.
+    # Threshold is SEPARATE from downday_threshold_pct so heartbeat/legacy display doesn't change.
+    conditional_downday_e6_enabled: bool = False
+    conditional_downday_e7_enabled: bool = False
+    conditional_downday_threshold_pct: float = 0.25  # 0.25% drop (matches up-day)
 
     # ── Conditional E6/E7 up-day put-only entries ────────────────────────────
     # Fire as put-only when SPX rises >= upday_threshold_pct above reference

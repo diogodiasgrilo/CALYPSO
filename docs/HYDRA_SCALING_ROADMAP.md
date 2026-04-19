@@ -1,9 +1,10 @@
 # HYDRA Scaling Roadmap
 
 **Created:** 2026-04-19
-**Status:** Phase 1 active
+**Last updated:** 2026-04-19 (Downday-035 added to Phase 1)
+**Status:** Phase 1 active (with Downday-035 deployed)
 
-A phased plan for validating and scaling HYDRA. Each phase isolates ONE change so any issue is attributable to its specific cause. Do NOT skip phases.
+A phased plan for validating and scaling HYDRA. Each phase isolates ONE change so any issue is attributable to its specific cause. Do NOT skip phases — EXCEPT when a change is orthogonal (different slot, different code path) and can be validated in parallel, as with Downday-035 below.
 
 ---
 
@@ -11,7 +12,7 @@ A phased plan for validating and scaling HYDRA. Each phase isolates ONE change s
 
 **Active config on VM:**
 - 2 base entries: E#2 (10:45), E#3 (11:15). E#1 (10:15) dropped at ALL VIX levels.
-- E6 conditional: Upday-035 (put-only) at 14:00 when SPX rises ≥ 0.25% from open.
+- E6 conditional: fires at 14:00 based on direction — **Upday-035** (put-only when SPX ≥ +0.25%) OR **Downday-035** (call-only when SPX ≤ -0.25%, added 2026-04-19).
 - VIX regime: `max_entries [2, 2, 2, 1]`, min credits regime-dependent.
 - Stops: `call_stop_buffer 0.75`, `put_stop_buffer 1.75`, MKT-042 decay 2.50×/4h.
 - MKT-045 chain snap + MKT-046 stop anti-spike filter active.
@@ -53,52 +54,61 @@ A phased plan for validating and scaling HYDRA. Each phase isolates ONE change s
 
 ---
 
-## Phase 2 — Drop E6 Upday-035 OR add Downday-035
+## Phase 2 — Drop E6 entirely (optional simplification)
 **Duration:** ~1-2 weeks (starting ~2026-05-04, after Phase 1 validation)
 
-Two possible paths through Phase 2. Pick one based on Phase 1 results:
+Originally this was a choice between dropping E6 OR adding Downday-035. As of 2026-04-19, Downday-035 has already been deployed alongside Phase 1 (see "Phase 1b" below) because it's orthogonal to the other Phase 1 changes. The only remaining Phase 2 decision is whether to drop E6 entirely.
 
-### Phase 2a: Drop E6 entirely
-**Change:** `conditional_upday_e6_enabled: false`
+### Phase 2 (optional): Drop E6 entirely
+**Change:** `conditional_upday_e6_enabled: false` AND `conditional_downday_e6_enabled: false`
 
 **Effect:** E6 never fires. Margin slot (~$11k) fully idle. Simplifies strategy.
 
-**When to pick this:** If Phase 1 shows no MKT-046 issues and you want to minimize strategy surface area before scaling contracts.
+**When to pick this:** Only if Phase 1 + Phase 1b data shows E6 conditional entries are net negative or creating operational issues.
 
-**Tradeoff:** Lose ~$243 lifetime P&L that E6 produced, gain simplicity.
+**Tradeoff:** Lose ~$243 (Upday-035 historical) + ~$1,100 est (Downday-035 historical) = ~$1,343 P&L, gain simplicity.
 
-### Phase 2b: Add Downday-035 (mirror of Upday-035)
-**Change:** Introduce call-only E6 when SPX drops ≥ 0.25% from open at 14:00.
+**Most likely outcome:** SKIP this phase — keep E6 with both Upday-035 and Downday-035 active.
 
-**Config additions:**
+---
+
+## Phase 1b — Downday-035 (deployed 2026-04-19 alongside Phase 1)
+
+**Status:** DEPLOYED
+
+**Change:** Introduced call-only E6 when SPX drops ≥ 0.25% from open at 14:00 (mirror of Upday-035).
+
+**Config on VM:**
 ```json
 "conditional_downday_e6_enabled": true,
-"downday_threshold_pct": 0.0025
+"conditional_downday_threshold_pct": 0.0025
 ```
 
-**Historical data supporting Downday-035:**
+**Historical data supporting Downday-035 (at time of deploy):**
 - 11 of 11 historical down days (26% of trading days) would have been wins at VIX-scaled OTM
 - Estimated ~$100-145 average credit at 14:00 (70% of put credit due to put skew)
 - Estimated +$1,100 additional P&L over the 42-day sample
 - All 11 candidates pass MKT-011 credit gate at their respective VIX regimes
 
-**Logic (mirror of Upday-035):**
+**Logic:**
 - E6 slot fires at 14:00
-- Up day (SPX ≥ +0.25%) → put-only (existing Upday-035)
-- Down day (SPX ≤ −0.25%) → call-only (new Downday-035)
-- Flat day → skip (existing behavior)
+- Up day (SPX ≥ +0.25%) → put-only (Upday-035)
+- Down day (SPX ≤ −0.25%) → call-only (Downday-035)
+- Flat day → skip
 
 **Integration with existing rules:**
-- **MKT-038 FOMC T+1:** Already forces call-only on ALL entries. Skip Downday-035 that day (redundant).
-- **MKT-011 credit gate:** Already handles per-regime credit floors. No new logic needed.
-- **Base-entry downday call-only:** Already fires at E#1-E#3 on down days (threshold 0.57%). Downday-035 at 14:00 uses 0.25% (lower threshold) because less time to expiry means less reversal risk.
+- **MKT-038 FOMC T+1:** Both Downday-035 and MKT-038 force call-only on T+1 down days. Downday-035 wins (more specific reason); override_reason = "downday-035". On T+1 flat/up days: existing behavior unchanged.
+- **MKT-011 credit gate:** Handles per-regime credit floors. If credit too low, skips automatically.
+- **Base-entry downday call-only:** Separate feature (0.57% threshold at morning entries E#2-E#3). Coexists without conflict — different slots.
+- **VIX gate:** No VIX gate on call-only entries (mirrors MKT-040). Fires at any VIX level.
 
-**When to pick this:** If Phase 1 validates cleanly and you want to add positive-EV capacity before scaling contracts.
-
-**Go/No-go criteria for Phase 3 (after Phase 2b):**
+**Go/No-go criteria (2-week observation window ~2026-04-20 to 2026-05-03):**
 - [ ] Downday-035 has triggered at least 2-3 times without unexpected behavior
 - [ ] Credit gate correctly skips when credit too low for VIX regime
 - [ ] No conflict with MKT-038 (FOMC T+1) or base-downday logic
+- [ ] override_reason = "downday-035" appears correctly in Sheets/dashboard/telegram
+
+**Rollback:** Single config flip — `"conditional_downday_e6_enabled": false` + restart HYDRA. Upday-035 unaffected.
 
 ---
 

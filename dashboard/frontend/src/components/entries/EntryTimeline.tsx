@@ -8,8 +8,9 @@ import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 // As of 2026-04-17, E#1 (10:15) is dropped at ALL VIX levels (max_entries [2,2,2,1]).
 // Dashboard still shows all 3 canonical slots; dropped slots display "dropped by VIX regime".
 const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15"];
-// Conditional entries: E6 (14:00) fires put-only when SPX rises ≥ 0.25% from open (Upday-035)
-// Hidden when all conditional flags are disabled in bot config
+// Conditional entries: E6 (14:00) fires put-only when SPX rises ≥ 0.25% (Upday-035)
+// or call-only when SPX drops ≥ 0.25% (Downday-035, added 2026-04-19). Hidden when
+// all conditional flags are disabled in bot config.
 const CONDITIONAL_ENTRY_TIMES = ["14:00"];
 
 const TIMELINE_START = 9.5 * 60; // 9:30 in minutes

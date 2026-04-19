@@ -480,10 +480,14 @@ def _simulate_entry(
             rise_pct = 0.0
 
         # ── Decide which trigger fires (down-day takes priority) ──────────
-        if is_conditional and drop_pct >= cfg.downday_threshold_pct * 100:
+        # Downday-035 (2026-04-19): uses dedicated conditional_downday_threshold_pct
+        # (default 0.25%) instead of legacy downday_threshold_pct (0.3%).
+        # Fall back to legacy threshold if new field not set, preserving old backtests.
+        downday_thr = getattr(cfg, "conditional_downday_threshold_pct", cfg.downday_threshold_pct) * 100
+        if is_conditional and drop_pct >= downday_thr:
             force_call_only = True
             result.entry_type = "call_only"
-            result.skip_reason = "mkt-035"
+            result.skip_reason = "downday-035"
         elif is_upday_conditional and rise_pct >= getattr(cfg, "upday_threshold_pct", 0.0025) * 100:
             force_put_only = True
             result.entry_type = "put_only"
@@ -1711,8 +1715,13 @@ def simulate_day(
                 next_slot += 1
 
     # ── Conditional entries (E6/E7) ─────────────────────────────────────
+    # Downday-035 (2026-04-19): OR legacy conditional_e6/e7_enabled with new
+    # conditional_downday_e6/e7_enabled. Either flag enables the down-day slot.
     cond_times = cfg.conditional_times_as_ms()
-    cond_down = [cfg.conditional_e6_enabled, cfg.conditional_e7_enabled]
+    cond_down = [
+        cfg.conditional_e6_enabled or getattr(cfg, "conditional_downday_e6_enabled", False),
+        cfg.conditional_e7_enabled or getattr(cfg, "conditional_downday_e7_enabled", False),
+    ]
     cond_up = [
         getattr(cfg, "conditional_upday_e6_enabled", False),
         getattr(cfg, "conditional_upday_e7_enabled", False),

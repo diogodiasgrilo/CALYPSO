@@ -5,6 +5,10 @@ import { useEffect, useState } from "react";
 interface BotConfig {
   conditional_e6_enabled: boolean;
   conditional_e7_enabled: boolean;
+  /** Downday-035 (2026-04-19): conditional E6 call-only on down days. */
+  conditional_downday_e6_enabled: boolean;
+  conditional_downday_e7_enabled: boolean;
+  conditional_downday_threshold_pct: number;
   conditional_upday_e6_enabled: boolean;
   conditional_upday_e7_enabled: boolean;
   downday_threshold_pct: number;
@@ -18,6 +22,9 @@ interface BotConfig {
 const DEFAULT_CONFIG: BotConfig = {
   conditional_e6_enabled: false,
   conditional_e7_enabled: false,
+  conditional_downday_e6_enabled: false,
+  conditional_downday_e7_enabled: false,
+  conditional_downday_threshold_pct: 0.0025,
   conditional_upday_e6_enabled: false,
   conditional_upday_e7_enabled: false,
   downday_threshold_pct: 0.003,
@@ -54,6 +61,8 @@ export function useShowConditionalEntries(): boolean {
   return (
     cfg.conditional_e6_enabled ||
     cfg.conditional_e7_enabled ||
+    cfg.conditional_downday_e6_enabled ||
+    cfg.conditional_downday_e7_enabled ||
     cfg.conditional_upday_e6_enabled ||
     cfg.conditional_upday_e7_enabled
   );

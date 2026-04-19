@@ -148,7 +148,7 @@ class HydraIronCondorEntry(IronCondorEntry):
     trend_signal: Optional[TrendSignal] = None  # The trend signal at entry time
 
     # Fix #49: Track why entry became one-sided (for correct logging)
-    override_reason: Optional[str] = None  # "trend", "mkt-011", "mkt-010", "mkt-035", "mkt-038", or None
+    override_reason: Optional[str] = None  # "trend", "mkt-011", "mkt-010", "mkt-035", "mkt-038", "mkt-040", "upday-035", "downday-035", "base-downday", or None
 
     # Fix #59: Track EMA values at entry time for Trades tab logging
     ema_20_at_entry: Optional[float] = None
@@ -318,9 +318,17 @@ class HydraStrategy(MEICStrategy):
 
         # MKT-035: _conditional_entry_times must be set BEFORE super().__init__()
         # because _parse_entry_times() (called from super) references it
+        # Downday-035 (2026-04-19): new flag `conditional_downday_e6_enabled` OR'd with
+        # legacy `conditional_e6_enabled` — both route to the same downday slot.
         conditional_strs = strategy_cfg.get("conditional_entry_times", [])
-        e6_enabled = strategy_cfg.get("conditional_e6_enabled", False)
-        e7_enabled = strategy_cfg.get("conditional_e7_enabled", False)
+        e6_enabled = (
+            strategy_cfg.get("conditional_e6_enabled", False)
+            or strategy_cfg.get("conditional_downday_e6_enabled", False)
+        )
+        e7_enabled = (
+            strategy_cfg.get("conditional_e7_enabled", False)
+            or strategy_cfg.get("conditional_downday_e7_enabled", False)
+        )
         all_conditional = [
             dt_time(int(p[0]), int(p[1]))
             for p in (t.split(":") for t in conditional_strs)
@@ -328,10 +336,10 @@ class HydraStrategy(MEICStrategy):
         self._conditional_entry_times = []
         for i, t in enumerate(all_conditional):
             if i == 0 and not e6_enabled:
-                logger.info(f"MKT-035: E6 disabled via config (conditional_e6_enabled=False)")
+                logger.info(f"Downday-035: E6 disabled via config (conditional_downday_e6_enabled=False)")
                 continue
             if i == 1 and not e7_enabled:
-                logger.info(f"MKT-035: E7 disabled via config (conditional_e7_enabled=False)")
+                logger.info(f"Downday-035: E7 disabled via config (conditional_downday_e7_enabled=False)")
                 continue
             self._conditional_entry_times.append(t)
         self._conditional_downday_times_set = set(self._conditional_entry_times)
@@ -564,6 +572,30 @@ class HydraStrategy(MEICStrategy):
             f"(threshold: +{self.upday_threshold_pct * 100:.2f}%, "
             f"reference: {self.upday_reference}, "
             f"upday slots: {len(self._conditional_upday_entry_times)})"
+        )
+
+        # Downday-035 (2026-04-19): conditional E6/E7 call-only on down days.
+        # Mirror of Upday-035. Separate threshold from legacy `downday_threshold_pct`
+        # (which controls heartbeat + _check_downday_filter). New threshold is used by
+        # _check_conditional_downday_filter() for the conditional E6/E7 slot only.
+        # OR'd with legacy conditional_e6_enabled/e7_enabled for back-compat.
+        self.downday_callonly_conditional_enabled = bool(
+            strategy_config.get("conditional_downday_e6_enabled", False) or
+            strategy_config.get("conditional_downday_e7_enabled", False) or
+            strategy_config.get("conditional_e6_enabled", False) or
+            strategy_config.get("conditional_e7_enabled", False)
+        )
+        # Fall back to legacy downday_threshold_pct if new key not set, preserving old behavior.
+        self.conditional_downday_threshold_pct = float(
+            strategy_config.get(
+                "conditional_downday_threshold_pct",
+                self.downday_threshold_pct,
+            )
+        )
+        logger.info(
+            f"  Downday-035 filter: {'ENABLED' if self.downday_callonly_conditional_enabled else 'DISABLED'} "
+            f"(threshold: -{self.conditional_downday_threshold_pct * 100:.2f}%, "
+            f"downday slots: {len(self._conditional_downday_times_set)})"
         )
 
         # MKT-038: Call-only entries on T+1 after FOMC announcement
@@ -2056,6 +2088,39 @@ class HydraStrategy(MEICStrategy):
             f"({current:.1f} vs {spx_ref:.1f}), threshold +{self.upday_threshold_pct * 100:.1f}% — {triggered}"
         )
         return is_up
+
+    def _check_conditional_downday_filter(self) -> bool:
+        """
+        Downday-035: Check if SPX is down more than conditional_downday_threshold_pct
+        from today's open. Returns True if call-only should be used at the conditional
+        E6/E7 slot (bearish day detected).
+
+        Mirror of _check_upday_filter() for the down side. Uses the DEDICATED
+        conditional_downday_threshold_pct (default 0.0025 = 0.25%), NOT the legacy
+        downday_threshold_pct (0.003) which controls the MKT-035 heartbeat display.
+        """
+        if not self.downday_callonly_conditional_enabled:
+            return False
+
+        spx_ref = self.market_data.spx_open
+        if not spx_ref or spx_ref <= 0:
+            logger.warning("Downday-035: No SPX open price available, skipping down-day check")
+            return False
+
+        current = self.current_price
+        if current <= 0:
+            return False
+
+        change_pct = (current - spx_ref) / spx_ref
+        # Strict < (not <=) — mirrors Upday-035 strict > convention. Exactly at -0.25% does NOT trigger.
+        is_down = change_pct < -self.conditional_downday_threshold_pct
+
+        triggered = "TRIGGERED → call-only" if is_down else "not triggered"
+        logger.info(
+            f"Downday-035: SPX {change_pct * 100:+.2f}% from open "
+            f"({current:.1f} vs {spx_ref:.1f}), threshold -{self.conditional_downday_threshold_pct * 100:.2f}% — {triggered}"
+        )
+        return is_down
 
     # =========================================================================
     # TREND DETECTION
@@ -3640,7 +3705,8 @@ class HydraStrategy(MEICStrategy):
                 _upday_triggered = False
                 if is_conditional and not self.dry_run:
                     if self._is_downday_conditional_entry(entry_num):
-                        _downday_triggered = self._check_downday_filter()
+                        # Downday-035: use dedicated conditional threshold (0.25%), not legacy 0.3%
+                        _downday_triggered = self._check_conditional_downday_filter()
                     if self._is_upday_conditional_entry(entry_num) and not _downday_triggered:
                         _upday_triggered = self._check_upday_filter()
                     if not _downday_triggered and not _upday_triggered:
@@ -3717,15 +3783,15 @@ class HydraStrategy(MEICStrategy):
 
                 if not self.dry_run:
                     if is_conditional and _downday_triggered:
-                        # Conditional entry: down day confirmed → force call-only (MKT-035)
+                        # Conditional entry: down day confirmed → force call-only (Downday-035)
                         entry.call_only = True
                         entry.put_only = False
                         entry.put_side_skipped = True
-                        entry.override_reason = "mkt-035"
+                        entry.override_reason = "downday-035"
                         place_call_only = True
                         credit_gate_handled = True
                         logger.info(
-                            f"MKT-035: Conditional Entry #{entry_num} — down day confirmed, "
+                            f"Downday-035: Conditional Entry #{entry_num} — down day confirmed, "
                             f"placing CALL spread only"
                         )
 
@@ -3736,7 +3802,7 @@ class HydraStrategy(MEICStrategy):
                         call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                         if est_call < call_floor:
                             logger.info(
-                                f"MKT-035: Entry #{entry_num} call credit "
+                                f"Downday-035: Entry #{entry_num} call credit "
                                 f"${est_call / 100:.2f} below floor — skipping"
                             )
                             self.daily_state.entries_skipped += 1
@@ -3747,11 +3813,11 @@ class HydraStrategy(MEICStrategy):
                             self._next_entry_index += 1
                             self._record_skipped_entry(
                                 entry_num,
-                                f"MKT-035: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
+                                f"Downday-035: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
                                 f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
                                 est_call=est_call
                             )
-                            return f"Entry #{entry_num} skipped - call credit non-viable (MKT-035)"
+                            return f"Entry #{entry_num} skipped - call credit non-viable (Downday-035)"
 
                     elif is_conditional and _upday_triggered:
                         # Up day confirmed → force put-only (Upday-035)
@@ -4121,18 +4187,20 @@ class HydraStrategy(MEICStrategy):
                     trend_label = original_trend.value.upper()
 
                     if place_call_only:
-                        # MKT-035/MKT-038/MKT-040: Call-only alert
+                        # Downday-035/MKT-035/MKT-038/MKT-040: Call-only alert
                         sc_fill = entry.short_call_fill_price
                         lc_fill = entry.long_call_fill_price
                         width = int(entry.long_call_strike - entry.short_call_strike)
                         spx_chg = ((self.current_price - self.market_data.spx_open) / self.market_data.spx_open * 100) if self.market_data.spx_open > 0 else 0
                         cond_tag = " (conditional)" if is_conditional else ""
-                        override = getattr(entry, 'override_reason', None) or "mkt-035"
+                        override = getattr(entry, 'override_reason', None) or "downday-035"
                         override_tag = override.upper()
                         if override == "mkt-038":
                             reason_text = "FOMC T+1 → puts skipped"
                         elif override == "mkt-040":
                             reason_text = "Put credit non-viable → call-only"
+                        elif override == "downday-035":
+                            reason_text = "Down day → puts skipped (Downday-035)"
                         else:
                             reason_text = "Down day → puts skipped"
                         msg_lines = [
@@ -4213,7 +4281,7 @@ class HydraStrategy(MEICStrategy):
                     self._save_state_to_disk()
 
                     if place_call_only:
-                        override = getattr(entry, 'override_reason', None) or "mkt-035"
+                        override = getattr(entry, 'override_reason', None) or "downday-035"
                         entry_type = f"Call-Only ({override.upper()})"
                     elif place_put_only:
                         entry_type = "Put-Only (MKT-011)"
@@ -5880,21 +5948,34 @@ class HydraStrategy(MEICStrategy):
                 base_label = f"E1-E{base_count}: full IC (<{base_thr:.2f}% drop)"
 
             # Conditional entry eligibility
+            # When both up + down conditional are enabled at the same slot, show a
+            # single combined line with both thresholds. Downday-035 (2026-04-19)
+            # introduces the conditional_downday threshold (default 0.25%) for
+            # call-only on down days — separate from legacy downday_threshold_pct.
             cond_parts = []
-            # E6 upday put-only (Upday-035)
-            if self.upday_putonly_enabled:
-                upday_thr = self.upday_threshold_pct * 100
+            upday_active = self.upday_putonly_enabled
+            downday_active = self.downday_callonly_conditional_enabled
+            upday_thr = self.upday_threshold_pct * 100 if upday_active else 0
+            downday_thr = self.conditional_downday_threshold_pct * 100 if downday_active else 0
+
+            if upday_active and downday_active:
+                # Combined line showing active direction
+                if change_pct >= upday_thr:
+                    cond_parts.append(f"E6: put-only ({sign}{change_pct:.2f}% >= +{upday_thr:.2f}%, Upday-035)")
+                elif change_pct < -downday_thr:
+                    cond_parts.append(f"E6: call-only ({sign}{change_pct:.2f}% <= -{downday_thr:.2f}%, Downday-035)")
+                else:
+                    cond_parts.append(f"E6: pending (-{downday_thr:.2f}% / +{upday_thr:.2f}%)")
+            elif upday_active:
                 if change_pct >= upday_thr:
                     cond_parts.append(f"E6: put-only ({sign}{change_pct:.2f}% >= +{upday_thr:.2f}%)")
                 else:
                     cond_parts.append(f"E6: pending (+{upday_thr:.2f}%)")
-            # E7 down-day call-only (MKT-035) — only if enabled
-            if self._conditional_downday_times_set:
-                dd_thr = self.downday_threshold_pct * 100
-                if change_pct <= -dd_thr:
-                    cond_parts.append(f"E7: call-only ({sign}{change_pct:.2f}% <= -{dd_thr:.2f}%)")
+            elif downday_active:
+                if change_pct < -downday_thr:
+                    cond_parts.append(f"E6: call-only ({sign}{change_pct:.2f}% <= -{downday_thr:.2f}%)")
                 else:
-                    cond_parts.append(f"E7: pending (-{dd_thr:.2f}%)")
+                    cond_parts.append(f"E6: pending (-{downday_thr:.2f}%)")
 
             cond_label = " | ".join(cond_parts) if cond_parts else ""
             separator = " | " if cond_label else ""
@@ -7377,7 +7458,9 @@ class HydraStrategy(MEICStrategy):
                 entry_type = "Call Spread"
                 # Fix #49: Use override_reason for correct tag
                 override_reason = getattr(entry, 'override_reason', None)
-                if override_reason == "mkt-035":
+                if override_reason == "downday-035":
+                    trend_tag = "[DOWNDAY-035]"
+                elif override_reason == "mkt-035":
                     trend_tag = "[MKT-035]"
                 elif override_reason == "mkt-038":
                     trend_tag = "[MKT-038]"
