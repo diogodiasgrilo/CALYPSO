@@ -80,6 +80,8 @@ export interface HydraState {
     conditional: string[];
   };
   fomc_t1_callonly_enabled?: boolean;
+  fomc_t1_skip_enabled?: boolean;        // 2026-04-19: T+1 blackout (supersedes MKT-038 call-only)
+  fomc_announcement_skip?: boolean;      // 2026-04-19: Day 2 blackout (currently false on VM)
   downday_callonly_enabled?: boolean;
   [key: string]: unknown;
 }

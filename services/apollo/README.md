@@ -1,6 +1,6 @@
 # APOLLO — Morning Scout
 
-**Last Updated:** 2026-03-29
+**Last Updated:** 2026-04-19
 
 Runs at 8:30 AM ET on weekdays via systemd timer. Provides a pre-market briefing with risk assessment for the trading day.
 

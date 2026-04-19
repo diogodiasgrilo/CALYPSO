@@ -1,7 +1,7 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-04-12
-**Version:** 1.22.3
+**Last Updated:** 2026-04-19
+**Version:** 1.23.0 (Downday-035 + FOMC T+1 blackout + E#1 drop + base-downday disabled)
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
@@ -81,7 +81,7 @@ MEIC's breakeven design means a full IC with one side stopped nets ~$0. HYDRA us
 - **One-sided entry in a trending market:** Risky if wrong. But if the trend is correctly identified, the spread is far OTM on the safe side and has a high probability of expiring worthless.
 - **Full IC in a trending market:** The stressed side gets stopped, but the surviving side's credit offsets the loss. Still safe (~$5 loss), but you tie up capital for a near-zero return.
 
-HYDRA's philosophy: **Default to full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds call credit non-viable but put credit viable, place a put-only entry only if VIX < 15.0 (MKT-032/MKT-039). At VIX >= 15.0, skip instead (no call hedge in volatile conditions). When put credit non-viable but call viable, place a call-only entry (MKT-040, v1.15.1; 89% WR, +$46 EV). When both non-viable, skip. On down days (SPX drops >= 0.57% below the session open), base entries E1-E3 convert to call-only. Conditional entry E6 fires as put-only on up days (SPX rises >= 0.25%, Upday-035). Whipsaw filter skips entries when intraday range > 1.75× expected move.**
+HYDRA's philosophy: **Default to full ICs (safe breakeven shield). EMA trend signal is informational only — logged and stored for analysis but never drives entry type. When MKT-011 finds call credit non-viable but put credit viable, place a put-only entry only if VIX < 15.0 (MKT-032/MKT-039). At VIX >= 15.0, skip instead (no call hedge in volatile conditions). When put credit non-viable but call viable, place a call-only entry (MKT-040, v1.15.1; 89% WR, +$46 EV). When both non-viable, skip. Base entries E2/E3 always attempt full ICs — base-entry down-day call-only conversion DISABLED 2026-04-19 (`base_entry_downday_callonly_pct: null`, negative EV across all thresholds 0.57-1.20%). Conditional entry E6 at 14:00 fires as put-only on up days (Upday-035, ≥0.25%) OR call-only on down days (Downday-035, ≥0.25%, NEW 2026-04-19). On FOMC T+1 (day after announcement), skip ALL entries entirely (`fomc_t1_skip_enabled: true`, supersedes MKT-038). Whipsaw filter skips entries when intraday range > 1.75× expected move.**
 
 ### Evolution Through Live Trading
 
@@ -609,31 +609,42 @@ Delays entry when SPX has moved sharply in the recent lookback window. Sharp spi
 
 Set `calm_entry_threshold_pts` to `null` to disable.
 
-### MKT-038: FOMC T+1 Call-Only Mode
+### FOMC T+1 Blackout (2026-04-19) — supersedes MKT-038
 
-On the day after FOMC announcement (T+1), all entries are forced to call-only spreads. This applies to both base entries (E1-E3) and conditional entries.
+On the day after an FOMC announcement (T+1), HYDRA **skips ALL entries entirely**. Supersedes MKT-038 (call-only force), which is now disabled.
 
-**Rationale:** Research on FOMC T+1 days shows:
-- 66.7% of T+1 days are down days
-- 23% more volatility than normal trading days
-- Put-side exposure is highly dangerous on T+1
+**A/B backtest** (2025-01-02 → 2026-04-10, 9 T+1 days, config matched to live VM):
+
+| Strategy | T+1 P&L | Δ vs normal |
+|---|---|---|
+| Trade normal (full IC) | −$900 | baseline |
+| MKT-038 ON (call-only force) | −$1,325 | **−$425** |
+| **Skip entirely (current live)** | **$0** | **+$900** (+$1,325 vs MKT-038) |
+
+**Rationale:** T+1 is ~66% down days on average, but the 33% up days crush call-only. Neither direction-agnostic strategy wins, so skip.
 
 **Rules:**
-- T+0 (FOMC announcement day only): MKT-008 blocks ALL entries (day 1 trades normally)
-- T+1 (day after announcement): MKT-038 forces call-only entries
-- T-1 (day before FOMC): No changes — actually favorable for premium selling (69.6% win rate)
+- T-1 (day before FOMC): trade normally (69.6% WR historically)
+- T+0 (Day 1, meeting but no announcement): trade normally
+- T+0 (Day 2, announcement 2 PM): trade normally. `fomc_announcement_skip: false` on VM (Day 2 backtest: +$230 over 10 days — coin flip with slight positive edge)
+- **T+1 (day after announcement): SKIP ALL ENTRIES** (`fomc_t1_skip_enabled: true`)
 
-**Stop formula:** Same as MKT-035: `call_credit + theoretical $2.60 put + call buffer`
-
-**Config:**
+**Config (live on VM):**
 ```json
-"fomc_t1_callonly_enabled": true,
+"fomc_t1_skip_enabled": true,
+"fomc_t1_callonly_enabled": false,
 "fomc_announcement_skip": false
 ```
 
-**FOMC announcement day (v1.19.0):** `fomc_announcement_skip` changed to `false` — backtest showed trading FOMC days is profitable.
+**Implementation:** In `_initiate_entry()`, immediately after the whipsaw filter and before `_entry_in_progress` is set, checks `is_fomc_t_plus_one()`. If true and flag enabled: increments `entries_skipped`, emits `FOMC_T1_SKIP` safety event + Telegram `ENTRY_SKIPPED` alert, advances `_next_entry_index`, returns early.
 
-**Implementation:** Uses `is_fomc_t_plus_one()` from `shared/event_calendar.py` to check if yesterday was an FOMC announcement day (day 2). Inserted in `_initiate_entry()` after MKT-035 conditional check and before MKT-011 credit gate.
+**Precedence:** `fomc_t1_skip_enabled` is checked BEFORE MKT-038 call-only logic. When both flags are true, skip wins.
+
+### MKT-038: FOMC T+1 Call-Only Mode — DISABLED (superseded)
+
+**Status (2026-04-19):** DISABLED on VM (`fomc_t1_callonly_enabled: false`). Superseded by FOMC T+1 Blackout (above) after A/B backtest showed MKT-038 loses −$425 over 9 T+1 days vs trade-normal. Code preserved as fallback — if `fomc_t1_skip_enabled` is disabled, MKT-038 still works as before.
+
+**Legacy behavior (when enabled):** Force all entries to call-only on T+1. Stop formula: `call_credit + theoretical $2.60 put + call buffer`. Inserted in `_initiate_entry()` after T+1 skip check and before MKT-011 credit gate.
 
 ### Stop Monitoring
 
@@ -774,9 +785,10 @@ Entry #1 → #2 → #3 placed normally
 | MKT-032 | VIX Gate for Put-Only | v1.9.1 | Put-only entries only when VIX < 15.0 (v1.19.0, lowered from 25); at VIX >= 15.0 skip |
 | MKT-033 | Long Leg Salvage | v1.9.2 | Requires `short_only_stop: true`. After short stop, sell long if appreciated >= $10 |
 | MKT-034 | VIX-Scaled Entry Time Shifting | v1.10.0 | Shifts 5-entry schedule later on high-VIX days. VIX gate checks E#1 at :14:00/:44:00; floor at 12:14:30 |
-| MKT-035 | Call-Only on Down Days | v1.11.0 | When SPX drops >= 0.57% (v1.19.0, was 0.3%) below session open, base entries E1-E3 convert to call-only. E7 DISABLED. Stop = call_credit + $260 theo put + buffer |
+| MKT-035 | Call-Only on Down Days | v1.11.0 | **Base-entry conversion DISABLED 2026-04-19** (`base_entry_downday_callonly_pct: null`, negative EV across all thresholds 0.57-1.20%). Conditional E6 call-only at 14:00 via Downday-035 (≥ 0.25%, `conditional_downday_threshold_pct: 0.0025`) remains active. Stop = call_credit + $260 theo put + buffer |
 | MKT-036 | Stop Confirmation Timer | v1.12.0 | **DISABLED.** Put buffer chosen instead ($1.75 in v1.23.0, was $5.00). When enabled: 75-second sustained breach before executing stop. Code preserved, configurable. |
-| MKT-038 | FOMC T+1 Call-Only | v1.13.0 | Day after FOMC announcement: force all entries to call-only. T+1 = 66.7% down days, 23% more volatile. Stop = call + $2.60 theo put + buffer. FOMC skip disabled (v1.19.0). |
+| MKT-038 | FOMC T+1 Call-Only | v1.13.0 | **DISABLED 2026-04-19** — superseded by FOMC T+1 Blackout (`fomc_t1_skip_enabled: true`) which skips all T+1 entries entirely. A/B backtest: MKT-038 ON lost −$425 over 9 T+1 days vs trade-normal; skip entirely saved +$900 vs normal / +$1,325 vs MKT-038. Code preserved as fallback. |
+| FOMC T+1 Blackout | Skip all entries on T+1 | v1.23.0 | **NEW 2026-04-19** — `fomc_t1_skip_enabled: true`. Skips all entries on the day after FOMC announcement. Takes precedence over MKT-038 call-only. Next T+1: Apr 30. |
 | MKT-039 | Put-Only Stop Tightening | v1.15.0 | Put-only stop = credit + put_stop_buffer ($1.75). MKT-032 VIX gate at 15.0 (v1.19.0). |
 | MKT-040 | Call-Only When Put Non-Viable | v1.15.1 | When put credit below minimum but call viable, place call-only (89% WR, +$46 EV). Stop = call + theo $2.60 put + buffer (unified with MKT-035/038). |
 | MKT-041 | Cushion Recovery Exit | v1.21.0 | **DISABLED** (buffer+cushion interfere). When enabled: closes IC side that reaches >= 96% of stop then recovers to <= 67%. Sharpe 2.182 vs 2.094 baseline (938 days). |
@@ -997,7 +1009,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `hold_check_enabled` | `true` | MKT-023: Only used when MKT-018 enabled. |
 | `hold_check_lean_tolerance` | `1.0` | MKT-023 lean threshold (%). Only used when enabled. |
 | `min_entries_before_roc_gate` | `3` | MKT-021: Only active when MKT-018 enabled. |
-| `downday_callonly_enabled` | `true` | MKT-035: Enable call-only entries on down days |
+| `downday_callonly_enabled` | `true` | MKT-035 legacy master switch. **NOTE:** Base-entry conversion is DISABLED via `base_entry_downday_callonly_pct: null` (2026-04-19); this flag only gates legacy conditional E6/E7. New Downday-035 uses `conditional_downday_*` keys. |
 | `downday_threshold_pct` | `0.003` | MKT-035: SPX must drop this % below the session open to trigger E6/E7 conditional (0.3%). E7 DISABLED. |
 | `downday_theoretical_put_credit` | `2.60` | MKT-035: Theoretical put credit ($) for stop calculation (v1.19.0, was $2.50) |
 | `base_entry_downday_callonly_pct` | `null` | DISABLED 2026-04-19 (negative EV in A/B sweep at 0.57-1.20%). Set to a decimal fraction (e.g. `0.0057`) to re-enable base-E1-E3 call-only conversion on down days. |

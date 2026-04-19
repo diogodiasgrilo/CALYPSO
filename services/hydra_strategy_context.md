@@ -172,4 +172,4 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 
 **E6 (14:00) conditional:** Fires only if SPX up ≥0.25% at 14:00 open. Skips logged as "Conditional: no up-day trigger".
 
-If agents observe **fewer than 3 base entries** on a VIX≥18 day, that is by design (regime drop), NOT a bug or skip. Check `vix_open` and regime config to determine expected entry count.
+E#1 at 10:15 is **always dropped** at every VIX level since 2026-04-17 (max_entries `[2,2,2,1]`). Expected live entry count: **2 base (10:45 + 11:15)** at VIX <28, or **1 base (11:15 only)** at VIX ≥28, plus up to 1 conditional E6 at 14:00 if Upday-035 or Downday-035 triggers. On FOMC T+1 days: **0 entries** (blackout). If observations diverge from this, check `vix_open` and the VIX-regime config.

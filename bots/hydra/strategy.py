@@ -13,10 +13,13 @@ Trend Detection (informational only, does NOT drive entry type):
 Risk Management (beyond base MEIC):
 - MKT-011: Pre-entry credit gate (put-only if call non-viable, skip if put non-viable)
 - MKT-018: Early close on ROC >= 3% (close all positions after entries placed) — DISABLED
-- Base-Entry Down-Day Call-Only: E1-E3 forced to call-only when SPX drops >= 0.57% from open
-  (config: base_entry_downday_callonly_pct, override_reason: "base-downday")
+- Base-Entry Down-Day Call-Only: DISABLED 2026-04-19 (`base_entry_downday_callonly_pct: null`).
+  A/B sweep over Feb-Apr 2026 showed negative EV at all thresholds 0.57%-1.20%.
+  Code preserved — set to a decimal fraction to re-enable.
 - Upday-035: Conditional E6 (14:00) put-only when SPX rises >= 0.25% above open
-- Downday-035: Conditional E6 (14:00) call-only when SPX drops >= 0.25% below open
+- Downday-035: Conditional E6 (14:00) call-only when SPX drops >= 0.25% below open (NEW 2026-04-19)
+- FOMC T+1 Blackout: skip ALL entries on day after FOMC announcement
+  (`fomc_t1_skip_enabled: true`, supersedes MKT-038 call-only, NEW 2026-04-19)
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
@@ -7651,9 +7654,11 @@ class HydraStrategy(MEICStrategy):
                     "conditional": [t.strftime('%H:%M') for t in self._conditional_entry_times],
                 },
                 # Dashboard: config flags for banner display
-                # getattr: fomc_t1_callonly_enabled is set post-super(); if state save is
-                # triggered during base-class recovery it may not exist yet.
+                # getattr: flags are set post-super(); if state save is
+                # triggered during base-class recovery they may not exist yet.
                 "fomc_t1_callonly_enabled": getattr(self, 'fomc_t1_callonly_enabled', True),
+                "fomc_t1_skip_enabled": getattr(self, 'fomc_t1_skip_enabled', False),
+                "fomc_announcement_skip": bool(self.strategy_config.get('fomc_announcement_skip', False)),
                 "downday_callonly_enabled": getattr(self, 'downday_callonly_enabled', True),
                 "entries": []
             }

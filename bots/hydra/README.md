@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.22.3 | **Last Updated:** 2026-04-12
+**Version:** 1.23.0 | **Last Updated:** 2026-04-19
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -193,15 +193,17 @@ When enabled: 75-second confirmation window before executing stop. 20-day backte
 | `call_stop_buffer` | `0.75` | Call stop buffer: call_stop = credit + $0.75 (v1.23.0, was $0.35 in v1.19.0) |
 | `put_stop_buffer` | `1.75` | Put stop buffer: put_stop = credit + $1.75 (v1.23.0, was $1.55 in v1.19.0). Falls back to `call_stop_buffer` if not set. |
 
-### FOMC T+1 Call-Only (MKT-038)
+### FOMC T+1 Blackout (NEW 2026-04-19) + MKT-038 (disabled)
 
-On the day after FOMC announcement (T+1), forces all entries to call-only spreads. Research shows T+1 is 66.7% down days with 23% more volatility — put-side exposure is dangerous.
+On the day after an FOMC announcement (T+1), HYDRA **skips ALL entries entirely**. A/B backtest over 2025-01 → 2026-04 (9 T+1 days, VM-matching config) showed trade-normal = −$900, MKT-038 ON = −$1,325, skip entirely = $0. Skip supersedes MKT-038.
 
-| Setting | Default | Description |
+| Setting | VM Default | Description |
 |---------|---------|-------------|
-| `fomc_t1_callonly_enabled` | `true` | Force call-only entries on day after FOMC announcement |
+| `fomc_t1_skip_enabled` | `true` | **NEW 2026-04-19.** Skip ALL entries on T+1. Takes precedence over MKT-038 call-only. Next T+1: Apr 30. |
+| `fomc_t1_callonly_enabled` | `false` | MKT-038 (legacy): force call-only on T+1. **Disabled** 2026-04-19 after A/B showed negative EV; code preserved as fallback if T+1 skip is disabled. |
+| `fomc_announcement_skip` | `false` | Day 2 (announcement day) skip. `false` = trade normally; A/B showed Day 2 is near coin-flip with slight positive edge. |
 
-Stop formula for MKT-038 entries: `call_credit + theoretical $2.60 put + call buffer` (same as MKT-035).
+Stop formula when MKT-038 fires (fallback only): `call_credit + theoretical $2.60 put + call buffer`.
 
 ### Whipsaw Filter (v1.19.0)
 

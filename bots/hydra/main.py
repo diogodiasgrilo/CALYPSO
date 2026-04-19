@@ -8,12 +8,17 @@ strategy with EMA-based trend detection (informational) and advanced risk contro
 
 Strategy Summary:
 -----------------
-1. 3 base entries at 10:15, 10:45, 11:15 ET + conditional E6 at 14:00 (upday put-only)
+1. 2 effective base entries at 10:45, 11:15 ET (E#1 at 10:15 dropped at ALL VIX levels
+   via regime max_entries [2,2,2,1]) + conditional E6 at 14:00 firing as put-only on
+   up days (Upday-035, +0.25%) or call-only on down days (Downday-035, −0.25%).
+   FOMC T+1 days skipped entirely (fomc_t1_skip_enabled).
 2. EMA 20/40 trend signal logged per entry (informational only)
-3. Credit gate validates minimum credit before each entry (call $2.00, put $2.75)
+3. Credit gate validates minimum credit before each entry (VIX-regime-dependent;
+   base fallback $2.00 call / $2.75 put is effectively dead — regime floors apply)
 4. Progressive OTM tightening finds optimal strikes (MKT-020/MKT-022)
 5. Hold-to-expiry (MKT-018 early close intentionally disabled)
-6. Stop loss closes both legs (total_credit + asymmetric buffer: call $0.35, put $1.55)
+6. Stop loss closes both legs (total_credit + asymmetric buffer: call $0.75, put $1.75,
+   with MKT-042 buffer decay 2.50× → 1× over 4h and MKT-046 10-second anti-spike filter)
 
 Usage:
 ------

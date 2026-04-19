@@ -1,175 +1,199 @@
 {
-    "bot_name": "HYDRA",
-    "saxo_api": {
-        "environment": "live",
-        "app_key": "FROM_SECRET_MANAGER",
-        "app_secret": "FROM_SECRET_MANAGER",
-        "redirect_uri": "http://localhost:8000/callback"
-    },
-    "strategy": {
-        "_comment_underlying": "US500.I is a CFD that tracks SPX - provides real-time prices",
-        "underlying_symbol": "US500.I",
-        "underlying_uic": 4913,
-
-        "_comment_options": "SPXW are SPX weekly options (0DTE)",
-        "option_root_uic": 128,
-
-        "_comment_vix": "VIX spot for volatility filtering",
-        "vix_spot_uic": 10606,
-
-        "_comment_entry_times": "Entry times in HH:MM format (US Eastern). Configured slots are :15/:45 starting at 10:15 AM, but the active VIX regime caps max_entries (currently [2,2,2,1] — drops EARLIEST entries first, so E#1 at 10:15 is dropped at ALL VIX levels). Effective live schedule = 10:45 + 11:15. MKT-031 smart entry scouting starts 10min before each time. Only used when vix_time_shift.enabled=false.",
-        "entry_times": ["10:15", "10:45", "11:15"],
-        "entry_window_minutes": 5,
-
-        "_comment_spread": "MKT-027: VIX-scaled spread widths. Formula: round(VIX × spread_vix_multiplier / 5) × 5, floor call_min/put_min, cap max_spread_width. min_spread_width is MKT-008 liquidity fallback floor.",
-        "spread_vix_multiplier": 6.0,
-        "min_spread_width": 25,
-        "call_min_spread_width": 25,
-        "put_min_spread_width": 25,
-        "max_spread_width": 110,
-
-        "_comment_credit": "Credit targets per side (call spread OR put spread)",
-        "min_credit_per_side": 1.00,
-        "max_credit_per_side": 1.75,
-        "credit_balance_tolerance": 0.25,
-
-        "_comment_credit_gate": "MKT-011: Credit gate thresholds. NOTE: min_viable_credit_per_side ($2.00) and min_viable_credit_put_side ($2.75) are BASE FALLBACKS ONLY — when vix_regime.enabled=true and all regime slots are filled (live VM: min_call_credit [1.00, 0.50, 0.30, 0.30], min_put_credit [1.25, 0.75, 0.50, 0.40]), the regime overrides these at every VIX level. Likewise, call_credit_floor / put_credit_floor here are only used if vix_regime.enabled=false; when regime is active they are recomputed as min_credit - $0.10. MKT-029 fallback steps -$0.05, -$0.10. MKT-032/MKT-039: put-only only when VIX < put_only_max_vix. MKT-040: call-only when put non-viable (89% WR, +$46 EV)",
-        "one_sided_entries_enabled": true,
-        "put_only_max_vix": 15.0,
-        "min_viable_credit_per_side": 2.00,
-        "min_viable_credit_put_side": 2.75,
-        "call_credit_floor": 0.20,
-        "put_credit_floor": 0.30,
-
-        "_comment_tightening": "MKT-020/MKT-022: OTM floors for progressive tightening (points). MKT-024: starting OTM multipliers (3.5x/4.0x = wider scan, batch API so zero extra cost). Put higher because put skew = credit viable further out",
-        "min_call_otm_distance": 25,
-        "min_put_otm_distance": 25,
-        "call_starting_otm_multiplier": 3.5,
-        "put_starting_otm_multiplier": 4.0,
-
-        "_comment_delta": "Delta targeting for strike selection",
-        "target_delta": 8,
-        "min_delta": 5,
-        "max_delta": 15,
-
-        "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses call_stop_buffer ($0.75). Put uses put_stop_buffer ($1.75). If put_stop_buffer not set, falls back to call_stop_buffer for both sides. Only used when price_based_stop_points is null. MKT-046 (10s anti-spike filter) applies when MKT-036 is disabled.",
-        "call_stop_buffer": 0.75,
-        "put_stop_buffer": 1.75,
-
-        "_comment_price_stop": "Price-based stop (replaces credit-based stop when set). Triggers when SPX reaches within N pts of the short strike: call side stops when SPX >= short_call - N, put side stops when SPX <= short_put + N. Applies to ALL entry types (full IC, call-only, put-only). Walk-forward backtest: 0.1pt gives Sharpe 2.098 vs credit-based 2.075, slippage-robust. Set to null to use credit-based stop.",
-        "price_based_stop_points": null,
-
-        "_comment_whipsaw": "Anti-whipsaw filter: skip entry if SPX intraday range (high-low) > mult × expected daily move. Expected move = SPX × VIX / 100 / sqrt(252). Set to null to disable. 1.5 = skip when range exceeds 1.5× expected move (backtest optimal 2026-03-29).",
-        "whipsaw_range_skip_mult": 1.75,
-
-        "_comment_risk": "Risk management settings. max_vix_entry: CALYPSO addition (neither Tammy nor Sandvand use VIX cutoffs). Set high to effectively disable.",
-        "max_vix_entry": 999,
-        "contracts_per_entry": 1,
-
-        "_comment_downday": "Conditional entry triggers (E6 at 14:00). Base entries E1-E3 always attempt full ICs. Base-entry conversion: SPX down >= base_entry_downday_callonly_pct (0.57%) → E1-E3 convert to call-only (stop = call_credit + $2.60 theo put + buffer). Downday-035 (NEW 2026-04-19): conditional_downday_e6_enabled → E6 at 14:00 fires call-only when SPX down >= conditional_downday_threshold_pct (0.25%). Upday-035: conditional_upday_e6_enabled → E6 at 14:00 fires put-only when SPX up >= upday_threshold_pct (0.25%). On FOMC T+1 (MKT-038), all entries forced call-only — Downday-035 still fires but override is informational. Legacy conditional_e6_enabled (MKT-035, threshold downday_threshold_pct=0.3%) superseded by conditional_downday_e6_enabled — OR'd for back-compat.",
-        "downday_callonly_enabled": true,
-        "downday_threshold_pct": 0.003,
-        "downday_theoretical_put_credit": 2.60,
-        "conditional_entry_times": ["14:00"],
-        "conditional_e6_enabled": false,
-        "conditional_e7_enabled": false,
-        "conditional_downday_e6_enabled": true,
-        "conditional_downday_e7_enabled": false,
-        "conditional_downday_threshold_pct": 0.0025,
-        "conditional_upday_e6_enabled": true,
-        "upday_threshold_pct": 0.0025,
-        "base_entry_downday_callonly_pct": null,
-
-        "_comment_fomc": "FOMC day handling. fomc_t1_skip_enabled (2026-04-19): skip ALL entries on T+1 (day after announcement) — supersedes MKT-038 call-only which was negative EV. A/B backtest over 15 months / 9 T+1 days: skip saves +$900 vs trade-normal, +$1,325 vs MKT-038 ON. MKT-038 (fomc_t1_callonly_enabled) preserved as fallback if skip is disabled. fomc_announcement_skip: skip ALL entries on the FOMC announcement day itself (false = trade normally — A/B showed Day 2 is near coin-flip, slight positive tilt).",
-        "fomc_t1_skip_enabled": true,
-        "fomc_t1_callonly_enabled": false,
-        "fomc_announcement_skip": false,
-
-        "_comment_cushion_recovery": "MKT-041: Cushion Recovery Exit. DISABLED (buffer+cushion interfere). Set both to non-null to enable. nearstop_pct = fraction of stop level to trigger near-stop state (e.g., 0.96 = 96%). recovery_pct = fraction of stop level to trigger recovery close (e.g., 0.67 = 67%).",
-        "cushion_nearstop_pct": null,
-        "cushion_recovery_pct": null,
-
-        "_comment_buffer_decay": "MKT-042: Time-decaying stop buffer. Starts at start_mult × normal buffer, linearly decays to 1× over decay_hours. Wider stops early (premium rich), normal later. Set start_mult to 1.0 or null to disable.",
-        "buffer_decay_start_mult": 2.50,
-        "buffer_decay_hours": 4.0,
-
-        "_comment_calm_entry": "MKT-043: Calm entry filter. Delays entry up to max_delay_min when SPX moved > threshold_pts in last lookback_min minutes. Prevents entering during sharp spikes. Set threshold_pts to null to disable.",
-        "calm_entry_lookback_min": 3,
-        "calm_entry_threshold_pts": 15.0,
-        "calm_entry_max_delay_min": 5,
-
-        "_comment_stop_confirmation": "MKT-036: Sustained breach confirmation. INTENTIONALLY DISABLED — put buffer (put_stop_buffer) is the chosen solution instead. Code preserved but dormant. When enabled: requires stop condition to persist for N seconds before closing.",
-        "stop_confirmation_enabled": false,
-        "stop_confirmation_seconds": 75,
-
-        "_comment_early_close": "MKT-018: INTENTIONALLY DISABLED. Backtest showed no ROC configuration beats hold-to-expiry. Code preserved but dormant. See docs/HYDRA_EARLY_CLOSE_ANALYSIS.md",
-        "early_close_enabled": false,
-        "early_close_roc_threshold": 0.03,
-        "early_close_cost_per_position": 5.00,
-
-        "_comment_hold_check": "MKT-023: Smart hold check before early close. Only relevant when MKT-018 is enabled (currently disabled)",
-        "hold_check_enabled": true,
-        "hold_check_lean_tolerance": 1.0,
-
-        "_comment_roc_gate": "MKT-021: Pre-entry ROC gate. Only active when MKT-018 is enabled (currently disabled)",
-        "min_entries_before_roc_gate": 3
-    },
-    "trend_filter": {
-        "_comment": "EMA-based trend direction detection for HYDRA",
-        "enabled": true,
-        "ema_short_period": 20,
-        "ema_long_period": 40,
-        "ema_neutral_threshold": 0.002,
-        "recheck_each_entry": true,
-        "chart_bars_count": 50,
-        "chart_horizon_minutes": 1
-    },
-    "smart_entry": {
-        "_comment": "MKT-031: Smart entry windows. DISABLED (v1.10.4): Early entries add complexity without proven edge. Enter at scheduled times only.",
-        "enabled": false,
-        "window_minutes": 10,
-        "score_threshold": 65,
-        "momentum_threshold_pct": 0.05
-    },
-    "vix_time_shift": {
-        "_comment": "MKT-034: VIX-scaled entry time shifting. DISABLED (v1.10.3): Neither Tammy nor Sandvand use VIX-based time shifting. When enabled, shifts entry schedule later on high-VIX days. When disabled, uses strategy.entry_times instead.",
-        "enabled": false,
-        "medium_vix_threshold": 20.0,
-        "high_vix_threshold": 23.0
-    },
+  "bot_name": "HYDRA",
+  "saxo_api": {
+    "environment": "live",
+    "app_key": "FROM_SECRET_MANAGER",
+    "app_secret": "FROM_SECRET_MANAGER",
+    "redirect_uri": "http://localhost:8000/callback"
+  },
+  "strategy": {
+    "_comment_underlying": "US500.I is a CFD that tracks SPX - provides real-time prices",
+    "underlying_symbol": "US500.I",
+    "underlying_uic": 4913,
+    "_comment_options": "SPXW are SPX weekly options (0DTE)",
+    "option_root_uic": 128,
+    "_comment_vix": "VIX spot for volatility filtering",
+    "vix_spot_uic": 10606,
+    "_comment_entry_times": "Entry times in HH:MM format (US Eastern). Configured slots are :15/:45 starting at 10:15 AM, but the active VIX regime caps max_entries (currently [2,2,2,1] \u2014 drops EARLIEST entries first, so E#1 at 10:15 is dropped at ALL VIX levels). Effective live schedule = 10:45 + 11:15. MKT-031 smart entry scouting starts 10min before each time. Only used when vix_time_shift.enabled=false.",
+    "entry_times": [
+      "10:15",
+      "10:45",
+      "11:15"
+    ],
+    "entry_window_minutes": 5,
+    "_comment_spread": "MKT-027: VIX-scaled spread widths. Formula: round(VIX \u00d7 spread_vix_multiplier / 5) \u00d7 5, floor call_min/put_min, cap max_spread_width. min_spread_width is MKT-008 liquidity fallback floor.",
+    "spread_vix_multiplier": 6.0,
+    "min_spread_width": 25,
+    "call_min_spread_width": 25,
+    "put_min_spread_width": 25,
+    "max_spread_width": 110,
+    "_comment_credit": "Credit targets per side (call spread OR put spread)",
+    "min_credit_per_side": 1.0,
+    "max_credit_per_side": 1.75,
+    "credit_balance_tolerance": 0.25,
+    "_comment_credit_gate": "MKT-011: Credit gate thresholds. NOTE: min_viable_credit_per_side ($2.00) and min_viable_credit_put_side ($2.75) are BASE FALLBACKS ONLY \u2014 when vix_regime.enabled=true and all regime slots are filled (live VM: min_call_credit [1.00, 0.50, 0.30, 0.30], min_put_credit [1.25, 0.75, 0.50, 0.40]), the regime overrides these at every VIX level. Likewise, call_credit_floor / put_credit_floor here are only used if vix_regime.enabled=false; when regime is active they are recomputed as min_credit - $0.10. MKT-029 fallback steps -$0.05, -$0.10. MKT-032/MKT-039: put-only only when VIX < put_only_max_vix. MKT-040: call-only when put non-viable (89% WR, +$46 EV)",
+    "one_sided_entries_enabled": true,
+    "put_only_max_vix": 15.0,
+    "min_viable_credit_per_side": 2.0,
+    "min_viable_credit_put_side": 2.75,
+    "call_credit_floor": 0.2,
+    "put_credit_floor": 0.3,
+    "_comment_tightening": "MKT-020/MKT-022: OTM floors for progressive tightening (points). MKT-024: starting OTM multipliers (3.5x/4.0x = wider scan, batch API so zero extra cost). Put higher because put skew = credit viable further out",
+    "min_call_otm_distance": 25,
+    "min_put_otm_distance": 25,
+    "call_starting_otm_multiplier": 3.5,
+    "put_starting_otm_multiplier": 4.0,
+    "_comment_delta": "Delta targeting for strike selection",
+    "target_delta": 8,
+    "min_delta": 5,
+    "max_delta": 15,
+    "_comment_stop_buffer": "Stop buffer: stop = credit + buffer. Call uses call_stop_buffer ($0.75). Put uses put_stop_buffer ($1.75). If put_stop_buffer not set, falls back to call_stop_buffer for both sides. Only used when price_based_stop_points is null. MKT-046 (10s anti-spike filter) applies when MKT-036 is disabled.",
+    "call_stop_buffer": 0.75,
+    "put_stop_buffer": 1.75,
+    "_comment_price_stop": "Price-based stop (replaces credit-based stop when set). Triggers when SPX reaches within N pts of the short strike: call side stops when SPX >= short_call - N, put side stops when SPX <= short_put + N. Applies to ALL entry types (full IC, call-only, put-only). Walk-forward backtest: 0.1pt gives Sharpe 2.098 vs credit-based 2.075, slippage-robust. Set to null to use credit-based stop.",
+    "price_based_stop_points": null,
+    "_comment_whipsaw": "Anti-whipsaw filter: skip entry if SPX intraday range (high-low) > mult \u00d7 expected daily move. Expected move = SPX \u00d7 VIX / 100 / sqrt(252). Set to null to disable. 1.5 = skip when range exceeds 1.5\u00d7 expected move (backtest optimal 2026-03-29).",
+    "whipsaw_range_skip_mult": 1.75,
+    "_comment_risk": "Risk management settings. max_vix_entry: CALYPSO addition (neither Tammy nor Sandvand use VIX cutoffs). Set high to effectively disable.",
+    "max_vix_entry": 999,
+    "contracts_per_entry": 1,
+    "_comment_downday": "Conditional entry triggers (E6 at 14:00). Base entries E1-E3 always attempt full ICs. Base-entry conversion: SPX down >= base_entry_downday_callonly_pct (0.57%) \u2192 E1-E3 convert to call-only (stop = call_credit + $2.60 theo put + buffer). Downday-035 (NEW 2026-04-19): conditional_downday_e6_enabled \u2192 E6 at 14:00 fires call-only when SPX down >= conditional_downday_threshold_pct (0.25%). Upday-035: conditional_upday_e6_enabled \u2192 E6 at 14:00 fires put-only when SPX up >= upday_threshold_pct (0.25%). On FOMC T+1 (MKT-038), all entries forced call-only \u2014 Downday-035 still fires but override is informational. Legacy conditional_e6_enabled (MKT-035, threshold downday_threshold_pct=0.3%) superseded by conditional_downday_e6_enabled \u2014 OR'd for back-compat.",
+    "downday_callonly_enabled": true,
+    "downday_threshold_pct": 0.003,
+    "downday_theoretical_put_credit": 2.6,
+    "conditional_entry_times": [
+      "14:00"
+    ],
+    "conditional_e6_enabled": false,
+    "conditional_e7_enabled": false,
+    "conditional_downday_e6_enabled": true,
+    "conditional_downday_e7_enabled": false,
+    "conditional_downday_threshold_pct": 0.0025,
+    "conditional_upday_e6_enabled": true,
+    "upday_threshold_pct": 0.0025,
+    "base_entry_downday_callonly_pct": null,
+    "_comment_fomc": "FOMC day handling. fomc_t1_skip_enabled (2026-04-19): skip ALL entries on T+1 (day after announcement) \u2014 supersedes MKT-038 call-only which was negative EV. A/B backtest over 15 months / 9 T+1 days: skip saves +$900 vs trade-normal, +$1,325 vs MKT-038 ON. MKT-038 (fomc_t1_callonly_enabled) preserved as fallback if skip is disabled. fomc_announcement_skip: skip ALL entries on the FOMC announcement day itself (false = trade normally \u2014 A/B showed Day 2 is near coin-flip, slight positive tilt).",
+    "fomc_t1_skip_enabled": true,
+    "fomc_t1_callonly_enabled": false,
+    "fomc_announcement_skip": false,
+    "_comment_cushion_recovery": "MKT-041: Cushion Recovery Exit. DISABLED (buffer+cushion interfere). Set both to non-null to enable. nearstop_pct = fraction of stop level to trigger near-stop state (e.g., 0.96 = 96%). recovery_pct = fraction of stop level to trigger recovery close (e.g., 0.67 = 67%).",
+    "cushion_nearstop_pct": null,
+    "cushion_recovery_pct": null,
+    "_comment_buffer_decay": "MKT-042: Time-decaying stop buffer. Starts at start_mult \u00d7 normal buffer, linearly decays to 1\u00d7 over decay_hours. Wider stops early (premium rich), normal later. Set start_mult to 1.0 or null to disable.",
+    "buffer_decay_start_mult": 2.5,
+    "buffer_decay_hours": 4.0,
+    "_comment_calm_entry": "MKT-043: Calm entry filter. Delays entry up to max_delay_min when SPX moved > threshold_pts in last lookback_min minutes. Prevents entering during sharp spikes. Set threshold_pts to null to disable.",
+    "calm_entry_lookback_min": 3,
+    "calm_entry_threshold_pts": 15.0,
+    "calm_entry_max_delay_min": 5,
+    "_comment_stop_confirmation": "MKT-036: Sustained breach confirmation. INTENTIONALLY DISABLED \u2014 put buffer (put_stop_buffer) is the chosen solution instead. Code preserved but dormant. When enabled: requires stop condition to persist for N seconds before closing.",
+    "stop_confirmation_enabled": false,
+    "stop_confirmation_seconds": 75,
+    "_comment_early_close": "MKT-018: INTENTIONALLY DISABLED. Backtest showed no ROC configuration beats hold-to-expiry. Code preserved but dormant. See docs/HYDRA_EARLY_CLOSE_ANALYSIS.md",
+    "early_close_enabled": false,
+    "early_close_roc_threshold": 0.03,
+    "early_close_cost_per_position": 5.0,
+    "_comment_hold_check": "MKT-023: Smart hold check before early close. Only relevant when MKT-018 is enabled (currently disabled)",
+    "hold_check_enabled": true,
+    "hold_check_lean_tolerance": 1.0,
+    "_comment_roc_gate": "MKT-021: Pre-entry ROC gate. Only active when MKT-018 is enabled (currently disabled)",
+    "min_entries_before_roc_gate": 3,
     "vix_regime": {
-        "_comment": "VIX Regime Adaptive (tuned 2026-04-14): adjusts entries and credit thresholds based on VIX at open. Breakpoints [18, 22, 28] define 4 zones. Arrays are per-zone [VIX<18, 18-22, 22-28, >=28]. null = use default (falls back to strategy.min_viable_credit_per_side / min_viable_credit_put_side). Disable with enabled: false. All credit slots are now filled, so the base min_viable_credit_per_side / min_viable_credit_put_side are effectively dead. When max_entries caps below base count, drops EARLIEST entries (keeps best-performing E#3 at 11:15). When this override runs, call_credit_floor / put_credit_floor are recomputed as min_credit - $0.10 for the active regime. shadow_call_otm and shadow_put_otm set OTM targets (pt) for v7 shadow_entries logging — observation only, does not affect trading.",
-        "enabled": true,
-        "breakpoints": [18.0, 22.0, 28.0],
-        "max_entries": [2, 2, 2, 1],
-        "put_stop_buffer": [null, null, null, null],
-        "call_stop_buffer": [null, null, null, null],
-        "min_call_credit": [1.00, 0.50, 0.30, 0.30],
-        "min_put_credit": [1.25, 0.75, 0.50, 0.40],
-        "shadow_call_otm": [40.0, 50.0, 75.0, 75.0],
-        "shadow_put_otm": [50.0, 75.0, 110.0, 90.0]
-    },
-    "long_salvage": {
-        "_comment": "MKT-025/033: short_only_stop=false closes both legs on stop (default). true enables short-only stop + long salvage.",
-        "short_only_stop": false,
-        "enabled": true,
-        "min_profit": 10.0
-    },
-    "filters": {
-        "_comment": "Skip trading on FOMC announcement days due to high volatility",
-        "fomc_blackout": true
-    },
-    "alerts": {
-        "_comment": "Alert settings - phone/email loaded from Secret Manager in cloud",
-        "enabled": true,
-        "phone_number": "+1XXXXXXXXXX",
-        "email": "your@email.com"
-    },
-    "logging": {
-        "log_level": "INFO",
-        "log_dir": "logs/hydra",
-        "google_sheets_enabled": true,
-        "spreadsheet_name": "Calypso_HYDRA_Live_Data",
-        "strategy_type": "hydra"
+      "_comment": "VIX Regime Adaptive (tuned 2026-04-14): adjusts entries and credit thresholds based on VIX at open. Breakpoints [18, 22, 28] define 4 zones. Arrays are per-zone [VIX<18, 18-22, 22-28, >=28]. null = use default (falls back to strategy.min_viable_credit_per_side / min_viable_credit_put_side). Disable with enabled: false. All credit slots are now filled, so the base min_viable_credit_per_side / min_viable_credit_put_side are effectively dead. When max_entries caps below base count, drops EARLIEST entries (keeps best-performing E#3 at 11:15). When this override runs, call_credit_floor / put_credit_floor are recomputed as min_credit - $0.10 for the active regime. shadow_call_otm and shadow_put_otm set OTM targets (pt) for v7 shadow_entries logging \u2014 observation only, does not affect trading.",
+      "enabled": true,
+      "breakpoints": [
+        18.0,
+        22.0,
+        28.0
+      ],
+      "max_entries": [
+        2,
+        2,
+        2,
+        1
+      ],
+      "put_stop_buffer": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "call_stop_buffer": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "min_call_credit": [
+        1.0,
+        0.5,
+        0.3,
+        0.3
+      ],
+      "min_put_credit": [
+        1.25,
+        0.75,
+        0.5,
+        0.4
+      ],
+      "shadow_call_otm": [
+        40.0,
+        50.0,
+        75.0,
+        75.0
+      ],
+      "shadow_put_otm": [
+        50.0,
+        75.0,
+        110.0,
+        90.0
+      ]
     }
+  },
+  "trend_filter": {
+    "_comment": "EMA-based trend direction detection for HYDRA",
+    "enabled": true,
+    "ema_short_period": 20,
+    "ema_long_period": 40,
+    "ema_neutral_threshold": 0.002,
+    "recheck_each_entry": true,
+    "chart_bars_count": 50,
+    "chart_horizon_minutes": 1
+  },
+  "smart_entry": {
+    "_comment": "MKT-031: Smart entry windows. DISABLED (v1.10.4): Early entries add complexity without proven edge. Enter at scheduled times only.",
+    "enabled": false,
+    "window_minutes": 10,
+    "score_threshold": 65,
+    "momentum_threshold_pct": 0.05
+  },
+  "vix_time_shift": {
+    "_comment": "MKT-034: VIX-scaled entry time shifting. DISABLED (v1.10.3): Neither Tammy nor Sandvand use VIX-based time shifting. When enabled, shifts entry schedule later on high-VIX days. When disabled, uses strategy.entry_times instead.",
+    "enabled": false,
+    "medium_vix_threshold": 20.0,
+    "high_vix_threshold": 23.0
+  },
+  "long_salvage": {
+    "_comment": "MKT-025/033: short_only_stop=false closes both legs on stop (default). true enables short-only stop + long salvage.",
+    "short_only_stop": false,
+    "enabled": true,
+    "min_profit": 10.0
+  },
+  "filters": {
+    "_comment": "Skip trading on FOMC announcement days due to high volatility",
+    "fomc_blackout": true
+  },
+  "alerts": {
+    "_comment": "Alert settings - phone/email loaded from Secret Manager in cloud",
+    "enabled": true,
+    "phone_number": "+1XXXXXXXXXX",
+    "email": "your@email.com"
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_dir": "logs/hydra",
+    "google_sheets_enabled": true,
+    "spreadsheet_name": "Calypso_HYDRA_Live_Data",
+    "strategy_type": "hydra"
+  }
 }

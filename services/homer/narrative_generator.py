@@ -130,7 +130,7 @@ Focus on:
 - Notable entry outcomes (which survived, which stopped, why)
 - Stop patterns (timing, clustering, which sides)
 - Credit quality and VIX impact on spread widths
-- MKT rule behavior (credit gate MKT-011, tightening MKT-020/022, down-day MKT-035, FOMC T+1 MKT-038, buffer decay MKT-042, calm entry MKT-043)
+- MKT rule behavior (credit gate MKT-011, tightening MKT-020/022, conditional entries via Upday-035 and Downday-035 E6 at 14:00, FOMC T+1 blackout skip, buffer decay MKT-042, calm entry MKT-043, chain snap MKT-045, stop anti-spike MKT-046)
 - Anything unusual or noteworthy about this specific day
 
 Output format:
@@ -197,8 +197,8 @@ Focus on:
 - Which active MKT rules triggered and their impact:
   - MKT-011 (credit gate): Did it skip any entries? Were skips justified?
   - MKT-020/022 (progressive tightening): How far did strikes tighten?
-  - MKT-035 (down-day filter): Did it trigger call-only entries? Were conditional entries placed?
-  - MKT-038 (FOMC T+1): Was today T+1 after FOMC? Were all entries forced call-only?
+  - Upday-035 / Downday-035 (E6 at 14:00): Did it trigger on SPX up ≥0.25% (put-only) or down ≥0.25% (call-only)? Was the conditional entry placed? Base-entry down-day call-only is DISABLED as of 2026-04-19.
+  - FOMC T+1 Blackout: Was today T+1 after FOMC? Were all entries correctly skipped (expected $0 P&L with ENTRY_SKIPPED reason "FOMC T+1 blackout")? MKT-038 call-only force is DISABLED as of 2026-04-19.
   - Stop close mode: Both legs closed (default). Were stops efficient?
 - Was this a good or bad day for the current strategy configuration?
 

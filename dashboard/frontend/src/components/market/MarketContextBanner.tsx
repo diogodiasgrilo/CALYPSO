@@ -20,10 +20,10 @@ function formatNextOpen(isoStr: string | undefined): string {
 }
 
 /** FOMC alert strip — rendered as overlay above any state.
- *  Shows HYDRA-specific behavior for each FOMC phase:
- *  Day 1: Normal trading (no announcement, safe)
- *  Day 2 (announcement): All entries skipped (MKT-008)
- *  T+1: Call-only entries (MKT-038)
+ *  Shows HYDRA-specific behavior for each FOMC phase (current: 2026-04-19):
+ *  Day 1: Normal trading (no announcement)
+ *  Day 2 (announcement): Normal trading (fomc_announcement_skip=false — A/B showed coin-flip with slight positive edge)
+ *  T+1: ALL entries skipped (fomc_t1_skip_enabled=true — supersedes MKT-038 call-only)
  */
 export function FOMCBanner() {
   const market = useHydraStore((s) => s.market);
@@ -34,8 +34,10 @@ export function FOMCBanner() {
   const isAnnouncement = market.is_fomc_announcement;
   const isTPlus1 = market.is_fomc_t_plus_one;
   const daysUntil = market.days_until_fomc;
-  // MKT-038 config flag from state file (default true if not yet populated)
-  const mkt038Enabled = hydraState?.fomc_t1_callonly_enabled !== false;
+  // FOMC T+1 handling (2026-04-19): skip takes precedence over MKT-038 call-only.
+  // Defaults assume today's VM config (skip=true, callonly=false) if state not yet populated.
+  const t1SkipEnabled = hydraState?.fomc_t1_skip_enabled !== false;
+  const mkt038Enabled = hydraState?.fomc_t1_callonly_enabled === true;
 
   // Show on: FOMC day, T+1, or 1-2 days before
   const showApproaching = !isFomcDay && !isTPlus1 && daysUntil != null && daysUntil > 0 && daysUntil <= 2;
@@ -48,22 +50,32 @@ export function FOMCBanner() {
 
   if (isAnnouncement) {
     headline = "FOMC Announcement Day — Rate Decision at 2:00 PM ET";
-    hydraTag = "HYDRA: All entries skipped (MKT-008)";
-    hydraTagColor = colors.loss;
+    // fomc_announcement_skip defaults false on VM (Day 2 backtest was coin-flip with slight positive edge)
+    const day2Skip = hydraState?.fomc_announcement_skip === true;
+    hydraTag = day2Skip
+      ? "HYDRA: All entries skipped (fomc_announcement_skip)"
+      : "HYDRA: Trading normally — Day 2 backtest showed slight positive edge";
+    hydraTagColor = day2Skip ? colors.loss : colors.warning;
   } else if (isFomcDay) {
     headline = "FOMC Meeting Day 1 — Announcement Tomorrow at 2:00 PM ET";
     hydraTag = "HYDRA: Normal trading — no announcement today";
     hydraTagColor = colors.profit;
   } else if (isTPlus1) {
     headline = "Post-FOMC Day (T+1) — Elevated Volatility Expected";
-    hydraTag = mkt038Enabled
-      ? "HYDRA: Call-only entries (MKT-038) — puts skipped"
-      : "HYDRA: Normal trading (MKT-038 disabled)";
-    hydraTagColor = mkt038Enabled ? colors.warning : colors.textSecondary;
+    if (t1SkipEnabled) {
+      hydraTag = "HYDRA: ALL ENTRIES SKIPPED (FOMC T+1 blackout)";
+      hydraTagColor = colors.loss;
+    } else if (mkt038Enabled) {
+      hydraTag = "HYDRA: Call-only entries (MKT-038) — puts skipped";
+      hydraTagColor = colors.warning;
+    } else {
+      hydraTag = "HYDRA: Normal trading (T+1 skip and MKT-038 both disabled)";
+      hydraTagColor = colors.textSecondary;
+    }
   } else {
     headline = `FOMC Meeting in ${daysUntil} day${daysUntil !== 1 ? "s" : ""}`;
     hydraTag = daysUntil === 1
-      ? "HYDRA: Normal trading today — entries skipped day after tomorrow"
+      ? "HYDRA: Normal trading today — T+1 blackout takes effect day after tomorrow"
       : "HYDRA: Normal trading — FOMC approaching";
     hydraTagColor = colors.textDim;
   }
