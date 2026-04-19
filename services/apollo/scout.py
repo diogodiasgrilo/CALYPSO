@@ -31,15 +31,16 @@ Assign a risk level for today's trading:
 
 **GREEN** — Normal conditions, expect standard HYDRA performance
 - VIX 12-20, no major events, SPX in normal range
-- HYDRA should run all 3 base entries with standard parameters
+- HYDRA runs 2 base entries (E#2 at 10:45, E#3 at 11:15) — E#1 at 10:15 is permanently dropped at ALL VIX levels since 2026-04-17
+- E6 conditional at 14:00 may fire (put-only on up days via Upday-035, call-only on down days via Downday-035)
 
 **YELLOW** — Elevated caution, possible wider spreads or fewer fills
 - VIX 20-25, minor economic data, pre-FOMC positioning
-- HYDRA may see MKT-011 skip on Entry #3 or wider tightening
+- HYDRA may see MKT-011 skip on E#3 or wider tightening
 
 **RED** — High risk, significant market-moving events
 - VIX > 25, major economic surprise
-- HYDRA may skip entries or see stops on early entries
+- HYDRA may skip entries or see stops on early entries; VIX regime may cap to E#3-only at VIX ≥ 28
 
 ## Output Format
 

@@ -106,18 +106,18 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 ### Entry Schedule
 
-3 base entries per day, spaced 30 minutes apart at :15/:45 marks, plus 1 conditional entry. Starting at 10:15 AM. E4/E5 dropped in v1.19.0 (negative EV in walk-forward backtest).
+2 effective base entries per day plus 1 conditional entry. **E#1 at 10:15 is permanently DROPPED at ALL VIX levels as of 2026-04-17** (worst slot historically: 24% WR, -$79/entry; 0% WR at VIX 22-25). E4/E5 dropped in v1.19.0 (negative EV in walk-forward backtest).
 
-**Current schedule (v1.19.0, walk-forward convergence):**
+**Current schedule (v1.23.0, post-E#1-drop):**
 
 | Entry | Time (ET) | Type | Notes |
 |-------|-----------|------|-------|
-| 1 | 10:15 | Base | Always attempts (full IC or one-sided) |
-| 2 | 10:45 | Base | |
-| 3 | 11:15 | Base | |
-| 6 | 14:00 | Conditional (Upday-035) | Only fires on up days as put-only |
+| 1 | 10:15 | Base | **DROPPED at all VIX levels (since 2026-04-17)** |
+| 2 | 10:45 | Base | Always attempts (full IC or one-sided per MKT-011) |
+| 3 | 11:15 | Base | Always attempts (full IC or one-sided per MKT-011) |
+| 6 | 14:00 | Conditional (Upday-035 / Downday-035) | Up days → put-only; down days → call-only |
 
-E7 (13:15) is DISABLED. E6 fires as put-only when SPX rises >= 0.25% above session open (Upday-035). On non-up days, E6 is silently skipped.
+E7 (13:15) is DISABLED. E6 fires as **put-only** when SPX rises >= 0.25% above session open (**Upday-035**) OR as **call-only** when SPX falls >= 0.25% below session open (**Downday-035**, deployed 2026-04-19). On flat days (-0.25% < move < +0.25%), E6 is silently skipped. Override reasons: `upday-035` / `downday-035`.
 
 **Previous schedule (MKT-034 enabled, v1.10.0-1.10.2):**
 

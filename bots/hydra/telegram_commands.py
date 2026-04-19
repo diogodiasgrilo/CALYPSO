@@ -186,6 +186,28 @@ EDITABLE_PARAMS = {
         "unit": "min",
         "description": "MKT-043: max entry delay when SPX spike detected",
     },
+    "upday_e6": {
+        "path": "strategy.conditional_upday_e6_enabled",
+        "type": "bool",
+        "description": "Upday-035: E6 put-only at 14:00 when SPX rises >= threshold",
+    },
+    "upday_threshold": {
+        "path": "strategy.upday_threshold_pct",
+        "type": "float",
+        "min": 0.0005, "max": 0.02,
+        "description": "Upday-035: SPX rise threshold (fraction, e.g. 0.0025 = 0.25%)",
+    },
+    "downday_e6": {
+        "path": "strategy.conditional_downday_e6_enabled",
+        "type": "bool",
+        "description": "Downday-035: E6 call-only at 14:00 when SPX drops >= threshold",
+    },
+    "downday_threshold": {
+        "path": "strategy.conditional_downday_threshold_pct",
+        "type": "float",
+        "min": 0.0005, "max": 0.02,
+        "description": "Downday-035: SPX drop threshold (fraction, e.g. 0.0025 = 0.25%)",
+    },
 }
 
 

@@ -17,7 +17,7 @@
         "_comment_vix": "VIX spot for volatility filtering",
         "vix_spot_uic": 10606,
 
-        "_comment_entry_times": "Entry times in HH:MM format (US Eastern). 3 base entries at :15/:45 offset. Starting at 10:15 AM. MKT-031 smart entry scouting starts 10min before each time. Only used when vix_time_shift.enabled=false.",
+        "_comment_entry_times": "Entry times in HH:MM format (US Eastern). Configured slots are :15/:45 starting at 10:15 AM, but the active VIX regime caps max_entries (currently [2,2,2,1] — drops EARLIEST entries first, so E#1 at 10:15 is dropped at ALL VIX levels). Effective live schedule = 10:45 + 11:15. MKT-031 smart entry scouting starts 10min before each time. Only used when vix_time_shift.enabled=false.",
         "entry_times": ["10:15", "10:45", "11:15"],
         "entry_window_minutes": 5,
 

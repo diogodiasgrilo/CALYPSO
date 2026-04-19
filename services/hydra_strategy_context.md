@@ -1,8 +1,8 @@
 # HYDRA Strategy Context (Shared)
 
 **Shared by:** APOLLO, HERMES, HOMER, CLIO
-**Last updated:** 2026-04-13
-**HYDRA version:** v1.22.3 (deployed 2026-04-09)
+**Last updated:** 2026-04-19
+**HYDRA version:** v1.23.0 (deployed 2026-04-19 — Downday-035 + MKT-045 + MKT-046)
 **Schema version:** v7
 **Source of truth:** `bots/hydra/config/config.json` on VM
 
@@ -12,8 +12,8 @@ This file is the single source of truth for HYDRA strategy parameters across all
 
 ## Entry Schedule
 
-**Base entries:** 10:15, 10:45, 11:15 ET (up to 3 slots)
-**Conditional entry:** 14:00 ET (E6 — upday put-only when SPX rises ≥0.25% above open)
+**Base entries:** 10:15, 10:45, 11:15 ET (up to 3 slots — but **E#1 at 10:15 is dropped at ALL VIX levels**, so effectively only 10:45 and 11:15 fire)
+**Conditional entry:** 14:00 ET (E6 — fires as **put-only** when SPX rises ≥0.25% above open [**Upday-035**] OR as **call-only** when SPX drops ≥0.25% below open [**Downday-035**, deployed 2026-04-19])
 **E7:** DISABLED
 
 **Historical per-slot performance (37 reliable days, Feb 10 - Apr 10, 2026):**
@@ -55,7 +55,8 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 - **MKT-042:** Buffer decay — starts at 2.5× normal, linearly decays to 1× over 4 hours
 - **MKT-043:** Calm entry filter — delays entry up to 5min if SPX moved >15pt in last 3min
 - **Base-downday call-only:** E1-E3 convert to call-only when SPX drops ≥0.57% from open (`base_entry_downday_callonly_pct: 0.0057`)
-- **Upday-035 (E6):** Put-only at 14:00 when SPX rises ≥0.25% above open (`upday_threshold_pct: 0.0025`)
+- **Upday-035 (E6):** Put-only at 14:00 when SPX rises ≥0.25% above open (`upday_threshold_pct: 0.0025`, override_reason `upday-035`)
+- **Downday-035 (E6):** Call-only at 14:00 when SPX drops ≥0.25% below open (`conditional_downday_threshold_pct: 0.0025`, override_reason `downday-035`, deployed 2026-04-19). Stop = `call_credit + $2.60 theo put + call_stop_buffer` (same as MKT-035/038/040)
 - **Whipsaw filter:** Skip entry if intraday range > 1.75× expected move (`whipsaw_range_skip_mult: 1.75`)
 - **MKT-045:** Chain strike snap — after all overlap adjustments, snaps strikes to actual Saxo chain (far OTM uses 10-25pt intervals, not 5pt)
 - **MKT-046:** Stop anti-spike filter — breach must persist 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price. Logs full bid/ask on every breach event (`STOP-DETAIL`).
@@ -147,6 +148,7 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 7. **MKT-046 stop anti-spike filter (2026-04-17):** When MKT-036 is disabled, requires stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price. Verified April 17 filtered 1 false stop on E#1 before executing confirmed stop.
 8. **Code fix (strategy.py `_apply_vix_regime_overrides()`):** When capping, drops EARLIEST entries (was LAST)
 9. **Added schema v7 `shadow_entries` table:** OTM-based counterfactual logging
+10. **Downday-035 conditional E6 (2026-04-19):** Mirror of Upday-035 for down days. When SPX drops ≥0.25% below open at 14:00, fires call-only spread (config `conditional_downday_e6_enabled: true`, `conditional_downday_threshold_pct: 0.0025`). Backtest (Feb 10 - Apr 10): 11 triggers, 91% WR, +$1,295 P&L delta vs Upday-only baseline. Override reason: `downday-035`.
 10. **Schema v6 bid/ask capture in `spread_snapshots`:** Saxo quotes per leg during monitoring
 11. **Fixed Haiku-introduced threshold unit bug:** `downday_threshold_pct` (0.3 vs 0.003) in backtest engine
 

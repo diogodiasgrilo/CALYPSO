@@ -16,18 +16,18 @@ HYDRA combines Tammy Chambless's MEIC (Multiple Entry Iron Condors) with trend-f
 
 On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped because the market was in a sustained downtrend. HYDRA addresses this with pre-entry credit validation (MKT-011), progressive OTM tightening (MKT-020/022), and wider starting OTM (MKT-024).
 
-### Entry Schedule (3 base + 1 conditional entry)
+### Entry Schedule (2 effective base + 1 conditional entry — E#1 dropped at all VIX levels as of 2026-04-17)
 
-**Current schedule (v1.19.0+ — walk-forward backtest convergence):**
+**Current schedule (v1.23.0+ — E#1 drop + Downday-035; v1.19.0 walk-forward convergence baseline):**
 
-| Entry | Time (ET) | Type | Notes |
-|-------|-----------|------|-------|
-| 1 | 10:15 | Base | Always attempts (full IC or one-sided) |
-| 2 | 10:45 | Base | Always attempts |
-| 3 | 11:15 | Base | Always attempts |
-| 6 | 14:00 | Conditional (Upday-035) | Only fires on up days as put-only |
+| Entry | Time (ET) | Type | Status | Notes |
+|-------|-----------|------|--------|-------|
+| 1 | 10:15 | Base (canonical) | **DROPPED** at ALL VIX levels | 24% WR, -$79/entry avg — worst slot. Dropped 2026-04-17. |
+| 2 | 10:45 | Base | **ACTIVE** | Always attempts (full IC or one-sided) |
+| 3 | 11:15 | Base | **ACTIVE** | Always attempts (full IC or one-sided). Only entry kept at VIX ≥ 28. |
+| 6 | 14:00 | Conditional | **ACTIVE** | Put-only on up days (Upday-035, SPX ≥ +0.25%) OR call-only on down days (Downday-035, SPX ≤ -0.25%) |
 
-E4 (11:45) and E5 (12:15) dropped in v1.19.0 — negative EV in walk-forward backtest. E7 (13:15) DISABLED. E6 fires as put-only when SPX rises >= 0.25% above session open (Upday-035).
+E4 (11:45) and E5 (12:15) dropped in v1.19.0 — negative EV in walk-forward backtest. E7 (13:15) DISABLED. E#1 dropped at all VIX levels as of 2026-04-17 via `max_entries: [2, 2, 2, 1]`.
 
 On early close days, cutoff is 12:30 PM. MKT-034 (VIX-scaled time shifting) is disabled — neither Tammy Chambless nor John Sandvand use VIX-based scheduling. Code preserved and configurable via `vix_time_shift.enabled`.
 

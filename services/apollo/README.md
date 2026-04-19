@@ -21,9 +21,9 @@ Runs at 8:30 AM ET on weekdays via systemd timer. Provides a pre-market briefing
 
 | Level | VIX Range | Events | Expected Impact |
 |-------|-----------|--------|-----------------|
-| GREEN | 12-20 | None major | Standard 3 base entries, normal fills |
-| YELLOW | 20-25 | Minor data | Possible MKT-011 skip on Entry #3, wider spreads |
-| RED | > 25 | CPI, Jobs | Multiple stops likely, entry skips |
+| GREEN | 12-20 | None major | 2 base entries (E#2+E#3; E#1 dropped at all VIX since 2026-04-17), normal fills |
+| YELLOW | 20-25 | Minor data | Possible MKT-011 skip on E#3, wider spreads |
+| RED | > 25 | CPI, Jobs | Multiple stops likely, entry skips, VIX regime may cap to E#3-only at VIX ≥ 28 |
 
 ## Output
 

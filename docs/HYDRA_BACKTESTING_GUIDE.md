@@ -54,7 +54,8 @@ The downloader skips already-cached dates. Safe to re-run.
 For each trading day:
 
 1. **Load data**: 1-min option chain quotes, Greeks (if real-Greeks mode), SPX index, VIX index
-2. **For each entry time** (10:15, 10:45, 11:15 + E6 at 14:00 if upday):
+2. **For each entry time** (10:15, 10:45, 11:15 + E6 at 14:00 if upday OR downday):
+   - Note: E#1 at 10:15 dropped at all VIX levels in live since 2026-04-17 (`max_entries: [2,2,2,1]`); backtests can still simulate it for historical comparison
    - Find 8-delta OTM distance from Greeks
    - Multiply by starting OTM multiplier (3.5× calls, 4.0× puts)
    - Scan inward in 5pt steps until credit ≥ minimum ($1.35 call, $2.10 put)

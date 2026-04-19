@@ -12,8 +12,11 @@ Trend Detection (informational only, does NOT drive entry type):
 
 Risk Management (beyond base MEIC):
 - MKT-011: Pre-entry credit gate (put-only if call non-viable, skip if put non-viable)
-- MKT-018: Early close on ROC >= 3% (close all positions after entries placed)
-- MKT-035: Call-only on down days (SPX drops >= 0.3% below open) with theoretical put stop
+- MKT-018: Early close on ROC >= 3% (close all positions after entries placed) — DISABLED
+- Base-Entry Down-Day Call-Only: E1-E3 forced to call-only when SPX drops >= 0.57% from open
+  (config: base_entry_downday_callonly_pct, override_reason: "base-downday")
+- Upday-035: Conditional E6 (14:00) put-only when SPX rises >= 0.25% above open
+- Downday-035: Conditional E6 (14:00) call-only when SPX drops >= 0.25% below open
 
 The idea comes from Tammy Chambless running MEIC alongside METF (Multiple Entry Trend Following).
 For capital-constrained accounts, this hybrid combines both concepts in one bot.
@@ -7021,17 +7024,34 @@ class HydraStrategy(MEICStrategy):
         if self.smart_entry_enabled:
             lines.append(f"Window: {self.scout_window_minutes}min | Threshold: {self.scout_score_threshold}")
 
-        # MKT-035: Down day filter
+        # Base-entry down-day call-only (MKT-035 family, applies to E1-E3)
+        if self.base_entry_downday_callonly_pct is not None:
+            base_dn_str = f"{self.base_entry_downday_callonly_pct * 100:.2f}% drop from open"
+        else:
+            base_dn_str = "Disabled"
         lines.extend([
             "",
-            "\u2501\u2501\u2501 Down Day (MKT-035) \u2501\u2501\u2501",
-            f"Enabled: {'Yes' if self.downday_callonly_enabled else 'No'}",
-            f"Threshold: {self.downday_threshold_pct * 100:.1f}% below open",
+            "\u2501\u2501\u2501 Base Down-Day Call-Only \u2501\u2501\u2501",
+            f"Threshold: {base_dn_str}",
             f"Theo put: ${self.downday_theoretical_put_credit / 100:.2f}",
         ])
-        if self._conditional_entry_times:
-            cond_str = ", ".join(t.strftime('%H:%M') for t in self._conditional_entry_times)
-            lines.append(f"Conditional: {cond_str} (call-only on down days)")
+
+        # Conditional E6/E7 (Upday-035 + Downday-035)
+        upday_e6 = self.strategy_config.get("conditional_upday_e6_enabled", False)
+        downday_e6 = self.strategy_config.get("conditional_downday_e6_enabled", False)
+        if self._conditional_entry_times and (upday_e6 or downday_e6 or self._conditional_upday_entry_times or self._conditional_downday_times_set):
+            up_thr = self.upday_threshold_pct * 100
+            dn_thr = self.conditional_downday_threshold_pct * 100
+            up_slots = ", ".join(t.strftime('%H:%M') for t in self._conditional_upday_entry_times) or "—"
+            dn_slots = ", ".join(t.strftime('%H:%M') for t in sorted(self._conditional_downday_times_set)) or "—"
+            lines.extend([
+                "",
+                "\u2501\u2501\u2501 Conditional E6 (Up/Down-035) \u2501\u2501\u2501",
+                f"Upday-035: {'ENABLED' if self.upday_putonly_enabled else 'DISABLED'} "
+                f"(put-only at +{up_thr:.2f}%, slots: {up_slots})",
+                f"Downday-035: {'ENABLED' if self.downday_callonly_conditional_enabled else 'DISABLED'} "
+                f"(call-only at -{dn_thr:.2f}%, slots: {dn_slots})",
+            ])
 
         # MKT-036: Stop confirmation timer
         lines.extend([
