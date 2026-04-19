@@ -54,7 +54,7 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 - **MKT-038:** FOMC T+1 call-only (day after FOMC announcement forced call-only)
 - **MKT-042:** Buffer decay — starts at 2.5× normal, linearly decays to 1× over 4 hours
 - **MKT-043:** Calm entry filter — delays entry up to 5min if SPX moved >15pt in last 3min
-- **Base-downday call-only:** E1-E3 convert to call-only when SPX drops ≥0.57% from open (`base_entry_downday_callonly_pct: 0.0057`)
+- **Base-downday call-only:** DISABLED (`base_entry_downday_callonly_pct: null`). Removed 2026-04-19 after A/B threshold sweep showed negative EV at all values 0.57%-1.20% over Feb-Apr 2026 (incl. multiple sustained sell-offs). Base entries E2/E3 now always attempt full ICs; MKT-011/MKT-040 handle put-uninvestable days.
 - **Upday-035 (E6):** Put-only at 14:00 when SPX rises ≥0.25% above open (`upday_threshold_pct: 0.0025`, override_reason `upday-035`)
 - **Downday-035 (E6):** Call-only at 14:00 when SPX drops ≥0.25% below open (`conditional_downday_threshold_pct: 0.0025`, override_reason `downday-035`, deployed 2026-04-19). Stop = `call_credit + $2.60 theo put + call_stop_buffer` (same as MKT-035/038/040)
 - **Whipsaw filter:** Skip entry if intraday range > 1.75× expected move (`whipsaw_range_skip_mult: 1.75`)
@@ -149,8 +149,9 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 8. **Code fix (strategy.py `_apply_vix_regime_overrides()`):** When capping, drops EARLIEST entries (was LAST)
 9. **Added schema v7 `shadow_entries` table:** OTM-based counterfactual logging
 10. **Downday-035 conditional E6 (2026-04-19):** Mirror of Upday-035 for down days. When SPX drops ≥0.25% below open at 14:00, fires call-only spread (config `conditional_downday_e6_enabled: true`, `conditional_downday_threshold_pct: 0.0025`). Backtest (Feb 10 - Apr 10): 11 triggers, 91% WR, +$1,295 P&L delta vs Upday-only baseline. Override reason: `downday-035`.
-10. **Schema v6 bid/ask capture in `spread_snapshots`:** Saxo quotes per leg during monitoring
-11. **Fixed Haiku-introduced threshold unit bug:** `downday_threshold_pct` (0.3 vs 0.003) in backtest engine
+11. **Base-entry down-day call-only DISABLED (2026-04-19):** `base_entry_downday_callonly_pct: null`. A/B threshold sweep (0.57% / 0.70% / 0.80% / 1.00% / 1.20%) over Feb 10 - Apr 10 2026 — a period with 19/42 days ≥0.57% intraday drop, worst single day −1.88%, worst 3-day −3.78%, cumulative −2.25% — showed negative EV at every threshold. Mechanism: mean-reverting drops forfeit put-side profit; continuing drops stop the call side too (so conversion doesn't actually limit risk). MKT-040 + MKT-011 credit gate handle put-uninvestable cases more surgically.
+12. **Schema v6 bid/ask capture in `spread_snapshots`:** Saxo quotes per leg during monitoring
+13. **Fixed Haiku-introduced threshold unit bug:** `downday_threshold_pct` (0.3 vs 0.003) in backtest engine
 
 ---
 

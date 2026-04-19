@@ -104,7 +104,7 @@ Located in `backtest/config.py` → `live_config()` function.
 | Put credit floor (MKT-029) | $2.07 | `put_credit_floor` | Same |
 | Call stop buffer | $0.35 | `call_stop_buffer` (×100 = 35.0) | `call_stop_buffer` (dollars = 0.35) |
 | Put stop buffer | $1.55 | `put_stop_buffer` (×100 = 155.0) | `put_stop_buffer` (dollars = 1.55) |
-| Down-day call-only threshold | 0.57% | `base_entry_downday_callonly_pct` (0.57) | `base_entry_downday_callonly_pct` (0.0057) |
+| Base down-day call-only threshold | DISABLED (live since 2026-04-19; negative EV) | `base_entry_downday_callonly_pct` (None) | `base_entry_downday_callonly_pct` (null) |
 | Upday threshold | 0.48% | `upday_threshold_pct` (0.48) | `upday_threshold_pct` (0.0048) |
 | Theo put credit (call-only stops) | $2.60 | `downday_theoretical_put_credit` (×100 = 260.0) | `downday_theoretical_put_credit` (2.60) |
 | One-sided entries | ON | `one_sided_entries_enabled` | Same |

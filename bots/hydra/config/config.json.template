@@ -78,7 +78,7 @@
         "conditional_downday_threshold_pct": 0.0025,
         "conditional_upday_e6_enabled": true,
         "upday_threshold_pct": 0.0025,
-        "base_entry_downday_callonly_pct": 0.0057,
+        "base_entry_downday_callonly_pct": null,
 
         "_comment_fomc": "MKT-038: Call-only entries on T+1 after FOMC announcement. fomc_announcement_skip: skip ALL entries on FOMC day (false = trade normally on FOMC day itself).",
         "fomc_t1_callonly_enabled": true,

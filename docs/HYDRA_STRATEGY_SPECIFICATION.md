@@ -338,12 +338,15 @@ Each entry goes through these phases in order:
 ### Phase 6.5: Conditional Entry Trigger (MKT-035 / Upday-035, updated v1.19.0)
 
 ```
-18.5a MKT-035 (down-day): Check if SPX < session_open × (1 - 0.0057)
-      ├── Base entry (1-3): Convert to call-only when down >= 0.57% (base_entry_downday_callonly_pct)
-      └── Conditional entries: E7 DISABLED
-18.5b Upday-035 (up-day): Check if SPX > session_open × (1 + 0.0025)
-      ├── E6 (14:00): Fire as PUT-ONLY when up >= 0.25%
-      └── Base entries (1-3): Unaffected by up-day status
+18.5a Base entries (E1-E3):
+      └── base_entry_downday_callonly_pct = null → no direction-based conversion
+          (re-enable by setting to a decimal fraction; disabled 2026-04-19 after
+           A/B sweep showed negative EV at every threshold 0.57-1.20%)
+18.5b Downday-035 (down-day, conditional E6 only): SPX < session_open × (1 - 0.0025)
+      └── E6 (14:00): Fire as CALL-ONLY when down >= 0.25% (override_reason "downday-035")
+18.5c Upday-035 (up-day, conditional E6 only): SPX > session_open × (1 + 0.0025)
+      └── E6 (14:00): Fire as PUT-ONLY when up >= 0.25% (override_reason "upday-035")
+      Precedence: Downday-035 check runs first; Upday-035 only evaluated if Downday did not trigger.
 ```
 
 ### Phase 7: Credit Gate
@@ -997,7 +1000,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `downday_callonly_enabled` | `true` | MKT-035: Enable call-only entries on down days |
 | `downday_threshold_pct` | `0.003` | MKT-035: SPX must drop this % below the session open to trigger E6/E7 conditional (0.3%). E7 DISABLED. |
 | `downday_theoretical_put_credit` | `2.60` | MKT-035: Theoretical put credit ($) for stop calculation (v1.19.0, was $2.50) |
-| `base_entry_downday_callonly_pct` | `0.0057` | Base entries E1-E3 convert to call-only when SPX drops >= 0.57% from open |
+| `base_entry_downday_callonly_pct` | `null` | DISABLED 2026-04-19 (negative EV in A/B sweep at 0.57-1.20%). Set to a decimal fraction (e.g. `0.0057`) to re-enable base-E1-E3 call-only conversion on down days. |
 | `conditional_entry_times` | `["14:00"]` | Conditional entry times (v1.19.0: E6 at 14:00) |
 | `conditional_e6_enabled` | `false` | MKT-035: E6 down-day call-only. **DISABLED** |
 | `conditional_e7_enabled` | `false` | MKT-035: E7. **DISABLED in v1.19.0** |

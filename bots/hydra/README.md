@@ -44,7 +44,7 @@ Before each scheduled entry, a 10-minute scouting window opens. Market condition
 
 ### Conditional Entry Trigger (MKT-035 / Upday-035)
 
-**MKT-035 (down-day call-only):** When SPX drops >= 0.57% below session open, conditional entries fire as call-only. Base entries E1-E3 convert to call-only on down days via `base_entry_downday_callonly_pct: 0.0057`. E7 is DISABLED.
+**Downday-035 (down-day call-only, conditional E6 only):** When SPX drops >= 0.25% below session open, E6 (14:00) fires as call-only (config `conditional_downday_e6_enabled: true`, `conditional_downday_threshold_pct: 0.0025`). Base entries E2/E3 are NOT converted — `base_entry_downday_callonly_pct` is `null` on VM since 2026-04-19 (see Base-Entry Down-Day section). E7 is DISABLED.
 
 **Upday-035 (up-day put-only):** When SPX rises >= 0.25% above session open, E6 (14:00) fires as put-only. Stop = put_credit + put_stop_buffer ($1.75).
 
@@ -167,7 +167,7 @@ Both use batch quote API for efficiency: 1 option chain fetch + 1 batch quote ca
 | `downday_callonly_enabled` | `true` | Enable/disable MKT-035 down day filter |
 | `downday_threshold_pct` | `0.003` | 0.3% — SPX must drop this much below session open to trigger E6/E7 conditional (E7 DISABLED) |
 | `downday_theoretical_put_credit` | `2.60` | Theoretical put credit ($) for stop calculation (v1.19.0) |
-| `base_entry_downday_callonly_pct` | `0.0057` | Base entries E1-E3 convert to call-only when SPX drops >= 0.57% from open |
+| `base_entry_downday_callonly_pct` | `null` | DISABLED 2026-04-19 (negative EV in A/B sweep). Set to a decimal fraction (e.g. `0.0057`) to re-enable — converts E1-E3 full IC to call-only when SPX drops ≥ threshold from open |
 | `conditional_entry_times` | `["14:00"]` | Extra entry times for conditional entries (v1.19.0: E6 at 14:00) |
 | `conditional_e6_enabled` | `false` | Enable/disable E6 conditional entry. **MKT-035 E6 DISABLED**; Upday-035 E6 controlled separately |
 | `conditional_e7_enabled` | `false` | Enable/disable E7 (13:15) conditional entry. **DISABLED in v1.19.0** |
