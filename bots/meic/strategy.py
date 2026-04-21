@@ -1773,6 +1773,8 @@ class MEICStrategy:
                     self.daily_state.total_credit_received += entry.total_credit
 
                     # Track commission (display only - 4 legs × $2.50 open = $10 per IC)
+                    # 4 legs × commission_per_leg × contracts_per_entry. At default
+                    # $2.50/leg and 1 contract = $10/IC; at 2 contracts = $20/IC.
                     entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
                     self.daily_state.total_commission += entry.open_commission
 

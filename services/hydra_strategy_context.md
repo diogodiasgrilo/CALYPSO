@@ -136,8 +136,12 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 
 ## Account
 
-- $35,000 margin
-- 1 contract per entry
+- ~$52,000 margin available (varies)
+- Contracts per entry: configurable (`contracts_per_entry` in config). Default 1,
+  but supported up to the account's margin limit. When checking today's data,
+  ALWAYS read the actual contract count from the daily summary / state file /
+  cheat_sheet rather than assuming 1. Per-contract normalization is required
+  for apples-to-apples comparisons when history spans multiple contract counts.
 
 ---
 

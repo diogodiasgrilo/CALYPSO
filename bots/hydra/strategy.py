@@ -5586,8 +5586,12 @@ class HydraStrategy(MEICStrategy):
                 )
             else:
                 detail = "no bid/ask data"
-            ask_sv = ((sc_ask or 0) - (lc_bid or 0)) * 100
-            bid_sv = ((sc_bid or 0) - (lc_ask or 0)) * 100
+            # Cosmetic C-7: scale diagnostic ask/bid spread values by entry.contracts
+            # so the STOP-DETAIL log line compares apples to apples against the
+            # (already-scaled) spread_value and stop_level on the same line.
+            _n = getattr(entry, "contracts", 1) or 1
+            ask_sv = ((sc_ask or 0) - (lc_bid or 0)) * 100 * _n
+            bid_sv = ((sc_bid or 0) - (lc_ask or 0)) * 100 * _n
         else:
             if sp_bid is not None and sp_ask is not None:
                 detail = (
@@ -5596,8 +5600,9 @@ class HydraStrategy(MEICStrategy):
                 )
             else:
                 detail = "no bid/ask data"
-            ask_sv = ((sp_ask or 0) - (lp_bid or 0)) * 100
-            bid_sv = ((sp_bid or 0) - (lp_ask or 0)) * 100
+            _n = getattr(entry, "contracts", 1) or 1
+            ask_sv = ((sp_ask or 0) - (lp_bid or 0)) * 100 * _n
+            bid_sv = ((sp_bid or 0) - (lp_ask or 0)) * 100 * _n
 
         logger.warning(
             f"STOP-DETAIL [{event}]: E#{entry.entry_number} {side} | "
