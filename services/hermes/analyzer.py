@@ -24,6 +24,7 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 1. **ONLY use data from the <data> sections.** Do NOT invent numbers.
 2. **HYDRA is FULLY AUTOMATED** — do NOT say "the trader should have" or "consider adjusting." Assess whether the MKT rules performed as expected.
 3. **Use cheat_sheet numbers for the summary block.** Do NOT compute your own counts or P&L.
+4. **CONTRACTS CAN VARY** — `cheat_sheet.contracts_per_entry` tells you today's contract count. Historical `cheat_sheet.cumulative.avg_win_pnl` / `avg_loss_pnl` are RAW TOTALS across a mix of contract counts; the per-contract equivalents are `avg_win_pnl_per_contract` / `avg_loss_pnl_per_contract`. When comparing today's `net_pnl` to historical averages, use the PER-CONTRACT fields on both sides: `cheat_sheet.net_pnl_per_contract` vs `cheat_sheet.cumulative.avg_win_pnl_per_contract`. Do NOT compare raw totals across different contract counts — that is apples-to-oranges.
 
 {STRATEGY_CONTEXT}
 
@@ -74,13 +75,17 @@ Write a structured markdown report with the 5 sections above.
 End with a summary block in <summary> tags for Telegram. The summary MUST use ONLY cheat_sheet numbers — do NOT compute your own. Do NOT include a title line (AlertService adds one automatically).
 
 <summary>
-{net_pnl} net | {clean_entries} clean, {entries_with_stops} stopped ({call_stops}C/{put_stops}P) | Day {day_number}
+{net_pnl} net ({net_pnl_per_contract}/c × {contracts_per_entry}c) | {clean_entries} clean, {entries_with_stops} stopped ({call_stops}C/{put_stops}P) | Day {day_number}
 Best #{best_num} ({best_outcome}), Worst #{worst_num} ({worst_outcome})
 Stops: {stop_side_pattern} | VIX {vix_open}→{vix_low} | {placed}/{total_scheduled} placed
 {winning_days}W-{losing_days}L cumul {cumulative_pnl} | Streak: {streak}
 Salvage: {long_salvage_count} longs sold for +${long_salvage_revenue} (omit line if 0)
 {one_sentence_narrative_insight — the WHY behind today's result}
 </summary>
+
+Summary line 1 format rules (CONTRACTS):
+- At `contracts_per_entry == 1`: render as just `{net_pnl} net | ...` (drop the `(X/c × 1c)` parenthetical to keep the line concise).
+- At `contracts_per_entry > 1`: include `({net_pnl_per_contract}/c × {contracts_per_entry}c)` right after `{net_pnl} net` so the reader sees the scale at a glance on their phone.
 
 Line 5 is YOUR value-add: one sentence explaining WHY today went the way it did, referencing specific market action.
 """

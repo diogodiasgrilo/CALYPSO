@@ -313,6 +313,10 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
 
     win_streak, lose_streak = _compute_streak(daily_returns)
     avg_win, avg_loss = _compute_averages(daily_returns)
+    # Phase 2 A-3: per-contract historical averages for mixed-count comparison.
+    # Critical when today is 2c but history is all 1c — the raw avg_win is
+    # misleading. Claude should use per-contract values for apples-to-apples.
+    avg_win_pc, avg_loss_pc = _compute_averages_per_contract(daily_returns)
 
     cumulative = {
         "day_number": len(daily_returns) if daily_returns else 1,
@@ -323,6 +327,9 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
         "lose_streak": lose_streak,
         "avg_win_pnl": avg_win,
         "avg_loss_pnl": avg_loss,
+        # Phase 2 A-3: per-contract-normalized averages (mixed-count aware).
+        "avg_win_pnl_per_contract": avg_win_pc,
+        "avg_loss_pnl_per_contract": avg_loss_pc,
     }
 
     # --- Apollo accuracy ---
@@ -336,6 +343,15 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     fomc_skip = True  # default
     if hydra_config:
         fomc_skip = hydra_config.get("strategy", {}).get("fomc_announcement_skip", True)
+
+    # Phase 2 A-3: today's contracts_per_entry from state file.
+    # Null-safe fallback chain: state top-level → max over entries → 1.
+    today_contracts = (
+        state.get("contracts_per_entry")
+        or max((e.get("contracts", 1) for e in entries), default=1)
+        or 1
+    )
+    net_pnl_per_contract = round(net_pnl / today_contracts, 2) if today_contracts else net_pnl
 
     return {
         "entry_outcomes": entry_outcomes,
@@ -354,6 +370,11 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
         "worst_entry": worst_entry,
         "stop_side_pattern": stop_side_pattern,
         "net_pnl": net_pnl,
+        # Phase 2 A-3: today's P&L normalized per-contract for apples-to-apples
+        # comparison against historical cumulative.avg_win_pnl_per_contract /
+        # avg_loss_pnl_per_contract. Equals net_pnl at contracts_per_entry=1.
+        "net_pnl_per_contract": net_pnl_per_contract,
+        "contracts_per_entry": today_contracts,
         "total_realized_pnl": total_realized_pnl,
         "total_commission": total_commission,
         "total_credit": total_credit_received,
@@ -430,7 +451,7 @@ def _compute_streak(daily_returns: List[Dict]) -> Tuple[int, int]:
 
 
 def _compute_averages(daily_returns: List[Dict]) -> Tuple[float, float]:
-    """Compute average win P&L and average loss P&L from daily returns."""
+    """Compute average win P&L and average loss P&L from daily returns (raw total $)."""
     wins = [dr["net_pnl"] for dr in daily_returns if dr.get("net_pnl", 0) > 0]
     losses = [dr["net_pnl"] for dr in daily_returns if dr.get("net_pnl", 0) < 0]
 
@@ -438,6 +459,34 @@ def _compute_averages(daily_returns: List[Dict]) -> Tuple[float, float]:
     avg_loss = round(sum(losses) / len(losses), 1) if losses else 0.0
 
     return avg_win, avg_loss
+
+
+def _compute_averages_per_contract(daily_returns: List[Dict]) -> Tuple[float, float]:
+    """Phase 2 A-3: per-contract averages for mixed-count historical comparison.
+
+    Each record's net_pnl is divided by its contracts_per_entry (default 1 for
+    pre-Phase-2 records that lack the field) before aggregating. Lets HERMES
+    compare today's 2-contract P&L to historical 1-contract days on an
+    apples-to-apples basis.
+
+    Null-safe: `or 1` handles None / 0 / missing contracts_per_entry values.
+    """
+    wins_pc = []
+    losses_pc = []
+    for dr in daily_returns:
+        pnl = dr.get("net_pnl", 0)
+        cpe = dr.get("contracts_per_entry") or 1
+        if cpe <= 0:
+            cpe = 1
+        per_c = pnl / cpe
+        if per_c > 0:
+            wins_pc.append(per_c)
+        elif per_c < 0:
+            losses_pc.append(per_c)
+
+    avg_win_pc = round(sum(wins_pc) / len(wins_pc), 1) if wins_pc else 0.0
+    avg_loss_pc = round(sum(losses_pc) / len(losses_pc), 1) if losses_pc else 0.0
+    return avg_win_pc, avg_loss_pc
 
 
 def _extract_apollo_assessment(
