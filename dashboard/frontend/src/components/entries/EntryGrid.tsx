@@ -46,8 +46,6 @@ export function EntryGrid() {
       ? config.conditional_entry_times
       : schedule?.conditional ?? [];
 
-  const baseCount = canonicalBaseTimes.length;
-
   // Runtime schedule — which canonical slots actually survived the VIX regime cap?
   const activeBaseSet = new Set(schedule?.base ?? canonicalBaseTimes);
   const activeCondSet = new Set(schedule?.conditional ?? canonicalCondTimes);
@@ -63,29 +61,35 @@ export function EntryGrid() {
   const effectiveCondNum = (time: string) =>
     activeBaseTimes.length + activeCondTimes.indexOf(time) + 1;
 
+  // Grid column class for 1/2/3/4 active slots. Explicit strings so Tailwind
+  // JIT compiler picks them up (dynamic `grid-cols-${n}` does not compile).
+  const baseColsClass =
+    activeBaseTimes.length === 1
+      ? "grid-cols-1"
+      : activeBaseTimes.length === 2
+        ? "grid-cols-2"
+        : activeBaseTimes.length === 3
+          ? "grid-cols-3"
+          : "grid-cols-4 max-lg:grid-cols-3";
+  const condColsClass =
+    activeCondTimes.length === 1
+      ? "grid-cols-3"  // single-card width matches base-grid cell width
+      : activeCondTimes.length === 2
+        ? "grid-cols-2"
+        : "grid-cols-3";
+
   return (
     <div>
       <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
         Entries
       </h3>
-      {/* Base entries — one card per canonical slot. Dropped slots show "dropped by VIX regime". */}
-      <div
-        className={`grid gap-2 max-sm:grid-cols-1 ${
-          baseCount <= 3 ? "grid-cols-3" : "grid-cols-4 max-lg:grid-cols-3"
-        }`}
-      >
-        {canonicalBaseTimes.map((canonicalTime, i) => {
-          const isActive = activeBaseSet.has(canonicalTime);
-
-          if (!isActive) {
-            // Dropped slot — label it "canonical" (not numbered) since the bot's
-            // effective numbering skips it. Historical E#N reference preserved in
-            // the tooltip via scheduledTime.
-            return (
-              <DroppedSlot key={i} label="canonical" scheduledTime={canonicalTime} />
-            );
-          }
-
+      {/* Base entries — one card per ACTIVE slot only. Canonical slots dropped by
+          the VIX regime cap (e.g. 10:15 since 2026-04-17 with max_entries [2,2,2,1])
+          are not rendered — the bot's effective numbering skips them, so showing
+          a strikethrough placeholder only adds visual noise. If the regime ever
+          re-enables a slot it will naturally reappear here. */}
+      <div className={`grid gap-2 max-sm:grid-cols-1 ${baseColsClass}`}>
+        {activeBaseTimes.map((canonicalTime, i) => {
           const label = `#${effectiveBaseNum(canonicalTime)}`;
           const entry = findEntryForCanonicalTime(entries, canonicalTime);
           if (entry) {
@@ -101,36 +105,17 @@ export function EntryGrid() {
         })}
       </div>
 
-      {/* Conditional entries — one card per canonical conditional slot. Header reflects
-          both directions live config supports (Upday-035 put-only + Downday-035 call-only,
-          both enabled since 2026-04-19). The single 14:00 slot resolves direction at
-          runtime based on SPX vs session open. */}
-      {showConditional && canonicalCondTimes.length > 0 && (
+      {/* Conditional entries — one card per ACTIVE conditional slot. Header
+          reflects both directions live config supports (Upday-035 put-only +
+          Downday-035 call-only, both enabled since 2026-04-19). Inactive
+          conditional slots are omitted (same rationale as base). */}
+      {showConditional && activeCondTimes.length > 0 && (
         <div className="mt-2">
           <span className="text-[10px] text-text-dim uppercase tracking-wider">
             Conditional (Up-day ↑ put-only · Down-day ↓ call-only)
           </span>
-          <div
-            className={`grid gap-2 max-sm:grid-cols-1 mt-1 ${
-              canonicalCondTimes.length === 1
-                ? "grid-cols-3"
-                : "grid-cols-5 max-lg:grid-cols-3"
-            }`}
-          >
-            {canonicalCondTimes.map((canonicalTime, i) => {
-              const isActive = activeCondSet.has(canonicalTime);
-
-              if (!isActive) {
-                return (
-                  <DroppedSlot
-                    key={`cond-${i}`}
-                    label="canonical"
-                    scheduledTime={canonicalTime}
-                    isConditional
-                  />
-                );
-              }
-
+          <div className={`grid gap-2 max-sm:grid-cols-1 mt-1 ${condColsClass}`}>
+            {activeCondTimes.map((canonicalTime, i) => {
               const label = `#${effectiveCondNum(canonicalTime)}`;
               const entry = findEntryForCanonicalTime(entries, canonicalTime);
               if (entry) {
@@ -222,35 +207,3 @@ function PendingSlot({
   );
 }
 
-/** Canonical slot that was dropped at runtime by the VIX regime cap. */
-function DroppedSlot({
-  label,
-  scheduledTime,
-  isConditional,
-}: {
-  label: string;
-  scheduledTime?: string;
-  isConditional?: boolean;
-}) {
-  return (
-    <div
-      className={`bg-card rounded-lg p-3 flex flex-col items-center justify-center min-h-[120px] ${
-        isConditional
-          ? "border border-dashed border-border-dim"
-          : "border border-border-dim"
-      }`}
-      style={{ opacity: 0.4 }}
-    >
-      <span className="text-text-dim text-xs font-semibold line-through">{label}</span>
-      {scheduledTime && (
-        <span className="text-text-dim text-[10px] mt-1">{scheduledTime} ET</span>
-      )}
-      <span
-        className="text-[9px] mt-1 px-1.5 py-0.5 rounded text-center leading-tight"
-        style={{ backgroundColor: `${colors.warning}20`, color: colors.warning }}
-      >
-        dropped by VIX regime
-      </span>
-    </div>
-  );
-}
