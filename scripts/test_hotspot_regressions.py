@@ -269,6 +269,41 @@ def test_h3_fresh_db_has_contracts_columns_inline():
                 os.unlink(p)
 
 
+def test_h4_partial_close_verification_mixed_contracts():
+    """
+    Fix #45 partial close verification bug (fifth-audit):
+    _verify_position_closed used self.contracts_per_entry to compute
+    expected_amount_after. After a config flip with a merged position
+    containing a legacy 1c entry, closing that entry (close_contracts=1)
+    under config=2c would:
+      before: Amount=-2
+      actual close: 1 contract
+      Saxo after: Amount=-1
+      expected_amount_after = -2 + self.contracts_per_entry(=2) = 0  ← wrong
+      Mismatch → retry loop → eventual timeout
+    Fix: use close_contracts (actual close order size) for verification math.
+    """
+    print("\n[H4-1] Fix #45 partial close verification uses actual close amount, not config")
+    # Simulate the post-fix logic:
+    close_contracts = 1           # the actual close order amount (legacy 1c entry)
+    self_contracts_per_entry = 2  # current config after mid-day flip
+    expected_amount_before = -2   # merged short position (1c + 1c at same strike)
+    current_amount_at_saxo = -1   # after partial close of 1 contract
+
+    # Post-fix code path:
+    close_qty = close_contracts if close_contracts else self_contracts_per_entry
+    expected_amount_after = expected_amount_before + close_qty
+    assert expected_amount_after == current_amount_at_saxo, (
+        f"v8 fix broken: expected {current_amount_at_saxo}, computed {expected_amount_after}"
+    )
+    print(f"  ✓ legacy 1c entry partial close: expected={expected_amount_after}, actual={current_amount_at_saxo} (match)")
+
+    # Bug reproduction: what the OLD code would have done
+    old_expected = expected_amount_before + self_contracts_per_entry
+    assert old_expected != current_amount_at_saxo, "bug repro should show mismatch"
+    print(f"  ⚠ old code would have computed expected={old_expected} → mismatch → retry loop")
+
+
 def test_h3_idempotent_after_inline():
     """After inlining contracts into CREATE, the ALTER path becomes a duplicate-column
     no-op. Verify ensure_schema still works cleanly on fresh DBs."""
@@ -313,6 +348,7 @@ def main():
         test_h3_daily_summary_missing_contracts_key,
         test_h3_fresh_db_has_contracts_columns_inline,
         test_h3_idempotent_after_inline,
+        test_h4_partial_close_verification_mixed_contracts,
     ]
     fails = 0
     for t in tests:

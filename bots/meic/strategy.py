@@ -4168,10 +4168,14 @@ class MEICStrategy:
                     # SAFETY-024: Verify position is actually closed after order placement
                     # Fix #45: Pass partial close info for merged position verification
                     time.sleep(1.5)  # Wait for order to fill
+                    # v8: pass close_contracts (actual close amount) to verification so
+                    # partial-close amount math uses the right quantity after a mid-day
+                    # config flip with mixed-contract merged positions.
                     if self._verify_position_closed(
                         position_id, leg_name, uic,
                         expected_amount_before=amount_before,
-                        is_partial_close=is_partial_close
+                        is_partial_close=is_partial_close,
+                        close_contracts=close_contracts,
                     ):
                         # Fix #45: Handle registry update based on whether position is shared
                         if is_partial_close and entry_number is not None:
@@ -4421,7 +4425,8 @@ class MEICStrategy:
 
     def _verify_position_closed(
         self, position_id: str, leg_name: str, uic: int,
-        expected_amount_before: Optional[int] = None, is_partial_close: bool = False
+        expected_amount_before: Optional[int] = None, is_partial_close: bool = False,
+        close_contracts: Optional[int] = None,
     ) -> bool:
         """
         SAFETY-024: Verify that a position was actually closed after placing a close order.
@@ -4434,12 +4439,20 @@ class MEICStrategy:
         share a position (e.g., Amount=-2), closing one entry's contract should reduce
         Amount to -1, not fully close the position.
 
+        v8 (2026-04-21): close_contracts param so verification matches the ACTUAL close
+        order size, not current config. Critical when config flipped mid-day (1c→2c)
+        with merged positions containing legacy 1c entries — expected_amount_after must
+        be computed against the amount we actually closed, not self.contracts_per_entry.
+
         Args:
             position_id: Saxo position ID that should be closed
             leg_name: Name for logging
             uic: UIC of the option (for additional verification)
             expected_amount_before: Fix #45 - Amount before close (e.g., -2 for merged short)
             is_partial_close: Fix #45 - True if this is a partial close (merged position)
+            close_contracts: v8 - Number of contracts actually closed (from close_contracts
+                             in _close_position_with_retry). Defaults to self.contracts_per_entry
+                             when None (backwards compat for callers not yet updated).
 
         Returns:
             True if position is confirmed closed (or partially closed for merged), False otherwise
@@ -4455,37 +4468,42 @@ class MEICStrategy:
                     current_amount = pos.get("PositionBase", {}).get("Amount", 0)
 
                     # Fix #45: For partial closes on merged positions, verify Amount decreased
+                    # v8: use close_contracts (actual close order size) not self.contracts_per_entry —
+                    # matches Bug 2 fix at L4141. After a config flip with a merged 1c+1c
+                    # position (Amount=-2), closing one 1c entry takes it to -1, not 0.
+                    # Using self.contracts_per_entry=2 here would compute expected=0 → mismatch → retry.
+                    close_qty = close_contracts if close_contracts else self.contracts_per_entry
                     if is_partial_close and expected_amount_before is not None:
                         # For shorts: expected_amount_before = -2, after partial close = -1
                         # Amount should have increased (less negative)
                         if expected_amount_before < 0:
                             # Short position: Amount should be closer to 0
-                            expected_amount_after = expected_amount_before + self.contracts_per_entry
+                            expected_amount_after = expected_amount_before + close_qty
                             if current_amount == expected_amount_after:
                                 logger.info(
                                     f"Fix #45: Verified partial close on {leg_name}: "
-                                    f"Amount changed from {expected_amount_before} to {current_amount}"
+                                    f"Amount changed from {expected_amount_before} to {current_amount} (closed {close_qty})"
                                 )
                                 return True
                             else:
                                 logger.warning(
                                     f"Fix #45: Partial close verification failed for {leg_name}: "
-                                    f"Expected Amount={expected_amount_after}, got {current_amount}"
+                                    f"Expected Amount={expected_amount_after} (closed {close_qty}), got {current_amount}"
                                 )
                                 return False
                         else:
                             # Long position: Amount should be closer to 0
-                            expected_amount_after = expected_amount_before - self.contracts_per_entry
+                            expected_amount_after = expected_amount_before - close_qty
                             if current_amount == expected_amount_after:
                                 logger.info(
                                     f"Fix #45: Verified partial close on {leg_name}: "
-                                    f"Amount changed from {expected_amount_before} to {current_amount}"
+                                    f"Amount changed from {expected_amount_before} to {current_amount} (closed {close_qty})"
                                 )
                                 return True
                             else:
                                 logger.warning(
                                     f"Fix #45: Partial close verification failed for {leg_name}: "
-                                    f"Expected Amount={expected_amount_after}, got {current_amount}"
+                                    f"Expected Amount={expected_amount_after} (closed {close_qty}), got {current_amount}"
                                 )
                                 return False
 
