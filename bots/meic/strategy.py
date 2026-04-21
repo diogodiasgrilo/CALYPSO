@@ -7077,6 +7077,10 @@ class MEICStrategy:
                 "date": self.daily_state.date,
                 "state": self.state.value,
                 "next_entry_index": self._next_entry_index,
+                # Phase 2 X-1: top-level contract count for downstream readers
+                # (dashboard, HOMER, HERMES). Per-entry `contracts` is still
+                # written inside each entry dict below.
+                "contracts_per_entry": self.contracts_per_entry,
                 "entries_completed": self.daily_state.entries_completed,
                 "entries_failed": self.daily_state.entries_failed,
                 "entries_skipped": self.daily_state.entries_skipped,

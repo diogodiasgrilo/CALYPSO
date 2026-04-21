@@ -67,6 +67,15 @@ async def get_widget_data():
 
     cumulative_pnl = metrics.get("cumulative_pnl", 0) if metrics else 0
 
+    # Phase 2 X-1: expose contract count so iOS widget can show a [Nc] badge
+    # next to P&L. Prefer state file's explicit field, fall back to max across
+    # per-entry contracts, then 1.
+    contracts = (
+        state.get("contracts_per_entry")
+        or max((e.get("contracts", 1) for e in entries), default=1)
+        or 1
+    )
+
     return {
         "status": bot_state.lower(),
         "market_open": market.get("is_open", False),
@@ -80,4 +89,5 @@ async def get_widget_data():
         "cumulative_pnl": round(cumulative_pnl, 2),
         "date": state.get("date", ""),
         "summary": summary,
+        "contracts_per_entry": contracts,
     }

@@ -7686,6 +7686,11 @@ class HydraStrategy(MEICStrategy):
                 "date": self.daily_state.date,
                 "state": self.state.value,
                 "next_entry_index": self._next_entry_index,
+                # Phase 2 X-1: top-level contract count for dashboard / agents / HOMER.
+                # Individual entries already carry their own `contracts` (written inside
+                # the per-entry dict below); this top-level field is a convenience so
+                # readers don't need to iterate entries to know today's scale.
+                "contracts_per_entry": self.contracts_per_entry,
                 "entries_completed": self.daily_state.entries_completed,
                 "entries_failed": self.daily_state.entries_failed,
                 "entries_skipped": self.daily_state.entries_skipped,

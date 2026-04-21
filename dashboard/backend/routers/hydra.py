@@ -37,6 +37,10 @@ async def get_bot_config():
         with open(config_path) as f:
             config = json.load(f)
         strategy = config.get("strategy", {})
+        # Phase 2 X-1: expose contracts_per_entry so the frontend can render a
+        # [Nc] badge on P&L panels, entry cards, and history rows. Null-safe
+        # fallback mirrors the Phase 1 pattern — None/0/missing → 1.
+        contracts = strategy.get("contracts_per_entry") or 1
         return {
             "conditional_e6_enabled": strategy.get("conditional_e6_enabled", False),
             "conditional_e7_enabled": strategy.get("conditional_e7_enabled", False),
@@ -52,6 +56,7 @@ async def get_bot_config():
             "upday_threshold_pct": strategy.get("upday_threshold_pct", 0.0025),
             "entry_times": strategy.get("entry_times", []),
             "conditional_entry_times": strategy.get("conditional_entry_times", []),
+            "contracts_per_entry": contracts,
         }
     except Exception as e:
         logger.warning(f"Could not read bot config ({config_path}): {e}")
@@ -67,6 +72,7 @@ async def get_bot_config():
             "upday_threshold_pct": 0.0025,
             "entry_times": [],
             "conditional_entry_times": [],
+            "contracts_per_entry": 1,
         }
 
 
@@ -105,6 +111,15 @@ async def get_summary():
         return {"error": "State not available"}
 
     entries = state.get("entries", [])
+    # Phase 2 X-1: derive today's contract count for the summary payload.
+    # Prefer state file's own field (written by the bot each heartbeat). If
+    # absent (e.g. pre-Phase-1 state), fall back to max over per-entry
+    # contracts, then finally to 1 — same null-safe pattern as Phase 1.
+    contracts = (
+        state.get("contracts_per_entry")
+        or max((e.get("contracts", 1) for e in entries), default=1)
+        or 1
+    )
     return {
         "date": state.get("date"),
         "state": state.get("state"),
@@ -122,4 +137,5 @@ async def get_summary():
         "credit_gate_skips": state.get("credit_gate_skips", 0),
         "active_entries": len([e for e in entries if not e.get("is_complete", True)]),
         "total_entries": len(entries),
+        "contracts_per_entry": contracts,
     }
