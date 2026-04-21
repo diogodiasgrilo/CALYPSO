@@ -8243,10 +8243,31 @@ class HydraStrategy(MEICStrategy):
             if self._base_entry_count > cap:
                 # Truncate base entries, keep conditional entries
                 # Keep LAST `cap` base times (drops earlier entries which underperform)
+                old_base_count = self._base_entry_count
                 base_times = self.entry_times[:self._base_entry_count]
                 cond_times = self.entry_times[self._base_entry_count:]
                 self.entry_times = base_times[-cap:] + cond_times
                 self._base_entry_count = cap
+                # FIX 2026-04-21: Mid-day restart bug — if TIME-002 already
+                # advanced `_next_entry_index` past a dropped slot (e.g., the
+                # 10:15 canonical slot when the bot restarts at 10:31 ET),
+                # the index now over-counts by `dropped_count` after truncation
+                # and would skip the remaining base entries. Decrement to
+                # re-point at the correct slot in the new (shorter) entry_times.
+                # Before fix: bot restarted at 10:31 with next_entry_index=1,
+                # TIME-002 leaves it at 1 (10:45 not yet past), VIX regime truncates
+                # [10:15, 10:45, 11:15, 14:00] → [10:45, 11:15, 14:00], index=1
+                # now points to 11:15 → misses 10:45 entry entirely.
+                dropped_count = old_base_count - cap
+                if dropped_count > 0 and self._next_entry_index > 0:
+                    new_idx = max(0, self._next_entry_index - dropped_count)
+                    if new_idx != self._next_entry_index:
+                        logger.info(
+                            f"VIX regime: adjusted _next_entry_index "
+                            f"{self._next_entry_index} → {new_idx} "
+                            f"(dropped {dropped_count} base entries from front)"
+                        )
+                        self._next_entry_index = new_idx
                 logger.info(f"VIX regime: VIX={vix:.1f}, regime={regime}, capped to {cap} base entries (dropped earliest)")
 
         # Apply stop buffer overrides (config values are per-contract dollars, multiply by 100)
