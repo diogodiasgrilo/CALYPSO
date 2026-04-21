@@ -6081,6 +6081,23 @@ class HydraStrategy(MEICStrategy):
 
         return lines
 
+    def _with_contracts_footer(self, lines: list) -> str:
+        """Phase 2 T-4: Append a contract-count footer to Telegram command responses.
+
+        Silent at contracts_per_entry == 1 (no change from legacy output). When > 1,
+        adds a blank line + italic footer `_[Nc per entry — credit/stop/P&L scaled ×N]_`
+        so every /status, /snapshot, /entry, /lastday, /week, /account, /stops,
+        /config response is self-describing about scale. Complements T-1's
+        auto-[Nc] prefix on push alerts.
+        """
+        n = getattr(self, "contracts_per_entry", 1) or 1
+        if n > 1:
+            lines = list(lines) + [
+                "",
+                f"_[{n}c per entry — credit / stop / P&L scaled ×{n}]_",
+            ]
+        return "\n".join(lines)
+
     def build_telegram_snapshot(self) -> str:
         """
         Build a formatted Telegram message showing current HYDRA position snapshot.
@@ -6275,7 +6292,7 @@ class HydraStrategy(MEICStrategy):
             threshold_pct = self.early_close_roc_threshold * 100
             lines.append(f"Early Close: {roc_sign}{roc:.1f}% / {threshold_pct:.0f}% target")
 
-        return "\n".join(lines)
+        return self._with_contracts_footer(lines)
 
     # =========================================================================
     # TELEGRAM HISTORICAL DATA COMMANDS
@@ -6367,7 +6384,7 @@ class HydraStrategy(MEICStrategy):
             lines.append("")
             lines.append(f"Cumulative: {cum_str}")
 
-            return "\n".join(lines)
+            return self._with_contracts_footer(lines)
 
         except Exception as e:
             logger.error("Failed to build /lastday message: %s", e)
@@ -6494,7 +6511,7 @@ class HydraStrategy(MEICStrategy):
                 if annualized:
                     lines.append(f"Annualized: {annualized:.0f}%")
 
-            return "\n".join(lines)
+            return self._with_contracts_footer(lines)
 
         except Exception as e:
             logger.error("Failed to build /account message: %s", e)
@@ -6650,7 +6667,7 @@ class HydraStrategy(MEICStrategy):
             f"Early close: {ec_str}",
         ]
 
-        return "\n".join(lines)
+        return self._with_contracts_footer(lines)
 
     def build_telegram_hermes(self) -> str:
         """
@@ -6833,7 +6850,7 @@ class HydraStrategy(MEICStrategy):
             win_rate = (winning / total_days * 100) if total_days > 0 else 0
             lines.append(f"Win rate: {win_rate:.0f}% ({winning}W / {losing}L)")
 
-            return "\n".join(lines)
+            return self._with_contracts_footer(lines)
 
         except Exception as e:
             logger.error("Failed to build /week message: %s", e)
@@ -6958,7 +6975,7 @@ class HydraStrategy(MEICStrategy):
         lines.append("")
         lines.append(f"P&L: {pnl_sign}${pnl:.0f}")
 
-        return "\n".join(lines)
+        return self._with_contracts_footer(lines)
 
     def build_telegram_stops(self) -> str:
         """
@@ -7050,7 +7067,7 @@ class HydraStrategy(MEICStrategy):
             lines.append("")
             lines.append("Historical data temporarily unavailable.")
 
-        return "\n".join(lines)
+        return self._with_contracts_footer(lines)
 
     def build_telegram_config(self) -> str:
         """
@@ -7181,7 +7198,7 @@ class HydraStrategy(MEICStrategy):
                 f"Floor: slot 2 (12:14:30)",
             ])
 
-        return "\n".join(lines)
+        return self._with_contracts_footer(lines)
 
     def get_dashboard_metrics(self) -> Dict[str, Any]:
         """
