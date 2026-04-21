@@ -139,6 +139,9 @@ CREATE TABLE IF NOT EXISTS shadow_entries (
     is_skipped INTEGER DEFAULT 0,
     skip_reason TEXT,
 
+    -- v8: contract count of the actual entry (0 if skipped)
+    contracts INTEGER NOT NULL DEFAULT 1,
+
     PRIMARY KEY (date, entry_number)
 );
 """
@@ -230,7 +233,14 @@ class DataRecorder:
         """
         def _migrate():
             with self._connect() as conn:
-                # Create base tables if they don't exist (fresh DB or HOMER never ran)
+                # Create base tables if they don't exist (fresh DB or HOMER never ran).
+                # v8: include `contracts`/`contracts_per_entry` inline so fresh DBs
+                # don't depend on the ALTER migration path adding them. Defense-in-depth:
+                # if ALTER ever fails silently (disk full, permission, etc.) schema_info
+                # still gets stamped at the current version, so a missing column would
+                # silently break future INSERTs. Having the columns inline on fresh
+                # create means ALTERs become no-ops ("duplicate column") — benign and
+                # already filtered by the error handler below.
                 conn.executescript("""
                     CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT);
                     CREATE TABLE IF NOT EXISTS market_ticks (
@@ -246,6 +256,7 @@ class DataRecorder:
                         call_spread_width REAL, put_spread_width REAL,
                         mkt031_score INTEGER, mkt031_early INTEGER,
                         otm_distance_call REAL, otm_distance_put REAL,
+                        contracts INTEGER NOT NULL DEFAULT 1,
                         PRIMARY KEY (date, entry_number));
                     CREATE TABLE IF NOT EXISTS trade_stops (
                         date TEXT NOT NULL, entry_number INTEGER NOT NULL, side TEXT NOT NULL,
@@ -253,6 +264,7 @@ class DataRecorder:
                         actual_debit REAL, net_pnl REAL,
                         salvage_sold INTEGER DEFAULT 0, salvage_revenue REAL DEFAULT 0.0,
                         confirmation_seconds INTEGER DEFAULT 0, breach_recoveries INTEGER DEFAULT 0,
+                        contracts INTEGER NOT NULL DEFAULT 1,
                         PRIMARY KEY (date, entry_number, side));
                     CREATE TABLE IF NOT EXISTS daily_summaries (
                         date TEXT PRIMARY KEY, spx_open REAL, spx_close REAL,
@@ -260,10 +272,12 @@ class DataRecorder:
                         vix_open REAL, vix_close REAL,
                         entries_placed INTEGER, entries_stopped INTEGER, entries_expired INTEGER,
                         gross_pnl REAL, net_pnl REAL, commission REAL,
-                        long_salvage_revenue REAL DEFAULT 0.0, day_type TEXT, day_of_week TEXT);
+                        long_salvage_revenue REAL DEFAULT 0.0, day_type TEXT, day_of_week TEXT,
+                        contracts_per_entry INTEGER NOT NULL DEFAULT 1);
                     CREATE TABLE IF NOT EXISTS spread_snapshots (
                         timestamp TEXT NOT NULL, entry_number INTEGER NOT NULL,
                         call_spread_value REAL, put_spread_value REAL,
+                        contracts INTEGER NOT NULL DEFAULT 1,
                         PRIMARY KEY (timestamp, entry_number));
                 """)
 
@@ -581,7 +595,14 @@ class DataRecorder:
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            values = tuple(summary_data.get(c) for c in cols)
+            # v8: contracts_per_entry column is NOT NULL DEFAULT 1 — caller that
+            # omits it would pass None and hit a constraint violation. Default to 1
+            # defensively so legacy/backfill callers without this key still succeed.
+            values = tuple(
+                summary_data.get(c) if c != "contracts_per_entry"
+                else summary_data.get("contracts_per_entry", 1)
+                for c in cols
+            )
 
             with self._connect() as conn:
                 conn.execute(
