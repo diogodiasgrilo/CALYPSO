@@ -351,7 +351,49 @@ def list_accounts(config: dict):
     print("=" * 80 + "\n")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SAFETY KILL-SWITCH — 2026-04-21
+# ─────────────────────────────────────────────────────────────────────────────
+# Per user directive (2026-04-21): HYDRA is the ONLY bot that should run.
+# All other bots (Iron Fly, Delta Neutral, Rolling Put Diagonal, MEIC) are
+# disabled at the CODE level as defense-in-depth, so even an accidental
+# `systemctl start <service>` or direct `python -m ...` invocation refuses
+# to trade.
+#
+# To re-enable this bot:
+#   1. Flip DISABLED_FOR_SAFETY to False below
+#   2. Coordinate with HYDRA (shared state, margin, position registry)
+#   3. Restart service
+DISABLED_FOR_SAFETY = True
+
+
+def _check_disabled_kill_switch():
+    """Refuse to start if DISABLED_FOR_SAFETY is True. Exits immediately
+    without importing Saxo client, loading config, or touching any trading
+    state. Called at the top of both main() and run_bot() for defense in depth."""
+    if not DISABLED_FOR_SAFETY:
+        return
+    import sys as _sys
+    banner = (
+        "\n" + "=" * 72 +
+        "\n  \u26d4 DELTA NEUTRAL BOT DISABLED FOR SAFETY \u2014 refusing to start" +
+        "\n" + "=" * 72 +
+        "\n  Per user directive (2026-04-21), HYDRA is the ONLY bot that runs." +
+        "\n" +
+        "\n  To re-enable:" +
+        "\n    Edit bots/delta_neutral/main.py" +
+        "\n    Set DISABLED_FOR_SAFETY = False" +
+        "\n    Coordinate with HYDRA before starting" +
+        "\n" + "=" * 72 + "\n"
+    )
+    print(banner, file=_sys.stderr, flush=True)
+    print(banner, flush=True)
+    _sys.exit(2)
+
+
 def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
+    # Defense in depth: refuse to run even if called directly via import
+    _check_disabled_kill_switch()
     """
     Run the main trading bot loop.
 
@@ -975,6 +1017,9 @@ def show_status(config: dict):
 
 def main():
     """Main entry point."""
+    # Refuse immediately if disabled (before arg parsing / config / imports)
+    _check_disabled_kill_switch()
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(
         description="Delta Neutral Trading Bot - SPY Options Strategy",

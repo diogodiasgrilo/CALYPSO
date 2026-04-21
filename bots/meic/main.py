@@ -240,6 +240,53 @@ def print_banner():
     print(banner)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SAFETY KILL-SWITCH — 2026-04-21
+# ─────────────────────────────────────────────────────────────────────────────
+# Per user directive (2026-04-21): HYDRA is the ONLY bot that should run.
+# All other bots (Iron Fly, Delta Neutral, Rolling Put Diagonal, MEIC) are
+# disabled at the CODE level as defense-in-depth, so even an accidental
+# `systemctl start <service>` or direct `python -m ...` invocation refuses
+# to trade.
+#
+# NOTE: This disables only the MEIC ENTRY POINT (main.py). The MEIC
+# strategy.py module remains fully importable — HYDRA inherits from
+# MEICStrategy as its parent class. This is the intended design.
+#
+# To re-enable this bot:
+#   1. Flip DISABLED_FOR_SAFETY to False below
+#   2. Coordinate with HYDRA (shared state, margin, position registry)
+#   3. Restart service
+DISABLED_FOR_SAFETY = True
+
+
+def _check_disabled_kill_switch():
+    """Refuse to start if DISABLED_FOR_SAFETY is True. Exits immediately
+    without importing Saxo client, loading config, or touching any trading
+    state. Called at the top of both main() and run_bot() for defense in depth.
+    Does NOT affect strategy.py module imports — that class is still available
+    to HYDRA as its parent."""
+    if not DISABLED_FOR_SAFETY:
+        return
+    import sys as _sys
+    banner = (
+        "\n" + "=" * 72 +
+        "\n  \u26d4 MEIC BOT DISABLED FOR SAFETY \u2014 refusing to start" +
+        "\n" + "=" * 72 +
+        "\n  Per user directive (2026-04-21), HYDRA is the ONLY bot that runs." +
+        "\n  (MEIC's strategy.py remains importable as HYDRA's parent class.)" +
+        "\n" +
+        "\n  To re-enable:" +
+        "\n    Edit bots/meic/main.py" +
+        "\n    Set DISABLED_FOR_SAFETY = False" +
+        "\n    Coordinate with HYDRA before starting" +
+        "\n" + "=" * 72 + "\n"
+    )
+    print(banner, file=_sys.stderr, flush=True)
+    print(banner, flush=True)
+    _sys.exit(2)
+
+
 def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
     """
     Run the main trading bot loop.
@@ -249,6 +296,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 5):
         dry_run: If True, simulate without placing real trades
         check_interval: Seconds between strategy checks
     """
+    # Defense in depth: refuse to run even if called directly via import
+    _check_disabled_kill_switch()
+
     global shutdown_requested
 
     # Initialize logging service
@@ -693,6 +743,10 @@ def show_status(config: dict):
 
 def main():
     """Main entry point."""
+    # Refuse immediately if disabled (before any side effects — kill_existing,
+    # arg parsing, config loading, Saxo client instantiation)
+    _check_disabled_kill_switch()
+
     # DUPLICATE-001: Kill any existing MEIC instances before starting
     # This prevents duplicate trades and circuit breaker issues from zombie processes
     kill_existing_meic_instances()
