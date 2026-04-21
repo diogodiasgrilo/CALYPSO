@@ -1595,6 +1595,10 @@ class HydraStrategy(MEICStrategy):
         stressed_credit_sum = 0.0
         stressed_net_sum = 0.0
         stressed_sides_count = 0
+        # v8: commission for potential stops scales by each entry's stamped count.
+        # Mixed-contract days (if config flips) need per-entry contribution, not a
+        # single self.contracts_per_entry multiplier.
+        stressed_commission_contracts = 0
 
         for entry, side, credit, stop_level in active_sides:
             if side == stressed_side:
@@ -1603,13 +1607,14 @@ class HydraStrategy(MEICStrategy):
                 stressed_credit_sum += credit
                 stressed_net_sum += (credit - stop_level)
                 stressed_sides_count += 1
+                stressed_commission_contracts += entry.contracts
             else:
                 # Safe side expires worthless = keep full credit
                 safe_credit_sum += credit
 
-        # Commission for stop closes (2 legs per stopped side)
+        # Commission for stop closes (2 legs per stopped side × that entry's contracts)
         stop_close_commission = (
-            stressed_sides_count * 2 * self.commission_per_leg * self.contracts_per_entry
+            stressed_commission_contracts * 2 * self.commission_per_leg
         )
 
         worst_case_hold_pnl = (
@@ -4827,8 +4832,10 @@ class HydraStrategy(MEICStrategy):
 
         self.daily_state.total_realized_pnl -= net_loss
 
-        # MKT-025: Commission for 1 close leg only ($2.50 instead of $5.00)
-        close_commission = 1 * self.commission_per_leg * self.contracts_per_entry
+        # MKT-025: Commission for 1 close leg only ($2.50 instead of $5.00).
+        # v8: scale by entry.contracts (the count this entry was opened at), NOT
+        # self.contracts_per_entry (which may have changed if config flipped).
+        close_commission = 1 * self.commission_per_leg * entry.contracts
         entry.close_commission += close_commission
         self.daily_state.total_commission += close_commission
 
@@ -4925,7 +4932,9 @@ class HydraStrategy(MEICStrategy):
                 if closed and closed.get("closing_price", 0) > 0:
                     fill_price = closed["closing_price"]
                     revenue = fill_price * 100 * entry.contracts
-                    close_commission = self.commission_per_leg * self.contracts_per_entry
+                    # v8: close commission scales with the entry's own contract count,
+                    # not current config (important when config flipped mid-day).
+                    close_commission = self.commission_per_leg * entry.contracts
 
                     self.daily_state.total_realized_pnl += revenue
                     self.daily_state.total_commission += close_commission
@@ -5036,7 +5045,9 @@ class HydraStrategy(MEICStrategy):
             self.daily_state.total_realized_pnl += revenue
 
             # Commission for closing 1 leg
-            close_commission = self.commission_per_leg * self.contracts_per_entry
+            # v8: use entry.contracts (stamped at entry creation) not current config —
+            # preserves correct commission even if config flipped since this entry opened.
+            close_commission = self.commission_per_leg * entry.contracts
             entry.close_commission += close_commission
             self.daily_state.total_commission += close_commission
 
@@ -8393,8 +8404,10 @@ class HydraStrategy(MEICStrategy):
                 )
                 if closed and closed.get("closing_price", 0) > 0:
                     fill_price = closed["closing_price"]
-                    revenue = fill_price * 100 * self.contracts_per_entry
-                    close_commission = self.commission_per_leg * self.contracts_per_entry
+                    # v8: scale revenue AND commission by entry.contracts, not current
+                    # config — preserves accuracy across config flips.
+                    revenue = fill_price * 100 * entry.contracts
+                    close_commission = self.commission_per_leg * entry.contracts
 
                     # Record exactly as MKT-033 does
                     self.daily_state.total_realized_pnl += revenue
@@ -9363,6 +9376,11 @@ class HydraStrategy(MEICStrategy):
                                         # Stop timestamps (for dashboard stop markers)
                                         "call_stop_time": entry_data.get("call_stop_time", ""),
                                         "put_stop_time": entry_data.get("put_stop_time", ""),
+                                        # v8: preserve the contract count this entry was OPENED at.
+                                        # Critical when config flips mid-day (1c→2c): stops, spread
+                                        # values, P&L, commissions must stay at the original contract
+                                        # count for entries already in the market.
+                                        "contracts": entry_data.get("contracts", self.contracts_per_entry),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -9399,6 +9417,12 @@ class HydraStrategy(MEICStrategy):
             for entry in recovered_entries:
                 if entry.entry_number in preserved_entry_credits:
                     saved = preserved_entry_credits[entry.entry_number]
+                    # v8: restore original contract count BEFORE restoring stop levels.
+                    # _reconstruct_entry_from_positions set entry.contracts to current
+                    # config; that's wrong if config flipped while this entry was open.
+                    # saved["contracts"] is the count at the time the entry was placed —
+                    # use it so spread_value / stop_level / commission all stay consistent.
+                    entry.contracts = saved.get("contracts", entry.contracts)
                     entry.call_spread_credit = saved["call_credit"]
                     entry.put_spread_credit = saved["put_credit"]
                     entry.call_side_stop = saved["call_stop"]
@@ -9716,6 +9740,9 @@ class HydraStrategy(MEICStrategy):
 
             # Retroactively calculate commission for entries without commission data
             # BUG FIX: Use 2 legs for one-sided entries, 4 for full ICs
+            # v8: scale by each entry's own entry.contracts (stamped at creation),
+            # not self.contracts_per_entry — recovered entries may span multiple
+            # contract counts if config flipped during a trading day.
             if self.daily_state.total_commission == 0 and recovered_entries:
                 retroactive_commission = 0.0
                 for entry in recovered_entries:
@@ -9723,15 +9750,15 @@ class HydraStrategy(MEICStrategy):
                         # One-sided entries have 2 legs, full ICs have 4
                         is_one_sided = getattr(entry, 'call_only', False) or getattr(entry, 'put_only', False)
                         open_legs = 2 if is_one_sided else 4
-                        entry.open_commission = open_legs * self.commission_per_leg * self.contracts_per_entry
+                        entry.open_commission = open_legs * self.commission_per_leg * entry.contracts
                         retroactive_commission += entry.open_commission
                     if entry.close_commission == 0:
                         if entry.call_side_stopped:
-                            close_comm = 2 * self.commission_per_leg * self.contracts_per_entry
+                            close_comm = 2 * self.commission_per_leg * entry.contracts
                             entry.close_commission += close_comm
                             retroactive_commission += close_comm
                         if entry.put_side_stopped:
-                            close_comm = 2 * self.commission_per_leg * self.contracts_per_entry
+                            close_comm = 2 * self.commission_per_leg * entry.contracts
                             entry.close_commission += close_comm
                             retroactive_commission += close_comm
                 self.daily_state.total_commission = retroactive_commission

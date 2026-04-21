@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # ============================================================================
 # Schema Migration SQL
@@ -90,6 +90,17 @@ MIGRATION_V6_SQL = [
     "ALTER TABLE spread_snapshots ADD COLUMN short_put_ask REAL",
     "ALTER TABLE spread_snapshots ADD COLUMN long_put_bid REAL",
     "ALTER TABLE spread_snapshots ADD COLUMN long_put_ask REAL",
+]
+
+# v8 migrations: per-row contract count for 2-contract scaling.
+# All existing rows default to 1 (historically accurate — bot ran at 1c until Phase 1).
+# Kept in sync with services/homer/db_manager.py v8 migration block.
+MIGRATION_V8_SQL = [
+    "ALTER TABLE trade_entries ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE trade_stops ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE spread_snapshots ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE shadow_entries ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE daily_summaries ADD COLUMN contracts_per_entry INTEGER NOT NULL DEFAULT 1",
 ]
 
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
@@ -284,6 +295,9 @@ class DataRecorder:
                     migration_sql += MIGRATION_V5_SQL
                 if current_version < 6:
                     migration_sql += MIGRATION_V6_SQL
+                if current_version < 8:
+                    # v8: per-row contracts column for 2-contract scaling
+                    migration_sql += MIGRATION_V8_SQL
 
                 for sql in migration_sql:
                     try:

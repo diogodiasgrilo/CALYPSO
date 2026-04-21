@@ -3994,7 +3994,10 @@ class MEICStrategy:
             close_legs = 2  # Dry run assumes both legs
         else:
             close_legs = legs_actually_closed if legs_actually_closed > 0 else 2
-        close_commission = close_legs * self.commission_per_leg * self.contracts_per_entry
+        # v8: scale by entry.contracts (stamped at creation), not current config —
+        # preserves correct commission even if contracts_per_entry flipped since
+        # this entry was opened.
+        close_commission = close_legs * self.commission_per_leg * entry.contracts
         entry.close_commission += close_commission
         self.daily_state.total_commission += close_commission
 
@@ -5221,6 +5224,11 @@ class MEICStrategy:
                                         # Stop timestamps (for dashboard stop markers)
                                         "call_stop_time": entry_data.get("call_stop_time", ""),
                                         "put_stop_time": entry_data.get("put_stop_time", ""),
+                                        # v8: preserve contract count — critical when config
+                                        # flips (1c→2c) while entries are open so their stop
+                                        # levels / spread values / commissions stay at the
+                                        # count they were opened with.
+                                        "contracts": entry_data.get("contracts", self.contracts_per_entry),
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -5260,6 +5268,12 @@ class MEICStrategy:
             for entry in recovered_entries:
                 if entry.entry_number in preserved_entry_credits:
                     saved = preserved_entry_credits[entry.entry_number]
+                    # v8: restore original contract count BEFORE stop levels.
+                    # _reconstruct_entry_from_positions set entry.contracts to current
+                    # config; override with the stamped count so stops/spread_value/P&L
+                    # math remain consistent with the contract count this entry was
+                    # actually placed at.
+                    entry.contracts = saved.get("contracts", entry.contracts)
                     # Restore original credits (not current spread values)
                     entry.call_spread_credit = saved["call_credit"]
                     entry.put_spread_credit = saved["put_credit"]
@@ -5446,23 +5460,26 @@ class MEICStrategy:
             # This handles state files from before commission tracking was added (v1.2.2)
             if self.daily_state.total_commission == 0 and recovered_entries:
                 retroactive_commission = 0.0
+                # v8: scale each entry's commission by its own entry.contracts (the count
+                # stamped at creation), not self.contracts_per_entry — recovered entries
+                # may span different contract counts if config was flipped mid-day.
                 for entry in recovered_entries:
-                    # Open commission: 4 legs × $2.50 = $10 per full IC
+                    # Open commission: 4 legs × $2.50 × contracts per full IC
                     # FIX #43: One-sided entries only have 2 legs
                     if entry.open_commission == 0:
                         call_only = getattr(entry, 'call_only', False)
                         put_only = getattr(entry, 'put_only', False)
                         num_legs = 2 if (call_only or put_only) else 4
-                        entry.open_commission = num_legs * self.commission_per_leg * self.contracts_per_entry
+                        entry.open_commission = num_legs * self.commission_per_leg * entry.contracts
                         retroactive_commission += entry.open_commission
-                    # Close commission: 2 legs per stopped side × $2.50 = $5 per side
+                    # Close commission: 2 legs per stopped side × $2.50 × contracts
                     if entry.close_commission == 0:
                         if entry.call_side_stopped:
-                            close_comm = 2 * self.commission_per_leg * self.contracts_per_entry
+                            close_comm = 2 * self.commission_per_leg * entry.contracts
                             entry.close_commission += close_comm
                             retroactive_commission += close_comm
                         if entry.put_side_stopped:
-                            close_comm = 2 * self.commission_per_leg * self.contracts_per_entry
+                            close_comm = 2 * self.commission_per_leg * entry.contracts
                             entry.close_commission += close_comm
                             retroactive_commission += close_comm
                 self.daily_state.total_commission = retroactive_commission
