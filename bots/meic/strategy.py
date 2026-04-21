@@ -7012,6 +7012,8 @@ class MEICStrategy:
                 if getattr(self, '_early_close_triggered', False) and getattr(self, '_early_close_time', None)
                 else ("Post-settlement" if self._settlement_reconciliation_complete else "")
             ),
+            # Phase 2 D-4: Sheets Daily Summary new Contracts column
+            "contracts_per_entry": self.contracts_per_entry,
         }
 
         # Convert P&L to EUR if exchange rate available

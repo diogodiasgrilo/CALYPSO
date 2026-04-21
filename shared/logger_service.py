@@ -503,7 +503,8 @@ class GoogleSheetsLogger:
                     ]
                 elif self.strategy_type == "hydra":
                     # HYDRA: MEIC with trend following - full OHLC, P&L breakdown, trend signals
-                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=41)
+                    # 42 cols total after Phase 2 D-4 (Contracts appended at end)
+                    worksheet = self.spreadsheet.add_worksheet(title="Daily Summary", rows=1000, cols=42)
                     headers = [
                         # Market Context (9 cols)
                         "Date", "SPX Open", "SPX Close", "SPX High", "SPX Low",
@@ -531,6 +532,9 @@ class GoogleSheetsLogger:
                         "Avg Daily ROC (%)", "Annualized Return (%)",
                         # MKT-033: Long salvage (1 col)
                         "Long Salvage ($)",
+                        # Phase 2 D-4: Contracts per entry for the day (blank / 1
+                        # implicit for rows before this column existed)
+                        "Contracts",
                     ]
                 else:
                     # Delta Neutral: Theta tracking for weekly strategy
@@ -549,12 +553,15 @@ class GoogleSheetsLogger:
             if self.strategy_type == "hydra":
                 try:
                     header_row = self._sheets_call_with_timeout(worksheet.row_values, 1)
-                    if header_row and len(header_row) < 41:
-                        # Build list of missing headers to append
+                    if header_row and len(header_row) < 42:
+                        # Build list of missing headers to append. Append-only so
+                        # pre-existing rows keep their column layout intact — empty
+                        # cells appear under the new column for historical rows.
                         all_expected = [
                             "Avg Capital Deployed ($)", "Cumulative ROC (%)",
                             "Avg Daily ROC (%)", "Annualized Return (%)",
                             "Long Salvage ($)",  # MKT-033
+                            "Contracts",  # Phase 2 D-4
                         ]
                         # Only add headers that don't already exist
                         existing_set = set(header_row)
@@ -565,7 +572,7 @@ class GoogleSheetsLogger:
                                 self._sheets_call_with_timeout(
                                     worksheet.update_cell, 1, start_col + i, h
                                 )
-                            target_cols = max(41, len(header_row) + len(new_headers))
+                            target_cols = max(42, len(header_row) + len(new_headers))
                             if worksheet.col_count < target_cols:
                                 self._sheets_call_with_timeout(worksheet.resize, cols=target_cols)
                             logger.info(f"Extended Daily Summary headers: added {len(new_headers)} new columns (total now {target_cols})")
@@ -2170,8 +2177,12 @@ class GoogleSheetsLogger:
                     f"{summary.get('annualized_return', 0):.1f}",
                     # MKT-033: Long salvage revenue (appended at end to avoid column shift)
                     f"{summary.get('long_salvage_revenue', 0):.2f}",
+                    # Phase 2 D-4: Contracts per entry for the day. Null-safe `or 1`
+                    # mirrors the Phase 1 recovery pattern so missing / None / 0
+                    # fall back to 1 (historically correct for pre-Phase-1 days).
+                    str(summary.get("contracts_per_entry") or 1),
                 ]
-                logger.debug(f"HYDRA daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f})")
+                logger.debug(f"HYDRA daily summary logged to Google Sheets (Entries: {entries_completed}, P&L: ${daily_pnl:.2f}, Contracts: {summary.get('contracts_per_entry') or 1})")
             else:
                 # Delta Neutral: Theta-based tracking
                 net_theta = summary.get('total_theta', summary.get('net_theta', 0))
