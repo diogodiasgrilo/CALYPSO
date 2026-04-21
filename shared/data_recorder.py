@@ -281,13 +281,17 @@ class DataRecorder:
                     self._initialized = True
                     return
 
-                # Create new tables (IF NOT EXISTS = safe)
+                # Create new tables (IF NOT EXISTS = safe — idempotent)
                 conn.executescript(CREATE_SKIPPED_ENTRIES_SQL)
                 conn.executescript(CREATE_MAE_MFE_SQL)
                 conn.executescript(CREATE_INDEXES_SQL)
-                if current_version < 7:
-                    conn.executescript(CREATE_SHADOW_ENTRIES_SQL)
-                    conn.executescript(CREATE_SHADOW_INDEX_SQL)
+                # Unconditionally ensure shadow_entries exists BEFORE v8 ALTERs.
+                # Previously gated on current_version < 7, but v8 ALTER adds a column
+                # to shadow_entries — if the table is missing for any reason, the ALTER
+                # silently fails (only "duplicate column" errors are filtered) and v8
+                # gets stamped anyway. CREATE IF NOT EXISTS is cheap and harmless here.
+                conn.executescript(CREATE_SHADOW_ENTRIES_SQL)
+                conn.executescript(CREATE_SHADOW_INDEX_SQL)
 
                 # Add new columns (catch duplicate column errors)
                 migration_sql = []
