@@ -3636,7 +3636,7 @@ class HydraStrategy(MEICStrategy):
             str: Description of action taken
         """
         entry_num = self._next_entry_index + 1
-        logger.info(f"HYDRA: Initiating Entry #{entry_num} of {len(self.entry_times)}")
+        logger.info(f"HYDRA: Initiating Entry #{entry_num} of {self._effective_total_entry_count()}")
 
         # MKT-043: Calm entry filter — delay if SPX moving fast.
         # CRITICAL: refresh prices and check stops during delay to avoid
@@ -6127,8 +6127,8 @@ class HydraStrategy(MEICStrategy):
         else:
             lines.append(f"Trend: {trend_str}")
 
-        # Entry count header
-        total_entries = len(self.entry_times)
+        # Entry count header — use effective count (E#1 @ 10:15 always dropped)
+        total_entries = self._effective_total_entry_count()
         completed = self.daily_state.entries_completed
         active_count = len(self.daily_state.active_entries)
         lines.append("")
@@ -6559,8 +6559,8 @@ class HydraStrategy(MEICStrategy):
         else:
             trend_detail = trend_str
 
-        # Entries
-        total_scheduled = len(self.entry_times)
+        # Entries — use effective count (E#1 @ 10:15 always dropped by VIX regime)
+        total_scheduled = self._effective_total_entry_count()
         completed = self.daily_state.entries_completed
         skipped = self.daily_state.entries_skipped
         active_count = len(self.daily_state.active_entries)
@@ -8183,6 +8183,41 @@ class HydraStrategy(MEICStrategy):
 
         # Save clean state to disk
         self._save_state_to_disk()
+
+    def _effective_total_entry_count(self) -> int:
+        """Return the effective number of entry slots for today.
+
+        Use this in USER-FACING displays (logs, heartbeats, Telegram responses)
+        instead of raw `len(self.entry_times)`, which returns the CANONICAL
+        schedule (4 slots including E#1 @ 10:15 which is always dropped by
+        the VIX regime max_entries cap).
+
+        Semantics:
+        - AFTER VIX regime is applied (_vix_regime_applied == True):
+          self.entry_times is already truncated → return its length.
+        - BEFORE VIX regime is applied (pre-market, VIX unknown):
+          estimate by taking max(vix_regime.max_entries) as the most common
+          base cap, plus the conditional slot count. For the current live
+          config [2, 2, 2, 1] + 1 conditional = 3 effective entries.
+          This matches the user's mental model: "the bot fires up to 3
+          entries today" (not 4, which includes the always-dropped E#1).
+
+        Rationale: users don't care about the pre-VIX-regime canonical
+        schedule — they see 3 entries fire (or attempt) each day. The
+        worst case (VIX >= 28, regime 3 with cap=1) is 1 base + 1
+        conditional = 2, but max is the conservative display default.
+        """
+        if getattr(self, "_vix_regime_applied", False):
+            return len(self.entry_times)
+        # Pre-regime: estimate using max cap across all configured regimes
+        caps = getattr(self, "vix_regime_max_entries", None) or []
+        valid_caps = [c for c in caps if isinstance(c, int) and c > 0]
+        if valid_caps:
+            base_effective = max(valid_caps)
+        else:
+            base_effective = getattr(self, "_base_entry_count", 0) or len(self.entry_times)
+        conditional_count = len(getattr(self, "_conditional_entry_times", []) or [])
+        return base_effective + conditional_count
 
     def _apply_vix_regime_overrides(self):
         """Apply VIX regime parameter overrides based on current VIX level."""

@@ -39,15 +39,31 @@ A "cheat_sheet" data section is provided with ALL counting and arithmetic alread
 CRITICAL: Day 1 is NOT a blackout — HYDRA trades normally on Day 1. Do NOT flag Day 1 trading as a rule violation.
 CRITICAL: Day 2 blackout is CONFIGURABLE. Always check `cheat_sheet.fomc_announcement_skip` before flagging Day 2 entries. If `false`, the user chose to trade — it is NOT a violation.
 
-## Entry Skip Pattern
+## Entry Schedule & Skip Pattern
 
-Entry #1 (10:15) is AUTO-DROPPED at ALL VIX LEVELS by the VIX regime cap (breakpoints [18, 22, 28],
-max_entries [2, 2, 2, 1], changed 2026-04-17). Per-entry analysis of 37 days showed E#1 is the
-worst-performing slot (24% WR, -$79/entry avg) — morning directional uncertainty. If you see
-"0 entries placed" or only E#2/E#3, that is INTENDED behavior, not a skip to flag.
-Entry #3 (11:15) is the best-performing slot (42% WR) and is preserved at all VIX levels.
-MKT-011 credit-gate skips (cheat_sheet.entries_skipped) tend to cluster on the call side
-(premium decays faster on calls).
+Today the bot fires up to **3 entries per day** (Entry #1 at 10:45, Entry #2 at 11:15,
+Entry #3 at 14:00 conditional). The canonical 10:15 slot is AUTO-DROPPED at ALL VIX
+levels by the VIX regime cap (breakpoints [18, 22, 28], max_entries [2, 2, 2, 1],
+changed 2026-04-17) — so the bot never attempts 10:15 in current config.
+
+Per-entry analysis of 37 historical days (Feb 10 - Apr 10, 2026, using the old
+naming where 10:15 was Entry #1) showed 10:15 was the worst-performing slot
+(24% WR, -$79/entry avg). Today the 11:15 slot (now Entry #2) is the best
+performer (42% WR) and is preserved at all VIX levels.
+
+If you see "0 entries placed" or only 2 entries (#1 and #2), that's INTENDED
+behavior, not a skip to flag. Entry #3 (14:00) is conditional — fires only
+if SPX rose ≥0.25% or fell ≥0.25% from open by 14:00; otherwise it's silently
+not attempted (not a skip either).
+
+MKT-011 credit-gate skips (cheat_sheet.entries_skipped) tend to cluster on
+the call side (premium decays faster on calls).
+
+**When reading historical rows (pre-2026-04-17):** old-era records may have
+`entry_number=1` at 10:15 and `entry_number=2` at 10:45. Use `entry_time`
+as the authoritative slot identifier, not `entry_number` alone. Docs that
+reference "E6" are talking about the 14:00 conditional slot — same as
+today's Entry #3.
 
 ## Analysis Framework
 

@@ -35,7 +35,8 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 
 - **P&L identity:** Expired Credits - Stop Loss Debits - Commission = Net P&L
 - When recommending parameter changes, phrase as concrete config edits (e.g., "change `vix_regime.breakpoints` from [18,22,28] to [18,22,26]").
-- When analyzing entries placed vs skipped, remember Entry #1 is dropped automatically at VIX ≥18 (regime design, not a bug).
+- **Entry numbering:** The bot fires up to 3 entries per day — Entry #1 at 10:45, Entry #2 at 11:15, Entry #3 at 14:00 conditional (historically called "E6"). The 10:15 slot is always dropped by the VIX regime cap (max_entries [2,2,2,1]) — that's INTENDED, not a skip to flag. At VIX ≥28 only Entry #2 (11:15) from the base schedule fires, plus the 14:00 conditional if triggered.
+- **Historical records (pre-2026-04-17):** old-era records may number Entry #1 as the 10:15 slot (when 10:15 still fired at low VIX). Use `entry_time` as the authoritative slot identifier for any row. Docs that reference "E6" mean the 14:00 conditional slot — today's Entry #3.
 - Leverage shadow_entries table when present — compare actual credit-based strike selection vs OTM-based hypothetical to inform strike-selection recommendations.
 
 ## Analysis Framework

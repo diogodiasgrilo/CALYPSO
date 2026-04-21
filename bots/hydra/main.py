@@ -144,9 +144,11 @@ def print_banner():
     ║         ══════════════════════                                ║
     ║                                                               ║
     ║         Multi-Entry Iron Condors (SPX 0DTE)                   ║
-    ║         3 Entries | Credit Gates | Buffer Decay                ║
+    ║         3 Entries | Credit Gates | Buffer Decay               ║
     ║                                                               ║
-    ║         10:15 / 10:45 / 11:15 ET + E6 14:00                  ║
+    ║         #1: 10:45 ET (base)                                   ║
+    ║         #2: 11:15 ET (base)                                   ║
+    ║         #3: 14:00 ET (conditional Up/Down-day)                ║
     ║                                                               ║
     ║         Version: 1.22.3                                       ║
     ║         API: Saxo Bank OpenAPI                                ║
@@ -403,13 +405,22 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     scout_suffix = ""
                     if 'scout_score' in status:
                         scout_suffix = f" | Scout: {status['scout_score']}/{strategy.scout_score_threshold}"
+                    # Use effective count so pre-VIX-regime heartbeats don't show /4
+                    _total_entries_display = (
+                        strategy._effective_total_entry_count()
+                        if hasattr(strategy, "_effective_total_entry_count")
+                        else len(strategy.entry_times)
+                    )
+                    _contracts_display = getattr(strategy, "contracts_per_entry", 1) or 1
+                    _contracts_tag = f" | {_contracts_display}c" if _contracts_display > 1 else ""
                     heartbeat_msg = (
                         f"{mode_prefix}HEARTBEAT | {status['state']} | "
                         f"SPX: {status['underlying_price']:.2f} | "
                         f"VIX: {status['vix']:.2f} | "
-                        f"Entries: {status['entries_completed']}/{len(strategy.entry_times)} | "
+                        f"Entries: {status['entries_completed']}/{_total_entries_display} | "
                         f"Active: {status['active_entries']} | "
                         f"Trend: {status.get('current_trend', 'N/A')}"
+                        f"{_contracts_tag}"
                         f"{scout_suffix}"
                     )
                     trade_logger.log_event(heartbeat_msg)

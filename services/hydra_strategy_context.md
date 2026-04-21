@@ -10,16 +10,37 @@ This file is the single source of truth for HYDRA strategy parameters across all
 
 ---
 
-## Entry Schedule
+## Entry Schedule (effective — 2026-04-17 onwards)
 
-**Base entries:** 10:15, 10:45, 11:15 ET (up to 3 slots — but **E#1 at 10:15 is dropped at ALL VIX levels**, so effectively only 10:45 and 11:15 fire)
-**Conditional entry:** 14:00 ET (E6 — fires as **put-only** when SPX rises ≥0.25% above open [**Upday-035**] OR as **call-only** when SPX drops ≥0.25% below open [**Downday-035**, deployed 2026-04-19])
-**E7:** DISABLED
+Today the bot fires up to **3 entries per day**. The canonical 10:15 slot is
+always dropped by the VIX regime cap (`max_entries: [2, 2, 2, 1]` at all VIX
+levels), so the first entry that actually fires is at 10:45.
 
-**Historical per-slot performance (37 reliable days, Feb 10 - Apr 10, 2026):**
-- E#1 (10:15): 24% WR, -$79/entry — **WORST** (auto-dropped at ALL VIX levels as of 2026-04-17)
-- E#2 (10:45): 35% WR, -$39/entry
-- E#3 (11:15): 42% WR, -$14/entry — **BEST** slot (preserved at all VIX levels)
+**Current live numbering (what the code emits):**
+- **Entry #1 — 10:45 ET** (first base slot that fires)
+- **Entry #2 — 11:15 ET** (second base slot)
+- **Entry #3 — 14:00 ET** (conditional — fires as **put-only** when SPX rises
+  ≥0.25% above open [**Upday-035**] OR as **call-only** when SPX drops ≥0.25%
+  below open [**Downday-035**, deployed 2026-04-19])
+
+**At VIX ≥28 (regime 3):** only Entry #2 (11:15) fires from the base schedule,
+plus Entry #3 conditional — so 2 entries max on extreme-VIX days.
+
+**E7:** DISABLED.
+
+**Historical note for reading old records (pre-2026-04-17):**
+Before Apr 17 2026, the VIX regime dropped E#1 only at high VIX. On low-VIX
+days before that date, the 10:15 slot also fired, so historical records may
+have `entry_number=1` at 10:15 and `entry_number=2` at 10:45. When reading
+a historical row: use `entry_time` as the authoritative slot identifier, not
+`entry_number` alone. Also note the old docs/backtests referred to the
+14:00 conditional as "E6" — that's the same slot as today's Entry #3.
+
+**Historical per-slot performance (37 reliable days, Feb 10 - Apr 10, 2026,
+using the old 10:15-inclusive numbering):**
+- 10:15 slot: 24% WR, -$79/entry — **WORST** (auto-dropped since 2026-04-17)
+- 10:45 slot: 35% WR, -$39/entry (now Entry #1)
+- 11:15 slot: 42% WR, -$14/entry — **BEST** (now Entry #2; preserved at all VIX levels)
 
 ---
 
@@ -29,10 +50,10 @@ This file is the single source of truth for HYDRA strategy parameters across all
 
 | Regime | VIX Range | Entries | Slots Kept | Call Min | Put Min | Effective Floors (call / put) |
 |--------|-----------|---------|------------|----------|---------|-------------------------------|
-| 0 | <18 (calm) | **2** | **10:45, 11:15** (drops E#1) | **$1.00** | **$1.25** | $0.90 / $1.15 |
-| 1 | 18-22 | **2** | **10:45, 11:15** (drops E#1) | **$0.50** | **$0.75** | $0.40 / $0.65 |
-| 2 | 22-28 | **2** | **10:45, 11:15** (drops E#1) | **$0.30** | **$0.50** | $0.20 / $0.40 |
-| 3 | ≥28 (extreme) | **1** | **11:15 only** (E#3) | **$0.30** | **$0.40** | $0.20 / $0.30 |
+| 0 | <18 (calm) | **2** | **10:45 (#1), 11:15 (#2)** | **$1.00** | **$1.25** | $0.90 / $1.15 |
+| 1 | 18-22 | **2** | **10:45 (#1), 11:15 (#2)** | **$0.50** | **$0.75** | $0.40 / $0.65 |
+| 2 | 22-28 | **2** | **10:45 (#1), 11:15 (#2)** | **$0.30** | **$0.50** | $0.20 / $0.40 |
+| 3 | ≥28 (extreme) | **1** | **11:15 only (#2)** | **$0.30** | **$0.40** | $0.20 / $0.30 |
 
 When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed to `min_credit − $0.10`; the config-level floors ($0.20 / $0.30) are only used if `vix_regime.enabled = false`.
 
@@ -56,8 +77,8 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 - **MKT-042:** Buffer decay — starts at 2.5× normal, linearly decays to 1× over 4 hours
 - **MKT-043:** Calm entry filter — delays entry up to 5min if SPX moved >15pt in last 3min
 - **Base-downday call-only:** DISABLED (`base_entry_downday_callonly_pct: null`). Removed 2026-04-19 after A/B threshold sweep showed negative EV at all values 0.57%-1.20% over Feb-Apr 2026 (incl. multiple sustained sell-offs). Base entries E2/E3 now always attempt full ICs; MKT-011/MKT-040 handle put-uninvestable days.
-- **Upday-035 (E6):** Put-only at 14:00 when SPX rises ≥0.25% above open (`upday_threshold_pct: 0.0025`, override_reason `upday-035`)
-- **Downday-035 (E6):** Call-only at 14:00 when SPX drops ≥0.25% below open (`conditional_downday_threshold_pct: 0.0025`, override_reason `downday-035`, deployed 2026-04-19). Stop = `call_credit + $2.60 theo put + call_stop_buffer` (same as MKT-035/038/040)
+- **Upday-035 (Entry #3 / 14:00):** Put-only at 14:00 when SPX rises ≥0.25% above open (`upday_threshold_pct: 0.0025`, override_reason `upday-035`). Docs refer to this slot as "E6" historically; today it's Entry #3.
+- **Downday-035 (Entry #3 / 14:00):** Call-only at 14:00 when SPX drops ≥0.25% below open (`conditional_downday_threshold_pct: 0.0025`, override_reason `downday-035`, deployed 2026-04-19). Stop = `call_credit + $2.60 theo put + call_stop_buffer` (same as MKT-035/038/040)
 - **Whipsaw filter:** Skip entry if intraday range > 1.75× expected move (`whipsaw_range_skip_mult: 1.75`)
 - **MKT-045:** Chain strike snap — after all overlap adjustments, snaps strikes to actual Saxo chain (far OTM uses 10-25pt intervals, not 5pt)
 - **MKT-046:** Stop anti-spike filter — breach must persist 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price. Logs full bid/ask on every breach event (`STOP-DETAIL`).
