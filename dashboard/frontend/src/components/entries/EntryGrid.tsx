@@ -52,6 +52,17 @@ export function EntryGrid() {
   const activeBaseSet = new Set(schedule?.base ?? canonicalBaseTimes);
   const activeCondSet = new Set(schedule?.conditional ?? canonicalCondTimes);
 
+  // Effective numbering (matches live bot code since 2026-04-21 rename).
+  // The bot emits `entry_number` based on its position in the POST-regime
+  // schedule, not the canonical schedule. So Entry #1 = first active base slot
+  // (10:45 when 10:15 is dropped), Entry #2 = second, and conditional slots
+  // continue the sequence.
+  const activeBaseTimes = canonicalBaseTimes.filter((t) => activeBaseSet.has(t));
+  const activeCondTimes = canonicalCondTimes.filter((t) => activeCondSet.has(t));
+  const effectiveBaseNum = (time: string) => activeBaseTimes.indexOf(time) + 1;
+  const effectiveCondNum = (time: string) =>
+    activeBaseTimes.length + activeCondTimes.indexOf(time) + 1;
+
   return (
     <div>
       <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
@@ -64,38 +75,40 @@ export function EntryGrid() {
         }`}
       >
         {canonicalBaseTimes.map((canonicalTime, i) => {
-          const canonicalLabel = `E${i + 1}`;
           const isActive = activeBaseSet.has(canonicalTime);
 
           if (!isActive) {
+            // Dropped slot — label it "canonical" (not numbered) since the bot's
+            // effective numbering skips it. Historical E#N reference preserved in
+            // the tooltip via scheduledTime.
             return (
-              <DroppedSlot key={i} label={canonicalLabel} scheduledTime={canonicalTime} />
+              <DroppedSlot key={i} label="canonical" scheduledTime={canonicalTime} />
             );
           }
 
+          const label = `#${effectiveBaseNum(canonicalTime)}`;
           const entry = findEntryForCanonicalTime(entries, canonicalTime);
           if (entry) {
-            return <EntryCard key={i} entry={entry} label={canonicalLabel} />;
+            return <EntryCard key={i} entry={entry} label={label} />;
           }
           return (
             <PendingSlot
               key={i}
-              label={canonicalLabel}
+              label={label}
               scheduledTime={canonicalTime}
             />
           );
         })}
       </div>
 
-      {/* Conditional entries — one card per canonical conditional slot. Header intentionally
-          omits the canonical number because the bot's conditional-slot naming has evolved
-          (E6/E7 historically, E4 now after the 3-base reconvergence); the time + direction
-          are what actually matter for the user. */}
+      {/* Conditional entries — one card per canonical conditional slot. Header reflects
+          both directions live config supports (Upday-035 put-only + Downday-035 call-only,
+          both enabled since 2026-04-19). The single 14:00 slot resolves direction at
+          runtime based on SPX vs session open. */}
       {showConditional && canonicalCondTimes.length > 0 && (
         <div className="mt-2">
           <span className="text-[10px] text-text-dim uppercase tracking-wider">
-            Conditional (Up-day ↑ put-only
-            {canonicalCondTimes.length > 1 ? " · Down-day ↓ call-only" : ""})
+            Conditional (Up-day ↑ put-only · Down-day ↓ call-only)
           </span>
           <div
             className={`grid gap-2 max-sm:grid-cols-1 mt-1 ${
@@ -105,27 +118,27 @@ export function EntryGrid() {
             }`}
           >
             {canonicalCondTimes.map((canonicalTime, i) => {
-              const canonicalLabel = `E${baseCount + i + 1}`;
               const isActive = activeCondSet.has(canonicalTime);
 
               if (!isActive) {
                 return (
                   <DroppedSlot
                     key={`cond-${i}`}
-                    label={canonicalLabel}
+                    label="canonical"
                     scheduledTime={canonicalTime}
                     isConditional
                   />
                 );
               }
 
+              const label = `#${effectiveCondNum(canonicalTime)}`;
               const entry = findEntryForCanonicalTime(entries, canonicalTime);
               if (entry) {
                 return (
                   <EntryCard
                     key={`cond-${i}`}
                     entry={entry}
-                    label={canonicalLabel}
+                    label={label}
                     isConditional
                   />
                 );
@@ -133,7 +146,7 @@ export function EntryGrid() {
               return (
                 <PendingSlot
                   key={`cond-${i}`}
-                  label={canonicalLabel}
+                  label={label}
                   scheduledTime={canonicalTime}
                   isConditional
                 />
