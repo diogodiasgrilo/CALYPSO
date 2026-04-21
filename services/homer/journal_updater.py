@@ -137,6 +137,11 @@ SECTION2_ROWS = [
     ("VIX Close", "VIX Close", lambda v: f"**{safe_float(v):.2f}**"),
     ("VIX High", "VIX High", lambda v: f"**{safe_float(v):.2f}**"),
     ("VIX Low", "VIX Low", lambda v: f"**{safe_float(v):.2f}**"),
+    # Phase 2 A-1/J-1: contracts_per_entry for the day. Reads the new Sheets
+    # "Contracts" column (Phase 2 D-4). Null-safe via `or 1` — pre-D-4 rows
+    # lack the column and read as empty string, which safe_int coerces to 1
+    # via the `or` fallback below. Default formatter shows the integer.
+    ("Contracts", "Contracts", lambda v: f"**{safe_int(v) or 1}**"),
     ("Entries Completed", "Entries Completed", lambda v: f"**{safe_int(v)}**"),
     ("Entries Skipped", "Entries Skipped", lambda v: f"**{safe_int(v)}**"),
     ("Full ICs", "Full ICs", lambda v: f"**{safe_int(v)}**"),

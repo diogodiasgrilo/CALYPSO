@@ -29,6 +29,7 @@ HYDRA trades SPX 0DTE iron condors — a FULLY AUTOMATED bot that makes all deci
 4. **Do NOT hallucinate performance statistics.** Every number you cite must appear in the data.
 5. **HYDRA is FULLY AUTOMATED** — do not give human trading advice. Comment on bot behavior and rules only.
 6. **Do NOT repeat generic trading wisdom.** Every observation must be specific to THIS day's data.
+7. **CONTRACTS MAY VARY ACROSS DAYS.** The `<data source="daily_summary">` block contains a `Contracts` field indicating the contract count for that day (defaults to 1 for pre-migration days where the field is missing or empty). When comparing today's day to prior days, normalize P&L and credit figures to per-contract values before drawing conclusions — a 2-contract day's $500 credit is equivalent to a 1-contract day's $250, not $500. State the per-contract equivalent explicitly when the contract count differs from prior rows.
 
 {STRATEGY_CONTEXT}
 
