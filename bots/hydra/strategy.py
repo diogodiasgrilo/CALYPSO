@@ -412,6 +412,13 @@ class HydraStrategy(MEICStrategy):
         self._bot_start_time = datetime.now()
 
         logger.info(f"HYDRA Strategy initialized")
+        # v8: prominent contract count line so log dumps immediately show the multiplier.
+        # Warning prefix when > 1 makes it unmissable in journalctl.
+        _cpe = self.contracts_per_entry
+        logger.info(
+            f"  Contracts per entry: {_cpe}"
+            + ("  \u26a0\ufe0f  (all P&L/credit/stop figures scale \u00d7{})".format(_cpe) if _cpe > 1 else "")
+        )
         logger.info(f"  Trend filter enabled: {self.trend_enabled}")
         logger.info(f"  EMA periods: {self.ema_short_period}/{self.ema_long_period}")
         logger.info(f"  Neutral threshold: {self.ema_neutral_threshold * 100:.2f}%")
@@ -1850,9 +1857,10 @@ class HydraStrategy(MEICStrategy):
                     else:
                         # Deferred fill lookup needed — capture UIC now before Phase 3 clears it
                         deferred_legs.append((entry, side_name, leg_name, order_id, uic))
-                    # Track close commission
-                    entry.close_commission += self.commission_per_leg
-                    self.daily_state.total_commission += self.commission_per_leg
+                    # Track close commission (scaled by contracts — this entry was placed
+                    # at entry.contracts, so its commission is per-leg × contracts)
+                    entry.close_commission += self.commission_per_leg * entry.contracts
+                    self.daily_state.total_commission += self.commission_per_leg * entry.contracts
                 else:
                     legs_failed += 1
                     logger.error(f"MKT-018: Failed to close {leg_name} for Entry #{entry.entry_number}")
@@ -3125,6 +3133,9 @@ class HydraStrategy(MEICStrategy):
                     "vix_at_skip": self.current_vix,
                     "estimated_call_credit": est_call / 100 if est_call else None,
                     "estimated_put_credit": est_put / 100 if est_put else None,
+                    # v8: contracts=0 means "no entry placed" (skip); signals to analytics
+                    # that this row should not be counted in per-contract aggregations.
+                    "contracts": 0,
                 })
             except Exception:
                 pass
@@ -3214,6 +3225,8 @@ class HydraStrategy(MEICStrategy):
                         snap["short_put_ask"] = getattr(entry, "short_put_ask", None)
                         snap["long_put_bid"] = getattr(entry, "long_put_bid", None)
                         snap["long_put_ask"] = getattr(entry, "long_put_ask", None)
+                    # v8: contract count of the entry being snapshotted
+                    snap["contracts"] = entry.contracts
                     snapshots.append(snap)
 
             if snapshots:
@@ -3335,6 +3348,8 @@ class HydraStrategy(MEICStrategy):
                 "shadow_spread_width": spread_width,
                 "is_skipped": 1 if is_skipped else 0,
                 "skip_reason": skip_reason,
+                # v8: contract count of the actual entry (0 if skipped)
+                "contracts": getattr(actual_entry, 'contracts', 0) if not is_skipped else 0,
                 **actual_data,
             })
         except Exception as e:
@@ -3412,6 +3427,8 @@ class HydraStrategy(MEICStrategy):
                 "margin_available": self._last_margin_snapshot.get("available"),
                 "margin_utilization_pct": self._last_margin_snapshot.get("utilization_pct"),
                 "config_version": HYDRA_VERSION,
+                # v8 contract count — stamped on entry at creation
+                "contracts": entry.contracts,
             }
 
             # Write entry data immediately (without Greeks)
@@ -3514,6 +3531,8 @@ class HydraStrategy(MEICStrategy):
                 "spx_move_since_entry": spx_move,
                 "minutes_held": minutes_held,
                 "cascade_gap_seconds": cascade_gap,
+                # v8 contract count of the stopped entry
+                "contracts": entry.contracts,
             })
         except Exception as e:
             logger.debug(f"DataRecorder stop write failed: {e}")
@@ -3565,6 +3584,8 @@ class HydraStrategy(MEICStrategy):
                 "economic_events": _json.dumps(events) if events else None,
                 "config_version": HYDRA_VERSION,
                 "opex_week": 1 if is_opex_week(now.date()) else 0,
+                # v8 contract count for the day
+                "contracts_per_entry": self.contracts_per_entry,
             })
 
             # Compute MAE/MFE from spread_snapshots
@@ -4979,19 +5000,23 @@ class HydraStrategy(MEICStrategy):
                 return False
 
             # Check profitability: appreciation must cover round-trip commission + slippage
+            # 2-contract scaling: appreciation is already total $ (× entry.contracts);
+            # threshold is per-entry-at-1c so scale by entry.contracts to preserve
+            # the "cover round-trip commission + slippage" semantic.
             appreciation = (bid - long_open_price) * 100 * entry.contracts
-            if appreciation < self.long_salvage_min_profit:
+            salvage_threshold = self.long_salvage_min_profit * entry.contracts
+            if appreciation < salvage_threshold:
                 logger.debug(
                     f"MKT-033: Entry #{entry.entry_number} long {side} below threshold: "
                     f"bid=${bid:.2f} - open=${long_open_price:.2f} = ${appreciation:.2f} "
-                    f"< ${self.long_salvage_min_profit:.2f} min"
+                    f"< ${salvage_threshold:.2f} min ({entry.contracts}c)"
                 )
                 return False
 
             logger.info(
                 f"MKT-033 LONG SALVAGE: Entry #{entry.entry_number} long {side} "
                 f"bid=${bid:.2f} (open=${long_open_price:.2f}), appreciation=${appreciation:.2f} "
-                f">= ${self.long_salvage_min_profit:.2f} threshold — selling via market order"
+                f">= ${salvage_threshold:.2f} threshold ({entry.contracts}c) — selling via market order"
             )
 
             # Sell the long via market order
@@ -5193,33 +5218,40 @@ class HydraStrategy(MEICStrategy):
         MKT-020/MKT-022 progressive tightening + regime-dependent credit minimums
         reduced skew from 3-7x to 1-3x.
 
+        2-contract scaling: buffers, theoretical put, and MIN_STOP_LEVEL are stored
+        in per-contract dollars. At `contracts_per_entry > 1` they must be multiplied
+        by contracts_per_entry so they match the contracts-scaled credit/spread_value.
+
         Args:
             entry: HydraIronCondorEntry to calculate stops for
         """
-        MIN_STOP_LEVEL = 50.0
+        n = self.contracts_per_entry
+        min_stop_level = 50.0 * n
+        call_buf = self.call_stop_buffer * n
+        put_buf = self.put_stop_buffer * n
+        theo_put = self.downday_theoretical_put_credit * n
 
         if entry.call_only:
             # Only call spread placed
             credit = entry.call_spread_credit
-            if credit < MIN_STOP_LEVEL:
+            if credit < min_stop_level:
                 logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
-                credit = MIN_STOP_LEVEL
+                credit = min_stop_level
 
             # All call-only entries use theoretical put for stop calculation:
             # stop = call_credit + theoretical_put ($260) + buffer
             # This applies to MKT-035 (conditional), MKT-038 (FOMC T+1),
             # and MKT-040 (put non-viable) — consistent formula for all.
-            theoretical_put = self.downday_theoretical_put_credit
-            base_stop = credit + theoretical_put
+            base_stop = credit + theo_put
             override = getattr(entry, 'override_reason', None) or "mkt-040"
             logger.info(
                 f"{override.upper()}: Call-only stop = call ${credit:.2f} + "
-                f"theoretical put ${theoretical_put:.2f} + buffer ${self.call_stop_buffer:.2f} "
-                f"= ${base_stop + self.call_stop_buffer:.2f}"
+                f"theoretical put ${theo_put:.2f} + buffer ${call_buf:.2f} "
+                f"= ${base_stop + call_buf:.2f} ({n}c)"
             )
 
-            stop_level = base_stop + self.call_stop_buffer
-            stop_level = max(stop_level, MIN_STOP_LEVEL)
+            stop_level = base_stop + call_buf
+            stop_level = max(stop_level, min_stop_level)
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = 0  # No put side
@@ -5227,20 +5259,20 @@ class HydraStrategy(MEICStrategy):
         elif entry.put_only:
             # Only put spread placed
             credit = entry.put_spread_credit
-            if credit < MIN_STOP_LEVEL:
+            if credit < min_stop_level:
                 logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
-                credit = MIN_STOP_LEVEL
+                credit = min_stop_level
 
             # MKT-039: Put-only stop = credit + $1.75 buffer (same pattern as full IC puts).
             # The $1.75 put buffer prevents false stops (walk-forward optimized); the old
             # 2× multiplier was redundant and inflated max loss.
             # Note: Call-only legacy keeps 2× because call buffer is only $0.10.
             base_stop = credit
-            stop_level = base_stop + self.put_stop_buffer
+            stop_level = base_stop + put_buf
 
             entry.put_side_stop = stop_level
             entry.call_side_stop = 0  # No call side
-            logger.info(f"Stop level for put spread: ${stop_level:.2f} (credit ${credit:.2f} + buffer ${self.put_stop_buffer:.2f})")
+            logger.info(f"Stop level for put spread: ${stop_level:.2f} (credit ${credit:.2f} + buffer ${put_buf:.2f}, {n}c)")
 
         else:
             # Full IC — stop = total_credit + asymmetric buffer (call_stop_buffer,
@@ -5248,25 +5280,25 @@ class HydraStrategy(MEICStrategy):
             # minimums keep skew manageable.
             total_credit = entry.total_credit
 
-            if total_credit < MIN_STOP_LEVEL:
+            if total_credit < min_stop_level:
                 logger.critical(f"CRITICAL: Total credit ${total_credit:.2f} very low, using minimum stop")
-                total_credit = MIN_STOP_LEVEL
+                total_credit = min_stop_level
 
             base_stop = total_credit
-            call_stop_level = base_stop + self.call_stop_buffer
-            put_stop_level = base_stop + self.put_stop_buffer
+            call_stop_level = base_stop + call_buf
+            put_stop_level = base_stop + put_buf
 
             entry.call_side_stop = call_stop_level
             entry.put_side_stop = put_stop_level
-            if self.put_stop_buffer != self.call_stop_buffer:
+            if put_buf != call_buf:
                 logger.info(
                     f"Stop level for full IC: call=${call_stop_level:.2f}, put=${put_stop_level:.2f} "
-                    f"(total credit ${total_credit:.2f} + call buffer ${self.call_stop_buffer:.2f} / put buffer ${self.put_stop_buffer:.2f})"
+                    f"(total credit ${total_credit:.2f} + call buffer ${call_buf:.2f} / put buffer ${put_buf:.2f}, {n}c)"
                 )
             else:
                 logger.info(
                     f"Stop level for full IC: ${call_stop_level:.2f} per side "
-                    f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f} + buffer ${self.call_stop_buffer:.2f})"
+                    f"(total credit: call=${entry.call_spread_credit:.2f} + put=${entry.put_spread_credit:.2f} = ${total_credit:.2f} + buffer ${call_buf:.2f}, {n}c)"
                 )
             # MKT-042: Log initial decayed stop levels if buffer decay is active
             if (self.buffer_decay_start_mult is not None
@@ -5502,8 +5534,10 @@ class HydraStrategy(MEICStrategy):
                 return base_stop
             decay_factor = max(0.0, min(1.0, 1.0 - elapsed_h / self.buffer_decay_hours))
             if decay_factor > 0:
+                # 2-contract scaling: buffer is per-contract; scale via entry.contracts
+                # to match the contract count the entry was placed at (not current config).
                 buf = self.call_stop_buffer if side == "call" else self.put_stop_buffer
-                extra = buf * (self.buffer_decay_start_mult - 1) * decay_factor
+                extra = buf * entry.contracts * (self.buffer_decay_start_mult - 1) * decay_factor
                 return base_stop + extra
         return base_stop
 
@@ -7033,6 +7067,14 @@ class HydraStrategy(MEICStrategy):
 
         lines = [
             f"\u2699\ufe0f *HYDRA* | Config (v{HYDRA_VERSION})",
+        ]
+        # v8: surface contract count prominently when > 1 so users don't miss the scaling.
+        # All credit/stop/buffer figures below are per-contract; live P&L is total.
+        if contracts > 1:
+            lines.append(
+                f"\u26a0\ufe0f *CONTRACTS/ENTRY = {contracts}* \u2014 all credit/P&L/stop figures scale \u00d7{contracts}"
+            )
+        lines.extend([
             "",
             "\u2501\u2501\u2501 Entries \u2501\u2501\u2501",
             f"Schedule: {schedule}",
@@ -7056,7 +7098,7 @@ class HydraStrategy(MEICStrategy):
             "",
             "\u2501\u2501\u2501 Smart Entry (MKT-031) \u2501\u2501\u2501",
             f"Enabled: {'Yes' if self.smart_entry_enabled else 'No'}",
-        ]
+        ])
 
         if self.smart_entry_enabled:
             lines.append(f"Window: {self.scout_window_minutes}min | Threshold: {self.scout_score_threshold}")
@@ -8679,74 +8721,82 @@ class HydraStrategy(MEICStrategy):
         entry.is_complete = has_all_legs
 
         # CRITICAL SAFETY CHECK: Prevent zero stop levels
-        MIN_STOP_LEVEL = 50.0
+        # 2-contract scaling: buffers/theoretical-put/floor are per-contract; scale by
+        # entry.contracts (the contract count stamped when the entry was placed), NOT
+        # self.contracts_per_entry (current config) — entries must retain their original
+        # scaling semantics even if config flipped since they were opened.
+        n = entry.contracts
+        min_stop_level = 50.0 * n
+        put_buf = self.put_stop_buffer * n
+        call_buf_live = self.call_stop_buffer * n
 
         # One-sided entry stop levels (must match _calculate_stop_levels_hydra behavior).
         # Call-only: call_credit + theoretical_put ($250) + buffer (consistent for all call-only types).
         # Put-only: credit + $1.75 buffer (MKT-039 — $1.75 buffer prevents false stops, walk-forward optimized).
         if entry.call_only:
             credit = entry.call_spread_credit
-            if credit < MIN_STOP_LEVEL:
+            if credit < min_stop_level:
                 logger.critical(
                     f"Recovery CRITICAL: Entry #{entry.entry_number} (call-only) has low credit "
-                    f"(${credit:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+                    f"(${credit:.2f}). Using minimum stop level ${min_stop_level:.2f}."
                 )
-                credit = MIN_STOP_LEVEL
+                credit = min_stop_level
 
             # All call-only entries: call_credit + theoretical_put + buffer
-            # Use getattr with default — recovery may run before HYDRA config is loaded
-            theoretical_put = getattr(self, 'downday_theoretical_put_credit', 260.0)
-            call_stop_buffer = getattr(self, 'call_stop_buffer', 35.0)
+            # Use getattr with default — recovery may run before HYDRA config is loaded.
+            # Defaults are per-contract; scale by entry.contracts.
+            theoretical_put = getattr(self, 'downday_theoretical_put_credit', 260.0) * n
+            call_stop_buffer = getattr(self, 'call_stop_buffer', 35.0) * n
             base_stop = credit + theoretical_put
             override = getattr(entry, 'override_reason', None) or "mkt-040"
             logger.info(
                 f"Recovery: {override.upper()} call-only stop = call ${credit:.2f} + "
-                f"theoretical put ${theoretical_put:.2f} + buffer ${call_stop_buffer:.2f}"
+                f"theoretical put ${theoretical_put:.2f} + buffer ${call_stop_buffer:.2f} ({n}c)"
             )
 
             stop_level = base_stop + call_stop_buffer
-            stop_level = max(stop_level, MIN_STOP_LEVEL)
+            stop_level = max(stop_level, min_stop_level)
 
             entry.call_side_stop = stop_level
             entry.put_side_stop = 0  # No put side to monitor
-            logger.info(f"Recovery: Call-only stop = ${stop_level:.2f}")
+            logger.info(f"Recovery: Call-only stop = ${stop_level:.2f} ({n}c)")
 
         elif entry.put_only:
             credit = entry.put_spread_credit
-            if credit < MIN_STOP_LEVEL:
+            if credit < min_stop_level:
                 logger.critical(
                     f"Recovery CRITICAL: Entry #{entry.entry_number} (put-only) has low credit "
-                    f"(${credit:.2f}). Using minimum stop level ${MIN_STOP_LEVEL:.2f}."
+                    f"(${credit:.2f}). Using minimum stop level ${min_stop_level:.2f}."
                 )
-                credit = MIN_STOP_LEVEL
+                credit = min_stop_level
 
             # MKT-039: Put-only stop = credit + $1.75 buffer (matches _calculate_stop_levels_hydra)
             base_stop = credit
-            stop_level = base_stop + self.put_stop_buffer
+            stop_level = base_stop + put_buf
 
             entry.put_side_stop = stop_level
             entry.call_side_stop = 0  # No call side to monitor
-            logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (credit ${credit:.2f} + buffer ${self.put_stop_buffer:.2f})")
+            logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (credit ${credit:.2f} + buffer ${put_buf:.2f}, {n}c)")
         else:
             # Full IC — stop = total_credit + buffer (asymmetric: call uses call_stop_buffer, put uses put_stop_buffer)
             total_credit = entry.total_credit
 
-            if total_credit < MIN_STOP_LEVEL:
+            if total_credit < min_stop_level:
                 logger.critical(
                     f"Recovery CRITICAL: Entry #{entry.entry_number} total credit too low "
                     f"(${total_credit:.2f}). Using minimum."
                 )
-                total_credit = MIN_STOP_LEVEL
+                total_credit = min_stop_level
 
             base_stop = total_credit
-            call_stop_level = base_stop + self.call_stop_buffer
-            put_stop_level = base_stop + self.put_stop_buffer
+            call_stop_level = base_stop + call_buf_live
+            put_stop_level = base_stop + put_buf
 
             entry.call_side_stop = call_stop_level
             entry.put_side_stop = put_stop_level
             logger.info(
                 f"Recovery: Full IC stop = call ${call_stop_level:.2f} / put ${put_stop_level:.2f} "
-                f"(total credit ${total_credit:.2f} + call buf ${self.call_stop_buffer:.2f} / put buf ${self.put_stop_buffer:.2f})"
+                f"(total credit ${total_credit:.2f} + call buf ${call_buf_live:.2f} / put buf ${put_buf:.2f}, {n}c)"
             )
 
         return entry

@@ -216,10 +216,22 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     try:
         mode = "DRY-RUN" if dry_run else "LIVE"
         status = strategy.get_status_summary()
+        contracts = getattr(strategy, 'contracts_per_entry', 1)
+        # Prefix title with a contracts warning when > 1 so the alert is unmissable
+        title_prefix = f"\u26a0\ufe0f {contracts}c " if contracts > 1 else ""
+        scale_note = (
+            f" \u26a0\ufe0f  all P&L/credit/stop figures are scaled \u00d7{contracts}"
+            if contracts > 1 else ""
+        )
         strategy.alert_service.send_alert(
             alert_type=AlertType.BOT_STARTED,
-            title=f"Bot Started ({mode})",
-            message=f"HYDRA started in {mode} mode.\nState: {status.get('state', 'Unknown')}, Entries today: {status.get('entries_completed', 0)}",
+            title=f"{title_prefix}Bot Started ({mode})",
+            message=(
+                f"HYDRA started in {mode} mode.\n"
+                f"Contracts/entry: {contracts}{scale_note}\n"
+                f"State: {status.get('state', 'Unknown')}, "
+                f"Entries today: {status.get('entries_completed', 0)}"
+            ),
             priority=AlertPriority.LOW,
         )
     except Exception as e:

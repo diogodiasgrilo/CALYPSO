@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS market_ticks (
@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS trade_entries (
     margin_utilization_pct REAL,
     config_version TEXT,
     attempts INTEGER DEFAULT 1,
+    contracts INTEGER NOT NULL DEFAULT 1,  -- v8: contract count at entry time (for multi-contract scaling)
     PRIMARY KEY (date, entry_number)
 );
 
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS trade_stops (
     spx_move_since_entry REAL,
     minutes_held REAL,
     cascade_gap_seconds REAL,
+    contracts INTEGER NOT NULL DEFAULT 1,  -- v8: contract count of the stopped entry
     PRIMARY KEY (date, entry_number, side)
 );
 
@@ -127,7 +129,8 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
     realized_volatility REAL,
     economic_events TEXT,
     config_version TEXT,
-    opex_week INTEGER DEFAULT 0
+    opex_week INTEGER DEFAULT 0,
+    contracts_per_entry INTEGER NOT NULL DEFAULT 1  -- v8: contract count for the day
 );
 
 CREATE TABLE IF NOT EXISTS schema_info (
@@ -152,6 +155,7 @@ CREATE TABLE IF NOT EXISTS spread_snapshots (
     short_put_ask REAL,
     long_put_bid REAL,
     long_put_ask REAL,
+    contracts INTEGER NOT NULL DEFAULT 1,  -- v8: contract count of the entry being snapshotted
     PRIMARY KEY (timestamp, entry_number)
 );
 
@@ -209,6 +213,7 @@ CREATE TABLE IF NOT EXISTS shadow_entries (
     actual_entry_type TEXT,
     is_skipped INTEGER DEFAULT 0,
     skip_reason TEXT,
+    contracts INTEGER NOT NULL DEFAULT 1,  -- v8: contract count of actual entry (0 if skipped)
     PRIMARY KEY (date, entry_number)
 );
 
@@ -378,6 +383,32 @@ class BacktestingDB:
                 pass
             logger.info("DB migrated to schema v7 (shadow_entries table)")
 
+        if current < 8:
+            # v8: contract count per row for multi-contract scaling. Wrapped in a
+            # single transaction so a partial failure rolls back cleanly and
+            # schema_info.version stays at 7 for retry. All existing rows default
+            # to contracts=1 — historically accurate since the bot ran 1c until
+            # this migration landed.
+            v8_alters = [
+                "ALTER TABLE trade_entries ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE trade_stops ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE spread_snapshots ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE shadow_entries ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE daily_summaries ADD COLUMN contracts_per_entry INTEGER NOT NULL DEFAULT 1",
+            ]
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for sql in v8_alters:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass  # Column already exists (idempotent retry)
+                conn.execute("COMMIT")
+                logger.info("DB migrated to schema v8 (per-row contracts column)")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode."""
         conn = sqlite3.connect(self.db_path)
@@ -449,8 +480,9 @@ class BacktestingDB:
              call_credit, put_credit, total_credit,
              call_spread_width, put_spread_width,
              mkt031_score, mkt031_early,
-             otm_distance_call, otm_distance_put)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             otm_distance_call, otm_distance_put,
+             contracts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         rows = [
             (
@@ -476,6 +508,7 @@ class BacktestingDB:
                 e.get("mkt031_early"),
                 e.get("otm_distance_call"),
                 e.get("otm_distance_put"),
+                e.get("contracts", 1),  # v8: default 1 for pre-migration backfills
             )
             for e in entries
         ]
@@ -493,8 +526,8 @@ class BacktestingDB:
             (date, entry_number, side, stop_time, spx_at_stop,
              trigger_level, actual_debit, net_pnl,
              salvage_sold, salvage_revenue,
-             confirmation_seconds, breach_recoveries)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             confirmation_seconds, breach_recoveries, contracts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         rows = [
             (
@@ -510,6 +543,7 @@ class BacktestingDB:
                 s.get("salvage_revenue", 0.0),
                 s.get("confirmation_seconds", 0),
                 s.get("breach_recoveries", 0),
+                s.get("contracts", 1),  # v8
             )
             for s in stops
         ]
@@ -526,8 +560,8 @@ class BacktestingDB:
              vix_open, vix_close,
              entries_placed, entries_stopped, entries_expired,
              gross_pnl, net_pnl, commission, long_salvage_revenue,
-             day_type, day_of_week)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             day_type, day_of_week, contracts_per_entry)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         row = (
             summary["date"],
@@ -547,6 +581,7 @@ class BacktestingDB:
             summary.get("long_salvage_revenue", 0.0),
             summary.get("day_type"),
             summary.get("day_of_week"),
+            summary.get("contracts_per_entry", 1),  # v8
         )
         with self._connect() as conn:
             cursor = conn.execute(sql, row)
@@ -570,8 +605,8 @@ class BacktestingDB:
             (timestamp, entry_number, call_spread_value, put_spread_value,
              short_call_price, long_call_price, short_put_price, long_put_price,
              short_call_bid, short_call_ask, long_call_bid, long_call_ask,
-             short_put_bid, short_put_ask, long_put_bid, long_put_ask)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             short_put_bid, short_put_ask, long_put_bid, long_put_ask, contracts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         rows = [
             (
@@ -591,6 +626,7 @@ class BacktestingDB:
                 s.get("short_put_ask"),
                 s.get("long_put_bid"),
                 s.get("long_put_ask"),
+                s.get("contracts", 1),  # v8
             )
             for s in snapshots
         ]

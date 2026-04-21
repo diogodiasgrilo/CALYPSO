@@ -6991,7 +6991,11 @@ class MEICStrategy:
                 "date": summary["date"],
                 "net_pnl": net_pnl,
                 "capital_deployed": capital_deployed,
-                "return_pct": net_pnl / capital_deployed
+                "return_pct": net_pnl / capital_deployed,
+                # v8: record contract count per day so downstream (HERMES per-contract avg,
+                # CLIO weekly aggregation) can normalize mixed-contract history correctly.
+                # Readers that predate v8 should default to 1 via .get("contracts_per_entry", 1).
+                "contracts_per_entry": self.contracts_per_entry,
             })
 
         self._save_cumulative_metrics(trading_date=summary["date"])
@@ -7516,20 +7520,24 @@ class MEICStrategy:
 
             # Calculate required margin for next entry
             # Each IC needs max(call_spread, put_spread) × $100 × contracts
-            required = MIN_BUYING_POWER_PER_IC
+            # 2-contract scaling: MIN_BUYING_POWER_PER_IC is the per-contract floor;
+            # multiply by contracts_per_entry so the gate remains functional at higher
+            # contract counts (worst-case per-IC margin scales linearly with contracts).
+            required = MIN_BUYING_POWER_PER_IC * self.contracts_per_entry
 
             if available < required:
                 logger.warning(
                     f"ORDER-004: Insufficient buying power. "
-                    f"Available: ${available:,.2f}, Required: ${required:,.2f}, "
+                    f"Available: ${available:,.2f}, Required: ${required:,.2f} "
+                    f"({self.contracts_per_entry}c × ${MIN_BUYING_POWER_PER_IC:,.0f}), "
                     f"Utilization: {margin_pct:.1f}%"
                 )
                 return False, (
                     f"Insufficient BP: ${available:,.2f} < ${required:,.2f} "
-                    f"(margin {margin_pct:.1f}% used)"
+                    f"({self.contracts_per_entry}c, margin {margin_pct:.1f}% used)"
                 )
 
-            return True, f"BP OK: ${available:,.2f} (margin {margin_pct:.1f}% used)"
+            return True, f"BP OK: ${available:,.2f} (margin {margin_pct:.1f}% used, req ${required:,.0f} at {self.contracts_per_entry}c)"
 
         except Exception as e:
             logger.error(f"ORDER-004: Error checking buying power: {e}")

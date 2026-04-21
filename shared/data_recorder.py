@@ -356,8 +356,8 @@ class DataRecorder:
                     (timestamp, entry_number, call_spread_value, put_spread_value,
                      short_call_price, long_call_price, short_put_price, long_put_price,
                      short_call_bid, short_call_ask, long_call_bid, long_call_ask,
-                     short_put_bid, short_put_ask, long_put_bid, long_put_ask)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     short_put_bid, short_put_ask, long_put_bid, long_put_ask, contracts)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     [
                         (
                             timestamp,
@@ -376,6 +376,7 @@ class DataRecorder:
                             s.get("short_put_ask"),
                             s.get("long_put_bid"),
                             s.get("long_put_ask"),
+                            s.get("contracts", 1),  # v8: contract count of the entry
                         )
                         for s in snapshots
                     ],
@@ -410,10 +411,14 @@ class DataRecorder:
                 "time_to_fill_ms", "slippage_call", "slippage_put",
                 "margin_available", "margin_utilization_pct",
                 "config_version", "attempts",
+                # v8 contract count
+                "contracts",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            values = tuple(entry_data.get(c) for c in cols)
+            # v8: default contracts to 1 when caller omits it (backfills, legacy code)
+            values = tuple(entry_data.get(c) if c != "contracts" else entry_data.get("contracts", 1)
+                           for c in cols)
 
             with self._connect() as conn:
                 conn.execute(
@@ -442,10 +447,13 @@ class DataRecorder:
                 # v5 new columns
                 "quoted_mid_at_stop", "slippage_on_close",
                 "spx_move_since_entry", "minutes_held", "cascade_gap_seconds",
+                # v8 contract count
+                "contracts",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            values = tuple(stop_data.get(c) for c in cols)
+            values = tuple(stop_data.get(c) if c != "contracts" else stop_data.get("contracts", 1)
+                           for c in cols)
 
             with self._connect() as conn:
                 conn.execute(
@@ -511,10 +519,13 @@ class DataRecorder:
                 "actual_otm_distance_call", "actual_otm_distance_put",
                 "actual_call_credit", "actual_put_credit", "actual_entry_type",
                 "is_skipped", "skip_reason",
+                # v8 contract count
+                "contracts",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            values = tuple(shadow_data.get(c) for c in cols)
+            values = tuple(shadow_data.get(c) if c != "contracts" else shadow_data.get("contracts", 1)
+                           for c in cols)
 
             with self._connect() as conn:
                 conn.execute(
@@ -547,6 +558,8 @@ class DataRecorder:
                 # v5 new columns
                 "overnight_gap", "realized_volatility", "economic_events",
                 "config_version", "opex_week",
+                # v8 contract count per day
+                "contracts_per_entry",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
