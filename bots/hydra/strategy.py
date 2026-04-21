@@ -1847,8 +1847,11 @@ class HydraStrategy(MEICStrategy):
                     except Exception as e:
                         logger.warning(f"  Fix #81: Quote check failed for {leg_name}: {e}, proceeding with close")
 
+                # v8: pass entry.contracts — MKT-018 early close of a mid-day-flipped
+                # entry must still target the contracts actually open.
                 success, fill_price, order_id = self._close_position_with_retry(
-                    pos_id, leg_name, uic=uic, entry_number=entry.entry_number
+                    pos_id, leg_name, uic=uic, entry_number=entry.entry_number,
+                    contracts=entry.contracts,
                 )
                 if success:
                     legs_closed += 1
@@ -4775,8 +4778,10 @@ class HydraStrategy(MEICStrategy):
             # Close only the short leg via market order
             for pos_id, leg_name, uic in positions_to_close:
                 if pos_id:
+                    # v8: pass entry.contracts (MKT-025 short-only stop of legacy entry)
                     _, fill_price, order_id = self._close_position_with_retry(
-                        pos_id, leg_name, uic=uic, entry_number=entry.entry_number
+                        pos_id, leg_name, uic=uic, entry_number=entry.entry_number,
+                        contracts=entry.contracts,
                     )
                     if fill_price is not None:
                         # Short leg: we BUY to close (costs money)
@@ -5028,9 +5033,11 @@ class HydraStrategy(MEICStrategy):
                 f">= ${salvage_threshold:.2f} threshold ({entry.contracts}c) — selling via market order"
             )
 
-            # Sell the long via market order
+            # Sell the long via market order — v8: pass entry.contracts so salvage
+            # of a legacy 1c entry under 2c config still orders amount=1.
             success, fill_price, order_id = self._close_position_with_retry(
-                long_pos_id, f"long_{side}", uic=long_uic, entry_number=entry.entry_number
+                long_pos_id, f"long_{side}", uic=long_uic, entry_number=entry.entry_number,
+                contracts=entry.contracts,
             )
 
             if not success:
@@ -9078,7 +9085,10 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.call_only = call_only
                 restored_entry.put_only = put_only
                 # Fix #52: Restore contract count (default to current config if not saved)
-                restored_entry.contracts = entry_data.get("contracts", self.contracts_per_entry)
+                # v8 null-safe: dict.get returns None (not default) when key is present
+                # with a null JSON value. `or` treats None, 0, and missing identically
+                # and falls back to current config — contracts must be a positive int.
+                restored_entry.contracts = entry_data.get("contracts") or self.contracts_per_entry
 
                 if entry_data.get("trend_signal"):
                     try:
@@ -9380,7 +9390,9 @@ class HydraStrategy(MEICStrategy):
                                         # Critical when config flips mid-day (1c→2c): stops, spread
                                         # values, P&L, commissions must stay at the original contract
                                         # count for entries already in the market.
-                                        "contracts": entry_data.get("contracts", self.contracts_per_entry),
+                                        # v8 null-safe: `or` instead of default arg so JSON null or 0 also
+                                        # falls back to current config (both are invalid for live entries).
+                                        "contracts": entry_data.get("contracts") or self.contracts_per_entry,
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -9422,7 +9434,10 @@ class HydraStrategy(MEICStrategy):
                     # config; that's wrong if config flipped while this entry was open.
                     # saved["contracts"] is the count at the time the entry was placed —
                     # use it so spread_value / stop_level / commission all stay consistent.
-                    entry.contracts = saved.get("contracts", entry.contracts)
+                    # v8 null-safe: `or` falls back on None (JSON null), 0, and missing alike.
+                    # Bug E-6 scenario: state file with "contracts": null from a crash mid-write
+                    # would otherwise set entry.contracts = None → TypeError in all downstream math.
+                    entry.contracts = saved.get("contracts") or entry.contracts
                     entry.call_spread_credit = saved["call_credit"]
                     entry.put_spread_credit = saved["put_credit"]
                     entry.call_side_stop = saved["call_stop"]
@@ -9592,7 +9607,8 @@ class HydraStrategy(MEICStrategy):
                     stopped_entry.call_only = stopped_entry_data.get("call_only", False)
                     stopped_entry.put_only = stopped_entry_data.get("put_only", False)
                     # Fix #52: Restore contract count (default to current config if not saved)
-                    stopped_entry.contracts = stopped_entry_data.get("contracts", self.contracts_per_entry)
+                    # v8 null-safe (see E-6): `or` handles None/0/missing uniformly
+                    stopped_entry.contracts = stopped_entry_data.get("contracts") or self.contracts_per_entry
                     if stopped_entry_data.get("trend_signal"):
                         try:
                             stopped_entry.trend_signal = TrendSignal(stopped_entry_data["trend_signal"])

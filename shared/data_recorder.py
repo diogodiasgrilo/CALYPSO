@@ -408,7 +408,7 @@ class DataRecorder:
                             s.get("short_put_ask"),
                             s.get("long_put_bid"),
                             s.get("long_put_ask"),
-                            s.get("contracts", 1),  # v8: contract count of the entry
+                            s.get("contracts") or 1,  # v8 null-safe: None/0/missing → 1
                         )
                         for s in snapshots
                     ],
@@ -448,9 +448,13 @@ class DataRecorder:
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            # v8: default contracts to 1 when caller omits it (backfills, legacy code)
-            values = tuple(entry_data.get(c) if c != "contracts" else entry_data.get("contracts", 1)
-                           for c in cols)
+            # v8 null-safe: `or 1` handles None/0/missing. Column is NOT NULL DEFAULT 1;
+            # passing explicit None would violate the constraint (silently swallowed
+            # by _safe_write). Legacy backfill callers that omit the key still succeed.
+            values = tuple(
+                entry_data.get(c) if c != "contracts" else (entry_data.get("contracts") or 1)
+                for c in cols
+            )
 
             with self._connect() as conn:
                 conn.execute(
@@ -484,8 +488,11 @@ class DataRecorder:
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            values = tuple(stop_data.get(c) if c != "contracts" else stop_data.get("contracts", 1)
-                           for c in cols)
+            # v8 null-safe (see record_entry)
+            values = tuple(
+                stop_data.get(c) if c != "contracts" else (stop_data.get("contracts") or 1)
+                for c in cols
+            )
 
             with self._connect() as conn:
                 conn.execute(
@@ -556,8 +563,17 @@ class DataRecorder:
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            values = tuple(shadow_data.get(c) if c != "contracts" else shadow_data.get("contracts", 1)
-                           for c in cols)
+            # v8 null-safe for shadow_entries. Distinct from trade_entries/trade_stops:
+            # shadow rows can legitimately have contracts=0 as a "skipped, no entry
+            # placed" sentinel (paired with is_skipped=1). So we ONLY coerce None /
+            # missing to the DEFAULT 1; an explicit 0 is preserved.
+            def _contracts_shadow(data):
+                v = data.get("contracts")
+                return 1 if v is None else v  # preserve 0, coerce None to 1
+            values = tuple(
+                shadow_data.get(c) if c != "contracts" else _contracts_shadow(shadow_data)
+                for c in cols
+            )
 
             with self._connect() as conn:
                 conn.execute(
@@ -595,12 +611,11 @@ class DataRecorder:
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            # v8: contracts_per_entry column is NOT NULL DEFAULT 1 — caller that
-            # omits it would pass None and hit a constraint violation. Default to 1
-            # defensively so legacy/backfill callers without this key still succeed.
+            # v8 null-safe: contracts_per_entry is NOT NULL DEFAULT 1. Handles
+            # missing key AND explicit None (JSON null).
             values = tuple(
                 summary_data.get(c) if c != "contracts_per_entry"
-                else summary_data.get("contracts_per_entry", 1)
+                else (summary_data.get("contracts_per_entry") or 1)
                 for c in cols
             )
 

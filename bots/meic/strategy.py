@@ -3637,12 +3637,14 @@ class MEICStrategy:
                 try:
                     # CRITICAL FIX (2026-02-03): Use market order instead of DELETE endpoint
                     # Determine direction: short positions need BUY to close, long positions need SELL
+                    # v8: unwinding a leg from the CURRENT entry — use entry.contracts
+                    # (equal to self.contracts_per_entry at placement time but explicit).
                     buy_sell = BuySell.BUY if leg_name.startswith("short") else BuySell.SELL
                     result = self.client.place_emergency_order(
                         uic=uic,
                         asset_type="StockIndexOption",
                         buy_sell=buy_sell,
-                        amount=self.contracts_per_entry,
+                        amount=entry.contracts,
                         order_type=OrderType.MARKET,
                         to_open_close="ToClose"
                     )
@@ -3902,8 +3904,11 @@ class MEICStrategy:
                         except Exception as e:
                             logger.warning(f"  Fix #83a: Quote check failed for {leg_name}: {e}, proceeding with close")
 
+                    # v8: pass entry.contracts so the close order size matches what was
+                    # actually opened, not current config (catches mid-day flip scenario).
                     success, fill_price, order_id = self._close_position_with_retry(
-                        pos_id, leg_name, uic=uic, entry_number=entry.entry_number
+                        pos_id, leg_name, uic=uic, entry_number=entry.entry_number,
+                        contracts=entry.contracts,
                     )
                     if success:
                         legs_actually_closed += 1
@@ -4027,7 +4032,8 @@ class MEICStrategy:
         return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${stop_level:.2f})"
 
     def _close_position_with_retry(
-        self, position_id: str, leg_name: str, uic: int = None, entry_number: int = None
+        self, position_id: str, leg_name: str, uic: int = None, entry_number: int = None,
+        contracts: Optional[int] = None,
     ) -> Tuple[bool, Optional[float], Optional[str]]:
         """
         EMERGENCY-001: Close a position with enhanced retry logic and spread validation.
@@ -4040,6 +4046,10 @@ class MEICStrategy:
         5. FIX #42 (2026-02-05): Captures actual fill price for accurate P&L
         6. Fix #45 (2026-02-06): Handles merged positions (multiple entries at same strike)
         7. FIX #70 (2026-02-12): Returns order_id for deferred price lookup
+        8. v8 (2026-04-21): Accepts explicit `contracts` param so callers can pass the
+           stamped entry.contracts instead of relying on self.contracts_per_entry. This
+           matters after a mid-day config flip (1c→2c) with existing open 1c positions:
+           the close order amount must match the ACTUAL size on Saxo, not the new config.
 
         CRITICAL FIX (2026-02-03): Saxo's DELETE /trade/v2/positions/{id} endpoint
         returns 404 for SPX options. Must use place_emergency_order with ToClose instead.
@@ -4049,6 +4059,8 @@ class MEICStrategy:
             leg_name: Name for logging (e.g., "short_call", "long_put")
             uic: Option UIC for spread checking (required for placing close order)
             entry_number: Fix #45 - Entry number being closed (for merged position handling)
+            contracts: v8 - Contract count to close. Defaults to self.contracts_per_entry
+                       when None (backwards-compat for call sites not yet updated).
 
         Returns:
             Tuple of (success: bool, fill_price: Optional[float], order_id: Optional[str])
@@ -4056,6 +4068,9 @@ class MEICStrategy:
             - If fill_price is None, P&L calculation should fall back to theoretical
             - order_id is the close order ID for deferred price lookup (FIX #70)
         """
+        # v8: resolve contract count. Defense in depth: if caller passes 0 or None, fall
+        # back to current config (invalid value likely means caller didn't wire it).
+        close_contracts = contracts if contracts else self.contracts_per_entry
         # UIC is REQUIRED now - we need it to place the close order
         if not uic:
             logger.error(f"EMERGENCY-001: Cannot close {leg_name} without UIC!")
@@ -4129,16 +4144,19 @@ class MEICStrategy:
 
                 # CRITICAL FIX: Use place_emergency_order with ToClose instead of DELETE endpoint
                 # This is how Iron Fly and Delta Neutral successfully close positions
+                # v8: amount = close_contracts (from the `contracts` kwarg or fallback to
+                # current config) — NOT self.contracts_per_entry directly, so a mid-day
+                # config flip doesn't place wrong-sized close orders on legacy entries.
                 logger.info(
                     f"EMERGENCY-001: Closing {leg_name} via {order_type.value} order "
-                    f"(UIC={uic}, {buy_sell.value}, amount={self.contracts_per_entry})"
+                    f"(UIC={uic}, {buy_sell.value}, amount={close_contracts})"
                     + (f" @ ${limit_price:.2f}" if limit_price else "")
                 )
                 result = self.client.place_emergency_order(
                     uic=uic,
                     asset_type="StockIndexOption",  # SPX options
                     buy_sell=buy_sell,
-                    amount=self.contracts_per_entry,
+                    amount=close_contracts,
                     order_type=order_type,
                     to_open_close="ToClose",
                     limit_price=limit_price
@@ -5228,7 +5246,8 @@ class MEICStrategy:
                                         # flips (1c→2c) while entries are open so their stop
                                         # levels / spread values / commissions stay at the
                                         # count they were opened with.
-                                        "contracts": entry_data.get("contracts", self.contracts_per_entry),
+                                        # v8 null-safe: handles JSON null, 0, and missing alike
+                                        "contracts": entry_data.get("contracts") or self.contracts_per_entry,
                                     }
                                     # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
                                     # A side is "done" if it was stopped OR expired OR skipped
@@ -5273,7 +5292,9 @@ class MEICStrategy:
                     # config; override with the stamped count so stops/spread_value/P&L
                     # math remain consistent with the contract count this entry was
                     # actually placed at.
-                    entry.contracts = saved.get("contracts", entry.contracts)
+                    # v8 null-safe: `or` falls back on None/0/missing to avoid TypeError
+                    # downstream when state file contains "contracts": null (crash mid-write).
+                    entry.contracts = saved.get("contracts") or entry.contracts
                     # Restore original credits (not current spread values)
                     entry.call_spread_credit = saved["call_credit"]
                     entry.put_spread_credit = saved["put_credit"]
@@ -5337,7 +5358,8 @@ class MEICStrategy:
                     stopped_entry.entry_time = stopped_entry_data.get("entry_time")
                     stopped_entry.strategy_id = stopped_entry_data.get("strategy_id", f"meic_{today.replace('-', '')}_{entry_num:03d}")
                     # Fix #52: Restore contract count (default to current config if not saved)
-                    stopped_entry.contracts = stopped_entry_data.get("contracts", self.contracts_per_entry)
+                    # v8 null-safe
+                    stopped_entry.contracts = stopped_entry_data.get("contracts") or self.contracts_per_entry
 
                     # Strikes
                     stopped_entry.short_call_strike = stopped_entry_data.get("short_call_strike", 0)
