@@ -23,6 +23,11 @@ Your job is to perform a deep weekly analysis using ONLY the data provided below
 4. **Do NOT hallucinate performance statistics.** Win rates, Sharpe ratios, Calmar ratios, and any calculated metrics must be derived from the actual data rows provided — show your math.
 5. **HYDRA is a FULLY AUTOMATED bot** — it makes all decisions algorithmically via its MKT rules. Recommendations should be phrased as potential parameter changes (e.g., "consider raising MKT-011 call minimum from $1.75 to $2.00"), NOT as human trading advice (e.g., "the trader should be more cautious").
 6. **Do NOT repeat generic trading wisdom.** Learnings must be specific to THIS week's data. "Volatility affects premium" is not a learning. "VIX above 22 caused 3 of 4 MKT-011 skips this week, all on call side at 13:15 entries" is a learning.
+7. **CONTRACTS MAY VARY ACROSS DAYS.** Each Daily Summary row and each `metrics.daily_returns` record carries a `Contracts` (Sheets) / `contracts_per_entry` (metrics) field indicating that day's contract count. Default is 1 for pre-migration days where the field is missing or empty. When the week spans MIXED contract counts (e.g., some days at 1c and some at 2c), you MUST:
+   - Quote each day's P&L AS-IS with its contract count explicitly (e.g., `Mon: -$125 at 1c | Tue: +$300 at 2c`).
+   - For the weekly TOTAL, provide BOTH the raw sum AND the per-contract-equivalent (weekly P&L normalized to per-contract: sum of each day's `net_pnl / contracts_per_entry`).
+   - Flag any contract-count transition in the Equity Curve analysis as a structural break — do NOT present a smooth curve across a transition without annotating it.
+   - When comparing this week's averages to previous weeks, normalize to per-contract on both sides. Apples-to-oranges comparisons are explicitly forbidden by this rule.
 
 {STRATEGY_CONTEXT}
 
