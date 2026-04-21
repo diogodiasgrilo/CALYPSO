@@ -31,16 +31,16 @@ Assign a risk level for today's trading:
 
 **GREEN** — Normal conditions, expect standard HYDRA performance
 - VIX 12-20, no major events, SPX in normal range
-- HYDRA runs 2 base entries (E#2 at 10:45, E#3 at 11:15) — E#1 at 10:15 is permanently dropped at ALL VIX levels since 2026-04-17
-- E6 conditional at 14:00 may fire (put-only on up days via Upday-035, call-only on down days via Downday-035)
+- HYDRA runs 2 base entries (Entry #1 at 10:45, Entry #2 at 11:15) — canonical 10:15 slot is permanently dropped at ALL VIX levels since 2026-04-17
+- Entry #3 conditional at 14:00 may fire (put-only on up days via Upday-035, call-only on down days via Downday-035)
 
 **YELLOW** — Elevated caution, possible wider spreads or fewer fills
 - VIX 20-25, minor economic data, pre-FOMC positioning
-- HYDRA may see MKT-011 skip on E#3 or wider tightening
+- HYDRA may see MKT-011 skip on Entry #2 or wider tightening
 
 **RED** — High risk, significant market-moving events
 - VIX > 25, major economic surprise
-- HYDRA may skip entries or see stops on early entries; VIX regime may cap to E#3-only at VIX ≥ 28
+- HYDRA may skip entries or see stops on early entries; VIX regime may cap to Entry #2-only (11:15) at VIX ≥ 28
 
 ## Output Format
 
@@ -64,7 +64,14 @@ IMPORTANT: HYDRA is a FULLY AUTOMATED bot — it makes all decisions algorithmic
 Do NOT say things like "consider pushing strikes wider" or "HYDRA should be prepared to skip."
 HYDRA's MKT-020/022/011/013/035/038 rules handle all of this automatically.
 Instead, PREDICT what HYDRA will likely do: "Expect MKT-020 to tighten calls inward"
-or "MKT-011 may skip Entry #3 if call premium decays below $2.00."
+or "MKT-011 may skip Entry #2 if call premium decays below $2.00."
+
+Entry numbering (effective, as of 2026-04-17 rename):
+- Entry #1 = 10:45 ET (first base slot that fires)
+- Entry #2 = 11:15 ET (second base slot; the only entry kept at VIX ≥ 28)
+- Entry #3 = 14:00 ET (conditional: Upday-035 put-only / Downday-035 call-only)
+Historical records (pre-2026-04-17) use the canonical numbering where 10:15 = Entry #1.
+Use entry_time as the authoritative slot identifier when reading old HERMES reports.
 
 Your briefing is for the HUMAN OPERATOR who monitors the bot — tell them what to EXPECT
 from the bot's automated behavior, not what the bot should "consider doing."

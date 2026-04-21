@@ -30,8 +30,11 @@ export function EntryGrid() {
   const showConditional = useShowConditionalEntries();
 
   // Canonical base times (pre-VIX-cap) come from bot config.
-  // As of 2026-04-17, E#1 (10:15) is dropped at ALL VIX levels (max_entries [2,2,2,1]).
-  // Canonical slots E1/E2/E3 still labelled for visual continuity; dropped slots show "dropped by VIX regime".
+  // As of 2026-04-17, the 10:15 slot is dropped at ALL VIX levels (max_entries [2,2,2,1]).
+  // Live bot code (v1.24.0+) emits effective numbering: Entry #1 = 10:45, #2 = 11:15,
+  // #3 = 14:00. Dashboard labels slots on the grid using canonical times for visual
+  // continuity; dropped slots display "dropped by VIX regime". Entry cards themselves
+  // use the state file's entry_number (effective), so per-card labels stay consistent.
   // Fall back to the current (possibly capped) state schedule, or hardcoded defaults,
   // when the bot-config fetch hasn't completed yet.
   const canonicalBaseTimes: string[] =

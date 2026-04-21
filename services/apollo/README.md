@@ -1,6 +1,6 @@
 # APOLLO — Morning Scout
 
-**Last Updated:** 2026-04-19
+**Last Updated:** 2026-04-21
 
 Runs at 8:30 AM ET on weekdays via systemd timer. Provides a pre-market briefing with risk assessment for the trading day.
 
@@ -21,9 +21,9 @@ Runs at 8:30 AM ET on weekdays via systemd timer. Provides a pre-market briefing
 
 | Level | VIX Range | Events | Expected Impact |
 |-------|-----------|--------|-----------------|
-| GREEN | 12-20 | None major | 2 base entries (E#2+E#3; E#1 dropped at all VIX since 2026-04-17), normal fills |
-| YELLOW | 20-25 | Minor data | Possible MKT-011 skip on E#3, wider spreads |
-| RED | > 25 | CPI, Jobs | Multiple stops likely, entry skips, VIX regime may cap to E#3-only at VIX ≥ 28 |
+| GREEN | 12-20 | None major | 2 base entries (Entry #1 at 10:45, Entry #2 at 11:15; canonical 10:15 slot dropped at all VIX since 2026-04-17), normal fills |
+| YELLOW | 20-25 | Minor data | Possible MKT-011 skip on Entry #2, wider spreads |
+| RED | > 25 | CPI, Jobs | Multiple stops likely, entry skips, VIX regime may cap to Entry #2-only (11:15) at VIX ≥ 28 |
 
 ## Output
 

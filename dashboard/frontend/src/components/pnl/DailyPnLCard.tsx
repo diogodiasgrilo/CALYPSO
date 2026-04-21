@@ -78,8 +78,14 @@ export function DailyPnLCard() {
   const avgStops = comparisons?.avg_stops ?? 0;
 
   const schedule = hydraState?.entry_schedule;
-  // Fallback to 3 if schedule unavailable (VIX regime may cap this — E#1 dropped at all VIX levels since 2026-04-17).
-  const baseCount = schedule?.base?.length ?? 3;
+  // Normal path: schedule.base is post-VIX-regime truncation (2 slots at regime
+  // 0-2, 1 slot at regime 3). With live bot v1.24.0+ effective numbering, Entry
+  // #1 = 10:45, Entry #2 = 11:15, Entry #3 = 14:00 (conditional). baseCount is
+  // used to classify entries as base (entry_number <= baseCount) vs conditional.
+  // Fallback 2 matches regime 0-2 (most common); only used when state hasn't loaded.
+  // (Prior fallback of 3 matched canonical pre-regime numbering and would mis-
+  // classify Entry #3 as base in the rare state-unavailable window.)
+  const baseCount = schedule?.base?.length ?? 2;
   const baseEntries = entries.filter((e) => e.entry_number <= baseCount).length;
   const conditionalEntries = entries.filter((e) => e.entry_number > baseCount).length;
 

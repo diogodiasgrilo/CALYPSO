@@ -83,7 +83,7 @@ DATA_DIR = os.path.join(
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.22.3"
+HYDRA_VERSION = "1.24.0"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -239,7 +239,7 @@ class HydraStrategy(MEICStrategy):
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.22.3 (2026-04-09)
+    Version: 1.24.0 (2026-04-21)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"

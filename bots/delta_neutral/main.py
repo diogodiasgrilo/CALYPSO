@@ -392,8 +392,6 @@ def _check_disabled_kill_switch():
 
 
 def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
-    # Defense in depth: refuse to run even if called directly via import
-    _check_disabled_kill_switch()
     """
     Run the main trading bot loop.
 
@@ -402,6 +400,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 30):
         dry_run: If True, simulate without placing real trades
         check_interval: Seconds between strategy checks
     """
+    # Defense in depth: refuse to run even if called directly via import
+    _check_disabled_kill_switch()
+
     global shutdown_requested
 
     # Initialize logging service

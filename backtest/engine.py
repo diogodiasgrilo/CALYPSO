@@ -1630,6 +1630,14 @@ def simulate_day(
     entry_ms_list = cfg.entry_times_as_ms()
 
     # ── Max entries cap (VIX regime + day-of-week) ────────────────────
+    # Keeps LATEST `_max_e` entries (drops earliest). Mirrors live strategy.py
+    # `_apply_vix_regime_overrides()` at line ~8118 which uses `base_times[-cap:]`.
+    # Reason: canonical 10:15 slot has the worst historical performance
+    # (24% WR, -$79/entry across all VIX); 11:15 has the best (42% WR).
+    # Dropping from the front preserves the best-performing slot.
+    # Live strategy.py switched to `[-cap:]` on 2026-04-19; the backtest
+    # engine still had the buggy `[:_max_e]` (kept WORST, dropped BEST) and
+    # was aligned with live on 2026-04-21.
     _max_e = len(entry_ms_list)
     if getattr(cfg, "vix_regime_enabled", False):
         _regime = _get_vix_regime(vix_at_open, cfg.vix_regime_breakpoints)
@@ -1640,7 +1648,7 @@ def simulate_day(
     if _dow_max is not None:
         _max_e = min(_max_e, _dow_max)
     if _max_e < len(entry_ms_list):
-        entry_ms_list = entry_ms_list[:_max_e]
+        entry_ms_list = entry_ms_list[-_max_e:]
 
     movement_pct = getattr(cfg, "movement_entry_pct", None)
 

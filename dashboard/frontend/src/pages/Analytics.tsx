@@ -82,7 +82,7 @@ const TAB_LABELS: Record<AnalyticsTab, string> = {
 
 const SCHEDULED_SLOTS = [
   615, 645, 675, 840,
-]; // 10:15,10:45,11:15,14:00 (canonical slots; E#1 dropped at all VIX levels since 2026-04-17)
+]; // 10:15,10:45,11:15,14:00 — canonical times (10:15 dropped at all VIX levels since 2026-04-17; live bot v1.24.0+ emits effective numbering Entry #1=10:45, #2=11:15, #3=14:00).
 
 const SLOT_LABELS: Record<number, string> = {
   615: "10:15", 645: "10:45", 675: "11:15", 840: "14:00",

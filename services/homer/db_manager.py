@@ -410,8 +410,15 @@ class BacktestingDB:
                 raise
 
     def _connect(self) -> sqlite3.Connection:
-        """Create a new connection with WAL mode."""
-        conn = sqlite3.connect(self.db_path)
+        """Create a new connection with WAL mode.
+
+        timeout=5 mirrors `shared/data_recorder.py:_connect` — explicit
+        consistency so concurrent access from HYDRA's DataRecorder and HOMER's
+        BacktestingDB during v8 migration races cleanly fail with
+        OperationalError after 5s instead of relying on Python's implicit
+        default (which is also 5s but undocumented at the call site).
+        """
+        conn = sqlite3.connect(self.db_path, timeout=5)
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 

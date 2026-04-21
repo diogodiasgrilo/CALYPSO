@@ -57,7 +57,7 @@ using the old 10:15-inclusive numbering):**
 
 When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed to `min_credit − $0.10`; the config-level floors ($0.20 / $0.30) are only used if `vix_regime.enabled = false`.
 
-**Code behavior:** When max_entries caps below base count, drops EARLIEST entries (keeps best-performing E#3 slot). Was previously the opposite (kept earliest) — fixed 2026-04-13 in `strategy.py::_apply_vix_regime_overrides()`.
+**Code behavior:** When max_entries caps below base count, drops EARLIEST entries (keeps best-performing 11:15 slot — live Entry #2 at 2-cap, live Entry #1 at 1-cap). Was previously the opposite (kept earliest) — fixed 2026-04-13 in `strategy.py::_apply_vix_regime_overrides()`.
 
 **Shadow OTM targets** (per regime, for v7 shadow_entries observation): call `[40, 50, 75, 75]`pt, put `[50, 75, 110, 90]`pt.
 

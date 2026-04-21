@@ -150,7 +150,7 @@ def print_banner():
     ║         #2: 11:15 ET (base)                                   ║
     ║         #3: 14:00 ET (conditional Up/Down-day)                ║
     ║                                                               ║
-    ║         Version: 1.22.3                                       ║
+    ║         Version: 1.24.0                                       ║
     ║         API: Saxo Bank OpenAPI                                ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝

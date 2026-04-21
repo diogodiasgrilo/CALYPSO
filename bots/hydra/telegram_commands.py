@@ -23,7 +23,12 @@ Supported commands:
 
 Security: Only responds to messages from the configured chat_id.
 
-Version: 2.2.0 (2026-04-09)
+Version: 2.3.0 (2026-04-21)
+
+2.3.0: Phase 2 T-4 — 8 command builders (/snapshot, /lastday, /account, /status,
+/week, /entry, /stops, /config) route through `_with_contracts_footer` helper to
+annotate responses with contract-count footer when contracts_per_entry > 1.
+/config gains prominent `⚠️ CONTRACTS/ENTRY = N` warning banner when >1.
 """
 
 import fcntl

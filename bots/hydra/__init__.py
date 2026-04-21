@@ -24,6 +24,33 @@ Conditional Entry Trigger (MKT-035 / Upday-035):
 - E7: DISABLED
 
 Version History:
+- 1.24.0 (2026-04-21): scale-to-2-contracts support + non-HYDRA bots kill-switched at code level.
+  Phase 1: All stop-level math (call/put buffers, theoretical put, MIN_STOP_LEVEL floor, MKT-042 buffer
+  decay) scales via self.contracts_per_entry (live path) or entry.contracts (recovery path). All
+  commission sites and close-order amounts scale via entry.contracts so mid-day config flips close the
+  right quantity on legacy entries. ORDER-004 margin gate scales MIN_BUYING_POWER_PER_IC. MKT-033 long
+  salvage threshold scales. DB schema v8: per-row `contracts` column on trade_entries, trade_stops,
+  spread_snapshots, shadow_entries, and `contracts_per_entry` on daily_summaries — transactional
+  migration with rollback. Metrics file daily_returns record gains contracts_per_entry for HERMES
+  per-contract normalization. State file now persists contracts_per_entry at both top-level and
+  per-entry levels (null-safe restoration with `.get() or fallback` pattern handles JSON null from
+  crash-mid-write scenarios).
+  Phase 2 telemetry: AlertService auto-prefixes `[Nc]` on title + enriches details dict — 14 HYDRA call
+  sites updated to pass `contracts=entry.contracts`. Dashboard `/api/hydra/summary`, `/api/hydra/bot-config`,
+  `/api/widget` expose contracts_per_entry with 3-level fallback. Google Sheets Daily Summary adds
+  Contracts column (append-only). HERMES cheat_sheet gets net_pnl_per_contract + per-contract averages;
+  CLIO prompt has mixed-week normalization rule; HOMER Section 2 gains Contracts row; all four agent
+  system prompts (HERMES/CLIO/HOMER/APOLLO) + hydra_strategy_context.md updated. 8 Telegram builders
+  route through `_with_contracts_footer` helper; `/config` banner warns prominently when contracts>1.
+  Cosmetics: STOP-DETAIL diagnostic ask_sv/bid_sv scale with entry.contracts for apples-to-apples log
+  comparison. Startup banner includes `Contracts per entry: N` line with warning icon when >1.
+  Effective entry numbering rename: live code emits `Entry #1 = 10:45, #2 = 11:15, #3 = 14:00` (post-VIX
+  regime) instead of canonical `E#1 = 10:15`. `_effective_total_entry_count()` helper used in all
+  user-facing displays (heartbeat, /snapshot, /status, startup log). Pre-2026-04-17 records use
+  canonical numbering — agents guided to use entry_time as authoritative slot ID. Kill-switches on
+  bots/delta_neutral/main.py, bots/iron_fly_0dte/main.py, bots/rolling_put_diagonal/main.py, bots/meic/main.py
+  (DISABLED_FOR_SAFETY=True + _check_disabled_kill_switch() exit before any side effects). MEIC
+  strategy.py module remains importable as HYDRA's parent class. 55/55 new regression tests pass.
 - 1.22.3 (2026-04-09): Fix #86 — Clear position IDs and UICs on entry object after stop loss.
   Without this, POS-003 hourly reconciliation finds closed positions as "missing from Saxo" and
   fires false "Position Mismatch Detected" HIGH alerts on Telegram after every stop. Base MEIC

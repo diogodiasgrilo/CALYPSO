@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.23.0 | **Last Updated:** 2026-04-19
+**Version:** 1.24.0 | **Last Updated:** 2026-04-21
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -18,16 +18,20 @@ On February 4, 2026, pure MEIC had all 6 entries get their PUT side stopped beca
 
 ### Entry Schedule (2 effective base + 1 conditional entry — E#1 dropped at all VIX levels as of 2026-04-17)
 
-**Current schedule (v1.23.0+ — E#1 drop + Downday-035; v1.19.0 walk-forward convergence baseline):**
+**Current schedule (v1.24.0+ — effective renumber + scale-2-contracts; v1.19.0 walk-forward convergence baseline):**
 
-| Entry | Time (ET) | Type | Status | Notes |
-|-------|-----------|------|--------|-------|
-| 1 | 10:15 | Base (canonical) | **DROPPED** at ALL VIX levels | 24% WR, -$79/entry avg — worst slot. Dropped 2026-04-17. |
-| 2 | 10:45 | Base | **ACTIVE** | Always attempts (full IC or one-sided) |
-| 3 | 11:15 | Base | **ACTIVE** | Always attempts (full IC or one-sided). Only entry kept at VIX ≥ 28. |
-| 6 | 14:00 | Conditional | **ACTIVE** | Put-only on up days (Upday-035, SPX ≥ +0.25%) OR call-only on down days (Downday-035, SPX ≤ -0.25%) |
+The live code emits **effective** entry numbers (what the bot actually fires today), NOT the canonical slot numbers. The canonical 10:15 slot is permanently dropped by the VIX regime cap, so it never gets an entry number.
 
-E4 (11:45) and E5 (12:15) dropped in v1.19.0 — negative EV in walk-forward backtest. E7 (13:15) DISABLED. E#1 dropped at all VIX levels as of 2026-04-17 via `max_entries: [2, 2, 2, 1]`.
+| Effective # | Time (ET) | Type | Status | Notes |
+|-------------|-----------|------|--------|-------|
+| — | 10:15 | Base (canonical, dropped) | **DROPPED** at ALL VIX levels | 24% WR, -$79/entry avg — worst slot. Dropped 2026-04-17 via `max_entries: [2, 2, 2, 1]`. Never assigned an entry number in live code. |
+| **Entry #1** | 10:45 | Base | **ACTIVE** | First fired entry. Always attempts (full IC or one-sided). |
+| **Entry #2** | 11:15 | Base | **ACTIVE** | Second base slot. Always attempts (full IC or one-sided). Only entry kept at VIX ≥ 28. |
+| **Entry #3** | 14:00 | Conditional | **ACTIVE** | Put-only on up days (Upday-035, SPX ≥ +0.25%) OR call-only on down days (Downday-035, SPX ≤ -0.25%). Historically called "E6" in pre-2026-04-17 docs. |
+
+E4 (11:45) and E5 (12:15) dropped in v1.19.0 — negative EV in walk-forward backtest. E7 (13:15) DISABLED.
+
+**Reading historical records:** pre-2026-04-17 days used canonical numbering where `entry_number=1` was the 10:15 slot. Use `entry_time` as the authoritative slot identifier when reading old HERMES reports or the HYDRA Trading Journal.
 
 On early close days, cutoff is 12:30 PM. MKT-034 (VIX-scaled time shifting) is disabled — neither Tammy Chambless nor John Sandvand use VIX-based scheduling. Code preserved and configurable via `vix_time_shift.enabled`.
 
@@ -44,11 +48,11 @@ Before each scheduled entry, a 10-minute scouting window opens. Market condition
 
 ### Conditional Entry Trigger (MKT-035 / Upday-035)
 
-**Downday-035 (down-day call-only, conditional E6 only):** When SPX drops >= 0.25% below session open, E6 (14:00) fires as call-only (config `conditional_downday_e6_enabled: true`, `conditional_downday_threshold_pct: 0.0025`). Base entries E2/E3 are NOT converted — `base_entry_downday_callonly_pct` is `null` on VM since 2026-04-19 (see Base-Entry Down-Day section). E7 is DISABLED.
+**Downday-035 (down-day call-only, conditional Entry #3 only):** When SPX drops >= 0.25% below session open, Entry #3 (14:00) fires as call-only (config `conditional_downday_e6_enabled: true`, `conditional_downday_threshold_pct: 0.0025`). Base entries (Entry #1 at 10:45, Entry #2 at 11:15) are NOT converted — `base_entry_downday_callonly_pct` is `null` on VM since 2026-04-19 (see Base-Entry Down-Day section). E7 is DISABLED. Config key names (`conditional_downday_e6_enabled`, `conditional_e7_enabled`) retain canonical "E6"/"E7" references for backward compatibility.
 
-**Upday-035 (up-day put-only):** When SPX rises >= 0.25% above session open, E6 (14:00) fires as put-only. Stop = put_credit + put_stop_buffer ($1.75).
+**Upday-035 (up-day put-only):** When SPX rises >= 0.25% above session open, Entry #3 (14:00) fires as put-only. Stop = put_credit + put_stop_buffer ($1.75).
 
-Base entries (#1-3) are unaffected by conditional triggers — they always attempt full ICs (or one-sided via MKT-011).
+Base entries (Entry #1 and #2) are unaffected by conditional triggers — they always attempt full ICs (or one-sided via MKT-011).
 
 ### Credit Gate (MKT-011)
 
@@ -216,14 +220,16 @@ Skips entries when intraday range exceeds a threshold relative to the expected m
 
 ### VIX Regime Adaptive (updated 2026-04-14)
 
-Adjusts entries AND credit thresholds based on VIX at open. Uses a 4-zone breakpoint system. When `max_entries` caps below base count, drops EARLIEST entries (keeps best-performing E#3 at 11:15). **All regime credit slots are now filled, so the base `min_viable_credit_per_side` / `min_viable_credit_put_side` are effectively dead — the regime always overrides.**
+Adjusts entries AND credit thresholds based on VIX at open. Uses a 4-zone breakpoint system. When `max_entries` caps below base count, drops EARLIEST entries (preserves the best-performing 11:15 slot). **All regime credit slots are now filled, so the base `min_viable_credit_per_side` / `min_viable_credit_put_side` are effectively dead — the regime always overrides.**
+
+"Entries Kept" uses the `time (effective #N)` format — the times are canonical slots; `#N` is the live effective entry number the bot emits.
 
 | Zone | VIX Range | Max Entries | Entries Kept | Call Min | Put Min | Effective Call Floor | Effective Put Floor |
 |------|-----------|-------------|--------------|----------|---------|----------------------|---------------------|
-| 0 | < 18 | 2 | E#2, E#3 | $1.00 | $1.25 | $0.90 | $1.15 |
-| 1 | 18-22 | 2 | E#2, E#3 | $0.50 | $0.75 | $0.40 | $0.65 |
-| 2 | 22-28 | 2 | E#2, E#3 | $0.30 | $0.50 | $0.20 | $0.40 |
-| 3 | >= 28 | 1 | E#3 only | $0.30 | $0.40 | $0.20 | $0.30 |
+| 0 | < 18 | 2 | 10:45 (#1), 11:15 (#2) | $1.00 | $1.25 | $0.90 | $1.15 |
+| 1 | 18-22 | 2 | 10:45 (#1), 11:15 (#2) | $0.50 | $0.75 | $0.40 | $0.65 |
+| 2 | 22-28 | 2 | 10:45 (#1), 11:15 (#2) | $0.30 | $0.50 | $0.20 | $0.40 |
+| 3 | >= 28 | 1 | 11:15 only (#1) | $0.30 | $0.40 | $0.20 | $0.30 |
 
 When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed as `min_credit − $0.10`; the top-level `call_credit_floor` ($0.20) and `put_credit_floor` ($0.30) in config only apply if the regime is disabled.
 
@@ -231,7 +237,7 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 |---------|---------------|-------------|
 | `vix_regime.enabled` | `true` | Enable/disable VIX regime adaptive |
 | `vix_regime.breakpoints` | `[18.0, 22.0, 28.0]` | VIX zone boundaries |
-| `vix_regime.max_entries` | `[2, 2, 2, 1]` | Max entries per zone. As of 2026-04-17, E#1 (10:15) is dropped at ALL VIX levels. Drops EARLIEST when capped. |
+| `vix_regime.max_entries` | `[2, 2, 2, 1]` | Max entries per zone. As of 2026-04-17, the canonical 10:15 slot is dropped at ALL VIX levels. Drops EARLIEST when capped (preserves the best-performing 11:15 slot). |
 | `vix_regime.min_call_credit` | `[1.00, 0.50, 0.30, 0.30]` | Per-zone call credit threshold |
 | `vix_regime.min_put_credit` | `[1.25, 0.75, 0.50, 0.40]` | Per-zone put credit threshold |
 | `vix_regime.shadow_call_otm` | `[40.0, 50.0, 75.0, 75.0]` | v7: OTM target (pt) for shadow_entries logging (observation only, no trading effect) |

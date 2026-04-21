@@ -4,13 +4,16 @@ import { statusColor, colors } from "../../lib/tradingColors";
 import type { EntryStatus } from "../shared/StatusBadge";
 import { useShowConditionalEntries } from "../../hooks/useBotConfig";
 
-// Canonical base entry slots: E1=10:15, E2=10:45, E3=11:15.
-// As of 2026-04-17, E#1 (10:15) is dropped at ALL VIX levels (max_entries [2,2,2,1]).
-// Dashboard still shows all 3 canonical slots; dropped slots display "dropped by VIX regime".
+// Canonical base entry slots (legacy numbering: 10:15, 10:45, 11:15).
+// As of 2026-04-17, the 10:15 slot is dropped at ALL VIX levels (max_entries [2,2,2,1]).
+// Live bot code (v1.24.0+) emits effective numbering: Entry #1 = 10:45, Entry #2 = 11:15.
+// Dashboard still shows all 3 canonical slots on the timeline; the dropped slot
+// displays "dropped by VIX regime" for visual continuity. Entry cards render using
+// the state file's entry_number (which is effective), so UI labels stay consistent.
 const BASE_ENTRY_TIMES = ["10:15", "10:45", "11:15"];
-// Conditional entries: E6 (14:00) fires put-only when SPX rises ≥ 0.25% (Upday-035)
+// Conditional 14:00 slot — live Entry #3. Fires put-only when SPX rises ≥ 0.25% (Upday-035)
 // or call-only when SPX drops ≥ 0.25% (Downday-035, added 2026-04-19). Hidden when
-// all conditional flags are disabled in bot config.
+// all conditional flags are disabled in bot config. Pre-2026-04-17 docs called this "E6".
 const CONDITIONAL_ENTRY_TIMES = ["14:00"];
 
 const TIMELINE_START = 9.5 * 60; // 9:30 in minutes
