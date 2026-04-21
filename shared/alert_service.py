@@ -270,7 +270,8 @@ class AlertService:
         title: str,
         message: str,
         priority: Optional[AlertPriority] = None,
-        details: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None,
+        contracts: int = 1
     ) -> bool:
         """
         Send an alert via Pub/Sub.
@@ -281,6 +282,12 @@ class AlertService:
             message: Alert message body
             priority: Priority level (defaults to DEFAULT_PRIORITIES mapping)
             details: Additional structured data (e.g., prices, P&L)
+            contracts: Contract count for this alert (default 1). When > 1, a
+                [{N}c] prefix is automatically added to the title so every
+                money-bearing alert is unmistakably annotated. Also included in
+                the structured `details` payload for log filtering. Backwards
+                compatible: legacy callers that don't pass this kwarg get the
+                default of 1, no change in output.
 
         Returns:
             bool: True if alert was published successfully
@@ -296,15 +303,31 @@ class AlertService:
         # Determine delivery channels based on priority and alert type
         send_email = self._should_send_email(alert_type, priority)
 
+        # Normalize contracts defensively — `or 1` handles None, 0, and missing
+        # (same null-safe pattern adopted in Phase 1 recovery paths). Live entries
+        # must always have contracts >= 1; anything else falls back to 1.
+        effective_contracts = contracts or 1
+
+        # Automatic title annotation when contracts > 1 so phone notifications are
+        # unmissable about scale. Leaves 1-contract titles untouched for backwards
+        # compat with existing alert consumers.
+        display_title = title
+        if effective_contracts > 1 and not title.startswith(f"[{effective_contracts}c]"):
+            display_title = f"[{effective_contracts}c] {title}"
+
+        # Enrich structured details with contract count for downstream log filtering
+        enriched_details = dict(details) if details else {}
+        enriched_details.setdefault("contracts", effective_contracts)
+
         # Build alert payload
         payload = {
             "bot_name": self.bot_name,
             "alert_type": alert_type.value,
             "priority": priority.value,
-            "title": title,
+            "title": display_title,
             "message": message,
             "timestamp": datetime.now(US_EASTERN).isoformat(),
-            "details": details or {},
+            "details": enriched_details,
             "delivery": {
                 "telegram": True,  # All alerts go to Telegram
                 "email": send_email,
@@ -322,9 +345,11 @@ class AlertService:
         }
         emoji = priority_emoji.get(priority, "📧")
 
+        # Use display_title (includes [Nc] prefix) so the service-side log also
+        # shows contract scaling when > 1.
         log_msg = (
             f"{emoji} ALERT [{self.bot_name}] [{priority.value.upper()}] "
-            f"{alert_type.value}: {title}"
+            f"{alert_type.value}: {display_title}"
         )
 
         if priority in [AlertPriority.CRITICAL, AlertPriority.HIGH]:

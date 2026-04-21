@@ -8170,6 +8170,12 @@ class MEICStrategy:
 
         details_text = "\n".join(details_lines)
 
+        # Contract count for title annotation: take the max across stopped entries
+        # in case this is a mixed-contract day (after a mid-day config flip).
+        _batch_contracts = max(
+            (getattr(e, 'contracts', 1) for e, _, _ in entries_stopped),
+            default=self.contracts_per_entry,
+        )
         self.alert_service.send_alert(
             alert_type=AlertType.STOP_LOSS,
             title=f"Multiple Stops Triggered ({count})",
@@ -8179,7 +8185,8 @@ class MEICStrategy:
                 "count": count,
                 "entries": [e.entry_number for e, _, _ in entries_stopped],
                 "total_loss": total_loss
-            }
+            },
+            contracts=_batch_contracts,
         )
 
         logger.info(f"ALERT-002: Sent batched alert for {count} stops")
@@ -8261,7 +8268,8 @@ class MEICStrategy:
                     "stop_level": stop_level,
                     "confirmation_seconds": alert_conf_seconds,
                     "breach_recoveries": alert_breach_recoveries,
-                }
+                },
+                contracts=entry.contracts,
             )
 
     def _flush_batched_alerts(self):

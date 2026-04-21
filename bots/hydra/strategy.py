@@ -1756,6 +1756,7 @@ class HydraStrategy(MEICStrategy):
                     f"Net P&L: ${final_net_pnl:.2f} | Capital: ${capital_deployed:,.0f}"
                 ),
                 priority=AlertPriority.MEDIUM,
+                contracts=self.contracts_per_entry,
             )
         except Exception as e:
             logger.error(f"MKT-018: Alert failed: {e}")
@@ -3170,7 +3171,8 @@ class HydraStrategy(MEICStrategy):
                 alert_type=AlertType.ENTRY_SKIPPED,
                 title=f"Entry #{entry_num} Skipped",
                 message=alert_msg,
-                details={"entry_number": entry_num, "reason": skip_reason}
+                details={"entry_number": entry_num, "reason": skip_reason},
+                contracts=self.contracts_per_entry,
             )
         except Exception as e:
             logger.warning(f"Failed to send skip alert for Entry #{entry_num}: {e}")
@@ -3714,7 +3716,8 @@ class HydraStrategy(MEICStrategy):
                 title=f"Entry #{entry_num} Skipped - Insufficient Margin",
                 message=bp_message,
                 priority=AlertPriority.HIGH,
-                details={"entry_number": entry_num, "reason": "margin"}
+                details={"entry_number": entry_num, "reason": "margin"},
+                contracts=self.contracts_per_entry,
             )
             return f"Entry #{entry_num} skipped - {bp_message}"
 
@@ -4334,6 +4337,7 @@ class HydraStrategy(MEICStrategy):
                         message="\n".join(msg_lines),
                         priority=AlertPriority.MEDIUM,
                         details=alert_details,
+                        contracts=entry.contracts,
                     )
 
                     self._record_api_result(True)
@@ -5125,7 +5129,8 @@ class HydraStrategy(MEICStrategy):
                         "open_price": long_open_price,
                         "revenue": revenue,
                         "net_profit": net_profit,
-                    }
+                    },
+                    contracts=entry.contracts,
                 )
             except Exception:
                 pass  # Alert failure shouldn't block trading
@@ -8001,7 +8006,8 @@ class HydraStrategy(MEICStrategy):
                     title="Position Mismatch Detected",
                     message=f"{len(missing)} {self.BOT_NAME} positions missing from Saxo. Manual intervention suspected.",
                     priority=AlertPriority.HIGH,
-                    details={"missing_ids": list(missing)}
+                    details={"missing_ids": list(missing)},
+                    contracts=self.contracts_per_entry,
                 )
 
                 # Clean up registry and daily state
@@ -8069,7 +8075,8 @@ class HydraStrategy(MEICStrategy):
                         title=f"{self.BOT_NAME} Overnight Position Detected!",
                         message=error_msg,
                         priority=AlertPriority.CRITICAL,
-                        details={"position_ids": list(still_open)}
+                        details={"position_ids": list(still_open)},
+                        contracts=self.contracts_per_entry,
                     )
                     # Halt trading - manual intervention required
                     self._critical_intervention_required = True
@@ -8087,7 +8094,8 @@ class HydraStrategy(MEICStrategy):
                     title=f"{self.BOT_NAME} Overnight Position Check Failed!",
                     message=error_msg,
                     priority=AlertPriority.CRITICAL,
-                    details={"position_ids": list(my_position_ids), "error": str(e)}
+                    details={"position_ids": list(my_position_ids), "error": str(e)},
+                    contracts=self.contracts_per_entry,
                 )
                 self._critical_intervention_required = True
                 self._critical_intervention_reason = f"Overnight position verification failed: {e}"
@@ -9789,7 +9797,13 @@ class HydraStrategy(MEICStrategy):
             logger.info(f"  Total credit: ${total_credit:.2f}")
             logger.info("=" * 60)
 
-            # Send recovery alert
+            # Send recovery alert. Recovered entries may span multiple contract
+            # counts (after mid-day flips) — use max(entry.contracts) so the
+            # [Nc] title prefix reflects the most prominent scale for user attention.
+            _recovered_contracts = max(
+                (getattr(e, 'contracts', 1) for e in recovered_entries),
+                default=self.contracts_per_entry,
+            )
             self.alert_service.send_alert(
                 alert_type=AlertType.POSITION_OPENED,
                 title=f"{self.BOT_NAME} Position Recovery",
@@ -9799,7 +9813,8 @@ class HydraStrategy(MEICStrategy):
                     "entries_recovered": len(recovered_entries),
                     "state": self.state.value,
                     "total_credit": total_credit
-                }
+                },
+                contracts=_recovered_contracts,
             )
 
             # Save recovered state to disk

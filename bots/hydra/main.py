@@ -212,20 +212,20 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     except Exception as e:
         trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
 
-    # Send BOT_STARTED alert
+    # Send BOT_STARTED alert. The contracts= kwarg auto-prefixes title with
+    # [{N}c] when > 1, so the manual prefix used in Phase 1 T-3 is removed —
+    # single source of truth at the service layer (avoids double-prefixing).
     try:
         mode = "DRY-RUN" if dry_run else "LIVE"
         status = strategy.get_status_summary()
         contracts = getattr(strategy, 'contracts_per_entry', 1)
-        # Prefix title with a contracts warning when > 1 so the alert is unmissable
-        title_prefix = f"\u26a0\ufe0f {contracts}c " if contracts > 1 else ""
         scale_note = (
             f" \u26a0\ufe0f  all P&L/credit/stop figures are scaled \u00d7{contracts}"
             if contracts > 1 else ""
         )
         strategy.alert_service.send_alert(
             alert_type=AlertType.BOT_STARTED,
-            title=f"{title_prefix}Bot Started ({mode})",
+            title=f"Bot Started ({mode})",
             message=(
                 f"HYDRA started in {mode} mode.\n"
                 f"Contracts/entry: {contracts}{scale_note}\n"
@@ -233,6 +233,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 f"Entries today: {status.get('entries_completed', 0)}"
             ),
             priority=AlertPriority.LOW,
+            contracts=contracts,
         )
     except Exception as e:
         trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
@@ -526,6 +527,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             title="Position Snapshot",
                             message=snapshot_msg,
                             priority=AlertPriority.LOW,
+                            contracts=getattr(strategy, 'contracts_per_entry', 1),
                         )
                         last_snapshot_time = now
                     except Exception as e:
@@ -626,6 +628,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                         title="Bot Stopped" if active == 0 else f"Bot Stopped — {active} ACTIVE positions!",
                         message=msg,
                         priority=priority,
+                        contracts=getattr(strategy, 'contracts_per_entry', 1),
                     )
                 except Exception as e:
                     trade_logger.log_error(f"Failed to send BOT_STOPPED alert: {e}")
