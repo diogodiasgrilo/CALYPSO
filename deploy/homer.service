@@ -23,7 +23,13 @@ SyslogIdentifier=calypso-homer
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/calypso/intel/homer /opt/calypso/docs /opt/calypso/.git /opt/calypso/data
+# HOMER does `git pull --rebase` which may touch any file in /opt/calypso that
+# has changed on origin (e.g. frontend src files, strategy modules). Limiting
+# ReadWritePaths to specific subdirectories caused silent `git rebase` failures
+# with "Read-only file system" (observed 2026-04-21 when the VM was behind
+# origin by frontend commits). /opt/calypso is HOMER's workspace — the whole
+# tree must be writable. ProtectSystem=strict still shields the rest of /.
+ReadWritePaths=/opt/calypso
 
 # Claude API (120s per narrative × 3 calls per day × N days) + Sheets reads (3×15s) + git (60s) + overhead
 TimeoutStartSec=600
