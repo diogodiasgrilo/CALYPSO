@@ -3541,6 +3541,9 @@ class HydraStrategy(MEICStrategy):
                 "spx_move_since_entry": spx_move,
                 "minutes_held": minutes_held,
                 "cascade_gap_seconds": cascade_gap,
+                # MKT-036/046 confirmation persistence (was missing — DB columns silent)
+                "confirmation_seconds": getattr(entry, f'{side}_confirm_secs_at_stop', None),
+                "breach_recoveries": getattr(entry, f'{side}_breach_count', 0),
                 # v8 contract count of the stopped entry
                 "contracts": entry.contracts,
             })
@@ -5659,6 +5662,7 @@ class HydraStrategy(MEICStrategy):
                         f"after {elapsed:.0f}s (threshold {confirm_secs}s)"
                     )
                     setattr(entry, f'{side}_breach_time', None)
+                    setattr(entry, f'{side}_confirm_secs_at_stop', int(elapsed))
                     return self._execute_stop_loss(entry, side)
                 else:
                     self._log_stop_detail(entry, side, spread_value, stop_level,
