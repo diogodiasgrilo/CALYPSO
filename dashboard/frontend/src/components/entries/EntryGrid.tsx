@@ -3,21 +3,16 @@ import { EntryCard } from "./EntryCard";
 import { colors } from "../../lib/tradingColors";
 import { useBotConfig, useShowConditionalEntries } from "../../hooks/useBotConfig";
 
-/** Extract HH:MM from an ET ISO timestamp (e.g. "2026-04-14T10:45:12.123-04:00") or "HH:MM" string. */
-function extractHHMM(s: string | null | undefined): string | null {
-  if (!s) return null;
-  const m = s.match(/(\d{2}):(\d{2})/);
-  return m ? `${m[1]}:${m[2]}` : null;
-}
-
-/** Find the entry whose placement time matches the canonical slot time (HH:MM). */
-function findEntryForCanonicalTime(
+/** Find the entry emitted by the bot for a given effective entry number. The
+ *  bot stamps `entry_number` based on the POST-VIX-regime active schedule
+ *  (since v1.24.0 rename), so matching by number is exact and robust to
+ *  fill-time drift (e.g. entry placed at 10:47 for the 10:45 slot). */
+function findEntryByNumber(
   entries: HydraEntry[],
-  canonicalTime: string
+  entryNumber: number
 ): HydraEntry | null {
   for (const e of entries) {
-    const hhmm = extractHHMM(e.entry_time);
-    if (hhmm === canonicalTime) return e;
+    if (e.entry_number === entryNumber) return e;
   }
   return null;
 }
@@ -90,8 +85,9 @@ export function EntryGrid() {
           re-enables a slot it will naturally reappear here. */}
       <div className={`grid gap-2 max-sm:grid-cols-1 ${baseColsClass}`}>
         {activeBaseTimes.map((canonicalTime, i) => {
-          const label = `#${effectiveBaseNum(canonicalTime)}`;
-          const entry = findEntryForCanonicalTime(entries, canonicalTime);
+          const num = effectiveBaseNum(canonicalTime);
+          const label = `#${num}`;
+          const entry = findEntryByNumber(entries, num);
           if (entry) {
             return <EntryCard key={i} entry={entry} label={label} />;
           }
@@ -116,8 +112,9 @@ export function EntryGrid() {
           </span>
           <div className={`grid gap-2 max-sm:grid-cols-1 mt-1 ${condColsClass}`}>
             {activeCondTimes.map((canonicalTime, i) => {
-              const label = `#${effectiveCondNum(canonicalTime)}`;
-              const entry = findEntryForCanonicalTime(entries, canonicalTime);
+              const num = effectiveCondNum(canonicalTime);
+              const label = `#${num}`;
+              const entry = findEntryByNumber(entries, num);
               if (entry) {
                 return (
                   <EntryCard
