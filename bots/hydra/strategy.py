@@ -714,6 +714,16 @@ class HydraStrategy(MEICStrategy):
                 f"  VIX regime: ENABLED — breakpoints {self.vix_regime_breakpoints}, "
                 f"max_entries {self.vix_regime_max_entries}"
             )
+            # Option B (2026-04-27): per-zone stop buffer overrides
+            logger.info(
+                f"  VIX regime stop buffers: call {self.vix_regime_call_stop_buffer}, "
+                f"put {self.vix_regime_put_stop_buffer} "
+                f"(null = fall back to global ${self.call_stop_buffer/100:.2f}/${self.put_stop_buffer/100:.2f})"
+            )
+            logger.info(
+                f"  VIX regime credit gates: min_call_credit {self.vix_regime_min_call_credit}, "
+                f"min_put_credit {self.vix_regime_min_put_credit}"
+            )
 
         # MKT-031: Scouting state (in-memory, no persistence needed)
         self._scouting_active = False

@@ -98,12 +98,23 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 ## Stop Formula
 
 **Full Iron Condor (both sides placed):**
-- Call side stop = `total_credit + call_stop_buffer` ($0.75 default)
-- Put side stop = `total_credit + put_stop_buffer` ($1.75 default)
+- Call side stop = `total_credit + call_stop_buffer`
+- Put side stop = `total_credit + put_stop_buffer`
+
+**Stop buffers — Option B per-VIX-regime (deployed 2026-04-27):**
+
+| VIX Zone | Range | call_stop_buffer | put_stop_buffer | Rationale |
+|---|---|---|---|---|
+| Z0 | <18 | `$0.75` (global) | `$1.75` (global) | Insufficient sample (n=5 days) — fall back to global |
+| **Z1** | **18-22** | **`$1.50`** | **`$2.50`** | Wider both — calm regime, most stops are noise |
+| **Z2** | **22-28** | **`$1.00`** | **`$1.50`** | Wider call, TIGHTER put — stress regime, fast exit beats cushion |
+| Z3 | ≥28 | `$0.75` (global) | `$1.75` (global) | Zero entries in study — fall back to global |
+
+Override applied **once per day at first entry** via `_apply_vix_regime_overrides()` based on VIX at open. Decision rationale + 4-week review triggers in `docs/HYDRA_BUFFER_OPTIMIZATION.md`.
 
 **One-sided entries:**
-- Call-only (MKT-035/038/040): `call_credit + $2.60 theoretical_put + call_stop_buffer`
-- Put-only (MKT-039, E6): `put_credit + put_stop_buffer`
+- Call-only (MKT-035/038/040): `call_credit + $2.60 theoretical_put + call_stop_buffer` (regime-conditioned)
+- Put-only (MKT-039, E6): `put_credit + put_stop_buffer` (regime-conditioned)
 
 **Buffer decay (MKT-042):** Applied to above formulas. Effective buffer starts at 2.50× normal at entry, linearly decays to 1× over 4 hours.
 
@@ -172,7 +183,7 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 2. **`max_entries` per regime:** `[2, null, null, 1]` → `[null, 2, 2, 1]` (drops E#1 at VIX≥18, 2026-04-13) → **`[2, 2, 2, 1]` (drops E#1 at ALL VIX levels, 2026-04-17)**. Reason: E#1 analysis showed 24% WR, -$79/entry avg — worst slot at every VIX regime. At VIX<18 specifically: 80-100% stop rate in recent data.
 3. **Per-regime credit thresholds (2026-04-13 initial → 2026-04-14 tuned):** `min_call_credit: [null, null, 0.75, 0.50]` → **`[1.00, 0.50, 0.30, 0.30]`**; `min_put_credit: [null, null, 1.25, 0.75]` → **`[1.25, 0.75, 0.50, 0.40]`**. All slots now filled — base $2.00 / $2.75 are effectively dead.
 4. **Credit floors:** `call_credit_floor: 0.75` → **`0.20`**, `put_credit_floor: 2.00` → **`0.30`** (but when regime is active, floor = `min_credit − $0.10`).
-5. **Stop buffers (2026-04-14 tuning carried forward):** `call_stop_buffer: 0.75` (was 0.35), `put_stop_buffer: 1.75` (was 1.55). Buffer decay `start_mult 2.50` over `4.0 hours` (was 2.10 / 2h).
+5. **Stop buffers (2026-04-14 baseline; 2026-04-27 Option B per-VIX-regime overrides on top):** Global fallback unchanged: `call_stop_buffer: 0.75` (was 0.35), `put_stop_buffer: 1.75` (was 1.55). Buffer decay `start_mult 2.50` over `4.0 hours` (was 2.10 / 2h). **Option B (2026-04-27)** populates `vix_regime.call_stop_buffer = [null, 1.50, 1.00, null]` and `vix_regime.put_stop_buffer = [null, 2.50, 1.50, null]` — Zone 0/3 use global fallback, Zone 1 widens both, Zone 2 widens call but tightens put. Override applied once per day at first entry.
 6. **MKT-045 chain strike snapping (2026-04-17):** After overlap adjustments (MKT-013/015, Fix #44/#66), snaps all 4 strikes to nearest actual Saxo chain strike (max 25pt tolerance). Far-OTM 0DTE strikes use 10-25pt intervals, not 5pt. Prevents entries being skipped due to non-existent strikes.
 7. **MKT-046 stop anti-spike filter (2026-04-17):** When MKT-036 is disabled, requires stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price. Verified April 17 filtered 1 false stop on E#1 before executing confirmed stop.
 8. **Code fix (strategy.py `_apply_vix_regime_overrides()`):** When capping, drops EARLIEST entries (was LAST)

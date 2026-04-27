@@ -95,16 +95,16 @@ EDITABLE_PARAMS = {
     "call_stop_buffer": {
         "path": "strategy.call_stop_buffer",
         "type": "float",
-        "min": 0.00, "max": 1.00,
+        "min": 0.00, "max": 2.00,
         "unit": "$",
-        "description": "Call stop buffer (credit + buffer)",
+        "description": "Call stop buffer (BASE fallback — overridden by vix_regime.call_stop_buffer per zone in live config; Option B 2026-04-27: Z1=$1.50, Z2=$1.00, Z0/Z3=this fallback)",
     },
     "put_stop_buffer": {
         "path": "strategy.put_stop_buffer",
         "type": "float",
         "min": 0.00, "max": 10.00,
         "unit": "$",
-        "description": "Put stop buffer (wider — avoids false put stops)",
+        "description": "Put stop buffer (BASE fallback — overridden by vix_regime.put_stop_buffer per zone in live config; Option B 2026-04-27: Z1=$2.50, Z2=$1.50, Z0/Z3=this fallback)",
     },
     "whipsaw": {
         "path": "strategy.whipsaw_range_skip_mult",

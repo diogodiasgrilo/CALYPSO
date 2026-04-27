@@ -17,11 +17,19 @@ MKT-035/MKT-038 call-only entries also use MKT-029 call floor ($0.75).
 - Put non-viable, call viable: Retry with tighter put strikes (5pt closer, max 2 retries), then call-only entry (MKT-040, v1.15.1)
 - Both non-viable: Skip entry entirely
 
-Conditional Entry Trigger (MKT-035 / Upday-035):
-- Base entries E1-E3 convert to call-only when SPX drops >= 0.57% below session open
+Conditional Entry Trigger (MKT-035 / Upday-035 / Downday-035):
+- Base-entry down-day call-only DISABLED (2026-04-19, base_entry_downday_callonly_pct=null — negative EV in A/B sweep)
 - Conditional entry E6 (14:00): fires as put-only when SPX rises >= 0.25% above session open (Upday-035)
-  Stop = put_credit + put_stop_buffer ($1.55)
+  OR call-only when SPX drops >= 0.25% below session open (Downday-035, deployed 2026-04-19)
+  Stop = credit + side_stop_buffer (see Option B per-VIX-regime values below)
 - E7: DISABLED
+
+Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
+- Global fallback: call_stop_buffer $0.75, put_stop_buffer $1.75
+- Zone 0 (VIX<18) and Zone 3 (VIX>=28): null — fall back to global values
+- Zone 1 (VIX 18-22): call $1.50, put $2.50 (wider both — calm regime)
+- Zone 2 (VIX 22-28): call $1.00, put $1.50 (wider call, TIGHTER put — stress regime)
+- See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
 - 1.24.0 (2026-04-21): scale-to-2-contracts support + non-HYDRA bots kill-switched at code level.
