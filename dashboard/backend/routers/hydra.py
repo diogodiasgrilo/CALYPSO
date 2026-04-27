@@ -41,6 +41,11 @@ async def get_bot_config():
         # [Nc] badge on P&L panels, entry cards, and history rows. Null-safe
         # fallback mirrors the Phase 1 pattern — None/0/missing → 1.
         contracts = strategy.get("contracts_per_entry") or 1
+        # 2026-04-27: expose dry_run flag so the frontend can render a prominent
+        # DRY-RUN banner — eliminates ambiguity when the bot is in dry mode
+        # (Path-B realistic dry-run uses real Saxo prices, so positions look
+        # identical to live except for the DRY_* prefix on position IDs).
+        dry_run = bool(config.get("dry_run", False))
         return {
             "conditional_e6_enabled": strategy.get("conditional_e6_enabled", False),
             "conditional_e7_enabled": strategy.get("conditional_e7_enabled", False),
@@ -57,6 +62,7 @@ async def get_bot_config():
             "entry_times": strategy.get("entry_times", []),
             "conditional_entry_times": strategy.get("conditional_entry_times", []),
             "contracts_per_entry": contracts,
+            "dry_run": dry_run,
         }
     except Exception as e:
         logger.warning(f"Could not read bot config ({config_path}): {e}")
@@ -73,6 +79,7 @@ async def get_bot_config():
             "entry_times": [],
             "conditional_entry_times": [],
             "contracts_per_entry": 1,
+            "dry_run": False,
         }
 
 

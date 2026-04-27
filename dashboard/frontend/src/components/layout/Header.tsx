@@ -4,11 +4,14 @@ import { formatPrice } from "../../lib/formatters";
 import { vixColor, colors } from "../../lib/tradingColors";
 import { useFlashOnChange } from "../../hooks/useFlashOnChange";
 import { isMuted, toggleMute } from "../../lib/sounds";
+import { useBotConfig } from "../../hooks/useBotConfig";
 import { useState } from "react";
 
 export function Header() {
   const { connectionStatus, hydraState, market, todayOHLC } = useHydraStore();
   const [muted, setMuted] = useState(isMuted());
+  const cfg = useBotConfig();
+  const dryRun = cfg.dry_run === true;
 
   // SPX: use last OHLC bar close (most recent), fall back to state file high/low midpoint
   const lastBar = todayOHLC.length > 0 ? todayOHLC[todayOHLC.length - 1] : null;
@@ -32,7 +35,23 @@ export function Header() {
   };
 
   return (
-    <header className="flex items-center justify-between px-4 max-sm:px-2 py-2 bg-bg border-b border-border-dim">
+    <>
+      {/* 2026-04-27: Path-B dry-run banner. Prominent, full-width, hard to miss.
+          Renders only when backend reports dry_run=true. */}
+      {dryRun && (
+        <div
+          className="w-full text-center font-bold tracking-widest text-xs sm:text-sm py-1.5 max-sm:py-1 select-none"
+          style={{
+            background: "repeating-linear-gradient(45deg, rgba(210,153,34,0.95) 0 14px, rgba(180,128,18,0.95) 14px 28px)",
+            color: "#1a1a1a",
+            letterSpacing: "0.15em",
+          }}
+          title="Path-B dry-run mode: real Saxo prices, no real orders placed. Position IDs prefixed DRY_*."
+        >
+          ⚠ DRY-RUN MODE — REAL PRICES, NO REAL ORDERS — POSITION IDs PREFIXED DRY_* ⚠
+        </div>
+      )}
+      <header className="flex items-center justify-between px-4 max-sm:px-2 py-2 bg-bg border-b border-border-dim">
       {/* Left: Logo + title + connection */}
       <div className="flex items-center gap-3 max-sm:gap-2">
         <img
@@ -139,5 +158,6 @@ export function Header() {
         </button>
       </div>
     </header>
+    </>
   );
 }
