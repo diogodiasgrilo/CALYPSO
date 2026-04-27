@@ -438,3 +438,114 @@ Across the parameter studies done 2026-04-27, three of four had the same regime-
 - **EMA trend signal:** no signal in current regime, period → deferred
 
 **Key lesson:** parameter optimization on a single 90-day window is mostly a regime-fitting mirage. Real edge comes from **regime-adaptive features** (which the buffer Option B is, but few others are). The most actionable structural improvement is investigating *whether to engage Z1/Z2 at all*, not how to optimize within them.
+
+---
+
+# Addendum #2 (2026-04-27, later same day) — Spread-width revisited via Saxo counterfactual
+
+After Addendum #1 documented the per-VIX-zone backtest finding that 50pt was meaningfully better in Z2 (-$6.6 vs -$21.5/entry), a Saxo-grounded counterfactual replay was run to validate. **The result substantially weakens the spread-narrowing P&L case** — the backtest's claimed Z2 advantage is mostly a model artifact, not a real-market phenomenon.
+
+## Methodology — anchor on actual fill, not modeled mid
+
+For each of last week's 6 stops (Apr 17–24), compute the counterfactual fill at 75pt and 50pt long strikes. The fix vs an earlier (buggy) attempt:
+
+```
+WRONG: counter_fill = BS(short) - BS(long_50pt) + slippage
+       (introduces BS model error which is huge for puts due to no skew)
+
+RIGHT: actual_mid = actual_debit - slippage              # anchor in reality
+       delta_long = BS(long_50pt) - BS(long_actual)      # BS only for delta
+       counter_mid = actual_mid - delta_long
+       counter_fill = counter_mid + slippage
+```
+
+The first approach makes BS model error look like real savings. The corrected approach uses BS only for the *difference* between two long strikes (where systematic errors largely cancel).
+
+## Corrected results
+
+| Date | # | Side | SPX | Trig | Actual | @75pt | @50pt | Δ@75 | Δ@50 |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-04-17 | 1 | call | 7137 | $320 | $445 | $444 | $436 | +$1 | +$9 |
+| 2026-04-21 | 1 | put | 7069 | $305 | $475 | $475 | $474 | +$0 | +$1 |
+| 2026-04-23 | 1 | put | 7102 | $300 | $535 | $535 | $535 | +$0 | +$0 |
+| 2026-04-23 | 2 | put | 7111 | $290 | $460 | $460 | $459 | +$0 | +$1 |
+| 2026-04-24 | 1 | call | 7159 | $195 | $360 | $360 | $355 | +$0 | +$5 |
+| 2026-04-24 | 2 | call | 7159 | $210 | $485 | $485 | $477 | +$0 | +$8 |
+| **TOTAL** | | | | | **$2,760** | **$2,759** | **$2,735** | **+$1** | **+$25** |
+
+**Total savings going from 110pt → 50pt across all 6 stops last week: ~$25.**
+
+## Why narrower didn't help last week
+
+All 6 stops fired with the SHORT still OTM (or barely ITM). At fill time:
+- Apr 17 call: short 7160, SPX 7137 → short still 23pt OTM
+- Apr 21 put: short 7050, SPX 7069 → short 19pt OTM
+- Apr 23 puts: shorts 7070/7085, SPX 7102/7111 → shorts 26-32pt OTM
+- Apr 24 calls: shorts 7180/7185, SPX 7159 → shorts 21-26pt OTM
+
+The actual long legs were 130+pt OTM at fill time. The hypothetical 50pt long would still be 50-80pt OTM at fill time. **Both deep OTM options had near-zero value differences.**
+
+The narrower-protects-more mechanic requires the SHORT to go meaningfully ITM (so its value is dominated by intrinsic, and the long approaches ATM). Last week's stops were all "barely tagged" stops where width didn't matter.
+
+## Reconciling with the backtest's per-VIX-zone result
+
+The backtest claimed Z2 50pt → $815 better than 110pt over 90 days (~$37/stop). Saxo replay says ~$4/stop. **9× discrepancy.** Most likely explanation: ThetaData backtest doesn't model real spread-mid dynamics during stop events realistically. Real market behavior preserves more long-leg-equivalent OTM-ness during typical stops than the backtest models.
+
+The truth is probably **$10-30/stop average savings** going 110pt → 50pt, weighted across mild and catastrophic stops. With ~18-20 stops/year, **annualized P&L benefit at 1c is ~$200-600/yr**, not the $1,236/yr Addendum #1 implied.
+
+## What this means — narrowing's value is NOT P&L
+
+| Reason to narrow | Magnitude | Real or artifact? |
+|---|---|---|
+| ~~Improve P&L per stopped trade~~ | ~~$15-37/stop~~ | **~~Mostly artifact~~** — Saxo says $0-25 |
+| **Sharpe improvement** | **+22-33%** (backtest) | Real — variance reduction, not return |
+| **Tail-risk cap reduction** | $11K → $5K max loss/IC | Real — pure structural |
+| **Margin freed up** | ~$6K/IC, $18K total at 1c×3 | Real — pure margin math |
+| **Optionality for 2c scaling** | Makes 2c×3 viable in $52K | Real — pure margin math |
+
+**The case for narrowing is built on Sharpe + tail risk + scalability — not on per-trade P&L improvement.** If Addendum #1's "spread-narrow saves money in stress" argument was the load-bearing reason, the corrected analysis weakens it significantly. But the Sharpe and tail-risk and margin arguments still stand independently.
+
+## Refined sequencing recommendation
+
+**Today: hold.** Buffer Option B just deployed. Single-change-at-a-time gives clean attribution at the 4-week review.
+
+**At 2026-05-25 (4-week review):**
+- Validate buffer Option B held up
+- Narrow `max_spread_width` 110 → **75pt** as the next single change (half-step toward Tammy's spec)
+- Reasons: Sharpe improvement, tail-risk halving, margin headroom — not P&L
+
+**At 2026-06-22 (8-week review):**
+- Validate 75pt held up
+- Either step to 50pt (Tammy spec, full margin freedom) OR flip to 2c at 75pt if capital math supports
+
+**At any time:** if account capital changes materially (e.g. deposit), 2c becomes possible at any width without parameter changes.
+
+## Updated decision flag — spread width is no longer "DROPPED"
+
+Reverting the priority list update from Addendum #1:
+
+| Rank | Action | Status | Expected timeframe |
+|---|---|---|---|
+| 1 | Watch Option B buffer change live | Active monitoring | until 2026-05-25 |
+| 2 | **Narrow `max_spread_width` 110 → 75pt** | **Scheduled** | 2026-05-25 (after buffer validates) |
+| 3 | Investigate Z1/Z2 unprofitability | Not started | After 2026-05-25 |
+| 4 | Re-test EMA at next review with fresh data | Scheduled | 2026-05-25 |
+| 5 | Re-evaluate buffer per-VIX-regime with combined data | Scheduled | 2026-05-25 |
+| 6 | Final spread step to 50pt OR 2c flip | Scheduled | 2026-06-22 |
+| 7 | Decay parameter study | Scheduled | ~late June 2026 |
+
+**Spread width is back on the roadmap, just deferred 4 weeks for clean buffer attribution.**
+
+## Reproducibility
+
+[`scripts/spread_width_counterfactual.py`](../scripts/spread_width_counterfactual.py) — the corrected Saxo-grounded counterfactual. Re-run against any date range to test alternative widths. Use as the validation step before any future spread-width change.
+
+---
+
+## Decision sign-off (updated)
+
+**Author:** Diogo Dias Grilo
+**Decision date:** 2026-04-27
+**Live deploys today:** Buffer Option B (per main doc above)
+**Spread-width status:** **DEFERRED to 2026-05-25** — narrow to 75pt at next review pending buffer validation
+**First review:** 2026-05-25 (4 weeks of live data)
