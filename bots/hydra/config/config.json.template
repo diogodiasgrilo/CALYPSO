@@ -112,16 +112,17 @@
         2,
         1
       ],
+      "_comment_buffers": "Per-VIX-zone stop buffer overrides (Option B, deployed 2026-04-27 per docs/HYDRA_BUFFER_OPTIMIZATION.md). Zone 0 (VIX<18) and Zone 3 (VIX>=28) left null due to insufficient sample data — fall back to global call_stop_buffer/put_stop_buffer floors. Zone 1 (18-22): wider both — calm regime, most stops are noise. Zone 2 (22-28): wider call but tighter put — stress regime, stops fire on real moves so quicker exit beats more cushion. Re-evaluate 2026-05-25 with 4 weeks of live data.",
       "put_stop_buffer": [
         null,
-        null,
-        null,
+        2.50,
+        1.50,
         null
       ],
       "call_stop_buffer": [
         null,
-        null,
-        null,
+        1.50,
+        1.00,
         null
       ],
       "min_call_credit": [

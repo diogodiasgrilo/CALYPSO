@@ -429,6 +429,8 @@ def live_config() -> BacktestConfig:
         vix_regime_max_entries=[2, 2, 2, 1],        # updated 2026-04-17: drops E#1 at ALL VIX levels
         vix_regime_min_call_credit=[1.0, 0.5, 0.3, 0.3],   # updated 2026-04-17: per-zone call credit floors matching VM
         vix_regime_min_put_credit=[1.25, 0.75, 0.5, 0.4],  # updated 2026-04-17: per-zone put credit floors matching VM
+        vix_regime_call_stop_buffer=[None, 150.0, 100.0, None],  # added 2026-04-27 (Option B per docs/HYDRA_BUFFER_OPTIMIZATION.md): wider call in Z1+Z2; Z0/Z3 fall back to global $0.75
+        vix_regime_put_stop_buffer=[None, 250.0, 150.0, None],   # added 2026-04-27 (Option B): wider put in Z1 (calm noise), TIGHTER put in Z2 (stress, exit faster); Z0/Z3 fall back to global $1.75
         conditional_downday_e6_enabled=True,                # added 2026-04-19: Downday-035 E6 call-only on down days
         conditional_downday_threshold_pct=0.0025,           # added 2026-04-19: 0.25% fraction (engine does *100)
     )
