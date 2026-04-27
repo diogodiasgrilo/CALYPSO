@@ -4780,7 +4780,20 @@ class HydraStrategy(MEICStrategy):
 
         if self.dry_run:
             logger.info(f"[DRY RUN] Would close {side} SHORT of Entry #{entry.entry_number}")
-            actual_close_cost = stop_level
+            # Path-B realism: estimate close cost from current real ask (market-order semantics).
+            # MKT-025 closes only the short — paying the ask is the conservative buy-back fill.
+            short_ask = getattr(entry, f"short_{side}_ask", None)
+            short_price = getattr(entry, f"short_{side}_price", 0)
+            if short_ask and short_ask > 0:
+                actual_close_cost = short_ask * 100 * entry.contracts
+                logger.info(f"[DRY RUN] MKT-025 short-only close estimated at ask=${short_ask:.2f} → cost ${actual_close_cost:.0f}")
+            elif short_price > 0:
+                # Fallback: mid + 10% slippage estimate
+                actual_close_cost = short_price * 1.10 * 100 * entry.contracts
+                logger.info(f"[DRY RUN] No ask available, using mid×1.10=${short_price*1.10:.2f} → cost ${actual_close_cost:.0f}")
+            else:
+                actual_close_cost = stop_level
+                logger.info(f"[DRY RUN] No price data, using theoretical stop level ${stop_level:.0f}")
         else:
             # Close only the short leg via market order
             for pos_id, leg_name, uic in positions_to_close:
@@ -5458,11 +5471,51 @@ class HydraStrategy(MEICStrategy):
         In dry-run mode: use _simulate_hydra_entry_prices() for one-sided entries.
         """
         if self.dry_run:
+            # Path-B realism: if entry has real UICs (populated by Path-B
+            # _simulate_entry), use REAL Saxo quotes. Fall back to simulation
+            # only for entries lacking UICs (recovery edge cases).
+            uic_map = {}
+            legacy_entries = []
             for entry in self.daily_state.active_entries:
                 call_done = entry.call_side_stopped or getattr(entry, 'call_side_expired', False) or getattr(entry, 'call_side_skipped', False)
                 put_done = entry.put_side_stopped or getattr(entry, 'put_side_expired', False) or getattr(entry, 'put_side_skipped', False)
                 if call_done and put_done:
                     continue
+                has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in ("short_call", "long_call", "short_put", "long_put"))
+                if has_uic:
+                    for leg in ("short_call", "long_call", "short_put", "long_put"):
+                        uic = getattr(entry, f"{leg}_uic", 0)
+                        if uic:
+                            uic_map.setdefault(uic, []).append((entry, leg))
+                else:
+                    legacy_entries.append(entry)
+
+            if uic_map:
+                try:
+                    quotes = self.client.get_quotes_batch(
+                        list(uic_map.keys()), asset_type="StockIndexOption"
+                    )
+                    for uic, targets in uic_map.items():
+                        quote = quotes.get(uic)
+                        mid_price = self._extract_mid_price(quote) or 0
+                        bid = None
+                        ask = None
+                        if quote and "Quote" in quote:
+                            q = quote["Quote"]
+                            bid = q.get("Bid") or None
+                            ask = q.get("Ask") or None
+                        for entry, leg in targets:
+                            setattr(entry, f"{leg}_price", mid_price)
+                            setattr(entry, f"{leg}_bid", bid)
+                            setattr(entry, f"{leg}_ask", ask)
+                except Exception as e:
+                    logger.warning(f"[DRY RUN] Real-quote batch fetch failed, using simulation: {e}")
+                    for entry in self.daily_state.active_entries:
+                        self._simulate_hydra_entry_prices(entry)
+                    return
+
+            # Fall back to simulation for entries without UICs
+            for entry in legacy_entries:
                 self._simulate_hydra_entry_prices(entry)
             return
 

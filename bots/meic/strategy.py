@@ -2586,20 +2586,44 @@ class MEICStrategy:
         """
         Simulate an iron condor entry (dry-run mode).
 
-        Args:
-            entry: IronCondorEntry to simulate
-
-        Returns:
-            True if simulation successful
+        Path-B realism (2026-04-27): use REAL credits from MKT-011 estimator and
+        REAL UICs from the Saxo chain, so heartbeat price updates fetch real
+        bid/ask. Only the actual order placement is skipped.
         """
-        # Simulate realistic credits based on spread width
-        # Typically collect 2-3% of spread width as credit
-        # Fix #52: Multiply by contracts_per_entry for multi-contract support
-        credit_ratio = 0.025  # 2.5% of spread width per side
-        entry.call_spread_credit = self.spread_width * credit_ratio * 100 * self.contracts_per_entry
-        entry.put_spread_credit = self.spread_width * credit_ratio * 100 * self.contracts_per_entry
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            logger.error("[DRY RUN] Could not determine today's expiry — falling back to crude sim")
+            credit_ratio = 0.025
+            entry.call_spread_credit = self.spread_width * credit_ratio * 100 * self.contracts_per_entry
+            entry.put_spread_credit = self.spread_width * credit_ratio * 100 * self.contracts_per_entry
+        else:
+            # Populate real UICs from chain so heartbeat fetches real quotes
+            try:
+                if entry.short_call_strike and entry.long_call_strike:
+                    entry.short_call_uic = self._get_option_uic(entry.short_call_strike, "Call", expiry) or 0
+                    entry.long_call_uic = self._get_option_uic(entry.long_call_strike, "Call", expiry) or 0
+                if entry.short_put_strike and entry.long_put_strike:
+                    entry.short_put_uic = self._get_option_uic(entry.short_put_strike, "Put", expiry) or 0
+                    entry.long_put_uic = self._get_option_uic(entry.long_put_strike, "Put", expiry) or 0
+            except Exception as e:
+                logger.warning(f"[DRY RUN] UIC lookup failed for Entry #{entry.entry_number}: {e}")
 
-        # Generate fake position IDs
+            # Use REAL estimated credits from current chain (not 2.5% formula)
+            try:
+                est_call, est_put = self._estimate_entry_credit(entry)
+                if est_call > 0:
+                    entry.call_spread_credit = est_call * self.contracts_per_entry
+                if est_put > 0:
+                    entry.put_spread_credit = est_put * self.contracts_per_entry
+            except Exception as e:
+                logger.warning(f"[DRY RUN] Credit estimate failed for Entry #{entry.entry_number}: {e}")
+                # Fallback to crude formula
+                if not entry.call_spread_credit:
+                    entry.call_spread_credit = self.spread_width * 0.025 * 100 * self.contracts_per_entry
+                if not entry.put_spread_credit:
+                    entry.put_spread_credit = self.spread_width * 0.025 * 100 * self.contracts_per_entry
+
+        # Generate fake position IDs (we have no real Saxo positions in dry mode)
         base_id = int(datetime.now().timestamp() * 1000)
         entry.short_call_position_id = f"DRY_{base_id}_SC"
         entry.long_call_position_id = f"DRY_{base_id}_LC"
@@ -2608,7 +2632,9 @@ class MEICStrategy:
 
         logger.info(
             f"[DRY RUN] Simulated Entry #{entry.entry_number}: "
-            f"Credit ${entry.total_credit:.2f}"
+            f"Real credits Call=${entry.call_spread_credit:.2f} Put=${entry.put_spread_credit:.2f} "
+            f"UICs SC={entry.short_call_uic} LC={entry.long_call_uic} "
+            f"SP={entry.short_put_uic} LP={entry.long_put_uic}"
         )
 
         return True
@@ -3875,8 +3901,26 @@ class MEICStrategy:
 
         if self.dry_run:
             logger.info(f"[DRY RUN] Would close {side} side of Entry #{entry.entry_number}")
-            # In dry-run, use theoretical stop level for P&L
-            actual_close_cost = stop_level
+            # Path-B realism: estimate close cost from current real bid/ask.
+            # Close-both semantics: BUY back short at ask, SELL long at bid.
+            # That's worst-case market-order fill on the spread.
+            short_ask = getattr(entry, f"short_{side}_ask", None)
+            long_bid = getattr(entry, f"long_{side}_bid", None)
+            short_price = getattr(entry, f"short_{side}_price", 0)
+            long_price = getattr(entry, f"long_{side}_price", 0)
+            if short_ask and short_ask > 0 and long_bid is not None:
+                # Real bid/ask available — use worst-case spread fill
+                long_bid_safe = long_bid if long_bid is not None else 0
+                actual_close_cost = (short_ask - long_bid_safe) * 100 * entry.contracts
+                logger.info(f"[DRY RUN] Close-both spread fill: short_ask=${short_ask:.2f} - long_bid=${long_bid_safe:.2f} → cost ${actual_close_cost:.0f}")
+            elif short_price > 0:
+                # Fallback: spread mid × 1.10 slippage estimate
+                spread_mid = max(0, short_price - long_price)
+                actual_close_cost = spread_mid * 1.10 * 100 * entry.contracts
+                logger.info(f"[DRY RUN] No bid/ask, using spread mid×1.10=${spread_mid*1.10:.2f} → cost ${actual_close_cost:.0f}")
+            else:
+                actual_close_cost = stop_level
+                logger.info(f"[DRY RUN] No price data, using theoretical stop level ${stop_level:.0f}")
         else:
             # EMERGENCY-001: Close positions with enhanced retry logic and spread validation
             # FIX #42: Collect fill prices from each leg
