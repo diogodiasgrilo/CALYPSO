@@ -336,3 +336,105 @@ All three are reproducible — re-run any of them against the current VM DB to e
 **Pre-deploy validation:** Pending (config diff to be applied next)
 **Live deploy date:** TBD (recommended pre-market Mon/Tue)
 **First review:** 2026-05-25 (4 weeks of live data)
+
+---
+
+# Addendum (2026-04-27, post-deploy) — Adjacent investigations
+
+After Option B was deployed, two adjacent questions were investigated:
+1. Should `max_spread_width` (currently 110pt) be narrowed?
+2. Should the EMA 20/40 trend signal be activated to drive entry-type selection?
+
+Both came back negative for action, but produced the most important strategic
+finding of the session — captured below for future reference.
+
+## Spread-width study — DO NOT CHANGE
+
+**Initial sweep ([scripts/sweep_max_spread_width.py](../scripts/sweep_max_spread_width.py))** over Dec 1 – Apr 10 (90 days, ThetaData backtest engine) suggested narrowing from 110pt to 50pt would improve Sharpe from 0.76 → 1.01 (+33%) and unlock 2c×3 margin viability ($29K vs $52K available).
+
+**Robustness check ([scripts/spread_width_robustness.py](../scripts/spread_width_robustness.py))** killed it. Splitting the 90-day window in halves revealed:
+
+| Window | Best width by Sharpe | Stop rate | 50pt EV vs 110pt |
+|---|---|---|---|
+| Half 1 (Dec 1 – Feb 4) | **150pt** (0.55) | 33% (stress) | −$6.6/entry |
+| Half 2 (Feb 5 – Apr 10) | **50pt** (2.72) | 18.8% (calm) | +$8.7/entry |
+| Full | 50pt by Sharpe, 150pt by EV | 24% | +$2.4/entry |
+
+**Top-3 overlap by Sharpe between halves: 0 of 3.** Identical regime fragility we saw on the put buffer, but with NO clean per-VIX intersection.
+
+**Per-VIX-regime spread analysis ([scripts/spread_width_per_vix_regime.py](../scripts/spread_width_per_vix_regime.py))** — bucket entries by VIX zone, find optimal width per zone:
+
+| Zone | VIX | Entries | Best width by EV | EV at best | Profitable? |
+|---|---|---|---|---|---|
+| **Z0** | <18 | 75 | **110pt** ($67.3/entry) | $5,050 | 🟢 highly + |
+| Z1 | 18-22 | 55 | 75pt (−$24.3) | −$1,335 | ❌ negative everywhere |
+| Z2 | 22-28 | 55 | 50pt (−$6.6) | −$365 | ❌ negative everywhere |
+| Z3 | ≥28 | 6 | 150pt | +$50 | inconclusive (n too small) |
+
+**Best widths disagree across all 4 zones** (110/75/50/150). No common winner.
+
+### What killed the spread-width recommendation
+
+1. **Z0 (calm regime) generates ALL of the strategy's profitability** ($5,050 of $5,160 total at best widths). Z1/Z2 are net losers at every width tested.
+2. **No spread width fixes Z1/Z2 unprofitability.** Best-case in Z2 is still negative (−$6.6/entry).
+3. **Z0 doesn't really care about width** — every width is hugely profitable ($59-67/entry) in calm conditions. Picking the optimum saves only ~$200-300/yr at 1c.
+4. **Per-VIX-regime widths would require engine code change** (`max_spread_width` is single-valued, would need an array). Engineering cost dwarfs benefit given Z0-only gains.
+5. **2c via spread narrowing is structurally unsafe.** At 50pt × 2c in a stress regime (Half 1), EV becomes $11.6/entry — same as current 1c at 110pt with double the position size and double the per-trade tail risk.
+
+### The bigger insight from spread-width work
+
+The strategy's edge is **concentrated in low-VIX regimes (Z0)**, with Z1/Z2 essentially break-even-or-worse and Z3 unmeasurable. The right investigation isn't "what spread width should I use?" but **"should I be trading Z1/Z2 at all?"**
+
+Concrete next-investigation candidates (NOT for today, but documented for future):
+1. Reduce `vix_regime.max_entries` in Z1/Z2 — currently `[2, 2, 2, 1]`, try `[2, 1, 1, 0]` or `[2, 2, 1, 0]`
+2. Raise `vix_regime.min_call_credit` / `min_put_credit` floors in Z1/Z2 (be more selective)
+3. Use EMA signal specifically as a Z1/Z2 filter (it might gate stress days even if it doesn't add directional info in calm Z0)
+4. New `vix_regime.skip_entry_pct` field — probability of skipping each entry per zone
+
+## EMA 20/40 trend signal study — leave disabled
+
+**Backtest ([scripts/ema_trend_backtest.py](../scripts/ema_trend_backtest.py))** over the same Saxo Mar 16 – Apr 24 window as the buffer study. For each candidate threshold {0.10%, 0.15%, 0.20%, 0.30%, 0.40%, 0.50%}, classify entries by EMA20-vs-EMA40 divergence and replay full_ic → put-only (BULLISH) or call-only (BEARISH) counterfactuals.
+
+**Result: EMA produces essentially zero actionable signal in this window.**
+
+| Threshold | Bullish entries | Bearish entries | Δ vs baseline |
+|---|---|---|---|
+| 0.10% | 3 | 3 | +$32 (within noise) |
+| 0.15% | 1 | 0 | −$140 |
+| 0.20% (live) | 1 | 0 | −$140 |
+| 0.30%+ | 0 | 0 | $0 (signal never fires) |
+
+EMA divergence distribution: median absolute = 0.030%, p90 = 0.087%, max = 0.244%. The signal is too tame to fire at any reasonable threshold.
+
+### Why this differs from Feb 2026 (Appendix C in HYDRA_TRADING_JOURNAL.md)
+
+Feb data showed +$850 impact at 0.20% threshold across 6 directional entries. Mar 16 – Apr 24 has similar |divergence| magnitudes BUT calmer days where neither side was in real danger — entries that "would have flipped" expired clean either way. The signal might still have value in stress regimes; we just don't have a stress sample in this window.
+
+### When to revisit EMA
+
+Re-run [scripts/ema_trend_backtest.py](../scripts/ema_trend_backtest.py) at the next 4-week review (2026-05-25). If by then we've had at least 5+ trading days with VIX > 22 and EMA |divergence| > 0.20%, the regime sample is meaningful enough to test directional flipping. Until then, leave EMA `informational only` as today.
+
+## Updated forward-looking priority list
+
+Reordered based on today's findings:
+
+| Rank | Action | Status | Expected timeframe |
+|---|---|---|---|
+| 1 | Watch Option B buffer change live | Active monitoring | 4 weeks (until 2026-05-25) |
+| 2 | Investigate Z1/Z2 unprofitability (entry-count caps, credit floors) | Not started | After 4-week buffer review |
+| 3 | Re-test EMA at next review with fresh data | Scheduled | 2026-05-25 |
+| 4 | Re-evaluate buffer per-VIX-regime with combined data | Scheduled | 2026-05-25 |
+| 5 | Decay parameter study (need 8 weeks MKT-042 data) | Scheduled | ~late June 2026 |
+| **DROPPED** | ~~Narrow `max_spread_width`~~ | Killed by robustness check | — |
+| **DROPPED** | ~~Per-VIX-regime spread widths~~ | Killed by per-zone analysis (engine cost > Z0-only benefit) | — |
+| **DROPPED** | ~~Activate EMA-driven entry-type flipping~~ | No signal in current regime | revisit 2026-05-25 |
+
+## Pattern recognition — what the session as a whole revealed
+
+Across the parameter studies done 2026-04-27, three of four had the same regime-fragility pattern (Half 1 vs Half 2 disagreement on direction):
+- **Buffer:** regime-fragile, but the engine had per-VIX-zone wiring → shipped Option B
+- **Base-entry directional conversion (tight thresholds):** regime-fragile AND no engine support for per-zone → killed
+- **Spread width:** regime-fragile AND per-zone analysis revealed unprofitable middle zones → killed
+- **EMA trend signal:** no signal in current regime, period → deferred
+
+**Key lesson:** parameter optimization on a single 90-day window is mostly a regime-fitting mirage. Real edge comes from **regime-adaptive features** (which the buffer Option B is, but few others are). The most actionable structural improvement is investigating *whether to engage Z1/Z2 at all*, not how to optimize within them.
