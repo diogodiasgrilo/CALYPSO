@@ -549,3 +549,102 @@ Reverting the priority list update from Addendum #1:
 **Live deploys today:** Buffer Option B (per main doc above)
 **Spread-width status:** **DEFERRED to 2026-05-25** — narrow to 75pt at next review pending buffer validation
 **First review:** 2026-05-25 (4 weeks of live data)
+
+---
+
+# Addendum #3 (2026-04-27 EOD) — Why we can't naively narrow `max_spread_width`
+
+After deploying Path-B dry-run + Option B buffers earlier in the day, the
+operator flipped `max_spread_width` from 110 → 50 (Tammy's spec) for a
+same-day dry-run experiment. **E#1 placed at 10:45:13 with strikes at
+177pt OTM call / 198pt OTM put and net credit of $5 per contract** (vs.
+HYDRA's typical ~$1.20-$1.50/contract at 110pt). Within 9 seconds, the
+state-reconciliation cascade marked the entry as "closed externally" and
+the dry session was effectively dead before it began.
+
+The reconciliation cascade is a separate Path-B bug fixed in commit
+[fixes-coming-next] — but the root strategy issue around narrow widths is
+a config-interaction footgun that needs explicit documentation here.
+
+## Why narrowing alone breaks strike selection
+
+**MKT-024 starting OTM** is `base_otm × call_starting_otm_multiplier`
+where `base_otm` is VIX-adjusted (~50pt at VIX 18-19) and the multiplier
+is 3.5×/4.0× (call/put). At the standard 110pt spread, this places the
+search starting point at ~175-200pt OTM, well into territory where Saxo's
+chain has 25pt strike intervals (not 5pt) and far-OTM options are
+illiquid.
+
+At 110pt spread, MKT-020/022 progressive tightening then scans inward
+in 5pt steps until net credit is viable. The wider 110pt long leg has
+near-zero value at far OTM, so net credit is dominated by the short's
+extrinsic premium — tightening rapidly produces enough credit to meet
+the minimum.
+
+**At 50pt spread, the long leg is much closer to the short and has
+MUCH higher value.** Net credit (= short_mid − long_mid) compresses
+across the entire OTM range. MKT-020/022 can scan all the way to the
+25pt OTM floor without reaching minimum credit. Plus — as observed
+2026-04-27 — at the wide MKT-024 starting position, MKT-007/008
+illiquidity checks fall back to the original strikes with a warning,
+and the tightening loop never logs a successful tighten. The bot ends
+up placing a full IC with negligible credit and a MIN_STOP_LEVEL
+fallback for stop pricing.
+
+## What today actually showed
+
+```
+10:45:04  MKT-024: VIX=18.7, base_otm=50pt → call_otm=175pt (×3.5),
+          put_otm=200pt (×4.0), call_spread=50pt, put_spread=50pt
+10:45:05  MKT-007: Call 7340 illiquid, trying 7335
+10:45:05  MKT-007: Call 7340 illiquid, trying 7330
+10:45:06  MKT-007: Could not find liquid strike for Call near 7340
+10:45:07  Strike 7385 Call not found in chain
+10:45:09  MKT-008: Could not find liquid long Call near 7390, using original
+10:45:13  [DRY RUN] Simulated Entry #1: Real credits Call=$0.00 Put=$5.00
+10:45:13  CRITICAL: Total credit $5.00 very low, using minimum stop
+```
+
+No `MKT-020: Call tightened` or `MKT-022: Put tightened` log line — the
+tightening scan didn't run (or ran but produced nothing actionable). The
+entry was placed at the original MKT-024 starting position with $0/share
+call credit and $0.05/share put credit.
+
+## What needs to change before any spread-width experiment
+
+Before running a 50pt or 75pt experiment again, **MKT-024's starting
+multipliers need to be lowered to match the narrower spread**. Sketched
+relationship:
+
+| max_spread_width | Recommended call_starting_otm_multiplier | put_starting_otm_multiplier |
+|---|---|---|
+| 110pt (current live) | 3.5 (current) | 4.0 (current) |
+| 75pt | ~2.0 | ~2.5 |
+| 50pt | ~1.0 (= base_otm itself) | ~1.5 |
+
+The intuition: at narrower spread, you can't afford to start far OTM
+because the long leg is too close to the short for the scan to recover
+viable credit. Start near the 8-delta target itself, then let MKT-020/022
+tighten only modestly inward.
+
+These multipliers haven't been backtested. **Any future narrow-width
+experiment should first run a backtest sweep on
+`(max_spread_width, call_starting_otm_multiplier, put_starting_otm_multiplier)`
+jointly** — not just `max_spread_width` in isolation.
+
+## Updated priority list — what NOT to repeat
+
+1. ❌ Don't flip `max_spread_width` alone without also reducing MKT-024
+   starting multipliers.
+2. ❌ Don't combine multiple parameter changes in a single restart
+   without validating each in isolation. Today bundled (a) Option B buffers
+   (b) Path-B dry-run (c) 50pt spread width — when E#1 misbehaved, attribution
+   was unclear until log dive.
+3. ❌ Don't trust a static "ready" audit. Future dry-run deploys must
+   include a smoke-test that runs through one full entry placement +
+   heartbeat + reconciliation cycle BEFORE market open.
+4. ✅ Do narrow `max_spread_width` only after a backtest validates
+   matched MKT-024 multipliers.
+
+This is captured here so future-me doesn't repeat the same experiment
+without the necessary config preparation.

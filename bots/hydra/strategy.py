@@ -4930,6 +4930,13 @@ class HydraStrategy(MEICStrategy):
         Returns:
             bool: True if long was sold successfully
         """
+        # Path-B dry-run defense (2026-04-27): primary callers (the reconciliation
+        # paths) are already gated, but defense-in-depth — calling
+        # client.get_closed_position_price for a DRY_* UIC has no real-world
+        # meaning and may surface confusing data.
+        if self.dry_run:
+            return False
+
         if side == "call":
             long_uic = entry.long_call_uic
             long_pos_id = entry.long_call_position_id
@@ -8062,6 +8069,11 @@ class HydraStrategy(MEICStrategy):
         - Manual intervention
         - Orphaned positions
         """
+        # Path-B dry-run skip (2026-04-27): DRY_* IDs never exist in Saxo by
+        # design — reconciliation would mark every dry leg as missing.
+        if self.dry_run:
+            return
+
         from bots.meic.strategy import is_market_open, RECONCILIATION_INTERVAL_MINUTES
 
         if not is_market_open():
@@ -8459,6 +8471,12 @@ class HydraStrategy(MEICStrategy):
         If Saxo's total differs from our calculated total, apply a correction
         to total_realized_pnl. This runs once at settlement time.
         """
+        # Path-B dry-run skip (2026-04-27): no real Saxo closures exist for
+        # DRY_* positions, so the closedpositions report has nothing matching
+        # our entry UICs. The "verification" would always conclude our P&L is
+        # off by the entire dry P&L and try to correct it to zero.
+        if self.dry_run:
+            return
         try:
             from shared.market_hours import get_us_market_time
             today = get_us_market_time().strftime("%Y-%m-%d")
@@ -8521,6 +8539,14 @@ class HydraStrategy(MEICStrategy):
         Saxo's closedpositions API to capture the actual sale revenue,
         replicating what MKT-033 would have recorded.
         """
+        # Path-B dry-run skip (2026-04-27): the base class skip (MEIC) already
+        # returns early in dry mode so this override never sees cleared longs
+        # to investigate. But to be defensive (and avoid the MKT-033 AUTO call
+        # to client.get_closed_position_price for DRY_* UICs that fired today
+        # at 10:45:23), exit explicitly before any Saxo API call.
+        if self.dry_run:
+            return
+
         # Snapshot which long legs have UICs BEFORE base reconciliation clears them
         pre_longs = {}
         for entry in self.daily_state.entries:
@@ -9327,6 +9353,14 @@ class HydraStrategy(MEICStrategy):
         Returns:
             bool: True if positions were recovered, False if starting fresh
         """
+        # Path-B dry-run skip (2026-04-27): no real Saxo positions exist in dry
+        # mode (DRY_* IDs only). On bot restart in dry mode, returning False
+        # tells the caller "no positions to recover" without clobbering the
+        # state file's active_entries — the dry session continues from disk.
+        if self.dry_run:
+            logger.info("Path-B: skipping HYDRA _recover_positions_from_saxo in dry-run mode")
+            return False
+
         logger.info("=" * 60)
         logger.info("POSITION RECOVERY: Querying Saxo API for source of truth...")
         logger.info("=" * 60)

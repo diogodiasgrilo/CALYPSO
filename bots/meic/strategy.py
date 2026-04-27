@@ -1146,6 +1146,15 @@ class MEICStrategy:
 
             pass
 
+        # Path-B dry-run skip (2026-04-27): in dry mode, _simulate_entry creates
+        # DRY_* position IDs but does NOT register them in the position registry,
+        # so expected_positions (from active_entries IDs) > registry_count (0).
+        # This false mismatch was triggering full Saxo reconciliation that then
+        # killed the dry entry within ~10s of placement. Dry positions are
+        # tracked in active_entries directly — registry is irrelevant here.
+        if self.dry_run:
+            return None
+
         # Cross-check with Position Registry
         expected_positions = sum(len(e.all_position_ids) for e in self.daily_state.active_entries)
         registry_count = len(my_positions)
@@ -1217,6 +1226,13 @@ class MEICStrategy:
         - Manual intervention
         - Orphaned positions
         """
+        # Path-B dry-run skip (2026-04-27): in dry mode, our positions use DRY_*
+        # IDs that never exist in Saxo by design. Comparing them against Saxo's
+        # positions list always reports them as "missing → manually closed",
+        # killing dry entries seconds after placement.
+        if self.dry_run:
+            return
+
         if not is_market_open():
             return
 
@@ -5154,6 +5170,15 @@ class MEICStrategy:
         Returns:
             bool: True if positions were recovered, False if starting fresh
         """
+        # Path-B dry-run skip (2026-04-27): in dry mode, no positions exist in
+        # Saxo by design (only DRY_* in active_entries). On bot restart in dry
+        # mode this would erroneously report "no positions to recover" and wipe
+        # whatever dry state was in active_entries. Just return False so caller
+        # treats this as "no recovery needed" without clobbering active_entries.
+        if self.dry_run:
+            logger.info("Path-B: skipping _recover_positions_from_saxo in dry-run mode")
+            return False
+
         logger.info("=" * 60)
         logger.info("POSITION RECOVERY: Querying Saxo API for source of truth...")
         logger.info("=" * 60)
@@ -5980,6 +6005,16 @@ class MEICStrategy:
         This is a lighter-weight check compared to full recovery.
         Handles POS-003: Positions closed manually during trading.
         """
+        # Path-B dry-run skip (2026-04-27): the entire reconciliation flow below
+        # compares DRY_* IDs against Saxo's real position list. Every DRY_* ID
+        # is "missing" by design, so the per-entry leg-missing block (lines
+        # 6004-6034) marks every dry side as stopped — killing the entry. The
+        # 2026-02-04 partial skip below covered orphan cleanup but missed this
+        # path. Skip the whole reconciliation in dry mode.
+        if self.dry_run:
+            logger.debug("Path-B: skipping _reconcile_positions in dry-run mode (DRY_* IDs not in Saxo by design)")
+            return
+
         logger.info("Reconciling positions with Saxo API...")
 
         # Get all positions from Saxo
