@@ -32,6 +32,19 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 1.25.0 (2026-04-30): Path-B dry-mode bookkeeping + MKT-024 multiplier tuning + 1v1 variant
+  comparison + 4 SAFETY-DRY defense-in-depth gates. (a) `_process_expired_credits` now treats
+  `DRY_*` synthetic IDs as settled — fixes Apr 28-29 false net_pnl=-$20 (commission-only) on
+  winning days; DB + metrics file backfilled. (b) MKT-024: call_starting_otm_multiplier 3.5→2.5,
+  put_starting_otm_multiplier 4.0→2.75, upper clamp 240→180pt. ~40-50% less wasted scan. (c) New
+  `dry_run_force_normal_day` flag bypasses FOMC date-based skips in dry mode; live untouched.
+  (d) Variant B = parallel HYDRA process (HYDRA_VARIANT_ID=b env var) running in dry mode with
+  max_spread_width=110 (vs A's 50). Isolated data/variant_b/* paths, hydra_variant_b.service.
+  Dashboard /comparison page (gated by DASHBOARD_COMPARISON_MODE_ENABLED) + 16th Telegram
+  command /compare + end-of-day VARIANT_COMPARISON_DAILY alert (idempotent). (e) Defense-in-depth
+  `if self.dry_run` gates at _place_option_order, _handle_naked_short, _unwind_partial_entry,
+  _close_position_with_retry — every Saxo-order entry point self-protects.
+
 - 1.24.0 (2026-04-21): scale-to-2-contracts support + non-HYDRA bots kill-switched at code level.
   Phase 1: All stop-level math (call/put buffers, theoretical put, MIN_STOP_LEVEL floor, MKT-042 buffer
   decay) scales via self.contracts_per_entry (live path) or entry.contracts (recovery path). All

@@ -97,7 +97,7 @@ DATA_DIR = (
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.24.0"
+HYDRA_VERSION = "1.25.0"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -6468,8 +6468,24 @@ class HydraStrategy(MEICStrategy):
             "call_stops": b_state.get("call_stops_triggered", 0),
             "put_stops": b_state.get("put_stops_triggered", 0),
             "entries": entries,
-            "spread_width": (b_state.get("market_data_ohlc") or {}).get("spread_width"),
         }
+
+    def _read_variant_b_spread_width(self) -> int:
+        """Read variant B's actual max_spread_width from its config file so
+        the comparison message header reflects the real spread (not a
+        hard-coded literal). Falls back to 110 only if the file can't be
+        read — which would also mean variant B isn't running, in which case
+        _send_variant_comparison_summary already short-circuits earlier."""
+        try:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            config_path = os.path.join(
+                project_root, "bots", "hydra", "config", "config_variant_b.json"
+            )
+            with open(config_path, "r") as f:
+                cfg = json.load(f)
+            return int(cfg.get("strategy", {}).get("max_spread_width", 110))
+        except Exception:
+            return 110
 
     def _peak_buffer_for_state(self, entries: list) -> tuple:
         """(call_pct, put_pct) — largest buffer utilization seen on any side."""
@@ -6514,7 +6530,7 @@ class HydraStrategy(MEICStrategy):
             winner_line = f"B leads by {self._fmt_money(abs(delta))} ({pct:.1f}%)"
 
         a_spread = self.strategy_config.get("max_spread_width", "?")
-        b_spread = (b_state.get("strategy_config") or {}).get("max_spread_width") or "110"
+        b_spread = self._read_variant_b_spread_width()
 
         a_peak_c, a_peak_p = self._peak_buffer_for_state(self.daily_state.entries)
         b_peak_c, b_peak_p = self._peak_buffer_for_state(b_summary.get("entries", []))
@@ -6553,6 +6569,14 @@ class HydraStrategy(MEICStrategy):
          - This is variant A (HYDRA_VARIANT_ID is None — variant B never sends)
          - Variant B's state file exists and is fresh (< 30 min old)
          - Alerts are enabled in this bot's config
+         - The alert hasn't already been sent for today's trading date
+
+        Idempotency mirrors the parent log_daily_summary FIX-71/83 pattern:
+        cumulative_metrics["variant_comparison_sent_date"] stores the YYYY-MM-DD
+        of the most recent successful send. On restart after settlement,
+        log_daily_summary's parent guard returns early but our override still
+        invokes this method, so we need our OWN guard or the comparison alert
+        would re-broadcast on every restart that day.
 
         Suppressed silently otherwise — never raises into the calling daily-
         summary path.
@@ -6563,6 +6587,16 @@ class HydraStrategy(MEICStrategy):
                 return
             if not getattr(self, "alert_service", None):
                 return
+
+            # Idempotency: skip if we already sent today's comparison.
+            today_et = get_us_market_time().date().isoformat()
+            sent_date = self.cumulative_metrics.get("variant_comparison_sent_date", "")
+            if sent_date == today_et:
+                logger.debug(
+                    f"Variant comparison already sent for {today_et} — skipping (idempotent)"
+                )
+                return
+
             b_state = self._load_variant_b_state()
             if not b_state:
                 return  # variant B not running or stale
@@ -6576,6 +6610,14 @@ class HydraStrategy(MEICStrategy):
                 message=body,
                 priority=AlertPriority.LOW,
             )
+            # Record successful send so a restart on the same trading day
+            # doesn't re-broadcast. Persist via _save_cumulative_metrics so
+            # the flag survives across restarts.
+            self.cumulative_metrics["variant_comparison_sent_date"] = today_et
+            try:
+                self._save_cumulative_metrics(trading_date=today_et)
+            except Exception as save_e:
+                logger.warning(f"Failed to persist variant_comparison_sent_date: {save_e}")
             logger.info("Sent VARIANT_COMPARISON_DAILY alert (variant A → Telegram)")
         except Exception as e:
             logger.warning(f"Variant comparison alert send failed (non-fatal): {e}")

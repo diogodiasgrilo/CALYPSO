@@ -440,7 +440,7 @@ This pipeline prevents Saxo from rejecting orders or merging positions:
 
 Steps 6-7 internally re-run steps 1-5 if they change strikes.
 
-**MKT-024 (v1.6.0):** Calls start at 3.5× and puts start at 4.0× the VIX-adjusted OTM distance. MKT-020/022 scan inward from there to find the widest viable strike at or above the active regime credit minimum (see VIX Regime section — base $2.00 / $2.75 are now dead, overridden by the regime at every VIX level). Put multiplier higher because put skew means credit is viable further OTM. Batch API = zero extra cost for wider scan.
+**MKT-024 (tuned 2026-04-30 in v1.25.0; was 3.5×/4.0× cap 240pt in v1.6.0):** Calls start at **2.5×** and puts start at **2.75×** the VIX-adjusted OTM distance, hard-clamped to **180pt**. MKT-020/022 scan inward from there to find the widest viable strike at or above the active regime credit minimum (see VIX Regime section — base $2.00 / $2.75 are now dead, overridden by the regime at every VIX level). The 180pt clamp covers the empirical max settled OTM (Mar 3 VIX 26.5: 116pt call) plus margin and the theoretical 8-delta strike at VIX 50 (~133pt). Put multiplier slightly higher because put skew means credit is viable further OTM. Old 3.5×/4.0× + 240pt clamp wasted ~125pt of inward scanning per entry; new values cut average scan distance ~40-50% with no change in final strikes. Batch API = zero extra cost for the scan that remains.
 
 ---
 

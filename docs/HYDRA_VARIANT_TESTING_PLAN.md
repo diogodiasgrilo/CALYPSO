@@ -1,10 +1,12 @@
 # HYDRA Variant Testing — Design Plan
 
-**Status:** Design / scoping document. Not yet implemented.
+**Status:** **IMPLEMENTED 2026-04-30** as a 1v1 (variant A vs B only) head-to-head, per the "Recommended Build Order" Phase B+C condensed into a single push. The full N=5 plan below is preserved for future reference if we expand. See CLAUDE.md lesson #75 for the deployed-version summary.
 **Author:** Diogo Dias Grilo
 **Created:** 2026-04-28
-**Prerequisites:** Single-variant dry mode validated end-to-end (Tuesday Apr 28 smoke test)
-**Estimated effort:** 5-7 days for full system, 2-3 days for proof-of-concept
+**Implemented:** 2026-04-30 (HYDRA v1.25.0)
+**Prerequisites:** Single-variant dry mode validated end-to-end (Tuesday Apr 28 smoke test) ✓
+**Estimated effort (original):** 5-7 days for full system, 2-3 days for proof-of-concept
+**Actual effort (1v1 cut):** 1 day for v1 (bot infra + dashboard + Phase 2 cross-day analytics + Telegram /compare), incl. defense-in-depth SAFETY-DRY gates
 
 ---
 

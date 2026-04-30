@@ -67,7 +67,7 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are recomputed
 
 - **MKT-011:** Credit gate — thresholds come from VIX regime above at every VIX level; skip entry if below
 - **MKT-020/022:** Progressive OTM tightening — scans 5pt inward until credit met (floor: 25pt OTM)
-- **MKT-024:** Starting OTM 3.5× call, 4.0× put (VIX-adjusted distance)
+- **MKT-024:** Starting OTM 2.5× call, 2.75× put (VIX-adjusted distance), hard-clamped to 180pt (tuned 2026-04-30; was 3.5×/4.0× at 240pt)
 - **MKT-027:** Spread width `round(VIX × 6.0 / 5) × 5`, 25-110pt range
 - **MKT-029:** Graduated fallback — floor = `min_credit − $0.10` (regime-dependent; e.g. at VIX<18: $0.90 call / $1.15 put)
 - **MKT-032/MKT-039:** Put-only when call non-viable AND VIX <15 (`put_only_max_vix: 15.0`)

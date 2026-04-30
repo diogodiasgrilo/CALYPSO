@@ -1,6 +1,6 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.24.0 | **Last Updated:** 2026-04-21
+**Version:** 1.25.0 | **Last Updated:** 2026-04-30
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
@@ -79,7 +79,7 @@ If the credit gate can't get valid quotes (rare), it falls back to wing illiquid
 
 ### Wider Starting OTM (MKT-024) - Updated v1.6.0
 
-Calls start at 3.5× and puts at 4.0× the VIX-adjusted OTM distance (asymmetric — put multiplier higher because put skew means credit is viable further OTM). MKT-020/MKT-022 then scan inward from there to find the widest viable strike at or above the minimum credit threshold. Batch API = zero extra cost for wider scan.
+Calls start at 2.5× and puts at 2.75× the VIX-adjusted OTM distance (tuned 2026-04-30; was 3.5×/4.0×), hard-clamped to **180pt** (was 240pt). The clamp covers the empirical max settled OTM (Mar 3 VIX 26.5: 116pt call) plus margin and the theoretical 8-delta strike at VIX 50 (~133pt). MKT-020/MKT-022 then scan inward from there to find the widest viable strike at or above the minimum credit threshold. Old wider multipliers + 240pt clamp wasted ~125pt of inward scanning per entry; new values cut average scan distance ~40-50% with no change in final strikes. Batch API = zero extra cost for the scan that remains.
 
 ### Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts)
 
@@ -298,8 +298,8 @@ Early close (MKT-018), smart hold check (MKT-023), and pre-entry ROC gate (MKT-0
 | `call_credit_floor` | `0.20` | MKT-029 fallback floor for calls when VIX regime disabled. When regime is active, floor is recomputed as `min_call_credit − $0.10`. |
 | `put_credit_floor` | `0.30` | MKT-029 fallback floor for puts when VIX regime disabled. When regime is active, floor is recomputed as `min_put_credit − $0.10`. |
 | `put_only_max_vix` | `15.0` | MKT-032/MKT-039: Max VIX for put-only entries (skip instead when VIX >= threshold). Lowered 25→15 in v1.19.0. |
-| `call_starting_otm_multiplier` | `3.5` | MKT-024: Call starting OTM = base × multiplier |
-| `put_starting_otm_multiplier` | `4.0` | MKT-024: Put starting OTM = base × multiplier (higher due to put skew) |
+| `call_starting_otm_multiplier` | `2.5` | MKT-024: Call starting OTM = base × multiplier (tuned 2026-04-30; was 3.5) |
+| `put_starting_otm_multiplier` | `2.75` | MKT-024: Put starting OTM = base × multiplier (tuned 2026-04-30; was 4.0; slightly higher than call for put skew) |
 | `min_call_otm_distance` | `25` | MKT-020: Minimum OTM distance (points) for call tightening floor |
 | `min_put_otm_distance` | `25` | MKT-022: Minimum OTM distance (points) for put tightening floor |
 | `early_close_enabled` | `false` | MKT-018: Intentionally disabled (hold-to-expiry outperforms). Set `true` to re-enable. |
@@ -349,7 +349,7 @@ sudo journalctl -u hydra -f
 |--------|-----------|---------|
 | Entry type | Always full IC | Full IC, put-only (MKT-032), or call-only (MKT-035/038/040) via credit gate |
 | Entries per day | 6 | 3 base + 1 conditional (v1.19.0, was 5+2) |
-| Starting OTM | VIX-adjusted | 3.5× calls, 4.0× puts (MKT-024), then tightened |
+| Starting OTM | VIX-adjusted | 2.5× calls, 2.75× puts (MKT-024), 180pt clamp, then tightened by MKT-020/022 |
 | Spread widths | 50pt fixed | VIX × 6.0, floor 25pt, cap 110pt (MKT-027 v1.19.0) |
 | Credit minimums | $0.50/side | VIX-regime-dependent (see VIX Regime Adaptive table): $1.00 / $1.25 at VIX<18 down to $0.30 / $0.40 at VIX≥28 |
 | Trend signal | None | EMA 20/40 (informational only) |
@@ -403,6 +403,8 @@ bots/hydra/
 
 ## Version History
 
+- **1.25.0** (2026-04-30): Path-B dry-mode bookkeeping + MKT-024 multiplier tuning + variant comparison (1v1) + 4 SAFETY-DRY defense-in-depth gates. (a) `_process_expired_credits` now treats `DRY_*` synthetic IDs as settled — Apr 28-29 net_pnl flipped from -$20 (commission-only) to actual +$275 / +$270; DB + metrics file backfilled. (b) MKT-024: `call_starting_otm_multiplier` 3.5→2.5, `put_starting_otm_multiplier` 4.0→2.75, upper clamp 240→180pt. ~40-50% less wasted MKT-020/022 scan distance per entry, same final strikes. (c) New `dry_run_force_normal_day` flag bypasses FOMC date-based skips (announcement, T+1, MKT-038) in dry mode for full data collection. Live mode untouched. (d) Variant B = parallel HYDRA process via `HYDRA_VARIANT_ID=b` env var, isolated `data/variant_b/*` paths, `hydra_variant_b.service`, `max_spread_width: 110` (vs A's 50). Dashboard `/comparison` page (gated by `DASHBOARD_COMPARISON_MODE_ENABLED`) with leaderboard/strikes/buffers/P&L chart/cross-day analytics + 16th Telegram command `/compare` + end-of-day `VARIANT_COMPARISON_DAILY` alert (idempotent). (e) Defense-in-depth `if self.dry_run` gates at `_place_option_order`, `_handle_naked_short`, `_unwind_partial_entry`, `_close_position_with_retry` so no upstream gating bug can produce a real Saxo order in dry mode.
+- **1.24.0** (2026-04-21): Scale-to-2-contracts + effective-entry renumber + non-HYDRA kill-switches. Per-contract dollar constants now multiply by contracts at the use site (call/put stop buffers, MKT-042 decay, downday theo put, MIN_STOP_LEVEL, commissions, salvage thresholds, MIN_BUYING_POWER). DB schema v8 adds `contracts` columns. Effective entry numbering (post-VIX-regime-cap) used in all live displays; canonical numbers preserved in historical records. AlertService auto-prefixes `[Nc]` titles when contracts>1. Kill-switches in delta_neutral/iron_fly_0dte/meic/rolling_put_diagonal main.py prevent accidental live trading.
 - **1.23.0** (2026-04-13): VIX regime reconvergence + Schema v7 shadow entry logging. Breakpoints updated `[14, 20, 30]` → `[18.0, 22.0, 28.0]` after per-entry analysis showed Entry #1 (10:15) underperforms at all VIX ≥ 18 (24% WR, -$79/entry). `max_entries` reshaped `[2, null, null, 1]` → `[null, 2, 2, 1]` (drops E#1 at VIX ≥ 18). Per-regime credit thresholds added at VIX ≥ 22 ($0.75 call / $1.25 put at zone 2, $0.50 / $0.75 at zone 3) to force strikes 60-100pt OTM. Code fix near `strategy.py:7721` — VIX regime cap now drops EARLIEST entries (preserves best-performing E#3 at 11:15), previously dropped latest. New `shadow_entries` SQLite table records what OTM-based strike selection WOULD have chosen alongside actual credit-based selection (observation only). Fix 2026-04-14: `_record_shadow_entry()` moved outside main DB-write try/except so shadow data survives upstream failures. Config-audit library + backtest-vs-live calibration scripts added under `scripts/`.
 - **1.22.1** (2026-04-02): MKT-042 buffer decay optimal: 2.10× start, 2h decay. Docs audit for MKT-041/042/043.
 - **1.22.0** (2026-04-02): MKT-042 Buffer Decay + MKT-043 Calm Entry. Buffer decay: starts at 2.10× normal buffer, linearly decays to 1× over 2h. Calm entry: delays entry up to 5min when SPX moved >15pt in 3min.
