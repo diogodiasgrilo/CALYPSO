@@ -600,11 +600,16 @@ def main():
             label = format_date_label(date_str)
             logger.info(f"Processing {label}...")
 
-            # Generate narratives (Claude API)
+            # Generate narratives (Claude API). Pass is_dry_run so the data
+            # context for Claude includes a <data source="bot_mode"> block
+            # that prevents false-positive "FOMC T+1 violated!" narratives
+            # on dry-run days where the runtime bypass is deliberate.
             narratives = {"observations": "", "market_label": "See data", "assessment": ""}
             if claude_client:
                 try:
-                    narratives = generate_day_narratives(claude_client, day_data, config)
+                    narratives = generate_day_narratives(
+                        claude_client, day_data, config, is_dry_run=dry_run_active
+                    )
                 except Exception as e:
                     logger.warning(f"Narrative generation failed for {label}: {e}")
 

@@ -46,6 +46,7 @@ def generate_day_narratives(
     client,
     day_data: Dict[str, Any],
     config: Dict[str, Any],
+    is_dry_run: bool = False,
 ) -> Dict[str, str]:
     """
     Generate all narrative sections for a trading day.
@@ -54,6 +55,11 @@ def generate_day_narratives(
         client: Anthropic client from get_anthropic_client().
         day_data: Day-specific data from collect_day_data().
         config: Agent config.
+        is_dry_run: When True, signals to Claude via a <data source="bot_mode">
+            block that the day was a dry-run with `dry_run_force_normal_day`
+            active. Without this flag the Apr 30 narrative falsely flagged
+            "FOMC T+1 blackout violated" as a contradiction — Claude couldn't
+            see that the runtime bypass was deliberate.
 
     Returns:
         Dict with keys: "observations", "market_label", "assessment".
@@ -70,7 +76,7 @@ def generate_day_narratives(
     hermes_report = day_data.get("hermes_report")
 
     # Build XML-wrapped data context for Claude (context chaining: includes HERMES report)
-    data_context = _build_data_context(summary, entries, hermes_report)
+    data_context = _build_data_context(summary, entries, hermes_report, is_dry_run=is_dry_run)
 
     model = config.get("homer", {}).get("claude_model", "claude-sonnet-4-6")
 
@@ -86,13 +92,34 @@ def generate_day_narratives(
     return narratives
 
 
-def _build_data_context(summary: Dict, entries: list, hermes_report: str = None) -> str:
+def _build_data_context(
+    summary: Dict,
+    entries: list,
+    hermes_report: str = None,
+    is_dry_run: bool = False,
+) -> str:
     """Build XML-wrapped data context for Claude prompts.
 
     Context chaining: if a HERMES daily report is available, it's included
-    so Claude has richer analysis context for narrative generation.
+    so Claude has richer analysis context for narrative generation. When
+    is_dry_run is True, a <data source="bot_mode"> block is prepended so
+    Claude knows this day was traded with `dry_run_force_normal_day`
+    active and won't flag the FOMC T+1 bypass (or any other date-based
+    skip override) as a contradiction.
     """
     lines = []
+
+    # Bot-mode block goes FIRST so Claude knows the regime before reading
+    # the day's data. Strategy context (system prompt) explains what
+    # `dry_run_force_normal_day` means; this block tells Claude whether
+    # it applies for THIS day.
+    if is_dry_run:
+        lines.append('<data source="bot_mode">')
+        lines.append("  dry_run: true")
+        lines.append("  dry_run_force_normal_day: true")
+        lines.append("  meaning: All FOMC date-based skips (T+1 blackout, Day-2 announcement skip, MKT-038 call-only) are RUNTIME-BYPASSED for this day. Entries placed on what the calendar says is FOMC T+1 are EXPECTED behavior in this mode, NOT a contradiction. Strikes, credits, and stop levels reflect Path-B (real Saxo bid/ask used for credit estimation; no real orders placed).")
+        lines.append("</data>")
+        lines.append("")
 
     # Daily summary in XML tags
     lines.append('<data source="daily_summary">')

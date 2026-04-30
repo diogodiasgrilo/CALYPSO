@@ -127,7 +127,9 @@ Override applied **once per day at first entry** via `_apply_vix_regime_override
 HYDRA's FOMC handling (updated 2026-04-19 after A/B backtest over 2025-01 → 2026-04):
 - **Day 1**: trade normally (+$430 over 10 days in backtest — don't skip)
 - **Day 2** (announcement, 2 PM): trade normally (+$230 over 10 days — coin flip with slight positive tilt)
-- **T+1** (day after): **SKIP ALL ENTRIES** (skipping = $0 vs trade-normal −$900 vs MKT-038 ON −$1,325)
+- **T+1** (day after): **SKIP ALL ENTRIES** in LIVE mode (skipping = $0 vs trade-normal −$900 vs MKT-038 ON −$1,325)
+
+**Important DRY-RUN exception (2026-04-30):** when `dry_run_force_normal_day: true` is set in the bot config AND the bot is in dry-run mode (`dry_run: true`), all FOMC date-based skips are runtime-bypassed: `fomc_t1_skip_enabled` is honored as configured for live but ignored in dry mode, the Day-2 announcement skip (`fomc_announcement_skip`) is ignored, and MKT-038 (`fomc_t1_callonly_enabled`) is ignored. Reason: variant-comparison and dry-run experiments need a full 252-day-per-year sample. If you observe entries placed on what the calendar says is T+1 in DRY-RUN data, that is **expected behavior, not a contradiction** — check the `<data source="bot_mode">` block in HOMER's prompt to confirm the dry-run + force-normal-day flags are set.
 
 | Meeting | Day 1 (TRADE) | Day 2 / Announcement (TRADE) | T+1 (SKIP — blackout) |
 |---------|---------------|----------------------------|-------------------------|
@@ -208,4 +210,4 @@ Records what OTM-based selection WOULD have placed alongside actual credit-based
 
 **E6 (14:00) conditional:** Fires only if SPX up ≥0.25% at 14:00 open. Skips logged as "Conditional: no up-day trigger".
 
-E#1 at 10:15 is **always dropped** at every VIX level since 2026-04-17 (max_entries `[2,2,2,1]`). Expected live entry count: **2 base (10:45 + 11:15)** at VIX <28, or **1 base (11:15 only)** at VIX ≥28, plus up to 1 conditional E6 at 14:00 if Upday-035 or Downday-035 triggers. On FOMC T+1 days: **0 entries** (blackout). If observations diverge from this, check `vix_open` and the VIX-regime config.
+E#1 at 10:15 is **always dropped** at every VIX level since 2026-04-17 (max_entries `[2,2,2,1]`). Expected live entry count: **2 base (10:45 + 11:15)** at VIX <28, or **1 base (11:15 only)** at VIX ≥28, plus up to 1 conditional E6 at 14:00 if Upday-035 or Downday-035 triggers. On FOMC T+1 days in **LIVE mode**: **0 entries** (blackout). On FOMC T+1 days in **DRY-RUN mode with `dry_run_force_normal_day: true`**: full normal entry schedule fires (the date-based skip is bypassed for data-collection purposes — see "Important DRY-RUN exception" above). If observations diverge from this, check `vix_open`, the VIX-regime config, AND the `<data source="bot_mode">` block.
