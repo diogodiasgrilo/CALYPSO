@@ -343,6 +343,7 @@ def update_cumulative_metrics(parser: JournalParser, metrics: Dict, date_label: 
 def build_section3_day_block(
     day_data: Dict[str, Any],
     narratives: Dict[str, str],
+    is_dry_run: bool = False,
 ) -> List[str]:
     """
     Build a complete Section 3 day block with entry table and observations.
@@ -350,6 +351,11 @@ def build_section3_day_block(
     Args:
         day_data: Day-specific data from collect_day_data().
         narratives: Dict with "observations" key from narrative generator.
+        is_dry_run: When True, prepends a clear "[DRY-RUN]" marker to the
+            day header so journal readers can immediately tell that day's
+            P&L was simulated, not live. The bot has been in dry-run mode
+            since 2026-04-27 for the variant-comparison experiment, so all
+            days from Apr 28 onward are dry-run until live trading resumes.
 
     Returns:
         List of lines for the day block.
@@ -371,8 +377,18 @@ def build_section3_day_block(
     spx_range_pct = (spx_range / spx_open * 100) if spx_open else 0
 
     lines = []
-    lines.append(f"### {date_label} ({day_name}) - NET P&L: {format_signed_currency(pnl)}")
+    dry_tag = "**[DRY-RUN]** " if is_dry_run else ""
+    lines.append(f"### {dry_tag}{date_label} ({day_name}) - NET P&L: {format_signed_currency(pnl)}")
     lines.append("")
+    if is_dry_run:
+        lines.append(
+            "> **Note**: This day was traded in DRY-RUN mode (Path-B dry-run "
+            "with real Saxo quotes for credit estimation, but no real orders "
+            "placed). P&L numbers are hypothetical-but-realistic — strikes, "
+            "credits, and stop levels reflect what the live bot would have "
+            "executed given the same market conditions."
+        )
+        lines.append("")
 
     # Market summary
     lines.append(

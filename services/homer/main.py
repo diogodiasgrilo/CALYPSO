@@ -502,6 +502,25 @@ def main():
     with open(journal_path) as f:
         journal_content = f.read()
 
+    # Detect whether the bot is currently in dry-run mode. When True, we
+    # tag today's journal entry with a clear "[DRY-RUN]" marker so future
+    # readers can immediately distinguish simulated days from live ones.
+    # The bot has been in dry-run since 2026-04-27 for the variant-
+    # comparison experiment. Past missing days are treated as dry-run
+    # only if today is dry-run (HOMER catches up at most a few days,
+    # and during a dry-run experiment those will all be dry-run too).
+    dry_run_active = False
+    try:
+        state_path = os.path.join(_project_root, "data", "hydra_state.json")
+        if os.path.exists(state_path):
+            with open(state_path) as f:
+                state_blob = json.load(f)
+            dry_run_active = bool(state_blob.get("dry_run", False))
+    except Exception as e:
+        logger.warning(f"Could not read state file for dry_run detection: {e}")
+    if dry_run_active:
+        logger.info("Bot is in DRY-RUN mode — journal entries will carry [DRY-RUN] marker")
+
     from services.homer.journal_parser import JournalParser
 
     jp = JournalParser(journal_content)
@@ -595,8 +614,9 @@ def main():
             # Section 2b: P&L verification
             add_pnl_verification(jp, day_data)
 
-            # Section 3: Entry detail block
-            block = build_section3_day_block(day_data, narratives)
+            # Section 3: Entry detail block (tagged DRY-RUN when bot is
+            # currently in dry-run mode — see dry_run_active detection above)
+            block = build_section3_day_block(day_data, narratives, is_dry_run=dry_run_active)
             insert_section3_block(jp, block)
 
             # Section 4: Market conditions

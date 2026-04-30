@@ -6488,21 +6488,39 @@ class HydraStrategy(MEICStrategy):
             return 110
 
     def _peak_buffer_for_state(self, entries: list) -> tuple:
-        """(call_pct, put_pct) — largest buffer utilization seen on any side."""
+        """(call_pct, put_pct) — largest buffer utilization seen on any side.
+
+        Accepts both formats:
+        - dataclass entries (HydraIronCondorEntry from self.daily_state.entries)
+        - dict entries (deserialized from variant B's state JSON file)
+
+        Earlier version used `e.get(...)` which raised
+        `'HydraIronCondorEntry' object has no attribute 'get'` when called
+        from variant A's path with live entries — that crash silently
+        suppressed the whole VARIANT_COMPARISON_DAILY Telegram alert today.
+        """
+        def _g(e, key, default=None):
+            if isinstance(e, dict):
+                return e.get(key, default)
+            return getattr(e, key, default)
+
         peak_call = 0.0
         peak_put = 0.0
         for e in entries or []:
-            if e.get("is_complete"):
+            if _g(e, "is_complete"):
+                # only true after settlement-time _process_expired_credits;
+                # during monitoring this is False so we still measure stress.
+                # Once an entry is fully done we skip it (no live buffer).
                 continue
-            csv = e.get("call_spread_value")
-            css = e.get("call_side_stop")
-            if csv is not None and css and css > 0 and not e.get("call_side_stopped"):
+            csv = _g(e, "call_spread_value")
+            css = _g(e, "call_side_stop")
+            if csv is not None and css and css > 0 and not _g(e, "call_side_stopped"):
                 pct = min(100.0, max(0.0, csv / css * 100))
                 if pct > peak_call:
                     peak_call = pct
-            psv = e.get("put_spread_value")
-            pss = e.get("put_side_stop")
-            if psv is not None and pss and pss > 0 and not e.get("put_side_stopped"):
+            psv = _g(e, "put_spread_value")
+            pss = _g(e, "put_side_stop")
+            if psv is not None and pss and pss > 0 and not _g(e, "put_side_stopped"):
                 pct = min(100.0, max(0.0, psv / pss * 100))
                 if pct > peak_put:
                     peak_put = pct

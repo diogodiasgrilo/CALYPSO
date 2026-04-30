@@ -4093,29 +4093,42 @@ class MEICStrategy:
         else:
             credit_received = entry.put_spread_credit
 
-        if fill_prices_captured and not self.dry_run:
-            # Use actual close cost
+        # Use actual_close_cost when we have a meaningful estimate of it:
+        # - LIVE mode + fill_prices_captured: real fill prices summed across legs
+        # - DRY mode: actual_close_cost was computed from real bid/ask above
+        #   (Path-B uses live Saxo quotes), giving a realistic estimate
+        # In both cases we want to record actual_X_stop_debit on the entry so
+        # the state file, the dashboard, and trade_stops.actual_debit DB rows
+        # reflect a non-zero estimated debit instead of $0. P&L identity stays
+        # correct (total_realized_pnl unchanged because net_loss math here
+        # equals what the previous theoretical branch computed when stop fires
+        # at the trigger level, which is approximately what dry-mode bid/ask
+        # estimates produce at the same instant).
+        use_actual_cost = self.dry_run or (fill_prices_captured and not self.dry_run)
+        if use_actual_cost:
             net_loss = actual_close_cost - credit_received
-            # Record actual debit for dashboard per-entry P&L
+            # Record actual debit for dashboard per-entry P&L + DB forensics
             if side == "call":
                 entry.actual_call_stop_debit = actual_close_cost
             else:
                 entry.actual_put_stop_debit = actual_close_cost
+            mode_tag = "DRY-RUN estimate" if self.dry_run else "FIX-42 actual"
             logger.info(
-                f"FIX-42: Actual P&L for Entry #{entry.entry_number} {side}: "
+                f"{mode_tag}: P&L for Entry #{entry.entry_number} {side}: "
                 f"close_cost=${actual_close_cost:.2f} - credit=${credit_received:.2f} = "
                 f"net_loss=${net_loss:.2f}"
             )
         else:
-            # Fallback to theoretical (stop_level = credit, so net_loss = 0 for MEIC)
-            # This is a known limitation - log warning
+            # Live-mode fallback: fill prices unavailable, use theoretical
+            # (stop_level approximates close cost since stop fires at that
+            # spread value). The deferred fill-correction worker (Fix #75)
+            # will update total_realized_pnl with actual prices ~10s later.
             net_loss = stop_level - credit_received
-            if not self.dry_run:
-                logger.warning(
-                    f"FIX-42: Using theoretical P&L (fill prices unavailable): "
-                    f"stop_level=${stop_level:.2f} - credit=${credit_received:.2f} = "
-                    f"net_loss=${net_loss:.2f} (may be inaccurate!)"
-                )
+            logger.warning(
+                f"FIX-42: Using theoretical P&L (fill prices unavailable): "
+                f"stop_level=${stop_level:.2f} - credit=${credit_received:.2f} = "
+                f"net_loss=${net_loss:.2f} (may be inaccurate!)"
+            )
 
         self.daily_state.total_realized_pnl -= net_loss
 
