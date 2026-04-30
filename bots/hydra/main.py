@@ -88,11 +88,35 @@ def interruptible_sleep(seconds: int, check_interval: int = 1) -> bool:
     return not shutdown_requested
 
 
+def _read_proc_variant_id(pid: int):
+    """
+    Read another HYDRA process's HYDRA_VARIANT_ID from /proc/<pid>/environ.
+
+    Returns the variant ID (lowercased, stripped, or None for variant A).
+    Returns the sentinel "?" if we can't determine the variant — caller
+    should treat that as "don't kill" to be safe (skip rather than risk
+    cross-variant termination).
+    """
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            env_bytes = f.read()
+    except (FileNotFoundError, PermissionError, OSError):
+        return "?"
+
+    for kv in env_bytes.split(b"\0"):
+        if kv.startswith(b"HYDRA_VARIANT_ID="):
+            value = kv[len(b"HYDRA_VARIANT_ID="):].decode(errors="replace").strip().lower()
+            return value or None
+    return None  # env var not set → variant A
+
+
 def kill_existing_instances() -> int:
     """
-    DUPLICATE-001: Find and kill any existing HYDRA bot instances before starting.
+    DUPLICATE-001: Find and kill any existing HYDRA bot instance with the SAME
+    variant ID as this process. Skips other variants so A and B can coexist.
     """
     current_pid = os.getpid()
+    my_variant = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower() or None
     killed_count = 0
 
     try:
@@ -108,11 +132,29 @@ def kill_existing_instances() -> int:
             for pid_str in pids:
                 try:
                     pid = int(pid_str.strip())
-                    if pid != current_pid:
-                        logger.info(f"DUPLICATE-001: Found existing HYDRA instance (PID: {pid}), terminating...")
-                        os.kill(pid, signal.SIGTERM)
-                        killed_count += 1
-                        time.sleep(1)
+                    if pid == current_pid:
+                        continue
+
+                    other_variant = _read_proc_variant_id(pid)
+                    if other_variant == "?":
+                        logger.info(
+                            f"DUPLICATE-001: Cannot determine variant of PID {pid} — skipping (safe default)"
+                        )
+                        continue
+
+                    if other_variant != my_variant:
+                        logger.info(
+                            f"DUPLICATE-001: PID {pid} is variant '{other_variant or 'A'}', "
+                            f"we are '{my_variant or 'A'}' — leaving it alone"
+                        )
+                        continue
+
+                    logger.info(
+                        f"DUPLICATE-001: Found same-variant HYDRA (PID: {pid}, variant={my_variant or 'A'}), terminating..."
+                    )
+                    os.kill(pid, signal.SIGTERM)
+                    killed_count += 1
+                    time.sleep(1)
                 except (ValueError, ProcessLookupError):
                     pass
 

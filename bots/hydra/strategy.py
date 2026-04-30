@@ -77,9 +77,23 @@ from bots.meic.strategy import (
 # - Metrics file: Historical performance tracking
 # The Position Registry is SHARED (for multi-bot position isolation on same underlying)
 
-DATA_DIR = os.path.join(
+# Variant ID for parallel head-to-head dry-run comparison.
+# When HYDRA_VARIANT_ID env var is set (e.g. "b"), data paths are namespaced
+# under data/variant_<id>/ and the bot becomes variant B (independent state,
+# metrics, DB, position prefix). Unset = variant A = current behavior.
+# Both variants must run in dry mode and never write to the live Sheets/Telegram
+# channels — that's enforced by variant B's config (alerts.enabled=false,
+# google_sheets.enabled=false), not by code, so variant A's setup is unchanged.
+HYDRA_VARIANT_ID = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower() or None
+
+_PROJECT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "data"
+)
+DATA_DIR = (
+    os.path.join(_PROJECT_DATA_DIR, f"variant_{HYDRA_VARIANT_ID}")
+    if HYDRA_VARIANT_ID
+    else _PROJECT_DATA_DIR
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
@@ -402,6 +416,9 @@ class HydraStrategy(MEICStrategy):
         self._last_margin_snapshot = {}  # From _check_buying_power
         try:
             from shared.data_recorder import DataRecorder
+            # Ensure the variant data directory exists so sqlite3.connect()
+            # doesn't fail on a fresh variant B install (data/variant_b/).
+            os.makedirs(DATA_DIR, exist_ok=True)
             db_path = os.path.join(DATA_DIR, "backtesting.db")
             self._data_recorder = DataRecorder(db_path)
             self._data_recorder.ensure_schema()

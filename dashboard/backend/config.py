@@ -17,6 +17,21 @@ class Settings(BaseSettings):
     # Log file
     hydra_log_file: Path = Path("/opt/calypso/logs/hydra/bot.log")
 
+    # Comparison mode (1v1 head-to-head dry-run experiment).
+    # When comparison_mode_enabled = True, the dashboard exposes:
+    #   - /api/variants/* endpoints reading variant B's parallel state/metrics/db
+    #   - /comparison page in the SPA (hidden from nav otherwise)
+    # Variant B is a second HYDRA process running in dry mode with a different
+    # spread width (config_variant_b.json), writing to data/variant_b/*.
+    comparison_mode_enabled: bool = False
+    variant_b_state_file: Path = Path("/opt/calypso/data/variant_b/hydra_state.json")
+    variant_b_metrics_file: Path = Path("/opt/calypso/data/variant_b/hydra_metrics.json")
+    variant_b_backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
+    variant_b_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
+    variant_b_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
+    variant_b_label: str = "B (110pt)"
+    variant_a_label: str = "A (50pt)"
+
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")
 

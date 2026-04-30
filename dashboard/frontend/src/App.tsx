@@ -1,16 +1,32 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
-import { LayoutDashboard, CalendarDays, BarChart3 } from "lucide-react";
+import { LayoutDashboard, CalendarDays, BarChart3, Scale } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
 import { Dashboard } from "./pages/Dashboard";
 import { History } from "./pages/History";
 import { Analytics } from "./pages/Analytics";
+import { Comparison } from "./pages/Comparison";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { CommandPalette } from "./components/shared/CommandPalette";
 import { ToastContainer } from "./components/shared/ToastContainer";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
-function NavTabs() {
+// Comparison-mode flag from backend. We fetch /api/variants/health once on
+// mount so the nav tab is hidden cleanly when comparison mode is off — same
+// gating as the backend endpoints (single source of truth lives in
+// dashboard/backend/config.py:Settings.comparison_mode_enabled).
+function useComparisonEnabled() {
+  const [enabled, setEnabled] = useState<boolean>(false);
+  useEffect(() => {
+    fetch("/api/variants/health")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => setEnabled(Boolean(j?.enabled)))
+      .catch(() => setEnabled(false));
+  }, []);
+  return enabled;
+}
+
+function NavTabs({ comparisonEnabled }: { comparisonEnabled: boolean }) {
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
       isActive
@@ -32,6 +48,12 @@ function NavTabs() {
         <BarChart3 size={14} />
         Analytics
       </NavLink>
+      {comparisonEnabled && (
+        <NavLink to="/comparison" className={linkClass}>
+          <Scale size={14} />
+          Comparison
+        </NavLink>
+      )}
     </nav>
   );
 }
@@ -39,6 +61,7 @@ function NavTabs() {
 function App() {
   useWebSocket();
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
+  const comparisonEnabled = useComparisonEnabled();
 
   const togglePalette = useCallback(() => {
     setCmdPaletteOpen((prev) => !prev);
@@ -48,12 +71,16 @@ function App() {
 
   return (
     <DashboardLayout>
-      <NavTabs />
+      <NavTabs comparisonEnabled={comparisonEnabled} />
       <div className="mt-3">
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/history" element={<History />} />
           <Route path="/analytics" element={<Analytics />} />
+          {/* Always register the route so direct URL works when enabled.
+              The page itself self-protects with a "disabled" notice when
+              comparison_mode_enabled is false on the backend. */}
+          <Route path="/comparison" element={<Comparison />} />
         </Routes>
       </div>
       <CommandPalette open={cmdPaletteOpen} onClose={() => setCmdPaletteOpen(false)} />
