@@ -350,3 +350,188 @@ async def get_variant_daily(variant_id: str, days: int = 30):
         raise HTTPException(404, f"Unknown variant '{variant_id}'")
     summaries = await _db_readers[vid].get_daily_summaries(limit=days)
     return {"variant": variant_id.upper(), "days": len(summaries), "summaries": summaries}
+
+
+def _per_variant_lifetime_stats(metrics: Optional[dict]) -> dict:
+    """Distill the metrics file into a flat dict for the aggregate endpoint.
+    Tolerates missing keys (variant B's metrics file may not exist yet).
+    """
+    if not metrics:
+        return {
+            "cumulative_pnl": 0.0,
+            "winning_days": 0,
+            "losing_days": 0,
+            "total_credit_collected": 0.0,
+            "total_stops": 0,
+            "total_entries": 0,
+            "daily_returns_count": 0,
+        }
+    return {
+        "cumulative_pnl": metrics.get("cumulative_pnl", 0.0),
+        "winning_days": metrics.get("winning_days", 0),
+        "losing_days": metrics.get("losing_days", 0),
+        "total_credit_collected": metrics.get("total_credit_collected", 0.0),
+        "total_stops": metrics.get("total_stops", 0),
+        "total_entries": metrics.get("total_entries", 0),
+        "daily_returns_count": len(metrics.get("daily_returns", []) or []),
+    }
+
+
+def _compute_advanced_stats(daily_pnls: list[float]) -> dict:
+    """Sharpe-like ratio + max drawdown + best/worst from a P&L array.
+
+    Sharpe is daily-return-mean / daily-return-stddev (no risk-free rate
+    subtraction — daily 0DTE strategy on minutes-of-decay isn't comparable
+    to T-bills). Returns 0.0 for any stat that needs more data than we have.
+    """
+    n = len(daily_pnls)
+    if n == 0:
+        return {"sharpe": 0.0, "max_drawdown": 0.0, "best_day": 0.0, "worst_day": 0.0}
+
+    mean = sum(daily_pnls) / n
+    if n < 2:
+        sharpe = 0.0
+    else:
+        var = sum((x - mean) ** 2 for x in daily_pnls) / (n - 1)
+        std = var ** 0.5
+        sharpe = (mean / std) if std > 0 else 0.0
+
+    # Max drawdown: largest peak-to-trough drop on the running cumulative curve
+    running = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for p in daily_pnls:
+        running += p
+        if running > peak:
+            peak = running
+        dd = peak - running
+        if dd > max_dd:
+            max_dd = dd
+
+    return {
+        "sharpe": round(sharpe, 3),
+        "max_drawdown": round(max_dd, 2),
+        "best_day": round(max(daily_pnls), 2),
+        "worst_day": round(min(daily_pnls), 2),
+    }
+
+
+@router.get("/aggregate")
+async def get_aggregate():
+    """Cross-variant lifetime + per-day aggregate for the cross-day view.
+
+    Returns:
+      - per-variant lifetime stats (cumulative_pnl, win_rate, sharpe, drawdown)
+      - per-day aligned series of {date, a_net_pnl, b_net_pnl, delta} sorted
+        by date ascending, suitable for direct Recharts ingestion
+      - head-to-head counters: days_a_won, days_b_won, days_tied (only over
+        the common-date intersection — days where one variant didn't run
+        don't contribute to the H2H tally)
+      - per-variant cumulative running totals (separate arrays so each
+        variant's curve plots independently of the H2H window)
+
+    Why align by date, not index: variant A's history goes back to Feb 10,
+    variant B's starts the day comparison mode launched. Index alignment
+    would silently compare A's Feb 10 to B's first-day, which is wrong.
+    Date intersection means small N early but correct semantics.
+    """
+    _check_enabled()
+
+    # Lifetime metrics (from JSON files)
+    a_metrics = _metrics_readers["a"].read_latest()
+    b_metrics = _metrics_readers["b"].read_latest()
+    a_lifetime = _per_variant_lifetime_stats(a_metrics)
+    b_lifetime = _per_variant_lifetime_stats(b_metrics)
+
+    # Per-day data (from DBs)
+    a_summaries = await _db_readers["a"].get_all_summaries()
+    b_summaries = await _db_readers["b"].get_all_summaries()
+
+    # Build date-keyed lookups so we can align without assuming order
+    a_by_date = {s["date"]: s for s in a_summaries if s.get("date")}
+    b_by_date = {s["date"]: s for s in b_summaries if s.get("date")}
+
+    # Per-variant cumulative curves (each plots its own history — no alignment)
+    def _cumulative_series(summaries: list[dict]) -> list[dict]:
+        running = 0.0
+        out = []
+        for s in summaries:
+            net = s.get("net_pnl") or 0.0
+            running += net
+            out.append({"date": s["date"], "net_pnl": net, "cumulative": round(running, 2)})
+        return out
+
+    a_curve = _cumulative_series(a_summaries)
+    b_curve = _cumulative_series(b_summaries)
+
+    # H2H aligned series — only dates where both variants have data
+    common_dates = sorted(set(a_by_date) & set(b_by_date))
+    per_day = []
+    days_a_won = 0
+    days_b_won = 0
+    days_tied = 0
+    cum_a = 0.0
+    cum_b = 0.0
+    for d in common_dates:
+        a_pnl = a_by_date[d].get("net_pnl") or 0.0
+        b_pnl = b_by_date[d].get("net_pnl") or 0.0
+        delta = a_pnl - b_pnl
+        cum_a += a_pnl
+        cum_b += b_pnl
+        if abs(delta) < 0.01:
+            days_tied += 1
+            winner = "tie"
+        elif delta > 0:
+            days_a_won += 1
+            winner = "A"
+        else:
+            days_b_won += 1
+            winner = "B"
+        per_day.append({
+            "date": d,
+            "a_net_pnl": round(a_pnl, 2),
+            "b_net_pnl": round(b_pnl, 2),
+            "delta": round(delta, 2),
+            "winner": winner,
+            "cumulative_a": round(cum_a, 2),
+            "cumulative_b": round(cum_b, 2),
+        })
+
+    # Advanced stats — computed per variant on each variant's full history,
+    # NOT just the H2H intersection (so variant A's Sharpe reflects all 50+
+    # days, not just the 5 since variant B started)
+    a_pnls = [s.get("net_pnl") or 0.0 for s in a_summaries]
+    b_pnls = [s.get("net_pnl") or 0.0 for s in b_summaries]
+    a_advanced = _compute_advanced_stats(a_pnls)
+    b_advanced = _compute_advanced_stats(b_pnls)
+
+    # Win rates — same scope as advanced stats (full per-variant history)
+    a_total = a_lifetime["winning_days"] + a_lifetime["losing_days"]
+    b_total = b_lifetime["winning_days"] + b_lifetime["losing_days"]
+    a_win_rate = (a_lifetime["winning_days"] / a_total) if a_total > 0 else 0.0
+    b_win_rate = (b_lifetime["winning_days"] / b_total) if b_total > 0 else 0.0
+
+    return {
+        "variants": {
+            "A": {
+                "label": settings.variant_a_label,
+                "lifetime": {**a_lifetime, "win_rate": round(a_win_rate, 4), **a_advanced},
+                "cumulative_curve": a_curve,
+                "total_days": len(a_summaries),
+            },
+            "B": {
+                "label": settings.variant_b_label,
+                "lifetime": {**b_lifetime, "win_rate": round(b_win_rate, 4), **b_advanced},
+                "cumulative_curve": b_curve,
+                "total_days": len(b_summaries),
+            },
+        },
+        "head_to_head": {
+            "common_days": len(common_dates),
+            "days_a_won": days_a_won,
+            "days_b_won": days_b_won,
+            "days_tied": days_tied,
+            "cumulative_delta_a_minus_b": round(cum_a - cum_b, 2),
+            "per_day": per_day,
+        },
+    }

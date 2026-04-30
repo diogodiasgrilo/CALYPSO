@@ -256,6 +256,7 @@ class TelegramCommandHandler:
         self._entry_callback: Optional[Callable[[int], str]] = None
         self._stops_callback: Optional[Callable[[], str]] = None
         self._config_callback: Optional[Callable[[], str]] = None
+        self._compare_callback: Optional[Callable[[], str]] = None
         self._active_positions_callback: Optional[Callable[[], int]] = None
         self._config_path: Optional[str] = None
         self._consecutive_errors = 0
@@ -297,6 +298,7 @@ class TelegramCommandHandler:
         entry_callback: Optional[Callable[[int], str]] = None,
         stops_callback: Optional[Callable[[], str]] = None,
         config_callback: Optional[Callable[[], str]] = None,
+        compare_callback: Optional[Callable[[], str]] = None,
         config_path: Optional[str] = None,
         active_positions_callback: Optional[Callable[[], int]] = None,
     ):
@@ -312,6 +314,7 @@ class TelegramCommandHandler:
         self._entry_callback = entry_callback
         self._stops_callback = stops_callback
         self._config_callback = config_callback
+        self._compare_callback = compare_callback
         self._config_path = config_path
         self._active_positions_callback = active_positions_callback
 
@@ -415,6 +418,8 @@ class TelegramCommandHandler:
                 self._handle_apollo(chat_id)
             elif text.startswith("/clio"):
                 self._handle_clio(chat_id)
+            elif text.startswith("/compare"):
+                self._handle_compare(chat_id)
             elif text.startswith("/restart"):
                 self._handle_restart(chat_id)
             elif text.startswith("/help"):
@@ -552,6 +557,21 @@ class TelegramCommandHandler:
         except Exception as e:
             logger.error("Failed to build /stops response: %s", e)
             self._send_message(chat_id, "Failed to retrieve stop data. Try again shortly.")
+
+    def _handle_compare(self, chat_id: str):
+        """Handle /compare command — variant A vs B head-to-head snapshot."""
+        if not self._compare_callback:
+            self._send_message(
+                chat_id,
+                "Comparison not available — variant comparison mode isn't enabled on this bot.",
+            )
+            return
+        try:
+            msg = self._compare_callback()
+            self._send_message(chat_id, msg)
+        except Exception as e:
+            logger.error("Failed to build /compare response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve comparison data. Try again shortly.")
 
     def _handle_config(self, chat_id: str):
         """Handle /config command — current configuration."""
@@ -1016,6 +1036,7 @@ class TelegramCommandHandler:
             "/hermes \u2014 Latest HERMES report\n"
             "/apollo \u2014 Latest APOLLO briefing\n"
             "/clio \u2014 Latest CLIO weekly analysis\n"
+            "/compare \u2014 Variant A vs B head-to-head (1v1 dry-run)\n"
             "\n*Control*\n"
             "/restart \u2014 Restart HYDRA\n"
             "/stop \u2014 Stop HYDRA (warns if positions)\n"

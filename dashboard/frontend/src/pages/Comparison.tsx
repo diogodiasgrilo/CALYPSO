@@ -24,6 +24,9 @@ import {
   CartesianGrid,
   Legend,
   ReferenceLine,
+  BarChart,
+  Bar,
+  Cell,
 } from "recharts";
 import { colors, pnlColor } from "../lib/tradingColors";
 import { formatPnL } from "../lib/formatters";
@@ -118,6 +121,56 @@ interface ComparisonPayload {
   variants: { A: VariantPayload; B: VariantPayload };
 }
 
+interface AggregateLifetime {
+  cumulative_pnl: number;
+  winning_days: number;
+  losing_days: number;
+  total_credit_collected: number;
+  total_stops: number;
+  total_entries: number;
+  win_rate: number;
+  sharpe: number;
+  max_drawdown: number;
+  best_day: number;
+  worst_day: number;
+  daily_returns_count?: number;
+}
+
+interface CumulativePoint {
+  date: string;
+  net_pnl: number;
+  cumulative: number;
+}
+
+interface AggregateVariant {
+  label: string;
+  lifetime: AggregateLifetime;
+  cumulative_curve: CumulativePoint[];
+  total_days: number;
+}
+
+interface H2HPoint {
+  date: string;
+  a_net_pnl: number;
+  b_net_pnl: number;
+  delta: number;
+  winner: "A" | "B" | "tie";
+  cumulative_a: number;
+  cumulative_b: number;
+}
+
+interface AggregatePayload {
+  variants: { A: AggregateVariant; B: AggregateVariant };
+  head_to_head: {
+    common_days: number;
+    days_a_won: number;
+    days_b_won: number;
+    days_tied: number;
+    cumulative_delta_a_minus_b: number;
+    per_day: H2HPoint[];
+  };
+}
+
 interface Health {
   enabled: boolean;
   variant_a_label: string;
@@ -137,6 +190,7 @@ async function fetchJSON<T>(url: string): Promise<T | null> {
 export function Comparison() {
   const [health, setHealth] = useState<Health | null>(null);
   const [data, setData] = useState<ComparisonPayload | null>(null);
+  const [aggregate, setAggregate] = useState<AggregatePayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -156,8 +210,6 @@ export function Comparison() {
         setError("Network error");
         return;
       }
-      // Backend returns 503 with { detail: ... } when disabled. Treat as
-      // a graceful "not available" rather than spamming errors.
       if ("detail" in json) {
         setError(json.detail);
         setData(null);
@@ -167,11 +219,27 @@ export function Comparison() {
       setData(json as ComparisonPayload);
     };
 
+    // Aggregate refreshes much less often — daily-level data only changes at
+    // end-of-day (4 PM ET). 30s poll is plenty and keeps the cross-day panel
+    // fresh enough for a researcher refreshing during the trading session.
+    const aggTick = async () => {
+      const json = await fetchJSON<AggregatePayload | { detail: string }>(
+        "/api/variants/aggregate"
+      );
+      if (!mounted) return;
+      if (json && !("detail" in json)) {
+        setAggregate(json as AggregatePayload);
+      }
+    };
+
     tick();
+    aggTick();
     const id = setInterval(tick, POLL_MS);
+    const aggId = setInterval(aggTick, 30_000);
     return () => {
       mounted = false;
       clearInterval(id);
+      clearInterval(aggId);
     };
   }, []);
 
@@ -216,6 +284,7 @@ export function Comparison() {
       </div>
       <PnLChart a={a} b={b} />
       <EndOfDayStats a={a} b={b} />
+      <CrossDayPanel agg={aggregate} />
     </div>
   );
 }
@@ -660,6 +729,303 @@ function EndOfDayStats({ a, b }: { a: VariantPayload; b: VariantPayload }) {
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function CrossDayPanel({ agg }: { agg: AggregatePayload | null }) {
+  // Cross-day rollups are most informative once both variants have at least
+  // 2 common days. Below that we render a placeholder explaining what the
+  // panel will show, so empty days don't make it look broken.
+  if (!agg) {
+    return (
+      <div className="rounded border border-border-dim bg-card p-3">
+        <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">
+          Cross-Day Performance
+        </div>
+        <div className="text-sm text-text-dim italic">Loading…</div>
+      </div>
+    );
+  }
+
+  const a = agg.variants.A;
+  const b = agg.variants.B;
+  const h2h = agg.head_to_head;
+  const hasH2H = h2h.common_days >= 2;
+
+  return (
+    <div className="rounded border border-border-dim bg-card p-3 space-y-4">
+      <div className="flex items-baseline justify-between">
+        <div className="text-xs uppercase tracking-wide text-text-secondary">
+          Cross-Day Performance
+        </div>
+        <div className="text-[11px] text-text-dim">
+          A history: {a.total_days}d · B history: {b.total_days}d · H2H window: {h2h.common_days}d
+        </div>
+      </div>
+
+      {/* Lifetime stats table — always shown */}
+      <LifetimeStatsTable a={a} b={b} h2h={h2h} />
+
+      {/* H2H per-day section — only meaningful with 2+ common days */}
+      {hasH2H ? (
+        <>
+          <H2HPerDayChart h2h={h2h} aLabel={a.label} bLabel={b.label} />
+          <H2HDeltaBars h2h={h2h} aLabel={a.label} bLabel={b.label} />
+        </>
+      ) : (
+        <div className="rounded border border-border-dim bg-bg p-3 text-xs text-text-dim italic">
+          Head-to-head charts will appear after both variants have run for 2+
+          common trading days. Currently {h2h.common_days} day
+          {h2h.common_days === 1 ? "" : "s"} of overlap.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LifetimeStatsTable({
+  a,
+  b,
+  h2h,
+}: {
+  a: AggregateVariant;
+  b: AggregateVariant;
+  h2h: AggregatePayload["head_to_head"];
+}) {
+  // Variant A's history goes back further than B's, so its lifetime stats
+  // include data from before the experiment started. We label the column
+  // headers with the day count so the user knows the comparison isn't on
+  // identical N — the H2H window section below is the apples-to-apples view.
+  const rows: Array<[string, (lt: AggregateLifetime) => string, boolean?]> = [
+    ["Cumulative P&L", (lt) => formatPnL(lt.cumulative_pnl), true],
+    ["Win rate", (lt) => `${(lt.win_rate * 100).toFixed(1)}%`],
+    [
+      "Win / Loss days",
+      (lt) => `${lt.winning_days} / ${lt.losing_days}`,
+    ],
+    ["Best day", (lt) => formatPnL(lt.best_day), true],
+    ["Worst day", (lt) => formatPnL(lt.worst_day), true],
+    ["Max drawdown", (lt) => `$${lt.max_drawdown.toFixed(0)}`],
+    ["Sharpe (daily)", (lt) => lt.sharpe.toFixed(2)],
+    ["Total credit", (lt) => `$${lt.total_credit_collected.toFixed(0)}`],
+    ["Total stops", (lt) => `${lt.total_stops}`],
+  ];
+
+  return (
+    <div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-text-secondary text-xs">
+            <th className="text-left font-normal pb-1">Lifetime metric</th>
+            <th className="text-right font-normal pb-1" style={{ color: colors.info }}>
+              {a.label} ({a.total_days}d)
+            </th>
+            <th className="text-right font-normal pb-1" style={{ color: colors.warning }}>
+              {b.label} ({b.total_days}d)
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, fn, colored], i) => {
+            const aVal = fn(a.lifetime);
+            const bVal = fn(b.lifetime);
+            const aColor =
+              colored && a.lifetime.cumulative_pnl !== undefined
+                ? pnlColor(a.lifetime[label.includes("Best") ? "best_day" : label.includes("Worst") ? "worst_day" : "cumulative_pnl"])
+                : undefined;
+            const bColor =
+              colored && b.lifetime.cumulative_pnl !== undefined
+                ? pnlColor(b.lifetime[label.includes("Best") ? "best_day" : label.includes("Worst") ? "worst_day" : "cumulative_pnl"])
+                : undefined;
+            return (
+              <tr key={i}>
+                <td className="py-0.5 text-text-secondary">{label}</td>
+                <td className="py-0.5 text-right font-mono" style={{ color: aColor }}>
+                  {aVal}
+                </td>
+                <td className="py-0.5 text-right font-mono" style={{ color: bColor }}>
+                  {bVal}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {h2h.common_days > 0 && (
+        <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+          <div className="rounded bg-bg p-2 text-center">
+            <div className="text-text-dim text-[10px] uppercase tracking-wide">A days won</div>
+            <div className="font-mono text-base mt-0.5" style={{ color: colors.info }}>
+              {h2h.days_a_won}
+            </div>
+          </div>
+          <div className="rounded bg-bg p-2 text-center">
+            <div className="text-text-dim text-[10px] uppercase tracking-wide">Tied</div>
+            <div className="font-mono text-base mt-0.5 text-text-secondary">
+              {h2h.days_tied}
+            </div>
+          </div>
+          <div className="rounded bg-bg p-2 text-center">
+            <div className="text-text-dim text-[10px] uppercase tracking-wide">B days won</div>
+            <div className="font-mono text-base mt-0.5" style={{ color: colors.warning }}>
+              {h2h.days_b_won}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {h2h.common_days > 0 && (
+        <div className="mt-2 text-xs text-text-secondary text-center">
+          H2H cumulative delta (A − B):{" "}
+          <span
+            className="font-mono"
+            style={{ color: pnlColor(h2h.cumulative_delta_a_minus_b) }}
+          >
+            {formatPnL(h2h.cumulative_delta_a_minus_b)}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function H2HPerDayChart({
+  h2h,
+  aLabel,
+  bLabel,
+}: {
+  h2h: AggregatePayload["head_to_head"];
+  aLabel: string;
+  bLabel: string;
+}) {
+  // Cumulative P&L curves over the H2H window. We chart `cumulative_a` /
+  // `cumulative_b` which are server-computed running sums starting from the
+  // first common day — NOT each variant's lifetime cumulative. This way the
+  // two lines start at $0 on the same day and divergence is purely the
+  // experiment's contribution.
+  return (
+    <div>
+      <div className="text-[11px] text-text-secondary mb-1">
+        Cumulative P&amp;L (H2H window only — starts at $0 on first common day)
+      </div>
+      <ResponsiveContainer width="100%" height={200}>
+        <LineChart data={h2h.per_day} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke={colors.borderDim} strokeDasharray="3 3" />
+          <XAxis
+            dataKey="date"
+            stroke={colors.textSecondary}
+            tick={{ fontSize: 10 }}
+            interval="preserveStartEnd"
+          />
+          <YAxis
+            stroke={colors.textSecondary}
+            tick={{ fontSize: 10 }}
+            tickFormatter={(v) => `$${v}`}
+          />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: colors.bgElevated,
+              border: `1px solid ${colors.border}`,
+              borderRadius: 4,
+              fontSize: 12,
+            }}
+            formatter={(value, name) => {
+              const label = name === "cumulative_a" ? aLabel : bLabel;
+              return [formatPnL(Number(value)), label];
+            }}
+          />
+          <Legend
+            wrapperStyle={{ fontSize: 11 }}
+            formatter={(v) => (v === "cumulative_a" ? aLabel : bLabel)}
+          />
+          <ReferenceLine y={0} stroke={colors.border} />
+          <Line
+            type="monotone"
+            dataKey="cumulative_a"
+            stroke={colors.info}
+            strokeWidth={2}
+            dot={{ r: 3 }}
+            isAnimationActive={false}
+          />
+          <Line
+            type="monotone"
+            dataKey="cumulative_b"
+            stroke={colors.warning}
+            strokeWidth={2}
+            dot={{ r: 3 }}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function H2HDeltaBars({
+  h2h,
+  aLabel,
+  bLabel,
+}: {
+  h2h: AggregatePayload["head_to_head"];
+  aLabel: string;
+  bLabel: string;
+}) {
+  // One bar per day, signed delta (A − B). Color by sign so the chart reads
+  // at a glance: blue bar = A won that day, amber bar = B won. Tooltip
+  // shows the actual per-side P&L for context.
+  return (
+    <div>
+      <div className="text-[11px] text-text-secondary mb-1">
+        Daily delta (A − B). Blue bar = A won, amber = B won.
+      </div>
+      <ResponsiveContainer width="100%" height={150}>
+        <BarChart data={h2h.per_day} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke={colors.borderDim} strokeDasharray="3 3" />
+          <XAxis
+            dataKey="date"
+            stroke={colors.textSecondary}
+            tick={{ fontSize: 10 }}
+            interval="preserveStartEnd"
+          />
+          <YAxis
+            stroke={colors.textSecondary}
+            tick={{ fontSize: 10 }}
+            tickFormatter={(v) => `$${v}`}
+          />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: colors.bgElevated,
+              border: `1px solid ${colors.border}`,
+              borderRadius: 4,
+              fontSize: 12,
+            }}
+            formatter={(_value, _name, item) => {
+              const p = (item?.payload || {}) as H2HPoint;
+              return [
+                `Δ ${formatPnL(p.delta)}  ·  ${aLabel} ${formatPnL(p.a_net_pnl)}  ·  ${bLabel} ${formatPnL(p.b_net_pnl)}`,
+                "",
+              ];
+            }}
+          />
+          <ReferenceLine y={0} stroke={colors.border} />
+          <Bar dataKey="delta" isAnimationActive={false}>
+            {h2h.per_day.map((p, i) => (
+              <Cell
+                key={i}
+                fill={
+                  p.winner === "A"
+                    ? colors.info
+                    : p.winner === "B"
+                    ? colors.warning
+                    : colors.textSecondary
+                }
+              />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
     </div>
   );
 }

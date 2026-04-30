@@ -140,6 +140,11 @@ class AlertType(Enum):
     # Entry Events
     ENTRY_SKIPPED = "entry_skipped"  # Entry skipped (credit gate, VIX gate, illiquidity, etc.)
 
+    # Variant comparison (1v1 dry-run experiment) — fires once at end-of-day
+    # from variant A only. Variant B never fires (alerts.enabled=false in
+    # its config), so there's no risk of double-broadcast.
+    VARIANT_COMPARISON_DAILY = "variant_comparison_daily"
+
 
 # Default priority mapping for alert types
 DEFAULT_PRIORITIES = {
@@ -187,6 +192,7 @@ DEFAULT_PRIORITIES = {
     AlertType.MARKET_HOLIDAY: AlertPriority.LOW,
     AlertType.MARKET_EARLY_CLOSE: AlertPriority.LOW,
     AlertType.ENTRY_SKIPPED: AlertPriority.LOW,  # Informational — entry skipped
+    AlertType.VARIANT_COMPARISON_DAILY: AlertPriority.LOW,  # End-of-day A vs B summary
 }
 
 
@@ -414,6 +420,7 @@ class AlertService:
         AlertType.MARKET_EARLY_CLOSE,  # Informational
         AlertType.POSITION_SNAPSHOT,   # 30-min dashboard — Telegram glance
         AlertType.ENTRY_SKIPPED,       # Entry skipped — informational
+        AlertType.VARIANT_COMPARISON_DAILY,  # End-of-day A vs B — Telegram glance
     }
 
     def _should_send_email(self, alert_type: AlertType, priority: AlertPriority) -> bool:

@@ -282,7 +282,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     except Exception as e:
         trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
 
-    # Initialize Telegram command handler (15 commands)
+    # Initialize Telegram command handler (16 commands incl. /compare)
     from bots.hydra.telegram_commands import TelegramCommandHandler
     telegram_cmd_handler = TelegramCommandHandler()
     try:
@@ -298,6 +298,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
             entry_callback=strategy.build_telegram_entry,
             stops_callback=strategy.build_telegram_stops,
             config_callback=strategy.build_telegram_config,
+            compare_callback=strategy.build_telegram_compare,
             config_path=config_path,
             active_positions_callback=lambda: len(strategy.daily_state.active_entries),
         )

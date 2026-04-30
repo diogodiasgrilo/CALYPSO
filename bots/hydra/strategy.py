@@ -6417,6 +6417,195 @@ class HydraStrategy(MEICStrategy):
         return self._with_contracts_footer(lines)
 
     # =========================================================================
+    # VARIANT COMPARISON (1v1 dry-run experiment)
+    # =========================================================================
+
+    def _load_variant_b_state(self) -> Optional[Dict]:
+        """Read variant B's state file. Returns None if not running today.
+
+        Variant B writes to data/variant_b/hydra_state.json on every heartbeat.
+        We trust the state file by 4 PM ET — both bots are on the same heartbeat
+        cadence so by the time variant A's daily-summary trigger fires, B's
+        state file has today's final entries + total_realized_pnl.
+
+        Stale-data guard: if the file's mtime is more than 30 minutes old, we
+        treat the file as invalid (variant B is stopped or hung) and return
+        None — the comparison alert is suppressed rather than reporting a
+        possibly-wrong delta.
+        """
+        try:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            b_state_path = os.path.join(project_root, "data", "variant_b", "hydra_state.json")
+            if not os.path.exists(b_state_path):
+                return None
+            stale_threshold_seconds = 30 * 60  # 30 min — generous for end-of-day timing
+            age = time.time() - os.path.getmtime(b_state_path)
+            if age > stale_threshold_seconds:
+                logger.info(
+                    f"Variant B state stale ({age/60:.1f} min old) — skipping comparison alert"
+                )
+                return None
+            with open(b_state_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to read variant B state: {e}")
+            return None
+
+    def _build_variant_b_summary(self, b_state: Dict) -> Dict:
+        """Distill variant B's state file into a summary dict shaped like
+        get_daily_summary() so the formatter can use a uniform interface."""
+        entries = b_state.get("entries", [])
+        total_credit = b_state.get("total_credit_received", 0) or 0
+        realized = b_state.get("total_realized_pnl", 0) or 0
+        commission = b_state.get("total_commission", 0) or 0
+        return {
+            "date": b_state.get("date"),
+            "entries_completed": b_state.get("entries_completed", 0),
+            "total_credit": total_credit,
+            "total_pnl": realized,
+            "total_commission": commission,
+            "net_pnl": realized - commission,
+            "call_stops": b_state.get("call_stops_triggered", 0),
+            "put_stops": b_state.get("put_stops_triggered", 0),
+            "entries": entries,
+            "spread_width": (b_state.get("market_data_ohlc") or {}).get("spread_width"),
+        }
+
+    def _peak_buffer_for_state(self, entries: list) -> tuple:
+        """(call_pct, put_pct) — largest buffer utilization seen on any side."""
+        peak_call = 0.0
+        peak_put = 0.0
+        for e in entries or []:
+            if e.get("is_complete"):
+                continue
+            csv = e.get("call_spread_value")
+            css = e.get("call_side_stop")
+            if csv is not None and css and css > 0 and not e.get("call_side_stopped"):
+                pct = min(100.0, max(0.0, csv / css * 100))
+                if pct > peak_call:
+                    peak_call = pct
+            psv = e.get("put_spread_value")
+            pss = e.get("put_side_stop")
+            if psv is not None and pss and pss > 0 and not e.get("put_side_stopped"):
+                pct = min(100.0, max(0.0, psv / pss * 100))
+                if pct > peak_put:
+                    peak_put = pct
+        return (peak_call, peak_put)
+
+    def _format_variant_comparison(self, a_summary: Dict, b_summary: Dict, b_state: Dict) -> str:
+        """Build the multi-line comparison body used by both Telegram alert and
+        the on-demand /compare command. Plain text (no Markdown) so the
+        existing AlertService Telegram path renders it identically to other
+        snapshot-style alerts.
+        """
+        from datetime import datetime as _dt
+        date_str = a_summary.get("date") or _dt.now().strftime("%Y-%m-%d")
+
+        a_net = a_summary.get("net_pnl", 0)
+        b_net = b_summary.get("net_pnl", 0)
+        delta = a_net - b_net
+        if abs(delta) < 0.01:
+            winner_line = "Tied"
+        elif delta > 0:
+            pct = abs(delta) / abs(b_net) * 100 if b_net else 0
+            winner_line = f"A leads by {self._fmt_money(abs(delta))} ({pct:.1f}%)"
+        else:
+            pct = abs(delta) / abs(a_net) * 100 if a_net else 0
+            winner_line = f"B leads by {self._fmt_money(abs(delta))} ({pct:.1f}%)"
+
+        a_spread = self.strategy_config.get("max_spread_width", "?")
+        b_spread = (b_state.get("strategy_config") or {}).get("max_spread_width") or "110"
+
+        a_peak_c, a_peak_p = self._peak_buffer_for_state(self.daily_state.entries)
+        b_peak_c, b_peak_p = self._peak_buffer_for_state(b_summary.get("entries", []))
+
+        lines = [
+            f"🏁 HYDRA Variant Comparison · {date_str}",
+            "",
+            f"A ({a_spread}pt):  net {self._fmt_money(a_net)} | "
+            f"{a_summary.get('entries_completed', 0)} entries | "
+            f"{a_summary.get('call_stops', 0)+a_summary.get('put_stops', 0)} stops",
+            f"B ({b_spread}pt): net {self._fmt_money(b_net)} | "
+            f"{b_summary.get('entries_completed', 0)} entries | "
+            f"{b_summary.get('call_stops', 0)+b_summary.get('put_stops', 0)} stops",
+            "",
+            f"Δ A−B: {self._fmt_money(delta, signed=True)} — {winner_line}",
+            "",
+            f"Total credit: A ${a_summary.get('total_credit', 0):.0f} | "
+            f"B ${b_summary.get('total_credit', 0):.0f}",
+            f"Peak put buffer: A {a_peak_p:.0f}% | B {b_peak_p:.0f}%",
+            f"Peak call buffer: A {a_peak_c:.0f}% | B {b_peak_c:.0f}%",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _fmt_money(value: float, signed: bool = False) -> str:
+        """Format dollar amount for variant-comparison messages."""
+        sign = ""
+        if signed and value > 0:
+            sign = "+"
+        elif value < 0:
+            sign = "-"
+        return f"{sign}${abs(value):.2f}"
+
+    def _send_variant_comparison_summary(self) -> None:
+        """End-of-day comparison alert. Fires only when:
+         - This is variant A (HYDRA_VARIANT_ID is None — variant B never sends)
+         - Variant B's state file exists and is fresh (< 30 min old)
+         - Alerts are enabled in this bot's config
+
+        Suppressed silently otherwise — never raises into the calling daily-
+        summary path.
+        """
+        try:
+            if HYDRA_VARIANT_ID is not None:
+                # Variant B: never broadcasts, alerts.enabled=false anyway.
+                return
+            if not getattr(self, "alert_service", None):
+                return
+            b_state = self._load_variant_b_state()
+            if not b_state:
+                return  # variant B not running or stale
+            a_summary = self.get_daily_summary()
+            b_summary = self._build_variant_b_summary(b_state)
+            body = self._format_variant_comparison(a_summary, b_summary, b_state)
+            from shared.alert_service import AlertType, AlertPriority
+            self.alert_service.send_alert(
+                alert_type=AlertType.VARIANT_COMPARISON_DAILY,
+                title=f"Variant A vs B · {a_summary.get('date')}",
+                message=body,
+                priority=AlertPriority.LOW,
+            )
+            logger.info("Sent VARIANT_COMPARISON_DAILY alert (variant A → Telegram)")
+        except Exception as e:
+            logger.warning(f"Variant comparison alert send failed (non-fatal): {e}")
+
+    def build_telegram_compare(self) -> str:
+        """Telegram /compare command — on-demand variant comparison message.
+
+        Works any time of day. Reads variant B's state file at call time so
+        intraday users can spot-check the head-to-head between entries.
+        """
+        if HYDRA_VARIANT_ID is not None:
+            return "/compare is only available on variant A (this bot is variant B)."
+        b_state = self._load_variant_b_state()
+        if not b_state:
+            return (
+                "Variant B not running (or state file stale).\n"
+                "Start it: `sudo systemctl start hydra_variant_b`"
+            )
+        a_summary = self.get_daily_summary()
+        b_summary = self._build_variant_b_summary(b_state)
+        return self._format_variant_comparison(a_summary, b_summary, b_state)
+
+    def log_daily_summary(self):
+        """Override to fire the variant-comparison alert after the canonical
+        daily summary completes. Variant A is the only sender; variant B's
+        config disables alerts so it would no-op anyway."""
+        super().log_daily_summary()
+        self._send_variant_comparison_summary()
+
+    # =========================================================================
     # TELEGRAM HISTORICAL DATA COMMANDS
     # =========================================================================
 
