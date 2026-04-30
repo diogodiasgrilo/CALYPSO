@@ -3774,7 +3774,8 @@ class HydraStrategy(MEICStrategy):
         # live strategy decisions. Order placement is gated separately at the
         # _execute_entry vs _simulate_entry fork (line ~4228).
         if (self.fomc_t1_skip_enabled
-                and is_fomc_t_plus_one()):
+                and is_fomc_t_plus_one()
+                and not self._force_normal_day()):
             self.daily_state.entries_skipped += 1
             self._next_entry_index += 1
             skip_reason = "FOMC T+1 blackout — skipping entry (A/B backtest: +$900 vs trade-normal, +$1,325 vs MKT-038)"
@@ -3852,9 +3853,11 @@ class HydraStrategy(MEICStrategy):
 
                 # Check MKT-038 (FOMC T+1) once here so we can skip put tightening.
                 # Path-B (2026-04-27): dry_run gate removed — dry mode mirrors live decisions.
+                # Dry-run force-normal-day bypasses this (data collection mode).
                 is_fomc_t1 = (
                     self.fomc_t1_callonly_enabled
                     and is_fomc_t_plus_one()
+                    and not self._force_normal_day()
                 )
 
                 # Base-entry down-day call-only: evaluate early so we can skip put tightening.

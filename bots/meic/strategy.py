@@ -797,6 +797,26 @@ class MEICStrategy:
         # Strategy configuration
         self.strategy_config = config.get("strategy", {})
 
+        # Dry-run "force normal day" override.
+        # When True AND dry_run is True, all DATE/EVENT-based skip rules are
+        # bypassed so every weekday runs as a normal full-IC trading day. The
+        # variant-comparison experiment depends on this — without it, FOMC weeks
+        # produce zero data points for variant B, blowing holes in the dataset.
+        # Live mode is unaffected: the flag has no effect when dry_run is False.
+        # Currently bypassed: FOMC announcement skip (MEIC), FOMC T+1 skip
+        # (HYDRA), MKT-038 FOMC T+1 call-only (HYDRA).
+        # NOT bypassed: market-condition skips (whipsaw, MKT-011 credit gate,
+        # MKT-040 put-non-viable, conditional Up/Down-day triggers) — those
+        # reflect what the live bot would also do given current market state.
+        self.dry_run_force_normal_day = bool(
+            self.strategy_config.get("dry_run_force_normal_day", False)
+        )
+        if self.dry_run and self.dry_run_force_normal_day:
+            logger.info(
+                "  Dry-run override: force-normal-day ENABLED — "
+                "FOMC/event-based skips bypassed (data collection mode)"
+            )
+
         # CONFIG-001: Validate configuration early
         config_valid, config_errors = self._validate_config()
         if not config_valid:
@@ -1052,8 +1072,9 @@ class MEICStrategy:
         # Day 1 has no announcement/press conference — safe to trade normally.
         # Day 2 has the 2:00 PM ET announcement — high volatility risk.
         # Override via config: set "fomc_announcement_skip": false to trade normally on announcement day.
+        # Dry-run force-normal-day also bypasses this (data-collection mode).
         fomc_skip = self.strategy_config.get("fomc_announcement_skip", True)
-        if is_fomc_announcement_day() and fomc_skip:
+        if is_fomc_announcement_day() and fomc_skip and not self._force_normal_day():
             if self.state != MEICState.DAILY_COMPLETE:
                 self.state = MEICState.DAILY_COMPLETE
                 logger.info("FOMC announcement day - skipping all entries")
@@ -6133,6 +6154,15 @@ class MEICStrategy:
     # =========================================================================
     # AFTER-HOURS SETTLEMENT RECONCILIATION (POS-004)
     # =========================================================================
+
+    def _force_normal_day(self) -> bool:
+        """Returns True iff the bot is in dry-run AND `dry_run_force_normal_day`
+        is set, in which case every date/event-based skip should be bypassed.
+
+        Used by FOMC announcement skip (this class), FOMC T+1 skip (HYDRA),
+        MKT-038 FOMC T+1 call-only (HYDRA). Live mode never returns True.
+        """
+        return self.dry_run and self.dry_run_force_normal_day
 
     @staticmethod
     def _position_is_settled(pid) -> bool:
