@@ -1,19 +1,26 @@
 /**
- * Comparison page — 1v1 head-to-head dry-run experiment.
+ * Comparison page — N-way head-to-head dry-run experiment.
  *
- * Variant A is the live HYDRA bot (current spread width). Variant B is a
- * parallel HYDRA process running in dry mode with a different spread width.
- * Both see identical market data; the only config delta should be the
- * spread width itself, so we can attribute P&L differences to that lever.
+ * Variant A is the live HYDRA bot (current spread width). Variants B, C, ...
+ * are parallel HYDRA processes running in dry mode with different configs
+ * (typically different spread widths). All see identical market data; the
+ * only config delta should be the lever being tested, so we can attribute
+ * P&L differences to that lever.
  *
- * Hidden when the backend reports comparison_mode_enabled=false. The nav
- * link gating lives in App.tsx; this page also self-protects by rendering
- * a "disabled" state if accessed directly.
+ * The set of variants is driven entirely by the backend's
+ * ``/api/variants/health`` response — adding a new variant on the backend
+ * (settings + reader registry) makes it appear here automatically with no
+ * frontend change. ``VARIANT_ACCENTS`` covers up to 5 variants out of the
+ * box (A–E); beyond that it falls back to a neutral text color.
+ *
+ * Hidden when the backend reports ``comparison_mode_enabled=false``. The nav
+ * link gating lives in App.tsx; this page also self-protects by rendering a
+ * "disabled" state if accessed directly.
  *
  * Polls /api/variants/comparison every 2s. Single endpoint = one round-trip
- * per refresh, gives us both variants' state + leaderboard + history.
+ * per refresh, gives us all variants' state + leaderboard + history.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   LineChart,
   Line,
@@ -32,6 +39,20 @@ import { colors, pnlColor } from "../lib/tradingColors";
 import { formatPnL } from "../lib/formatters";
 
 const POLL_MS = 2000;
+
+// Per-variant accent color. Order: A=blue, B=amber, C=mint, D=coral, E=purple-ish.
+// New variants past E render in textPrimary — easy to extend if needed.
+const VARIANT_ACCENTS: Record<string, string> = {
+  A: colors.info,
+  B: colors.warning,
+  C: colors.profit,
+  D: colors.loss,
+  E: "#a371f7",
+};
+
+function accentFor(id: string): string {
+  return VARIANT_ACCENTS[id] ?? colors.textPrimary;
+}
 
 interface VariantConfig {
   max_spread_width?: number;
@@ -113,12 +134,15 @@ interface VariantPayload {
 interface ComparisonPayload {
   date: string;
   leaderboard: {
-    winner: "A" | "B" | "tie" | "n/a";
-    a_net_pnl: number;
-    b_net_pnl: number;
-    delta_net_pnl: number;
+    winner: string; // "A" | "B" | "C" | ... | "tie" | "n/a"
+    scores: Record<string, number>;
+    deltas_vs_a: Record<string, number>;
+    // Legacy fields kept for compat — new code reads scores/deltas_vs_a.
+    a_net_pnl?: number;
+    b_net_pnl?: number;
+    delta_net_pnl?: number;
   };
-  variants: { A: VariantPayload; B: VariantPayload };
+  variants: Record<string, VariantPayload>;
 }
 
 interface AggregateLifetime {
@@ -149,32 +173,36 @@ interface AggregateVariant {
   total_days: number;
 }
 
+// Per-day H2H rows include dynamic per-variant fields like a_net_pnl,
+// b_net_pnl, c_net_pnl, cumulative_a, cumulative_b, cumulative_c, etc.
+// We type them as a string-indexed record so new variants don't require
+// type changes — the chart looks up by `${id.toLowerCase()}_net_pnl`.
 interface H2HPoint {
   date: string;
-  a_net_pnl: number;
-  b_net_pnl: number;
-  delta: number;
-  winner: "A" | "B" | "tie";
-  cumulative_a: number;
-  cumulative_b: number;
+  winner: string;
+  delta: number; // legacy A−B
+  [key: string]: number | string;
 }
 
 interface AggregatePayload {
-  variants: { A: AggregateVariant; B: AggregateVariant };
+  variants: Record<string, AggregateVariant>;
   head_to_head: {
     common_days: number;
-    days_a_won: number;
-    days_b_won: number;
     days_tied: number;
-    cumulative_delta_a_minus_b: number;
     per_day: H2HPoint[];
+    days_won_per_variant: Record<string, number>;
+    cumulative_per_variant: Record<string, number>;
+    // Legacy
+    days_a_won?: number;
+    days_b_won?: number;
+    cumulative_delta_a_minus_b?: number;
   };
 }
 
 interface Health {
   enabled: boolean;
-  variant_a_label: string;
-  variant_b_label: string;
+  variants: string[]; // ["A", "B", "C"]
+  labels: Record<string, string>;
 }
 
 async function fetchJSON<T>(url: string): Promise<T | null> {
@@ -196,7 +224,6 @@ export function Comparison() {
   useEffect(() => {
     let mounted = true;
 
-    // Initial health check (also drives the disabled-state UI).
     fetchJSON<Health>("/api/variants/health").then((h) => {
       if (mounted) setHealth(h);
     });
@@ -243,6 +270,15 @@ export function Comparison() {
     };
   }, []);
 
+  // Sorted list of available variant ids drives ALL rendering downstream.
+  // Sourcing from health (not data) means we render placeholder cards even
+  // before the first /comparison response arrives.
+  const variantIds = useMemo(() => {
+    if (health?.variants?.length) return [...health.variants].sort();
+    if (data?.variants) return Object.keys(data.variants).sort();
+    return ["A", "B"];
+  }, [health, data]);
+
   if (health && !health.enabled) {
     return <DisabledNotice />;
   }
@@ -266,25 +302,39 @@ export function Comparison() {
   }
 
   const { variants, leaderboard } = data;
-  const a = variants.A;
-  const b = variants.B;
+
+  // Render variant payloads in canonical order. Missing payloads (e.g. a
+  // backend hiccup mid-poll) get a neutral placeholder row.
+  const orderedVariants = variantIds.map((vid) => variants[vid]).filter(Boolean);
+
+  // Tailwind doesn't support fully-dynamic class names well, so we map known
+  // counts to fixed grid-cols-N classes and fall back to grid-cols-1 + flex.
+  const gridCols =
+    orderedVariants.length === 1
+      ? "grid-cols-1"
+      : orderedVariants.length === 2
+      ? "grid-cols-2 max-lg:grid-cols-1"
+      : orderedVariants.length === 3
+      ? "grid-cols-3 max-xl:grid-cols-2 max-md:grid-cols-1"
+      : "grid-cols-4 max-xl:grid-cols-2 max-md:grid-cols-1";
 
   return (
     <div className="space-y-3 px-3 pb-3">
       <Leaderboard
-        a={a}
-        b={b}
+        variantIds={variantIds}
+        variants={variants}
         winner={leaderboard.winner}
-        delta={leaderboard.delta_net_pnl}
+        scores={leaderboard.scores}
       />
-      <ConfigDelta a={a} b={b} />
-      <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-        <VariantPanel v={a} accent={colors.info} />
-        <VariantPanel v={b} accent={colors.warning} />
+      <ConfigDelta variantIds={variantIds} variants={variants} />
+      <div className={`grid ${gridCols} gap-3`}>
+        {orderedVariants.map((v) => (
+          <VariantPanel key={v.id} v={v} accent={accentFor(v.id)} />
+        ))}
       </div>
-      <PnLChart a={a} b={b} />
-      <EndOfDayStats a={a} b={b} />
-      <CrossDayPanel agg={aggregate} />
+      <PnLChart variantIds={variantIds} variants={variants} />
+      <EndOfDayStats variantIds={variantIds} variants={variants} />
+      <CrossDayPanel agg={aggregate} variantIds={variantIds} />
     </div>
   );
 }
@@ -300,8 +350,10 @@ function DisabledNotice() {
           in the dashboard environment and restarting <code>dashboard.service</code>.
         </p>
         <p>
-          Then start the variant B bot with{" "}
-          <code className="text-info">sudo systemctl start hydra_variant_b</code>.
+          Then start the variant bots, e.g.{" "}
+          <code className="text-info">sudo systemctl start hydra_variant_b</code>
+          {" "}and{" "}
+          <code className="text-info">sudo systemctl start hydra_variant_c</code>.
         </p>
       </div>
     </div>
@@ -309,22 +361,21 @@ function DisabledNotice() {
 }
 
 function Leaderboard({
-  a,
-  b,
+  variantIds,
+  variants,
   winner,
-  delta,
+  scores,
 }: {
-  a: VariantPayload;
-  b: VariantPayload;
+  variantIds: string[];
+  variants: Record<string, VariantPayload>;
   winner: string;
-  delta: number;
+  scores: Record<string, number>;
 }) {
-  const aNet = a.summary?.net_pnl ?? 0;
-  const bNet = b.summary?.net_pnl ?? 0;
+  const winnerVariant = variants[winner];
   const winnerLabel =
-    winner === "A" ? a.label : winner === "B" ? b.label : winner === "tie" ? "Tied" : "—";
+    winner === "tie" ? "Tied" : winner === "n/a" ? "—" : winnerVariant?.label ?? winner;
   const winnerColor =
-    winner === "A" ? colors.info : winner === "B" ? colors.warning : colors.textSecondary;
+    winner === "tie" || winner === "n/a" ? colors.textSecondary : accentFor(winner);
 
   return (
     <div className="rounded border border-border-dim bg-card p-4">
@@ -337,10 +388,19 @@ function Leaderboard({
             {winnerLabel}
           </div>
         </div>
-        <div className="flex gap-6 max-md:gap-3">
-          <PnLBlock label={a.label} value={aNet} accent={colors.info} />
-          <PnLBlock label="Δ A − B" value={delta} accent={colors.textSecondary} />
-          <PnLBlock label={b.label} value={bNet} accent={colors.warning} />
+        <div className="flex gap-6 max-md:gap-3 flex-wrap">
+          {variantIds.map((vid) => {
+            const v = variants[vid];
+            const value = scores?.[vid] ?? v?.summary?.net_pnl ?? 0;
+            return (
+              <PnLBlock
+                key={vid}
+                label={v?.label ?? vid}
+                value={value}
+                accent={accentFor(vid)}
+              />
+            );
+          })}
         </div>
       </div>
     </div>
@@ -360,10 +420,16 @@ function PnLBlock({ label, value, accent }: { label: string; value: number; acce
   );
 }
 
-function ConfigDelta({ a, b }: { a: VariantPayload; b: VariantPayload }) {
+function ConfigDelta({
+  variantIds,
+  variants,
+}: {
+  variantIds: string[];
+  variants: Record<string, VariantPayload>;
+}) {
   // Surface the actual config differences so a viewer who lands on the page
-  // immediately sees what's being tested. Variant A's config is the
-  // "control"; bold rows where B differs.
+  // immediately sees what's being tested. Variant A is the "control"; rows
+  // are bolded where ANY variant differs from variant A's value.
   const rows: Array<{ key: keyof VariantConfig; label: string }> = [
     { key: "max_spread_width", label: "Spread width (pt)" },
     { key: "call_starting_otm_multiplier", label: "Call start ×" },
@@ -382,29 +448,40 @@ function ConfigDelta({ a, b }: { a: VariantPayload; b: VariantPayload }) {
         <thead>
           <tr className="text-text-secondary text-xs">
             <th className="text-left font-normal pb-1">Knob</th>
-            <th className="text-right font-normal pb-1" style={{ color: colors.info }}>
-              {a.label}
-            </th>
-            <th className="text-right font-normal pb-1" style={{ color: colors.warning }}>
-              {b.label}
-            </th>
+            {variantIds.map((vid) => (
+              <th
+                key={vid}
+                className="text-right font-normal pb-1"
+                style={{ color: accentFor(vid) }}
+              >
+                {variants[vid]?.label ?? vid}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
           {rows.map(({ key, label }) => {
-            const av = (a.config as Record<string, unknown>)[key as string];
-            const bv = (b.config as Record<string, unknown>)[key as string];
-            const differs = JSON.stringify(av) !== JSON.stringify(bv);
+            const aValRaw =
+              (variants["A"]?.config as Record<string, unknown> | undefined)?.[key as string];
+            const aValStr = JSON.stringify(aValRaw);
             return (
-              <tr key={key} className={differs ? "text-text-primary" : ""}>
+              <tr key={key}>
                 <td className="py-0.5">{label}</td>
-                <td className="py-0.5 text-right font-mono">{String(av ?? "—")}</td>
-                <td
-                  className="py-0.5 text-right font-mono"
-                  style={{ color: differs ? colors.warning : undefined }}
-                >
-                  {String(bv ?? "—")}
-                </td>
+                {variantIds.map((vid) => {
+                  const v = (variants[vid]?.config as Record<string, unknown> | undefined)?.[
+                    key as string
+                  ];
+                  const differs = vid !== "A" && JSON.stringify(v) !== aValStr;
+                  return (
+                    <td
+                      key={vid}
+                      className="py-0.5 text-right font-mono"
+                      style={{ color: differs ? accentFor(vid) : undefined }}
+                    >
+                      {String(v ?? "—")}
+                    </td>
+                  );
+                })}
               </tr>
             );
           })}
@@ -578,15 +655,27 @@ function BufferBar({
   );
 }
 
-function PnLChart({ a, b }: { a: VariantPayload; b: VariantPayload }) {
-  // Merge both variants' P&L history onto a single time axis. Each variant's
+function PnLChart({
+  variantIds,
+  variants,
+}: {
+  variantIds: string[];
+  variants: Record<string, VariantPayload>;
+}) {
+  // Merge all variants' P&L history onto a single time axis. Each variant's
   // pnl_history is a list of {time, pnl} written by the bot every ~10s during
   // market hours. We zip them by index because they share the same heartbeat
-  // cadence and start time. If one has fewer points (e.g. variant B started
-  // late), the missing side is left null — Recharts just skips that point.
-  const aHist = a.pnl_history ?? [];
-  const bHist = b.pnl_history ?? [];
-  const maxLen = Math.max(aHist.length, bHist.length);
+  // cadence and start time. If one has fewer points (e.g. a variant started
+  // late), the missing series is left null at that index — Recharts skips it.
+  //
+  // Per-variant series live in row[`pnl_${id.toLowerCase()}`] so we can have
+  // any number of variants without changing the row schema.
+  const histories = variantIds.map((vid) => ({
+    id: vid,
+    label: variants[vid]?.label ?? vid,
+    series: variants[vid]?.pnl_history ?? [],
+  }));
+  const maxLen = Math.max(0, ...histories.map((h) => h.series.length));
 
   if (maxLen === 0) {
     return (
@@ -595,21 +684,30 @@ function PnLChart({ a, b }: { a: VariantPayload; b: VariantPayload }) {
           P&amp;L Over Time
         </div>
         <div className="text-sm text-text-dim italic">
-          No P&amp;L data yet — chart will appear once both variants have been
+          No P&amp;L data yet — chart will appear once the variants have been
           monitoring an entry for one heartbeat cycle.
         </div>
       </div>
     );
   }
 
-  const merged: { time: string; a: number | null; b: number | null }[] = [];
+  const merged: Array<Record<string, string | number | null>> = [];
   for (let i = 0; i < maxLen; i++) {
-    merged.push({
-      time: (aHist[i] ?? bHist[i])?.time ?? "",
-      a: aHist[i]?.pnl ?? null,
-      b: bHist[i]?.pnl ?? null,
-    });
+    const row: Record<string, string | number | null> = { time: "" };
+    for (const h of histories) {
+      const point = h.series[i];
+      if (point && !row.time) {
+        row.time = point.time;
+      }
+      row[`pnl_${h.id.toLowerCase()}`] = point?.pnl ?? null;
+    }
+    merged.push(row);
   }
+
+  // Tooltip needs to map series key -> variant label
+  const labelByKey = Object.fromEntries(
+    histories.map((h) => [`pnl_${h.id.toLowerCase()}`, h.label]),
+  );
 
   return (
     <div className="rounded border border-border-dim bg-card p-3">
@@ -638,52 +736,52 @@ function PnLChart({ a, b }: { a: VariantPayload; b: VariantPayload }) {
               fontSize: 12,
             }}
             formatter={(value, name) => {
-              const label = name === "a" ? a.label : b.label;
+              const label = labelByKey[String(name)] ?? String(name);
               if (value === null || value === undefined) return ["—", label];
               return [formatPnL(Number(value)), label];
             }}
           />
           <Legend
             wrapperStyle={{ fontSize: 11 }}
-            formatter={(v) => (v === "a" ? a.label : b.label)}
+            formatter={(v) => labelByKey[String(v)] ?? String(v)}
           />
           <ReferenceLine y={0} stroke={colors.border} />
-          <Line
-            type="monotone"
-            dataKey="a"
-            stroke={colors.info}
-            strokeWidth={2}
-            dot={false}
-            connectNulls
-            isAnimationActive={false}
-          />
-          <Line
-            type="monotone"
-            dataKey="b"
-            stroke={colors.warning}
-            strokeWidth={2}
-            dot={false}
-            connectNulls
-            isAnimationActive={false}
-          />
+          {histories.map((h) => (
+            <Line
+              key={h.id}
+              type="monotone"
+              dataKey={`pnl_${h.id.toLowerCase()}`}
+              stroke={accentFor(h.id)}
+              strokeWidth={2}
+              dot={false}
+              connectNulls
+              isAnimationActive={false}
+            />
+          ))}
         </LineChart>
       </ResponsiveContainer>
     </div>
   );
 }
 
-function EndOfDayStats({ a, b }: { a: VariantPayload; b: VariantPayload }) {
+function EndOfDayStats({
+  variantIds,
+  variants,
+}: {
+  variantIds: string[];
+  variants: Record<string, VariantPayload>;
+}) {
   // Per-variant single-day stats. After 4 PM these become the locked
   // end-of-day comparison; before that they update live.
-  const rows: Array<[string, (v: VariantPayload) => string | number, boolean?]> = [
-    ["Entries placed", (v) => v.summary?.entries_completed ?? 0],
-    ["Stops fired", (v) => v.summary?.total_stops ?? 0],
-    ["Total credit", (v) => `$${(v.summary?.total_credit_received ?? 0).toFixed(0)}`],
-    ["Realized P&L", (v) => formatPnL(v.summary?.total_realized_pnl ?? 0), true],
-    ["Commission", (v) => `$${(v.summary?.total_commission ?? 0).toFixed(0)}`],
-    ["Net P&L", (v) => formatPnL(v.summary?.net_pnl ?? 0), true],
-    ["Peak call buffer used", (v) => `${(v.peak_buffer?.call_pct ?? 0).toFixed(0)}%`],
-    ["Peak put buffer used", (v) => `${(v.peak_buffer?.put_pct ?? 0).toFixed(0)}%`],
+  const rows: Array<[string, (v: VariantPayload | undefined) => string | number, boolean?]> = [
+    ["Entries placed", (v) => v?.summary?.entries_completed ?? 0],
+    ["Stops fired", (v) => v?.summary?.total_stops ?? 0],
+    ["Total credit", (v) => `$${(v?.summary?.total_credit_received ?? 0).toFixed(0)}`],
+    ["Realized P&L", (v) => formatPnL(v?.summary?.total_realized_pnl ?? 0), true],
+    ["Commission", (v) => `$${(v?.summary?.total_commission ?? 0).toFixed(0)}`],
+    ["Net P&L", (v) => formatPnL(v?.summary?.net_pnl ?? 0), true],
+    ["Peak call buffer used", (v) => `${(v?.peak_buffer?.call_pct ?? 0).toFixed(0)}%`],
+    ["Peak put buffer used", (v) => `${(v?.peak_buffer?.put_pct ?? 0).toFixed(0)}%`],
   ];
 
   return (
@@ -695,46 +793,51 @@ function EndOfDayStats({ a, b }: { a: VariantPayload; b: VariantPayload }) {
         <thead>
           <tr className="text-text-secondary text-xs">
             <th className="text-left font-normal pb-1">Metric</th>
-            <th className="text-right font-normal pb-1" style={{ color: colors.info }}>
-              {a.label}
-            </th>
-            <th className="text-right font-normal pb-1" style={{ color: colors.warning }}>
-              {b.label}
-            </th>
+            {variantIds.map((vid) => (
+              <th
+                key={vid}
+                className="text-right font-normal pb-1"
+                style={{ color: accentFor(vid) }}
+              >
+                {variants[vid]?.label ?? vid}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {rows.map(([label, getter, colored], i) => {
-            const av = getter(a);
-            const bv = getter(b);
-            const aNum = colored && a.summary ? (a.summary.net_pnl ?? 0) : 0;
-            const bNum = colored && b.summary ? (b.summary.net_pnl ?? 0) : 0;
-            return (
-              <tr key={i}>
-                <td className="py-0.5 text-text-secondary">{label}</td>
-                <td
-                  className="py-0.5 text-right font-mono"
-                  style={{ color: colored ? pnlColor(aNum) : undefined }}
-                >
-                  {av}
-                </td>
-                <td
-                  className="py-0.5 text-right font-mono"
-                  style={{ color: colored ? pnlColor(bNum) : undefined }}
-                >
-                  {bv}
-                </td>
-              </tr>
-            );
-          })}
+          {rows.map(([label, getter, colored], i) => (
+            <tr key={i}>
+              <td className="py-0.5 text-text-secondary">{label}</td>
+              {variantIds.map((vid) => {
+                const v = variants[vid];
+                const value = getter(v);
+                const netPnL = v?.summary?.net_pnl ?? 0;
+                return (
+                  <td
+                    key={vid}
+                    className="py-0.5 text-right font-mono"
+                    style={{ color: colored ? pnlColor(netPnL) : undefined }}
+                  >
+                    {value}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>
   );
 }
 
-function CrossDayPanel({ agg }: { agg: AggregatePayload | null }) {
-  // Cross-day rollups are most informative once both variants have at least
+function CrossDayPanel({
+  agg,
+  variantIds,
+}: {
+  agg: AggregatePayload | null;
+  variantIds: string[];
+}) {
+  // Cross-day rollups are most informative once all variants have at least
   // 2 common days. Below that we render a placeholder explaining what the
   // panel will show, so empty days don't make it look broken.
   if (!agg) {
@@ -748,10 +851,17 @@ function CrossDayPanel({ agg }: { agg: AggregatePayload | null }) {
     );
   }
 
-  const a = agg.variants.A;
-  const b = agg.variants.B;
   const h2h = agg.head_to_head;
   const hasH2H = h2h.common_days >= 2;
+
+  // Use whichever variant set is in the aggregate response (the source of
+  // truth) but keep canonical sort order for display.
+  const aggIds = Object.keys(agg.variants).sort();
+  const idsToShow = aggIds.length > 0 ? aggIds : variantIds;
+
+  const totalDaysRow = idsToShow
+    .map((vid) => `${vid} history: ${agg.variants[vid]?.total_days ?? 0}d`)
+    .join(" · ");
 
   return (
     <div className="rounded border border-border-dim bg-card p-3 space-y-4">
@@ -760,22 +870,20 @@ function CrossDayPanel({ agg }: { agg: AggregatePayload | null }) {
           Cross-Day Performance
         </div>
         <div className="text-[11px] text-text-dim">
-          A history: {a.total_days}d · B history: {b.total_days}d · H2H window: {h2h.common_days}d
+          {totalDaysRow} · H2H window: {h2h.common_days}d
         </div>
       </div>
 
-      {/* Lifetime stats table — always shown */}
-      <LifetimeStatsTable a={a} b={b} h2h={h2h} />
+      <LifetimeStatsTable agg={agg} ids={idsToShow} />
 
-      {/* H2H per-day section — only meaningful with 2+ common days */}
       {hasH2H ? (
         <>
-          <H2HPerDayChart h2h={h2h} aLabel={a.label} bLabel={b.label} />
-          <H2HDeltaBars h2h={h2h} aLabel={a.label} bLabel={b.label} />
+          <H2HCumulativeChart h2h={h2h} ids={idsToShow} agg={agg} />
+          <H2HDailyDeltaChart h2h={h2h} ids={idsToShow} agg={agg} />
         </>
       ) : (
         <div className="rounded border border-border-dim bg-bg p-3 text-xs text-text-dim italic">
-          Head-to-head charts will appear after both variants have run for 2+
+          Head-to-head charts will appear after all variants have run for 2+
           common trading days. Currently {h2h.common_days} day
           {h2h.common_days === 1 ? "" : "s"} of overlap.
         </div>
@@ -784,33 +892,26 @@ function CrossDayPanel({ agg }: { agg: AggregatePayload | null }) {
   );
 }
 
-function LifetimeStatsTable({
-  a,
-  b,
-  h2h,
-}: {
-  a: AggregateVariant;
-  b: AggregateVariant;
-  h2h: AggregatePayload["head_to_head"];
-}) {
-  // Variant A's history goes back further than B's, so its lifetime stats
-  // include data from before the experiment started. We label the column
-  // headers with the day count so the user knows the comparison isn't on
-  // identical N — the H2H window section below is the apples-to-apples view.
-  const rows: Array<[string, (lt: AggregateLifetime) => string, boolean?]> = [
-    ["Cumulative P&L", (lt) => formatPnL(lt.cumulative_pnl), true],
-    ["Win rate", (lt) => `${(lt.win_rate * 100).toFixed(1)}%`],
+function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[] }) {
+  // Variant A's history typically goes back further than the other variants',
+  // so its lifetime stats include data from before the experiment started.
+  // Column headers carry the day count so the user knows the comparison isn't
+  // on identical N — the H2H window section below is the apples-to-apples view.
+  const rows: Array<[string, (lt: AggregateLifetime) => string, "pnl" | "best" | "worst" | undefined]> =
     [
-      "Win / Loss days",
-      (lt) => `${lt.winning_days} / ${lt.losing_days}`,
-    ],
-    ["Best day", (lt) => formatPnL(lt.best_day), true],
-    ["Worst day", (lt) => formatPnL(lt.worst_day), true],
-    ["Max drawdown", (lt) => `$${lt.max_drawdown.toFixed(0)}`],
-    ["Sharpe (daily)", (lt) => lt.sharpe.toFixed(2)],
-    ["Total credit", (lt) => `$${lt.total_credit_collected.toFixed(0)}`],
-    ["Total stops", (lt) => `${lt.total_stops}`],
-  ];
+      ["Cumulative P&L", (lt) => formatPnL(lt.cumulative_pnl), "pnl"],
+      ["Win rate", (lt) => `${(lt.win_rate * 100).toFixed(1)}%`, undefined],
+      ["Win / Loss days", (lt) => `${lt.winning_days} / ${lt.losing_days}`, undefined],
+      ["Best day", (lt) => formatPnL(lt.best_day), "best"],
+      ["Worst day", (lt) => formatPnL(lt.worst_day), "worst"],
+      ["Max drawdown", (lt) => `$${lt.max_drawdown.toFixed(0)}`, undefined],
+      ["Sharpe (daily)", (lt) => lt.sharpe.toFixed(2), undefined],
+      ["Total credit", (lt) => `$${lt.total_credit_collected.toFixed(0)}`, undefined],
+      ["Total stops", (lt) => `${lt.total_stops}`, undefined],
+    ];
+
+  const h2h = agg.head_to_head;
+  const daysWon = h2h.days_won_per_variant ?? {};
 
   return (
     <div>
@@ -818,93 +919,109 @@ function LifetimeStatsTable({
         <thead>
           <tr className="text-text-secondary text-xs">
             <th className="text-left font-normal pb-1">Lifetime metric</th>
-            <th className="text-right font-normal pb-1" style={{ color: colors.info }}>
-              {a.label} ({a.total_days}d)
-            </th>
-            <th className="text-right font-normal pb-1" style={{ color: colors.warning }}>
-              {b.label} ({b.total_days}d)
-            </th>
+            {ids.map((vid) => (
+              <th
+                key={vid}
+                className="text-right font-normal pb-1"
+                style={{ color: accentFor(vid) }}
+              >
+                {agg.variants[vid]?.label ?? vid} ({agg.variants[vid]?.total_days ?? 0}d)
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {rows.map(([label, fn, colored], i) => {
-            const aVal = fn(a.lifetime);
-            const bVal = fn(b.lifetime);
-            const aColor =
-              colored && a.lifetime.cumulative_pnl !== undefined
-                ? pnlColor(a.lifetime[label.includes("Best") ? "best_day" : label.includes("Worst") ? "worst_day" : "cumulative_pnl"])
-                : undefined;
-            const bColor =
-              colored && b.lifetime.cumulative_pnl !== undefined
-                ? pnlColor(b.lifetime[label.includes("Best") ? "best_day" : label.includes("Worst") ? "worst_day" : "cumulative_pnl"])
-                : undefined;
-            return (
-              <tr key={i}>
-                <td className="py-0.5 text-text-secondary">{label}</td>
-                <td className="py-0.5 text-right font-mono" style={{ color: aColor }}>
-                  {aVal}
-                </td>
-                <td className="py-0.5 text-right font-mono" style={{ color: bColor }}>
-                  {bVal}
-                </td>
-              </tr>
-            );
-          })}
+          {rows.map(([label, fn, kind], i) => (
+            <tr key={i}>
+              <td className="py-0.5 text-text-secondary">{label}</td>
+              {ids.map((vid) => {
+                const lt = agg.variants[vid]?.lifetime;
+                if (!lt) return <td key={vid} className="py-0.5 text-right text-text-dim">—</td>;
+                let color: string | undefined;
+                if (kind === "pnl") color = pnlColor(lt.cumulative_pnl);
+                else if (kind === "best") color = pnlColor(lt.best_day);
+                else if (kind === "worst") color = pnlColor(lt.worst_day);
+                return (
+                  <td
+                    key={vid}
+                    className="py-0.5 text-right font-mono"
+                    style={{ color }}
+                  >
+                    {fn(lt)}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
         </tbody>
       </table>
 
       {h2h.common_days > 0 && (
-        <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-          <div className="rounded bg-bg p-2 text-center">
-            <div className="text-text-dim text-[10px] uppercase tracking-wide">A days won</div>
-            <div className="font-mono text-base mt-0.5" style={{ color: colors.info }}>
-              {h2h.days_a_won}
+        <div
+          className="mt-3 grid gap-2 text-xs"
+          style={{ gridTemplateColumns: `repeat(${ids.length + 1}, minmax(0, 1fr))` }}
+        >
+          {ids.map((vid) => (
+            <div key={vid} className="rounded bg-bg p-2 text-center">
+              <div className="text-text-dim text-[10px] uppercase tracking-wide">
+                {vid} days won
+              </div>
+              <div
+                className="font-mono text-base mt-0.5"
+                style={{ color: accentFor(vid) }}
+              >
+                {daysWon[vid] ?? 0}
+              </div>
             </div>
-          </div>
+          ))}
           <div className="rounded bg-bg p-2 text-center">
             <div className="text-text-dim text-[10px] uppercase tracking-wide">Tied</div>
             <div className="font-mono text-base mt-0.5 text-text-secondary">
               {h2h.days_tied}
             </div>
           </div>
-          <div className="rounded bg-bg p-2 text-center">
-            <div className="text-text-dim text-[10px] uppercase tracking-wide">B days won</div>
-            <div className="font-mono text-base mt-0.5" style={{ color: colors.warning }}>
-              {h2h.days_b_won}
-            </div>
-          </div>
         </div>
       )}
 
-      {h2h.common_days > 0 && (
+      {h2h.common_days > 0 && h2h.cumulative_per_variant && (
         <div className="mt-2 text-xs text-text-secondary text-center">
-          H2H cumulative delta (A − B):{" "}
-          <span
-            className="font-mono"
-            style={{ color: pnlColor(h2h.cumulative_delta_a_minus_b) }}
-          >
-            {formatPnL(h2h.cumulative_delta_a_minus_b)}
-          </span>
+          H2H cumulative:{" "}
+          {ids.map((vid, i) => (
+            <span key={vid}>
+              {i > 0 && " · "}
+              <span style={{ color: accentFor(vid) }}>{vid}</span>{" "}
+              <span
+                className="font-mono"
+                style={{ color: pnlColor(h2h.cumulative_per_variant[vid] ?? 0) }}
+              >
+                {formatPnL(h2h.cumulative_per_variant[vid] ?? 0)}
+              </span>
+            </span>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function H2HPerDayChart({
+function H2HCumulativeChart({
   h2h,
-  aLabel,
-  bLabel,
+  ids,
+  agg,
 }: {
   h2h: AggregatePayload["head_to_head"];
-  aLabel: string;
-  bLabel: string;
+  ids: string[];
+  agg: AggregatePayload;
 }) {
-  // Cumulative P&L curves over the H2H window. We chart `cumulative_a` /
-  // `cumulative_b` which are server-computed running sums starting from the
-  // first common day — NOT each variant's lifetime cumulative. This way the
-  // two lines start at $0 on the same day and divergence is purely the
-  // experiment's contribution.
+  // Cumulative P&L curves over the H2H window. We chart `cumulative_<id>`
+  // which are server-computed running sums starting from the first common
+  // day — NOT each variant's lifetime cumulative. This way all lines start
+  // at $0 on the same day and divergence is purely the experiment's
+  // contribution.
+  const labelByKey = Object.fromEntries(
+    ids.map((vid) => [`cumulative_${vid.toLowerCase()}`, agg.variants[vid]?.label ?? vid]),
+  );
+
   return (
     <div>
       <div className="text-[11px] text-text-secondary mb-1">
@@ -932,55 +1049,116 @@ function H2HPerDayChart({
               fontSize: 12,
             }}
             formatter={(value, name) => {
-              const label = name === "cumulative_a" ? aLabel : bLabel;
+              const label = labelByKey[String(name)] ?? String(name);
               return [formatPnL(Number(value)), label];
             }}
           />
           <Legend
             wrapperStyle={{ fontSize: 11 }}
-            formatter={(v) => (v === "cumulative_a" ? aLabel : bLabel)}
+            formatter={(v) => labelByKey[String(v)] ?? String(v)}
           />
           <ReferenceLine y={0} stroke={colors.border} />
-          <Line
-            type="monotone"
-            dataKey="cumulative_a"
-            stroke={colors.info}
-            strokeWidth={2}
-            dot={{ r: 3 }}
-            isAnimationActive={false}
-          />
-          <Line
-            type="monotone"
-            dataKey="cumulative_b"
-            stroke={colors.warning}
-            strokeWidth={2}
-            dot={{ r: 3 }}
-            isAnimationActive={false}
-          />
+          {ids.map((vid) => (
+            <Line
+              key={vid}
+              type="monotone"
+              dataKey={`cumulative_${vid.toLowerCase()}`}
+              stroke={accentFor(vid)}
+              strokeWidth={2}
+              dot={{ r: 3 }}
+              isAnimationActive={false}
+            />
+          ))}
         </LineChart>
       </ResponsiveContainer>
     </div>
   );
 }
 
-function H2HDeltaBars({
+function H2HDailyDeltaChart({
   h2h,
-  aLabel,
-  bLabel,
+  ids,
+  agg,
 }: {
   h2h: AggregatePayload["head_to_head"];
-  aLabel: string;
-  bLabel: string;
+  ids: string[];
+  agg: AggregatePayload;
 }) {
-  // One bar per day, signed delta (A − B). Color by sign so the chart reads
-  // at a glance: blue bar = A won that day, amber bar = B won. Tooltip
-  // shows the actual per-side P&L for context.
+  // For 2 variants: signed delta bar chart (A − B). For 3+ variants: per-day
+  // bars per variant with a winner highlight via cell color. The 3-way bar
+  // chart shows absolute net P&L per day per variant grouped — easier to
+  // read at a glance than three signed-delta series superimposed.
+  if (ids.length === 2) {
+    const [a, b] = ids;
+    const aLabel = agg.variants[a]?.label ?? a;
+    const bLabel = agg.variants[b]?.label ?? b;
+    return (
+      <div>
+        <div className="text-[11px] text-text-secondary mb-1">
+          Daily delta ({a} − {b}). {a} bar = {a} won, {b} bar = {b} won.
+        </div>
+        <ResponsiveContainer width="100%" height={150}>
+          <BarChart data={h2h.per_day} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+            <CartesianGrid stroke={colors.borderDim} strokeDasharray="3 3" />
+            <XAxis
+              dataKey="date"
+              stroke={colors.textSecondary}
+              tick={{ fontSize: 10 }}
+              interval="preserveStartEnd"
+            />
+            <YAxis
+              stroke={colors.textSecondary}
+              tick={{ fontSize: 10 }}
+              tickFormatter={(v) => `$${v}`}
+            />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: colors.bgElevated,
+                border: `1px solid ${colors.border}`,
+                borderRadius: 4,
+                fontSize: 12,
+              }}
+              formatter={(_value, _name, item) => {
+                const p = (item?.payload || {}) as H2HPoint;
+                const aPnL = Number(p[`${a.toLowerCase()}_net_pnl`] ?? 0);
+                const bPnL = Number(p[`${b.toLowerCase()}_net_pnl`] ?? 0);
+                return [
+                  `Δ ${formatPnL(Number(p.delta))}  ·  ${aLabel} ${formatPnL(aPnL)}  ·  ${bLabel} ${formatPnL(bPnL)}`,
+                  "",
+                ];
+              }}
+            />
+            <ReferenceLine y={0} stroke={colors.border} />
+            <Bar dataKey="delta" isAnimationActive={false}>
+              {h2h.per_day.map((p, i) => (
+                <Cell
+                  key={i}
+                  fill={
+                    p.winner === a
+                      ? accentFor(a)
+                      : p.winner === b
+                      ? accentFor(b)
+                      : colors.textSecondary
+                  }
+                />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
+
+  // 3+ variants: grouped bar chart, one bar per variant per day.
+  const labelByKey = Object.fromEntries(
+    ids.map((vid) => [`${vid.toLowerCase()}_net_pnl`, agg.variants[vid]?.label ?? vid]),
+  );
   return (
     <div>
       <div className="text-[11px] text-text-secondary mb-1">
-        Daily delta (A − B). Blue bar = A won, amber = B won.
+        Daily net P&amp;L per variant. Tallest bar of the day = winner.
       </div>
-      <ResponsiveContainer width="100%" height={150}>
+      <ResponsiveContainer width="100%" height={170}>
         <BarChart data={h2h.per_day} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid stroke={colors.borderDim} strokeDasharray="3 3" />
           <XAxis
@@ -1001,29 +1179,24 @@ function H2HDeltaBars({
               borderRadius: 4,
               fontSize: 12,
             }}
-            formatter={(_value, _name, item) => {
-              const p = (item?.payload || {}) as H2HPoint;
-              return [
-                `Δ ${formatPnL(p.delta)}  ·  ${aLabel} ${formatPnL(p.a_net_pnl)}  ·  ${bLabel} ${formatPnL(p.b_net_pnl)}`,
-                "",
-              ];
+            formatter={(value, name) => {
+              const label = labelByKey[String(name)] ?? String(name);
+              return [formatPnL(Number(value)), label];
             }}
           />
+          <Legend
+            wrapperStyle={{ fontSize: 11 }}
+            formatter={(v) => labelByKey[String(v)] ?? String(v)}
+          />
           <ReferenceLine y={0} stroke={colors.border} />
-          <Bar dataKey="delta" isAnimationActive={false}>
-            {h2h.per_day.map((p, i) => (
-              <Cell
-                key={i}
-                fill={
-                  p.winner === "A"
-                    ? colors.info
-                    : p.winner === "B"
-                    ? colors.warning
-                    : colors.textSecondary
-                }
-              />
-            ))}
-          </Bar>
+          {ids.map((vid) => (
+            <Bar
+              key={vid}
+              dataKey={`${vid.toLowerCase()}_net_pnl`}
+              fill={accentFor(vid)}
+              isAnimationActive={false}
+            />
+          ))}
         </BarChart>
       </ResponsiveContainer>
     </div>

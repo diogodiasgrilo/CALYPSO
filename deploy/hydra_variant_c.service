@@ -1,0 +1,24 @@
+[Unit]
+Description=HYDRA Variant C (25pt spread, dry-run, parallel head-to-head)
+After=network.target token_keeper.service
+Wants=token_keeper.service
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="HYDRA_VARIANT_ID=c"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main --config bots/hydra/config/config_variant_c.json
+Restart=always
+RestartSec=30
+StartLimitInterval=600
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hydra_variant_c
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

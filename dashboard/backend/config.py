@@ -17,20 +17,34 @@ class Settings(BaseSettings):
     # Log file
     hydra_log_file: Path = Path("/opt/calypso/logs/hydra/bot.log")
 
-    # Comparison mode (1v1 head-to-head dry-run experiment).
+    # Comparison mode (head-to-head dry-run experiment).
     # When comparison_mode_enabled = True, the dashboard exposes:
-    #   - /api/variants/* endpoints reading variant B's parallel state/metrics/db
+    #   - /api/variants/* endpoints reading each variant's parallel state/metrics/db
     #   - /comparison page in the SPA (hidden from nav otherwise)
-    # Variant B is a second HYDRA process running in dry mode with a different
-    # spread width (config_variant_b.json), writing to data/variant_b/*.
+    # Each non-A variant is a second HYDRA process running in dry mode with a
+    # different config (config_variant_<id>.json), writing to data/variant_<id>/.
+    # The router builds its registry by enumerating variant_<id>_state_file fields
+    # below — to add a variant D, add 5 fields here and the router picks it up.
     comparison_mode_enabled: bool = False
+
+    # Variant A — the canonical/live HYDRA bot (uses the hydra_* paths above).
+    variant_a_label: str = "A (50pt)"
+
+    # Variant B (currently 110pt spread)
     variant_b_state_file: Path = Path("/opt/calypso/data/variant_b/hydra_state.json")
     variant_b_metrics_file: Path = Path("/opt/calypso/data/variant_b/hydra_metrics.json")
     variant_b_backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
     variant_b_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
     variant_b_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
     variant_b_label: str = "B (110pt)"
-    variant_a_label: str = "A (50pt)"
+
+    # Variant C (currently 25pt spread)
+    variant_c_state_file: Path = Path("/opt/calypso/data/variant_c/hydra_state.json")
+    variant_c_metrics_file: Path = Path("/opt/calypso/data/variant_c/hydra_metrics.json")
+    variant_c_backtesting_db: Path = Path("/opt/calypso/data/variant_c/backtesting.db")
+    variant_c_log_file: Path = Path("/opt/calypso/logs/hydra_variant_c/bot.log")
+    variant_c_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
+    variant_c_label: str = "C (25pt)"
 
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")

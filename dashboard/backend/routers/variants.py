@@ -1,13 +1,19 @@
-"""1v1 head-to-head variant comparison endpoints.
+"""N-way head-to-head variant comparison endpoints.
 
-Variant A = the live HYDRA bot (current spread width, current config).
-Variant B = a parallel HYDRA process running in dry mode with a different
-            spread width, writing to data/variant_b/* and logs/hydra_variant_b/.
+Variant A is the live HYDRA bot (current spread width, current config).
+Variants B, C, ... are parallel HYDRA processes running in dry mode with
+different configs (typically a different spread width), each writing to
+data/variant_<id>/* and logs/hydra_variant_<id>/.
+
+The variant set is built at import time from ``settings`` — to add a new
+variant you only need to (1) add 5 ``variant_<id>_*`` fields to
+``dashboard/backend/config.py`` and (2) install a matching systemd service
+on the VM. This router auto-discovers it.
 
 All endpoints return 503 when ``settings.comparison_mode_enabled`` is False so
-the comparison UI can hide cleanly when the experiment isn't running. Variant
-B's state file is allowed to be missing (variant might not be running yet) —
-the dashboard surfaces that as ``available: false`` rather than a 500.
+the comparison UI can hide cleanly when the experiment isn't running. A
+variant's state file is allowed to be missing (its bot may not be running yet)
+— the dashboard surfaces that as ``available: false`` rather than a 500.
 """
 
 import json
@@ -28,21 +34,73 @@ logger = logging.getLogger("dashboard.variants")
 
 router = APIRouter(prefix="/api/variants", tags=["variants"])
 
-# Variant readers — one set per variant, reusing the same primitives as the
-# main HYDRA endpoints. Variant A points at the live data files; variant B at
-# the parallel data/variant_b/* tree.
-_state_readers = {
-    "a": StateFileReader(settings.hydra_state_file),
-    "b": StateFileReader(settings.variant_b_state_file),
+
+# ----------------------------------------------------------------------------
+# Variant registry
+# ----------------------------------------------------------------------------
+# Each entry maps a lowercase variant id ("a", "b", "c", ...) to the four
+# file paths and label that define it. Built once at import — adding a new
+# variant means adding a new ``variant_<id>_*`` group to settings + appending
+# its id to ``_VARIANT_IDS`` below.
+#
+# Variant A is special-cased: it points at the canonical hydra_* paths
+# (so the live bot's data IS variant A's data without any duplication).
+# All other variants point at their parallel ``data/variant_<id>/*`` tree.
+
+_VARIANT_IDS: list[str] = ["a", "b", "c"]
+
+
+def _variant_paths(vid: str) -> dict:
+    """Resolve the 5 paths + label for a given variant id from settings.
+
+    Returns ``None`` for any field whose corresponding settings attribute
+    isn't defined — that lets us list a variant id even if its settings
+    haven't been added yet (defensive against typos in _VARIANT_IDS).
+    """
+    if vid == "a":
+        return {
+            "label": settings.variant_a_label,
+            "state_file": settings.hydra_state_file,
+            "metrics_file": settings.hydra_metrics_file,
+            "backtesting_db": settings.backtesting_db,
+            "log_file": settings.hydra_log_file,
+            "config_file": settings.calypso_root / "bots/hydra/config/config.json",
+        }
+    return {
+        "label": getattr(settings, f"variant_{vid}_label", f"Variant {vid.upper()}"),
+        "state_file": getattr(settings, f"variant_{vid}_state_file", None),
+        "metrics_file": getattr(settings, f"variant_{vid}_metrics_file", None),
+        "backtesting_db": getattr(settings, f"variant_{vid}_backtesting_db", None),
+        "log_file": getattr(settings, f"variant_{vid}_log_file", None),
+        "config_file": getattr(settings, f"variant_{vid}_config_file", None),
+    }
+
+
+_VARIANTS: dict[str, dict] = {vid: _variant_paths(vid) for vid in _VARIANT_IDS}
+
+# Reader pools — one per variant. Built lazily so a missing settings field
+# doesn't crash module import, just makes that variant unavailable.
+_state_readers: dict[str, StateFileReader] = {
+    vid: StateFileReader(p["state_file"])
+    for vid, p in _VARIANTS.items()
+    if p.get("state_file") is not None
 }
-_metrics_readers = {
-    "a": MetricsFileReader(settings.hydra_metrics_file),
-    "b": MetricsFileReader(settings.variant_b_metrics_file),
+_metrics_readers: dict[str, MetricsFileReader] = {
+    vid: MetricsFileReader(p["metrics_file"])
+    for vid, p in _VARIANTS.items()
+    if p.get("metrics_file") is not None
 }
-_db_readers = {
-    "a": BacktestingDBReader(settings.backtesting_db),
-    "b": BacktestingDBReader(settings.variant_b_backtesting_db),
+_db_readers: dict[str, BacktestingDBReader] = {
+    vid: BacktestingDBReader(p["backtesting_db"])
+    for vid, p in _VARIANTS.items()
+    if p.get("backtesting_db") is not None
 }
+
+
+# Visualization accent colors per variant — lifted from the frontend palette
+# so backend-side aggregations could carry them through if ever needed. The
+# frontend currently picks its own accents but we keep the mapping centralized.
+_VARIANT_ACCENT = {"a": "info", "b": "warning", "c": "profit"}
 
 
 def _check_enabled() -> None:
@@ -54,18 +112,29 @@ def _check_enabled() -> None:
         )
 
 
-def _file_age_seconds(path: Path) -> Optional[float]:
+def _validate_variant(vid: str) -> str:
+    """Lowercase + check it's a known variant. Raise 404 with helpful message."""
+    v = vid.lower()
+    if v not in _state_readers:
+        known = ", ".join(sorted(_state_readers.keys())).upper()
+        raise HTTPException(404, f"Unknown variant '{vid}' (known: {known})")
+    return v
+
+
+def _file_age_seconds(path: Optional[Path]) -> Optional[float]:
     """Seconds since the file was last modified, or None if it doesn't exist."""
     try:
-        if not path.exists():
+        if path is None or not path.exists():
             return None
         return time.time() - path.stat().st_mtime
     except OSError:
         return None
 
 
-def _read_variant_config(path: Path) -> dict:
+def _read_variant_config(path: Optional[Path]) -> dict:
     """Read a variant's config.json so the UI can show what's actually different."""
+    if path is None:
+        return {}
     try:
         with open(path) as f:
             cfg = json.load(f)
@@ -125,7 +194,7 @@ def _compute_unrealized_pnl(entries: list[dict]) -> float:
 
 def _summary_from_state(state: dict) -> dict:
     """Mirror dashboard.routers.hydra._summary, but takes a state dict directly
-    so we can build a summary for either variant without code duplication.
+    so we can build a summary for any variant without code duplication.
 
     Net P&L is LIVE (realized + unrealized − commission) so the leaderboard
     and Day Summary cells track the same race the P&L chart is plotting.
@@ -228,7 +297,7 @@ def _query_peak_spread_values(db_path, today: str) -> dict:
     """
     import sqlite3
     try:
-        if not db_path.exists():
+        if db_path is None or not db_path.exists():
             return {}
         # Read-only URI so we can't accidentally write through this path.
         conn = sqlite3.connect(
@@ -268,8 +337,7 @@ def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
 
     Without (1) and (2) the previous version reported 0% for stopped
     sides (state file zeroes out spread_value after stop), missing
-    the most stressful moments of the day. Today's call sides hit
-    100% at 13:30 and 13:59 but the dashboard showed 0%.
+    the most stressful moments of the day.
     """
     today = get_today_et()
     peak_snapshots = _query_peak_spread_values(db_path, today) if db_path else {}
@@ -314,60 +382,54 @@ def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
     return {"call_pct": round(peak_call, 1), "put_pct": round(peak_put, 1)}
 
 
-def _variant_payload(variant_id: str) -> dict:
+def _variant_payload(vid: str) -> dict:
     """Full per-variant payload used by both /{id}/state and /comparison.
 
     Always returns a dict; if the variant isn't running yet, the dict has
     ``available: false`` and otherwise-empty fields. The frontend renders
     a placeholder card in that case rather than erroring out.
     """
-    label = settings.variant_a_label if variant_id == "a" else settings.variant_b_label
-    config_path = (
-        settings.calypso_root / "bots/hydra/config/config.json"
-        if variant_id == "a"
-        else settings.variant_b_config_file
-    )
-    state_file = (
-        settings.hydra_state_file if variant_id == "a" else settings.variant_b_state_file
-    )
-
+    paths = _VARIANTS[vid]
+    state_file = paths["state_file"]
     state_age = _file_age_seconds(state_file)
+
     if state_age is None:
         return {
-            "id": variant_id.upper(),
-            "label": label,
+            "id": vid.upper(),
+            "label": paths["label"],
             "available": False,
             "reason": f"State file missing ({state_file})",
-            "config": _read_variant_config(config_path),
+            "config": _read_variant_config(paths["config_file"]),
         }
 
-    state = _state_readers[variant_id].read_latest() or {}
+    state = _state_readers[vid].read_latest() or {}
     entries = state.get("entries", [])
 
-    # Variant DB path so _peak_buffer_pct can read spread_snapshots history
-    # (current cost-to-close in state is just a live snapshot — peak today
-    # may have been higher earlier, especially before stops fired).
-    db_path = (
-        settings.backtesting_db
-        if variant_id == "a"
-        else settings.variant_b_backtesting_db
-    )
-
     return {
-        "id": variant_id.upper(),
-        "label": label,
+        "id": vid.upper(),
+        "label": paths["label"],
         "available": True,
         "state_file_age_seconds": round(state_age, 1),
-        "config": _read_variant_config(config_path),
+        "config": _read_variant_config(paths["config_file"]),
         "summary": _summary_from_state(state),
         "entries": _enrich_entries(entries),
         "pnl_history": state.get("pnl_history", []),
-        "peak_buffer": _peak_buffer_pct(entries, db_path=db_path),
+        "peak_buffer": _peak_buffer_pct(entries, db_path=paths["backtesting_db"]),
         "spx_open": (state.get("market_data_ohlc") or {}).get("spx_open"),
         "vix_open": (state.get("market_data_ohlc") or {}).get("vix_open"),
         "spx_high": (state.get("market_data_ohlc") or {}).get("spx_high"),
         "spx_low": (state.get("market_data_ohlc") or {}).get("spx_low"),
     }
+
+
+def _all_variant_ids_upper() -> list[str]:
+    """The known variant ids in uppercase, in canonical order (A, B, C, ...)."""
+    return [vid.upper() for vid in _VARIANT_IDS if vid in _state_readers]
+
+
+def _all_variant_labels() -> dict[str, str]:
+    """Map of "A" -> label, "B" -> label, ..."""
+    return {vid.upper(): _VARIANTS[vid]["label"] for vid in _VARIANT_IDS if vid in _state_readers}
 
 
 @router.get("/health")
@@ -377,31 +439,34 @@ async def get_health():
 
     The frontend hides the /comparison nav entry + page when ``enabled``
     is False — same gating as the backend endpoints, single source of truth.
+
+    The ``variants`` array drives N-variant rendering on the frontend; adding
+    a new variant id automatically surfaces it without UI code changes.
     """
     return {
         "enabled": settings.comparison_mode_enabled,
-        "variants": ["A", "B"],
-        "variant_a_label": settings.variant_a_label,
-        "variant_b_label": settings.variant_b_label,
+        "variants": _all_variant_ids_upper(),
+        "labels": _all_variant_labels(),
     }
 
 
 @router.get("/list")
 async def list_variants():
-    """Lightweight list of active variants — used by nav/breadcrumbs."""
+    """Lightweight list of active variants — used by nav/breadcrumbs.
+
+    ``available`` reflects whether the variant's bot has produced a state
+    file yet, so the frontend can mark not-yet-started variants distinctly.
+    """
     _check_enabled()
     return {
         "variants": [
             {
-                "id": "A",
-                "label": settings.variant_a_label,
-                "available": _file_age_seconds(settings.hydra_state_file) is not None,
-            },
-            {
-                "id": "B",
-                "label": settings.variant_b_label,
-                "available": _file_age_seconds(settings.variant_b_state_file) is not None,
-            },
+                "id": vid.upper(),
+                "label": _VARIANTS[vid]["label"],
+                "available": _file_age_seconds(_VARIANTS[vid]["state_file"]) is not None,
+            }
+            for vid in _VARIANT_IDS
+            if vid in _state_readers
         ]
     }
 
@@ -410,9 +475,7 @@ async def list_variants():
 async def get_variant_state(variant_id: str):
     """Full state of one variant (state file + enriched entries)."""
     _check_enabled()
-    vid = variant_id.lower()
-    if vid not in _state_readers:
-        raise HTTPException(404, f"Unknown variant '{variant_id}' (expected A or B)")
+    vid = _validate_variant(variant_id)
     return _variant_payload(vid)
 
 
@@ -420,15 +483,9 @@ async def get_variant_state(variant_id: str):
 async def get_variant_summary(variant_id: str):
     """Just the today-summary block for one variant (low-bandwidth poll)."""
     _check_enabled()
-    vid = variant_id.lower()
-    if vid not in _state_readers:
-        raise HTTPException(404, f"Unknown variant '{variant_id}' (expected A or B)")
+    vid = _validate_variant(variant_id)
     state = _state_readers[vid].read_latest() or {}
-    db_path = (
-        settings.backtesting_db
-        if vid == "a"
-        else settings.variant_b_backtesting_db
-    )
+    db_path = _VARIANTS[vid]["backtesting_db"]
     return {
         "id": variant_id.upper(),
         "summary": _summary_from_state(state),
@@ -438,44 +495,55 @@ async def get_variant_summary(variant_id: str):
 
 @router.get("/comparison")
 async def get_comparison():
-    """The big one — both variants + a leaderboard delta computed server-side.
+    """All variants + leaderboard delta computed server-side.
 
     Frontend polls this every ~2s. Returns enough data to render the entire
     Comparison page without further round-trips: leaderboard, strikes table,
     buffer bars, P&L line chart series.
 
-    P&L line: each variant exposes its ``pnl_history`` list (heartbeat-written,
-    one point per ~10s during market hours). Frontend can plot directly.
+    The leaderboard's ``winner`` field is the variant id with the highest
+    NET P&L (realized + unrealized − commission) among AVAILABLE variants.
+    Tie returns ``"tie"``. ``deltas`` exposes per-variant deltas vs the
+    canonical variant A so multi-way leaderboards can show "B is +$50 vs A,
+    C is −$120 vs A" without re-deriving on the client.
 
-    The leaderboard's ``winner`` field uses NET P&L (realized - commission).
-    Tie returns ``"tie"``. ``delta_net_pnl`` is signed: positive means A is
-    ahead, negative means B is ahead.
+    Backwards compat: ``a_net_pnl`` / ``b_net_pnl`` / ``delta_net_pnl`` are
+    kept so older frontend builds don't 500 mid-deploy. New frontend code
+    should read ``leaderboard.scores`` (a dict of id→net_pnl) and
+    ``leaderboard.deltas_vs_a`` instead.
     """
     _check_enabled()
 
-    a = _variant_payload("a")
-    b = _variant_payload("b")
+    payloads = {vid.upper(): _variant_payload(vid) for vid in _VARIANT_IDS if vid in _state_readers}
 
-    a_net = (a.get("summary") or {}).get("net_pnl", 0) if a.get("available") else 0
-    b_net = (b.get("summary") or {}).get("net_pnl", 0) if b.get("available") else 0
-    delta = a_net - b_net
+    # Score table: only count available variants in the winner determination.
+    scores: dict[str, float] = {}
+    for vid_upper, p in payloads.items():
+        if p.get("available"):
+            scores[vid_upper] = (p.get("summary") or {}).get("net_pnl", 0) or 0
 
-    if not (a.get("available") and b.get("available")):
+    if not scores:
         winner = "n/a"
-    elif abs(delta) < 0.01:
-        winner = "tie"
     else:
-        winner = "A" if delta > 0 else "B"
+        best = max(scores.values())
+        leaders = [vid for vid, s in scores.items() if abs(s - best) < 0.01]
+        winner = leaders[0] if len(leaders) == 1 else "tie"
+
+    a_score = scores.get("A", 0)
+    deltas_vs_a = {vid: round(score - a_score, 2) for vid, score in scores.items() if vid != "A"}
 
     return {
         "date": get_today_et(),
         "leaderboard": {
             "winner": winner,
-            "a_net_pnl": a_net,
-            "b_net_pnl": b_net,
-            "delta_net_pnl": delta,  # signed: + = A leads, - = B leads
+            "scores": scores,           # {id: net_pnl} — only available variants
+            "deltas_vs_a": deltas_vs_a,  # signed: + = beats A, − = behind A
+            # Legacy fields (kept for in-flight frontend builds):
+            "a_net_pnl": scores.get("A", 0),
+            "b_net_pnl": scores.get("B", 0),
+            "delta_net_pnl": scores.get("A", 0) - scores.get("B", 0),
         },
-        "variants": {"A": a, "B": b},
+        "variants": payloads,
     }
 
 
@@ -483,20 +551,18 @@ async def get_comparison():
 async def get_variant_daily(variant_id: str, days: int = 30):
     """Historical daily summaries for one variant (calendar/long-term view).
 
-    Variant B's DB only has data from when comparison mode started, so the
-    list will be short until the experiment has run for a few days.
+    Non-A variants' DBs only have data from when their experiment started, so
+    the list will be short until they've run for a few days.
     """
     _check_enabled()
-    vid = variant_id.lower()
-    if vid not in _db_readers:
-        raise HTTPException(404, f"Unknown variant '{variant_id}'")
+    vid = _validate_variant(variant_id)
     summaries = await _db_readers[vid].get_daily_summaries(limit=days)
     return {"variant": variant_id.upper(), "days": len(summaries), "summaries": summaries}
 
 
 def _per_variant_lifetime_stats(metrics: Optional[dict]) -> dict:
     """Distill the metrics file into a flat dict for the aggregate endpoint.
-    Tolerates missing keys (variant B's metrics file may not exist yet).
+    Tolerates missing keys (a variant's metrics file may not exist yet).
     """
     if not metrics:
         return {
@@ -558,122 +624,142 @@ def _compute_advanced_stats(daily_pnls: list[float]) -> dict:
     }
 
 
+def _cumulative_series(summaries: list[dict]) -> list[dict]:
+    """Build a running-cumulative series from a list of daily summaries.
+    Each output point: {date, net_pnl, cumulative}.
+    """
+    running = 0.0
+    out = []
+    for s in summaries:
+        net = s.get("net_pnl") or 0.0
+        running += net
+        out.append({"date": s["date"], "net_pnl": net, "cumulative": round(running, 2)})
+    return out
+
+
 @router.get("/aggregate")
 async def get_aggregate():
     """Cross-variant lifetime + per-day aggregate for the cross-day view.
 
     Returns:
       - per-variant lifetime stats (cumulative_pnl, win_rate, sharpe, drawdown)
-      - per-day aligned series of {date, a_net_pnl, b_net_pnl, delta} sorted
-        by date ascending, suitable for direct Recharts ingestion
-      - head-to-head counters: days_a_won, days_b_won, days_tied (only over
-        the common-date intersection — days where one variant didn't run
-        don't contribute to the H2H tally)
+      - per-day aligned series: each row has {date, <id>_net_pnl for each
+        variant, winner, cumulative_<id> for each variant}, suitable for
+        direct Recharts ingestion
+      - head-to-head counters: days_<id>_won counts how many days each
+        variant beat ALL others on (only over the common-date intersection
+        — days where any variant didn't run don't contribute to H2H tally)
       - per-variant cumulative running totals (separate arrays so each
         variant's curve plots independently of the H2H window)
 
     Why align by date, not index: variant A's history goes back to Feb 10,
-    variant B's starts the day comparison mode launched. Index alignment
+    other variants' histories start the day they launched. Index alignment
     would silently compare A's Feb 10 to B's first-day, which is wrong.
     Date intersection means small N early but correct semantics.
+
+    Backwards compat: legacy ``A``/``B`` keys are kept under ``variants`` and
+    legacy ``a_net_pnl``/``b_net_pnl``/``cumulative_a``/``cumulative_b`` are
+    kept on each per_day row so older frontend builds don't 500 mid-deploy.
     """
     _check_enabled()
 
-    # Lifetime metrics (from JSON files)
-    a_metrics = _metrics_readers["a"].read_latest()
-    b_metrics = _metrics_readers["b"].read_latest()
-    a_lifetime = _per_variant_lifetime_stats(a_metrics)
-    b_lifetime = _per_variant_lifetime_stats(b_metrics)
+    available_ids_lower = [vid for vid in _VARIANT_IDS if vid in _state_readers]
+    available_ids_upper = [vid.upper() for vid in available_ids_lower]
 
-    # Per-day data (from DBs)
-    a_summaries = await _db_readers["a"].get_all_summaries()
-    b_summaries = await _db_readers["b"].get_all_summaries()
+    # ---- Lifetime metrics + per-variant DB summaries ----
+    lifetimes: dict[str, dict] = {}
+    cumulative_curves: dict[str, list] = {}
+    summaries_by_variant: dict[str, list[dict]] = {}
 
-    # Build date-keyed lookups so we can align without assuming order
-    a_by_date = {s["date"]: s for s in a_summaries if s.get("date")}
-    b_by_date = {s["date"]: s for s in b_summaries if s.get("date")}
+    for vid in available_ids_lower:
+        vid_upper = vid.upper()
+        metrics = _metrics_readers[vid].read_latest()
+        lifetimes[vid_upper] = _per_variant_lifetime_stats(metrics)
+        summaries = await _db_readers[vid].get_all_summaries()
+        summaries_by_variant[vid_upper] = summaries
+        cumulative_curves[vid_upper] = _cumulative_series(summaries)
 
-    # Per-variant cumulative curves (each plots its own history — no alignment)
-    def _cumulative_series(summaries: list[dict]) -> list[dict]:
-        running = 0.0
-        out = []
-        for s in summaries:
-            net = s.get("net_pnl") or 0.0
-            running += net
-            out.append({"date": s["date"], "net_pnl": net, "cumulative": round(running, 2)})
-        return out
+    # ---- Date-keyed lookups for alignment ----
+    by_date_per_variant: dict[str, dict[str, dict]] = {
+        vid_upper: {s["date"]: s for s in summaries if s.get("date")}
+        for vid_upper, summaries in summaries_by_variant.items()
+    }
 
-    a_curve = _cumulative_series(a_summaries)
-    b_curve = _cumulative_series(b_summaries)
+    # ---- H2H: only dates where ALL available variants have data ----
+    if by_date_per_variant:
+        common_dates_set = set.intersection(
+            *(set(d.keys()) for d in by_date_per_variant.values())
+        )
+    else:
+        common_dates_set = set()
+    common_dates = sorted(common_dates_set)
 
-    # H2H aligned series — only dates where both variants have data
-    common_dates = sorted(set(a_by_date) & set(b_by_date))
-    per_day = []
-    days_a_won = 0
-    days_b_won = 0
+    # Per-day rows + per-variant H2H win counters + per-variant H2H cumulative
+    per_day: list[dict] = []
+    days_won = {vid_upper: 0 for vid_upper in available_ids_upper}
     days_tied = 0
-    cum_a = 0.0
-    cum_b = 0.0
+    cum_h2h: dict[str, float] = {vid_upper: 0.0 for vid_upper in available_ids_upper}
+
     for d in common_dates:
-        a_pnl = a_by_date[d].get("net_pnl") or 0.0
-        b_pnl = b_by_date[d].get("net_pnl") or 0.0
-        delta = a_pnl - b_pnl
-        cum_a += a_pnl
-        cum_b += b_pnl
-        if abs(delta) < 0.01:
-            days_tied += 1
-            winner = "tie"
-        elif delta > 0:
-            days_a_won += 1
-            winner = "A"
+        row: dict = {"date": d}
+        pnls: dict[str, float] = {}
+        for vid_upper in available_ids_upper:
+            pnl = by_date_per_variant[vid_upper][d].get("net_pnl") or 0.0
+            pnls[vid_upper] = pnl
+            cum_h2h[vid_upper] += pnl
+            row[f"{vid_upper.lower()}_net_pnl"] = round(pnl, 2)
+            row[f"cumulative_{vid_upper.lower()}"] = round(cum_h2h[vid_upper], 2)
+
+        # Winner determination — tightest tolerance for "tied"
+        best = max(pnls.values())
+        leaders = [vid for vid, p in pnls.items() if abs(p - best) < 0.01]
+        if len(leaders) == 1:
+            winner = leaders[0]
+            days_won[winner] += 1
         else:
-            days_b_won += 1
-            winner = "B"
-        per_day.append({
-            "date": d,
-            "a_net_pnl": round(a_pnl, 2),
-            "b_net_pnl": round(b_pnl, 2),
-            "delta": round(delta, 2),
-            "winner": winner,
-            "cumulative_a": round(cum_a, 2),
-            "cumulative_b": round(cum_b, 2),
-        })
+            winner = "tie"
+            days_tied += 1
+        row["winner"] = winner
+        # Delta vs A (legacy + still useful for the bar chart's signed-bar logic)
+        a_pnl = pnls.get("A", 0)
+        row["delta"] = round(pnls.get("B", 0) - a_pnl, 2)  # legacy A−B
+        row["a_net_pnl"] = round(a_pnl, 2)
+        row["b_net_pnl"] = round(pnls.get("B", 0), 2)
+        row["cumulative_a"] = round(cum_h2h.get("A", 0), 2)
+        row["cumulative_b"] = round(cum_h2h.get("B", 0), 2)
+        per_day.append(row)
 
-    # Advanced stats — computed per variant on each variant's full history,
-    # NOT just the H2H intersection (so variant A's Sharpe reflects all 50+
-    # days, not just the 5 since variant B started)
-    a_pnls = [s.get("net_pnl") or 0.0 for s in a_summaries]
-    b_pnls = [s.get("net_pnl") or 0.0 for s in b_summaries]
-    a_advanced = _compute_advanced_stats(a_pnls)
-    b_advanced = _compute_advanced_stats(b_pnls)
+    # ---- Advanced stats per variant ----
+    variants_payload: dict[str, dict] = {}
+    for vid_upper in available_ids_upper:
+        summaries = summaries_by_variant[vid_upper]
+        pnls = [s.get("net_pnl") or 0.0 for s in summaries]
+        advanced = _compute_advanced_stats(pnls)
+        win_total = lifetimes[vid_upper]["winning_days"] + lifetimes[vid_upper]["losing_days"]
+        win_rate = (lifetimes[vid_upper]["winning_days"] / win_total) if win_total > 0 else 0.0
 
-    # Win rates — same scope as advanced stats (full per-variant history)
-    a_total = a_lifetime["winning_days"] + a_lifetime["losing_days"]
-    b_total = b_lifetime["winning_days"] + b_lifetime["losing_days"]
-    a_win_rate = (a_lifetime["winning_days"] / a_total) if a_total > 0 else 0.0
-    b_win_rate = (b_lifetime["winning_days"] / b_total) if b_total > 0 else 0.0
+        variants_payload[vid_upper] = {
+            "label": _VARIANTS[vid_upper.lower()]["label"],
+            "lifetime": {**lifetimes[vid_upper], "win_rate": round(win_rate, 4), **advanced},
+            "cumulative_curve": cumulative_curves[vid_upper],
+            "total_days": len(summaries),
+        }
+
+    # ---- H2H summary block (N-way) ----
+    head_to_head: dict = {
+        "common_days": len(common_dates),
+        "days_tied": days_tied,
+        "per_day": per_day,
+        # New N-way fields
+        "days_won_per_variant": days_won,
+        "cumulative_per_variant": {vid: round(cum, 2) for vid, cum in cum_h2h.items()},
+        # Legacy 2-way fields (so older frontend builds keep working)
+        "days_a_won": days_won.get("A", 0),
+        "days_b_won": days_won.get("B", 0),
+        "cumulative_delta_a_minus_b": round(cum_h2h.get("A", 0) - cum_h2h.get("B", 0), 2),
+    }
 
     return {
-        "variants": {
-            "A": {
-                "label": settings.variant_a_label,
-                "lifetime": {**a_lifetime, "win_rate": round(a_win_rate, 4), **a_advanced},
-                "cumulative_curve": a_curve,
-                "total_days": len(a_summaries),
-            },
-            "B": {
-                "label": settings.variant_b_label,
-                "lifetime": {**b_lifetime, "win_rate": round(b_win_rate, 4), **b_advanced},
-                "cumulative_curve": b_curve,
-                "total_days": len(b_summaries),
-            },
-        },
-        "head_to_head": {
-            "common_days": len(common_dates),
-            "days_a_won": days_a_won,
-            "days_b_won": days_b_won,
-            "days_tied": days_tied,
-            "cumulative_delta_a_minus_b": round(cum_a - cum_b, 2),
-            "per_day": per_day,
-        },
+        "variants": variants_payload,
+        "head_to_head": head_to_head,
     }

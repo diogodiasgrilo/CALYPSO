@@ -336,6 +336,19 @@ class HydraStrategy(MEICStrategy):
         # of the configured value.
         self.downday_theoretical_put_credit = float(strategy_cfg.get("downday_theoretical_put_credit", 2.60)) * 100
 
+        # API pacing multiplier — multiplies the monitoring loop's recommended
+        # check interval AND main.py's status_interval so non-canonical
+        # variants pace their Saxo calls more loosely. Defaults to 1.0
+        # (no change). When 3+ variants run simultaneously, this is the lever
+        # that keeps the combined Saxo API rate under the ~60 req/min sustained
+        # limit. Variant A: 1.0 (live, safety-critical), B: 1.5, C: 2.0.
+        # Vigilant mode is intentionally NOT scaled — when a stop is near, we
+        # need fast detection on every variant (still cheap because vigilant
+        # only kicks in for one entry at a time).
+        self.api_pacing_multiplier = float(strategy_cfg.get("api_pacing_multiplier", 1.0))
+        if self.api_pacing_multiplier != 1.0:
+            logger.info(f"  API pacing multiplier: {self.api_pacing_multiplier}x (variant={HYDRA_VARIANT_ID or 'a'})")
+
         # MKT-035: _conditional_entry_times must be set BEFORE super().__init__()
         # because _parse_entry_times() (called from super) references it
         # Downday-035 (2026-04-19): new flag `conditional_downday_e6_enabled` OR'd with
@@ -6420,72 +6433,113 @@ class HydraStrategy(MEICStrategy):
     # VARIANT COMPARISON (1v1 dry-run experiment)
     # =========================================================================
 
-    def _load_variant_b_state(self) -> Optional[Dict]:
-        """Read variant B's state file. Returns None if not running today.
+    def _discover_variant_ids(self) -> list:
+        """Find all non-A variant ids that have a current state file.
 
-        Variant B writes to data/variant_b/hydra_state.json on every heartbeat.
-        We trust the state file by 4 PM ET — both bots are on the same heartbeat
-        cadence so by the time variant A's daily-summary trigger fires, B's
-        state file has today's final entries + total_realized_pnl.
-
-        Stale-data guard: if the file's mtime is more than 30 minutes old, we
-        treat the file as invalid (variant B is stopped or hung) and return
-        None — the comparison alert is suppressed rather than reporting a
-        possibly-wrong delta.
+        Globs ``data/variant_*/hydra_state.json``. Returns lowercase variant
+        ids sorted alphabetically (e.g. ``["b", "c"]``). Filesystem-driven
+        discovery so adding a new variant only requires installing its
+        systemd service — no code change here.
         """
         try:
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            b_state_path = os.path.join(project_root, "data", "variant_b", "hydra_state.json")
-            if not os.path.exists(b_state_path):
+            variant_dir = os.path.join(project_root, "data")
+            ids = []
+            if not os.path.isdir(variant_dir):
+                return []
+            for name in os.listdir(variant_dir):
+                if not name.startswith("variant_"):
+                    continue
+                vid = name[len("variant_"):]
+                if not vid or vid == "a":
+                    continue
+                state_path = os.path.join(variant_dir, name, "hydra_state.json")
+                if os.path.exists(state_path):
+                    ids.append(vid)
+            return sorted(ids)
+        except Exception as e:
+            logger.warning(f"Variant discovery failed: {e}")
+            return []
+
+    def _load_variant_state(self, vid: str) -> Optional[Dict]:
+        """Read a non-A variant's state file. Returns None if not running today.
+
+        Each variant writes to data/variant_<id>/hydra_state.json on every
+        heartbeat. We trust the state file by 4 PM ET — all bots are on the
+        same heartbeat cadence so by the time variant A's daily-summary
+        trigger fires, the others' state files have today's final entries +
+        total_realized_pnl.
+
+        Stale-data guard: if the file's mtime is more than 30 minutes old, we
+        treat the file as invalid (the variant is stopped or hung) and return
+        None — that variant is silently dropped from the comparison rather
+        than contributing a possibly-wrong delta.
+        """
+        try:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            state_path = os.path.join(project_root, "data", f"variant_{vid}", "hydra_state.json")
+            if not os.path.exists(state_path):
                 return None
             stale_threshold_seconds = 30 * 60  # 30 min — generous for end-of-day timing
-            age = time.time() - os.path.getmtime(b_state_path)
+            age = time.time() - os.path.getmtime(state_path)
             if age > stale_threshold_seconds:
                 logger.info(
-                    f"Variant B state stale ({age/60:.1f} min old) — skipping comparison alert"
+                    f"Variant {vid.upper()} state stale ({age/60:.1f} min old) — skipping in comparison"
                 )
                 return None
-            with open(b_state_path, "r") as f:
+            with open(state_path, "r") as f:
                 return json.load(f)
         except Exception as e:
-            logger.warning(f"Failed to read variant B state: {e}")
+            logger.warning(f"Failed to read variant {vid.upper()} state: {e}")
             return None
 
-    def _build_variant_b_summary(self, b_state: Dict) -> Dict:
-        """Distill variant B's state file into a summary dict shaped like
+    # Backwards-compat shim — older test/diagnostic scripts may call this.
+    def _load_variant_b_state(self) -> Optional[Dict]:
+        return self._load_variant_state("b")
+
+    def _build_variant_summary(self, state: Dict) -> Dict:
+        """Distill a variant's state file into a summary dict shaped like
         get_daily_summary() so the formatter can use a uniform interface."""
-        entries = b_state.get("entries", [])
-        total_credit = b_state.get("total_credit_received", 0) or 0
-        realized = b_state.get("total_realized_pnl", 0) or 0
-        commission = b_state.get("total_commission", 0) or 0
+        entries = state.get("entries", [])
+        total_credit = state.get("total_credit_received", 0) or 0
+        realized = state.get("total_realized_pnl", 0) or 0
+        commission = state.get("total_commission", 0) or 0
         return {
-            "date": b_state.get("date"),
-            "entries_completed": b_state.get("entries_completed", 0),
+            "date": state.get("date"),
+            "entries_completed": state.get("entries_completed", 0),
             "total_credit": total_credit,
             "total_pnl": realized,
             "total_commission": commission,
             "net_pnl": realized - commission,
-            "call_stops": b_state.get("call_stops_triggered", 0),
-            "put_stops": b_state.get("put_stops_triggered", 0),
+            "call_stops": state.get("call_stops_triggered", 0),
+            "put_stops": state.get("put_stops_triggered", 0),
             "entries": entries,
         }
 
-    def _read_variant_b_spread_width(self) -> int:
-        """Read variant B's actual max_spread_width from its config file so
+    # Backwards-compat shim
+    def _build_variant_b_summary(self, b_state: Dict) -> Dict:
+        return self._build_variant_summary(b_state)
+
+    def _read_variant_spread_width(self, vid: str) -> Optional[int]:
+        """Read a non-A variant's actual max_spread_width from its config so
         the comparison message header reflects the real spread (not a
-        hard-coded literal). Falls back to 110 only if the file can't be
-        read — which would also mean variant B isn't running, in which case
-        _send_variant_comparison_summary already short-circuits earlier."""
+        hard-coded literal). Returns None if the file can't be read."""
         try:
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             config_path = os.path.join(
-                project_root, "bots", "hydra", "config", "config_variant_b.json"
+                project_root, "bots", "hydra", "config", f"config_variant_{vid}.json"
             )
             with open(config_path, "r") as f:
                 cfg = json.load(f)
-            return int(cfg.get("strategy", {}).get("max_spread_width", 110))
+            width = cfg.get("strategy", {}).get("max_spread_width")
+            return int(width) if width is not None else None
         except Exception:
-            return 110
+            return None
+
+    # Backwards-compat shim
+    def _read_variant_b_spread_width(self) -> int:
+        w = self._read_variant_spread_width("b")
+        return w if w is not None else 110
 
     def _peak_buffer_for_state(self, entries: list) -> tuple:
         """(call_pct, put_pct) — largest buffer utilization seen on any side.
@@ -6526,32 +6580,23 @@ class HydraStrategy(MEICStrategy):
                     peak_put = pct
         return (peak_call, peak_put)
 
-    def _format_variant_comparison(self, a_summary: Dict, b_summary: Dict, b_state: Dict) -> str:
+    def _format_variant_comparison(
+        self, a_summary: Dict, others: list
+    ) -> str:
         """Build the multi-line comparison body used by both Telegram alert and
-        the on-demand /compare command. Plain text (no Markdown) so the
-        existing AlertService Telegram path renders it identically to other
-        snapshot-style alerts.
+        the on-demand /compare command. ``others`` is a list of dicts:
+        ``[{"id": "B", "summary": {...}, "spread": 110, "entries": [...]}]``.
+
+        Renders A first, then each other variant with a Δ vs A line. Plain
+        text (no Markdown) so the existing AlertService Telegram path renders
+        it identically to other snapshot-style alerts.
         """
         from datetime import datetime as _dt
         date_str = a_summary.get("date") or _dt.now().strftime("%Y-%m-%d")
 
         a_net = a_summary.get("net_pnl", 0)
-        b_net = b_summary.get("net_pnl", 0)
-        delta = a_net - b_net
-        if abs(delta) < 0.01:
-            winner_line = "Tied"
-        elif delta > 0:
-            pct = abs(delta) / abs(b_net) * 100 if b_net else 0
-            winner_line = f"A leads by {self._fmt_money(abs(delta))} ({pct:.1f}%)"
-        else:
-            pct = abs(delta) / abs(a_net) * 100 if a_net else 0
-            winner_line = f"B leads by {self._fmt_money(abs(delta))} ({pct:.1f}%)"
-
         a_spread = self.strategy_config.get("max_spread_width", "?")
-        b_spread = self._read_variant_b_spread_width()
-
         a_peak_c, a_peak_p = self._peak_buffer_for_state(self.daily_state.entries)
-        b_peak_c, b_peak_p = self._peak_buffer_for_state(b_summary.get("entries", []))
 
         lines = [
             f"🏁 HYDRA Variant Comparison · {date_str}",
@@ -6559,17 +6604,62 @@ class HydraStrategy(MEICStrategy):
             f"A ({a_spread}pt):  net {self._fmt_money(a_net)} | "
             f"{a_summary.get('entries_completed', 0)} entries | "
             f"{a_summary.get('call_stops', 0)+a_summary.get('put_stops', 0)} stops",
-            f"B ({b_spread}pt): net {self._fmt_money(b_net)} | "
-            f"{b_summary.get('entries_completed', 0)} entries | "
-            f"{b_summary.get('call_stops', 0)+b_summary.get('put_stops', 0)} stops",
-            "",
-            f"Δ A−B: {self._fmt_money(delta, signed=True)} — {winner_line}",
-            "",
-            f"Total credit: A ${a_summary.get('total_credit', 0):.0f} | "
-            f"B ${b_summary.get('total_credit', 0):.0f}",
-            f"Peak put buffer: A {a_peak_p:.0f}% | B {b_peak_p:.0f}%",
-            f"Peak call buffer: A {a_peak_c:.0f}% | B {b_peak_c:.0f}%",
         ]
+
+        # Per-other-variant net P&L line + capture deltas for the leader call
+        deltas = []
+        for o in others:
+            v_id = o["id"].upper()
+            v_summary = o["summary"]
+            v_spread = o.get("spread")
+            spread_str = f"{v_spread}pt" if v_spread is not None else "?pt"
+            v_net = v_summary.get("net_pnl", 0)
+            stops = v_summary.get("call_stops", 0) + v_summary.get("put_stops", 0)
+            lines.append(
+                f"{v_id} ({spread_str}): net {self._fmt_money(v_net)} | "
+                f"{v_summary.get('entries_completed', 0)} entries | {stops} stops"
+            )
+            deltas.append((v_id, v_net - a_net))  # signed: + = beats A
+
+        # Leader summary — N-way: highest net wins
+        all_scores = [("A", a_net)]
+        for v_id, d in deltas:
+            all_scores.append((v_id, a_net + d))
+        best = max(s for _, s in all_scores)
+        leaders = [v for v, s in all_scores if abs(s - best) < 0.01]
+        if len(leaders) > 1:
+            winner_line = f"Tied: {', '.join(leaders)}"
+        else:
+            leader = leaders[0]
+            runner_up = max(s for v, s in all_scores if v != leader)
+            margin = best - runner_up
+            base = abs(runner_up) if abs(runner_up) > 0.01 else abs(best)
+            pct = (margin / base * 100) if base else 0
+            winner_line = f"{leader} leads by {self._fmt_money(margin)} ({pct:.1f}%)"
+
+        lines.append("")
+        for v_id, d in deltas:
+            lines.append(f"Δ {v_id}−A: {self._fmt_money(d, signed=True)}")
+        lines.append(f"Leader: {winner_line}")
+        lines.append("")
+
+        # Total-credit + peak-buffer rows (A first, then each other)
+        credit_parts = [f"A ${a_summary.get('total_credit', 0):.0f}"]
+        for o in others:
+            credit_parts.append(f"{o['id'].upper()} ${o['summary'].get('total_credit', 0):.0f}")
+        lines.append(f"Total credit: {' | '.join(credit_parts)}")
+
+        put_parts = [f"A {a_peak_p:.0f}%"]
+        call_parts = [f"A {a_peak_c:.0f}%"]
+        for o in others:
+            o_peak_c, o_peak_p = self._peak_buffer_for_state(
+                o["summary"].get("entries", [])
+            )
+            put_parts.append(f"{o['id'].upper()} {o_peak_p:.0f}%")
+            call_parts.append(f"{o['id'].upper()} {o_peak_c:.0f}%")
+        lines.append(f"Peak put buffer: {' | '.join(put_parts)}")
+        lines.append(f"Peak call buffer: {' | '.join(call_parts)}")
+
         return "\n".join(lines)
 
     @staticmethod
@@ -6615,16 +6705,16 @@ class HydraStrategy(MEICStrategy):
                 )
                 return
 
-            b_state = self._load_variant_b_state()
-            if not b_state:
-                return  # variant B not running or stale
+            others = self._collect_other_variants()
+            if not others:
+                return  # no non-A variants running or all stale
             a_summary = self.get_daily_summary()
-            b_summary = self._build_variant_b_summary(b_state)
-            body = self._format_variant_comparison(a_summary, b_summary, b_state)
+            body = self._format_variant_comparison(a_summary, others)
             from shared.alert_service import AlertType, AlertPriority
+            other_ids = ", ".join(o["id"].upper() for o in others)
             self.alert_service.send_alert(
                 alert_type=AlertType.VARIANT_COMPARISON_DAILY,
-                title=f"Variant A vs B · {a_summary.get('date')}",
+                title=f"Variant A vs {other_ids} · {a_summary.get('date')}",
                 message=body,
                 priority=AlertPriority.LOW,
             )
@@ -6640,23 +6730,43 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.warning(f"Variant comparison alert send failed (non-fatal): {e}")
 
+    def _collect_other_variants(self) -> list:
+        """Discover and load every non-A variant whose state file is fresh.
+
+        Returns a list of dicts: ``[{"id": "b", "summary": {...}, "spread": 110,
+        "entries": [...]}]`` sorted by id. Stale or missing variants are
+        silently dropped — they just don't appear in the comparison.
+        """
+        out = []
+        for vid in self._discover_variant_ids():
+            state = self._load_variant_state(vid)
+            if not state:
+                continue
+            out.append({
+                "id": vid,
+                "summary": self._build_variant_summary(state),
+                "spread": self._read_variant_spread_width(vid),
+            })
+        return out
+
     def build_telegram_compare(self) -> str:
         """Telegram /compare command — on-demand variant comparison message.
 
-        Works any time of day. Reads variant B's state file at call time so
-        intraday users can spot-check the head-to-head between entries.
+        Works any time of day. Reads each non-A variant's state file at call
+        time so intraday users can spot-check the head-to-head between entries.
+        Auto-discovers variants by globbing data/variant_*/.
         """
         if HYDRA_VARIANT_ID is not None:
-            return "/compare is only available on variant A (this bot is variant B)."
-        b_state = self._load_variant_b_state()
-        if not b_state:
+            return f"/compare is only available on variant A (this bot is variant {HYDRA_VARIANT_ID.upper()})."
+        others = self._collect_other_variants()
+        if not others:
             return (
-                "Variant B not running (or state file stale).\n"
-                "Start it: `sudo systemctl start hydra_variant_b`"
+                "No other variants running (or state files stale).\n"
+                "Start one: `sudo systemctl start hydra_variant_b` "
+                "or `sudo systemctl start hydra_variant_c`"
             )
         a_summary = self.get_daily_summary()
-        b_summary = self._build_variant_b_summary(b_state)
-        return self._format_variant_comparison(a_summary, b_summary, b_state)
+        return self._format_variant_comparison(a_summary, others)
 
     def log_daily_summary(self):
         """Override to fire the variant-comparison alert after the canonical
@@ -7699,6 +7809,22 @@ class HydraStrategy(MEICStrategy):
         summary['stops_avoided_mkt036'] = self.daily_state.stops_avoided_mkt036
 
         return summary
+
+    # =========================================================================
+    # OVERRIDE: API pacing — multiply normal-mode check interval by the
+    # variant's `api_pacing_multiplier` so parallel variants don't blow past
+    # the Saxo ~60 req/min sustained limit. Vigilant mode is left at the
+    # parent's value (2s) because stop detection latency is safety-critical.
+    # Multiplier 1.0 (variant A default) is a no-op — parent behavior unchanged.
+    # =========================================================================
+
+    def get_recommended_check_interval(self) -> int:
+        base = super().get_recommended_check_interval()
+        mode = self.get_monitoring_mode()
+        if mode == "vigilant":
+            return base
+        scaled = max(base, int(round(base * self.api_pacing_multiplier)))
+        return scaled
 
     # =========================================================================
     # OVERRIDE: Logging for trend-following entries

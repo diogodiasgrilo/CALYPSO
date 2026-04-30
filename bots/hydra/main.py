@@ -315,7 +315,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     trade_logger.log_event("-" * 60)
 
     last_status_time = datetime.now()
-    status_interval = 10
+    # Heartbeat cadence — drives spread_snapshots, account summary, state file
+    # write, and cushion bar updates. Variants pace this looser via
+    # api_pacing_multiplier (variant A = 1.0 → 10s; B at 1.5 → 15s; C at 2.0 → 20s).
+    # Account summary calls Saxo /port/v1/balances every cycle so this is one of
+    # the API-load levers when running 3+ variants.
+    pacing = float(getattr(strategy, "api_pacing_multiplier", 1.0) or 1.0)
+    status_interval = max(10, int(round(10 * pacing)))
     last_bot_log_time = datetime.now()
     bot_log_interval = 3600
     last_snapshot_time = None  # Telegram snapshot — starts after first entry
