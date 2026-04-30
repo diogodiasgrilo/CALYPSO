@@ -216,19 +216,102 @@ def _enrich_entries(entries: list[dict]) -> list[dict]:
     return out
 
 
-def _peak_buffer_pct(entries: list[dict]) -> dict:
-    """Largest call/put utilization across all today's entries, for the
-    leaderboard panel ('peak stress per variant'). Returns 0.0 if no entries
-    have measurable buffer data."""
+def _query_peak_spread_values(db_path, today: str) -> dict:
+    """Read the historical peak cost-to-close per entry per side from the
+    `spread_snapshots` table — the bot writes one row every ~10s during
+    monitoring with current call/put `*_spread_value` numbers. The MAX
+    across the day is the true peak used for the buffer-stress display.
+
+    Returns {entry_number: (max_call_spread_value, max_put_spread_value)}
+    or {} on any error / missing DB. Read-only connection with a 2s
+    timeout so a slow disk doesn't block the dashboard.
+    """
+    import sqlite3
+    try:
+        if not db_path.exists():
+            return {}
+        # Read-only URI so we can't accidentally write through this path.
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, timeout=2
+        )
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT entry_number,
+                      MAX(call_spread_value) AS max_call,
+                      MAX(put_spread_value) AS max_put
+               FROM spread_snapshots
+               WHERE substr(timestamp, 1, 10) = ?
+               GROUP BY entry_number""",
+            (today,),
+        ).fetchall()
+        conn.close()
+        return {
+            r["entry_number"]: (r["max_call"], r["max_put"]) for r in rows
+        }
+    except Exception as e:
+        logger.debug(f"Could not query spread_snapshots peaks: {e}")
+        return {}
+
+
+def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
+    """Largest call/put buffer utilization across today's entries.
+
+    Per side, takes the MAX of three signals (whichever is highest):
+      1. **100%** if the side is `*_side_stopped` — by definition the
+         cost-to-close reached the trigger level when the stop fired,
+         so peak buffer use was at least 100%.
+      2. **Historical peak from spread_snapshots** — the bot writes
+         a snapshot every ~10s; MAX(call_spread_value)/stop_level is
+         the true peak observed today even if it has since recovered.
+      3. **Current cost-to-close** — `call_spread_value` from the
+         state file, divided by stop level, as a live floor.
+
+    Without (1) and (2) the previous version reported 0% for stopped
+    sides (state file zeroes out spread_value after stop), missing
+    the most stressful moments of the day. Today's call sides hit
+    100% at 13:30 and 13:59 but the dashboard showed 0%.
+    """
+    today = get_today_et()
+    peak_snapshots = _query_peak_spread_values(db_path, today) if db_path else {}
+
     peak_call = 0.0
     peak_put = 0.0
-    for e in entries:
-        b = _compute_buffer_utilization(e)
-        if b.get("call_pct") is not None and b["call_pct"] > peak_call:
-            peak_call = b["call_pct"]
-        if b.get("put_pct") is not None and b["put_pct"] > peak_put:
-            peak_put = b["put_pct"]
-    return {"call_pct": peak_call, "put_pct": peak_put}
+
+    for e in entries or []:
+        n = e.get("entry_number")
+        snap_call, snap_put = peak_snapshots.get(n, (None, None))
+
+        # ---------- CALL SIDE ----------
+        if e.get("call_side_stopped"):
+            peak_call = max(peak_call, 100.0)
+        css = e.get("call_side_stop")
+        if css and css > 0:
+            # historical peak from snapshots
+            if snap_call is not None:
+                pct = min(120.0, max(0.0, snap_call / css * 100))
+                peak_call = max(peak_call, pct)
+            # live floor (only if side is still active and value is meaningful)
+            if _side_active(e, "call"):
+                csv = e.get("call_spread_value")
+                if csv is not None and csv > 0:
+                    pct = min(120.0, csv / css * 100)
+                    peak_call = max(peak_call, pct)
+
+        # ---------- PUT SIDE ----------
+        if e.get("put_side_stopped"):
+            peak_put = max(peak_put, 100.0)
+        pss = e.get("put_side_stop")
+        if pss and pss > 0:
+            if snap_put is not None:
+                pct = min(120.0, max(0.0, snap_put / pss * 100))
+                peak_put = max(peak_put, pct)
+            if _side_active(e, "put"):
+                psv = e.get("put_spread_value")
+                if psv is not None and psv > 0:
+                    pct = min(120.0, psv / pss * 100)
+                    peak_put = max(peak_put, pct)
+
+    return {"call_pct": round(peak_call, 1), "put_pct": round(peak_put, 1)}
 
 
 def _variant_payload(variant_id: str) -> dict:
@@ -261,6 +344,15 @@ def _variant_payload(variant_id: str) -> dict:
     state = _state_readers[variant_id].read_latest() or {}
     entries = state.get("entries", [])
 
+    # Variant DB path so _peak_buffer_pct can read spread_snapshots history
+    # (current cost-to-close in state is just a live snapshot — peak today
+    # may have been higher earlier, especially before stops fired).
+    db_path = (
+        settings.backtesting_db
+        if variant_id == "a"
+        else settings.variant_b_backtesting_db
+    )
+
     return {
         "id": variant_id.upper(),
         "label": label,
@@ -270,7 +362,7 @@ def _variant_payload(variant_id: str) -> dict:
         "summary": _summary_from_state(state),
         "entries": _enrich_entries(entries),
         "pnl_history": state.get("pnl_history", []),
-        "peak_buffer": _peak_buffer_pct(entries),
+        "peak_buffer": _peak_buffer_pct(entries, db_path=db_path),
         "spx_open": (state.get("market_data_ohlc") or {}).get("spx_open"),
         "vix_open": (state.get("market_data_ohlc") or {}).get("vix_open"),
         "spx_high": (state.get("market_data_ohlc") or {}).get("spx_high"),
@@ -332,10 +424,15 @@ async def get_variant_summary(variant_id: str):
     if vid not in _state_readers:
         raise HTTPException(404, f"Unknown variant '{variant_id}' (expected A or B)")
     state = _state_readers[vid].read_latest() or {}
+    db_path = (
+        settings.backtesting_db
+        if vid == "a"
+        else settings.variant_b_backtesting_db
+    )
     return {
         "id": variant_id.upper(),
         "summary": _summary_from_state(state),
-        "peak_buffer": _peak_buffer_pct(state.get("entries", [])),
+        "peak_buffer": _peak_buffer_pct(state.get("entries", []), db_path=db_path),
     }
 
 
