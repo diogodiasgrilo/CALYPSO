@@ -2862,6 +2862,20 @@ class MEICStrategy:
             dict with order result including position_id, uic, credit/debit
             None if order failed
         """
+        # SAFETY-DRY-01: Defense-in-depth dry-run gate.
+        # Reaching this method in dry mode means an upstream gate failed —
+        # _execute_entry should never be called when self.dry_run is True
+        # (the fork at _initiate_entry routes to _simulate_entry instead).
+        # This is a belt-and-braces check; if it ever fires, something is
+        # wrong upstream — log loudly so it's visible in journalctl.
+        if self.dry_run:
+            logger.critical(
+                f"[DRY RUN] SAFETY-DRY-01: _place_option_order called for "
+                f"{put_call} {strike} ({buy_sell.value}) — NO real order will be placed. "
+                f"This indicates an upstream gating bug; investigate immediately."
+            )
+            return None
+
         # Get option UIC from chain
         uic = self._get_option_uic(strike, put_call, expiry)
         if not uic:
@@ -3647,6 +3661,21 @@ class MEICStrategy:
         """
         leg_name, pos_id, uic = naked_info
 
+        # SAFETY-DRY-02: Defense-in-depth dry-run gate.
+        # Naked-short detection happens after a leg "fills" during entry
+        # placement. In dry mode, _simulate_entry doesn't place real orders
+        # so naked shorts can't actually exist — but if a recovery/state-
+        # restore path ever surfaces a synthetic naked short, we must NOT
+        # send a real BUY-to-close to Saxo against an SPX option we don't
+        # own. Log and return.
+        if self.dry_run:
+            logger.critical(
+                f"[DRY RUN] SAFETY-DRY-02: _handle_naked_short called for {leg_name} "
+                f"(pos={pos_id}) — NO real close order placed. Defense-in-depth: "
+                f"naked-short detection should not surface in dry mode."
+            )
+            return
+
         logger.critical(f"HANDLING NAKED SHORT: {leg_name} position {pos_id}")
 
         # Log safety event for audit trail
@@ -3695,6 +3724,20 @@ class MEICStrategy:
             filled_legs: List of (leg_name, position_id, uic) tuples
             entry: The entry being unwound
         """
+        # SAFETY-DRY-03: Defense-in-depth dry-run gate.
+        # _unwind_partial_entry is invoked from _execute_entry after one or
+        # more legs filled. In dry mode _execute_entry should never be
+        # reached — _simulate_entry is the dry-mode fork. If we somehow get
+        # here, do NOT send real close orders against SPX options that
+        # don't actually exist on Saxo.
+        if self.dry_run:
+            logger.critical(
+                f"[DRY RUN] SAFETY-DRY-03: _unwind_partial_entry called for "
+                f"{len(filled_legs)} legs (entry #{entry.entry_number}) — NO real "
+                f"close orders placed. Investigate why _execute_entry was reached."
+            )
+            return
+
         logger.warning(f"Unwinding {len(filled_legs)} partially filled legs")
 
         for leg_name, pos_id, uic in filled_legs:
@@ -4151,6 +4194,20 @@ class MEICStrategy:
             - If fill_price is None, P&L calculation should fall back to theoretical
             - order_id is the close order ID for deferred price lookup (FIX #70)
         """
+        # SAFETY-DRY-04: Defense-in-depth dry-run gate at the canonical close
+        # function. Every closure path (stop loss, MKT-018 early close, MKT-025
+        # short-only stop, MKT-033 long salvage, partial-entry unwind, naked-
+        # short cleanup) eventually flows through here. With this gate at the
+        # bottom of the stack, NO upstream gating bug can produce a real Saxo
+        # close order in dry mode. Each upstream caller still has its own
+        # gate (defense in depth), but this is the last-line guarantee.
+        if self.dry_run:
+            logger.warning(
+                f"[DRY RUN] SAFETY-DRY-04: _close_position_with_retry called for "
+                f"{leg_name} (pos={position_id}) — NO real close order will be placed."
+            )
+            return True, None, None
+
         # v8: resolve contract count. Defense in depth: if caller passes 0 or None, fall
         # back to current config (invalid value likely means caller didn't wire it).
         close_contracts = contracts if contracts else self.contracts_per_entry
