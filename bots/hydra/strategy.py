@@ -8331,6 +8331,16 @@ class HydraStrategy(MEICStrategy):
             # This is OK - waiting for next entry while monitoring existing
             pass
 
+        # Path-B dry-run skip (2026-04-30): mirrors the gate added to the
+        # MEIC parent class on 2026-04-27 (commit fe7d0ba). Without this,
+        # the HYDRA override fires false STATE-002 mismatches every ~5s in
+        # dry mode because _simulate_entry creates DRY_* position IDs that
+        # are intentionally not registered (registry has 0, active_entries
+        # has 4). Dry positions are tracked in active_entries directly —
+        # the registry comparison is meaningless in dry mode.
+        if self.dry_run:
+            return None
+
         # Cross-check with Position Registry
         expected_positions = sum(len(e.all_position_ids) for e in self.daily_state.active_entries)
         registry_count = len(my_positions)
