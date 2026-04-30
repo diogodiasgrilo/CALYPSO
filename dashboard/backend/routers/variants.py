@@ -83,21 +83,73 @@ def _read_variant_config(path: Path) -> dict:
         return {}
 
 
+def _side_active(entry: dict, side: str) -> bool:
+    """True when an entry's side is still live (not stopped/expired/skipped).
+
+    Note: do NOT use entry.is_complete to gate this. is_complete is set
+    immediately after entry PLACEMENT (meic/strategy.py:1808) so it's True
+    for monitoring entries — it only becomes meaningful at settlement when
+    _process_expired_credits sets it again based on per-side flags. The
+    side-status flags are the only reliable "is this still live?" signal
+    during the trading day.
+    """
+    return (
+        not entry.get(f"{side}_side_stopped")
+        and not entry.get(f"{side}_side_expired")
+        and not entry.get(f"{side}_side_skipped")
+    )
+
+
+def _compute_unrealized_pnl(entries: list[dict]) -> float:
+    """Sum unrealized P&L across all entries' active sides.
+
+    Per side: unrealized = credit_received − cost_to_close (spread_value).
+    Done sides (stopped/expired/skipped) contribute 0 since their P&L is
+    already in total_realized_pnl. Sides without populated spread_value
+    (heartbeat hasn't run yet) contribute 0 — return what we know.
+    """
+    total = 0.0
+    for e in entries or []:
+        if _side_active(e, "call"):
+            credit = e.get("call_spread_credit") or 0
+            value = e.get("call_spread_value")
+            if credit > 0 and value is not None:
+                total += credit - value
+        if _side_active(e, "put"):
+            credit = e.get("put_spread_credit") or 0
+            value = e.get("put_spread_value")
+            if credit > 0 and value is not None:
+                total += credit - value
+    return total
+
+
 def _summary_from_state(state: dict) -> dict:
     """Mirror dashboard.routers.hydra._summary, but takes a state dict directly
-    so we can build a summary for either variant without code duplication."""
+    so we can build a summary for either variant without code duplication.
+
+    Net P&L is LIVE (realized + unrealized − commission) so the leaderboard
+    and Day Summary cells track the same race the P&L chart is plotting.
+    Realized-only is exposed separately as `realized_pnl` for analysts who
+    want the locked-in figure.
+    """
     if not state:
         return {}
     entries = state.get("entries", [])
     total_credit = state.get("total_credit_received", 0) or 0
     realized = state.get("total_realized_pnl", 0) or 0
     commission = state.get("total_commission", 0) or 0
+    unrealized = _compute_unrealized_pnl(entries)
     call_stops = state.get("call_stops_triggered", 0) or 0
     put_stops = state.get("put_stops_triggered", 0) or 0
     contracts = (
         state.get("contracts_per_entry")
         or max((e.get("contracts", 1) for e in entries), default=1)
         or 1
+    )
+    # An entry is "active" if either side is still live. is_complete-only
+    # gating mis-counted entries during monitoring (it goes True at placement).
+    active_count = sum(
+        1 for e in entries if _side_active(e, "call") or _side_active(e, "put")
     )
     return {
         "date": state.get("date"),
@@ -107,12 +159,13 @@ def _summary_from_state(state: dict) -> dict:
         "entries_skipped": state.get("entries_skipped", 0),
         "total_credit_received": total_credit,
         "total_realized_pnl": realized,
+        "unrealized_pnl": unrealized,
         "total_commission": commission,
-        "net_pnl": realized - commission,
+        "net_pnl": realized + unrealized - commission,  # LIVE: matches chart
         "call_stops": call_stops,
         "put_stops": put_stops,
         "total_stops": call_stops + put_stops,
-        "active_entries": len([e for e in entries if not e.get("is_complete", True)]),
+        "active_entries": active_count,
         "total_entries": len(entries),
         "contracts_per_entry": contracts,
     }
@@ -120,43 +173,35 @@ def _summary_from_state(state: dict) -> dict:
 
 def _compute_buffer_utilization(entry: dict) -> dict:
     """For a single entry, return per-side buffer utilization based on the
-    most recent cost-to-close vs the trigger level. Only meaningful for live
-    monitoring snapshots — entries that have already stopped/expired return
-    None so the UI doesn't show misleading bars on closed positions.
+    most recent cost-to-close vs the trigger level.
 
-    Cost-to-close for a side is: ``call_spread_value`` / ``put_spread_value``
+    Cost-to-close for a side is the ``call_spread_value`` / ``put_spread_value``
     fields, written by the bot during heartbeat. ``call_side_stop`` /
     ``put_side_stop`` is the trigger threshold. Utilization = cost / stop.
+
+    Per-side gating uses the actual side-status flags (stopped/expired/skipped),
+    NOT entry.is_complete — the latter goes True immediately after placement
+    (meic/strategy.py:1808) and would suppress the bar for monitoring entries.
+    A done side returns None so the UI renders a placeholder instead of a
+    misleading 0%.
     """
     out = {"call_pct": None, "put_pct": None, "call_value": None, "put_value": None}
-    is_complete = entry.get("is_complete", False)
-    if is_complete:
-        return out
 
-    call_active = (
-        not entry.get("call_side_stopped")
-        and not entry.get("call_side_expired")
-        and not entry.get("call_side_skipped")
-    )
-    put_active = (
-        not entry.get("put_side_stopped")
-        and not entry.get("put_side_expired")
-        and not entry.get("put_side_skipped")
-    )
+    if _side_active(entry, "call"):
+        csv = entry.get("call_spread_value")
+        if csv is not None:
+            out["call_value"] = csv
+            css = entry.get("call_side_stop")
+            if css and css > 0:
+                out["call_pct"] = round(min(100.0, max(0.0, csv / css * 100)), 1)
 
-    csv = entry.get("call_spread_value")
-    if csv is not None and call_active:
-        css = entry.get("call_side_stop")
-        out["call_value"] = csv
-        if css and css > 0:
-            out["call_pct"] = round(min(100.0, max(0.0, csv / css * 100)), 1)
-
-    psv = entry.get("put_spread_value")
-    if psv is not None and put_active:
-        pss = entry.get("put_side_stop")
-        out["put_value"] = psv
-        if pss and pss > 0:
-            out["put_pct"] = round(min(100.0, max(0.0, psv / pss * 100)), 1)
+    if _side_active(entry, "put"):
+        psv = entry.get("put_spread_value")
+        if psv is not None:
+            out["put_value"] = psv
+            pss = entry.get("put_side_stop")
+            if pss and pss > 0:
+                out["put_pct"] = round(min(100.0, max(0.0, psv / pss * 100)), 1)
 
     return out
 
