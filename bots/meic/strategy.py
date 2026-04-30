@@ -6134,13 +6134,30 @@ class MEICStrategy:
     # AFTER-HOURS SETTLEMENT RECONCILIATION (POS-004)
     # =========================================================================
 
+    @staticmethod
+    def _position_is_settled(pid) -> bool:
+        """
+        Position is "settled / gone from Saxo" when the ID is missing OR is a
+        Path-B dry-run synthetic ID (DRY_*).
+
+        DRY_* IDs are populated by _simulate_entry() so heartbeat monitoring
+        treats the entry as live during the day. At settlement, they should
+        be treated as gone — no real Saxo position ever existed to look up.
+        Without this, _process_expired_credits() never marked dry-run sides
+        as expired and credit was never added to total_realized_pnl, leaving
+        winning dry-run days reporting net_pnl = -$commission (Apr 28-29).
+        """
+        if not pid:
+            return True
+        return str(pid).startswith("DRY_")
+
     def _process_expired_credits(self) -> float:
         """
         FIX #77: Process entries with un-finalized sides as expired.
 
         Iterates through daily_state.entries and marks any side that:
         - Had positions (strike > 0)
-        - Has no position IDs (positions gone from Saxo)
+        - Has no position IDs (positions gone from Saxo, or DRY_* in dry mode)
         - Is NOT already stopped, expired, or skipped
 
         ...as EXPIRED, adding its credit to total_realized_pnl.
@@ -6154,7 +6171,10 @@ class MEICStrategy:
         for entry in self.daily_state.entries:
             # Check call side
             call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
-            call_positions_gone = not entry.short_call_position_id and not entry.long_call_position_id
+            call_positions_gone = (
+                self._position_is_settled(entry.short_call_position_id)
+                and self._position_is_settled(entry.long_call_position_id)
+            )
 
             if call_had_positions and call_positions_gone:
                 if not entry.call_side_stopped and not entry.call_side_expired and not getattr(entry, 'call_side_skipped', False):
@@ -6169,7 +6189,10 @@ class MEICStrategy:
 
             # Check put side
             put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
-            put_positions_gone = not entry.short_put_position_id and not entry.long_put_position_id
+            put_positions_gone = (
+                self._position_is_settled(entry.short_put_position_id)
+                and self._position_is_settled(entry.long_put_position_id)
+            )
 
             if put_had_positions and put_positions_gone:
                 if not entry.put_side_stopped and not entry.put_side_expired and not getattr(entry, 'put_side_skipped', False):

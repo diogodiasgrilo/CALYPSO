@@ -8403,10 +8403,14 @@ class HydraStrategy(MEICStrategy):
 
         Iterates through daily_state.entries and marks any side that:
         - Had positions (strike > 0)
-        - Has no position IDs (positions gone from Saxo)
+        - Has no position IDs (positions gone from Saxo, or DRY_* in dry mode)
         - Is NOT already stopped, expired, or skipped
 
         ...as EXPIRED, adding its credit to total_realized_pnl.
+
+        DRY_* synthetic IDs from Path-B _simulate_entry() are treated as
+        settled here (via MEICStrategy._position_is_settled). See comment
+        on the helper for the full rationale.
 
         Returns:
             float: Total expired credit added to realized P&L
@@ -8417,7 +8421,10 @@ class HydraStrategy(MEICStrategy):
         for entry in self.daily_state.entries:
             # Check call side
             call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
-            call_positions_gone = not entry.short_call_position_id and not entry.long_call_position_id
+            call_positions_gone = (
+                self._position_is_settled(entry.short_call_position_id)
+                and self._position_is_settled(entry.long_call_position_id)
+            )
 
             if call_had_positions and call_positions_gone:
                 if not entry.call_side_stopped and not entry.call_side_expired and not entry.call_side_skipped:
@@ -8432,7 +8439,10 @@ class HydraStrategy(MEICStrategy):
 
             # Check put side
             put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
-            put_positions_gone = not entry.short_put_position_id and not entry.long_put_position_id
+            put_positions_gone = (
+                self._position_is_settled(entry.short_put_position_id)
+                and self._position_is_settled(entry.long_put_position_id)
+            )
 
             if put_had_positions and put_positions_gone:
                 if not entry.put_side_stopped and not entry.put_side_expired and not entry.put_side_skipped:
