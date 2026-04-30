@@ -807,11 +807,15 @@ class HydraStrategy(MEICStrategy):
         otm_distance = round(otm_distance / 5) * 5
         otm_distance = max(25, min(120, otm_distance))
 
-        # MKT-024: Apply separate multipliers for wider starting distance
+        # MKT-024: Apply separate multipliers for wider starting distance.
+        # Upper clamp 180 covers max observed settled OTM (Mar 3 VIX 26.5
+        # call settled at 116pt) with margin and the theoretical 8-delta
+        # strike at VIX 50 (~133pt). Larger clamps just waste MKT-020/022
+        # scan distance — settled strikes don't actually land further OTM.
         call_otm = round((otm_distance * self.call_starting_otm_multiplier) / 5) * 5
-        call_otm = max(25, min(240, call_otm))  # Extended upper clamp for 2× range
+        call_otm = max(25, min(180, call_otm))
         put_otm = round((otm_distance * self.put_starting_otm_multiplier) / 5) * 5
-        put_otm = max(25, min(240, put_otm))
+        put_otm = max(25, min(180, put_otm))
 
         # MKT-027/028: Asymmetric VIX-adjusted spread widths
         call_spread_width = self._get_vix_adjusted_spread_width(vix, "call")
