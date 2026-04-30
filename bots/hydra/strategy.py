@@ -8100,6 +8100,14 @@ class HydraStrategy(MEICStrategy):
                 "fomc_t1_skip_enabled": getattr(self, 'fomc_t1_skip_enabled', False),
                 "fomc_announcement_skip": bool(self.strategy_config.get('fomc_announcement_skip', False)),
                 "downday_callonly_enabled": getattr(self, 'downday_callonly_enabled', True),
+                # Dashboard: dry-mode override flag — when both dry_run and
+                # dry_run_force_normal_day are true, FOMC date-based skips are
+                # bypassed at runtime. The banner needs both to render the
+                # correct "trading normally" message instead of "ALL ENTRIES
+                # SKIPPED" when T+1 + skip_enabled would otherwise show the
+                # blackout text but the runtime gate is letting entries through.
+                "dry_run": bool(getattr(self, 'dry_run', False)),
+                "dry_run_force_normal_day": bool(getattr(self, 'dry_run_force_normal_day', False)),
                 "entries": []
             }
 

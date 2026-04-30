@@ -38,6 +38,13 @@ export function FOMCBanner() {
   // Defaults assume today's VM config (skip=true, callonly=false) if state not yet populated.
   const t1SkipEnabled = hydraState?.fomc_t1_skip_enabled !== false;
   const mkt038Enabled = hydraState?.fomc_t1_callonly_enabled === true;
+  // 2026-04-30: when bot is in dry mode AND dry_run_force_normal_day is set,
+  // FOMC date-based skips (announce + T+1 + MKT-038) are runtime-bypassed.
+  // Banner must show "trading normally (dry-run override)" to reflect actual
+  // bot behavior, not the static config flags.
+  const forceNormalDay = Boolean(
+    hydraState?.dry_run && hydraState?.dry_run_force_normal_day
+  );
 
   // Show on: FOMC day, T+1, or 1-2 days before
   const showApproaching = !isFomcDay && !isTPlus1 && daysUntil != null && daysUntil > 0 && daysUntil <= 2;
@@ -52,17 +59,27 @@ export function FOMCBanner() {
     headline = "FOMC Announcement Day — Rate Decision at 2:00 PM ET";
     // fomc_announcement_skip defaults false on VM (Day 2 backtest was coin-flip with slight positive edge)
     const day2Skip = hydraState?.fomc_announcement_skip === true;
-    hydraTag = day2Skip
-      ? "HYDRA: All entries skipped (fomc_announcement_skip)"
-      : "HYDRA: Trading normally — Day 2 backtest showed slight positive edge";
-    hydraTagColor = day2Skip ? colors.loss : colors.warning;
+    if (forceNormalDay) {
+      hydraTag = "HYDRA: Trading normally — dry-run force-normal-day bypass active";
+      hydraTagColor = colors.warning;
+    } else {
+      hydraTag = day2Skip
+        ? "HYDRA: All entries skipped (fomc_announcement_skip)"
+        : "HYDRA: Trading normally — Day 2 backtest showed slight positive edge";
+      hydraTagColor = day2Skip ? colors.loss : colors.warning;
+    }
   } else if (isFomcDay) {
     headline = "FOMC Meeting Day 1 — Announcement Tomorrow at 2:00 PM ET";
     hydraTag = "HYDRA: Normal trading — no announcement today";
     hydraTagColor = colors.profit;
   } else if (isTPlus1) {
     headline = "Post-FOMC Day (T+1) — Elevated Volatility Expected";
-    if (t1SkipEnabled) {
+    if (forceNormalDay) {
+      // Dry-run override bypasses T+1 skip + MKT-038 — bot will trade normally
+      // for full data collection (variant comparison experiment).
+      hydraTag = "HYDRA: Trading normally — dry-run force-normal-day bypass active";
+      hydraTagColor = colors.warning;
+    } else if (t1SkipEnabled) {
       hydraTag = "HYDRA: ALL ENTRIES SKIPPED (FOMC T+1 blackout)";
       hydraTagColor = colors.loss;
     } else if (mkt038Enabled) {

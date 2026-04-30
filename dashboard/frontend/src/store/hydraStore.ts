@@ -83,6 +83,12 @@ export interface HydraState {
   fomc_t1_skip_enabled?: boolean;        // 2026-04-19: T+1 blackout (supersedes MKT-038 call-only)
   fomc_announcement_skip?: boolean;      // 2026-04-19: Day 2 blackout (currently false on VM)
   downday_callonly_enabled?: boolean;
+  // 2026-04-30: dry-mode "force normal day" override — when both dry_run and
+  // dry_run_force_normal_day are true, FOMC date-based skips (T+1, announcement,
+  // MKT-038) are bypassed at runtime. The FOMCBanner uses this to show
+  // "trading normally" instead of "ALL ENTRIES SKIPPED" on T+1 dry-run days.
+  dry_run?: boolean;
+  dry_run_force_normal_day?: boolean;
   [key: string]: unknown;
 }
 
