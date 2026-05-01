@@ -358,6 +358,40 @@ class HydraStrategy(MEICStrategy):
         if self.api_pacing_multiplier != 1.0:
             logger.info(f"  API pacing multiplier: {self.api_pacing_multiplier}x (variant={HYDRA_VARIANT_ID or 'a'})")
 
+        # Directional pivot strategy (HYDRA variant B/C, 2026-05-01).
+        # Two new behaviors gated by `directional_pivot.enabled`:
+        #   1. Pre-entry defer gate: if SPX is already >= threshold from
+        #      session open at an entry time, mark the entry DEFERRED and
+        #      watch for the band re-entry for up to `pre_entry_defer_minutes`.
+        #      Place if SPX returns inside the band; skip if window expires.
+        #   2. Continuous breach monitor: at any time during the day, if SPX
+        #      breaches +/-threshold from open, close all OPEN base entries
+        #      (E#1, E#2) via the configured `close_mode`:
+        #         - "stressed_only": close only the side facing the move
+        #         - "both_sides":    close all 4 legs of each base entry
+        #      Conditional E#3 (Upday-035 / Downday-035) is unaffected — it
+        #      evaluates SPX-vs-open at 14:00 independently of pivot history.
+        #
+        # When `enabled: false` (variant A default), all checks no-op and the
+        # standard MEIC entry/exit paths run unchanged.
+        pivot_cfg = strategy_cfg.get("directional_pivot", {}) or {}
+        self.directional_pivot_enabled = bool(pivot_cfg.get("enabled", False))
+        self.directional_pivot_threshold_pct = float(pivot_cfg.get("threshold_pct", 0.0025))
+        self.directional_pivot_close_mode = str(pivot_cfg.get("close_mode", "both_sides"))
+        self.directional_pivot_defer_minutes = int(pivot_cfg.get("pre_entry_defer_minutes", 15))
+        if self.directional_pivot_close_mode not in ("stressed_only", "both_sides"):
+            logger.warning(
+                f"directional_pivot.close_mode invalid ({self.directional_pivot_close_mode!r}); "
+                "falling back to 'both_sides'"
+            )
+            self.directional_pivot_close_mode = "both_sides"
+        if self.directional_pivot_enabled:
+            logger.info(
+                f"  Directional pivot: ENABLED — threshold {self.directional_pivot_threshold_pct*100:.2f}%, "
+                f"close_mode={self.directional_pivot_close_mode}, "
+                f"defer_window={self.directional_pivot_defer_minutes}min"
+            )
+
         # MKT-035: _conditional_entry_times must be set BEFORE super().__init__()
         # because _parse_entry_times() (called from super) references it
         # Downday-035 (2026-04-19): new flag `conditional_downday_e6_enabled` OR'd with
@@ -1161,12 +1195,37 @@ class HydraStrategy(MEICStrategy):
 
     def _is_entry_time(self) -> bool:
         """
-        Override: extend entry window to include MKT-031 scouting period for retries.
+        Override: extend entry window for (1) MKT-031 smart-entry scouting and
+        (2) directional-pivot defer-and-watch (variant B/C, 2026-05-01).
 
-        Without this, if early entry triggers at 11:07 for 11:15 slot, the retry
+        Without (1): if early entry triggers at 11:07 for 11:15 slot, the retry
         loop calls base _is_entry_time() which checks 11:15 <= 11:07 → False →
         retries abort immediately.
+
+        Without (2): a deferred entry can't be re-evaluated past the standard
+        ENTRY_WINDOW_MINUTES (5 min). The pivot gate sets a defer record with
+        deadline = scheduled_time + pre_entry_defer_minutes (default 15), so
+        we extend the window when an active defer record exists.
         """
+        # Pivot defer extension: any time the current entry index has an
+        # active defer record, the entry window stays open until the defer
+        # deadline. Independent of MKT-031 — this works even when smart_entry
+        # is disabled.
+        if (self.directional_pivot_enabled
+                and self._next_entry_index < len(self.entry_times)
+                and self._next_entry_index in self.daily_state.deferred_entries):
+            now = get_us_market_time()
+            try:
+                deadline_dt = datetime.fromisoformat(
+                    self.daily_state.deferred_entries[self._next_entry_index]["deadline"]
+                )
+                if deadline_dt.tzinfo is None and now.tzinfo is not None:
+                    deadline_dt = deadline_dt.replace(tzinfo=now.tzinfo)
+                if now < deadline_dt:
+                    return True
+            except (KeyError, ValueError, TypeError):
+                pass  # malformed defer record — fall through to standard checks
+
         if not self.smart_entry_enabled:
             return super()._is_entry_time()
         if self._next_entry_index >= len(self.entry_times):
@@ -2090,6 +2149,366 @@ class HydraStrategy(MEICStrategy):
             return reason
 
         return None
+
+    # =========================================================================
+    # DIRECTIONAL PIVOT (HYDRA variant B/C, 2026-05-01)
+    #
+    # Pre-entry defer gate + continuous breach monitor. When SPX moves >=
+    # threshold from session open, base entries (E#1, E#2) are either deferred
+    # (if not yet placed) or actively closed (if already open). The conditional
+    # E#3 at 14:00 (Upday-035 / Downday-035) is unaffected — it evaluates
+    # SPX-vs-open at 14:00 independently of pivot history.
+    # =========================================================================
+
+    def _check_directional_breach(self) -> Optional[str]:
+        """Return the direction of the breach, or None if within band.
+
+        Returns:
+            "up"   if SPX >= +threshold from session open
+            "down" if SPX <= -threshold from session open
+            None   if within +/-threshold band (or no data available)
+
+        Uses self.market_data.spx_open as the reference. After the 2026-05-01
+        fix to anchor spx_open to >= 9:30 ET, this is the actual regular-session
+        open. Returns None pre-market (when spx_open is still 0.0) to avoid
+        firing on stale or pre-market data.
+        """
+        if not self.directional_pivot_enabled:
+            return None
+        spx_ref = self.market_data.spx_open
+        if not spx_ref or spx_ref <= 0:
+            return None
+        current = self.current_price
+        if current <= 0:
+            return None
+        change = (current - spx_ref) / spx_ref
+        if change >= self.directional_pivot_threshold_pct:
+            return "up"
+        if change <= -self.directional_pivot_threshold_pct:
+            return "down"
+        return None
+
+    def _apply_directional_pivot_pre_entry_gate(self, entry_num: int) -> Optional[str]:
+        """Pre-entry breach gate with defer-and-watch behavior.
+
+        Returns:
+            None: proceed with entry placement
+            "deferred": entry is being deferred; caller should NOT increment
+                ``_next_entry_index`` and should re-check on the next
+                heartbeat cycle (within the extended entry window honored by
+                ``_is_entry_time``).
+            "skipped:<reason>": entry should be permanently skipped this slot;
+                caller should increment counters + ``_next_entry_index``.
+
+        Idempotent re-entry semantics:
+          - First call when breach active: sets defer_record, returns "deferred".
+          - Subsequent calls before deadline + breach still active: returns
+            "deferred" without re-creating the record.
+          - Subsequent calls before deadline + breach cleared: clears the
+            defer record and returns None (caller proceeds to place the entry).
+          - Calls after deadline expires: returns "skipped:directional_bias_defer_timeout".
+
+        If the continuous monitor has already fired (`directional_pivot_fired`),
+        all remaining base entries cascade-skip immediately — no point placing
+        an entry that would be closed on the next heartbeat anyway.
+        """
+        if not self.directional_pivot_enabled:
+            return None
+
+        # Cascade: pivot already fired today → don't even start a new base entry.
+        if self.daily_state.directional_pivot_fired:
+            return f"skipped:pivot_already_fired_today_{self.daily_state.directional_pivot_direction}"
+
+        entry_idx = entry_num - 1  # _next_entry_index is 0-based
+        defer_record = self.daily_state.deferred_entries.get(entry_idx)
+        now = get_us_market_time()
+        breach = self._check_directional_breach()
+
+        # No defer record yet: this is the first attempt
+        if defer_record is None:
+            if breach is None:
+                return None  # No breach, proceed normally
+            # First time deferring — record + return "deferred"
+            deadline = now + timedelta(minutes=self.directional_pivot_defer_minutes)
+            self.daily_state.deferred_entries[entry_idx] = {
+                "deferred_at": now.isoformat(),
+                "deadline": deadline.isoformat(),
+                "direction": breach,
+            }
+            logger.info(
+                f"DIRECTIONAL_PIVOT: Entry #{entry_num} DEFERRED at "
+                f"{now.strftime('%H:%M:%S')} — SPX {breach}-breach detected "
+                f"(deadline {deadline.strftime('%H:%M:%S')}, "
+                f"{self.directional_pivot_defer_minutes}min window)"
+            )
+            # LOW-priority informational Telegram so the user can see deferrals
+            # in real time. Failure here is non-fatal — defer logic is in state.
+            try:
+                if getattr(self, "alert_service", None):
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.ENTRY_SKIPPED,
+                        title=f"Entry #{entry_num} Deferred (directional bias)",
+                        message=(
+                            f"SPX {breach}-breach detected at {now.strftime('%H:%M:%S')} ET. "
+                            f"Watching for band re-entry until {deadline.strftime('%H:%M:%S')} "
+                            f"({self.directional_pivot_defer_minutes}min window). Entry will "
+                            f"place if SPX returns inside +/-{self.directional_pivot_threshold_pct*100:.2f}% "
+                            f"from open before deadline."
+                        ),
+                        priority=AlertPriority.LOW,
+                        contracts=getattr(self, "contracts_per_entry", 1),
+                    )
+            except Exception as e:
+                logger.warning(f"Defer alert send failed (non-fatal): {e}")
+            return "deferred"
+
+        # Already have a defer record — check deadline first
+        deadline_dt = datetime.fromisoformat(defer_record["deadline"])
+        # iso strings drop tz info if naive; market time is tz-aware. Normalize.
+        if deadline_dt.tzinfo is None and now.tzinfo is not None:
+            deadline_dt = deadline_dt.replace(tzinfo=now.tzinfo)
+
+        if now >= deadline_dt:
+            # Window expired — permanent skip. Clear the defer record.
+            del self.daily_state.deferred_entries[entry_idx]
+            logger.info(
+                f"DIRECTIONAL_PIVOT: Entry #{entry_num} SKIPPED after defer "
+                f"timeout ({self.directional_pivot_defer_minutes}min window expired, "
+                f"breach was {defer_record.get('direction')})"
+            )
+            return "skipped:directional_bias_defer_timeout"
+
+        # Still within window — check if breach has cleared
+        if breach is None:
+            # Band re-entered → place the entry NOW
+            del self.daily_state.deferred_entries[entry_idx]
+            elapsed = (now - datetime.fromisoformat(defer_record["deferred_at"]).replace(
+                tzinfo=now.tzinfo if now.tzinfo else None
+            )).total_seconds() / 60
+            logger.info(
+                f"DIRECTIONAL_PIVOT: Entry #{entry_num} band re-entered after "
+                f"{elapsed:.1f}min defer (breach was {defer_record.get('direction')}); "
+                f"placing now"
+            )
+            return None  # proceed with placement
+
+        # Breach still active and within window — keep waiting
+        remaining = (deadline_dt - now).total_seconds() / 60
+        logger.debug(
+            f"DIRECTIONAL_PIVOT: Entry #{entry_num} still deferred — "
+            f"{remaining:.1f}min remaining, breach={breach}"
+        )
+        return "deferred"
+
+    def _check_directional_pivot_continuous(self) -> Optional[str]:
+        """Continuous breach monitor — closes any open base entries on breach.
+
+        Called from the main loop's heartbeat. Idempotent: once fired today,
+        won't re-fire. Skip-cascades any pending deferred entries (they would
+        have been closed on the next heartbeat anyway, so save the round-trip).
+
+        Returns the breach direction ("up"/"down") if it fired, else None.
+        Conditional E#3 (14:00) is NOT a base entry and is unaffected.
+        """
+        if not self.directional_pivot_enabled:
+            return None
+        if self.daily_state.directional_pivot_fired:
+            return None  # already fired today (idempotent)
+
+        breach = self._check_directional_breach()
+        if breach is None:
+            return None
+
+        now = get_us_market_time()
+        # Mark fired BEFORE the close loop so re-entrant heartbeat ticks during
+        # close fills don't re-evaluate.
+        self.daily_state.directional_pivot_fired = True
+        self.daily_state.directional_pivot_direction = breach
+        self.daily_state.directional_pivot_fired_at = now.isoformat()
+
+        # Identify open BASE entries (not conditional E#3+). _is_conditional_entry
+        # is parent-class helper that checks entry_num > self._base_entry_count.
+        open_base_entries = [
+            e for e in self.daily_state.entries
+            if not self._is_conditional_entry(e.entry_number)
+            and any([
+                getattr(e, "short_call_position_id", None),
+                getattr(e, "long_call_position_id", None),
+                getattr(e, "short_put_position_id", None),
+                getattr(e, "long_put_position_id", None),
+            ])
+        ]
+
+        logger.info(
+            f"DIRECTIONAL_PIVOT FIRED at {now.strftime('%H:%M:%S')} — "
+            f"SPX {breach}-breach (>={self.directional_pivot_threshold_pct*100:.2f}%); "
+            f"closing {len(open_base_entries)} open base entries via "
+            f"close_mode={self.directional_pivot_close_mode}"
+        )
+
+        for entry in open_base_entries:
+            try:
+                self._close_entry_via_pivot(entry, direction=breach)
+            except Exception as e:
+                logger.error(f"DIRECTIONAL_PIVOT close failed for Entry #{entry.entry_number}: {e}")
+
+        # Cascade-skip any deferred (not-yet-placed) base entries
+        if self.daily_state.deferred_entries:
+            cascade_count = len(self.daily_state.deferred_entries)
+            for idx in list(self.daily_state.deferred_entries.keys()):
+                self.daily_state.entries_skipped += 1
+            self.daily_state.deferred_entries.clear()
+            logger.info(
+                f"DIRECTIONAL_PIVOT: cascade-skipped {cascade_count} pending deferred entries"
+            )
+
+        # One-shot Telegram alert summarizing the pivot fire
+        try:
+            if getattr(self, "alert_service", None):
+                self.alert_service.send_alert(
+                    alert_type=AlertType.POSITION_CLOSED,
+                    title=f"Directional Pivot Fired ({breach.upper()}-breach)",
+                    message=(
+                        f"SPX moved {breach} >= {self.directional_pivot_threshold_pct*100:.2f}% "
+                        f"from session open. Closing {len(open_base_entries)} open base entries "
+                        f"({self.directional_pivot_close_mode}). Conditional E#3 at 14:00 "
+                        f"will fire if breach is sustained."
+                    ),
+                    priority=AlertPriority.MEDIUM,
+                    contracts=getattr(self, "contracts_per_entry", 1),
+                )
+        except Exception as e:
+            logger.warning(f"DIRECTIONAL_PIVOT alert send failed (non-fatal): {e}")
+
+        return breach
+
+    def _close_entry_via_pivot(self, entry, direction: str) -> None:
+        """Close one entry due to the directional pivot trigger.
+
+        ``direction``: "up" (call side faces the move) or "down" (put side).
+        ``self.directional_pivot_close_mode``:
+          - "stressed_only": close only the side facing the move
+          - "both_sides":    close all 4 legs of the IC
+
+        Stop-already-fired interaction (Option 1 precedence): if a side has
+        already been stopped before pivot fires, this method skips that side.
+        For "both_sides" with one side stopped, only the surviving side closes
+        — net effect equivalent to "stressed_only" on the unstopped side.
+
+        In dry-run mode, ``_close_position_with_retry`` is gated by
+        SAFETY-DRY-04 and short-circuits without sending Saxo orders. The
+        bookkeeping (set *_pivot_closed flag, update realized P&L) still runs.
+        """
+        sides_to_close = []
+        if self.directional_pivot_close_mode == "stressed_only":
+            sides_to_close = ["call"] if direction == "up" else ["put"]
+        else:  # "both_sides"
+            sides_to_close = ["call", "put"]
+
+        for side in sides_to_close:
+            already_done_attr = f"{side}_side_stopped"
+            already_pivot_attr = f"{side}_side_pivot_closed"
+            if getattr(entry, already_done_attr, False) or getattr(entry, already_pivot_attr, False):
+                logger.info(
+                    f"DIRECTIONAL_PIVOT: Entry #{entry.entry_number} {side} side "
+                    f"already closed (stopped or prior pivot) — skipping"
+                )
+                continue
+            self._execute_pivot_side_close(entry, side)
+
+    def _execute_pivot_side_close(self, entry, side: str) -> None:
+        """Close one side of an entry (both legs of that vertical spread).
+
+        Uses the existing _close_position_with_retry path which handles dry-run
+        gating, retries, fill-price reconciliation, registry unregistration,
+        and commission tracking. After both legs close, marks the entry's
+        ``{side}_side_pivot_closed`` flag and books realized P&L from
+        actual close cost minus that side's credit.
+        """
+        # Map side → leg attributes
+        if side == "call":
+            short_pid = entry.short_call_position_id
+            long_pid = entry.long_call_position_id
+            short_uic = getattr(entry, "short_call_uic", None)
+            long_uic = getattr(entry, "long_call_uic", None)
+            credit_attr = "call_spread_credit"
+            stop_time_attr = "call_stop_time"
+            flag_attr = "call_side_pivot_closed"
+        else:
+            short_pid = entry.short_put_position_id
+            long_pid = entry.long_put_position_id
+            short_uic = getattr(entry, "short_put_uic", None)
+            long_uic = getattr(entry, "long_put_uic", None)
+            credit_attr = "put_spread_credit"
+            stop_time_attr = "put_stop_time"
+            flag_attr = "put_side_pivot_closed"
+
+        credit_received = getattr(entry, credit_attr, 0) or 0
+        contracts = entry.contracts
+
+        # Close short leg first (the high-premium side; long leg may be
+        # essentially worthless on the unstressed side or only modestly valued
+        # on the stressed side. Close-short-then-long matches the existing
+        # MKT-025 short-only stop pattern). Signature matches all other
+        # call sites in HYDRA: positional (position_id, leg_name) + keyword
+        # uic/entry_number/contracts. Returns (success, fill_price, order_id).
+        actual_close_cost = 0.0  # accumulator for short_cost - long_revenue
+        legs_closed = 0
+
+        if short_pid:
+            ok, fill, _ = self._close_position_with_retry(
+                short_pid,
+                f"E#{entry.entry_number} {side} short (pivot)",
+                uic=short_uic,
+                entry_number=entry.entry_number,
+                contracts=contracts,
+            )
+            if ok:
+                legs_closed += 1
+                if fill is not None:
+                    actual_close_cost += fill * 100 * contracts
+
+        if long_pid:
+            ok, fill, _ = self._close_position_with_retry(
+                long_pid,
+                f"E#{entry.entry_number} {side} long (pivot)",
+                uic=long_uic,
+                entry_number=entry.entry_number,
+                contracts=contracts,
+            )
+            if ok:
+                legs_closed += 1
+                if fill is not None:
+                    actual_close_cost -= fill * 100 * contracts  # selling long → revenue offsets debit
+
+        # Bookkeeping: set flag, log, update realized P&L
+        setattr(entry, flag_attr, True)
+        setattr(entry, stop_time_attr, get_us_market_time().isoformat())
+
+        # Realized P&L on this side: close_cost - credit_received (negative = loss)
+        # In dry-run, fills are None (SAFETY-DRY-04), so actual_close_cost stays 0
+        # and realized loss can't be computed precisely. Fall back to a flat
+        # "estimated as full credit + buffer" loss for dry-run bookkeeping.
+        if self.dry_run and actual_close_cost == 0:
+            # Estimate realized loss as credit + buffer (worst-case stop-equivalent)
+            buffer = (self.call_stop_buffer if side == "call" else self.put_stop_buffer) * contracts
+            realized_loss = -buffer  # net P&L = credit kept - close_cost; estimated as -buffer
+            self.daily_state.total_realized_pnl += credit_received - (credit_received + buffer)
+        else:
+            realized_loss = credit_received - actual_close_cost
+            self.daily_state.total_realized_pnl += realized_loss
+
+        # Commission: 2 legs × $2.50 × contracts
+        commission_added = 2 * 2.50 * contracts
+        self.daily_state.total_commission += commission_added
+
+        logger.info(
+            f"DIRECTIONAL_PIVOT closed E#{entry.entry_number} {side} side: "
+            f"{legs_closed}/2 legs, credit=${credit_received:.2f}, "
+            f"close_cost=${actual_close_cost:.2f}, "
+            f"realized_pnl_delta=${(realized_loss if not (self.dry_run and actual_close_cost == 0) else -buffer):.2f}, "
+            f"commission=+${commission_added:.2f}"
+        )
 
     # MKT-035: DOWN DAY FILTER
     # =========================================================================
@@ -3693,6 +4112,27 @@ class HydraStrategy(MEICStrategy):
         """
         entry_num = self._next_entry_index + 1
         logger.info(f"HYDRA: Initiating Entry #{entry_num} of {self._effective_total_entry_count()}")
+
+        # Directional pivot pre-entry gate (HYDRA variant B/C, 2026-05-01).
+        # Before any other filters run (including the calm-entry delay), check
+        # whether SPX has already moved >= threshold from session open. If so,
+        # mark the entry DEFERRED and watch the band for re-entry up to
+        # `pre_entry_defer_minutes`. The bot returns from `_initiate_entry`
+        # immediately on "deferred" or "skipped:..." paths, so we don't burn
+        # 5 minutes in the calm-entry waiter on entries we're about to defer
+        # or cascade-skip. When the gate returns None, normal placement
+        # proceeds (which is also what happens when the band is re-entered
+        # within the defer window — del self.daily_state.deferred_entries[idx]
+        # has already cleared the marker by then).
+        pivot_gate = self._apply_directional_pivot_pre_entry_gate(entry_num)
+        if pivot_gate == "deferred":
+            return f"Entry #{entry_num} deferred — directional bias active"
+        if pivot_gate and pivot_gate.startswith("skipped:"):
+            reason = pivot_gate.split("skipped:", 1)[1]
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, reason, send_alert=True)
+            return f"Entry #{entry_num} skipped — {reason}"
 
         # MKT-043: Calm entry filter — delay if SPX moving fast.
         # CRITICAL: refresh prices and check stops during delay to avoid
@@ -9605,6 +10045,14 @@ class HydraStrategy(MEICStrategy):
             # MKT-036: Restore stop confirmation avoided counter
             self.daily_state.stops_avoided_mkt036 = saved_state.get("stops_avoided_mkt036", 0)
 
+            # Directional-pivot state (HYDRA variant B/C, 2026-05-01).
+            # All fields default to a "not fired" state for backwards compat
+            # with state files written before the pivot strategy was added.
+            self.daily_state.directional_pivot_fired = saved_state.get("directional_pivot_fired", False)
+            self.daily_state.directional_pivot_direction = saved_state.get("directional_pivot_direction")
+            self.daily_state.directional_pivot_fired_at = saved_state.get("directional_pivot_fired_at", "")
+            self.daily_state.deferred_entries = saved_state.get("deferred_entries", {}) or {}
+
             # MKT-018: Restore early close state
             self._early_close_triggered = saved_state.get("early_close_triggered", False)
             ec_time_str = saved_state.get("early_close_time")
@@ -9703,6 +10151,9 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.put_side_expired = put_expired
                 restored_entry.call_side_skipped = call_skipped
                 restored_entry.put_side_skipped = put_skipped
+                # Directional-pivot close flags (HYDRA variant B/C, 2026-05-01)
+                restored_entry.call_side_pivot_closed = entry_data.get("call_side_pivot_closed", False)
+                restored_entry.put_side_pivot_closed = entry_data.get("put_side_pivot_closed", False)
                 # Fix #61: Restore merge flags
                 restored_entry.call_side_merged = entry_data.get("call_side_merged", False)
                 restored_entry.put_side_merged = entry_data.get("put_side_merged", False)
@@ -10086,6 +10537,9 @@ class HydraStrategy(MEICStrategy):
                     entry.put_side_expired = saved.get("put_side_expired", False)
                     entry.call_side_skipped = saved.get("call_side_skipped", False)
                     entry.put_side_skipped = saved.get("put_side_skipped", False)
+                    # Directional-pivot close flags (HYDRA variant B/C, 2026-05-01)
+                    entry.call_side_pivot_closed = saved.get("call_side_pivot_closed", False)
+                    entry.put_side_pivot_closed = saved.get("put_side_pivot_closed", False)
 
                     entry.open_commission = saved.get("open_commission", 0)
                     entry.close_commission = saved.get("close_commission", 0)

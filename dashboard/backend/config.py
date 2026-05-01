@@ -27,24 +27,24 @@ class Settings(BaseSettings):
     # below — to add a variant D, add 5 fields here and the router picks it up.
     comparison_mode_enabled: bool = False
 
-    # Variant A — the canonical/live HYDRA bot (uses the hydra_* paths above).
-    variant_a_label: str = "A (50pt)"
+    # Variant A — canonical/live HYDRA (75pt baseline, no pivot).
+    variant_a_label: str = "A (75pt baseline)"
 
-    # Variant B (currently 110pt spread)
+    # Variant B (75pt + directional pivot, close stressed leg only)
     variant_b_state_file: Path = Path("/opt/calypso/data/variant_b/hydra_state.json")
     variant_b_metrics_file: Path = Path("/opt/calypso/data/variant_b/hydra_metrics.json")
     variant_b_backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
     variant_b_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
     variant_b_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
-    variant_b_label: str = "B (110pt)"
+    variant_b_label: str = "B (pivot, stressed-only)"
 
-    # Variant C (currently 25pt spread)
+    # Variant C (75pt + directional pivot, close both legs)
     variant_c_state_file: Path = Path("/opt/calypso/data/variant_c/hydra_state.json")
     variant_c_metrics_file: Path = Path("/opt/calypso/data/variant_c/hydra_metrics.json")
     variant_c_backtesting_db: Path = Path("/opt/calypso/data/variant_c/backtesting.db")
     variant_c_log_file: Path = Path("/opt/calypso/logs/hydra_variant_c/bot.log")
     variant_c_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
-    variant_c_label: str = "C (25pt)"
+    variant_c_label: str = "C (pivot, both-legs)"
 
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")

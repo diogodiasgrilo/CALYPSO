@@ -427,6 +427,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             break
                     continue
 
+                # Directional-pivot continuous monitor (HYDRA variant B/C, 2026-05-01).
+                # Fires BEFORE the strategy state machine on each heartbeat, so a
+                # breach detected this tick can close open base entries before the
+                # state machine's stop-loss / entry-placement logic runs. Idempotent
+                # within the day (won't re-fire after the first trigger). No-op when
+                # `directional_pivot.enabled: false` (variant A default).
+                # Wrapped in try/except so a pivot bug never blocks the main loop.
+                try:
+                    if hasattr(strategy, "_check_directional_pivot_continuous"):
+                        strategy._check_directional_pivot_continuous()
+                except Exception as e:
+                    trade_logger.log_error(f"Directional pivot monitor error (non-fatal): {e}", exception=e)
+
                 # Run strategy check
                 action = strategy.run_strategy_check()
 
