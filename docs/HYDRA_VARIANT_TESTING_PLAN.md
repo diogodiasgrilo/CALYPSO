@@ -1,12 +1,13 @@
 # HYDRA Variant Testing — Design Plan
 
-**Status:** **IMPLEMENTED 2026-04-30** as a 1v1 (variant A vs B only) head-to-head, per the "Recommended Build Order" Phase B+C condensed into a single push. The full N=5 plan below is preserved for future reference if we expand. See CLAUDE.md lesson #75 for the deployed-version summary.
+**Status:** **IMPLEMENTED 2026-04-30 (1v1 A↔B); EXPANDED 2026-05-01 (N-way → A↔B↔C)**. Per the "Recommended Build Order" Phase B+C condensed into a single push, then the dashboard backend + frontend + bot strategy + Telegram all refactored to N-variant on 2026-05-01 to add variant C (`max_spread_width: 25`). The full N=5 plan below is preserved for future expansion. See CLAUDE.md lesson #75 + `bots/hydra/__init__.py` v1.25.1 entry for deployed details.
 **Author:** Diogo Dias Grilo
 **Created:** 2026-04-28
-**Implemented:** 2026-04-30 (HYDRA v1.25.0)
+**Implemented:** 2026-04-30 (HYDRA v1.25.0, 1v1) → 2026-05-01 (HYDRA v1.25.1, N-way + variant C)
 **Prerequisites:** Single-variant dry mode validated end-to-end (Tuesday Apr 28 smoke test) ✓
 **Estimated effort (original):** 5-7 days for full system, 2-3 days for proof-of-concept
 **Actual effort (1v1 cut):** 1 day for v1 (bot infra + dashboard + Phase 2 cross-day analytics + Telegram /compare), incl. defense-in-depth SAFETY-DRY gates
+**Actual effort (N-way refactor):** ~2 hours overnight 2026-04-30 → 2026-05-01 (registry pattern + dynamic frontend + filesystem-glob discovery + api_pacing_multiplier)
 
 ---
 

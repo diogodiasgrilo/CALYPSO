@@ -32,6 +32,18 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 1.25.1 (2026-05-01): N-way variant comparison + variant C scaffolding. Backend `dashboard/backend/
+  routers/variants.py` refactored from hardcoded a/b ternaries to a `_VARIANTS` registry (add a
+  variant by appending to `_VARIANT_IDS` + adding 5 `variant_<id>_*` settings fields). Frontend
+  `Comparison.tsx` renders N variants from `/api/variants/health`; 3+ variant grouped-bar daily
+  delta chart added. Bot `_discover_variant_ids()` globs `data/variant_*/` so Telegram `/compare`
+  and end-of-day `VARIANT_COMPARISON_DAILY` auto-discover all running non-A variants. New
+  `api_pacing_multiplier` strategy config (default 1.0 = variant A no-op) scales monitoring
+  loop + heartbeat intervals — variant B at 1.5×, C at 2.0× — to keep combined Saxo API rate
+  under ~60 req/min. Vigilant mode (stop detection) is intentionally NOT scaled (safety-critical).
+  Variant C config: max_spread_width=25, dry_run, alerts off, sheets off. `deploy/hydra_variant_c.
+  service` mirrors variant B's unit with HYDRA_VARIANT_ID=c.
+
 - 1.25.0 (2026-04-30): Path-B dry-mode bookkeeping + MKT-024 multiplier tuning + 1v1 variant
   comparison + 4 SAFETY-DRY defense-in-depth gates. (a) `_process_expired_credits` now treats
   `DRY_*` synthetic IDs as settled — fixes Apr 28-29 false net_pnl=-$20 (commission-only) on

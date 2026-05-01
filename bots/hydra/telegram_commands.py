@@ -559,7 +559,10 @@ class TelegramCommandHandler:
             self._send_message(chat_id, "Failed to retrieve stop data. Try again shortly.")
 
     def _handle_compare(self, chat_id: str):
-        """Handle /compare command — variant A vs B head-to-head snapshot."""
+        """Handle /compare command — variant A vs all running non-A variants
+        (B, C, ...) head-to-head snapshot. The callback auto-discovers running
+        variants via filesystem glob, so adding a new variant doesn't need a
+        change here."""
         if not self._compare_callback:
             self._send_message(
                 chat_id,
@@ -1036,7 +1039,7 @@ class TelegramCommandHandler:
             "/hermes \u2014 Latest HERMES report\n"
             "/apollo \u2014 Latest APOLLO briefing\n"
             "/clio \u2014 Latest CLIO weekly analysis\n"
-            "/compare \u2014 Variant A vs B head-to-head (1v1 dry-run)\n"
+            "/compare \u2014 Variant A vs all running variants (B, C, ...) head-to-head\n"
             "\n*Control*\n"
             "/restart \u2014 Restart HYDRA\n"
             "/stop \u2014 Stop HYDRA (warns if positions)\n"

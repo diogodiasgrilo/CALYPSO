@@ -97,7 +97,7 @@ DATA_DIR = (
 )
 HYDRA_STATE_FILE = os.path.join(DATA_DIR, "hydra_state.json")
 HYDRA_METRICS_FILE = os.path.join(DATA_DIR, "hydra_metrics.json")
-HYDRA_VERSION = "1.25.0"
+HYDRA_VERSION = "1.25.1"
 
 # MKT-031: Smart Entry Window defaults
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
@@ -232,10 +232,11 @@ class HydraStrategy(MEICStrategy):
       min_put_credit at every VIX level in live config. MKT-029 graduated fallback to
       min_credit - $0.10. Call non-viable → put-only entry (MKT-032/MKT-039, VIX < 15).
       Put non-viable → call-only entry (MKT-040, 89% WR).
-    - Progressive Call Tightening (MKT-020): Scans from 3.5x OTM inward for viable credit
-    - Progressive Put Tightening (MKT-022): Scans from 4.0x OTM inward for viable credit
-    - VIX-Scaled Spread Width (MKT-027): round(VIX × 6.0 / 5) × 5, floor 25pt, cap 110pt
-    - Buffer Decay (MKT-042): Stop buffer starts at 2.10x, decays to 1x over 2.0 hours
+    - Progressive Call Tightening (MKT-020): Scans from 2.5x OTM inward for viable credit
+    - Progressive Put Tightening (MKT-022): Scans from 2.75x OTM inward for viable credit
+    - VIX-Scaled Spread Width (MKT-027): round(VIX × 6.0 / 5) × 5, floor 25pt, cap CONFIGURABLE
+      (variant A=50pt, B=110pt, C=25pt — driven by max_spread_width per config)
+    - Buffer Decay (MKT-042): Stop buffer starts at 2.5x, decays to 1x over 4.0 hours
     - Calm Entry (MKT-043): Delays entry up to 5min when SPX >15pt move in 3min
     - Anti-Whipsaw: Skips entries when intraday range > 1.75x expected move
     - VIX Regime: Adapts entries/credits based on VIX at open (breakpoints [18, 22, 28],
@@ -245,15 +246,23 @@ class HydraStrategy(MEICStrategy):
       VIX<18: E#2+E#3 ($1.00/$1.25). VIX 18-22: E#2+E#3 ($0.50/$0.75).
       VIX 22-28: E#2+E#3 ($0.30/$0.50). VIX>=28: E#3 only ($0.30/$0.40).
       Floors are regime-dependent (= min_credit - $0.10). Code drops EARLIEST entries.
-    - Down-Day Call-Only: E1-E3 convert to call-only when SPX drops >= 0.57% from open
-    - FOMC T+1 (MKT-038): All entries forced call-only day after FOMC announcement
+    - Down-Day Call-Only: DISABLED 2026-04-19 (base_entry_downday_callonly_pct: null after
+      A/B sweep showed negative EV at every threshold). Code preserved.
+    - FOMC T+1 Blackout: ALL entries skipped on day after FOMC (fomc_t1_skip_enabled: true).
+      MKT-038 call-only legacy path is DISABLED on VM (superseded by full skip 2026-04-19).
+    - dry_run_force_normal_day: When True AND dry_run is True, FOMC date-based skips are
+      bypassed for full-data variant comparison experiments. Live mode unaffected.
     - Early Close (MKT-018): INTENTIONALLY DISABLED. Hold-to-expiry outperforms.
-    - Stop formula: total_credit + asymmetric buffer (call $0.75, put $1.75)
+    - Stop formula: total_credit + asymmetric buffer (call $0.75, put $1.75 globally;
+      Option B per-VIX-regime overrides applied at first entry — see VIX Regime config).
+    - Variant comparison (N-way): HYDRA_VARIANT_ID env var routes data paths to
+      data/variant_<id>/ for parallel A/B/C dry-run experiments. api_pacing_multiplier
+      scales monitoring/heartbeat intervals per variant (A=1.0, B=1.5, C=2.0).
 
     All other functionality (stop losses, position management, reconciliation)
     is inherited from MEICStrategy.
 
-    Version: 1.24.0 (2026-04-21)
+    Version: 1.25.0 (2026-04-30 / N-way variants 2026-05-01)
     """
 
     # Bot name for Position Registry - overrides MEIC's hardcoded "MEIC"
@@ -6493,10 +6502,6 @@ class HydraStrategy(MEICStrategy):
             logger.warning(f"Failed to read variant {vid.upper()} state: {e}")
             return None
 
-    # Backwards-compat shim — older test/diagnostic scripts may call this.
-    def _load_variant_b_state(self) -> Optional[Dict]:
-        return self._load_variant_state("b")
-
     def _build_variant_summary(self, state: Dict) -> Dict:
         """Distill a variant's state file into a summary dict shaped like
         get_daily_summary() so the formatter can use a uniform interface."""
@@ -6516,10 +6521,6 @@ class HydraStrategy(MEICStrategy):
             "entries": entries,
         }
 
-    # Backwards-compat shim
-    def _build_variant_b_summary(self, b_state: Dict) -> Dict:
-        return self._build_variant_summary(b_state)
-
     def _read_variant_spread_width(self, vid: str) -> Optional[int]:
         """Read a non-A variant's actual max_spread_width from its config so
         the comparison message header reflects the real spread (not a
@@ -6535,11 +6536,6 @@ class HydraStrategy(MEICStrategy):
             return int(width) if width is not None else None
         except Exception:
             return None
-
-    # Backwards-compat shim
-    def _read_variant_b_spread_width(self) -> int:
-        w = self._read_variant_spread_width("b")
-        return w if w is not None else 110
 
     def _peak_buffer_for_state(self, entries: list) -> tuple:
         """(call_pct, put_pct) — largest buffer utilization seen on any side.
