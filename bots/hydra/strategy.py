@@ -484,6 +484,19 @@ class HydraStrategy(MEICStrategy):
 
         self._bot_start_time = datetime.now()
 
+        # Restore market_data OHLC from state file at startup (regardless of
+        # dry-run / position-recovery flow). The standard recovery path
+        # `_recover_positions_from_saxo` short-circuits in dry mode, leaving
+        # `_load_state_file_history` (which restores OHLC) un-called. On a
+        # mid-day restart that means market_data.spx_open / vix_open default
+        # to 0.0 and the next SPX/VIX tick captures the *current* price as
+        # "open" — wrong by however far SPX has moved since the actual 9:30
+        # capture earlier in the day. The directional-pivot strategy uses
+        # spx_open as the breach reference, so an incorrect anchor would
+        # cause spurious or missed pivot triggers. Idempotent — runs once
+        # at startup and only restores when the state file is for today.
+        self._restore_market_ohlc_from_state_file_unconditional()
+
         logger.info(f"HYDRA Strategy initialized")
         # v8: prominent contract count line so log dumps immediately show the multiplier.
         # Warning prefix when > 1 makes it unmissable in journalctl.
@@ -9994,6 +10007,61 @@ class HydraStrategy(MEICStrategy):
             import traceback
             logger.error(traceback.format_exc())
             return {}
+
+    def _restore_market_ohlc_from_state_file_unconditional(self) -> None:
+        """Always-on OHLC restoration at HYDRA startup.
+
+        Reads the state file ONCE during __init__ and restores
+        market_data.{spx,vix}_{open,high,low} when the saved state is for
+        today. This is independent of position recovery — the existing
+        `_load_state_file_history` path is only reached when there are no
+        live positions in Saxo, AND in dry-run mode `_recover_positions_from_saxo`
+        short-circuits before that path even runs. The result was that
+        mid-day restarts captured the *current* SPX as "open" instead of the
+        actual 9:30 ET open already recorded earlier in the day.
+
+        Safe-by-default: any exception is logged and swallowed (returns
+        without raising). Skips silently if the state file is missing,
+        unreadable, for a different date, or has no `market_data_ohlc` block.
+        Logs a single INFO line on successful restoration so journalctl shows
+        the anchor value the bot will use for breach calculations.
+        """
+        try:
+            if not os.path.exists(self.state_file):
+                return
+            with open(self.state_file, "r") as f:
+                saved = json.load(f)
+            today = get_us_market_time().strftime("%Y-%m-%d")
+            if saved.get("date") != today:
+                return  # stale state file (yesterday or earlier) — leave OHLC as defaults
+            ohlc = saved.get("market_data_ohlc") or {}
+            if not ohlc:
+                return
+            spx_open = ohlc.get("spx_open")
+            if spx_open and spx_open > 0:
+                self.market_data.spx_open = spx_open
+            spx_high = ohlc.get("spx_high")
+            if spx_high and spx_high > 0:
+                self.market_data.spx_high = spx_high
+            spx_low = ohlc.get("spx_low")
+            if spx_low and spx_low > 0:
+                self.market_data.spx_low = spx_low
+            vix_open = ohlc.get("vix_open")
+            if vix_open and vix_open > 0:
+                self.market_data.vix_open = vix_open
+            vix_high = ohlc.get("vix_high")
+            if vix_high and vix_high > 0:
+                self.market_data.vix_high = vix_high
+            vix_low = ohlc.get("vix_low")
+            if vix_low and vix_low > 0:
+                self.market_data.vix_low = vix_low
+            if self.market_data.spx_open > 0:
+                logger.info(
+                    f"OHLC restored from state file: spx_open={self.market_data.spx_open:.2f}, "
+                    f"vix_open={self.market_data.vix_open:.2f} (date={today})"
+                )
+        except Exception as e:
+            logger.warning(f"OHLC state-file restore failed (non-fatal): {e}")
 
     def _load_state_file_history(self) -> bool:
         """
