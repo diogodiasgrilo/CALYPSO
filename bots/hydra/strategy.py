@@ -2228,7 +2228,22 @@ class HydraStrategy(MEICStrategy):
         if not self.directional_pivot_enabled:
             return None
 
-        # Cascade: pivot already fired today → don't even start a new base entry.
+        # CONDITIONAL E#3 EXEMPTION (2026-05-01 fix): the pivot pre-entry gate
+        # applies ONLY to base entries (E#1, E#2). The conditional E#3 at 14:00
+        # has its own trigger logic (Upday-035 / Downday-035 evaluating
+        # SPX-vs-open AT 14:00) that is INDEPENDENT of pivot history. If we
+        # gated conditional E#3 on `directional_pivot_fired`, then on any
+        # directional day where the pivot fires earlier in the day, the
+        # conditional E#3 would be incorrectly cascade-skipped — exactly the
+        # opposite of the strategy's intent. So bail out of the gate for
+        # conditional entries and let the standard conditional-trigger path
+        # in _initiate_entry / _handle_conditional_entry decide.
+        if self._is_conditional_entry(entry_num):
+            return None
+
+        # Cascade: pivot already fired today → don't even start a new BASE entry.
+        # Conditional entries are exempted above; this cascade applies to the
+        # remaining base entries (E#1, E#2) only.
         if self.daily_state.directional_pivot_fired:
             return f"skipped:pivot_already_fired_today_{self.daily_state.directional_pivot_direction}"
 
