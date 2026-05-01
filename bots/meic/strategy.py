@@ -620,36 +620,75 @@ class MarketData:
     # P3: Flash crash velocity tracking
     price_history: Deque[Tuple[datetime, float]] = field(default_factory=lambda: deque(maxlen=100))
 
+    @staticmethod
+    def _is_regular_session_or_later() -> bool:
+        """True when current ET time is at-or-after 9:30 AM (regular-session open).
+
+        Used to gate intraday-OHLC capture (spx_open / spx_high / spx_low /
+        vix_open / vix_high / vix_low) so pre-market Saxo extended-hours
+        quotes (available from 7:00 AM ET via Saxo extended hours) can't
+        contaminate the "% from open" reference. All downstream strategy
+        decisions that compute SPX/VIX move from open — Upday-035,
+        Downday-035, whipsaw filter, ROC gate, directional-pivot — depend on
+        this anchor being the actual regular-session open (9:30 AM ET).
+
+        Early-close days (Black Friday, day before holidays) still open at
+        9:30 ET and only differ on the close side, so 9:30 is universal.
+        """
+        now = get_us_market_time()
+        return (now.hour, now.minute) >= (9, 30)
+
     def update_spx(self, price: float):
-        """Update SPX price with timestamp and track open/high/low."""
+        """Update SPX price with timestamp and track open/high/low.
+
+        SPX live price (and flash-crash velocity tracking) is updated for
+        every valid tick, including pre-market. But intraday-OHLC capture
+        is gated to regular session (>= 9:30 ET) — see _is_regular_session_or_later
+        for the rationale.
+        """
         if price > 0:
             self.spx_price = price
             self.last_spx_update = get_us_market_time()
 
-            # Track opening price (first valid update of the day)
+            # Velocity history is captured for all valid ticks (pre-market
+            # included) so flash-crash detection works through extended hours.
+            self.price_history.append((self.last_spx_update, price))
+
+            # Intraday OHLC tracking: regular session only.
+            if not self._is_regular_session_or_later():
+                return
+
+            # Track opening price (first valid update of the regular session)
             if self.spx_open == 0.0:
                 self.spx_open = price
+                logger.info(f"SPX session open captured: {price:.2f} at {self.last_spx_update.strftime('%H:%M:%S')} ET")
 
-            # Track intraday high/low
+            # Track intraday high/low (regular session only)
             if price > self.spx_high:
                 self.spx_high = price
             if price < self.spx_low:
                 self.spx_low = price
 
-            # Track for velocity detection
-            self.price_history.append((self.last_spx_update, price))
-
     def update_vix(self, vix: float):
-        """Update VIX with timestamp and track open/high/low/average."""
+        """Update VIX with timestamp and track open/high/low/average.
+
+        Same gating as update_spx: pre-market VIX (if available) updates
+        the live `vix` field but does NOT contribute to vix_open/high/low
+        or the samples list.
+        """
         if vix > 0:
             self.vix = vix
             self.last_vix_update = get_us_market_time()
 
-            # Track opening VIX (first valid update of the day)
+            if not self._is_regular_session_or_later():
+                return
+
+            # Track opening VIX (first valid update of the regular session)
             if self.vix_open == 0.0:
                 self.vix_open = vix
+                logger.info(f"VIX session open captured: {vix:.2f} at {self.last_vix_update.strftime('%H:%M:%S')} ET")
 
-            # Track VIX high/low and samples for average
+            # Track VIX high/low and samples for average (regular session only)
             if vix > self.vix_high:
                 self.vix_high = vix
             if vix < self.vix_low:
