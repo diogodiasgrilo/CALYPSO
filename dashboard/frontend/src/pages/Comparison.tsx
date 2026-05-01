@@ -56,11 +56,18 @@ function accentFor(id: string): string {
 
 interface VariantConfig {
   max_spread_width?: number;
+  contracts_per_entry?: number;
+  entry_times?: string[];
   call_starting_otm_multiplier?: number;
   put_starting_otm_multiplier?: number;
   call_stop_buffer?: number;
   put_stop_buffer?: number;
   dry_run?: boolean;
+  // Directional pivot strategy (variant B/C, 2026-05-01)
+  directional_pivot_enabled?: boolean;
+  directional_pivot_close_mode?: string | null;
+  directional_pivot_threshold_pct?: number | null;
+  directional_pivot_defer_minutes?: number | null;
 }
 
 interface VariantSummary {
@@ -432,10 +439,17 @@ function ConfigDelta({
   // are bolded where ANY variant differs from variant A's value.
   const rows: Array<{ key: keyof VariantConfig; label: string }> = [
     { key: "max_spread_width", label: "Spread width (pt)" },
+    { key: "contracts_per_entry", label: "Contracts/entry" },
+    { key: "entry_times", label: "Entry times" },
     { key: "call_starting_otm_multiplier", label: "Call start ×" },
     { key: "put_starting_otm_multiplier", label: "Put start ×" },
     { key: "call_stop_buffer", label: "Call stop buffer ($)" },
     { key: "put_stop_buffer", label: "Put stop buffer ($)" },
+    // Directional pivot strategy rows (variant B/C, 2026-05-01)
+    { key: "directional_pivot_enabled", label: "Directional pivot" },
+    { key: "directional_pivot_close_mode", label: "Pivot close mode" },
+    { key: "directional_pivot_threshold_pct", label: "Pivot threshold (%)" },
+    { key: "directional_pivot_defer_minutes", label: "Pivot defer window (min)" },
     { key: "dry_run", label: "Dry-run" },
   ];
 
@@ -472,13 +486,27 @@ function ConfigDelta({
                     key as string
                   ];
                   const differs = vid !== "A" && JSON.stringify(v) !== aValStr;
+                  // Format display based on field type — array → join, threshold
+                  // → %, null → em-dash, everything else → String().
+                  let display: string;
+                  if (v === null || v === undefined) {
+                    display = "—";
+                  } else if (Array.isArray(v)) {
+                    display = v.length ? v.join(", ") : "—";
+                  } else if (key === "directional_pivot_threshold_pct" && typeof v === "number") {
+                    display = (v * 100).toFixed(2) + "%";
+                  } else if (typeof v === "boolean") {
+                    display = v ? "yes" : "no";
+                  } else {
+                    display = String(v);
+                  }
                   return (
                     <td
                       key={vid}
                       className="py-0.5 text-right font-mono"
                       style={{ color: differs ? accentFor(vid) : undefined }}
                     >
-                      {String(v ?? "—")}
+                      {display}
                     </td>
                   );
                 })}

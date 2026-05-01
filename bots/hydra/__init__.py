@@ -32,6 +32,28 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 1.26.0 (2026-05-01 PM): Directional pivot strategy + spx_open 9:30 anchor + 75pt × 2c
+  baseline. (a) `MarketData.update_spx` / `update_vix` now gate intraday-OHLC capture
+  (spx_open, spx_high, spx_low, vix_open, vix_high, vix_low) to >= 9:30 ET via new
+  `_is_regular_session_or_later` static — pre-market Saxo extended-hours ticks no
+  longer pollute the "% from open" reference used by Upday-035, Downday-035, whipsaw
+  filter, ROC gate, and the new pivot. (b) `_restore_market_ohlc_from_state_file_unconditional`
+  is called once at end of HYDRA __init__ so mid-day restarts in dry-run still
+  preserve the actual 9:30 anchor (the existing recovery path short-circuits in dry
+  mode before reaching `_load_state_file_history`'s OHLC restore). (c) New directional
+  pivot strategy gated by `directional_pivot.enabled` (variant B/C only): pre-entry
+  defer-and-watch (skip up to `pre_entry_defer_minutes`, default 15) when SPX is
+  already breached at entry time, plus a continuous breach monitor (any-time SPX
+  ±0.25% from session open closes open base entries via configured `close_mode`:
+  `stressed_only` = close the side facing the move; `both_sides` = close all 4 legs).
+  Conditional E#3 at 14:00 (Upday-035 / Downday-035) is unaffected. Idempotent within
+  the day; cascade-skips deferred entries on fire. New `IronCondorEntry.{call,put}_side_pivot_closed`
+  flags + 4 new `MEICDailyState` fields persisted/restored. Stops take precedence over
+  pivot (Option 1). Main-loop hook in `bots/hydra/main.py` wrapped in try/except. New
+  Telegram alerts: LOW "Entry Deferred" + MEDIUM "Directional Pivot Fired". Dashboard
+  variant labels updated. VM: all 3 → 75pt × 2c; B/C `entry_times` = ["10:15","10:45"]
+  with pivot block enabled (B: stressed_only, C: both_sides); A unchanged (control).
+
 - 1.25.1 (2026-05-01): N-way variant comparison + variant C scaffolding. Backend `dashboard/backend/
   routers/variants.py` refactored from hardcoded a/b ternaries to a `_VARIANTS` registry (add a
   variant by appending to `_VARIANT_IDS` + adding 5 `variant_<id>_*` settings fields). Frontend

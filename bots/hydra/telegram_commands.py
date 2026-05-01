@@ -228,6 +228,37 @@ EDITABLE_PARAMS = {
         "type": "bool",
         "description": "FOMC Day 2 blackout: skip entries on announcement day (currently OFF — coin flip + slight positive edge)",
     },
+    # Directional pivot strategy (variant B/C, 2026-05-01). When `pivot_enabled`
+    # is true, base entries (E#1, E#2) are gated by a pre-entry breach check
+    # (defer + watch up to `pivot_defer_min` minutes) and a continuous
+    # breach monitor closes any open base entries via `pivot_close_mode`
+    # ("stressed_only" = close the side facing the move, "both_sides" = close
+    # all 4 legs). Conditional E#3 at 14:00 (Upday-035 / Downday-035) is
+    # unaffected. Variant A keeps `pivot_enabled: false` as the control.
+    "pivot_enabled": {
+        "path": "strategy.directional_pivot.enabled",
+        "type": "bool",
+        "description": "Directional pivot strategy (variant B/C only — close base entries on SPX ±0.25% from open)",
+    },
+    "pivot_threshold": {
+        "path": "strategy.directional_pivot.threshold_pct",
+        "type": "float",
+        "min": 0.001, "max": 0.01,
+        "unit": "%",
+        "description": "Pivot breach threshold as fraction (0.0025 = 0.25%)",
+    },
+    "pivot_close_mode": {
+        "path": "strategy.directional_pivot.close_mode",
+        "type": "str",
+        "choices": ["stressed_only", "both_sides"],
+        "description": "Pivot close mode: 'stressed_only' (close one side) or 'both_sides' (close all 4 legs)",
+    },
+    "pivot_defer_min": {
+        "path": "strategy.directional_pivot.pre_entry_defer_minutes",
+        "type": "int",
+        "min": 0, "max": 60,
+        "description": "Pre-entry defer-and-watch window (minutes) before permanent skip",
+    },
 }
 
 
@@ -837,6 +868,13 @@ class TelegramCommandHandler:
                 validated.append(f"{hour:02d}:{minute:02d}")
             validated.sort()
             return validated
+
+        if ptype == "str":
+            v = value_str.strip()
+            choices = param_def.get("choices")
+            if choices and v not in choices:
+                raise ValueError(f"Must be one of: {', '.join(choices)}")
+            return v
 
         raise ValueError(f"Unknown parameter type: {ptype}")
 

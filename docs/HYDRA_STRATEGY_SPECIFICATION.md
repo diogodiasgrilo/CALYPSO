@@ -1,11 +1,23 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-04-19
-**Version:** 1.23.0 (Downday-035 + FOMC T+1 blackout + E#1 drop + base-downday disabled)
+**Last Updated:** 2026-05-01
+**Version:** 1.26.0 (Directional pivot strategy + spx_open 9:30 anchor + 75pt × 2c baseline)
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
-**Status:** LIVE — deployed on Google Cloud VM, sole active trading bot
+**Status:** DRY-RUN since 2026-04-27 — variants A/B/C running 75pt × 2c in parallel comparison; sole active HYDRA-family bot.
+
+> **2026-05-01 update**: variants B and C run a new **directional pivot strategy**
+> in addition to the canonical entry/exit logic described below. Variant A is
+> the unchanged control. The pivot rules (pre-entry defer-and-watch + continuous
+> breach monitor with two close modes) are documented in
+> `services/hydra_strategy_context.md` (Variant Comparison & Directional Pivot
+> Strategy section). Conditional E#3 at 14:00 (Upday-035 / Downday-035) is
+> unaffected by the pivot — it evaluates SPX-vs-open at 14:00 independently of
+> pivot history. Also as of 2026-05-01: `MarketData.update_spx` /
+> `update_vix` gate intraday OHLC capture to >= 9:30 ET so all "% from open"
+> calculations (Upday-035, Downday-035, whipsaw filter, ROC gate, pivot) use
+> the actual regular-session open as the reference.
 
 ---
 

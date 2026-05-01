@@ -122,6 +122,42 @@ Override applied **once per day at first entry** via `_apply_vix_regime_override
 
 ---
 
+## Variant Comparison & Directional Pivot Strategy (2026-05-01 onward)
+
+Three HYDRA variants run in parallel in dry-run mode for head-to-head A/B/C
+comparison. All three: 75pt × 2c, FOMC bypass active, real Saxo quotes for
+credit estimation but no real orders. Same MKT-024 / VIX-regime / stop
+buffers. The **only** difference is in entry-schedule + close behavior:
+
+| Variant | Entry times | Close behavior |
+|---------|-------------|----------------|
+| **A (control)** | 10:15, 10:45, 11:15 (10:15 dropped by VIX regime → effective 10:45 + 11:15) | Standard: stop at credit + buffer; expire at settlement; conditional E#3 at 14:00 (Upday-035 / Downday-035) |
+| **B (pivot, stressed-only)** | **10:15 + 10:45** (re-enabled 10:15) | Pre-entry breach gate (defer 15min if SPX already ±0.25% from open) + continuous monitor (close stressed leg only — call on up-breach, put on down-breach) + conditional E#3 at 14:00 |
+| **C (pivot, both-legs)** | **10:15 + 10:45** | Same gate + monitor as B but `close_mode: both_sides` — closes ALL 4 legs of each open base entry on breach + conditional E#3 at 14:00 |
+
+### Directional pivot rules (variant B/C only — gated by `directional_pivot.enabled`)
+
+1. **Pre-entry defer-and-watch**: at each base entry time, if `|current_spx - spx_open| / spx_open >= 0.25%`, mark entry DEFERRED and watch for band re-entry up to `pre_entry_defer_minutes` (default 15). Place when band re-enters; permanent skip when window expires (skip_reason `directional_bias_defer_timeout`).
+2. **Continuous breach monitor**: every heartbeat, check the same condition. If breached AND not already fired today, close all OPEN base entries via `close_mode`. Idempotent — `directional_pivot_fired` flag persists in state.
+3. **Cascade-skip**: when continuous monitor fires, any pending deferred entries are permanently skipped (skip_reason `pivot_already_fired_today_<direction>`).
+4. **Conditional E#3 at 14:00 — UNCHANGED**: still evaluates Upday-035 / Downday-035 at 14:00 based on SPX-vs-open AT 14:00, independent of pivot history. Fires put-only on up-breach, call-only on down-breach.
+5. **Stop precedence**: stops fire first if hit before the pivot threshold (Option 1). Already-stopped sides are skipped on subsequent pivot fire.
+6. **New entry status flags**: `IronCondorEntry.{call,put}_side_pivot_closed` distinguish pivot-closed sides from stopped/expired/skipped. Treated as "done" by `active_entries`. P&L treatment identical to a stop.
+
+### How to read variant B/C journal entries
+
+- Entries placed at **10:15** and **10:45** (not the canonical 10:45 + 11:15 of variant A).
+- An entry with `override_reason: directional_bias_defer_timeout` was deferred at its scheduled time and skipped after 15-min defer window expired.
+- An entry with `override_reason: pivot_already_fired_today_up|down` was cascade-skipped because the continuous monitor fired earlier in the day.
+- An entry with `call_side_pivot_closed: true` (or `put_side_pivot_closed`) was closed mid-day by the continuous-monitor pivot trigger, not by a stop. The other side may still be open (if `close_mode: stressed_only`).
+- The conditional E#3 at 14:00 fires identically across all three variants — base entry behavior is the only differentiator.
+
+### `spx_open` / `vix_open` anchor (NEW 2026-05-01)
+
+`MarketData.update_spx` and `update_vix` now gate intraday-OHLC capture (open/high/low) to the regular session via `_is_regular_session_or_later()` — only ticks at-or-after 9:30 ET update spx_open/spx_high/spx_low/vix_open/vix_high/vix_low. Pre-market Saxo extended-hours quotes (available from 7:00 AM ET) update the live spx_price/vix but do NOT contribute to the OHLC anchor. HYDRA __init__ also unconditionally restores OHLC from the state file at startup so mid-day restarts in dry-run preserve the actual 9:30 anchor. **All "% from open" calculations** (Upday-035, Downday-035, whipsaw filter, ROC gate, directional pivot) use this corrected anchor. Apr 30 evidence: bot stored spx_open=7138.71 vs actual 9:30 open of 7169.97 — 31-point reference error invisible at typical 1%+ moves but fatal for the pivot's 0.25% primary threshold.
+
+---
+
 ## 2026 FOMC Calendar
 
 HYDRA's FOMC handling (updated 2026-04-19 after A/B backtest over 2025-01 → 2026-04):

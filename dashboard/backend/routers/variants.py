@@ -132,20 +132,33 @@ def _file_age_seconds(path: Optional[Path]) -> Optional[float]:
 
 
 def _read_variant_config(path: Optional[Path]) -> dict:
-    """Read a variant's config.json so the UI can show what's actually different."""
+    """Read a variant's config.json so the UI can show what's actually different.
+
+    Includes the directional-pivot block (added 2026-05-01) so the Comparison
+    page's ConfigDelta table can show variant B (`stressed_only`) vs variant
+    C (`both_sides`) — that's the headline difference between B and C.
+    """
     if path is None:
         return {}
     try:
         with open(path) as f:
             cfg = json.load(f)
         s = cfg.get("strategy", {})
+        pivot = s.get("directional_pivot") or {}
         return {
             "max_spread_width": s.get("max_spread_width"),
+            "contracts_per_entry": s.get("contracts_per_entry"),
+            "entry_times": s.get("entry_times"),
             "call_starting_otm_multiplier": s.get("call_starting_otm_multiplier"),
             "put_starting_otm_multiplier": s.get("put_starting_otm_multiplier"),
             "call_stop_buffer": s.get("call_stop_buffer"),
             "put_stop_buffer": s.get("put_stop_buffer"),
             "dry_run": cfg.get("dry_run"),
+            # Directional pivot exposure (2026-05-01) — rendered in ConfigDelta
+            "directional_pivot_enabled": bool(pivot.get("enabled", False)),
+            "directional_pivot_close_mode": pivot.get("close_mode") if pivot.get("enabled") else None,
+            "directional_pivot_threshold_pct": pivot.get("threshold_pct") if pivot.get("enabled") else None,
+            "directional_pivot_defer_minutes": pivot.get("pre_entry_defer_minutes") if pivot.get("enabled") else None,
         }
     except Exception as e:
         logger.warning(f"Could not read variant config {path}: {e}")
