@@ -8846,10 +8846,26 @@ class HydraStrategy(MEICStrategy):
                                    and not entry.call_side_expired)
                     put_active = (not entry.put_side_stopped and not entry.put_side_skipped
                                   and not entry.put_side_expired)
+                    # Skip a side's unrealized contribution when its spread_value
+                    # is 0 with non-trivial credit. That pattern means the bot
+                    # hasn't refreshed prices for this side yet (just-placed
+                    # entry, default IronCondorEntry.{call,put}_spread_value =
+                    # 0.0), and naively computing credit-0 would produce a
+                    # phantom +credit unrealized that vanishes on the next tick
+                    # — visible as a misleading first-point spike on the
+                    # dashboard's pnl_history chart. Wait one tick, get a real
+                    # mark, then contribute. (2026-05-05 fix; same pattern as
+                    # bots/hydra/brandon/take_profit.py:evaluate.)
                     if call_active:
-                        net_pnl += entry.call_spread_credit - (entry.call_spread_value or 0)
+                        if entry.call_spread_credit > 0 and (entry.call_spread_value or 0) == 0:
+                            pass  # stale — contribute 0 this minute
+                        else:
+                            net_pnl += entry.call_spread_credit - (entry.call_spread_value or 0)
                     if put_active:
-                        net_pnl += entry.put_spread_credit - (entry.put_spread_value or 0)
+                        if entry.put_spread_credit > 0 and (entry.put_spread_value or 0) == 0:
+                            pass
+                        else:
+                            net_pnl += entry.put_spread_credit - (entry.put_spread_value or 0)
                     # Surviving long legs after MKT-025 stop
                     if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False) and entry.long_call_uic:
                         net_pnl += entry.long_call_price * 100 * entry.contracts
