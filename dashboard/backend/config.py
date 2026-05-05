@@ -27,24 +27,28 @@ class Settings(BaseSettings):
     # below — to add a variant D, add 5 fields here and the router picks it up.
     comparison_mode_enabled: bool = False
 
-    # Variant A — canonical/live HYDRA (75pt baseline, no pivot).
-    variant_a_label: str = "A (75pt baseline)"
+    # Variant A — canonical baseline HYDRA (75pt MKT-027, no Brandon stack, no pivot).
+    variant_a_label: str = "A (baseline 75pt)"
 
-    # Variant B (75pt + directional pivot, close stressed leg only)
+    # Variant B — Brandon Trojan Horse stack + HYDRA's MKT-027 dynamic widths (mirrors A).
+    # TP@80% is LIVE; GEX adjuster / GEX breach exit / defensive overlay run shadow-only
+    # for the first 4 weeks. Polygon API key required (see deploy/polygon.env.example).
     variant_b_state_file: Path = Path("/opt/calypso/data/variant_b/hydra_state.json")
     variant_b_metrics_file: Path = Path("/opt/calypso/data/variant_b/hydra_metrics.json")
     variant_b_backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
     variant_b_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
     variant_b_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
-    variant_b_label: str = "B (pivot, stressed-only)"
+    variant_b_label: str = "B (Brandon, 75pt dynamic)"
 
-    # Variant C (75pt + directional pivot, close both legs)
+    # Variant C — Brandon Trojan Horse stack + Brandon's narrow 5/10pt spreads.
+    # Same Brandon stack as B; only spread width differs (narrow_spread.enabled=true
+    # overrides MKT-027 with 5pt at VIX<22, 10pt at VIX>=22).
     variant_c_state_file: Path = Path("/opt/calypso/data/variant_c/hydra_state.json")
     variant_c_metrics_file: Path = Path("/opt/calypso/data/variant_c/hydra_metrics.json")
     variant_c_backtesting_db: Path = Path("/opt/calypso/data/variant_c/backtesting.db")
     variant_c_log_file: Path = Path("/opt/calypso/logs/hydra_variant_c/bot.log")
     variant_c_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
-    variant_c_label: str = "C (pivot, both-legs)"
+    variant_c_label: str = "C (Brandon, narrow 5/10pt)"
 
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")

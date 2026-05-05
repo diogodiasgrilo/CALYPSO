@@ -235,7 +235,9 @@ class HydraStrategy(MEICStrategy):
     - Progressive Call Tightening (MKT-020): Scans from 2.5x OTM inward for viable credit
     - Progressive Put Tightening (MKT-022): Scans from 2.75x OTM inward for viable credit
     - VIX-Scaled Spread Width (MKT-027): round(VIX × 6.0 / 5) × 5, floor 25pt, cap CONFIGURABLE
-      (variant A=50pt, B=110pt, C=25pt — driven by max_spread_width per config)
+      via max_spread_width per config. Live values: variant A=75pt; variant B=75pt
+      (matches A; tests Brandon additions in isolation); variant C uses Brandon's
+      narrow_spread override (5pt at VIX<22, 10pt otherwise) instead of MKT-027.
     - Buffer Decay (MKT-042): Stop buffer starts at 2.5x, decays to 1x over 4.0 hours
     - Calm Entry (MKT-043): Delays entry up to 5min when SPX >15pt move in 3min
     - Anti-Whipsaw: Skips entries when intraday range > 1.75x expected move
@@ -358,8 +360,8 @@ class HydraStrategy(MEICStrategy):
         if self.api_pacing_multiplier != 1.0:
             logger.info(f"  API pacing multiplier: {self.api_pacing_multiplier}x (variant={HYDRA_VARIANT_ID or 'a'})")
 
-        # Directional pivot strategy (HYDRA variant B/C, 2026-05-01).
-        # Two new behaviors gated by `directional_pivot.enabled`:
+        # Directional pivot strategy (introduced 2026-05-01 in v1.26.0).
+        # Two behaviors gated by `directional_pivot.enabled`:
         #   1. Pre-entry defer gate: if SPX is already >= threshold from
         #      session open at an entry time, mark the entry DEFERRED and
         #      watch for the band re-entry for up to `pre_entry_defer_minutes`.
@@ -372,8 +374,15 @@ class HydraStrategy(MEICStrategy):
         #      Conditional E#3 (Upday-035 / Downday-035) is unaffected — it
         #      evaluates SPX-vs-open at 14:00 independently of pivot history.
         #
-        # When `enabled: false` (variant A default), all checks no-op and the
-        # standard MEIC entry/exit paths run unchanged.
+        # When `enabled: false`, all checks no-op and the standard MEIC
+        # entry/exit paths run unchanged.
+        #
+        # Status as of v1.27 (Brandon refactor): all variants currently run
+        # with `enabled: false`. Variants A baseline + new B/C (Brandon
+        # Trojan Horse stack) all leave pivot dormant; new B/C use Brandon's
+        # GEX-breach exit signal (shadow) for the same protective role.
+        # Pivot logic is preserved as a togglable alternative — flip
+        # `directional_pivot.enabled: true` per-variant config to revive.
         pivot_cfg = strategy_cfg.get("directional_pivot", {}) or {}
         self.directional_pivot_enabled = bool(pivot_cfg.get("enabled", False))
         self.directional_pivot_threshold_pct = float(pivot_cfg.get("threshold_pct", 0.0025))
@@ -1209,7 +1218,7 @@ class HydraStrategy(MEICStrategy):
     def _is_entry_time(self) -> bool:
         """
         Override: extend entry window for (1) MKT-031 smart-entry scouting and
-        (2) directional-pivot defer-and-watch (variant B/C, 2026-05-01).
+        (2) directional-pivot defer-and-watch (introduced 2026-05-01, currently disabled across all variants).
 
         Without (1): if early entry triggers at 11:07 for 11:15 slot, the retry
         loop calls base _is_entry_time() which checks 11:15 <= 11:07 → False →
@@ -2164,7 +2173,7 @@ class HydraStrategy(MEICStrategy):
         return None
 
     # =========================================================================
-    # DIRECTIONAL PIVOT (HYDRA variant B/C, 2026-05-01)
+    # DIRECTIONAL PIVOT (directional_pivot, introduced 2026-05-01)
     #
     # Pre-entry defer gate + continuous breach monitor. When SPX moves >=
     # threshold from session open, base entries (E#1, E#2) are either deferred
@@ -4141,7 +4150,7 @@ class HydraStrategy(MEICStrategy):
         entry_num = self._next_entry_index + 1
         logger.info(f"HYDRA: Initiating Entry #{entry_num} of {self._effective_total_entry_count()}")
 
-        # Directional pivot pre-entry gate (HYDRA variant B/C, 2026-05-01).
+        # Directional pivot pre-entry gate (directional_pivot, introduced 2026-05-01).
         # Before any other filters run (including the calm-entry delay), check
         # whether SPX has already moved >= threshold from session open. If so,
         # mark the entry DEFERRED and watch the band for re-entry up to
@@ -8279,7 +8288,7 @@ class HydraStrategy(MEICStrategy):
     # variant's `api_pacing_multiplier` so parallel variants don't blow past
     # the Saxo ~60 req/min sustained limit. Vigilant mode is left at the
     # parent's value (2s) because stop detection latency is safety-critical.
-    # Multiplier 1.0 (variant A default) is a no-op — parent behavior unchanged.
+    # Multiplier 1.0 (default) is a no-op — parent behavior unchanged.
     # =========================================================================
 
     def get_recommended_check_interval(self) -> int:
@@ -10128,7 +10137,7 @@ class HydraStrategy(MEICStrategy):
             # MKT-036: Restore stop confirmation avoided counter
             self.daily_state.stops_avoided_mkt036 = saved_state.get("stops_avoided_mkt036", 0)
 
-            # Directional-pivot state (HYDRA variant B/C, 2026-05-01).
+            # Directional-pivot state (directional_pivot, introduced 2026-05-01).
             # All fields default to a "not fired" state for backwards compat
             # with state files written before the pivot strategy was added.
             self.daily_state.directional_pivot_fired = saved_state.get("directional_pivot_fired", False)
@@ -10234,7 +10243,7 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.put_side_expired = put_expired
                 restored_entry.call_side_skipped = call_skipped
                 restored_entry.put_side_skipped = put_skipped
-                # Directional-pivot close flags (HYDRA variant B/C, 2026-05-01)
+                # Directional-pivot close flags (directional_pivot, introduced 2026-05-01)
                 restored_entry.call_side_pivot_closed = entry_data.get("call_side_pivot_closed", False)
                 restored_entry.put_side_pivot_closed = entry_data.get("put_side_pivot_closed", False)
                 # Fix #61: Restore merge flags
@@ -10620,7 +10629,7 @@ class HydraStrategy(MEICStrategy):
                     entry.put_side_expired = saved.get("put_side_expired", False)
                     entry.call_side_skipped = saved.get("call_side_skipped", False)
                     entry.put_side_skipped = saved.get("put_side_skipped", False)
-                    # Directional-pivot close flags (HYDRA variant B/C, 2026-05-01)
+                    # Directional-pivot close flags (directional_pivot, introduced 2026-05-01)
                     entry.call_side_pivot_closed = saved.get("call_side_pivot_closed", False)
                     entry.put_side_pivot_closed = saved.get("put_side_pivot_closed", False)
 

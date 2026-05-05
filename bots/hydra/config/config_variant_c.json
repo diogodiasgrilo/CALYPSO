@@ -1,0 +1,173 @@
+{
+  "_comment_variant": "HYDRA Variant C — Brandon Trojan Horse stack with Brandon's narrow 5/10pt spread widths (his actual rule from the interview). Same Brandon feature stack as variant B; only spread width differs. Dry-run for the first 4 weeks. After observation: B vs C tells us whether narrow widths help on top of Brandon's additions.",
+  "bot_name": "HYDRA",
+  "dry_run": true,
+  "saxo_api": {
+    "environment": "live",
+    "app_key": "FROM_SECRET_MANAGER",
+    "app_secret": "FROM_SECRET_MANAGER",
+    "redirect_uri": "http://localhost:8000/callback"
+  },
+  "strategy": {
+    "_comment_widths": "MKT-027 settings here are unused at runtime — strategy.brandon.narrow_spread.enabled=true overrides _get_vix_adjusted_spread_width with Brandon's 5/10pt rule. Values kept aligned with variant A's VM config (max=75pt) for consistency / debugging clarity.",
+    "underlying_symbol": "US500.I",
+    "underlying_uic": 4913,
+    "option_root_uic": 128,
+    "vix_spot_uic": 10606,
+    "entry_times": ["10:15", "10:45", "11:15"],
+    "entry_window_minutes": 5,
+    "spread_vix_multiplier": 6.0,
+    "min_spread_width": 25,
+    "call_min_spread_width": 25,
+    "put_min_spread_width": 25,
+    "max_spread_width": 75,
+    "min_credit_per_side": 1.0,
+    "max_credit_per_side": 1.75,
+    "credit_balance_tolerance": 0.25,
+    "one_sided_entries_enabled": true,
+    "put_only_max_vix": 15.0,
+    "min_viable_credit_per_side": 2.0,
+    "min_viable_credit_put_side": 2.75,
+    "call_credit_floor": 0.2,
+    "put_credit_floor": 0.3,
+    "min_call_otm_distance": 25,
+    "min_put_otm_distance": 25,
+    "call_starting_otm_multiplier": 3.5,
+    "put_starting_otm_multiplier": 4.0,
+    "target_delta": 8,
+    "min_delta": 5,
+    "max_delta": 15,
+    "call_stop_buffer": 0.75,
+    "put_stop_buffer": 1.75,
+    "price_based_stop_points": null,
+    "whipsaw_range_skip_mult": 1.75,
+    "max_vix_entry": 999,
+    "contracts_per_entry": 1,
+    "downday_callonly_enabled": true,
+    "downday_threshold_pct": 0.003,
+    "downday_theoretical_put_credit": 2.6,
+    "conditional_entry_times": ["14:00"],
+    "conditional_e6_enabled": false,
+    "conditional_e7_enabled": false,
+    "conditional_downday_e6_enabled": true,
+    "conditional_downday_e7_enabled": false,
+    "conditional_downday_threshold_pct": 0.0025,
+    "conditional_upday_e6_enabled": true,
+    "upday_threshold_pct": 0.0025,
+    "base_entry_downday_callonly_pct": null,
+    "fomc_t1_skip_enabled": true,
+    "fomc_t1_callonly_enabled": false,
+    "fomc_announcement_skip": false,
+    "cushion_nearstop_pct": null,
+    "cushion_recovery_pct": null,
+    "buffer_decay_start_mult": 2.5,
+    "buffer_decay_hours": 4.0,
+    "calm_entry_lookback_min": 3,
+    "calm_entry_threshold_pts": 15.0,
+    "calm_entry_max_delay_min": 5,
+    "stop_confirmation_enabled": false,
+    "stop_confirmation_seconds": 75,
+    "early_close_enabled": false,
+    "early_close_roc_threshold": 0.03,
+    "early_close_cost_per_position": 5.0,
+    "hold_check_enabled": true,
+    "hold_check_lean_tolerance": 1.0,
+    "min_entries_before_roc_gate": 3,
+    "vix_regime": {
+      "enabled": true,
+      "breakpoints": [18.0, 22.0, 28.0],
+      "max_entries": [2, 2, 2, 1],
+      "put_stop_buffer": [null, 2.50, 1.50, null],
+      "call_stop_buffer": [null, 1.50, 1.00, null],
+      "min_call_credit": [1.0, 0.5, 0.3, 0.3],
+      "min_put_credit": [1.25, 0.75, 0.5, 0.4],
+      "shadow_call_otm": [40.0, 50.0, 75.0, 75.0],
+      "shadow_put_otm": [50.0, 75.0, 110.0, 90.0]
+    },
+    "directional_pivot": {
+      "_comment": "Disabled in variant C — Brandon GEX-breach exit (shadow) plays the same role.",
+      "enabled": false,
+      "threshold_pct": 0.0025,
+      "close_mode": "both_sides",
+      "pre_entry_defer_minutes": 15
+    },
+    "brandon": {
+      "_comment": "Identical Brandon stack to variant B; only narrow_spread.enabled differs. Per Brandon: 5pt at VIX < 22, 10pt at VIX >= 22 (plus a 25pt safety ceiling). All other Brandon features are fully LIVE (TP / strike adjuster / breach exit / overlay). Only shadow behavior is hydra_stop_shadow — same as variant B.",
+      "enabled": true,
+      "take_profit": {
+        "enabled": true,
+        "threshold": 0.80
+      },
+      "narrow_spread": {
+        "enabled": true,
+        "breakpoint_vix": 22.0,
+        "width_low": 5,
+        "width_high": 10
+      },
+      "gex": {
+        "enabled": true,
+        "polygon_api_key_env": "POLYGON_API_KEY",
+        "polygon_underlying": "SPX",
+        "strike_adjuster_enabled": true,
+        "breach_exit_enabled": true,
+        "breach_confirmation_seconds": 90,
+        "decel_min_pct": 0.05,
+        "accel_min_pct": 0.10,
+        "max_shift_pts": 25.0,
+        "shift_buffer_pts": 5.0
+      },
+      "defensive_overlay": {
+        "enabled": true,
+        "trigger_distance_pts": 25.0,
+        "butterfly_width_pts": 10,
+        "butterfly_cutoff_hour": 12,
+        "butterfly_cutoff_minute": 30
+      },
+      "hydra_stop_shadow": {
+        "_comment": "When true, computes HYDRA's existing credit+buffer stop every tick in parallel without acting. First fire per side per day is Telegrammed for head-to-head comparison against Brandon's GEX breach (which IS the live stop in B/C).",
+        "enabled": true
+      }
+    }
+  },
+  "trend_filter": {
+    "enabled": true,
+    "ema_short_period": 20,
+    "ema_long_period": 40,
+    "ema_neutral_threshold": 0.002,
+    "recheck_each_entry": true,
+    "chart_bars_count": 50,
+    "chart_horizon_minutes": 1
+  },
+  "smart_entry": {
+    "enabled": false,
+    "window_minutes": 10,
+    "score_threshold": 65,
+    "momentum_threshold_pct": 0.05
+  },
+  "vix_time_shift": {
+    "enabled": false,
+    "medium_vix_threshold": 20.0,
+    "high_vix_threshold": 23.0
+  },
+  "long_salvage": {
+    "short_only_stop": false,
+    "enabled": true,
+    "min_profit": 10.0
+  },
+  "filters": {
+    "fomc_blackout": true
+  },
+  "alerts": {
+    "enabled": true,
+    "phone_number": "+1XXXXXXXXXX",
+    "email": "your@email.com"
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_dir": "logs/hydra_variant_c",
+    "google_sheets_enabled": true,
+    "spreadsheet_name": "Calypso_HYDRA_Variant_C",
+    "strategy_type": "hydra_brandon_narrow"
+  },
+  "api_pacing_multiplier": 2.0
+}

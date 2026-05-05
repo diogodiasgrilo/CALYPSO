@@ -359,7 +359,7 @@ class IronCondorEntry:
     put_side_expired: bool = False   # Put spread expired worthless (PROFIT - kept credit)
     call_side_skipped: bool = False  # Call side was never opened (HYDRA one-sided entry)
     put_side_skipped: bool = False   # Put side was never opened (HYDRA one-sided entry)
-    # Directional-pivot close (HYDRA variant B/C, 2026-05-01): closed mid-day
+    # Directional-pivot close (directional_pivot, introduced 2026-05-01): closed mid-day
     # because SPX moved >= 0.25% from session open. Distinguished from
     # *_side_stopped (which uses credit+buffer threshold) so the journal /
     # dashboard / HOMER prompt can attribute the close to the pivot rule
@@ -544,7 +544,7 @@ class MEICDailyState:
     credit_gate_skips: int = 0  # Fix #57: Times credit gate skipped/modified entry
     stops_avoided_mkt036: int = 0  # MKT-036: Times breach recovered before confirmation
 
-    # Directional-pivot strategy state (HYDRA variant B/C, 2026-05-01).
+    # Directional-pivot strategy state (directional_pivot, introduced 2026-05-01).
     # Always 0/empty/None for base MEIC and for HYDRA variant A which has
     # the pivot rule disabled. Tracked here (not subclassed) so state
     # serialization stays uniform across all variants.
@@ -5480,7 +5480,7 @@ class MEICStrategy:
                                         "put_side_expired": entry_data.get("put_side_expired", False),
                                         "call_side_skipped": entry_data.get("call_side_skipped", False),
                                         "put_side_skipped": entry_data.get("put_side_skipped", False),
-                                        # Directional-pivot close flags (HYDRA variant B/C, 2026-05-01)
+                                        # Directional-pivot close flags (directional_pivot, introduced 2026-05-01)
                                         "call_side_pivot_closed": entry_data.get("call_side_pivot_closed", False),
                                         "put_side_pivot_closed": entry_data.get("put_side_pivot_closed", False),
                                         # Commission tracking
@@ -5511,7 +5511,7 @@ class MEICStrategy:
                                     put_expired = entry_data.get("put_side_expired", False)
                                     call_skipped = entry_data.get("call_side_skipped", False)
                                     put_skipped = entry_data.get("put_side_skipped", False)
-                                    # Pivot-closed (HYDRA variant B/C) — same disposition as stopped
+                                    # Pivot-closed (directional_pivot rule) — same disposition as stopped
                                     # for "is this side fully done?" logic.
                                     call_pivot_closed = entry_data.get("call_side_pivot_closed", False)
                                     put_pivot_closed = entry_data.get("put_side_pivot_closed", False)
@@ -7372,7 +7372,7 @@ class MEICStrategy:
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
                 "double_stops": self.daily_state.double_stops,
                 "circuit_breaker_opens": self.daily_state.circuit_breaker_opens,
-                # Directional-pivot state (HYDRA variant B/C, 2026-05-01)
+                # Directional-pivot state (directional_pivot, introduced 2026-05-01)
                 "directional_pivot_fired": getattr(self.daily_state, "directional_pivot_fired", False),
                 "directional_pivot_direction": getattr(self.daily_state, "directional_pivot_direction", None),
                 "directional_pivot_fired_at": getattr(self.daily_state, "directional_pivot_fired_at", ""),
@@ -7419,7 +7419,7 @@ class MEICStrategy:
                     "put_side_expired": entry.put_side_expired,
                     "call_side_skipped": entry.call_side_skipped,
                     "put_side_skipped": entry.put_side_skipped,
-                    # Directional-pivot close flags (HYDRA variant B/C, 2026-05-01)
+                    # Directional-pivot close flags (directional_pivot, introduced 2026-05-01)
                     "call_side_pivot_closed": getattr(entry, "call_side_pivot_closed", False),
                     "put_side_pivot_closed": getattr(entry, "put_side_pivot_closed", False),
                     # Fix #61: Position merge tracking

@@ -1,5 +1,5 @@
 [Unit]
-Description=HYDRA Variant C (25pt spread, dry-run, parallel head-to-head)
+Description=HYDRA Variant C (Brandon Trojan Horse stack: TP@80% live, GEX/overlay/breach shadow; Brandon 5/10pt narrow widths; dry-run)
 After=network.target token_keeper.service
 Wants=token_keeper.service
 
@@ -10,6 +10,12 @@ Group=calypso
 WorkingDirectory=/opt/calypso
 Environment="HYDRA_VARIANT_ID=c"
 Environment="PYTHONUNBUFFERED=1"
+# Polygon API key for the Brandon GEX features. Create /etc/calypso/polygon.env
+# with:  POLYGON_API_KEY=pk_xxxxxxxxxxxxxxxxxxxxxxxx
+# The leading dash makes it optional — if the file is absent, GEX features
+# silently disable (logged warning, no crash) and only TP + narrow_spread
+# stay active.
+EnvironmentFile=-/etc/calypso/polygon.env
 ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main --config bots/hydra/config/config_variant_c.json
 Restart=always
 RestartSec=30

@@ -224,10 +224,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
 
     trade_logger.log_event("Authentication successful!")
 
-    # Initialize strategy
     strategy = None
     try:
-        strategy = HydraStrategy(client, config, trade_logger, dry_run=dry_run)
+        strategy_cfg = config.get("strategy", {}) or {}
+        brandon_cfg = strategy_cfg.get("brandon") or {}
+        if brandon_cfg.get("enabled", False):
+            from bots.hydra.brandon.strategy import BrandonHydraStrategy
+            trade_logger.log_event("Loading BrandonHydraStrategy (TP / GEX / overlay / narrow-spread)")
+            strategy = BrandonHydraStrategy(client, config, trade_logger, dry_run=dry_run)
+        else:
+            strategy = HydraStrategy(client, config, trade_logger, dry_run=dry_run)
     except Exception as e:
         trade_logger.log_error(f"Failed to initialize strategy: {e}")
         logger.exception("Strategy initialization failed")
@@ -427,12 +433,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             break
                     continue
 
-                # Directional-pivot continuous monitor (HYDRA variant B/C, 2026-05-01).
+                # Directional-pivot continuous monitor (introduced 2026-05-01 in v1.26.0).
                 # Fires BEFORE the strategy state machine on each heartbeat, so a
                 # breach detected this tick can close open base entries before the
                 # state machine's stop-loss / entry-placement logic runs. Idempotent
                 # within the day (won't re-fire after the first trigger). No-op when
-                # `directional_pivot.enabled: false` (variant A default).
+                # `directional_pivot.enabled: false` (default — disabled across all
+                # variants as of v1.27; new B/C use Brandon GEX-breach exit instead).
                 # Wrapped in try/except so a pivot bug never blocks the main loop.
                 try:
                     if hasattr(strategy, "_check_directional_pivot_continuous"):

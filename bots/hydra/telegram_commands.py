@@ -228,17 +228,19 @@ EDITABLE_PARAMS = {
         "type": "bool",
         "description": "FOMC Day 2 blackout: skip entries on announcement day (currently OFF — coin flip + slight positive edge)",
     },
-    # Directional pivot strategy (variant B/C, 2026-05-01). When `pivot_enabled`
+    # Directional pivot strategy (introduced 2026-05-01 in v1.26.0; currently
+    # disabled across all variants as of v1.27 — new variants B/C use Brandon's
+    # GEX-breach exit signal for the same protective role). When `pivot_enabled`
     # is true, base entries (E#1, E#2) are gated by a pre-entry breach check
-    # (defer + watch up to `pivot_defer_min` minutes) and a continuous
-    # breach monitor closes any open base entries via `pivot_close_mode`
+    # (defer + watch up to `pivot_defer_min` minutes) and a continuous breach
+    # monitor closes any open base entries via `pivot_close_mode`
     # ("stressed_only" = close the side facing the move, "both_sides" = close
     # all 4 legs). Conditional E#3 at 14:00 (Upday-035 / Downday-035) is
-    # unaffected. Variant A keeps `pivot_enabled: false` as the control.
+    # unaffected. Togglable per-variant via config.
     "pivot_enabled": {
         "path": "strategy.directional_pivot.enabled",
         "type": "bool",
-        "description": "Directional pivot strategy (variant B/C only — close base entries on SPX ±0.25% from open)",
+        "description": "Directional pivot strategy (close base entries on SPX ±0.25% from open). Currently disabled across variants A/B/C; togglable.",
     },
     "pivot_threshold": {
         "path": "strategy.directional_pivot.threshold_pct",

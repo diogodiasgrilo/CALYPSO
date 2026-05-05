@@ -32,6 +32,78 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 1.27.2 (2026-05-05 PM): Hedge position tracking for the defensive overlay.
+  Closes the dry-run gap where overlay placements were logged but not journaled.
+  New `bots/hydra/brandon/hedge_position.py` module: HedgeLeg dataclass,
+  Black-Scholes call/put pricers, per-leg P&L at expiry (long: +(intrinsic −
+  fill); short: +(fill − intrinsic), × 100 × quantity), aggregated debit-spread
+  and butterfly payoff math. `BrandonHydraStrategy._brandon_place_overlay` now
+  creates HedgeLeg objects with synthetic DRY_OVERLAY_* position ids and
+  Black-Scholes-estimated fill prices (default IV 0.18 for SPX 0DTE) and stores
+  them on `self._brandon_hedge_legs[entry_number]`. New
+  `_brandon_settle_hedges(spx_settle)` runs at log_daily_summary time, computes
+  per-hedge net P&L vs SPX_close, fires per-hedge `BRANDON-OVERLAY-SETTLED`
+  Telegram + a day-aggregate `BRANDON-OVERLAY-DAY` Telegram. Idempotent within
+  the day. New override `log_daily_summary` calls settlement before parent
+  super(). Reset in `_reset_for_new_day`. Tests: 166 passing (was 138). Added:
+  `tests/test_brandon_hedge_position.py` (23 tests covering BS pricing,
+  per-leg P&L, debit-spread payoff at all three regions, butterfly payoff
+  including symmetric +/-100pt sanity check, settle_hedge aggregation),
+  `TestOverlayHedgeTracking` integration class (5 tests covering placement
+  → HedgeLeg creation, idempotent placement, settlement returns settlements,
+  settlement is idempotent within day, reset clears hedge state).
+
+- 1.27.1 (2026-05-05): Brandon Trojan Horse stack — promoted to FULLY LIVE in
+  variants B/C. Removes the "shadow" framing on GEX strike adjuster, GEX
+  breach exit, and defensive overlay — all three now act in dry-run mode
+  (and would act in live mode when dry_run is flipped off). The ONLY
+  shadow-only behavior is HYDRA's existing credit+buffer stop, which runs
+  in parallel as a counterfactual and Telegrams when it would have fired,
+  but never closes a position in B/C — Brandon's GEX breach is the live
+  stop. (a) GEX strike adjuster mutates `entry.short_*_strike` and
+  `entry.long_*_strike` BEFORE _execute_entry / _simulate_entry runs;
+  SKIP routes through HYDRA's existing one-sided entry path by setting
+  `*_side_skipped` and `*_only` flags. (b) GEX breach exit closes the IC
+  via `_close_entry_early` on a confirmed 90s sustained breach, marking
+  sides via `*_side_pivot_closed` (same disposition as a directional-pivot
+  close). Filter is anchored to the entry's short strike, not current
+  spot, so a wall stays "relevant" even after spot has moved past it.
+  (c) Defensive overlay places the proposed debit-spread / butterfly legs
+  via `_place_option_order` in live mode; in dry-run mode logs the legs
+  to journal + Telegram and skips the Saxo round-trip (per
+  SAFETY-DRY-01). (d) GEX cache TTL: 1-day → 15-min refresh, with 60s
+  failure cooldown. Polygon Starter is unlimited so cost is zero. (e) New
+  config knobs promoted from hard-coded defaults to per-variant tuning:
+  `gex.{decel_min_pct, accel_min_pct, max_shift_pts, shift_buffer_pts}`,
+  `defensive_overlay.{butterfly_cutoff_hour, butterfly_cutoff_minute}`,
+  `hydra_stop_shadow.enabled`. (f) Tests: 138 passing (was 131 in 1.27.0).
+  Added: TestStrikeAdjusterLive (4 tests), TestBreachExitLive (2 tests),
+  TestHydraShadowStop (3 tests). Removed obsolete shadow-only tests.
+
+- 1.27.0 (2026-05-04): Brandon Trojan Horse stack — new variants B/C replace the
+  retired pivot experiments (old B = stressed_only, old C = both_sides, both at
+  75pt). New variants share Brandon's three additions on top of HYDRA: (a) flat
+  80% take-profit closes the IC when its mark decays to 20% of credit received
+  (LIVE in B/C); (b) GEX-aware strike adjustment via Polygon SPX option chain —
+  shifts wings to enclose positive-gamma deceleration walls or skips a side
+  inside negative-gamma acceleration zones (SHADOW for first 4 weeks); (c) GEX
+  breach exit signal on sustained 90s breach of the outermost decel wall on the
+  threatened side (SHADOW); plus defensive overlay (debit spread before 12:30 ET
+  / butterfly after) when SPX threatens a short strike + GEX confirms accel
+  (SHADOW). Variant B uses HYDRA's MKT-027 dynamic widths (75pt cap, matches A);
+  variant C uses Brandon's narrow 5/10pt rule (5pt at VIX<22, 10pt otherwise) via
+  the new `narrow_spread` module — strategy.brandon.narrow_spread.enabled=true
+  overrides _get_vix_adjusted_spread_width. Implementation lives in
+  bots/hydra/brandon/ as a `BrandonHydraStrategy(HydraStrategy)` subclass loaded
+  by main.py when `strategy.brandon.enabled: true`. Variant A's path is
+  untouched (zero Brandon references in strategy.py). Polygon dependency: set
+  POLYGON_API_KEY env var on the VM; absent key disables GEX features
+  gracefully (no crashes). All three variants run dry-run on the VM —
+  promoting B/C to live is one config flip per file. directional_pivot is
+  disabled across all variants in v1.27 (Brandon's GEX-breach exit plays
+  the same role) but the pivot logic remains togglable. 131 new tests +
+  79 pre-existing = 210 passing.
+
 - 1.26.0 (2026-05-01 PM): Directional pivot strategy + spx_open 9:30 anchor + 75pt × 2c
   baseline. (a) `MarketData.update_spx` / `update_vix` now gate intraday-OHLC capture
   (spx_open, spx_high, spx_low, vix_open, vix_high, vix_low) to >= 9:30 ET via new
