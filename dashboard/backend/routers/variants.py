@@ -134,9 +134,11 @@ def _file_age_seconds(path: Optional[Path]) -> Optional[float]:
 def _read_variant_config(path: Optional[Path]) -> dict:
     """Read a variant's config.json so the UI can show what's actually different.
 
-    Includes the directional-pivot block (added 2026-05-01) so the Comparison
-    page's ConfigDelta table can show variant B (`stressed_only`) vs variant
-    C (`both_sides`) — that's the headline difference between B and C.
+    Exposes the Brandon Trojan Horse stack (v1.27, 2026-05-04) per-feature so
+    the Comparison page's ConfigDelta table can show variant A (no Brandon)
+    vs B/C (Brandon stack live), and within B vs C the narrow_spread
+    differentiator. The legacy directional_pivot fields are still exposed for
+    historical snapshots; in v1.27 pivot is disabled across all variants.
     """
     if path is None:
         return {}
@@ -145,6 +147,12 @@ def _read_variant_config(path: Optional[Path]) -> dict:
             cfg = json.load(f)
         s = cfg.get("strategy", {})
         pivot = s.get("directional_pivot") or {}
+        brandon = s.get("brandon") or {}
+        b_tp = brandon.get("take_profit") or {}
+        b_gex = brandon.get("gex") or {}
+        b_overlay = brandon.get("defensive_overlay") or {}
+        b_narrow = brandon.get("narrow_spread") or {}
+        b_shadow = brandon.get("hydra_stop_shadow") or {}
         return {
             "max_spread_width": s.get("max_spread_width"),
             "contracts_per_entry": s.get("contracts_per_entry"),
@@ -154,7 +162,17 @@ def _read_variant_config(path: Optional[Path]) -> dict:
             "call_stop_buffer": s.get("call_stop_buffer"),
             "put_stop_buffer": s.get("put_stop_buffer"),
             "dry_run": cfg.get("dry_run"),
-            # Directional pivot exposure (2026-05-01) — rendered in ConfigDelta
+            # Brandon Trojan Horse stack (v1.27.x, 2026-05-04). Primary
+            # differentiator between A (no Brandon) and B/C (full stack live).
+            "brandon_enabled": bool(brandon.get("enabled", False)),
+            "brandon_tp_enabled": bool(b_tp.get("enabled", False)),
+            "brandon_tp_threshold": b_tp.get("threshold") if b_tp.get("enabled") else None,
+            "brandon_gex_strike_adjuster_enabled": bool(b_gex.get("strike_adjuster_enabled", False)),
+            "brandon_gex_breach_exit_enabled": bool(b_gex.get("breach_exit_enabled", False)),
+            "brandon_overlay_enabled": bool(b_overlay.get("enabled", False)),
+            "brandon_narrow_spread_enabled": bool(b_narrow.get("enabled", False)),
+            "brandon_hydra_stop_shadow_enabled": bool(b_shadow.get("enabled", False)),
+            # Directional pivot — preserved for historical snapshots; disabled in v1.27.
             "directional_pivot_enabled": bool(pivot.get("enabled", False)),
             "directional_pivot_close_mode": pivot.get("close_mode") if pivot.get("enabled") else None,
             "directional_pivot_threshold_pct": pivot.get("threshold_pct") if pivot.get("enabled") else None,

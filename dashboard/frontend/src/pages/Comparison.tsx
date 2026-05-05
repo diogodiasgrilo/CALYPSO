@@ -63,7 +63,16 @@ interface VariantConfig {
   call_stop_buffer?: number;
   put_stop_buffer?: number;
   dry_run?: boolean;
-  // Directional pivot strategy (variant B/C, 2026-05-01)
+  // Brandon Trojan Horse stack (v1.27, 2026-05-04)
+  brandon_enabled?: boolean;
+  brandon_tp_enabled?: boolean;
+  brandon_tp_threshold?: number | null;
+  brandon_gex_strike_adjuster_enabled?: boolean;
+  brandon_gex_breach_exit_enabled?: boolean;
+  brandon_overlay_enabled?: boolean;
+  brandon_narrow_spread_enabled?: boolean;
+  brandon_hydra_stop_shadow_enabled?: boolean;
+  // Directional pivot — preserved for historical snapshots; disabled in v1.27
   directional_pivot_enabled?: boolean;
   directional_pivot_close_mode?: string | null;
   directional_pivot_threshold_pct?: number | null;
@@ -438,18 +447,22 @@ function ConfigDelta({
   // immediately sees what's being tested. Variant A is the "control"; rows
   // are bolded where ANY variant differs from variant A's value.
   const rows: Array<{ key: keyof VariantConfig; label: string }> = [
-    { key: "max_spread_width", label: "Spread width (pt)" },
+    { key: "max_spread_width", label: "Spread width cap (pt)" },
     { key: "contracts_per_entry", label: "Contracts/entry" },
     { key: "entry_times", label: "Entry times" },
     { key: "call_starting_otm_multiplier", label: "Call start ×" },
     { key: "put_starting_otm_multiplier", label: "Put start ×" },
     { key: "call_stop_buffer", label: "Call stop buffer ($)" },
     { key: "put_stop_buffer", label: "Put stop buffer ($)" },
-    // Directional pivot strategy rows (variant B/C, 2026-05-01)
-    { key: "directional_pivot_enabled", label: "Directional pivot" },
-    { key: "directional_pivot_close_mode", label: "Pivot close mode" },
-    { key: "directional_pivot_threshold_pct", label: "Pivot threshold (%)" },
-    { key: "directional_pivot_defer_minutes", label: "Pivot defer window (min)" },
+    // Brandon Trojan Horse stack (v1.27, 2026-05-04) — primary differentiator
+    // between A (no Brandon) and B/C (full stack live).
+    { key: "brandon_enabled", label: "Brandon stack" },
+    { key: "brandon_tp_enabled", label: "TP at 80% credit" },
+    { key: "brandon_gex_strike_adjuster_enabled", label: "GEX strike adjuster" },
+    { key: "brandon_gex_breach_exit_enabled", label: "GEX breach exit" },
+    { key: "brandon_overlay_enabled", label: "Defensive overlay" },
+    { key: "brandon_narrow_spread_enabled", label: "Brandon narrow spread (5/10pt)" },
+    { key: "brandon_hydra_stop_shadow_enabled", label: "HYDRA stop (shadow)" },
     { key: "dry_run", label: "Dry-run" },
   ];
 
@@ -495,6 +508,8 @@ function ConfigDelta({
                     display = v.length ? v.join(", ") : "—";
                   } else if (key === "directional_pivot_threshold_pct" && typeof v === "number") {
                     display = (v * 100).toFixed(2) + "%";
+                  } else if (key === "brandon_tp_threshold" && typeof v === "number") {
+                    display = (v * 100).toFixed(0) + "%";
                   } else if (typeof v === "boolean") {
                     display = v ? "yes" : "no";
                   } else {
