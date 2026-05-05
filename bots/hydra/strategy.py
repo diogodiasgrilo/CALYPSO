@@ -10312,6 +10312,28 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.actual_put_stop_debit = entry_data.get("actual_put_stop_debit", 0.0)
                 # v1.16.0: Restore skip reason for dashboard display
                 restored_entry.skip_reason = entry_data.get("skip_reason", "")
+                # 2026-05-05: position IDs + UICs were silently dropped on
+                # restore. In live mode the Saxo recovery path (the other
+                # branch in _recover_positions_from_saxo) repopulates these
+                # from the API; in dry mode the synthetic DRY_* IDs and the
+                # option UICs are only persisted in this state file, so a
+                # restart without restoring them left active_entries with no
+                # position IDs and no UICs — the bot couldn't refresh
+                # option prices, and the heartbeat counted Active=0 because
+                # has_any_position fell through to all-None.
+                restored_entry.short_call_position_id = entry_data.get("short_call_position_id")
+                restored_entry.long_call_position_id = entry_data.get("long_call_position_id")
+                restored_entry.short_put_position_id = entry_data.get("short_put_position_id")
+                restored_entry.long_put_position_id = entry_data.get("long_put_position_id")
+                restored_entry.short_call_uic = entry_data.get("short_call_uic")
+                restored_entry.long_call_uic = entry_data.get("long_call_uic")
+                restored_entry.short_put_uic = entry_data.get("short_put_uic")
+                restored_entry.long_put_uic = entry_data.get("long_put_uic")
+                # Spread values + total credit so dashboard cushion math and
+                # heartbeat P&L don't reset to defaults on restart.
+                restored_entry.call_spread_value = entry_data.get("call_spread_value", 0.0)
+                restored_entry.put_spread_value = entry_data.get("put_spread_value", 0.0)
+                restored_entry.total_credit = entry_data.get("total_credit", 0.0)
 
                 if is_fully_done:
                     restored_entry.is_complete = True
