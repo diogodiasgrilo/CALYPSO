@@ -118,10 +118,14 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_overlay_placed: set[tuple[int, str]] = set()
         self._brandon_hydra_shadow_fired: set[tuple[int, str]] = set()
         # Hedge legs placed during the day, keyed by entry_number. List grows
-        # when an overlay fires; cleared in _reset_for_new_day. Settled
-        # against SPX_close in log_daily_summary.
+        # when an overlay fires; cleared in _reset_for_new_day. Persisted to
+        # a sidecar JSON next to the bot's state file so a mid-day restart
+        # doesn't lose hedge tracking. Settled against SPX_close in
+        # log_daily_summary.
         self._brandon_hedge_legs: dict[int, list[HedgeLeg]] = {}
         self._brandon_hedge_settlements: list[HedgeSettlement] = []
+        self._brandon_hedge_state_path = self._brandon_resolve_hedge_state_path()
+        self._brandon_load_hedge_state()
 
         logger.info(
             "Brandon features active: tp=%s (thr=%.2f) | narrow_spread=%s | "
@@ -296,6 +300,15 @@ class BrandonHydraStrategy(HydraStrategy):
         if not call_alive and not put_alive:
             return None
 
+        # Per-side staleness check (closes the hole in evaluate_iron_condor's
+        # SUM-based check): if a side is alive with credit but spread_value
+        # is 0, that side hasn't been refreshed yet on this tick. Wait one
+        # tick rather than firing TP on bogus data.
+        if call_alive and entry.call_spread_credit > 0 and entry.call_spread_value == 0:
+            return None
+        if put_alive and entry.put_spread_credit > 0 and entry.put_spread_value == 0:
+            return None
+
         decision = take_profit.evaluate_iron_condor(
             call_credit=entry.call_spread_credit if call_alive else 0.0,
             put_credit=entry.put_spread_credit if put_alive else 0.0,
@@ -312,13 +325,27 @@ class BrandonHydraStrategy(HydraStrategy):
         except Exception as exc:
             logger.error("BRANDON-TP E#%s: close failed (%s)", entry.entry_number, exc)
             return None
+
+        # P&L attribution: HYDRA's settlement records P&L per side based on the
+        # disposition flag + actual_*_stop_debit. For a TP close at threshold T,
+        # the close cost equals the spread's mark price right now (which IS the
+        # cost-to-buy-back the spread). Recording that as actual_*_stop_debit
+        # makes settlement compute P&L = credit - close_cost = T × credit.
+        # Without this, marking sides *_expired would record the FULL credit as
+        # kept P&L — overstating profit by (1 - T) × credit per side.
+        contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
         if call_alive:
-            entry.call_side_expired = True
+            entry.call_side_stopped = True
+            entry.actual_call_stop_debit = float(entry.call_spread_value) * 100.0 * contracts \
+                if entry.call_spread_value else 0.0
         if put_alive:
-            entry.put_side_expired = True
+            entry.put_side_stopped = True
+            entry.actual_put_stop_debit = float(entry.put_spread_value) * 100.0 * contracts \
+                if entry.put_spread_value else 0.0
         return (
             f"BRANDON-TP E#{entry.entry_number}: closed {legs_closed} legs "
-            f"({legs_failed} failed) — {decision.profit_captured_pct:.1%} captured"
+            f"({legs_failed} failed) — {decision.profit_captured_pct:.1%} captured, "
+            f"close_cost call=${entry.actual_call_stop_debit:.2f} put=${entry.actual_put_stop_debit:.2f}"
         )
 
     # ------------------------------------------------------------------
@@ -373,15 +400,28 @@ class BrandonHydraStrategy(HydraStrategy):
                 except Exception as exc:
                     logger.error("BRANDON-BREACH E#%s %s: close failed (%s)", entry.entry_number, side, exc)
                     return None
-                # Mark as pivot-closed so dashboard / HOMER attribute the close
-                # to a structural rule, not a credit+buffer stop.
-                if side == "call" or self._brandon_side_alive(entry, "call"):
+                # P&L attribution: same pattern as TP. Use *_side_stopped (HYDRA's
+                # standard early-close-with-cost flag) and populate actual_*_stop_debit
+                # from the spread_value at close so settlement computes
+                # P&L = credit - close_cost correctly. *_side_pivot_closed is also set
+                # so the dashboard/HOMER can attribute the close to "Brandon breach"
+                # vs a generic stop in the journal narrative.
+                contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
+                if self._brandon_side_alive(entry, "call"):
+                    entry.call_side_stopped = True
+                    entry.actual_call_stop_debit = float(entry.call_spread_value) * 100.0 * contracts \
+                        if entry.call_spread_value else 0.0
                     setattr(entry, "call_side_pivot_closed", True)
-                if side == "put" or self._brandon_side_alive(entry, "put"):
+                if self._brandon_side_alive(entry, "put"):
+                    entry.put_side_stopped = True
+                    entry.actual_put_stop_debit = float(entry.put_spread_value) * 100.0 * contracts \
+                        if entry.put_spread_value else 0.0
                     setattr(entry, "put_side_pivot_closed", True)
                 return (
                     f"BRANDON-BREACH E#{entry.entry_number} {side}: closed "
-                    f"{legs_closed} legs ({legs_failed} failed) on confirmed wall breach"
+                    f"{legs_closed} legs ({legs_failed} failed) on confirmed wall breach, "
+                    f"close_cost call=${entry.actual_call_stop_debit:.2f} "
+                    f"put=${entry.actual_put_stop_debit:.2f}"
                 )
         return None
 
@@ -528,6 +568,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 placed_at=placed_at,
             ))
         self._brandon_hedge_legs.setdefault(entry.entry_number, []).extend(hedge_legs)
+        self._brandon_save_hedge_state()
 
         if self.dry_run:
             return
@@ -620,8 +661,12 @@ class BrandonHydraStrategy(HydraStrategy):
 
     def log_daily_summary(self):
         # Settle hedges BEFORE the parent's daily summary so they're journaled
-        # for the same day. SPX_close is in current_price by this point (the
-        # main loop updates it post-close before firing the daily summary).
+        # for the same day. We use self.current_price as the proxy for the
+        # actual SPXW PM-settlement value. The bot's last in-session price
+        # update is normally a 4:00 PM ET tick, so this is within ~0.05% of
+        # the official settlement value — acceptable for dry-run analytics.
+        # If precision matters more later, wire up Polygon's settlement
+        # endpoint or pull SPX from /v2/aggs/ticker/I:SPX/prev (next morning).
         try:
             spx_settle = float(self.current_price or 0.0)
             if spx_settle > 0:
@@ -705,12 +750,27 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_gex_profile = profile
         self._brandon_gex_profile_fetched_at = now
         self._brandon_gex_failure_at = None
+        # Surface chain coverage so a sudden gap (e.g., Polygon dropping Greeks
+        # on most strikes) shows up in the journal. Normal: dropped few. If
+        # this number spikes, GEX cluster strength is being underestimated.
+        chain_total = len(contracts)
+        with_greeks_or_iv = sum(
+            1 for c in contracts
+            if (c.get("greeks") or {}).get("gamma") is not None
+            or c.get("implied_volatility") is not None
+        )
+        contributed = len(profile.strikes)
+        dropped = chain_total - contributed
         logger.info(
-            "Brandon GEX profile refreshed: spot=%.2f, %d strikes, %d positive clusters, %d negative clusters",
+            "Brandon GEX profile refreshed: spot=%.2f, %d strikes contributed, "
+            "%d positive / %d negative clusters; chain=%d, hydrated_with_greeks_or_iv=%d, dropped=%d",
             profile.spot,
-            len(profile.strikes),
+            contributed,
             len(profile.positive_clusters(min_strength_pct=self.brandon_decel_min_pct)),
             len(profile.negative_clusters(min_strength_pct=self.brandon_accel_min_pct)),
+            chain_total,
+            with_greeks_or_iv,
+            dropped,
         )
         return profile
 
@@ -727,6 +787,108 @@ class BrandonHydraStrategy(HydraStrategy):
             or getattr(entry, f"{prefix}_side_skipped", False)
             or getattr(entry, f"{prefix}_side_pivot_closed", False)
         )
+
+    # ------------------------------------------------------------------
+    # Hedge-leg persistence (survives mid-day restart)
+    # ------------------------------------------------------------------
+
+    def _brandon_resolve_hedge_state_path(self) -> str:
+        """Return the path to the variant's hedge_legs JSON sidecar.
+
+        Lives alongside the bot's state file (same data dir) so it follows
+        the variant_<id> isolation. Format: brandon_hedge_legs.json.
+        """
+        try:
+            from bots.hydra.strategy import _PROJECT_DATA_DIR
+            return os.path.join(_PROJECT_DATA_DIR, "brandon_hedge_legs.json")
+        except Exception:
+            return "/opt/calypso/data/brandon_hedge_legs.json"
+
+    def _brandon_load_hedge_state(self) -> None:
+        """Restore hedge_legs from sidecar on startup. No-op if file absent
+        or stale (different date)."""
+        path = getattr(self, "_brandon_hedge_state_path", None)
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                blob = __import__("json").load(f)
+        except Exception as exc:
+            logger.warning("BRANDON: could not read hedge state %s: %s", path, exc)
+            return
+        # Stale day → start fresh
+        today_str = self._brandon_today_date().isoformat()
+        if blob.get("date") != today_str:
+            return
+        legs_by_entry = blob.get("legs_by_entry") or {}
+        loaded = 0
+        for ent_str, leg_dicts in legs_by_entry.items():
+            try:
+                ent = int(ent_str)
+            except (TypeError, ValueError):
+                continue
+            restored = []
+            for d in leg_dicts:
+                try:
+                    placed_at = datetime.fromisoformat(d["placed_at"])
+                except Exception:
+                    placed_at = datetime.now(timezone.utc)
+                restored.append(HedgeLeg(
+                    entry_number=int(d["entry_number"]),
+                    side=str(d["side"]),
+                    contract_type=str(d["contract_type"]),
+                    strike=float(d["strike"]),
+                    quantity=int(d["quantity"]),
+                    fill_price=float(d["fill_price"]),
+                    position_id=str(d["position_id"]),
+                    structure=str(d["structure"]),
+                    threatened_side=str(d["threatened_side"]),
+                    placed_at=placed_at,
+                ))
+            if restored:
+                self._brandon_hedge_legs[ent] = restored
+                loaded += len(restored)
+        if loaded:
+            logger.info("BRANDON: restored %d hedge legs across %d entries from %s",
+                        loaded, len(self._brandon_hedge_legs), path)
+
+    def _brandon_save_hedge_state(self) -> None:
+        """Write hedge_legs to sidecar. Called after every overlay placement
+        so a restart between placement and EOD still has the hedge tracked."""
+        path = getattr(self, "_brandon_hedge_state_path", None)
+        if not path:
+            return
+        try:
+            blob = {
+                "date": self._brandon_today_date().isoformat(),
+                "legs_by_entry": {
+                    str(ent): [
+                        {
+                            "entry_number": l.entry_number,
+                            "side": l.side,
+                            "contract_type": l.contract_type,
+                            "strike": l.strike,
+                            "quantity": l.quantity,
+                            "fill_price": l.fill_price,
+                            "position_id": l.position_id,
+                            "structure": l.structure,
+                            "threatened_side": l.threatened_side,
+                            "placed_at": l.placed_at.isoformat(),
+                        }
+                        for l in legs
+                    ]
+                    for ent, legs in self._brandon_hedge_legs.items()
+                },
+            }
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                __import__("json").dump(blob, f, indent=2)
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.warning("BRANDON: could not write hedge state %s: %s", path, exc)
+
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _brandon_today_date():
@@ -789,3 +951,10 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_hydra_shadow_fired.clear()
         self._brandon_hedge_legs.clear()
         self._brandon_hedge_settlements = []
+        # Wipe yesterday's hedge sidecar so a new-day restart won't restore it.
+        try:
+            path = getattr(self, "_brandon_hedge_state_path", None)
+            if path and os.path.exists(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.debug("BRANDON: hedge sidecar cleanup failed (non-fatal): %s", exc)

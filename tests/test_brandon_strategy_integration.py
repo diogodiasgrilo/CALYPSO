@@ -112,6 +112,11 @@ class TestTakeProfitDispatch:
         # think a side is dead because of an auto-mock.
         e.call_side_pivot_closed = False
         e.put_side_pivot_closed = False
+        # P&L attribution fields populated by Brandon TP/breach paths.
+        # Keep as concrete floats so format strings don't TypeError on a
+        # MagicMock attr.
+        e.actual_call_stop_debit = 0.0
+        e.actual_put_stop_debit = 0.0
         for k, v in kw.items():
             setattr(e, k, v)
         return e
@@ -136,8 +141,13 @@ class TestTakeProfitDispatch:
         assert result is not None
         assert "TP" in result
         inst._close_entry_early.assert_called_once_with(e)
-        assert e.call_side_expired is True
-        assert e.put_side_expired is True
+        # Brandon TP closes through HYDRA's *_side_stopped path (not _expired)
+        # so the close cost gets recorded via actual_*_stop_debit and HYDRA's
+        # P&L attribution computes credit − close_cost = 80% kept.
+        assert e.call_side_stopped is True
+        assert e.put_side_stopped is True
+        assert e.actual_call_stop_debit == pytest.approx(20.0 * 100 * 1)  # $2000
+        assert e.actual_put_stop_debit == pytest.approx(20.0 * 100 * 1)
 
     def test_skips_already_closed_sides(self):
         inst = _make_instance(brandon_take_profit_enabled=True, brandon_take_profit_threshold=0.80)
@@ -145,14 +155,15 @@ class TestTakeProfitDispatch:
         # Put: credit 100, SV 20 → 80% captured → fires
         e = self._entry(
             call_side_stopped=True,
-            call_spread_value=999.0,  # ignored
+            call_spread_value=999.0,  # ignored — call already dead
             put_spread_value=20.0,
         )
         inst._close_entry_early = MagicMock(return_value=(2, 0, []))
         result = inst._brandon_check_take_profit(e)
         assert result is not None
-        # Put expired flag set, call left as stopped
-        assert e.put_side_expired is True
+        # Put closed via Brandon TP → *_side_stopped + actual_*_stop_debit
+        assert e.put_side_stopped is True
+        assert e.actual_put_stop_debit == pytest.approx(20.0 * 100 * 1)
 
     def test_no_op_when_all_sides_already_done(self):
         inst = _make_instance(brandon_take_profit_enabled=True)
