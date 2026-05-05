@@ -1,5 +1,5 @@
 {
-  "_comment_variant": "HYDRA Variant B — Brandon Trojan Horse stack with HYDRA's current MKT-027 dynamic spread width (matches variant A). Dry-run for the first 4 weeks of observation. After observation period: review BRANDON-* shadow log lines vs. variant A live outcomes, then flip individual feature modes from 'shadow' to 'live' as data supports.",
+  "_comment_variant": "HYDRA Variant B — Brandon Trojan Horse stack with NARROW 5/10pt widths (same as variant C) but a denser 7-slot entry grid (09:31 / 09:45 / 10:15 / 10:45 / 11:15 / 11:45 / 12:15) instead of C's 3 morning slots. Goal: discover which entry times are best for Brandon's narrow-spread approach by firing all morning slots and comparing TP / breach-exit / settlement outcomes per slot. Pre-2026-05-05 design used HYDRA wide widths; that experiment was retired because Brandon GEX-ADJ + put-only VIX gate combined to skip B on most days. Dry-run only.",
   "bot_name": "HYDRA",
   "dry_run": true,
   "saxo_api": {
@@ -9,12 +9,12 @@
     "redirect_uri": "http://localhost:8000/callback"
   },
   "strategy": {
-    "_comment_widths": "MKT-027 width settings mirror variant A's actual VM config (max=75pt, floor=25pt) per the 2026-05-04 dashboard. NB: strategy.py:238 docstring claims A=50pt — that docstring is stale; dashboard is authoritative.",
+    "_comment_widths": "MKT-027 settings here are unused at runtime — strategy.brandon.narrow_spread.enabled=true overrides _get_vix_adjusted_spread_width with Brandon's 5/10pt rule. Values kept aligned with variant A's VM config (max=75pt) for consistency / debugging clarity.",
     "underlying_symbol": "US500.I",
     "underlying_uic": 4913,
     "option_root_uic": 128,
     "vix_spot_uic": 10606,
-    "entry_times": ["10:15", "10:45", "11:15"],
+    "entry_times": ["09:31", "09:45", "10:15", "10:45", "11:15", "11:45", "12:15"],
     "entry_window_minutes": 5,
     "spread_vix_multiplier": 6.0,
     "min_spread_width": 25,
@@ -28,8 +28,9 @@
     "put_only_max_vix": 15.0,
     "min_viable_credit_per_side": 2.0,
     "min_viable_credit_put_side": 2.75,
-    "call_credit_floor": 0.2,
-    "put_credit_floor": 0.3,
+    "_comment_credit_floors": "Lowered ~10× vs original variant B because narrow_spread.enabled=true makes the IC 5pt or 10pt wide instead of 75pt — credits scale roughly proportionally with spread width, so HYDRA's standard $0.20/$0.30 floors would skip every entry.",
+    "call_credit_floor": 0.02,
+    "put_credit_floor": 0.03,
     "min_call_otm_distance": 25,
     "min_put_otm_distance": 25,
     "call_starting_otm_multiplier": 2.5,
@@ -42,17 +43,20 @@
     "price_based_stop_points": null,
     "whipsaw_range_skip_mult": 1.75,
     "max_vix_entry": 999,
-    "contracts_per_entry": 1,
+    "contracts_per_entry": 15,
+    "_comment_safety_caps": "ORDER-006 caps tuned for B's 7-slot grid at 15c. Per-order cap 20 leaves headroom; per-underlying cap 90 = 1.5 ICs (15c × 4 legs × 1.5) — keeps B from monopolizing the shared $50,741 Saxo margin pool when A and C are also placing trades. With 6-IC account-wide concurrent-open ceiling, B's slice is ~1-2 simultaneous; the rest of B's 7 slots fire sequentially as TPs cycle.",
+    "max_contracts_per_order": 20,
+    "max_contracts_per_underlying": 90,
     "downday_callonly_enabled": true,
     "downday_threshold_pct": 0.003,
     "downday_theoretical_put_credit": 2.6,
-    "conditional_entry_times": ["14:00"],
+    "conditional_entry_times": [],
     "conditional_e6_enabled": false,
     "conditional_e7_enabled": false,
-    "conditional_downday_e6_enabled": true,
+    "conditional_downday_e6_enabled": false,
     "conditional_downday_e7_enabled": false,
     "conditional_downday_threshold_pct": 0.0025,
-    "conditional_upday_e6_enabled": true,
+    "conditional_upday_e6_enabled": false,
     "upday_threshold_pct": 0.0025,
     "base_entry_downday_callonly_pct": null,
     "fomc_t1_skip_enabled": true,
@@ -74,32 +78,34 @@
     "hold_check_lean_tolerance": 1.0,
     "min_entries_before_roc_gate": 3,
     "vix_regime": {
+      "_comment_max_entries": "Raised from C's [2,2,2,1] so all 7 base entry times can fire at low VIX (test goal: which slot is best). High-VIX zones still capped because 10pt × 15c = $15k margin per IC.",
       "enabled": true,
       "breakpoints": [18.0, 22.0, 28.0],
-      "max_entries": [2, 2, 2, 1],
+      "max_entries": [7, 7, 5, 2],
       "put_stop_buffer": [null, 2.50, 1.50, null],
       "call_stop_buffer": [null, 1.50, 1.00, null],
-      "min_call_credit": [1.0, 0.5, 0.3, 0.3],
-      "min_put_credit": [1.25, 0.75, 0.5, 0.4],
+      "_comment_min_credits": "Lowered ~10× vs variant A because narrow_spread.enabled=true makes the IC 5pt or 10pt wide instead of 75pt — credits scale roughly proportionally with spread width.",
+      "min_call_credit": [0.10, 0.05, 0.05, 0.05],
+      "min_put_credit": [0.15, 0.10, 0.05, 0.05],
       "shadow_call_otm": [40.0, 50.0, 75.0, 75.0],
       "shadow_put_otm": [50.0, 75.0, 110.0, 90.0]
     },
     "directional_pivot": {
-      "_comment": "Disabled in variant B — superseded by Brandon GEX-breach exit (shadow). Re-enable post observation if Brandon breach signal underperforms.",
+      "_comment": "Disabled in variant B — Brandon GEX-breach exit (live) plays the same role.",
       "enabled": false,
       "threshold_pct": 0.0025,
       "close_mode": "both_sides",
       "pre_entry_defer_minutes": 15
     },
     "brandon": {
-      "_comment": "Brandon Trojan Horse stack — fully LIVE in v1.27.1. Every Brandon feature acts (TP closes, GEX adjuster mutates strikes, GEX breach closes the IC, defensive overlay places hedge orders). The ONLY shadow behavior is hydra_stop_shadow, which computes HYDRA's existing credit+buffer stop in parallel for head-to-head comparison and Telegrams when it would have fired without ever closing anything. All numerical thresholds are config knobs — tune after observation.",
+      "_comment": "Same Brandon stack as variant C (narrow 5/10pt widths). All Brandon features LIVE: TP, narrow_spread, GEX strike adjuster, GEX breach exit, defensive overlay. Only shadow behavior is hydra_stop_shadow for head-to-head comparison.",
       "enabled": true,
       "take_profit": {
         "enabled": true,
         "threshold": 0.80
       },
       "narrow_spread": {
-        "enabled": false,
+        "enabled": true,
         "breakpoint_vix": 22.0,
         "width_low": 5,
         "width_high": 10
@@ -158,7 +164,7 @@
     "fomc_blackout": true
   },
   "google_sheets": {
-    "_comment": "Top-level google_sheets block — schema GoogleSheetsLogger.__init__ actually reads. The logging.* keys are read by LocalFileLogger and a few other consumers, but Sheets-specific config lives here. Mirrors variant A's block, only spreadsheet_name differs.",
+    "_comment": "Top-level google_sheets block — schema GoogleSheetsLogger.__init__ actually reads. Mirrors variant A's block, only spreadsheet_name differs.",
     "enabled": true,
     "credentials_file": "config/google_credentials.json",
     "spreadsheet_name": "Calypso_HYDRA_Variant_B",
@@ -175,7 +181,7 @@
     "log_dir": "logs/hydra_variant_b",
     "google_sheets_enabled": true,
     "spreadsheet_name": "Calypso_HYDRA_Variant_B",
-    "strategy_type": "hydra_brandon"
+    "strategy_type": "hydra_brandon_narrow_dense"
   },
-  "api_pacing_multiplier": 1.5
+  "api_pacing_multiplier": 2.0
 }
