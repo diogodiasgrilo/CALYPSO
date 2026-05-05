@@ -240,6 +240,18 @@ class BrandonHydraStrategy(HydraStrategy):
     # ------------------------------------------------------------------
 
     def _check_stop_losses(self) -> Optional[str]:
+        # Refresh entry prices BEFORE running any Brandon decision. Parent's
+        # _check_stop_losses does this at the top; we replace parent's flow
+        # so we have to call it ourselves. Without this, entry.{call,put}_spread_value
+        # stays at the dataclass default 0.0 right after placement, and
+        # take_profit.evaluate() sees credit > 0, value = 0 → 100% captured →
+        # fires immediately. _batch_update_entry_prices is idempotent; a
+        # parallel call from a future tick is fine.
+        try:
+            self._batch_update_entry_prices()
+        except Exception as exc:
+            logger.debug("BRANDON: price refresh failed (non-fatal): %s", exc)
+
         # 1. Take-profit (LIVE)
         if self.brandon_take_profit_enabled:
             for entry in list(self.daily_state.active_entries):

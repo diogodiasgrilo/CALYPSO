@@ -46,6 +46,19 @@ def evaluate(
     if current_value < 0:
         return TakeProfitDecision(False, 0.0, 0.0, f"invalid current_value {current_value!r}")
 
+    # current_value == 0 with credit_received > 0 is overwhelmingly likely to
+    # mean "spread_value not yet refreshed by the bot's price loop" rather
+    # than "spread genuinely worth nothing." Refuse to fire in that case —
+    # next tick will populate it with a real mark and the TP rule can decide
+    # honestly. Otherwise a TP fires the moment an entry is placed (stale
+    # default of 0.0 on IronCondorEntry.{call,put}_spread_value) and closes
+    # the position before any real price tick has happened.
+    if current_value == 0 and credit_received > 0:
+        return TakeProfitDecision(
+            False, 0.0, 0.0,
+            "current_value is 0 with non-zero credit — likely stale, holding for next price tick",
+        )
+
     threshold_value = (1.0 - threshold) * credit_received
     captured = (credit_received - current_value) / credit_received
 

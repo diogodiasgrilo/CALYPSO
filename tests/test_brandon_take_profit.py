@@ -34,11 +34,13 @@ class TestEvaluate:
         assert d.should_close is False
         assert d.profit_captured_pct == pytest.approx(0.02)
 
-    def test_fires_when_value_zero(self):
-        # Total decay — definitely close.
+    def test_does_not_fire_when_value_zero_with_credit(self):
+        # current_value=0 with credit>0 is almost always stale spread_value
+        # (just-placed entry, price not yet refreshed). Refuse to fire so
+        # the next tick can populate a real mark first.
         d = evaluate(credit_received=100.0, current_value=0.0, threshold=0.80)
-        assert d.should_close is True
-        assert d.profit_captured_pct == pytest.approx(1.0)
+        assert d.should_close is False
+        assert "stale" in d.reason
 
     def test_threshold_at_85_percent(self):
         # Brandon mentions 80–85%. Verify the upper end works.
