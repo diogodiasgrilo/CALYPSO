@@ -10329,11 +10329,12 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.long_call_uic = entry_data.get("long_call_uic")
                 restored_entry.short_put_uic = entry_data.get("short_put_uic")
                 restored_entry.long_put_uic = entry_data.get("long_put_uic")
-                # Spread values + total credit so dashboard cushion math and
-                # heartbeat P&L don't reset to defaults on restart.
-                restored_entry.call_spread_value = entry_data.get("call_spread_value", 0.0)
-                restored_entry.put_spread_value = entry_data.get("put_spread_value", 0.0)
-                restored_entry.total_credit = entry_data.get("total_credit", 0.0)
+                # spread_value and total_credit are read-only @properties
+                # derived from short/long prices and call/put credits — both
+                # of those underlying fields ARE restored above (or
+                # repopulated by the next price tick), so spread_value and
+                # total_credit recover automatically. Don't try to set them
+                # directly.
 
                 if is_fully_done:
                     restored_entry.is_complete = True
