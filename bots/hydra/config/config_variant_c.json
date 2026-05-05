@@ -157,6 +157,14 @@
   "filters": {
     "fomc_blackout": true
   },
+  "google_sheets": {
+    "_comment": "Top-level google_sheets block — schema GoogleSheetsLogger.__init__ actually reads. The logging.* keys are read by LocalFileLogger and a few other consumers, but Sheets-specific config lives here. Mirrors variant A's block, only spreadsheet_name differs.",
+    "enabled": true,
+    "credentials_file": "config/google_credentials.json",
+    "spreadsheet_name": "Calypso_HYDRA_Variant_C",
+    "worksheet_name": "Trades",
+    "strategy_type": "hydra"
+  },
   "alerts": {
     "enabled": true,
     "phone_number": "+1XXXXXXXXXX",
