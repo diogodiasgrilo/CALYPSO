@@ -10355,11 +10355,18 @@ class HydraStrategy(MEICStrategy):
             bool: True if positions were recovered, False if starting fresh
         """
         # Path-B dry-run skip (2026-04-27): no real Saxo positions exist in dry
-        # mode (DRY_* IDs only). On bot restart in dry mode, returning False
-        # tells the caller "no positions to recover" without clobbering the
-        # state file's active_entries — the dry session continues from disk.
+        # mode (DRY_* IDs only). The original comment claimed the dry session
+        # "continues from disk" — that was wrong. Returning False here without
+        # calling `_load_state_file_history()` left `daily_state.entries` empty
+        # in memory; the next state-save then clobbered today's entries on
+        # disk. Live demonstration: 2026-05-05 11:31 ET restart wiped variant A's
+        # 10:45 IC and variant C's 11:16 put-only entry from the journal even
+        # though both were on disk pre-shutdown. Fix: explicitly load today's
+        # state from disk in dry-run mode so a mid-day restart preserves the
+        # session.
         if self.dry_run:
-            logger.info("Path-B: skipping HYDRA _recover_positions_from_saxo in dry-run mode")
+            logger.info("Path-B: dry-run — loading HYDRA state from disk (no Saxo recovery in dry mode)")
+            self._load_state_file_history()
             return False
 
         logger.info("=" * 60)

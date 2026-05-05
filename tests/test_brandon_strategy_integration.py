@@ -625,6 +625,46 @@ class TestOverlayHedgeTracking:
         assert inst._brandon_hedge_settlements == []
 
 
+class TestDryRunStateRecovery:
+    """Regression coverage for the 2026-05-05 dry-run state-loss bug.
+
+    Pre-fix: a mid-day restart in dry mode short-circuited
+    `_recover_positions_from_saxo` to `return False` without loading the
+    state file. The next state-save then wrote empty entries to disk,
+    silently wiping today's session (variant A's 10:45 IC and variant C's
+    11:16 put-only entry both vanished from the journal). The fix calls
+    `_load_state_file_history()` before returning so today's entries are
+    rehydrated into `daily_state` first.
+    """
+
+    def test_dry_run_loads_state_history_before_returning(self):
+        from bots.hydra.strategy import HydraStrategy
+
+        inst = _make_instance()
+        inst.client = MagicMock()
+        inst.dry_run = True
+        inst._load_state_file_history = MagicMock(return_value=True)
+
+        result = HydraStrategy._recover_positions_from_saxo(inst)
+
+        assert result is False
+        inst._load_state_file_history.assert_called_once_with()
+
+    def test_live_mode_still_queries_saxo(self):
+        from bots.hydra.strategy import HydraStrategy
+
+        inst = _make_instance()
+        inst.dry_run = False
+        inst.client = MagicMock()
+        inst.client.get_positions.return_value = []
+        inst._load_state_file_history = MagicMock(return_value=False)
+        inst.daily_state = MagicMock()
+
+        HydraStrategy._recover_positions_from_saxo(inst)
+
+        inst.client.get_positions.assert_called_once_with()
+
+
 class TestSubclassRelationship:
     def test_is_hydra_strategy_subclass(self):
         from bots.hydra.strategy import HydraStrategy
