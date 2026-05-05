@@ -927,6 +927,19 @@ class MEICStrategy:
         self.max_vix_entry = self.strategy_config.get("max_vix_entry", DEFAULT_MAX_VIX_ENTRY)
         self.contracts_per_entry = self.strategy_config.get("contracts_per_entry", 1)
 
+        # ORDER-006 caps — config-overridable so variants that intentionally
+        # size up (Brandon narrow-spread = many small spreads) don't trip the
+        # 1c-baseline safety net. Defaults preserve the original limits for
+        # variant A / MEIC. Variant C raises these in its config because 15c ×
+        # 4 entries × 4 legs = 240 contracts per underlying, well beyond the
+        # 30 default.
+        self.max_contracts_per_order = self.strategy_config.get(
+            "max_contracts_per_order", MAX_CONTRACTS_PER_ORDER
+        )
+        self.max_contracts_per_underlying = self.strategy_config.get(
+            "max_contracts_per_underlying", MAX_CONTRACTS_PER_UNDERLYING
+        )
+
         # Commission tracking (display only - does not affect strategy logic)
         # Saxo Bank charges $2.50 per leg per contract, round-trip = $5.00 per leg
         self.commission_per_leg = self.strategy_config.get("commission_per_leg", 2.50)
@@ -3279,10 +3292,10 @@ class MEICStrategy:
             Tuple of (is_valid, error_message)
         """
         # Check 1: Per-order maximum
-        if amount > MAX_CONTRACTS_PER_ORDER:
+        if amount > self.max_contracts_per_order:
             error = (
                 f"ORDER-006 REJECTED: Order size {amount} contracts exceeds "
-                f"max {MAX_CONTRACTS_PER_ORDER}. Order: {order_description}"
+                f"max {self.max_contracts_per_order}. Order: {order_description}"
             )
             logger.critical(error)
             self.alert_service.send_alert(
@@ -3298,11 +3311,11 @@ class MEICStrategy:
         current_position_size = self._get_current_position_size()
         projected_size = current_position_size + amount
 
-        if projected_size > MAX_CONTRACTS_PER_UNDERLYING:
+        if projected_size > self.max_contracts_per_underlying:
             error = (
                 f"ORDER-006 REJECTED: Position limit exceeded. "
                 f"Current={current_position_size}, Adding={amount}, "
-                f"Projected={projected_size}, Max={MAX_CONTRACTS_PER_UNDERLYING}"
+                f"Projected={projected_size}, Max={self.max_contracts_per_underlying}"
             )
             logger.critical(error)
             self.alert_service.send_alert(
@@ -8219,10 +8232,13 @@ class MEICStrategy:
         if not (min_delta <= target_delta <= max_delta):
             warnings.append(f"target_delta ({target_delta}) outside min/max range")
 
-        # Contracts validation
+        # Contracts validation — respect per-config override so variants
+        # that intentionally size up (Brandon narrow-spread) aren't blocked
+        # by the 1c baseline cap.
         contracts = strategy.get("contracts_per_entry", 1)
-        if contracts < 1 or contracts > MAX_CONTRACTS_PER_ORDER:
-            errors.append(f"Invalid contracts_per_entry: {contracts} (must be 1-{MAX_CONTRACTS_PER_ORDER})")
+        per_order_cap = strategy.get("max_contracts_per_order", MAX_CONTRACTS_PER_ORDER)
+        if contracts < 1 or contracts > per_order_cap:
+            errors.append(f"Invalid contracts_per_entry: {contracts} (must be 1-{per_order_cap})")
 
         # Credit validation
         min_credit = strategy.get("min_credit_per_side", 1.00)
