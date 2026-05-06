@@ -48,6 +48,8 @@
     "_comment_safety_caps": "ORDER-006 caps raised vs 1c default (10 / 30) to accommodate Brandon narrow-spread sizing: 15c × 4 entries × 4 legs = 240 worst-case open contracts on SPX. 20 per-order cap leaves headroom for size adjustments without disabling the bug-protection check entirely.",
     "max_contracts_per_order": 20,
     "max_contracts_per_underlying": 250,
+    "_comment_min_bp_per_ic": "ORDER-004 BP-per-contract floor lowered $5000 → $500 because narrow 5pt × $100 = $500/contract margin (Brandon narrow-spread economics). Default is sized for wide HYDRA-baseline; without this override, every 15c entry trips $75,000 required vs $50,741 available — same bug pattern as MAX_CONTRACTS_PER_ORDER yesterday.",
+    "min_buying_power_per_ic": 500,
     "_comment_downday_callonly": "OFF on C — Brandon GEX adjuster is the sole side-selection logic on the Brandon stack; HYDRA's down-day call-only override would conflict with GEX zone reads.",
     "downday_callonly_enabled": false,
     "downday_threshold_pct": 0.003,
@@ -164,6 +166,10 @@
   },
   "filters": {
     "fomc_blackout": true
+  },
+  "external_price_feed": {
+    "_comment": "Yahoo Finance fallback for VIX/SPX when Saxo returns NoAccess. shared/config_loader.py defaults enabled=false in cloud — explicit override here because Saxo's VIX feed flaps NoAccess every 10-15 sec on FullTradingAndChat session contention.",
+    "enabled": true
   },
   "google_sheets": {
     "_comment": "Top-level google_sheets block — schema GoogleSheetsLogger.__init__ actually reads. The logging.* keys are read by LocalFileLogger and a few other consumers, but Sheets-specific config lives here. Mirrors variant A's block, only spreadsheet_name differs.",

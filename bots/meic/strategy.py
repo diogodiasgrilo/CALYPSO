@@ -939,6 +939,16 @@ class MEICStrategy:
         self.max_contracts_per_underlying = self.strategy_config.get(
             "max_contracts_per_underlying", MAX_CONTRACTS_PER_UNDERLYING
         )
+        # ORDER-004 BP-per-IC gate — config-overridable for the same reason as
+        # the order/underlying caps above. Default $5,000/contract is sized
+        # for the wide HYDRA-baseline (50pt × $100). Brandon narrow-spread
+        # variants (5pt × $100 = $500/contract) need to lower this or every
+        # 15c entry gets margin-rejected on a $50K account. Lesson learned
+        # 2026-05-06: B and C lost a full day's data because all entries
+        # tripped 15c × $5,000 = $75K > $50,741 available BP.
+        self.min_buying_power_per_ic = self.strategy_config.get(
+            "min_buying_power_per_ic", MIN_BUYING_POWER_PER_IC
+        )
 
         # Commission tracking (display only - does not affect strategy logic)
         # Saxo Bank charges $2.50 per leg per contract, round-trip = $5.00 per leg
@@ -7882,17 +7892,16 @@ class MEICStrategy:
             }
 
             # Calculate required margin for next entry
-            # Each IC needs max(call_spread, put_spread) × $100 × contracts
-            # 2-contract scaling: MIN_BUYING_POWER_PER_IC is the per-contract floor;
-            # multiply by contracts_per_entry so the gate remains functional at higher
-            # contract counts (worst-case per-IC margin scales linearly with contracts).
-            required = MIN_BUYING_POWER_PER_IC * self.contracts_per_entry
+            # Each IC needs max(call_spread, put_spread) × $100 × contracts.
+            # `min_buying_power_per_ic` is the per-contract floor, configurable
+            # so narrow-spread variants don't trip the wide-baseline default.
+            required = self.min_buying_power_per_ic * self.contracts_per_entry
 
             if available < required:
                 logger.warning(
                     f"ORDER-004: Insufficient buying power. "
                     f"Available: ${available:,.2f}, Required: ${required:,.2f} "
-                    f"({self.contracts_per_entry}c × ${MIN_BUYING_POWER_PER_IC:,.0f}), "
+                    f"({self.contracts_per_entry}c × ${self.min_buying_power_per_ic:,.0f}), "
                     f"Utilization: {margin_pct:.1f}%"
                 )
                 return False, (
