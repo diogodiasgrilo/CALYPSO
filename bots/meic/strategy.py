@@ -949,6 +949,18 @@ class MEICStrategy:
         self.min_buying_power_per_ic = self.strategy_config.get(
             "min_buying_power_per_ic", MIN_BUYING_POWER_PER_IC
         )
+        # DATA-003 P&L sanity bounds — used by both per-entry stop check and
+        # daily total check. The min in particular is the same class of bug
+        # as MIN_BUYING_POWER_PER_IC: -$3,000 was the floor for 1c × 50pt
+        # baseline. At 15c × 5pt the real max loss is -$7,500, and at 15c ×
+        # 10pt it's -$14,700 — a hardcoded -$3,000 floor would flag these as
+        # "impossible" and silently skip the per-entry stop check. Now
+        # config-overridable; B/C scale up to fit narrow-spread × 15c worst
+        # case. The per-entry max check separately uses entry.total_credit
+        # × 1.2 when available (so the max bound is mostly self-correcting),
+        # but we still expose it for completeness.
+        self.max_pnl_per_ic = self.strategy_config.get("max_pnl_per_ic", MAX_PNL_PER_IC)
+        self.min_pnl_per_ic = self.strategy_config.get("min_pnl_per_ic", MIN_PNL_PER_IC)
 
         # Commission tracking (display only - does not affect strategy logic)
         # Saxo Bank charges $2.50 per leg per contract, round-trip = $5.00 per leg
@@ -8340,7 +8352,7 @@ class MEICStrategy:
         # DATA-003: Check for impossible P&L values
         # Max profit = 100% of credit received (all options expire worthless)
         # Use entry's actual credit, not fixed constant, because credits vary
-        max_profit = entry.total_credit if entry.total_credit > 0 else MAX_PNL_PER_IC
+        max_profit = entry.total_credit if entry.total_credit > 0 else self.max_pnl_per_ic
         # Add 20% buffer for floating point and timing differences
         max_profit_with_buffer = max_profit * 1.2
 
@@ -8351,10 +8363,14 @@ class MEICStrategy:
             )
             return False, f"P&L too high: ${pnl:.2f}"
 
-        if pnl < MIN_PNL_PER_IC:
+        # Min loss bound scales with contracts (15c × 5pt = $7,500 max loss
+        # blows past the -$3,000 baseline). Multiply by contracts so per-IC
+        # floor stays meaningful at any size.
+        min_loss_floor = self.min_pnl_per_ic * max(1, getattr(entry, "contracts", self.contracts_per_entry))
+        if pnl < min_loss_floor:
             logger.error(
                 f"DATA-003: Impossible P&L detected for Entry #{entry.entry_number}: "
-                f"${pnl:.2f} < min ${MIN_PNL_PER_IC}"
+                f"${pnl:.2f} < min ${min_loss_floor:.2f}"
             )
             return False, f"P&L too low: ${pnl:.2f}"
 
@@ -8390,8 +8406,8 @@ class MEICStrategy:
         if actual_credit > 0:
             max_possible = actual_credit * 1.1  # 10% buffer above collected credit
         else:
-            max_possible = MAX_PNL_PER_IC * num_entries * self.contracts_per_entry
-        min_possible = MIN_PNL_PER_IC * num_entries * self.contracts_per_entry
+            max_possible = self.max_pnl_per_ic * num_entries * self.contracts_per_entry
+        min_possible = self.min_pnl_per_ic * num_entries * self.contracts_per_entry
 
         # Check for NaN or infinity
         import math

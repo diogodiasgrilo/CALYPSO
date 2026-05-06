@@ -5955,17 +5955,22 @@ class HydraStrategy(MEICStrategy):
                     return False, "Call side has partial zero price"
 
             # Check P&L bounds for call-only entry
+            # Bounds scale with contracts via instance attrs (config-overridable
+            # so 15c × narrow-spread variants don't trip a 1c-baseline floor).
             pnl = entry.unrealized_pnl
-            if pnl > MAX_PNL_PER_IC:
+            n = max(1, getattr(entry, "contracts", self.contracts_per_entry))
+            max_bound = self.max_pnl_per_ic * n
+            min_bound = self.min_pnl_per_ic * n
+            if pnl > max_bound:
                 logger.error(
                     f"DATA-003: Impossible P&L for call-only Entry #{entry.entry_number}: "
-                    f"${pnl:.2f} > max ${MAX_PNL_PER_IC}"
+                    f"${pnl:.2f} > max ${max_bound:.2f}"
                 )
                 return False, f"P&L too high: ${pnl:.2f}"
-            if pnl < MIN_PNL_PER_IC:
+            if pnl < min_bound:
                 logger.error(
                     f"DATA-003: Impossible P&L for call-only Entry #{entry.entry_number}: "
-                    f"${pnl:.2f} < min ${MIN_PNL_PER_IC}"
+                    f"${pnl:.2f} < min ${min_bound:.2f}"
                 )
                 return False, f"P&L too low: ${pnl:.2f}"
 
@@ -5991,18 +5996,22 @@ class HydraStrategy(MEICStrategy):
                     )
                     return False, "Put side has partial zero price"
 
-            # Check P&L bounds for put-only entry
+            # Check P&L bounds for put-only entry — same contracts-aware
+            # scaling as the call-only path above.
             pnl = entry.unrealized_pnl
-            if pnl > MAX_PNL_PER_IC:
+            n = max(1, getattr(entry, "contracts", self.contracts_per_entry))
+            max_bound = self.max_pnl_per_ic * n
+            min_bound = self.min_pnl_per_ic * n
+            if pnl > max_bound:
                 logger.error(
                     f"DATA-003: Impossible P&L for put-only Entry #{entry.entry_number}: "
-                    f"${pnl:.2f} > max ${MAX_PNL_PER_IC}"
+                    f"${pnl:.2f} > max ${max_bound:.2f}"
                 )
                 return False, f"P&L too high: ${pnl:.2f}"
-            if pnl < MIN_PNL_PER_IC:
+            if pnl < min_bound:
                 logger.error(
                     f"DATA-003: Impossible P&L for put-only Entry #{entry.entry_number}: "
-                    f"${pnl:.2f} < min ${MIN_PNL_PER_IC}"
+                    f"${pnl:.2f} < min ${min_bound:.2f}"
                 )
                 return False, f"P&L too low: ${pnl:.2f}"
 
