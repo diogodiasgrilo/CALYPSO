@@ -7910,6 +7910,23 @@ class MEICStrategy:
             required = self.min_buying_power_per_ic * self.contracts_per_entry
 
             if available < required:
+                # In dry-run, log the would-be rejection for diagnostics but
+                # don't actually block the entry. The whole point of dry-run
+                # is to record what the strategy WOULD fire under ideal
+                # conditions, not filter it through today's account margin.
+                # Saxo positions are synthetic (DRY_*) so no real money moves.
+                # Re-engages automatically when dry_run flips to false.
+                if self.dry_run:
+                    logger.info(
+                        f"ORDER-004 (dry-run): would-be insufficient BP — "
+                        f"Available ${available:,.2f} < Required ${required:,.2f} "
+                        f"({self.contracts_per_entry}c × ${self.min_buying_power_per_ic:,.0f}). "
+                        f"Bypassing margin gate for data collection."
+                    )
+                    return True, (
+                        f"BP bypass (dry-run): ${available:,.2f} < ${required:,.2f}, "
+                        f"would reject in live"
+                    )
                 logger.warning(
                     f"ORDER-004: Insufficient buying power. "
                     f"Available: ${available:,.2f}, Required: ${required:,.2f} "
