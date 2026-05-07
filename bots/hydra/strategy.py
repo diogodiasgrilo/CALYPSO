@@ -10376,6 +10376,12 @@ class HydraStrategy(MEICStrategy):
                 # repopulated by the next price tick), so spread_value and
                 # total_credit recover automatically. Don't try to set them
                 # directly.
+                # close_reason — set at close time (TP/BREACH/STOP/EXPIRED).
+                # Without restoring it, the next state-save would write back
+                # an empty string and the dashboard would lose the close-type
+                # tag for entries that closed before the last bot restart.
+                if "close_reason" in entry_data:
+                    setattr(restored_entry, "close_reason", entry_data.get("close_reason") or "")
 
                 if is_fully_done:
                     restored_entry.is_complete = True

@@ -357,14 +357,18 @@ def _entry_disposition(entry: dict) -> str:
 
 
 def _entry_realized_pnl(entry: dict) -> float:
-    """Net realized P&L for an entry's closed sides, in dollars.
+    """GROSS realized P&L for an entry's closed sides, in dollars.
 
     For each side that has finalized via stop or close (actual_*_stop_debit
     populated), realized = side_credit - actual_debit. Sides that simply
-    expired worthless contribute the full side credit. Open commission
-    (open_commission) is subtracted in full at placement; close commission
-    is subtracted as it's booked. Returns 0 for entries that haven't closed
-    anything yet (Net P&L for live entries is unrealized, shown separately).
+    expired worthless contribute the full side credit. Returns 0 for
+    entries that haven't closed anything yet.
+
+    NOTE: this is GROSS (excludes commissions). Per-entry view shows
+    "TP +$187.50" so the user sees the trade economics directly. Variant-
+    level Net P&L already deducts total commission separately, so the
+    variant card stays internally consistent: sum(per-entry realized) -
+    total_commission ≈ realized line on the summary.
     """
     cc = entry.get("call_spread_credit") or 0
     pc = entry.get("put_spread_credit") or 0
@@ -376,7 +380,6 @@ def _entry_realized_pnl(entry: dict) -> float:
     put_expired = entry.get("put_side_expired") and not put_stopped
 
     realized = 0.0
-    # Stopped/closed sides: credit - actual close cost
     if call_stopped:
         realized += cc - cd
     elif call_expired:
@@ -386,10 +389,6 @@ def _entry_realized_pnl(entry: dict) -> float:
     elif put_expired:
         realized += pc
 
-    # Subtract commissions (open + close, if any side closed)
-    if call_stopped or put_stopped or call_expired or put_expired:
-        realized -= entry.get("open_commission") or 0
-        realized -= entry.get("close_commission") or 0
     return realized
 
 
