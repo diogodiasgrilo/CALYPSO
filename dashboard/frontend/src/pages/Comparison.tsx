@@ -122,6 +122,10 @@ interface VariantEntry {
   call_side_skipped?: boolean;
   put_side_skipped?: boolean;
   is_complete?: boolean;
+  // Server-computed: TP / BREACH / STOP / EXPIRED / SKIPPED / LIVE
+  disposition?: string;
+  // Server-computed: net realized P&L for this entry's closed sides
+  entry_realized_pnl?: number;
   buffer?: BufferInfo;
 }
 
@@ -607,10 +611,25 @@ function EntryRow({ entry, accent }: { entry: VariantEntry; accent: string }) {
   const num = entry.entry_number ?? "?";
   const callDone = entry.call_side_stopped || entry.call_side_expired || entry.call_side_skipped;
   const putDone = entry.put_side_stopped || entry.put_side_expired || entry.put_side_skipped;
-  const status = entry.is_complete ? "DONE" : "LIVE";
-  const statusColor = entry.is_complete ? colors.textDim : accent;
+  // Status from server-computed disposition (TP / BREACH / STOP / EXPIRED /
+  // SKIPPED / LIVE). Falls back to flag-based inference if the server
+  // didn't enrich (older payload). We deliberately do NOT use is_complete
+  // here — it's True from placement, not from lifecycle end.
+  const disposition = entry.disposition ??
+    ((callDone && putDone) ? "DONE" : "LIVE");
+  const isLive = disposition === "LIVE";
+  // Color the badge by what happened: green for profit-style closes,
+  // red for stops/breaches, amber for partial/skipped, dim for live.
+  const statusColor =
+    disposition === "TP" ? colors.profit :
+    disposition === "EXPIRED" ? colors.profit :
+    disposition === "BREACH" || disposition === "STOP" ? colors.loss :
+    disposition === "SKIPPED" ? colors.warning :
+    accent;
 
   const buffer = entry.buffer ?? { call_pct: null, put_pct: null, call_value: null, put_value: null };
+  const realized = entry.entry_realized_pnl ?? 0;
+  const realizedColor = realized > 0 ? colors.profit : realized < 0 ? colors.loss : colors.textDim;
 
   return (
     <div className="rounded border border-border-dim bg-bg p-2 text-xs">
@@ -619,8 +638,16 @@ function EntryRow({ entry, accent }: { entry: VariantEntry; accent: string }) {
           <span style={{ color: accent }}>#{num}</span>{" "}
           <span className="text-text-secondary">{entry.entry_time?.slice(11, 16) ?? "—"}</span>
         </div>
-        <div className="text-[10px] font-mono uppercase tracking-wider" style={{ color: statusColor }}>
-          {status}
+        <div className="flex items-center gap-2">
+          {/* Realized P&L for closed entries — the answer to "what happened?" */}
+          {!isLive && realized !== 0 && (
+            <span className="text-[11px] font-mono" style={{ color: realizedColor }}>
+              {realized > 0 ? "+" : ""}${realized.toFixed(2)}
+            </span>
+          )}
+          <span className="text-[10px] font-mono uppercase tracking-wider" style={{ color: statusColor }}>
+            {disposition}
+          </span>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-2 font-mono text-text-secondary">
@@ -639,7 +666,7 @@ function EntryRow({ entry, accent }: { entry: VariantEntry; accent: string }) {
           <span className="text-text-dim ml-2">${entry.put_spread_credit?.toFixed(0)}</span>
         </div>
       </div>
-      {!entry.is_complete && (buffer.call_pct !== null || buffer.put_pct !== null) && (
+      {isLive && (buffer.call_pct !== null || buffer.put_pct !== null) && (
         <div className="flex gap-3 mt-1.5">
           {buffer.call_pct !== null && (
             <div className="flex-1">

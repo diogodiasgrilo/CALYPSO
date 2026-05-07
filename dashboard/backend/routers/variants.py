@@ -306,12 +306,104 @@ def _compute_buffer_utilization(entry: dict) -> dict:
     return out
 
 
+def _entry_disposition(entry: dict) -> str:
+    """Compute a human-readable disposition tag for an entry.
+
+    Returns one of: TP, BREACH, STOP, EXPIRED, SKIPPED, LIVE.
+
+    Prefers the explicit `close_reason` field set at close time. Falls back
+    to flag-based inference for entries closed before close_reason was
+    introduced. Brandon TP path sets both *_side_stopped and *_side_expired
+    via _close_entry_early, so the legacy fallback can't tell TP apart from
+    a true HYDRA stop without close_reason — those legacy entries get the
+    catch-all "STOP" label.
+
+    is_complete is intentionally ignored — it's True from the moment of
+    placement, not from lifecycle end.
+    """
+    explicit = entry.get("close_reason")
+    if explicit:
+        return explicit
+    call_pivot = entry.get("call_side_pivot_closed")
+    put_pivot = entry.get("put_side_pivot_closed")
+    if call_pivot or put_pivot:
+        return "BREACH"
+    call_stopped = entry.get("call_side_stopped")
+    put_stopped = entry.get("put_side_stopped")
+    call_expired = entry.get("call_side_expired")
+    put_expired = entry.get("put_side_expired")
+    call_skipped = entry.get("call_side_skipped")
+    put_skipped = entry.get("put_side_skipped")
+    # Determine which side was the "active" side (the one we placed)
+    call_placed = bool(entry.get("short_call_position_id")) or bool(entry.get("short_call_strike"))
+    put_placed = bool(entry.get("short_put_position_id")) or bool(entry.get("short_put_strike"))
+    # "Active" = placed-and-not-finalised
+    call_done = call_stopped or call_expired or call_skipped
+    put_done = put_stopped or put_expired or put_skipped
+    placed_sides_done = (
+        (not call_placed or call_done)
+        and (not put_placed or put_done)
+    )
+    if not placed_sides_done:
+        return "LIVE"
+    # All placed sides resolved. Pick a label.
+    if call_stopped or put_stopped:
+        return "STOP"  # legacy — Brandon TP also lands here without close_reason
+    if call_expired or put_expired:
+        return "EXPIRED"
+    if call_skipped and put_skipped:
+        return "SKIPPED"
+    return "DONE"
+
+
+def _entry_realized_pnl(entry: dict) -> float:
+    """Net realized P&L for an entry's closed sides, in dollars.
+
+    For each side that has finalized via stop or close (actual_*_stop_debit
+    populated), realized = side_credit - actual_debit. Sides that simply
+    expired worthless contribute the full side credit. Open commission
+    (open_commission) is subtracted in full at placement; close commission
+    is subtracted as it's booked. Returns 0 for entries that haven't closed
+    anything yet (Net P&L for live entries is unrealized, shown separately).
+    """
+    cc = entry.get("call_spread_credit") or 0
+    pc = entry.get("put_spread_credit") or 0
+    cd = entry.get("actual_call_stop_debit") or 0
+    pd = entry.get("actual_put_stop_debit") or 0
+    call_stopped = entry.get("call_side_stopped")
+    put_stopped = entry.get("put_side_stopped")
+    call_expired = entry.get("call_side_expired") and not call_stopped
+    put_expired = entry.get("put_side_expired") and not put_stopped
+
+    realized = 0.0
+    # Stopped/closed sides: credit - actual close cost
+    if call_stopped:
+        realized += cc - cd
+    elif call_expired:
+        realized += cc  # expired worthless = full credit kept
+    if put_stopped:
+        realized += pc - pd
+    elif put_expired:
+        realized += pc
+
+    # Subtract commissions (open + close, if any side closed)
+    if call_stopped or put_stopped or call_expired or put_expired:
+        realized -= entry.get("open_commission") or 0
+        realized -= entry.get("close_commission") or 0
+    return realized
+
+
 def _enrich_entries(entries: list[dict]) -> list[dict]:
-    """Add buffer-utilization fields to each entry for the comparison panel."""
+    """Add buffer-utilization, disposition tag, and per-entry realized P&L
+    so the comparison panel can show what actually happened to each entry
+    instead of a bare "DONE" badge.
+    """
     out = []
     for e in entries:
         copy = dict(e)
         copy["buffer"] = _compute_buffer_utilization(e)
+        copy["disposition"] = _entry_disposition(e)
+        copy["entry_realized_pnl"] = round(_entry_realized_pnl(e), 2)
         out.append(copy)
     return out
 

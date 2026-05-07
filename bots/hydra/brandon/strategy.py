@@ -353,6 +353,11 @@ class BrandonHydraStrategy(HydraStrategy):
             close_cost_put = float(entry.put_spread_value) if entry.put_spread_value else 0.0
             entry.actual_put_stop_debit = close_cost_put
             self.daily_state.total_realized_pnl -= close_cost_put
+        # Tag the close so the dashboard / journal can distinguish "TP at 80%
+        # captured" from a stop or end-of-day expiry. Both sides share the
+        # same reason because Brandon TP fires aggregate (both legs go out
+        # together when total captured ≥ threshold).
+        entry.close_reason = "TP"
         return (
             f"BRANDON-TP E#{entry.entry_number}: closed {legs_closed} legs "
             f"({legs_failed} failed) — {decision.profit_captured_pct:.1%} captured, "
@@ -430,6 +435,9 @@ class BrandonHydraStrategy(HydraStrategy):
                     entry.actual_put_stop_debit = close_cost_put
                     self.daily_state.total_realized_pnl -= close_cost_put
                     setattr(entry, "put_side_pivot_closed", True)
+                # Tag close type for the dashboard. BREACH = Brandon GEX wall
+                # breach, distinct from TP and from a HYDRA credit+buffer stop.
+                entry.close_reason = "BREACH"
                 return (
                     f"BRANDON-BREACH E#{entry.entry_number} {side}: closed "
                     f"{legs_closed} legs ({legs_failed} failed) on confirmed wall breach, "

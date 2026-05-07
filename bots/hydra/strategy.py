@@ -8787,6 +8787,11 @@ class HydraStrategy(MEICStrategy):
                     # Actual stop debit (for dashboard per-entry P&L accuracy)
                     "actual_call_stop_debit": entry.actual_call_stop_debit,
                     "actual_put_stop_debit": entry.actual_put_stop_debit,
+                    # Close reason — set by the close path that fired
+                    # (TP / BREACH / STOP / EXPIRED). Empty until a close
+                    # happens. Read by the dashboard to label DONE entries
+                    # with what actually happened instead of just "DONE".
+                    "close_reason": getattr(entry, "close_reason", ""),
                     # Status
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,
