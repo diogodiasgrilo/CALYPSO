@@ -4785,8 +4785,24 @@ class HydraStrategy(MEICStrategy):
                     self.daily_state.entries_completed += 1
                     self.daily_state.total_credit_received += entry.total_credit
 
-                    # Track commission: 2 legs for one-sided, 4 for full IC
-                    num_legs = 2 if (place_put_only or place_call_only) else 4
+                    # Track commission: 2 legs for one-sided, 4 for full IC.
+                    # IMPORTANT: check the entry's actual placement state, not
+                    # just the pre-Brandon routing flags. Brandon GEX strike
+                    # adjuster runs INSIDE _simulate_entry / _execute_entry
+                    # and can mutate a full-IC entry into put-only by setting
+                    # call_side_skipped=True (and the symmetric call-only).
+                    # Trusting place_put_only/place_call_only alone over-
+                    # charged 4-leg commission on every Brandon-skipped-call
+                    # entry — observed 2026-05-07: B's 5 put-only entries
+                    # each booked $150 open vs the real $75, totalling $375
+                    # phantom commission and turning a +$562 realized day
+                    # into a displayed -$525 net loss.
+                    is_one_sided = (
+                        place_put_only or place_call_only
+                        or getattr(entry, "call_side_skipped", False)
+                        or getattr(entry, "put_side_skipped", False)
+                    )
+                    num_legs = 2 if is_one_sided else 4
                     entry.open_commission = num_legs * self.commission_per_leg * self.contracts_per_entry
                     self.daily_state.total_commission += entry.open_commission
 
