@@ -326,22 +326,33 @@ class BrandonHydraStrategy(HydraStrategy):
             logger.error("BRANDON-TP E#%s: close failed (%s)", entry.entry_number, exc)
             return None
 
-        # P&L attribution: HYDRA's settlement records P&L per side based on the
-        # disposition flag + actual_*_stop_debit. For a TP close at threshold T,
-        # the close cost equals the spread's mark price right now (which IS the
-        # cost-to-buy-back the spread). Recording that as actual_*_stop_debit
-        # makes settlement compute P&L = credit - close_cost = T × credit.
-        # Without this, marking sides *_expired would record the FULL credit as
-        # kept P&L — overstating profit by (1 - T) × credit per side.
+        # P&L attribution. Two pieces to get right:
+        #
+        # 1. actual_*_stop_debit storage. spread_value is ALREADY in dollars
+        #    (computed as (short_price − long_price) × 100 × contracts inside
+        #    IronCondorEntry). Just store it raw — multiplying by 100 ×
+        #    contracts again is a 1500× double-multiply at 15c. Live evidence
+        #    2026-05-07: state file recorded actual_put_stop_debit=$56,250
+        #    for SV=$37.50 closes (= $37.50 × 100 × 15) until this fix.
+        #
+        # 2. Realized-P&L correction. _close_entry_early already added the
+        #    full credit to total_realized_pnl on the deferred-fill path
+        #    (line ~2030). In dry-run, deferred fills never resolve (no real
+        #    Saxo positions), so the credit-only number sticks and the
+        #    journal overstates profit by close_cost per side. We subtract
+        #    close_cost here to match what live mode would converge to once
+        #    the async deferred-fill correction landed.
         contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
         if call_alive:
             entry.call_side_stopped = True
-            entry.actual_call_stop_debit = float(entry.call_spread_value) * 100.0 * contracts \
-                if entry.call_spread_value else 0.0
+            close_cost_call = float(entry.call_spread_value) if entry.call_spread_value else 0.0
+            entry.actual_call_stop_debit = close_cost_call
+            self.daily_state.total_realized_pnl -= close_cost_call
         if put_alive:
             entry.put_side_stopped = True
-            entry.actual_put_stop_debit = float(entry.put_spread_value) * 100.0 * contracts \
-                if entry.put_spread_value else 0.0
+            close_cost_put = float(entry.put_spread_value) if entry.put_spread_value else 0.0
+            entry.actual_put_stop_debit = close_cost_put
+            self.daily_state.total_realized_pnl -= close_cost_put
         return (
             f"BRANDON-TP E#{entry.entry_number}: closed {legs_closed} legs "
             f"({legs_failed} failed) — {decision.profit_captured_pct:.1%} captured, "
@@ -400,22 +411,24 @@ class BrandonHydraStrategy(HydraStrategy):
                 except Exception as exc:
                     logger.error("BRANDON-BREACH E#%s %s: close failed (%s)", entry.entry_number, side, exc)
                     return None
-                # P&L attribution: same pattern as TP. Use *_side_stopped (HYDRA's
-                # standard early-close-with-cost flag) and populate actual_*_stop_debit
-                # from the spread_value at close so settlement computes
-                # P&L = credit - close_cost correctly. *_side_pivot_closed is also set
-                # so the dashboard/HOMER can attribute the close to "Brandon breach"
-                # vs a generic stop in the journal narrative.
+                # Same P&L attribution as the TP path: store spread_value
+                # raw (already-in-dollars; the × 100 × contracts is baked in)
+                # and subtract close_cost from total_realized_pnl to undo
+                # the credit-only addition done by _close_entry_early on its
+                # deferred-fill branch. *_side_pivot_closed marks this as a
+                # Brandon breach close in the journal narrative.
                 contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
                 if self._brandon_side_alive(entry, "call"):
                     entry.call_side_stopped = True
-                    entry.actual_call_stop_debit = float(entry.call_spread_value) * 100.0 * contracts \
-                        if entry.call_spread_value else 0.0
+                    close_cost_call = float(entry.call_spread_value) if entry.call_spread_value else 0.0
+                    entry.actual_call_stop_debit = close_cost_call
+                    self.daily_state.total_realized_pnl -= close_cost_call
                     setattr(entry, "call_side_pivot_closed", True)
                 if self._brandon_side_alive(entry, "put"):
                     entry.put_side_stopped = True
-                    entry.actual_put_stop_debit = float(entry.put_spread_value) * 100.0 * contracts \
-                        if entry.put_spread_value else 0.0
+                    close_cost_put = float(entry.put_spread_value) if entry.put_spread_value else 0.0
+                    entry.actual_put_stop_debit = close_cost_put
+                    self.daily_state.total_realized_pnl -= close_cost_put
                     setattr(entry, "put_side_pivot_closed", True)
                 return (
                     f"BRANDON-BREACH E#{entry.entry_number} {side}: closed "

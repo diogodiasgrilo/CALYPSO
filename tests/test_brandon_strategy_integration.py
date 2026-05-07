@@ -134,6 +134,13 @@ class TestTakeProfitDispatch:
 
     def test_fires_when_threshold_reached(self):
         inst = _make_instance(brandon_take_profit_enabled=True, brandon_take_profit_threshold=0.80)
+        # Set up daily_state so the realized-P&L correction can run.
+        # _close_entry_early in dry-run records full credit; Brandon then
+        # subtracts close_cost. We start at +200 (the credit-only number a
+        # mocked _close_entry_early would have left) so the post-call value
+        # tells us "credit + correction" worked: 200 - 20 - 20 = 160.
+        inst.daily_state = MagicMock()
+        inst.daily_state.total_realized_pnl = 200.0
         # Total credit $200, total SV $40 → 80% captured exactly
         e = self._entry(call_spread_value=20.0, put_spread_value=20.0)
         inst._close_entry_early = MagicMock(return_value=(4, 0, []))
@@ -141,16 +148,21 @@ class TestTakeProfitDispatch:
         assert result is not None
         assert "TP" in result
         inst._close_entry_early.assert_called_once_with(e)
-        # Brandon TP closes through HYDRA's *_side_stopped path (not _expired)
-        # so the close cost gets recorded via actual_*_stop_debit and HYDRA's
-        # P&L attribution computes credit − close_cost = 80% kept.
+        # Brandon TP closes through *_side_stopped (not _expired) and
+        # populates actual_*_stop_debit with the raw spread_value (already in
+        # dollars — the × 100 × contracts is baked into the property).
         assert e.call_side_stopped is True
         assert e.put_side_stopped is True
-        assert e.actual_call_stop_debit == pytest.approx(20.0 * 100 * 1)  # $2000
-        assert e.actual_put_stop_debit == pytest.approx(20.0 * 100 * 1)
+        assert e.actual_call_stop_debit == pytest.approx(20.0)  # raw, not × 100 × contracts
+        assert e.actual_put_stop_debit == pytest.approx(20.0)
+        # Realized P&L correction: subtracts close_cost from each side.
+        # 200 (credit-only added by mocked _close_entry_early) − 20 − 20 = 160.
+        assert inst.daily_state.total_realized_pnl == pytest.approx(160.0)
 
     def test_skips_already_closed_sides(self):
         inst = _make_instance(brandon_take_profit_enabled=True, brandon_take_profit_threshold=0.80)
+        inst.daily_state = MagicMock()
+        inst.daily_state.total_realized_pnl = 100.0
         # Call already stopped — only put side counts
         # Put: credit 100, SV 20 → 80% captured → fires
         e = self._entry(
@@ -161,9 +173,11 @@ class TestTakeProfitDispatch:
         inst._close_entry_early = MagicMock(return_value=(2, 0, []))
         result = inst._brandon_check_take_profit(e)
         assert result is not None
-        # Put closed via Brandon TP → *_side_stopped + actual_*_stop_debit
+        # Put closed via Brandon TP → *_side_stopped + actual_*_stop_debit raw
         assert e.put_side_stopped is True
-        assert e.actual_put_stop_debit == pytest.approx(20.0 * 100 * 1)
+        assert e.actual_put_stop_debit == pytest.approx(20.0)
+        # Only put side correction (call was already dead, not touched).
+        assert inst.daily_state.total_realized_pnl == pytest.approx(80.0)
 
     def test_no_op_when_all_sides_already_done(self):
         inst = _make_instance(brandon_take_profit_enabled=True)
@@ -433,6 +447,9 @@ class TestBreachExitLive:
 
         e = self._entry()
         inst._close_entry_early = MagicMock(return_value=(4, 0, []))
+        # daily_state needed for the realized-P&L correction (see TP test).
+        inst.daily_state = MagicMock()
+        inst.daily_state.total_realized_pnl = 0.0
         result = inst._brandon_check_breach_exit(e)
         assert result is not None
         assert "closed" in result
