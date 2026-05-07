@@ -447,19 +447,23 @@ def _query_peak_spread_values(db_path, today: str) -> dict:
 def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
     """Largest call/put buffer utilization across today's entries.
 
-    Per side, takes the MAX of three signals (whichever is highest):
-      1. **100%** if the side is `*_side_stopped` — by definition the
-         cost-to-close reached the trigger level when the stop fired,
-         so peak buffer use was at least 100%.
-      2. **Historical peak from spread_snapshots** — the bot writes
+    Per side, takes the MAX of two signals (whichever is highest):
+      1. **Historical peak from spread_snapshots** — the bot writes
          a snapshot every ~10s; MAX(call_spread_value)/stop_level is
          the true peak observed today even if it has since recovered.
-      3. **Current cost-to-close** — `call_spread_value` from the
+      2. **Current cost-to-close** — `call_spread_value` from the
          state file, divided by stop level, as a live floor.
 
-    Without (1) and (2) the previous version reported 0% for stopped
-    sides (state file zeroes out spread_value after stop), missing
-    the most stressful moments of the day.
+    Subtle prior bug (2026-05-07): we used to also force peak=100% for
+    any *_side_stopped=True. That's correct for HYDRA stops, but Brandon
+    TP closes ALSO set *_side_stopped=True (set in
+    bots/hydra/brandon/strategy.py to route P&L through the actual-debit
+    accounting). At TP the spread_value is at ~16-20% of stop, not 100%
+    — but the 100% rule kicked in anyway, making every Brandon TP day
+    look like a maxed-out put-buffer day even when nothing went near a
+    stop. Now we only force-100% for closes whose `close_reason` is a
+    real stop (STOP / BREACH) — TP / EXPIRED reads from snapshots like
+    everything else.
     """
     today = get_today_et()
     peak_snapshots = _query_peak_spread_values(db_path, today) if db_path else {}
@@ -467,16 +471,25 @@ def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
     peak_call = 0.0
     peak_put = 0.0
 
+    REAL_STOPS = {"STOP", "BREACH"}
+
     for e in entries or []:
         n = e.get("entry_number")
         snap_call, snap_put = peak_snapshots.get(n, (None, None))
+        # Determine if THIS entry was closed by a real stop. Prefer the
+        # explicit close_reason; fall back to pivot_closed (a Brandon
+        # breach legacy signal that pre-dates close_reason).
+        reason = e.get("close_reason") or ""
+        was_real_stop_call = reason in REAL_STOPS or e.get("call_side_pivot_closed")
+        was_real_stop_put = reason in REAL_STOPS or e.get("put_side_pivot_closed")
 
         # ---------- CALL SIDE ----------
-        if e.get("call_side_stopped"):
+        if e.get("call_side_stopped") and was_real_stop_call:
             peak_call = max(peak_call, 100.0)
         css = e.get("call_side_stop")
         if css and css > 0:
-            # historical peak from snapshots
+            # historical peak from snapshots (always honoured — captures
+            # the high-water mark regardless of how the entry closed)
             if snap_call is not None:
                 pct = min(120.0, max(0.0, snap_call / css * 100))
                 peak_call = max(peak_call, pct)
@@ -488,7 +501,7 @@ def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
                     peak_call = max(peak_call, pct)
 
         # ---------- PUT SIDE ----------
-        if e.get("put_side_stopped"):
+        if e.get("put_side_stopped") and was_real_stop_put:
             peak_put = max(peak_put, 100.0)
         pss = e.get("put_side_stop")
         if pss and pss > 0:
