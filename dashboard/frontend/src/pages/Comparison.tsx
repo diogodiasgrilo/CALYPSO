@@ -705,22 +705,25 @@ function PnLChart({
   variantIds: string[];
   variants: Record<string, VariantPayload>;
 }) {
-  // Merge all variants' P&L history onto a single time axis. Each variant's
-  // pnl_history is a list of {time, pnl} written by the bot every ~10s during
-  // market hours. We zip them by index because they share the same heartbeat
-  // cadence and start time. If one has fewer points (e.g. a variant started
-  // late), the missing series is left null at that index — Recharts skips it.
+  // Merge all variants' P&L history onto a single time axis.
   //
-  // Per-variant series live in row[`pnl_${id.toLowerCase()}`] so we can have
-  // any number of variants without changing the row schema.
+  // Bug fix 2026-05-07: prior version zipped by ARRAY INDEX, assuming all
+  // variants share the same heartbeat cadence and start time. They don't —
+  // each variant's pnl_history starts at the minute its first entry was
+  // placed (B at 09:31, A at 10:45, C at 10:46 on May 7). Index-zipping
+  // produced a non-monotonic x-axis: once A's shorter series ran out, row.
+  // time fell through to B's earlier timestamps and the chart visibly
+  // jumped backwards in time mid-graph. Now we union all time keys, sort
+  // them in HH:MM order, and look up each variant's value at each time —
+  // properly handling missing points as null.
   const histories = variantIds.map((vid) => ({
     id: vid,
     label: variants[vid]?.label ?? vid,
     series: variants[vid]?.pnl_history ?? [],
   }));
-  const maxLen = Math.max(0, ...histories.map((h) => h.series.length));
+  const totalPoints = histories.reduce((acc, h) => acc + h.series.length, 0);
 
-  if (maxLen === 0) {
+  if (totalPoints === 0) {
     return (
       <div className="rounded border border-border-dim bg-card p-4">
         <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">
@@ -734,18 +737,24 @@ function PnLChart({
     );
   }
 
-  const merged: Array<Record<string, string | number | null>> = [];
-  for (let i = 0; i < maxLen; i++) {
-    const row: Record<string, string | number | null> = { time: "" };
-    for (const h of histories) {
-      const point = h.series[i];
-      if (point && !row.time) {
-        row.time = point.time;
-      }
-      row[`pnl_${h.id.toLowerCase()}`] = point?.pnl ?? null;
+  // Build a per-variant time→pnl lookup, then union all times and sort.
+  const lookups = histories.map((h) => {
+    const m = new Map<string, number>();
+    for (const p of h.series) m.set(p.time, p.pnl);
+    return { id: h.id, label: h.label, map: m };
+  });
+  const allTimes = new Set<string>();
+  for (const l of lookups) for (const t of l.map.keys()) allTimes.add(t);
+  // HH:MM strings sort lexicographically in chronological order.
+  const sortedTimes = [...allTimes].sort();
+
+  const merged: Array<Record<string, string | number | null>> = sortedTimes.map((t) => {
+    const row: Record<string, string | number | null> = { time: t };
+    for (const l of lookups) {
+      row[`pnl_${l.id.toLowerCase()}`] = l.map.has(t) ? (l.map.get(t) as number) : null;
     }
-    merged.push(row);
-  }
+    return row;
+  });
 
   // Tooltip needs to map series key -> variant label
   const labelByKey = Object.fromEntries(

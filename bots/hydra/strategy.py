@@ -8875,11 +8875,22 @@ class HydraStrategy(MEICStrategy):
                             pass
                         else:
                             net_pnl += entry.put_spread_credit - (entry.put_spread_value or 0)
-                    # Surviving long legs after MKT-025 stop
-                    if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False) and entry.long_call_uic:
-                        net_pnl += entry.long_call_price * 100 * entry.contracts
-                    if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False) and entry.long_put_uic:
-                        net_pnl += entry.long_put_price * 100 * entry.contracts
+                    # Surviving long legs after MKT-025 stop. Only applies in
+                    # short-only-stop mode (the long leg stays open after the
+                    # short closes). Without the self.short_only_stop guard
+                    # this fires on EVERY closed side — including Brandon TP
+                    # and breach exits that close BOTH legs — and adds a
+                    # phantom long_*_price × 100 × contracts to the dashboard
+                    # P&L curve. Live evidence 2026-05-07: B's 3 TP'd entries
+                    # had ~$0.50 long_put_price × 100 × 15c = $750 phantom
+                    # each, inflating the chart from real ~$562 to ~$2,400.
+                    # Per-entry serialization at ~line 8825 already gates on
+                    # short_only_stop; this section was missing that guard.
+                    if self.short_only_stop:
+                        if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False) and entry.long_call_uic:
+                            net_pnl += entry.long_call_price * 100 * entry.contracts
+                        if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False) and entry.long_put_uic:
+                            net_pnl += entry.long_put_price * 100 * entry.contracts
 
                 # Append or update current minute
                 if self._pnl_history and self._pnl_history[-1]["time"] == time_key:
