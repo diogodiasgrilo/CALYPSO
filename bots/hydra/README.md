@@ -1,6 +1,20 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.26.0 | **Last Updated:** 2026-05-01
+**Version:** 1.28.0 | **Last Updated:** 2026-05-08
+
+> **2026-05-06 → 2026-05-08 — Brandon variants restructured.**
+> Variants B and C now run the Brandon stack with all features LIVE (not
+> shadow): TP@80%, GEX strike adjuster, GEX breach exit, defensive overlay,
+> and an 8-delta-target strike-selection override that anchors short
+> strikes to the live Polygon chain. HYDRA's MKT-020/MKT-022 progressive
+> tighteners are disabled on B/C (`brandon.disable_progressive_tightening:
+> true`) so strikes stay where Brandon's GEX-zone selection wants them.
+> Variant B uses a 7-slot dense entry grid (09:31–12:15) for entry-time
+> edge discovery; variant C keeps HYDRA's 3-slot canonical grid. Both run
+> at 15c with narrow 5/10pt widths to match A's $7,500-per-IC margin.
+> Several HYDRA-1c-baseline safety constants are now config-overridable
+> (BP-per-IC gate, P&L sanity bounds, ORDER-006 contract caps). See
+> CLAUDE.md §11 for the complete scheme.
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 

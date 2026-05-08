@@ -129,46 +129,61 @@ comparison. All three: 75pt × 2c, FOMC bypass active, real Saxo quotes for
 credit estimation but no real orders. Same MKT-024 / VIX-regime / stop
 buffers. The **only** difference is in entry-schedule + close behavior:
 
-| Variant | Entry times | Spread width | Brandon stack | Close behavior |
-|---------|-------------|--------------|---------------|----------------|
-| **A (baseline 75pt)** | 10:15, 10:45, 11:15 (10:15 dropped by VIX regime → effective 10:45 + 11:15) | MKT-027 dynamic (75pt cap) | none | Standard: stop at credit + buffer; expire at settlement; conditional E#3 at 14:00 (Upday-035 / Downday-035) |
-| **B (Brandon, 75pt dynamic)** | 10:15, 10:45, 11:15 (mirrors A) | MKT-027 dynamic (75pt cap, mirrors A) | TP@80% **LIVE**; GEX adjuster / GEX breach exit / defensive overlay all in **SHADOW** mode for the first 4 weeks | Standard stops + Brandon TP-at-80% (closes IC when mark ≤ 20% of credit). Shadow features log "would have" events without acting. |
-| **C (Brandon, narrow 5/10pt)** | 10:15, 10:45, 11:15 (mirrors A) | Brandon `narrow_spread`: 5pt at VIX<22, 10pt at VIX≥22 (overrides MKT-027) | Same as B | Same as B |
+| Variant | Entry times | Contracts | Spread width | Brandon stack | Close behavior |
+|---------|-------------|-----------|--------------|---------------|----------------|
+| **A (baseline 75pt)** | 10:15, 10:45, 11:15 (10:15 dropped by VIX regime → effective 10:45 + 11:15) | 1c | MKT-027 dynamic (75pt cap) | none | Standard: stop at credit + buffer; expire at settlement; conditional E#3 at 14:00 (Upday-035 / Downday-035) |
+| **B (Brandon narrow, 7-slot grid)** | 09:31, 09:45, 10:15, 10:45, 11:15, 11:45, 12:15 | 15c | Brandon `narrow_spread`: 5pt at VIX<22, 10pt at VIX≥22 | All Brandon features **LIVE** (TP@80%, GEX adjuster, GEX breach exit, defensive overlay) + delta-target strike selection (8δ from Polygon chain). HYDRA tighteners (MKT-020/022) DISABLED. | Brandon TP@80% closes IC when mark ≤ 20% of credit. Brandon GEX breach exit closes after sustained 90s breach of decel wall. HYDRA credit+buffer stop runs in `hydra_stop_shadow` (parallel comparison only). |
+| **C (Brandon, narrow 5/10pt)** | 10:15, 10:45, 11:15 + conditional 14:00 (mirrors A's grid) | 15c | Same as B | Same as B (all LIVE + delta-target) | Same as B |
 
 All three variants run **dry-run** (`dry_run: true` in config). Pivot strategy
-(`directional_pivot.enabled`) is **disabled across all variants** in v1.27 —
-Brandon's GEX-breach exit (in shadow mode) plays the same protective role
-for B/C, and A had pivot off all along. Pivot logic remains togglable per
-variant via config if you want to revive it.
+(`directional_pivot.enabled`) is **disabled across all variants** since v1.27
+— Brandon's GEX-breach exit replaces it on B/C (now LIVE).
 
 ### Brandon Trojan Horse stack (variants B/C only — gated by `strategy.brandon.enabled`)
 
-Five independently-toggleable features under `strategy.brandon.*`:
+All features now LIVE on B/C (post-2026-05-06 restructure). Each independently
+toggleable under `strategy.brandon.*`:
 
-1. **`take_profit`** (LIVE in v1.27): close the IC when its mark price decays
-   to ≤ `(1 - threshold) × credit_received`. Default threshold 0.80. Uses the
-   existing `_close_entry_early` machinery; sides are marked `expired` rather
-   than `stopped` so HOMER and dashboard distinguish profit-takes from stops.
+1. **`take_profit`** (LIVE): close the IC when total mark decays to
+   ≤ `(1 - threshold) × credit_received`. Default threshold 0.80. Uses
+   `_close_entry_early`; sides are marked `*_side_stopped=True` and
+   `actual_*_stop_debit` is populated with the close cost so realized P&L
+   correctly equals `credit − close_cost`. `entry.close_reason="TP"` set for
+   journal narrative.
 
-2. **`narrow_spread`** (LIVE in variant C only): override the MKT-027 spread
-   width formula with Brandon's discretionary rule (5pt at VIX<22, 10pt at
-   VIX≥22, plus a 25pt safety ceiling).
+2. **`narrow_spread`** (LIVE on B and C): override `_get_vix_adjusted_spread_width`
+   with Brandon's rule (5pt at VIX<22, 10pt at VIX≥22, 25pt safety ceiling).
 
-3. **`gex.strike_adjuster_mode`** (SHADOW for first 4 weeks): per-side
-   keep / shift / skip decision based on Polygon-derived GEX clusters. In
-   shadow mode, logs `BRANDON-GEX-ADJ-SHADOW E#N call/put: …` without
-   moving strikes. After observation window, promote to `live` to actually
-   apply the adjustment.
+3. **`gex.strike_adjuster_enabled`** (LIVE): per-side keep / shift / skip
+   decision based on Polygon-derived GEX clusters at placement. SKIP on the
+   call side routes the entry as put-only (and vice versa). KEEP / SHIFT
+   decisions logged for journal review.
 
-4. **`gex.breach_exit_mode`** (SHADOW): sustained-90s breach of the outermost
-   positive-gamma decel wall on the threatened side. Logs
-   `BRANDON-BREACH-SHADOW E#N call/put: would close — …` without closing.
+4. **`gex.breach_exit_enabled`** (LIVE): sustained-90s breach of the outermost
+   positive-gamma decel wall on the threatened side closes the IC. Records
+   real `actual_*_stop_debit` from `entry.*_spread_value` at the moment of
+   breach (captured BEFORE `_close_entry_early` mutates side flags — fixes
+   2026-05-07 silent-$0-close-cost bug). `entry.close_reason="BREACH"`.
 
-5. **`defensive_overlay.mode`** (SHADOW): when SPX comes within
-   `trigger_distance_pts` of a short strike + GEX confirms an accel zone
-   on that side, propose a debit spread (before 12:30 ET) or a butterfly
-   pinning the nearest decel-wall midpoint (12:30 ET onward). Logs
-   `BRANDON-OVERLAY-SHADOW E#N …` without placing the hedge.
+5. **`defensive_overlay.enabled`** (LIVE): when SPX comes within
+   `trigger_distance_pts` of a short strike, place a debit spread hedge
+   (before 12:30 ET) or a butterfly (12:30 ET onward).
+
+6. **`disable_progressive_tightening`** (LIVE on B/C): turns off MKT-020 +
+   MKT-022 so HYDRA's credit-chasing doesn't walk strikes onto walls Brandon
+   is trying to avoid. If credit at the GEX-aware strike doesn't clear the
+   gate, the entry SKIPS — Brandon's preferred outcome.
+
+7. **`delta_target_strike_selection.enabled`** (LIVE on B/C): override
+   `_calculate_strikes` to anchor short strikes to the configured delta
+   (default 0.08 / 8δ inherited from `strategy.target_delta`) using the live
+   Polygon chain. Replaces HYDRA's OTM-multiplier-of-expected-move heuristic
+   which drifts onto walls at low VIX. Falls back to parent
+   `_calculate_strikes` on Polygon outage / missing greeks.
+
+8. **`hydra_stop_shadow`** (always SHADOW on B/C): HYDRA's credit+buffer
+   stop computes every tick in parallel for head-to-head comparison without
+   acting. First fire per side per day is Telegrammed.
 
 The Brandon code lives under `bots/hydra/brandon/` as a
 `BrandonHydraStrategy(HydraStrategy)` subclass. Variant A loads
