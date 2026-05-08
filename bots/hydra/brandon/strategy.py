@@ -108,6 +108,22 @@ class BrandonHydraStrategy(HydraStrategy):
         self.brandon_narrow_width_low = int(ns.get("width_low", 5))
         self.brandon_narrow_width_high = int(ns.get("width_high", 10))
 
+        # Per Brandon: strikes are picked by GEX zones (decel walls, accel zones)
+        # and the configured starting OTM multiplier. NOT by HYDRA's
+        # MKT-020/MKT-022 progressive credit-chasing tighteners. When True,
+        # tighteners are skipped — strikes stay at their initial GEX-aware
+        # position even if the credit-gate floor isn't met (MKT-011 will then
+        # skip the entry, which is what Brandon would do anyway).
+        # Live evidence 2026-05-07: MKT-022 walked B's E#5/E#6 puts from 125pt
+        # OTM (safe) to 35-40pt OTM (right on the 7330 GEX wall) chasing
+        # credit. Brandon's strike adjuster fired AFTER tightening but couldn't
+        # find a decel cluster at that exact moment, returned silent KEEP, and
+        # the strikes stayed on the wall. Result: 4 breach exits when the wall
+        # broke, ~$8.7K in close costs.
+        self.brandon_disable_progressive_tightening = bool(
+            bcfg.get("disable_progressive_tightening", False)
+        )
+
         hs = bcfg.get("hydra_stop_shadow") or {}
         self.brandon_hydra_shadow_enabled = bool(hs.get("enabled", True))
 
@@ -215,6 +231,13 @@ class BrandonHydraStrategy(HydraStrategy):
                 entry.long_call_strike = 0.0
                 if hasattr(entry, "put_only"):
                     entry.put_only = True
+            else:
+                # KEEP — log so we have visibility on no-op decisions. Without
+                # this the journal looked like the adjuster wasn't running.
+                logger.info(
+                    "BRANDON-GEX-ADJ E#%s call: KEEP — short %.0f, %s",
+                    entry.entry_number, entry.short_call_strike, r.reason,
+                )
 
         if entry.short_put_strike and not getattr(entry, "put_side_skipped", False):
             r = gex_strike_adjuster.adjust_put_strike(
@@ -238,6 +261,15 @@ class BrandonHydraStrategy(HydraStrategy):
                 entry.long_put_strike = 0.0
                 if hasattr(entry, "call_only"):
                     entry.call_only = True
+            else:
+                # KEEP — log so we can audit no-op decisions. The 2026-05-07
+                # incident was hidden because the put adjuster returned KEEP
+                # silently (no decel cluster detected at that exact tick), and
+                # the journal had no record of the adjuster having run.
+                logger.info(
+                    "BRANDON-GEX-ADJ E#%s put: KEEP — short %.0f, %s",
+                    entry.entry_number, entry.short_put_strike, r.reason,
+                )
 
     # ------------------------------------------------------------------
     # Per-tick monitoring: TP / breach / overlay / HYDRA-shadow stop

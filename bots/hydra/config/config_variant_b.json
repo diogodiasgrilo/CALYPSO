@@ -107,6 +107,8 @@
     "brandon": {
       "_comment": "Same Brandon stack as variant C (narrow 5/10pt widths). All Brandon features LIVE: TP, narrow_spread, GEX strike adjuster, GEX breach exit, defensive overlay. Only shadow behavior is hydra_stop_shadow for head-to-head comparison.",
       "enabled": true,
+      "_comment_disable_tightening": "MKT-020/MKT-022 progressive tightening is HYDRA's credit-chasing mechanism — it walks strikes inward when initial credit < floor. Brandon's strategy picks strikes per GEX zones and accepts low credit at safe strikes; if credit < gate the entry should SKIP, not move strikes onto a wall. 2026-05-07 incident: tightener walked B's E#5/E#6 puts from 125pt OTM (safe) to 35-40pt OTM (right on the 7330 GEX wall) chasing credit; when SPX broke the wall at 13:26 the resulting 4 breach exits cost ~$8.7K. With this flag set, MKT-020/MKT-022 skip on B and the strike stays where Brandon GEX-ADJ wants it.",
+      "disable_progressive_tightening": true,
       "take_profit": {
         "enabled": true,
         "threshold": 0.80

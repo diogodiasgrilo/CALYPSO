@@ -107,6 +107,8 @@
     "brandon": {
       "_comment": "Identical Brandon stack to variant B; only narrow_spread.enabled differs. Per Brandon: 5pt at VIX < 22, 10pt at VIX >= 22 (plus a 25pt safety ceiling). All other Brandon features are fully LIVE (TP / strike adjuster / breach exit / overlay). Only shadow behavior is hydra_stop_shadow — same as variant B.",
       "enabled": true,
+      "_comment_disable_tightening": "Same rationale as variant B: HYDRA's MKT-020/MKT-022 tighteners chase credit by walking strikes toward ATM, which clashes with Brandon's GEX-zone strike selection. C's E#2 on 2026-05-07 was tightened from 125pt OTM to 25pt OTM (P:7340) right on the 7330 wall — when the wall broke, the breach close cost was $2,925 vs the recorded $0. Disabled here so Brandon GEX-ADJ is the sole strike-selection mechanism.",
+      "disable_progressive_tightening": true,
       "take_profit": {
         "enabled": true,
         "threshold": 0.80

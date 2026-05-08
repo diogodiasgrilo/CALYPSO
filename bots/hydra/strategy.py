@@ -3150,6 +3150,15 @@ class HydraStrategy(MEICStrategy):
         if entry.call_only or entry.put_only:
             return False
 
+        # Brandon variants pick strikes per GEX zones, not by progressive
+        # credit-chasing. When the flag is set we leave the initial GEX-aware
+        # strike alone — if that strike doesn't yield enough credit to clear
+        # MKT-011, the entry will skip rather than walk the strike onto a
+        # gamma wall.
+        if getattr(self, "brandon_disable_progressive_tightening", False):
+            logger.info("MKT-020: skipped (Brandon disable_progressive_tightening=True)")
+            return False
+
         spx = round(self.current_price / 5) * 5
         min_otm = self.min_call_otm_distance
         min_credit = self.min_viable_credit_per_side  # In cents; VIX-regime-overridden
@@ -3387,6 +3396,14 @@ class HydraStrategy(MEICStrategy):
         Returns:
             True if put strikes were tightened, False if no change needed
         """
+        # Brandon variants — see MKT-020 docstring above for rationale.
+        # Disabling MKT-022 in particular is the primary fix for the
+        # 2026-05-07 incident where 4 breach exits cost ~$8.7K because the
+        # tightener walked puts onto the 7330 GEX wall.
+        if getattr(self, "brandon_disable_progressive_tightening", False):
+            logger.info("MKT-022: skipped (Brandon disable_progressive_tightening=True)")
+            return False
+
         if entry.call_only or entry.put_only:
             return False
 
