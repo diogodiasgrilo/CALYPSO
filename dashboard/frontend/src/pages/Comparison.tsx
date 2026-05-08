@@ -72,6 +72,9 @@ interface VariantConfig {
   brandon_overlay_enabled?: boolean;
   brandon_narrow_spread_enabled?: boolean;
   brandon_hydra_stop_shadow_enabled?: boolean;
+  // 2026-05-08 restructure: tightener-disable + delta-target strike selection
+  brandon_disable_progressive_tightening?: boolean;
+  brandon_delta_target_enabled?: boolean;
   // Directional pivot — preserved for historical snapshots; disabled in v1.27
   directional_pivot_enabled?: boolean;
   directional_pivot_close_mode?: string | null;
@@ -467,6 +470,9 @@ function ConfigDelta({
     { key: "brandon_overlay_enabled", label: "Defensive overlay" },
     { key: "brandon_narrow_spread_enabled", label: "Brandon narrow spread (5/10pt)" },
     { key: "brandon_hydra_stop_shadow_enabled", label: "HYDRA stop (shadow)" },
+    // 2026-05-08 restructure
+    { key: "brandon_disable_progressive_tightening", label: "Disable HYDRA tighteners" },
+    { key: "brandon_delta_target_enabled", label: "Delta-target strike selection (8δ)" },
     { key: "dry_run", label: "Dry-run" },
   ];
 

@@ -153,6 +153,7 @@ def _read_variant_config(path: Optional[Path]) -> dict:
         b_overlay = brandon.get("defensive_overlay") or {}
         b_narrow = brandon.get("narrow_spread") or {}
         b_shadow = brandon.get("hydra_stop_shadow") or {}
+        b_dts = brandon.get("delta_target_strike_selection") or {}
         return {
             "max_spread_width": s.get("max_spread_width"),
             "contracts_per_entry": s.get("contracts_per_entry"),
@@ -172,6 +173,11 @@ def _read_variant_config(path: Optional[Path]) -> dict:
             "brandon_overlay_enabled": bool(b_overlay.get("enabled", False)),
             "brandon_narrow_spread_enabled": bool(b_narrow.get("enabled", False)),
             "brandon_hydra_stop_shadow_enabled": bool(b_shadow.get("enabled", False)),
+            # 2026-05-08: tightener-disable + delta-target strike selection
+            # — added so the Config Delta panel reflects the May 6→8
+            # restructure that distinguishes B/C from A on these axes.
+            "brandon_disable_progressive_tightening": bool(brandon.get("disable_progressive_tightening", False)),
+            "brandon_delta_target_enabled": bool(b_dts.get("enabled", False)),
             # Directional pivot — preserved for historical snapshots; disabled in v1.27.
             "directional_pivot_enabled": bool(pivot.get("enabled", False)),
             "directional_pivot_close_mode": pivot.get("close_mode") if pivot.get("enabled") else None,
