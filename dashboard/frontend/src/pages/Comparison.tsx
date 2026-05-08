@@ -72,8 +72,12 @@ interface VariantConfig {
   brandon_overlay_enabled?: boolean;
   brandon_narrow_spread_enabled?: boolean;
   brandon_hydra_stop_shadow_enabled?: boolean;
-  // 2026-05-08 restructure: tightener-disable + delta-target strike selection
+  // 2026-05-08 restructure: tightener state + delta-target strike selection.
+  // Backend exposes both the literal config key (disable_progressive_tightening)
+  // AND a positively-phrased derived field (progressive_tightening_enabled)
+  // — Config Delta uses the latter to avoid double-negative readings.
   brandon_disable_progressive_tightening?: boolean;
+  brandon_progressive_tightening_enabled?: boolean;
   brandon_delta_target_enabled?: boolean;
   // Directional pivot — preserved for historical snapshots; disabled in v1.27
   directional_pivot_enabled?: boolean;
@@ -470,8 +474,8 @@ function ConfigDelta({
     { key: "brandon_overlay_enabled", label: "Defensive overlay" },
     { key: "brandon_narrow_spread_enabled", label: "Brandon narrow spread (5/10pt)" },
     { key: "brandon_hydra_stop_shadow_enabled", label: "HYDRA stop (shadow)" },
-    // 2026-05-08 restructure
-    { key: "brandon_disable_progressive_tightening", label: "Disable HYDRA tighteners" },
+    // 2026-05-08 restructure — positively phrased to avoid double-negative.
+    { key: "brandon_progressive_tightening_enabled", label: "HYDRA tighteners (MKT-020/022)" },
     { key: "brandon_delta_target_enabled", label: "Delta-target strike selection (8δ)" },
     { key: "dry_run", label: "Dry-run" },
   ];

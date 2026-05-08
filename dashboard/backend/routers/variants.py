@@ -173,10 +173,17 @@ def _read_variant_config(path: Optional[Path]) -> dict:
             "brandon_overlay_enabled": bool(b_overlay.get("enabled", False)),
             "brandon_narrow_spread_enabled": bool(b_narrow.get("enabled", False)),
             "brandon_hydra_stop_shadow_enabled": bool(b_shadow.get("enabled", False)),
-            # 2026-05-08: tightener-disable + delta-target strike selection
-            # — added so the Config Delta panel reflects the May 6→8
-            # restructure that distinguishes B/C from A on these axes.
+            # 2026-05-08: tightener state + delta-target strike selection.
+            # The literal config key is `disable_progressive_tightening`
+            # (negated phrasing) — exposing it AS-IS forces the dashboard
+            # to render "Disable HYDRA tighteners: yes" which is a confusing
+            # double-negative. We expose a positively-phrased derived field
+            # `brandon_progressive_tightening_enabled` so the Config Delta
+            # row reads "HYDRA tighteners (MKT-020/022): yes/no" directly.
+            # Both the literal and derived fields are surfaced; consumers
+            # that want the raw config can read the literal.
             "brandon_disable_progressive_tightening": bool(brandon.get("disable_progressive_tightening", False)),
+            "brandon_progressive_tightening_enabled": not bool(brandon.get("disable_progressive_tightening", False)),
             "brandon_delta_target_enabled": bool(b_dts.get("enabled", False)),
             # Directional pivot — preserved for historical snapshots; disabled in v1.27.
             "directional_pivot_enabled": bool(pivot.get("enabled", False)),
