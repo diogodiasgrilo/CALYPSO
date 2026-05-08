@@ -249,13 +249,8 @@ class BrandonHydraStrategy(HydraStrategy):
         entry.long_call_strike = float(call_short + call_width)
         entry.short_put_strike = float(put_short)
         entry.long_put_strike = float(put_short - put_width)
-        # Capture the resolved width on the entry so downstream margin /
-        # stop calc reads the right number (parent normally sets this in
-        # its own _calculate_strikes).
-        try:
-            entry.spread_width = max(call_width, put_width)
-        except AttributeError:
-            pass
+        # entry.spread_width is a derived @property reading max(call_width,
+        # put_width) from the strikes we just set — no setter needed.
 
         logger.info(
             "BRANDON-DELTA-TARGET E#%s: target=%.3fδ → call %.0f/%.0f (w=%dpt), put %.0f/%.0f (w=%dpt) at spot %.2f",

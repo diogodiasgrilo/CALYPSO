@@ -2013,6 +2013,17 @@ class HydraStrategy(MEICStrategy):
                 credit = getattr(entry, f"{side_name}_spread_credit", 0)
                 setattr(entry, f"{side_name}_side_expired", True)
                 entry.early_closed = True
+                # Record the actual close moment so capital-deployed
+                # sweep-line and any other timing-aware metric can pick it
+                # up. HYDRA stop paths set call_stop_time / put_stop_time;
+                # Brandon TP / breach close paths route through here, where
+                # neither of those got set — leaving capital_deployed
+                # treating closed entries as still-open through EOD. Single
+                # `close_time` field consolidates both shapes; first close
+                # wins so we don't overwrite when the other side closes
+                # later.
+                if not getattr(entry, "close_time", ""):
+                    entry.close_time = get_us_market_time().isoformat()
 
                 if credit > 0 and side_close_cost != 0:
                     # Net P&L for this side = credit - net_close_cost
@@ -8853,6 +8864,9 @@ class HydraStrategy(MEICStrategy):
                     # Stop timestamps (for dashboard stop markers)
                     "call_stop_time": entry.call_stop_time,
                     "put_stop_time": entry.put_stop_time,
+                    # Unified close_time covers Brandon TP/breach closes
+                    # which don't set the side-specific stop_time fields.
+                    "close_time": getattr(entry, "close_time", ""),
                     # MKT-036: Stop confirmation timer
                     "call_breach_time": entry.call_breach_time.isoformat() if getattr(entry, 'call_breach_time', None) else None,
                     "put_breach_time": entry.put_breach_time.isoformat() if getattr(entry, 'put_breach_time', None) else None,
@@ -10360,6 +10374,7 @@ class HydraStrategy(MEICStrategy):
                 # Restore stop timestamps (for dashboard stop markers)
                 restored_entry.call_stop_time = entry_data.get("call_stop_time", "")
                 restored_entry.put_stop_time = entry_data.get("put_stop_time", "")
+                restored_entry.close_time = entry_data.get("close_time", "")
                 # Fill prices (for /entry display after restart)
                 restored_entry.short_call_fill_price = entry_data.get("short_call_fill_price", 0)
                 restored_entry.long_call_fill_price = entry_data.get("long_call_fill_price", 0)

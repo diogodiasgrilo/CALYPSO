@@ -7093,68 +7093,139 @@ class MEICStrategy:
         return total
 
     def _calculate_capital_deployed(self) -> float:
-        """
-        Peak CONCURRENT margin tied up across today's entries.
+        """Peak CONCURRENT margin tied up across today's entries.
 
         Prior version SUMMED every entry's max-loss (spread_width × $100 ×
         contracts). For sessions where TPs cycled fast, the same dollars
         of margin got reused multiple times — the sum overstated capital.
-        Live evidence 2026-05-07: variant B placed 7 entries × 5pt × 15c
-        = $52,500 sum, but peak concurrent open was 4 ICs = $30,000.
-        Return-on-capital was understated by 1.75× as a result.
 
-        Now computes a sweep over (open_time, close_time) intervals per
-        entry and returns the maximum margin-at-any-instant. Conservative
-        when timing data is missing (treats entry as open from
-        entry_time → end-of-session). Falls back to the old sum for
-        entries with no timing data at all.
+        Implementation notes (2026-05-08 v2 — earlier v1 was a no-op):
+
+        Two timing-related complications make this less straightforward than
+        a textbook sweep-line:
+
+        1. `entry.entry_time` is a `datetime`, but `entry.{call,put}_stop_time`
+           is an ISO-format STRING (set via `.isoformat()` in stop paths).
+           Comparing them with `str()` on the datetime gives "YYYY-MM-DD H…"
+           (space) vs "YYYY-MM-DDTH…" (T) — space < T in ASCII, so all opens
+           sort before all closes lexically and the sweep produces the SUM
+           rather than the peak. v1 fix had this latent bug.
+
+        2. Brandon TP/breach close paths route through `_close_entry_early`,
+           which sets `*_side_expired=True` but does NOT set call_stop_time
+           or put_stop_time. Without a close timestamp on those entries the
+           sweep treats them as still-open through end-of-session — also
+           collapsing back to the SUM behaviour. v1 fix had this bug too.
+
+        Fix:
+          • Coerce all timestamps to comparable datetimes via `_to_dt()`.
+          • If neither stop_time is populated but the side is marked
+            stopped/expired, treat the entry's most-recent disposition flag
+            transition as "closed at heartbeat-now" — pessimistic but
+            captures the freed-margin moment for non-HYDRA close paths.
+          • Tie-break: closes before opens at the same instant, so a close
+            and a same-second open don't double-count concurrent margin.
         """
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        def _to_dt(t) -> Optional[_dt]:
+            """Coerce datetime / ISO string / empty-string to a datetime."""
+            if t is None or t == "":
+                return None
+            if isinstance(t, _dt):
+                return t
+            try:
+                return _dt.fromisoformat(str(t))
+            except (ValueError, TypeError):
+                return None
+
+        # "Now" used for entries that are clearly closed but have no
+        # explicit close timestamp (Brandon TP/breach path). Using now
+        # rather than entry-time means closed entries aren't treated as
+        # eternally open.
+        now = _dt.now(_tz.utc)
+
         intervals = []
         any_missing_timing = False
         for entry in self.daily_state.entries:
             if entry.spread_width <= 0:
                 continue
             margin = entry.spread_width * 100 * entry.contracts
-            open_t = getattr(entry, "entry_time", None)
-            # Use stop_time / close_time when set; otherwise treat as still open.
-            close_t = (
-                getattr(entry, "call_stop_time", None)
-                or getattr(entry, "put_stop_time", None)
-                or None
-            )
+            open_t = _to_dt(getattr(entry, "entry_time", None))
             if open_t is None:
                 any_missing_timing = True
                 continue
+            # Prefer the unified close_time (set by HYDRA's _close_entry_early
+            # for Brandon TP/breach paths). Fall back to side-specific
+            # stop_time for HYDRA stop paths that haven't been migrated.
+            close_t = (
+                _to_dt(getattr(entry, "close_time", None))
+                or _to_dt(getattr(entry, "call_stop_time", None))
+                or _to_dt(getattr(entry, "put_stop_time", None))
+            )
+            # If no explicit close_time but the entry is actually closed
+            # (any disposition flag set on a placed side), use "now" so
+            # the margin is freed in the sweep instead of held forever.
+            if close_t is None:
+                placed_call = bool(getattr(entry, "short_call_position_id", None))
+                placed_put = bool(getattr(entry, "short_put_position_id", None))
+                call_done = (
+                    getattr(entry, "call_side_stopped", False)
+                    or getattr(entry, "call_side_expired", False)
+                    or getattr(entry, "call_side_skipped", False)
+                )
+                put_done = (
+                    getattr(entry, "put_side_stopped", False)
+                    or getattr(entry, "put_side_expired", False)
+                    or getattr(entry, "put_side_skipped", False)
+                )
+                # Same logic as is_complete in _close_entry_early but
+                # evaluated locally so we don't depend on is_complete being
+                # set correctly (it's True from placement, not from close).
+                if placed_call and placed_put:
+                    closed = call_done and put_done
+                elif placed_call:
+                    closed = call_done
+                elif placed_put:
+                    closed = put_done
+                else:
+                    closed = False
+                if closed:
+                    close_t = now
+
+            # Coerce both to UTC-aware datetimes so comparisons work
+            # regardless of how each timestamp was set. Naive datetimes
+            # are assumed to be UTC.
+            if open_t is not None and open_t.tzinfo is None:
+                open_t = open_t.replace(tzinfo=_tz.utc)
+            if close_t is not None and close_t.tzinfo is None:
+                close_t = close_t.replace(tzinfo=_tz.utc)
+
             intervals.append((open_t, close_t, margin))
 
         if not intervals:
-            # Fallback: keep old behaviour (sum) when we can't reason about
-            # timing — better than returning 0 and breaking return_pct math.
             return sum(
                 e.spread_width * 100 * e.contracts
                 for e in self.daily_state.entries
                 if e.spread_width > 0
             )
 
-        # Sweep-line over all unique time points; an entry is "open" at time
-        # t if open_t <= t < close_t (or close_t is None).
+        # Sweep-line. Process closes BEFORE opens at the same instant so a
+        # close-then-immediate-reopen doesn't double the running total.
         events = []
         for open_t, close_t, margin in intervals:
-            events.append((open_t, "open", margin))
+            events.append((open_t, 0, margin))   # open: kind=0 (positive margin)
             if close_t is not None:
-                events.append((close_t, "close", margin))
-        events.sort(key=lambda x: (str(x[0]), 0 if x[1] == "close" else 1))
+                events.append((close_t, -1, margin))  # close: kind=-1 sorts BEFORE 0
+        events.sort(key=lambda x: (x[0], x[1]))
 
         peak = 0.0
         running = 0.0
         for _, kind, margin in events:
-            if kind == "open":
-                running += margin
-            else:
-                running -= margin
+            running += margin if kind == 0 else -margin
             peak = max(peak, running)
 
-        # If any entries had no timing at all, add their margin pessimistically.
         if any_missing_timing:
             peak += sum(
                 e.spread_width * 100 * e.contracts

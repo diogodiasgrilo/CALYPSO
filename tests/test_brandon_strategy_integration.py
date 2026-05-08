@@ -69,6 +69,86 @@ def _make_instance(**brandon_attrs):
     return inst
 
 
+class TestCapitalDeployedSweep:
+    """Verify capital_deployed returns peak-concurrent margin, not sum.
+
+    Regression for the 2026-05-08 audit finding: v1 of the fix had two
+    silent bugs (lex-sort confusion between datetime/ISO string AND
+    Brandon close paths not setting close_time), which made the sweep
+    collapse back to the sum behaviour. v3 fixes both.
+    """
+
+    def _entry(self, open_dt, close_dt, *, contracts=15, spread_width=5):
+        from unittest.mock import MagicMock
+        e = MagicMock()
+        e.spread_width = spread_width
+        e.contracts = contracts
+        e.entry_time = open_dt
+        e.call_stop_time = ""
+        e.put_stop_time = ""
+        e.close_time = close_dt.isoformat() if close_dt else ""
+        # Put-only via Brandon GEX-ADJ shape
+        e.short_call_position_id = None
+        e.short_put_position_id = "DRY"
+        e.call_side_skipped = True
+        e.put_side_stopped = bool(close_dt)
+        e.put_side_expired = bool(close_dt)
+        e.put_side_skipped = False
+        e.call_side_stopped = False
+        e.call_side_expired = False
+        return e
+
+    def _strategy(self, entries):
+        from unittest.mock import MagicMock
+        from bots.meic.strategy import MEICStrategy
+        inst = MEICStrategy.__new__(MEICStrategy)
+        ds = MagicMock()
+        ds.entries = entries
+        inst.daily_state = ds
+        return inst
+
+    def test_returns_sum_when_all_alive(self):
+        # 3 entries opened, all still open → peak = sum (3 × $7,500).
+        from datetime import datetime
+        entries = [
+            self._entry(datetime(2026, 5, 8, 9, 31), None),
+            self._entry(datetime(2026, 5, 8, 9, 45), None),
+            self._entry(datetime(2026, 5, 8, 10, 15), None),
+        ]
+        assert self._strategy(entries)._calculate_capital_deployed() == 22500.0
+
+    def test_returns_peak_concurrent_when_tps_cycle(self):
+        # Same shape as variant B's 2026-05-07: 7 entries with TPs/breaches
+        # cycling. Peak concurrent is 4, not 7.
+        from datetime import datetime
+        entries = [
+            self._entry(datetime(2026, 5, 7, 9, 31), datetime(2026, 5, 7, 9, 46)),
+            self._entry(datetime(2026, 5, 7, 9, 45), datetime(2026, 5, 7, 11, 0)),
+            self._entry(datetime(2026, 5, 7, 10, 15), datetime(2026, 5, 7, 11, 1)),
+            self._entry(datetime(2026, 5, 7, 10, 45), datetime(2026, 5, 7, 13, 28)),
+            self._entry(datetime(2026, 5, 7, 11, 15), datetime(2026, 5, 7, 13, 49)),
+            self._entry(datetime(2026, 5, 7, 11, 45), datetime(2026, 5, 7, 13, 49)),
+            self._entry(datetime(2026, 5, 7, 12, 15), None),
+        ]
+        result = self._strategy(entries)._calculate_capital_deployed()
+        # Peak between 12:15 and 13:28 = 4 ICs × $7,500 = $30,000.
+        assert result == 30000.0
+
+    def test_iso_string_close_time_compared_correctly(self):
+        # close_time is set as iso STRING in real code; entry_time is
+        # datetime. v1 of the fix sorted by str() which placed all opens
+        # before all closes lexically (space < T). Here we check the
+        # comparator handles the mixed types correctly.
+        from datetime import datetime
+        e1 = self._entry(datetime(2026, 5, 7, 9, 31),
+                         close_dt=datetime(2026, 5, 7, 9, 46))
+        e2 = self._entry(datetime(2026, 5, 7, 11, 15),
+                         close_dt=datetime(2026, 5, 7, 13, 49))
+        # E#1 closes before E#2 opens → never overlap → peak = 1 IC.
+        result = self._strategy([e1, e2])._calculate_capital_deployed()
+        assert result == 7500.0
+
+
 class TestDeltaTargetStrikeSelection:
     """_calculate_strikes anchors short strikes to a delta target on B/C."""
 
