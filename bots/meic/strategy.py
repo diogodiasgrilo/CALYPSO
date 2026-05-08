@@ -7094,16 +7094,74 @@ class MEICStrategy:
 
     def _calculate_capital_deployed(self) -> float:
         """
-        Calculate total margin/capital tied up in today's entries.
+        Peak CONCURRENT margin tied up across today's entries.
 
-        Capital deployed = spread_width x $100 x contracts per entry.
-        This is the maximum risk per entry (margin requirement).
+        Prior version SUMMED every entry's max-loss (spread_width × $100 ×
+        contracts). For sessions where TPs cycled fast, the same dollars
+        of margin got reused multiple times — the sum overstated capital.
+        Live evidence 2026-05-07: variant B placed 7 entries × 5pt × 15c
+        = $52,500 sum, but peak concurrent open was 4 ICs = $30,000.
+        Return-on-capital was understated by 1.75× as a result.
+
+        Now computes a sweep over (open_time, close_time) intervals per
+        entry and returns the maximum margin-at-any-instant. Conservative
+        when timing data is missing (treats entry as open from
+        entry_time → end-of-session). Falls back to the old sum for
+        entries with no timing data at all.
         """
-        total = 0.0
+        intervals = []
+        any_missing_timing = False
         for entry in self.daily_state.entries:
-            if entry.spread_width > 0:
-                total += entry.spread_width * 100 * entry.contracts
-        return total
+            if entry.spread_width <= 0:
+                continue
+            margin = entry.spread_width * 100 * entry.contracts
+            open_t = getattr(entry, "entry_time", None)
+            # Use stop_time / close_time when set; otherwise treat as still open.
+            close_t = (
+                getattr(entry, "call_stop_time", None)
+                or getattr(entry, "put_stop_time", None)
+                or None
+            )
+            if open_t is None:
+                any_missing_timing = True
+                continue
+            intervals.append((open_t, close_t, margin))
+
+        if not intervals:
+            # Fallback: keep old behaviour (sum) when we can't reason about
+            # timing — better than returning 0 and breaking return_pct math.
+            return sum(
+                e.spread_width * 100 * e.contracts
+                for e in self.daily_state.entries
+                if e.spread_width > 0
+            )
+
+        # Sweep-line over all unique time points; an entry is "open" at time
+        # t if open_t <= t < close_t (or close_t is None).
+        events = []
+        for open_t, close_t, margin in intervals:
+            events.append((open_t, "open", margin))
+            if close_t is not None:
+                events.append((close_t, "close", margin))
+        events.sort(key=lambda x: (str(x[0]), 0 if x[1] == "close" else 1))
+
+        peak = 0.0
+        running = 0.0
+        for _, kind, margin in events:
+            if kind == "open":
+                running += margin
+            else:
+                running -= margin
+            peak = max(peak, running)
+
+        # If any entries had no timing at all, add their margin pessimistically.
+        if any_missing_timing:
+            peak += sum(
+                e.spread_width * 100 * e.contracts
+                for e in self.daily_state.entries
+                if e.spread_width > 0 and getattr(e, "entry_time", None) is None
+            )
+        return peak
 
     def _calculate_sortino_ratio(self, today_net_pnl: float, today_capital: float) -> float:
         """

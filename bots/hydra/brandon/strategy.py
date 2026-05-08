@@ -411,29 +411,44 @@ class BrandonHydraStrategy(HydraStrategy):
                     "BRANDON-BREACH E#%s %s: confirmed breach — closing IC. %s",
                     entry.entry_number, side, decision.reason,
                 )
+                # CRITICAL: capture aliveness AND spread_value BEFORE
+                # _close_entry_early runs. _close_entry_early sets
+                # *_side_expired=True on every closed side, which makes
+                # _brandon_side_alive return False — so checking it AFTER
+                # the close skips the entire close-cost block, leaves
+                # actual_*_stop_debit at its 0.0 default, and never
+                # subtracts the real close cost from total_realized_pnl.
+                # Live evidence 2026-05-07: 3 breach exits on B (E#4 SV
+                # $750, E#5 SV $4,125, E#6 SV $3,900) and 1 on C (E#2 SV
+                # $2,925) all recorded close_cost=$0 → reported a +$787
+                # day on B that was actually ~-$8,000 net of real close
+                # costs. Same shape of bug we fixed in TP path days ago,
+                # missed in breach exit because it uses live attr lookup
+                # instead of a captured local.
+                call_alive_pre = self._brandon_side_alive(entry, "call")
+                put_alive_pre = self._brandon_side_alive(entry, "put")
+                close_cost_call_real = float(entry.call_spread_value) if (call_alive_pre and entry.call_spread_value) else 0.0
+                close_cost_put_real = float(entry.put_spread_value) if (put_alive_pre and entry.put_spread_value) else 0.0
+
                 try:
                     legs_closed, legs_failed, _ = self._close_entry_early(entry)
                 except Exception as exc:
                     logger.error("BRANDON-BREACH E#%s %s: close failed (%s)", entry.entry_number, side, exc)
                     return None
-                # Same P&L attribution as the TP path: store spread_value
-                # raw (already-in-dollars; the × 100 × contracts is baked in)
-                # and subtract close_cost from total_realized_pnl to undo
-                # the credit-only addition done by _close_entry_early on its
-                # deferred-fill branch. *_side_pivot_closed marks this as a
-                # Brandon breach close in the journal narrative.
+                # P&L attribution: same pattern as TP. Use the captured
+                # pre-close aliveness flags + spread_values to record the
+                # real close cost on each side that was alive at the moment
+                # of breach.
                 contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
-                if self._brandon_side_alive(entry, "call"):
+                if call_alive_pre:
                     entry.call_side_stopped = True
-                    close_cost_call = float(entry.call_spread_value) if entry.call_spread_value else 0.0
-                    entry.actual_call_stop_debit = close_cost_call
-                    self.daily_state.total_realized_pnl -= close_cost_call
+                    entry.actual_call_stop_debit = close_cost_call_real
+                    self.daily_state.total_realized_pnl -= close_cost_call_real
                     setattr(entry, "call_side_pivot_closed", True)
-                if self._brandon_side_alive(entry, "put"):
+                if put_alive_pre:
                     entry.put_side_stopped = True
-                    close_cost_put = float(entry.put_spread_value) if entry.put_spread_value else 0.0
-                    entry.actual_put_stop_debit = close_cost_put
-                    self.daily_state.total_realized_pnl -= close_cost_put
+                    entry.actual_put_stop_debit = close_cost_put_real
+                    self.daily_state.total_realized_pnl -= close_cost_put_real
                     setattr(entry, "put_side_pivot_closed", True)
                 # Tag close type for the dashboard. BREACH = Brandon GEX wall
                 # breach, distinct from TP and from a HYDRA credit+buffer stop.

@@ -446,15 +446,39 @@ class TestBreachExitLive:
         inst._brandon_now_et = lambda: datetime.now(timezone.utc)
 
         e = self._entry()
+        # Ensure call side has a real spread_value at the moment of breach.
+        # The bug-fix verifies we capture this BEFORE _close_entry_early
+        # zeroes out the aliveness flags. If the buggy version had survived,
+        # actual_call_stop_debit would be 0.
+        e.call_spread_credit = 100.0
+        e.call_spread_value = 80.0  # call SV at moment of breach close
+        e.put_spread_credit = 100.0
+        e.put_spread_value = 60.0
         inst._close_entry_early = MagicMock(return_value=(4, 0, []))
         # daily_state needed for the realized-P&L correction (see TP test).
         inst.daily_state = MagicMock()
-        inst.daily_state.total_realized_pnl = 0.0
+        inst.daily_state.total_realized_pnl = 200.0  # full credit pre-correction
+        # Simulate _close_entry_early's flag-flip side-effect: it sets
+        # *_side_expired=True. The fix must capture aliveness BEFORE this
+        # mutation so the close-cost block still runs.
+        def fake_close(entry):
+            entry.call_side_expired = True
+            entry.put_side_expired = True
+            return (4, 0, [])
+        inst._close_entry_early = MagicMock(side_effect=fake_close)
         result = inst._brandon_check_breach_exit(e)
         assert result is not None
         assert "closed" in result
         inst._close_entry_early.assert_called_once_with(e)
         assert e.call_side_pivot_closed is True
+        # Real close costs MUST be recorded — this is the regression
+        # guard for the 2026-05-07 incident where breach exits silently
+        # logged $0 close cost while the actual SV was $750-$4,125.
+        assert e.actual_call_stop_debit == pytest.approx(80.0)
+        assert e.actual_put_stop_debit == pytest.approx(60.0)
+        # And realized P&L must be reduced by both close costs:
+        # 200 (credit pre-correction) - 80 - 60 = 60.
+        assert inst.daily_state.total_realized_pnl == pytest.approx(60.0)
 
 
 class TestHydraShadowStop:
