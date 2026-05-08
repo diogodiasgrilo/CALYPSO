@@ -48,6 +48,21 @@ class StrikeGEX:
 
 
 @dataclass(frozen=True)
+class StrikeDelta:
+    """Per-strike, per-side option delta from the chain snapshot.
+
+    Used for delta-target strike selection (Brandon's "8 delta short" rule).
+    Polygon Starter exposes delta in the per-contract snapshot; calls have
+    delta in (0, 1] and puts in [-1, 0). When the API doesn't return greeks
+    we leave delta=None and the lookup falls back to the OTM-multiplier
+    method downstream.
+    """
+    strike: float
+    contract_type: str  # "call" or "put"
+    delta: Optional[float]
+
+
+@dataclass(frozen=True)
 class GEXCluster:
     strike_low: float
     strike_high: float
@@ -64,6 +79,11 @@ class GEXProfile:
     expiry: date
     fetched_at: datetime
     strikes: tuple[StrikeGEX, ...] = field(default_factory=tuple)
+    # Per-strike per-side delta data captured from the same chain fetch
+    # that built the GEX clusters. Reused by delta-target strike selection
+    # so we don't issue a second chain fetch per entry. Empty tuple if the
+    # chain didn't carry greeks (Brandon falls back to OTM-multiplier).
+    deltas: tuple[StrikeDelta, ...] = field(default_factory=tuple)
 
     def gex_at(self, strike: float, tolerance: float = 0.01) -> float:
         for sg in self.strikes:
@@ -130,6 +150,7 @@ def build_profile(
     if fetched_at is None:
         fetched_at = datetime.now(timezone.utc)
     by_strike: dict[float, float] = {}
+    delta_records: list[StrikeDelta] = []
 
     for c in contracts:
         details = c.get("details") or {}
@@ -138,11 +159,22 @@ def build_profile(
         if strike is None or ctype not in ("call", "put"):
             continue
 
+        # Capture delta even for zero-OI contracts — delta-target strike
+        # selection wants the full chain shape, not just the OI-weighted
+        # subset. GEX clustering still drops zero-OI below.
+        greeks = c.get("greeks") or {}
+        delta_raw = greeks.get("delta")
+        delta_records.append(StrikeDelta(
+            strike=float(strike),
+            contract_type=ctype,
+            delta=float(delta_raw) if delta_raw is not None else None,
+        ))
+
         oi = int(c.get("open_interest") or 0)
         if oi <= 0:
             continue
 
-        gamma = ((c.get("greeks") or {}).get("gamma"))
+        gamma = greeks.get("gamma")
         if gamma is None:
             iv = c.get("implied_volatility")
             if iv is None or iv <= 0:
@@ -160,7 +192,14 @@ def build_profile(
     strikes_sorted = tuple(
         StrikeGEX(strike=k, gex=v) for k, v in sorted(by_strike.items())
     )
-    return GEXProfile(spot=spot, expiry=expiry, fetched_at=fetched_at, strikes=strikes_sorted)
+    deltas_sorted = tuple(sorted(delta_records, key=lambda d: (d.strike, d.contract_type)))
+    return GEXProfile(
+        spot=spot,
+        expiry=expiry,
+        fetched_at=fetched_at,
+        strikes=strikes_sorted,
+        deltas=deltas_sorted,
+    )
 
 
 def _detect_clusters(
@@ -217,6 +256,70 @@ def _flush_cluster(out: list[GEXCluster], run: list[StrikeGEX], threshold: float
 
 POLYGON_SNAPSHOT_URL = "https://api.polygon.io/v3/snapshot/options/{underlying}"
 POLYGON_PER_CONTRACT_URL = "https://api.polygon.io/v3/snapshot/options/I:{underlying}/{ticker}"
+
+
+SPX_STRIKE_GRID_PT = 5.0
+
+
+def find_strike_at_delta(
+    profile: GEXProfile,
+    *,
+    side: str,
+    target_delta_abs: float,
+    spot_fallback: Optional[float] = None,
+) -> Optional[float]:
+    """Find the strike whose `side` option delta is closest to ±target_delta_abs.
+
+    Brandon's "8 delta short" rule: target_delta_abs ≈ 0.08, side="put" or "call".
+    For puts we match against |delta| since Polygon returns put deltas as
+    negative values; calls are positive in (0, 1].
+
+    Constraints:
+    - Strike must be on the SPX 5pt grid (snapped to nearest).
+    - Calls must be ABOVE spot, puts must be BELOW spot — protects against a
+      degenerate delta crossover (e.g., a put with positive delta from stale
+      data) flipping the strike to the wrong side.
+    - Returns None if the chain has no contracts on the requested side with
+      delta data (caller should fall back to OTM-multiplier).
+
+    Args:
+        profile: GEXProfile with `deltas` populated by build_profile.
+        side: "call" or "put"
+        target_delta_abs: target absolute delta, e.g. 0.08 for 8 delta
+        spot_fallback: spot price to gate strikes against (defaults to
+            profile.spot if not provided)
+
+    Returns:
+        float strike price (snapped to 5pt grid) or None.
+    """
+    side = side.lower()
+    if side not in ("call", "put"):
+        raise ValueError(f"side must be 'call' or 'put', got {side!r}")
+    if target_delta_abs <= 0 or target_delta_abs >= 1:
+        raise ValueError(f"target_delta_abs must be in (0, 1), got {target_delta_abs}")
+
+    spot = float(spot_fallback if spot_fallback is not None else profile.spot)
+    if spot <= 0:
+        return None
+
+    # Filter to the right side, with delta populated, on the right side of spot.
+    candidates = []
+    for d in profile.deltas:
+        if d.contract_type != side or d.delta is None:
+            continue
+        if side == "call" and d.strike <= spot:
+            continue
+        if side == "put" and d.strike >= spot:
+            continue
+        candidates.append(d)
+
+    if not candidates:
+        return None
+
+    # Closest by absolute delta distance to target.
+    best = min(candidates, key=lambda d: abs(abs(d.delta) - target_delta_abs))
+    snapped = round(best.strike / SPX_STRIKE_GRID_PT) * SPX_STRIKE_GRID_PT
+    return snapped
 
 
 HttpFetcher = Callable[[str], dict]

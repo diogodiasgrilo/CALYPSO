@@ -109,6 +109,10 @@
       "enabled": true,
       "_comment_disable_tightening": "MKT-020/MKT-022 progressive tightening is HYDRA's credit-chasing mechanism — it walks strikes inward when initial credit < floor. Brandon's strategy picks strikes per GEX zones and accepts low credit at safe strikes; if credit < gate the entry should SKIP, not move strikes onto a wall. 2026-05-07 incident: tightener walked B's E#5/E#6 puts from 125pt OTM (safe) to 35-40pt OTM (right on the 7330 GEX wall) chasing credit; when SPX broke the wall at 13:26 the resulting 4 breach exits cost ~$8.7K. With this flag set, MKT-020/MKT-022 skip on B and the strike stays where Brandon GEX-ADJ wants it.",
       "disable_progressive_tightening": true,
+      "_comment_delta_target": "Brandon-faithful strike selection: anchor short strikes to a delta target read from Polygon's option chain (8 delta default, inherited from strategy.target_delta). Replaces HYDRA's 'starting OTM = N × expected_move' approximation, which underestimates real risk on low-VIX days. When enabled, _calculate_strikes asks the GEX profile for the strike at the configured delta; downstream HYDRA pipeline (Brandon GEX-ADJ for accel-zone skip, narrow-spread width, MKT-045 chain snap) runs on top unchanged. Falls back to OTM-multiplier if Polygon greeks are unavailable.",
+      "delta_target_strike_selection": {
+        "enabled": true
+      },
       "take_profit": {
         "enabled": true,
         "threshold": 0.80

@@ -12,23 +12,30 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from bots.hydra.brandon.gex_provider import (
     GEXCluster,
     GEXProfile,
+    StrikeDelta,
     StrikeGEX,
     black_scholes_gamma,
     build_profile,
     fetch_per_contract_snapshot,
     fetch_polygon_chain,
     fetch_polygon_chain_with_greeks,
+    find_strike_at_delta,
     time_to_expiry_years,
 )
 
 
-def _contract(strike, ctype, oi, *, gamma=None, iv=None):
+def _contract(strike, ctype, oi, *, gamma=None, iv=None, delta=None):
     out = {
         "details": {"strike_price": strike, "contract_type": ctype},
         "open_interest": oi,
     }
+    greeks = {}
     if gamma is not None:
-        out["greeks"] = {"gamma": gamma}
+        greeks["gamma"] = gamma
+    if delta is not None:
+        greeks["delta"] = delta
+    if greeks:
+        out["greeks"] = greeks
     if iv is not None:
         out["implied_volatility"] = iv
     return out
@@ -481,3 +488,153 @@ class TestFetchPolygonChainWithGreeks:
             api_key="KEY", http_fetch=fake_http,
         )
         assert result == []
+
+
+class TestBuildProfileDeltas:
+    """build_profile should preserve per-strike per-side delta from greeks."""
+
+    def test_delta_captured_alongside_gex(self):
+        # 3 strikes, both sides, all with greeks (delta + gamma)
+        contracts = [
+            _contract(7250, "put",  oi=1000, gamma=0.0008, delta=-0.05),
+            _contract(7300, "put",  oi=1000, gamma=0.0010, delta=-0.10),
+            _contract(7350, "put",  oi=1000, gamma=0.0012, delta=-0.30),
+            _contract(7350, "call", oi=1000, gamma=0.0012, delta=+0.70),
+            _contract(7400, "call", oi=1000, gamma=0.0010, delta=+0.30),
+            _contract(7450, "call", oi=1000, gamma=0.0008, delta=+0.10),
+        ]
+        prof = build_profile(
+            contracts, spot=7350, expiry=date(2026, 5, 8), time_to_expiry=1 / 365.0,
+        )
+        # All 6 contracts should be in deltas (preserved regardless of GEX).
+        assert len(prof.deltas) == 6
+        # Spot-check a put and a call.
+        put_7300 = next(d for d in prof.deltas if d.strike == 7300 and d.contract_type == "put")
+        assert put_7300.delta == pytest.approx(-0.10)
+        call_7400 = next(d for d in prof.deltas if d.strike == 7400 and d.contract_type == "call")
+        assert call_7400.delta == pytest.approx(+0.30)
+
+    def test_delta_none_when_greeks_missing(self):
+        # OI present, IV present, but no delta — should preserve None
+        contracts = [
+            _contract(7300, "put", oi=1000, iv=0.18),  # no greeks dict
+        ]
+        prof = build_profile(
+            contracts, spot=7350, expiry=date(2026, 5, 8), time_to_expiry=1 / 365.0,
+        )
+        assert len(prof.deltas) == 1
+        assert prof.deltas[0].delta is None
+
+    def test_zero_oi_still_recorded_in_deltas(self):
+        # Zero OI is dropped from gex aggregation but deltas should still
+        # carry it — we want full chain shape for delta-target lookups.
+        contracts = [
+            _contract(7300, "put", oi=0, gamma=0.001, delta=-0.10),
+            _contract(7400, "call", oi=0, gamma=0.001, delta=+0.10),
+        ]
+        prof = build_profile(
+            contracts, spot=7350, expiry=date(2026, 5, 8), time_to_expiry=1 / 365.0,
+        )
+        assert len(prof.strikes) == 0  # zero OI — not in GEX
+        assert len(prof.deltas) == 2  # but kept in deltas
+
+
+class TestFindStrikeAtDelta:
+    """Brandon-faithful strike selection — find the strike at target delta."""
+
+    def _profile_with(self, deltas):
+        """Build a GEXProfile from a list of (strike, side, delta) tuples."""
+        return GEXProfile(
+            spot=7350.0,
+            expiry=date(2026, 5, 8),
+            fetched_at=datetime.now(timezone.utc),
+            strikes=tuple(),
+            deltas=tuple(StrikeDelta(strike=s, contract_type=t, delta=d) for s, t, d in deltas),
+        )
+
+    def test_finds_closest_put_to_target_delta(self):
+        # Targeting 8δ put. Strike 7290 has |delta| 0.07, closest to 0.08.
+        prof = self._profile_with([
+            (7250, "put", -0.04),
+            (7290, "put", -0.07),
+            (7310, "put", -0.12),
+            (7330, "put", -0.20),
+        ])
+        result = find_strike_at_delta(prof, side="put", target_delta_abs=0.08)
+        assert result == 7290.0
+
+    def test_finds_closest_call_to_target_delta(self):
+        # Targeting 8δ call.
+        prof = self._profile_with([
+            (7400, "call", +0.20),
+            (7430, "call", +0.12),
+            (7460, "call", +0.07),
+            (7490, "call", +0.03),
+        ])
+        result = find_strike_at_delta(prof, side="call", target_delta_abs=0.08)
+        assert result == 7460.0
+
+    def test_snaps_to_5pt_grid(self):
+        # If chain has off-grid strikes (rare but possible), snap to nearest 5.
+        prof = self._profile_with([(7287.5, "put", -0.08)])
+        result = find_strike_at_delta(prof, side="put", target_delta_abs=0.08)
+        # Python's round() uses banker's rounding: 7287.5/5=1457.5 → 1458
+        # (nearest even) → 7290.
+        assert result == 7290.0
+
+    def test_excludes_wrong_side_of_spot(self):
+        # A put with stale data showing positive delta above spot should not
+        # be selected. spot=7350; put at 7400 ignored.
+        prof = self._profile_with([
+            (7300, "put", -0.08),  # below spot, valid
+            (7400, "put", -0.08),  # above spot, gating block excludes
+        ])
+        result = find_strike_at_delta(prof, side="put", target_delta_abs=0.08)
+        assert result == 7300.0
+
+    def test_returns_none_when_no_deltas_on_side(self):
+        # Only puts in chain — call request returns None
+        prof = self._profile_with([(7300, "put", -0.08)])
+        assert find_strike_at_delta(prof, side="call", target_delta_abs=0.08) is None
+
+    def test_returns_none_when_all_deltas_missing(self):
+        # Side present but every contract has delta=None
+        prof = self._profile_with([(7300, "put", None), (7290, "put", None)])
+        assert find_strike_at_delta(prof, side="put", target_delta_abs=0.08) is None
+
+    def test_rejects_invalid_target_delta(self):
+        prof = self._profile_with([(7300, "put", -0.08)])
+        with pytest.raises(ValueError):
+            find_strike_at_delta(prof, side="put", target_delta_abs=0.0)
+        with pytest.raises(ValueError):
+            find_strike_at_delta(prof, side="put", target_delta_abs=1.5)
+
+    def test_rejects_invalid_side(self):
+        prof = self._profile_with([(7300, "put", -0.08)])
+        with pytest.raises(ValueError):
+            find_strike_at_delta(prof, side="straddle", target_delta_abs=0.08)
+
+    def test_brandon_real_world_2026_05_07_scenario(self):
+        # Reproduce yesterday's setup: spot ~7345, GEX wall at 7330. With
+        # delta-target the bot should pick a put short well below the wall
+        # (high probability of expiring OTM), NOT 7340 like the tightener
+        # walked it to.
+        deltas = [
+            (7250, "put", -0.04),  # 8δ candidate
+            (7270, "put", -0.06),
+            (7280, "put", -0.08),  # closest to target
+            (7300, "put", -0.14),
+            (7320, "put", -0.22),
+            (7330, "put", -0.30),  # right at the wall — DEFINITELY not 8δ
+            (7340, "put", -0.42),  # what the tightener picked yesterday
+        ]
+        prof = GEXProfile(
+            spot=7345.0,
+            expiry=date(2026, 5, 8),
+            fetched_at=datetime.now(timezone.utc),
+            strikes=tuple(),
+            deltas=tuple(StrikeDelta(strike=s, contract_type=t, delta=d) for s, t, d in deltas),
+        )
+        result = find_strike_at_delta(prof, side="put", target_delta_abs=0.08)
+        # Brandon: 8δ short = 7280, 50pt below the wall and well outside it.
+        assert result == 7280.0

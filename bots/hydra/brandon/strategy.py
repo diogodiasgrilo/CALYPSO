@@ -124,6 +124,27 @@ class BrandonHydraStrategy(HydraStrategy):
             bcfg.get("disable_progressive_tightening", False)
         )
 
+        # Brandon-faithful strike selection: anchor short strikes to a delta
+        # target read from the live option chain (Polygon greeks). Replaces
+        # HYDRA's "starting OTM = N × expected_move" approximation, which
+        # drifts onto walls when expected_move underestimates real risk
+        # (low-VIX days like 2026-05-07). target_delta_pct is the absolute
+        # delta target as a fraction (0.08 = 8 delta); we read the existing
+        # strategy.target_delta config (expressed as 8 = 8%) by default so a
+        # variant doesn't have to set it twice. When True: _calculate_strikes
+        # asks the GEX profile for the strike whose option delta is closest
+        # to the target. If the chain isn't available or has no greeks, the
+        # method falls back to HYDRA's OTM-multiplier path.
+        dts = bcfg.get("delta_target_strike_selection") or {}
+        self.brandon_delta_target_enabled = bool(dts.get("enabled", False))
+        # Look first at the brandon-specific target (lets variants override),
+        # then strategy.target_delta (already set, e.g. 8 = 8δ), default 0.08.
+        _td_pct = dts.get("target_delta_pct")
+        if _td_pct is None:
+            _td_strategy = self.strategy_config.get("target_delta", 8)
+            _td_pct = float(_td_strategy) / 100.0  # 8 → 0.08
+        self.brandon_delta_target_pct = float(_td_pct)
+
         hs = bcfg.get("hydra_stop_shadow") or {}
         self.brandon_hydra_shadow_enabled = bool(hs.get("enabled", True))
 
@@ -169,6 +190,82 @@ class BrandonHydraStrategy(HydraStrategy):
             )
             return narrow_spread.narrow_spread_width(vix, cfg)
         return super()._get_vix_adjusted_spread_width(vix, side)
+
+    # ------------------------------------------------------------------
+    # Strike calculation override — delta-target via Polygon chain
+    # ------------------------------------------------------------------
+
+    def _calculate_strikes(self, entry) -> bool:
+        """Anchor short strikes to a Brandon delta target before falling
+        through to HYDRA's calculation.
+
+        Brandon's framework: pick the short strike whose option delta is
+        closest to the configured target (default 8δ). Long strike sits at
+        the spread width away. Spreads then enter the rest of HYDRA's
+        pipeline (whipsaw filter, credit gate, MKT-045 chain snap, the
+        Brandon GEX adjuster on top, etc) unchanged.
+
+        Falls back to HYDRA's parent _calculate_strikes when:
+          - delta_target_strike_selection is disabled
+          - the GEX profile isn't available yet (Polygon failure / first
+            tick of the day)
+          - the chain has no per-contract greeks for either side
+        """
+        if not getattr(self, "brandon_delta_target_enabled", False):
+            return super()._calculate_strikes(entry)
+
+        spot = float(self.current_price or 0.0)
+        if spot <= 0:
+            logger.debug("BRANDON-DELTA-TARGET: spot unknown — falling back to OTM-multiplier")
+            return super()._calculate_strikes(entry)
+
+        profile = self._brandon_get_gex_profile(self._brandon_today_date())
+        if profile is None or not profile.deltas:
+            logger.warning(
+                "BRANDON-DELTA-TARGET E#%s: no chain delta data — falling back to OTM-multiplier",
+                getattr(entry, "entry_number", "?"),
+            )
+            return super()._calculate_strikes(entry)
+
+        target = self.brandon_delta_target_pct
+        call_short = gex_provider.find_strike_at_delta(
+            profile, side="call", target_delta_abs=target, spot_fallback=spot,
+        )
+        put_short = gex_provider.find_strike_at_delta(
+            profile, side="put", target_delta_abs=target, spot_fallback=spot,
+        )
+        if call_short is None or put_short is None:
+            logger.warning(
+                "BRANDON-DELTA-TARGET E#%s: chain missing %s — falling back to OTM-multiplier",
+                getattr(entry, "entry_number", "?"),
+                "call greeks" if call_short is None else "put greeks",
+            )
+            return super()._calculate_strikes(entry)
+
+        # Apply VIX-adjusted spread width (Brandon narrow on B/C).
+        call_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
+        put_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
+        entry.short_call_strike = float(call_short)
+        entry.long_call_strike = float(call_short + call_width)
+        entry.short_put_strike = float(put_short)
+        entry.long_put_strike = float(put_short - put_width)
+        # Capture the resolved width on the entry so downstream margin /
+        # stop calc reads the right number (parent normally sets this in
+        # its own _calculate_strikes).
+        try:
+            entry.spread_width = max(call_width, put_width)
+        except AttributeError:
+            pass
+
+        logger.info(
+            "BRANDON-DELTA-TARGET E#%s: target=%.3fδ → call %.0f/%.0f (w=%dpt), put %.0f/%.0f (w=%dpt) at spot %.2f",
+            getattr(entry, "entry_number", "?"),
+            target,
+            entry.short_call_strike, entry.long_call_strike, call_width,
+            entry.short_put_strike, entry.long_put_strike, put_width,
+            spot,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Strike adjuster — applied just before order placement (live + dry)

@@ -109,6 +109,10 @@
       "enabled": true,
       "_comment_disable_tightening": "Same rationale as variant B: HYDRA's MKT-020/MKT-022 tighteners chase credit by walking strikes toward ATM, which clashes with Brandon's GEX-zone strike selection. C's E#2 on 2026-05-07 was tightened from 125pt OTM to 25pt OTM (P:7340) right on the 7330 wall — when the wall broke, the breach close cost was $2,925 vs the recorded $0. Disabled here so Brandon GEX-ADJ is the sole strike-selection mechanism.",
       "disable_progressive_tightening": true,
+      "_comment_delta_target": "Same Brandon-faithful delta-target strike selection as variant B. 8δ short anchored to Polygon's option chain (strategy.target_delta=8 above), with Brandon GEX-ADJ stacked on top to skip accel-zone sides.",
+      "delta_target_strike_selection": {
+        "enabled": true
+      },
       "take_profit": {
         "enabled": true,
         "threshold": 0.80

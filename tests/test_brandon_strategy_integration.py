@@ -47,6 +47,9 @@ def _make_instance(**brandon_attrs):
         brandon_narrow_breakpoint_vix=22.0,
         brandon_narrow_width_low=5,
         brandon_narrow_width_high=10,
+        brandon_disable_progressive_tightening=False,
+        brandon_delta_target_enabled=False,
+        brandon_delta_target_pct=0.08,
         brandon_hydra_shadow_enabled=True,
         _brandon_gex_profile=None,
         _brandon_gex_profile_fetched_at=None,
@@ -64,6 +67,145 @@ def _make_instance(**brandon_attrs):
     for k, v in defaults.items():
         setattr(inst, k, v)
     return inst
+
+
+class TestDeltaTargetStrikeSelection:
+    """_calculate_strikes anchors short strikes to a delta target on B/C."""
+
+    def _profile(self, deltas):
+        from datetime import date, datetime, timezone
+        from bots.hydra.brandon.gex_provider import GEXProfile, StrikeDelta
+        return GEXProfile(
+            spot=7345.0,
+            expiry=date(2026, 5, 8),
+            fetched_at=datetime.now(timezone.utc),
+            strikes=tuple(),
+            deltas=tuple(StrikeDelta(strike=s, contract_type=t, delta=d) for s, t, d in deltas),
+        )
+
+    def test_falls_back_to_super_when_disabled(self):
+        inst = _make_instance(
+            brandon_delta_target_enabled=False,
+            current_price=7345.0,
+        )
+        # Ensure parent _calculate_strikes is invoked. Mock the parent to
+        # return True so we don't need the full HYDRA strike pipeline.
+        with patch.object(
+            BrandonHydraStrategy.__mro__[1],
+            "_calculate_strikes",
+            return_value=True,
+        ) as parent_method:
+            entry = MagicMock()
+            result = inst._calculate_strikes(entry)
+        assert result is True
+        parent_method.assert_called_once_with(entry)
+
+    def test_falls_back_when_no_chain(self):
+        inst = _make_instance(
+            brandon_delta_target_enabled=True,
+            current_price=7345.0,
+        )
+        inst._brandon_get_gex_profile = lambda d: None
+        inst._brandon_today_date = lambda: None
+        with patch.object(
+            BrandonHydraStrategy.__mro__[1],
+            "_calculate_strikes",
+            return_value=True,
+        ) as parent_method:
+            entry = MagicMock(entry_number=1)
+            result = inst._calculate_strikes(entry)
+        assert result is True
+        parent_method.assert_called_once()
+
+    def test_falls_back_when_chain_has_no_deltas(self):
+        from datetime import date, datetime, timezone
+        from bots.hydra.brandon.gex_provider import GEXProfile
+        prof = GEXProfile(
+            spot=7345.0,
+            expiry=date(2026, 5, 8),
+            fetched_at=datetime.now(timezone.utc),
+            strikes=tuple(),
+            deltas=tuple(),
+        )
+        inst = _make_instance(
+            brandon_delta_target_enabled=True,
+            current_price=7345.0,
+        )
+        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_today_date = lambda: None
+        with patch.object(
+            BrandonHydraStrategy.__mro__[1],
+            "_calculate_strikes",
+            return_value=True,
+        ) as parent_method:
+            entry = MagicMock(entry_number=1)
+            result = inst._calculate_strikes(entry)
+        assert result is True
+        parent_method.assert_called_once()
+
+    def test_picks_strike_at_target_delta_with_narrow_widths(self):
+        # Real-world May 7 setup: 8δ put should land at 7280 (well below
+        # 7330 wall), not 7340 like the tightener walked it to.
+        prof = self._profile([
+            (7280, "put", -0.08),   # closest to 8δ
+            (7320, "put", -0.20),
+            (7340, "put", -0.42),
+            (7400, "call", +0.20),
+            (7420, "call", +0.10),
+            (7430, "call", +0.08),  # closest to 8δ
+        ])
+        inst = _make_instance(
+            brandon_delta_target_enabled=True,
+            brandon_delta_target_pct=0.08,
+            brandon_narrow_spread_enabled=True,  # 5pt at low VIX
+            current_price=7345.0,
+            current_vix=17.0,
+        )
+        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_today_date = lambda: None
+        # Use a real-ish entry with mutable strike attrs
+        entry = MagicMock(entry_number=1, spec_set=None)
+        entry.short_call_strike = 0.0
+        entry.long_call_strike = 0.0
+        entry.short_put_strike = 0.0
+        entry.long_put_strike = 0.0
+        entry.spread_width = 0
+        result = inst._calculate_strikes(entry)
+        assert result is True
+        assert entry.short_put_strike == 7280.0
+        assert entry.long_put_strike == 7275.0  # 5pt below
+        assert entry.short_call_strike == 7430.0
+        assert entry.long_call_strike == 7435.0  # 5pt above
+
+    def test_brandon_avoids_yesterday_wall_strike(self):
+        # Sanity check: with the tightener disabled AND delta-target on,
+        # B's E#5 yesterday would NOT have landed at 7340 (which was on
+        # the wall). It would have landed at 7280 (8δ).
+        prof = self._profile([
+            (7280, "put", -0.08),
+            (7330, "put", -0.30),  # the GEX wall
+            (7340, "put", -0.42),  # what we picked yesterday
+            (7430, "call", +0.08),
+        ])
+        inst = _make_instance(
+            brandon_delta_target_enabled=True,
+            brandon_delta_target_pct=0.08,
+            brandon_narrow_spread_enabled=True,
+            current_price=7345.0,
+            current_vix=17.0,
+        )
+        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_today_date = lambda: None
+        entry = MagicMock(entry_number=5)
+        entry.short_put_strike = 0.0
+        entry.long_put_strike = 0.0
+        entry.short_call_strike = 0.0
+        entry.long_call_strike = 0.0
+        entry.spread_width = 0
+        inst._calculate_strikes(entry)
+        # Strike is at 8δ, far below the 7330 wall.
+        assert entry.short_put_strike == 7280.0
+        assert entry.short_put_strike < 7330.0  # decisively below the wall
 
 
 class TestNarrowSpreadOverride:
