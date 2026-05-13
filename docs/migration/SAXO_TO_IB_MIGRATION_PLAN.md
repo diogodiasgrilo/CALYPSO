@@ -1,12 +1,16 @@
 # Saxo → Interactive Brokers Migration Plan
 
+> **⚠️ ARCHITECTURE UPDATE 2026-05-13 (afternoon)**: Follow-up research resolved all 6 open questions and **pivoted the architecture**. The Phase 1 + 4 + 7 sections below describe the original IB Gateway + `ib_async` + IBC plan; the **production path is now OAuth 1.0a + `ibind` (gateway-free, no weekly phone tap)** per [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md). Gateway path retained as documented fallback if IBKR ever revokes OAuth 1.0a retail self-service. **Read `IB_OPEN_QUESTIONS_ANSWERED.md` "Implications for the migration plan" section before executing Phase 1.**
+>
 > **Status**: research + plan only. No code changes yet. This document is the prescriptive sequencing for the migration; the companion `INTERACTIVE_BROKERS_API_REFERENCE.md` is the supporting encyclopedia.
 >
-> **Migration scope**: full replacement of `shared/saxo_client.py` (5,152 lines) and the WebSocket streaming layer with an IBKR equivalent built on `ib_async`. All four bots that import the Saxo client (`hydra/`, `meic/`, `iron_fly_0dte/`, `delta_neutral/`, `rolling_put_diagonal/`) cut over together.
+> **Migration scope**: full replacement of `shared/saxo_client.py` (5,152 lines) and the WebSocket streaming layer with an IBKR equivalent. SDK now: **`ibind` (forked locally to swap pyCrypto → pycryptodome)** for the OAuth 1.0a primary path; `ib_async` retained for the Gateway-fallback path. All four bots that import the Saxo client (`hydra/`, `meic/`, `iron_fly_0dte/`, `delta_neutral/`, `rolling_put_diagonal/`) cut over together.
 >
-> **Compiled**: 2026-05-13.
+> **Compiled**: 2026-05-13. **Architecture pivoted**: 2026-05-13 afternoon (Q&A research).
 >
-> **Companion**: [`INTERACTIVE_BROKERS_API_REFERENCE.md`](./INTERACTIVE_BROKERS_API_REFERENCE.md)
+> **Companion**:
+> - [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md) — **READ FIRST** — architecture pivot + 6 verified answers.
+> - [`INTERACTIVE_BROKERS_API_REFERENCE.md`](./INTERACTIVE_BROKERS_API_REFERENCE.md) — IB API encyclopedia.
 
 ---
 

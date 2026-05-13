@@ -1,8 +1,12 @@
 # Interactive Brokers API — Reference for CALYPSO
 
+> **⚠️ ARCHITECTURE UPDATE 2026-05-13 (afternoon)**: The TL;DR table below shows the ORIGINAL recommendation (IB Gateway + `ib_async` + IBC). **Follow-up research [resolved the 6 open questions](./IB_OPEN_QUESTIONS_ANSWERED.md) and changed this**: the practical retail path is **OAuth 1.0a "Extended" first-party via `ibind`** — fully headless, no Gateway, no IBC, no weekly phone tap. The Gateway path remains documented as a fallback if IBKR ever closes OAuth 1.0a self-service to retail. **Read `IB_OPEN_QUESTIONS_ANSWERED.md` first** for the post-research architecture.
+>
 > **Status**: research-only reference (no code changes yet). Compiled 2026-05-13 from 5 parallel research agents covering API landscape, market data, orders/positions, production deployment, and SPX 0DTE edge cases. Cite primary IBKR docs at every decision point; this is a navigation index plus the cross-cutting decisions, not a replacement for the source documentation. Re-verify dollar figures, subscription names, and version numbers before any cutover.
 >
-> **Companion doc**: `SAXO_TO_IB_MIGRATION_PLAN.md` — the actual migration sequencing with our Saxo surface mapped to IB calls.
+> **Companion docs**:
+> - [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md) — **READ FIRST** — answers to the 6 open questions, with the architecture pivot to OAuth 1.0a.
+> - [`SAXO_TO_IB_MIGRATION_PLAN.md`](./SAXO_TO_IB_MIGRATION_PLAN.md) — the actual migration sequencing with our Saxo surface mapped to IB calls.
 >
 > **Deep-dive chapters** (the raw research, kept verbatim under `research_scratch/`):
 > 1. [API landscape](./research_scratch/01_ib_api_landscape.md) — every IB API surface, SDK options, auth flows, cost.
@@ -194,16 +198,21 @@ Code must:
 
 ---
 
-## Open questions that need IBKR API support email confirmation
+## Open questions — STATUS UPDATE 2026-05-13 afternoon
 
-Before final architecture sign-off, email `api-solutions@interactivebrokers.com` to confirm:
+**All 6 questions resolved via additional research.** See [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md) for the full answers; key items:
 
-1. For an **individual IBKR Pro account**, is there a documented OAuth 2.0 path to the Web API trading endpoint that **does not require running `clientportal.gw`** on the deployment host? (Per the research, the answer is "no" today, but the docs are in beta and this could change.)
-2. Public-key rotation cadence for First-Party OAuth 2.0 `private_key_jwt` registrations.
-3. Current monthly fee for the **Cboe Streaming Market Indexes** subscription for non-pros (covers live SPX index).
-4. Is weekly-cold-login 2FA still enforced for accounts with only "IB Key Security via IBKR Mobile" enabled as of May 2026? Any path to a true unattended-week-plus session for a single-trader algorithmic account?
-5. Final official 2026 ORF on Cboe (SPX) per-contract sell-side.
-6. For an **EUR-base account** trading USD SPX options, which `accountSummary` tag gives the live USD-tradable amount that updates intraday on every fill?
+1. ✅ **Gateway-free OAuth 2.0 for retail**: NO (institutional/vendor only). **But OAuth 1.0a Extended first-party works gateway-free for retail** — architecture pivot to `ibind`.
+2. ✅ **OAuth 2.0 key rotation**: not documented; self-impose 12-month overlap via Message Center tickets.
+3. ✅ **Cboe Streaming Market Indexes fee**: ~$1.50/mo non-pro for **VIX only**. **SPX is a separate subscription** (CME S&P Indexes, ~$1.50-3/mo). Total ~$3-5/mo.
+4. ✅ **Unattended week+ session**: only possible on the OAuth 1.0a Web API path (no phone tap). Gateway path's Sunday tap is enforced, no documented bypass.
+5. ✅ **2026 ORF on SPX**: $0.0023/contract sell-side (effective Jan 2 – Jun 30 2026; reverts to $0.0017 Jul 1 unless extended).
+6. ✅ **EUR-base USD-tradable**: `reqAccountSummary(tags="AvailableFunds,$LEDGER:USD")` + compute `EUR_AvailableFunds × ExchangeRate@USD + USD_CashBalance`. **3-minute refresh cadence, not per-fill** — bot must reserve margin client-side.
+
+**Remaining items that DO still need IBKR API support email**:
+
+1. Max concurrent registered public keys per OAuth 2.0 `client_id` (matters only if we ever move from 1.0a to 2.0).
+2. Fast-revoke SLA on a compromised public key — same-business-day disable path or only standard Message Center ticket?
 
 ---
 
