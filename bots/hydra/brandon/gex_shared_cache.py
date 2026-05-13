@@ -162,7 +162,7 @@ def save_shared_profile(profile: GEXProfile, *, underlying: str) -> None:
 
 
 @contextlib.contextmanager
-def fetch_lock(timeout_seconds: float = 30.0):
+def fetch_lock(timeout_seconds: float = 30.0, poll_interval_seconds: float = 0.25):
     """Exclusive lock serializing GEX fetches across variant processes.
 
     Two B/C processes hitting the same scheduled slot would otherwise both
@@ -170,6 +170,15 @@ def fetch_lock(timeout_seconds: float = 30.0):
     near-identical-but-not-identical snapshots that lead to divergent
     decisions. Under the lock, the second variant enters after the first
     finishes and finds the first's write in the shared cache.
+
+    Non-blocking with bounded wait: uses LOCK_EX | LOCK_NB and polls until
+    timeout_seconds elapses. If the lock can't be acquired in that window
+    (sibling hanging, crashed mid-fetch, or kernel quirk), the contextmanager
+    yields WITHOUT holding the lock so the caller's fetch path proceeds
+    unlocked. That keeps the bot's monitor loop alive — better to do a
+    parallel double-fetch than freeze waiting on a sibling. Default 30s
+    cap is well above a normal Polygon round-trip (~5-10s) but well below
+    any user-visible monitor-loop stall threshold.
 
     The lock is best-effort: if filesystem isn't writable or fcntl isn't
     available (non-POSIX), it falls through to a no-op contextmanager.
@@ -186,19 +195,35 @@ def fetch_lock(timeout_seconds: float = 30.0):
         logger.warning("Brandon GEX shared cache lock unavailable: %s", exc)
         yield
         return
+
+    held = False
     try:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        except OSError as exc:
-            logger.warning("Brandon GEX shared cache flock failed: %s", exc)
-            yield
-            return
+        # Poll for LOCK_EX | LOCK_NB up to timeout. Yields once acquired OR
+        # once timeout elapses (unlocked fall-through — see docstring).
+        import time as _time
+        deadline = _time.monotonic() + timeout_seconds
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except (BlockingIOError, OSError):
+                # Lock held by sibling — wait briefly and retry
+                if _time.monotonic() >= deadline:
+                    logger.warning(
+                        "Brandon GEX fetch_lock timeout after %.0fs; proceeding "
+                        "without lock (sibling may be hung; double-fetch acceptable)",
+                        timeout_seconds,
+                    )
+                    break
+                _time.sleep(poll_interval_seconds)
         yield
     finally:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
+        if held:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
         try:
             os.close(lock_fd)
         except OSError:

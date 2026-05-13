@@ -1,7 +1,7 @@
 # HYDRA Strategy Context (Shared)
 
 **Shared by:** APOLLO, HERMES, HOMER, CLIO
-**Last updated:** 2026-04-19
+**Last updated:** 2026-05-13
 **HYDRA version:** v1.23.0 (deployed 2026-04-19 — Downday-035 + MKT-045 + MKT-046)
 **Schema version:** v7
 **Source of truth:** `bots/hydra/config/config.json` on VM
@@ -132,8 +132,8 @@ buffers. The **only** difference is in entry-schedule + close behavior:
 | Variant | Entry times | Contracts | Spread width | Brandon stack | Close behavior |
 |---------|-------------|-----------|--------------|---------------|----------------|
 | **A (baseline 75pt)** | 10:15, 10:45, 11:15 (10:15 dropped by VIX regime → effective 10:45 + 11:15) | 1c | MKT-027 dynamic (75pt cap) | none | Standard: stop at credit + buffer; expire at settlement; conditional E#3 at 14:00 (Upday-035 / Downday-035) |
-| **B (Brandon narrow, 7-slot grid)** | 09:31, 09:45, 10:15, 10:45, 11:15, 11:45, 12:15 | 15c | Brandon `narrow_spread`: 5pt at VIX<22, 10pt at VIX≥22 | All Brandon features **LIVE** (TP@80%, GEX adjuster, GEX breach exit, defensive overlay) + delta-target strike selection (8δ from Polygon chain). HYDRA tighteners (MKT-020/022) DISABLED. | Brandon TP@80% closes IC when mark ≤ 20% of credit. Brandon GEX breach exit closes after sustained 90s breach of decel wall. HYDRA credit+buffer stop runs in `hydra_stop_shadow` (parallel comparison only). |
-| **C (Brandon, narrow 5/10pt)** | 10:15, 10:45, 11:15 + conditional 14:00 (mirrors A's grid) | 15c | Same as B | Same as B (all LIVE + delta-target) | Same as B |
+| **B (Brandon narrow, 4-slot grid)** | 09:45, 10:45, 11:15, 11:45 (2026-05-13 trim from 7-slot — dropped 09:31 whipsaw, 10:15 between-slot, 12:15 late) | 10c | Brandon `narrow_spread`: 5pt at VIX<22, 10pt at VIX≥22 | All Brandon features **LIVE** (TP@80%, GEX adjuster, GEX breach exit, defensive overlay) + delta-target strike selection (8δ from Polygon chain) with BS-recompute at live spot. HYDRA tighteners (MKT-020/022) DISABLED. GEX-adjuster SKIP is peak-localized (±25pt from |GEX| peak, not full cluster range). | Brandon TP@80% closes IC when mark ≤ 20% of credit. Brandon GEX breach exit closes after sustained 90s breach of decel wall. HYDRA credit+buffer stop runs in `hydra_stop_shadow` (parallel comparison only). |
+| **C (Brandon, narrow 5/10pt)** | 10:15, 10:45, 11:15 + conditional 14:00 (mirrors A's grid) | 10c | Same as B | Same as B (all LIVE + delta-target with BS-recompute + peak-localized SKIP) | Same as B |
 
 All three variants run **dry-run** (`dry_run: true` in config). Pivot strategy
 (`directional_pivot.enabled`) is **disabled across all variants** since v1.27

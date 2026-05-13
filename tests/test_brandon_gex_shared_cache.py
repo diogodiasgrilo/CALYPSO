@@ -155,3 +155,29 @@ class TestFetchLock:
         # Subsequent acquire works
         with gex_shared_cache.fetch_lock():
             pass
+
+    def test_lock_times_out_when_held_by_another_fd(self, _tmp_cache_dir):
+        # Hold the lockfile via a separate fd to simulate a sibling that
+        # acquired the lock and never released. The fetch_lock() context
+        # should give up after timeout_seconds and yield UNLOCKED rather
+        # than hang the bot. This is the "sibling crashed mid-fetch" path.
+        import fcntl
+        import os
+        import time
+
+        lock_path = _tmp_cache_dir / "brandon_gex_profile.lock"
+        # Pre-create + lock the file so fetch_lock() can't acquire
+        holder_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(holder_fd, fcntl.LOCK_EX)
+        try:
+            start = time.monotonic()
+            entered = False
+            with gex_shared_cache.fetch_lock(timeout_seconds=0.5, poll_interval_seconds=0.05):
+                entered = True
+            elapsed = time.monotonic() - start
+            # Yielded after timeout (not before) and returned (not hung)
+            assert entered is True
+            assert 0.4 <= elapsed <= 2.0, f"unexpected elapsed: {elapsed:.2f}s"
+        finally:
+            fcntl.flock(holder_fd, fcntl.LOCK_UN)
+            os.close(holder_fd)

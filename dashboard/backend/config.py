@@ -31,18 +31,18 @@ class Settings(BaseSettings):
     variant_a_label: str = "A (baseline 75pt)"
 
     # Variant B — Brandon Trojan Horse stack with NARROW 5/10pt widths (same
-    # as C) but a denser 7-slot entry grid (09:31 / 09:45 / 10:15 / 10:45 /
-    # 11:15 / 11:45 / 12:15) to test which entry time is best for the
-    # narrow-spread approach. Pre-2026-05-05 design used HYDRA wide widths;
-    # retired because Brandon GEX-ADJ + put-only VIX gate combined to skip
-    # B on most days. Brandon TP / GEX adjuster / GEX breach exit /
-    # defensive overlay all LIVE; HYDRA stop runs in shadow mode only.
+    # as C) and a 4-slot entry grid (09:45 / 10:45 / 11:15 / 11:45) at 10c.
+    # 2026-05-13 trim from the original 7-slot × 15c design after 5/4-5/12
+    # review showed B at 0-for-4 winning days with commission drag dominating;
+    # dropped 09:31 (whipsaw), 10:15 (between-slot), 12:15 (late). Brandon TP
+    # / GEX adjuster (peak-localized SKIP) / GEX breach exit / defensive
+    # overlay all LIVE; HYDRA stop runs in shadow mode only.
     variant_b_state_file: Path = Path("/opt/calypso/data/variant_b/hydra_state.json")
     variant_b_metrics_file: Path = Path("/opt/calypso/data/variant_b/hydra_metrics.json")
     variant_b_backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
     variant_b_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
     variant_b_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
-    variant_b_label: str = "B (Brandon narrow, 7-slot grid)"
+    variant_b_label: str = "B (Brandon narrow, 4-slot grid)"
 
     # Variant C — Brandon Trojan Horse stack + Brandon's narrow 5/10pt spreads.
     # Same Brandon stack as B; only spread width differs (narrow_spread.enabled=true

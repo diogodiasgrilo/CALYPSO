@@ -1,20 +1,32 @@
 # HYDRA (Trend Following Hybrid) Trading Bot
 
-**Version:** 1.28.0 | **Last Updated:** 2026-05-08
+**Version:** 1.29.0 | **Last Updated:** 2026-05-13
 
-> **2026-05-06 → 2026-05-08 — Brandon variants restructured.**
-> Variants B and C now run the Brandon stack with all features LIVE (not
+> **2026-05-06 → 2026-05-13 — Brandon variants restructured + retuned.**
+> Variants B and C run the Brandon stack with all features LIVE (not
 > shadow): TP@80%, GEX strike adjuster, GEX breach exit, defensive overlay,
 > and an 8-delta-target strike-selection override that anchors short
 > strikes to the live Polygon chain. HYDRA's MKT-020/MKT-022 progressive
 > tighteners are disabled on B/C (`brandon.disable_progressive_tightening:
 > true`) so strikes stay where Brandon's GEX-zone selection wants them.
-> Variant B uses a 7-slot dense entry grid (09:31–12:15) for entry-time
-> edge discovery; variant C keeps HYDRA's 3-slot canonical grid. Both run
-> at 15c with narrow 5/10pt widths to match A's $7,500-per-IC margin.
-> Several HYDRA-1c-baseline safety constants are now config-overridable
-> (BP-per-IC gate, P&L sanity bounds, ORDER-006 contract caps). See
-> CLAUDE.md §11 for the complete scheme.
+> **2026-05-13 retune**: variant B trimmed from 7-slot to 4-slot
+> (09:45/10:45/11:15/11:45 — dropped 09:31 whipsaw, 10:15 between-slot,
+> 12:15 late); B and C both cut from 15c to 10c (commission-drag review of
+> 5/4-5/12 results). Variant C keeps HYDRA's 3-slot canonical grid plus
+> 14:00 conditional. Three Brandon GEX subsystem fixes also shipped
+> 2026-05-13: (1) accel-zone SKIP is now peak-localized to ±25pt of the
+> negative cluster's |GEX| peak strike (was: full-cluster-range, which on
+> SPX 0DTE collapsed the entire call wing into one giant "accel zone" and
+> drove B/C to 77%/89% put-only); (2) delta-target picker recomputes each
+> candidate's delta from cached IV + live spot via Black-Scholes so
+> stale-snapshot drift can't flip 8δ picks into 14δ; (3) GEX profile is
+> shared across B and C via `data/shared/brandon_gex_profile.json` (atomic
+> write + fcntl lock with 30s timeout) so simultaneous entries see the
+> same chain; background TTL cut 15min → 3min; `_calculate_strikes`
+> force-refreshes at strike-selection time. Several HYDRA-1c-baseline
+> safety constants are now config-overridable (BP-per-IC gate, P&L
+> sanity bounds, ORDER-006 contract caps). See CLAUDE.md §11 for the
+> complete scheme.
 
 A modified MEIC bot that adds EMA-based trend direction detection, pre-entry credit validation, progressive OTM tightening, and hold-to-expiry profit management.
 
