@@ -99,9 +99,16 @@ class BacktestConfig:
     contracts: int = 1
     stop_slippage_per_leg: float = 5.0      # $0.05/leg slippage on stop-loss market orders (based on Mar 31 live data)
     entry_slippage_per_leg: float = 0.0     # $/leg slippage on entry fills (conservative credit estimate for MKT-011 gate)
-    broker_spread_markup: float = 0.0       # $/leg markup for Saxo wider spreads vs ThetaData during monitoring
-                                             # Adds to short_ask, subtracts from long_bid when computing cost-to-close
-                                             # Simulates retail broker spread characteristics (Saxo > OPRA aggregate)
+    broker_spread_markup: float = 0.0       # $/leg additive markup applied at the bid/ask level (engine._get_spread_close_cost):
+                                            # adds to short_ask, subtracts from long_bid when computing cost-to-close.
+                                            # Models Saxo's wider quotes vs ThetaData/OPRA for the ENTIRE spread-value series.
+    stop_spread_markup_pct: float = 0.0     # Multiplicative markup applied ONLY at the stop-comparison step
+                                            # (engine: cv_check = cv * (1 + stop_spread_markup_pct)).
+                                            # Adds a separate safety factor on top of broker_spread_markup, since Saxo's ask
+                                            # widens additionally during fast moves — a 5% multiplier guards against stops
+                                            # missed because the additive markup alone didn't capture the dynamic widening.
+                                            # broker_spread_markup tunes monitoring/close-cost accuracy; this tunes the stop
+                                            # trigger sensitivity. They compose; both default 0.0 = no markup.
 
     # ── Data / cache ─────────────────────────────────────────────────────────
     cache_dir: str = "backtest/data/cache"
@@ -315,8 +322,9 @@ class BacktestConfig:
     use_real_greeks: bool = False
 
     # ── Simulation behaviour ─────────────────────────────────────────────────
-    # Interval (ms) between stop checks. 300000 = 5-min (matches data resolution).
-    monitor_interval_ms: int = 300000
+    # Interval (ms) between stop checks. 0 = use every data point (default).
+    # Set to e.g. 120000 for 2-min, 300000 for 5-min (sweep_monitor_interval.py).
+    monitor_interval_ms: int = 0
 
     # ── FOMC dates (for MKT-038) ─────────────────────────────────────────────
     # The engine will auto-load from shared/event_calendar.py if available,
@@ -419,20 +427,27 @@ def live_config() -> BacktestConfig:
         base_entry_downday_callonly_pct=None, # DISABLED 2026-04-19 — A/B sweep showed negative EV at all thresholds 0.57-1.20%
         fomc_announcement_skip=False,       # 1-min test: skip costs -$5,855 P&L, -0.096 Sharpe (2026-03-29)
         whipsaw_range_skip_mult=1.75,       # reconvergence 2026-03-31 (was 1.50, Sharpe 2.360)
+        # MKT-042 buffer decay — current VM (2.5× start, 4h decay; stashed pre-04-13 was 2.1×/2h, retired)
         buffer_decay_start_mult=2.5,        # updated 2026-04-13: start at 2.5× normal buffer, decay over 4h
         buffer_decay_hours=4.0,             # updated 2026-04-13: reach normal buffer after 4 hours
-        calm_entry_lookback_min=3,          # updated 2026-04-13: check last 3 minutes for large moves
-        calm_entry_threshold_pts=15.0,      # updated 2026-04-13: 15pt threshold for SPX movement
-        calm_entry_max_delay_min=5,         # updated 2026-04-13: max 5min delay before entering anyway
-        vix_regime_enabled=True,            # updated 2026-04-13: enable VIX regime caps on entry count
-        vix_regime_breakpoints=[18.0, 22.0, 28.0],  # updated 2026-04-17: VM VIX regime breakpoints [18, 22, 28]
+        # MKT-043 calm-entry filter (unchanged across config epochs)
+        calm_entry_lookback_min=3,          # check last 3 minutes for large moves
+        calm_entry_threshold_pts=15.0,      # 15pt threshold for SPX movement
+        calm_entry_max_delay_min=5,         # max 5min delay before entering anyway
+        # VIX regime — adapt entries/credit floors/buffers based on VIX at open. Values mirror
+        # the current VM config (post-2026-04-17). Older breakpoints [14,20,30] with sparse
+        # per-zone values were the pre-04-17 design; superseded.
+        vix_regime_enabled=True,
+        vix_regime_breakpoints=[18.0, 22.0, 28.0],  # updated 2026-04-17: VM breakpoints [18, 22, 28]
         vix_regime_max_entries=[2, 2, 2, 1],        # updated 2026-04-17: drops E#1 at ALL VIX levels
-        vix_regime_min_call_credit=[1.0, 0.5, 0.3, 0.3],   # updated 2026-04-17: per-zone call credit floors matching VM
-        vix_regime_min_put_credit=[1.25, 0.75, 0.5, 0.4],  # updated 2026-04-17: per-zone put credit floors matching VM
-        vix_regime_call_stop_buffer=[None, 150.0, 100.0, None],  # added 2026-04-27 (Option B per docs/HYDRA_BUFFER_OPTIMIZATION.md): wider call in Z1+Z2; Z0/Z3 fall back to global $0.75
-        vix_regime_put_stop_buffer=[None, 250.0, 150.0, None],   # added 2026-04-27 (Option B): wider put in Z1 (calm noise), TIGHTER put in Z2 (stress, exit faster); Z0/Z3 fall back to global $1.75
-        conditional_downday_e6_enabled=True,                # added 2026-04-19: Downday-035 E6 call-only on down days
-        conditional_downday_threshold_pct=0.0025,           # added 2026-04-19: 0.25% fraction (engine does *100)
+        vix_regime_min_call_credit=[1.0, 0.5, 0.3, 0.3],   # per-zone call credit floors matching VM
+        vix_regime_min_put_credit=[1.25, 0.75, 0.5, 0.4],  # per-zone put credit floors matching VM
+        # Option B per-zone stop buffers (added 2026-04-27; see docs/HYDRA_BUFFER_OPTIMIZATION.md):
+        vix_regime_call_stop_buffer=[None, 150.0, 100.0, None],  # wider call in Z1+Z2; Z0/Z3 fall back to global $0.75
+        vix_regime_put_stop_buffer=[None, 250.0, 150.0, None],   # wider put in Z1 (calm noise), TIGHTER put in Z2 (stress, exit faster); Z0/Z3 fall back to global $1.75
+        # Downday-035: conditional E6 call-only when SPX -0.25% at 14:00 (added 2026-04-19)
+        conditional_downday_e6_enabled=True,
+        conditional_downday_threshold_pct=0.0025,            # 0.25% as fraction (engine multiplies by 100)
     )
 
 

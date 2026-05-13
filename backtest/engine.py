@@ -800,6 +800,10 @@ def _simulate_entry(
 
         # Stop checks: use ask-based close cost (realistic fill price)
         slip = getattr(cfg, "stop_slippage_per_leg", 0.0) * 2  # 2 legs, value already in dollars
+        # Saxo spread markup: Saxo's ask is wider than NBBO during fast moves,
+        # causing stops to trigger earlier than ThetaData data shows.
+        # Multiply spread value by (1 + markup) before comparing to stop level.
+        _spread_markup = 1.0 + getattr(cfg, "stop_spread_markup_pct", 0.0)
 
         # ── Time-decaying buffer: widen stop early in position's life ──────
         if _buf_decay_enabled:
@@ -826,7 +830,13 @@ def _simulate_entry(
                         result.call_exit_ms = monitor_ms
                         result.call_close_cost = min(cv + slip, call_cap)
             else:
+                # broker_spread_markup adjusts bid/ask additively (matches all 17 other call sites);
+                # _spread_markup (= 1 + cfg.stop_spread_markup_pct, computed at line 806) adds a
+                # multiplicative safety factor on the stop-trigger comparison so Saxo's dynamic
+                # spread widening during fast moves doesn't miss stops the additive markup alone
+                # would have caught. Both default to 0/1.0 (no markup) and compose without overlap.
                 cv = _get_spread_close_cost(lookup, result.short_call, result.long_call, "C", monitor_ms, cfg.broker_spread_markup)
+                cv_check = cv * _spread_markup
                 # ── Trailing stop: tighten call side when decay threshold reached
                 if _trailing_en and not _call_trail and cv > 0 and result.call_credit > 0:
                     if cv <= result.call_credit * _trailing_trig:
@@ -837,7 +847,7 @@ def _simulate_entry(
                             result.call_stop = result.call_credit + cfg.downday_theoretical_put_credit + _trail_call_buf
                         result.call_stop = max(result.call_stop, cfg.min_stop_level)
                 # ── Stop check (may use tightened level)
-                if cv > 0 and cv >= result.call_stop:
+                if cv_check > 0 and cv_check >= result.call_stop:
                     call_stopped = True
                     result.call_outcome = "stopped"
                     result.call_exit_ms = monitor_ms
@@ -853,7 +863,11 @@ def _simulate_entry(
                         result.put_exit_ms = monitor_ms
                         result.put_close_cost = min(pv + slip, put_cap)
             else:
+                # Symmetric to call side: additive bid/ask via broker_spread_markup +
+                # multiplicative stop-trigger safety via _spread_markup. See call-side
+                # comment ~30 lines above for rationale.
                 pv = _get_spread_close_cost(lookup, result.short_put, result.long_put, "P", monitor_ms, cfg.broker_spread_markup)
+                pv_check = pv * _spread_markup
                 # ── Trailing stop: tighten put side when decay threshold reached
                 if _trailing_en and not _put_trail and pv > 0 and result.put_credit > 0:
                     if pv <= result.put_credit * _trailing_trig:
@@ -864,7 +878,7 @@ def _simulate_entry(
                             result.put_stop = result.put_credit + getattr(cfg, "upday_theoretical_call_credit", 0.0) + _trail_put_buf
                         result.put_stop = max(result.put_stop, cfg.min_stop_level)
                 # ── Stop check (may use tightened level)
-                if pv > 0 and pv >= result.put_stop:
+                if pv_check > 0 and pv_check >= result.put_stop:
                     put_stopped = True
                     result.put_outcome = "stopped"
                     result.put_exit_ms = monitor_ms
@@ -1477,9 +1491,12 @@ def simulate_day(
     if trading_date.weekday() in getattr(cfg, "skip_weekdays", []):
         return None
 
-    # Load data — use 1-min or 5-min subfolder based on config
+    # Load data — use 5-sec, 1-min, or 5-min subfolder based on config
     resolution = getattr(cfg, "data_resolution", "5min")
-    if resolution == "1min":
+    if resolution == "5sec":
+        opts_dir = cache_dir / "options_5sec"
+        grk_dir = cache_dir / "greeks_1min"  # Greeks at 1-min is sufficient
+    elif resolution == "1min":
         opts_dir = cache_dir / "options_1min"
         grk_dir = cache_dir / "greeks_1min"
     else:
@@ -1503,7 +1520,21 @@ def simulate_day(
         return None
 
     lookup = _build_chain_lookup(chain_df)
-    monitor_times = sorted(chain_df["ms_of_day"].unique().tolist())
+    all_times = sorted(chain_df["ms_of_day"].unique().tolist())
+
+    # Thin monitor times to configured interval (default: use all data points).
+    # monitor_interval_ms=60000 = 1-min (every point), 120000 = 2-min, 300000 = 5-min.
+    interval_ms = getattr(cfg, "monitor_interval_ms", 0)
+    if interval_ms and interval_ms > 60000 and len(all_times) > 1:
+        monitor_times = [all_times[0]]  # Always include first
+        for t in all_times[1:]:
+            if t - monitor_times[-1] >= interval_ms:
+                monitor_times.append(t)
+        # Always include last time (for settlement)
+        if monitor_times[-1] != all_times[-1]:
+            monitor_times.append(all_times[-1])
+    else:
+        monitor_times = all_times
 
     # Session open price (first valid 1-min SPX bar at/after 9:30)
     spx_open_row = spx_df[spx_df["price"] > 0]
