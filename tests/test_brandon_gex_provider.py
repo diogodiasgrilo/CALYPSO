@@ -206,6 +206,26 @@ class TestProfileQueries:
         # min_strength_pct 5% drops the noise strike
         assert len(p.positive_clusters(min_strength_pct=0.05)) == 1
 
+    def test_peak_strike_is_max_abs_gex_in_cluster(self):
+        # A broad call-OI cluster across 6810-6900 with peak OI at 6850 (the
+        # bulky middle strike). peak_strike should resolve to 6850 — not the
+        # cluster boundary, which is what the accel-zone peak-locality test
+        # in the strike adjuster keys off.
+        c = [
+            _contract(6810, "call", 5000, gamma=0.001),
+            _contract(6820, "call", 5000, gamma=0.001),
+            _contract(6850, "call", 250000, gamma=0.001),  # the peak
+            _contract(6880, "call", 5000, gamma=0.001),
+            _contract(6900, "call", 5000, gamma=0.001),
+        ]
+        p = build_profile(c, spot=6800, expiry=date(2026, 5, 4), time_to_expiry=1 / 365.0)
+        clusters = p.negative_clusters(min_strength_pct=0.01)
+        assert len(clusters) == 1
+        assert clusters[0].peak_strike == 6850
+        # Boundaries unchanged — peak is a new annotation, not a replacement
+        assert clusters[0].strike_low == 6810
+        assert clusters[0].strike_high == 6900
+
 
 class TestFetchPolygonChain:
     def test_single_page(self):

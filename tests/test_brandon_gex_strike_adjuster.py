@@ -51,7 +51,7 @@ class TestAdjustCallStrike:
         )
         r = adjust_call_strike(spot=6800, proposed_short=6850, profile=prof)
         assert r.action == AdjustAction.SKIP
-        assert "accel zone" in r.reason
+        assert "accel-zone peak" in r.reason
 
     def test_shift_to_capture_decel_wall_above(self):
         # Big put OI cluster at 6870-6880 → positive cluster (decel wall) above
@@ -109,6 +109,42 @@ class TestAdjustCallStrike:
         )
         assert r.action == AdjustAction.SKIP
 
+    def test_keep_when_proposed_far_from_accel_peak(self):
+        # Reproduces 2026-05-04..05-12 B/C pathology: the SpotGamma sign
+        # convention makes the entire call wing one giant negative cluster.
+        # Pre-peak-locality, ANY call short inside that broad band was SKIP'd
+        # — driving B to 77% put-only across 5/4-5/12. Peak-locality fixes
+        # this: a strike 40pt away from the cluster's |GEX| peak is no longer
+        # SKIP'd, even though it lies inside the broad contiguous run.
+        # Setup: huge call OI at the ATM-adjacent peak (6810), thin tail to
+        # 6900 — one contiguous negative cluster but its peak is at 6810.
+        contracts = [_contract(6810, "call", 200000)]
+        for k in range(6820, 6905, 10):
+            contracts.append(_contract(k, "call", 5000))
+        prof = _profile(contracts, spot=6800)
+        # Proposed call short 6850 is 40pt off-peak — should KEEP under the
+        # 25pt default locality, despite still being inside the broad cluster.
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6850, profile=prof,
+            config=AdjusterConfig(accel_min_pct=0.01),
+        )
+        assert r.action == AdjustAction.KEEP
+
+    def test_skip_still_fires_when_proposed_near_accel_peak(self):
+        # Inverse of the above: a short at the cluster's peak (within 25pt)
+        # SHOULD still be SKIP'd. This proves the new gate doesn't disable
+        # accel-zone protection — it just localizes it.
+        contracts = [_contract(6810, "call", 200000)]
+        for k in range(6820, 6905, 10):
+            contracts.append(_contract(k, "call", 5000))
+        prof = _profile(contracts, spot=6800)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6815, profile=prof,
+            config=AdjusterConfig(accel_min_pct=0.01),
+        )
+        assert r.action == AdjustAction.SKIP
+        assert "peak" in r.reason
+
 
 class TestAdjustPutStrike:
     def test_keep_when_no_signals(self):
@@ -130,7 +166,7 @@ class TestAdjustPutStrike:
         )
         r = adjust_put_strike(spot=6800, proposed_short=6750, profile=prof)
         assert r.action == AdjustAction.SKIP
-        assert "accel zone" in r.reason
+        assert "accel-zone peak" in r.reason
 
     def test_shift_to_capture_decel_wall_below(self):
         # Big PUT OI cluster below proposed put short → positive cluster

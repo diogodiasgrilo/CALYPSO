@@ -94,6 +94,7 @@ class BrandonHydraStrategy(HydraStrategy):
         self.brandon_accel_min_pct = float(gex.get("accel_min_pct", 0.10))
         self.brandon_max_shift_pts = float(gex.get("max_shift_pts", 25.0))
         self.brandon_shift_buffer_pts = float(gex.get("shift_buffer_pts", 5.0))
+        self.brandon_accel_peak_locality_pts = float(gex.get("accel_peak_locality_pts", 25.0))
 
         ov = bcfg.get("defensive_overlay") or {}
         self.brandon_overlay_enabled = bool(ov.get("enabled", False))
@@ -309,6 +310,7 @@ class BrandonHydraStrategy(HydraStrategy):
             decel_min_pct=self.brandon_decel_min_pct,
             max_shift_pts=self.brandon_max_shift_pts,
             shift_buffer_pts=self.brandon_shift_buffer_pts,
+            accel_peak_locality_pts=self.brandon_accel_peak_locality_pts,
         )
 
         if entry.short_call_strike and not getattr(entry, "call_side_skipped", False):

@@ -38,6 +38,7 @@ def _make_instance(**brandon_attrs):
         brandon_accel_min_pct=0.10,
         brandon_max_shift_pts=25.0,
         brandon_shift_buffer_pts=5.0,
+        brandon_accel_peak_locality_pts=25.0,
         brandon_overlay_enabled=False,
         brandon_overlay_trigger_distance_pts=25.0,
         brandon_overlay_butterfly_width=10,

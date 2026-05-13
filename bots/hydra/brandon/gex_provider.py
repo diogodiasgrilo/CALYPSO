@@ -73,6 +73,12 @@ class GEXCluster:
     strike_low: float
     strike_high: float
     total_gex: float
+    # Peak strike: the single strike inside the cluster's contiguous run with
+    # the largest |GEX|. The strike adjuster uses this for peak-locality SKIP
+    # tests so a 300pt-wide same-sign band doesn't blanket-ban every short on
+    # that side — only shorts within a small radius of the peak are forbidden.
+    # See gex_strike_adjuster.AdjusterConfig.accel_peak_locality_pts.
+    peak_strike: float = 0.0
 
     @property
     def sign(self) -> str:
@@ -285,11 +291,13 @@ def _flush_cluster(out: list[GEXCluster], run: list[StrikeGEX], threshold: float
     total = sum(sg.gex for sg in run)
     if abs(total) < threshold:
         return
+    peak = max(run, key=lambda sg: abs(sg.gex))
     out.append(
         GEXCluster(
             strike_low=run[0].strike,
             strike_high=run[-1].strike,
             total_gex=total,
+            peak_strike=peak.strike,
         )
     )
 

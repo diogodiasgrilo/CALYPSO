@@ -53,12 +53,23 @@ class AdjusterConfig:
         strike. Prevents giving up too much credit chasing a weak wall.
     shift_buffer_pts: how many points beyond the wall's far edge to place the
         new short, so the wall sits cleanly inside the wings.
+    accel_peak_locality_pts: SKIP fires only when the proposed short is within
+        this distance of the cluster's |GEX| peak strike. Without this gate,
+        the SpotGamma sign convention (calls negated, puts positive) collapses
+        the entire call wing into ONE giant negative cluster and the entire
+        put wing into ONE giant positive cluster on SPX 0DTE — meaning every
+        call short, by definition above spot, lands inside the call-wing
+        "accel" cluster and gets SKIP'd. The 5/4-5/12 data showed B/C at 77%
+        and 89% put-only as a direct result. Peak-locality recovers Brandon's
+        actual "wall is a localized feature, not a hemisphere" intent: a
+        cluster is only a real accel zone within ±N pts of its peak strike.
     """
 
     accel_min_pct: float = 0.10
     decel_min_pct: float = 0.05
     max_shift_pts: float = 25.0
     shift_buffer_pts: float = 5.0
+    accel_peak_locality_pts: float = 25.0
 
 
 def _snap(strike: float) -> float:
@@ -86,12 +97,14 @@ def adjust_call_strike(
     accel_zones = profile.negative_clusters(min_strength_pct=config.accel_min_pct)
     for c in accel_zones:
         if c.strike_low <= proposed_short <= c.strike_high:
-            return AdjustResult(
-                AdjustAction.SKIP,
-                None,
-                f"call short {proposed_short:.0f} inside accel zone "
-                f"[{c.strike_low:.0f}, {c.strike_high:.0f}] (GEX {c.total_gex:.2e})",
-            )
+            if abs(proposed_short - c.peak_strike) <= config.accel_peak_locality_pts:
+                return AdjustResult(
+                    AdjustAction.SKIP,
+                    None,
+                    f"call short {proposed_short:.0f} within {config.accel_peak_locality_pts:.0f}pt "
+                    f"of accel-zone peak {c.peak_strike:.0f} "
+                    f"[zone {c.strike_low:.0f}-{c.strike_high:.0f}, GEX {c.total_gex:.2e}]",
+                )
 
     decel_walls = profile.positive_clusters(min_strength_pct=config.decel_min_pct)
     walls_above_proposed = [c for c in decel_walls if c.strike_low > proposed_short]
@@ -129,12 +142,14 @@ def adjust_put_strike(
     accel_zones = profile.negative_clusters(min_strength_pct=config.accel_min_pct)
     for c in accel_zones:
         if c.strike_low <= proposed_short <= c.strike_high:
-            return AdjustResult(
-                AdjustAction.SKIP,
-                None,
-                f"put short {proposed_short:.0f} inside accel zone "
-                f"[{c.strike_low:.0f}, {c.strike_high:.0f}] (GEX {c.total_gex:.2e})",
-            )
+            if abs(proposed_short - c.peak_strike) <= config.accel_peak_locality_pts:
+                return AdjustResult(
+                    AdjustAction.SKIP,
+                    None,
+                    f"put short {proposed_short:.0f} within {config.accel_peak_locality_pts:.0f}pt "
+                    f"of accel-zone peak {c.peak_strike:.0f} "
+                    f"[zone {c.strike_low:.0f}-{c.strike_high:.0f}, GEX {c.total_gex:.2e}]",
+                )
 
     decel_walls = profile.positive_clusters(min_strength_pct=config.decel_min_pct)
     walls_below_proposed = [c for c in decel_walls if c.strike_high < proposed_short]
