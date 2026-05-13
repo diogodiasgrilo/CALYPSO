@@ -9414,6 +9414,16 @@ class HydraStrategy(MEICStrategy):
                             f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
                             f"+${credit:.2f} profit (credit kept)"
                         )
+                    # Capital-deployed sweep needs a close_time on every closed
+                    # entry to free margin in its interval calculation. Without
+                    # this, settlement-expired entries look "still open through
+                    # EOD" and the sweep collapses back to sum-of-margins. The
+                    # close_reason="EXPIRED" tag also makes the disposition
+                    # explicit on the dashboard.
+                    if not getattr(entry, "close_time", ""):
+                        entry.close_time = get_us_market_time().isoformat()
+                    if not getattr(entry, "close_reason", ""):
+                        entry.close_reason = "EXPIRED"
 
             # Check put side
             put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
@@ -9432,6 +9442,11 @@ class HydraStrategy(MEICStrategy):
                             f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
                             f"+${credit:.2f} profit (credit kept)"
                         )
+                    # Same rationale as the call-side block above.
+                    if not getattr(entry, "close_time", ""):
+                        entry.close_time = get_us_market_time().isoformat()
+                    if not getattr(entry, "close_reason", ""):
+                        entry.close_reason = "EXPIRED"
 
             # Mark complete if both sides done
             if entry.call_only:
