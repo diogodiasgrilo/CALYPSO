@@ -228,11 +228,21 @@ class BrandonHydraStrategy(HydraStrategy):
             return super()._calculate_strikes(entry)
 
         target = self.brandon_delta_target_pct
+        # Recompute delta from cached IV at LIVE spot. The cached snapshot
+        # is up to 15 minutes old (cache TTL) plus Polygon's own ~15-min
+        # delayed feed — on 0DTE that's enough drift to turn an 8δ pick
+        # into a 14δ one (verified on B's 2026-05-12 E#4: chain showed
+        # 8δ at 7320 from spot=7358 fetch, but live spot at placement was
+        # 7366.61 → real delta = 14δ). Falls back to cached delta when IV
+        # is missing for a strike.
+        t_years = self._brandon_estimate_t_years_to_close()
         call_short = gex_provider.find_strike_at_delta(
             profile, side="call", target_delta_abs=target, spot_fallback=spot,
+            recompute_t_years=t_years,
         )
         put_short = gex_provider.find_strike_at_delta(
             profile, side="put", target_delta_abs=target, spot_fallback=spot,
+            recompute_t_years=t_years,
         )
         if call_short is None or put_short is None:
             logger.warning(

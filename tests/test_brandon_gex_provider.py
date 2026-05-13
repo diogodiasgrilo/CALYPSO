@@ -14,6 +14,7 @@ from bots.hydra.brandon.gex_provider import (
     GEXProfile,
     StrikeDelta,
     StrikeGEX,
+    black_scholes_delta,
     black_scholes_gamma,
     build_profile,
     fetch_per_contract_snapshot,
@@ -637,4 +638,76 @@ class TestFindStrikeAtDelta:
         )
         result = find_strike_at_delta(prof, side="put", target_delta_abs=0.08)
         # Brandon: 8δ short = 7280, 50pt below the wall and well outside it.
+        assert result == 7280.0
+
+    def test_recompute_overrides_stale_snapshot_delta(self):
+        # Mirror the 2026-05-12 B E#4 pathology: cached chain says strike X
+        # is at 8δ, but by placement time the real delta at the live spot
+        # is materially different. With BS-recompute on, the live pick's
+        # ACTUAL delta at live spot must land closer to the 8δ target than
+        # the stale pick's actual delta would. Direction-independent — the
+        # spot can drift either way between snapshot and live.
+        snapshot_spot = 7370.0
+        live_spot = 7358.0  # spot dropped → put deltas climb at fixed strikes
+        t_years_remaining = 4.0 / (365.0 * 24.0)  # ~4 hours to 0DTE close
+        target = 0.08
+
+        iv = 0.15
+        deltas = []
+        for k in (7280, 7300, 7320, 7330, 7340):
+            cached = black_scholes_delta(
+                spot=snapshot_spot, strike=k, iv=iv,
+                t_years=t_years_remaining, contract_type="put",
+            )
+            deltas.append(StrikeDelta(
+                strike=float(k), contract_type="put", delta=cached, iv=iv,
+            ))
+        prof = GEXProfile(
+            spot=snapshot_spot,
+            expiry=date(2026, 5, 12),
+            fetched_at=datetime.now(timezone.utc),
+            strikes=tuple(),
+            deltas=tuple(deltas),
+        )
+
+        stale_pick = find_strike_at_delta(
+            prof, side="put", target_delta_abs=target, spot_fallback=snapshot_spot,
+        )
+        live_pick = find_strike_at_delta(
+            prof, side="put", target_delta_abs=target, spot_fallback=live_spot,
+            recompute_t_years=t_years_remaining,
+        )
+        assert stale_pick is not None and live_pick is not None
+        # Recompute must change the pick when spot has drifted meaningfully.
+        assert live_pick != stale_pick
+        # And the live pick's REAL delta at live spot must be closer to the
+        # 8δ target than the stale pick's real delta at the same live spot.
+        stale_actual = abs(black_scholes_delta(
+            spot=live_spot, strike=stale_pick, iv=iv,
+            t_years=t_years_remaining, contract_type="put",
+        ))
+        live_actual = abs(black_scholes_delta(
+            spot=live_spot, strike=live_pick, iv=iv,
+            t_years=t_years_remaining, contract_type="put",
+        ))
+        assert abs(live_actual - target) < abs(stale_actual - target)
+
+    def test_recompute_falls_back_to_cached_delta_when_iv_missing(self):
+        # Mixed-mode: some strikes have IV (recompute), others don't (use
+        # cached snapshot delta). Selector should still return a strike.
+        deltas = [
+            StrikeDelta(strike=7280, contract_type="put", delta=-0.08, iv=None),
+            StrikeDelta(strike=7300, contract_type="put", delta=-0.14, iv=None),
+        ]
+        prof = GEXProfile(
+            spot=7345.0,
+            expiry=date(2026, 5, 12),
+            fetched_at=datetime.now(timezone.utc),
+            strikes=tuple(),
+            deltas=tuple(deltas),
+        )
+        result = find_strike_at_delta(
+            prof, side="put", target_delta_abs=0.08, spot_fallback=7345.0,
+            recompute_t_years=4.0 / (365.0 * 24.0),
+        )
         assert result == 7280.0

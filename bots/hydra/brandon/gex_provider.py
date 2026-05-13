@@ -56,10 +56,16 @@ class StrikeDelta:
     delta in (0, 1] and puts in [-1, 0). When the API doesn't return greeks
     we leave delta=None and the lookup falls back to the OTM-multiplier
     method downstream.
+
+    `iv` is captured from the same chain snapshot so callers can BS-recompute
+    delta at a *live* spot when the cached `delta` is stale. 0DTE delta moves
+    very fast as spot drifts (high gamma near expiry); a 15-min snapshot can
+    drift 5-10 delta points by the time the next entry fires.
     """
     strike: float
     contract_type: str  # "call" or "put"
     delta: Optional[float]
+    iv: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,40 @@ def black_scholes_gamma(spot: float, strike: float, iv: float, t_years: float, r
     return pdf / (spot * iv * sqrt_t)
 
 
+def _norm_cdf(x: float) -> float:
+    """Standard-normal CDF via math.erf — no scipy dependency."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def black_scholes_delta(
+    spot: float,
+    strike: float,
+    iv: float,
+    t_years: float,
+    contract_type: str,
+    r: float = 0.0,
+) -> Optional[float]:
+    """Standard Black-Scholes delta. Call ∈ (0, 1], put ∈ [-1, 0).
+
+    Returns None on degenerate inputs (so callers can fall back to the
+    cached snapshot delta cleanly).
+
+    Used by find_strike_at_delta(recompute_t_years=...) to refresh stale
+    Polygon snapshot deltas from a live spot. 0DTE gamma is enormous —
+    spot moving 5 points in the 12 minutes since the last chain fetch
+    can flip a 7δ put into a 14δ put without anything else changing.
+    """
+    if t_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
+        return None
+    sqrt_t = math.sqrt(t_years)
+    d1 = (math.log(spot / strike) + (r + 0.5 * iv * iv) * t_years) / (iv * sqrt_t)
+    if contract_type == "call":
+        return _norm_cdf(d1)
+    if contract_type == "put":
+        return _norm_cdf(d1) - 1.0
+    return None
+
+
 def time_to_expiry_years(now_et: datetime, expiry_close_et: datetime) -> float:
     """Calendar-time T in years for BS. expiry_close_et is the option's settlement instant."""
     delta = (expiry_close_et - now_et).total_seconds()
@@ -161,13 +201,17 @@ def build_profile(
 
         # Capture delta even for zero-OI contracts — delta-target strike
         # selection wants the full chain shape, not just the OI-weighted
-        # subset. GEX clustering still drops zero-OI below.
+        # subset. GEX clustering still drops zero-OI below. IV travels
+        # alongside so callers can BS-recompute delta at a live spot if
+        # the cached delta is too stale (see find_strike_at_delta).
         greeks = c.get("greeks") or {}
         delta_raw = greeks.get("delta")
+        iv_raw = c.get("implied_volatility")
         delta_records.append(StrikeDelta(
             strike=float(strike),
             contract_type=ctype,
             delta=float(delta_raw) if delta_raw is not None else None,
+            iv=float(iv_raw) if iv_raw is not None else None,
         ))
 
         oi = int(c.get("open_interest") or 0)
@@ -267,6 +311,7 @@ def find_strike_at_delta(
     side: str,
     target_delta_abs: float,
     spot_fallback: Optional[float] = None,
+    recompute_t_years: Optional[float] = None,
 ) -> Optional[float]:
     """Find the strike whose `side` option delta is closest to ±target_delta_abs.
 
@@ -288,6 +333,12 @@ def find_strike_at_delta(
         target_delta_abs: target absolute delta, e.g. 0.08 for 8 delta
         spot_fallback: spot price to gate strikes against (defaults to
             profile.spot if not provided)
+        recompute_t_years: when provided alongside `spot_fallback`, refresh
+            each candidate's delta via Black-Scholes using the cached IV +
+            live spot + current time-to-expiry. Fixes the stale-snapshot
+            problem on 0DTE chains where delta drifts fast between the
+            15-min refresh windows. Strikes whose cached `iv` is missing
+            keep their cached `delta` (mixed-mode fallback).
 
     Returns:
         float strike price (snapped to 5pt grid) or None.
@@ -302,23 +353,44 @@ def find_strike_at_delta(
     if spot <= 0:
         return None
 
-    # Filter to the right side, with delta populated, on the right side of spot.
-    candidates = []
+    recompute_enabled = (
+        recompute_t_years is not None
+        and recompute_t_years > 0
+        and spot_fallback is not None
+    )
+
+    # Filter to the right side, on the right side of spot, with a usable
+    # delta source (cached snapshot OR cached IV for BS-recompute).
+    candidates: list[tuple[StrikeDelta, float]] = []
     for d in profile.deltas:
-        if d.contract_type != side or d.delta is None:
+        if d.contract_type != side:
             continue
         if side == "call" and d.strike <= spot:
             continue
         if side == "put" and d.strike >= spot:
             continue
-        candidates.append(d)
+
+        effective_delta: Optional[float] = None
+        if recompute_enabled and d.iv is not None and d.iv > 0:
+            effective_delta = black_scholes_delta(
+                spot=spot,
+                strike=d.strike,
+                iv=d.iv,
+                t_years=float(recompute_t_years),
+                contract_type=side,
+            )
+        if effective_delta is None:
+            effective_delta = d.delta
+        if effective_delta is None:
+            continue
+        candidates.append((d, effective_delta))
 
     if not candidates:
         return None
 
     # Closest by absolute delta distance to target.
-    best = min(candidates, key=lambda d: abs(abs(d.delta) - target_delta_abs))
-    snapped = round(best.strike / SPX_STRIKE_GRID_PT) * SPX_STRIKE_GRID_PT
+    best_d, _ = min(candidates, key=lambda item: abs(abs(item[1]) - target_delta_abs))
+    snapped = round(best_d.strike / SPX_STRIKE_GRID_PT) * SPX_STRIKE_GRID_PT
     return snapped
 
 
