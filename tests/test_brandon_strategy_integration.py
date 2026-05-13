@@ -186,7 +186,7 @@ class TestDeltaTargetStrikeSelection:
             brandon_delta_target_enabled=True,
             current_price=7345.0,
         )
-        inst._brandon_get_gex_profile = lambda d: None
+        inst._brandon_get_gex_profile = lambda d, **_kw: None
         inst._brandon_today_date = lambda: None
         with patch.object(
             BrandonHydraStrategy.__mro__[1],
@@ -212,7 +212,7 @@ class TestDeltaTargetStrikeSelection:
             brandon_delta_target_enabled=True,
             current_price=7345.0,
         )
-        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
         inst._brandon_today_date = lambda: None
         with patch.object(
             BrandonHydraStrategy.__mro__[1],
@@ -242,7 +242,7 @@ class TestDeltaTargetStrikeSelection:
             current_price=7345.0,
             current_vix=17.0,
         )
-        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
         inst._brandon_today_date = lambda: None
         # Use a real-ish entry with mutable strike attrs
         entry = MagicMock(entry_number=1, spec_set=None)
@@ -275,7 +275,7 @@ class TestDeltaTargetStrikeSelection:
             current_price=7345.0,
             current_vix=17.0,
         )
-        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
         inst._brandon_today_date = lambda: None
         entry = MagicMock(entry_number=5)
         entry.short_put_strike = 0.0
@@ -551,7 +551,7 @@ class TestStrikeAdjusterLive:
             brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
             current_price=6800,
         )
-        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
         e = self._entry()
         inst._brandon_apply_strike_adjuster(e)
         assert e.short_call_strike == 6850
@@ -568,7 +568,7 @@ class TestStrikeAdjusterLive:
             brandon_decel_min_pct=0.01, brandon_max_shift_pts=50,
             current_price=6800,
         )
-        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
         e = self._entry()
         original_width = e.long_call_strike - e.short_call_strike
         inst._brandon_apply_strike_adjuster(e)
@@ -583,7 +583,7 @@ class TestStrikeAdjusterLive:
             brandon_accel_min_pct=0.05,
             current_price=6800,
         )
-        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
         e = self._entry()
         inst._brandon_apply_strike_adjuster(e)
         assert e.call_side_skipped is True
@@ -599,7 +599,7 @@ class TestStrikeAdjusterLive:
             brandon_gex_enabled=True, brandon_strike_adjuster_enabled=False,
             current_price=6800,
         )
-        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
         e = self._entry()
         inst._brandon_apply_strike_adjuster(e)
         assert e.short_call_strike == 6850  # unchanged
@@ -638,7 +638,7 @@ class TestBreachExitLive:
             brandon_gex_enabled=True, brandon_breach_exit_enabled=True,
             current_price=6800,
         )
-        inst._brandon_get_gex_profile = lambda d: empty_profile
+        inst._brandon_get_gex_profile = lambda d, **_kw: empty_profile
         e = self._entry()
         inst._close_entry_early = MagicMock(return_value=(4, 0, []))
         result = inst._brandon_check_breach_exit(e)
@@ -663,7 +663,7 @@ class TestBreachExitLive:
             brandon_decel_min_pct=0.01, brandon_breach_confirmation_seconds=90,
             current_price=6905,  # past the wall (6900) but not yet at short (6920)
         )
-        inst._brandon_get_gex_profile = lambda d: prof
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
         first = datetime.now(timezone.utc) - timedelta(seconds=100)
         inst._brandon_breach_states[(1, "call")] = BreachState(first_breach_at=first)
         inst._brandon_now_et = lambda: datetime.now(timezone.utc)
@@ -802,7 +802,7 @@ class TestOverlayHedgeTracking:
             brandon_overlay_butterfly_cutoff_minute=59,
             current_price=6820,
         )
-        inst._brandon_get_gex_profile = lambda d: self._profile_with_call_accel()
+        inst._brandon_get_gex_profile = lambda d, **_kw: self._profile_with_call_accel()
         e = self._entry()
         inst._brandon_check_overlay(e)
 
@@ -823,7 +823,7 @@ class TestOverlayHedgeTracking:
             brandon_overlay_butterfly_cutoff_minute=59,
             current_price=6820,
         )
-        inst._brandon_get_gex_profile = lambda d: self._profile_with_call_accel()
+        inst._brandon_get_gex_profile = lambda d, **_kw: self._profile_with_call_accel()
         e = self._entry()
         inst._brandon_check_overlay(e)
         first_count = len(inst._brandon_hedge_legs.get(1, []))

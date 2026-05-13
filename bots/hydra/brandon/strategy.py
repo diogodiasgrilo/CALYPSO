@@ -43,6 +43,7 @@ from . import (
     defensive_overlay,
     gex_breach_exit,
     gex_provider,
+    gex_shared_cache,
     gex_strike_adjuster,
     hedge_position,
     narrow_spread,
@@ -54,7 +55,7 @@ from .hedge_position import HedgeLeg, HedgeSettlement
 logger = logging.getLogger(__name__)
 
 
-_GEX_REFRESH_SECONDS = 15 * 60   # match Polygon's 15-min delay; refreshing more often re-reads the same data
+_GEX_REFRESH_SECONDS = 3 * 60    # 2026-05-13: cut 15min → 3min after divergence audit. With force_refresh at entry time, the background TTL only governs breach-exit / overlay ticks, where freshness matters less and Polygon's underlying snapshot only updates every ~15 min anyway. 3 min strikes the balance between staleness on the strike-adjuster re-check path and avoiding wasted fetches between entries.
 _GEX_FAILURE_COOLDOWN = 60       # don't hammer a flaky API
 
 
@@ -220,7 +221,17 @@ class BrandonHydraStrategy(HydraStrategy):
             logger.debug("BRANDON-DELTA-TARGET: spot unknown — falling back to OTM-multiplier")
             return super()._calculate_strikes(entry)
 
-        profile = self._brandon_get_gex_profile(self._brandon_today_date())
+        # Force-refresh: this is the entry-placement strike-selection moment,
+        # the most consequential GEX read of the day. Pull a brand-new chain
+        # snapshot (under the cross-variant fetch lock) so the picker keys
+        # off chain data that's seconds old, not minutes. The just-written
+        # profile then warms the shared cache so _brandon_apply_strike_adjuster
+        # (called a few hundred ms later from _execute_entry / _simulate_entry)
+        # and any breach-exit ticks in the next 3 min hit the cache without
+        # re-fetching.
+        profile = self._brandon_get_gex_profile(
+            self._brandon_today_date(), force_refresh=True
+        )
         if profile is None or not profile.deltas:
             logger.warning(
                 "BRANDON-DELTA-TARGET E#%s: no chain delta data — falling back to OTM-multiplier",
@@ -848,10 +859,34 @@ class BrandonHydraStrategy(HydraStrategy):
         super().log_daily_summary()
 
     # ------------------------------------------------------------------
-    # GEX profile cache (15-min TTL, 60s failure cooldown)
+    # GEX profile cache (3-min TTL, 60s failure cooldown, cross-variant
+    # shared via filesystem + per-variant in-memory fast path)
     # ------------------------------------------------------------------
 
-    def _brandon_get_gex_profile(self, expiry_date) -> Optional[GEXProfile]:
+    def _brandon_get_gex_profile(
+        self, expiry_date, *, force_refresh: bool = False
+    ) -> Optional[GEXProfile]:
+        """Return the current GEX profile. Used by strike adjuster, breach
+        exit, and the delta-target picker.
+
+        Cache layers (in order):
+        1. Shared filesystem cache (cross-variant) — read first, so B and C
+           see the same chain snapshot. Persisted by whichever variant most
+           recently fetched.
+        2. Per-variant in-memory cache — fast path when the shared file
+           system is unavailable (defensive — should rarely apply).
+        3. Fresh Polygon fetch under fetch_lock(), serializing concurrent
+           refreshes across variant processes. The lock holder writes the
+           result to the shared cache; the lock waiter re-checks the cache
+           on entry and reuses the holder's just-written profile instead of
+           fetching again.
+
+        force_refresh=True bypasses layers (1) and (2) and forces a Polygon
+        round trip. Used at strike-selection time so each entry decision
+        keys off a chain ≤ a few seconds old, regardless of the background
+        TTL. Other call sites (breach-exit ticks, overlay checks) use the
+        default and stay on the TTL cache to limit API load.
+        """
         if not self.brandon_gex_enabled:
             return None
         now = datetime.now(timezone.utc)
@@ -862,12 +897,28 @@ class BrandonHydraStrategy(HydraStrategy):
         ):
             return self._brandon_gex_profile  # honor cooldown — return stale or None
 
-        if (
-            self._brandon_gex_profile is not None
-            and self._brandon_gex_profile_fetched_at is not None
-            and (now - self._brandon_gex_profile_fetched_at).total_seconds() < _GEX_REFRESH_SECONDS
-        ):
-            return self._brandon_gex_profile
+        # Layer 1: shared filesystem cache (cross-variant)
+        if not force_refresh:
+            shared = gex_shared_cache.load_shared_profile(
+                underlying=self.brandon_polygon_underlying,
+                expiry=expiry_date,
+                max_age_seconds=_GEX_REFRESH_SECONDS,
+            )
+            if shared is not None:
+                # Sync in-memory fast path so subsequent reads avoid the
+                # filesystem round-trip during the TTL window.
+                self._brandon_gex_profile = shared
+                self._brandon_gex_profile_fetched_at = now
+                return shared
+
+            # Layer 2: in-memory fast path (defensive fallback if shared FS
+            # is unwritable / unreadable — still better than re-fetching).
+            if (
+                self._brandon_gex_profile is not None
+                and self._brandon_gex_profile_fetched_at is not None
+                and (now - self._brandon_gex_profile_fetched_at).total_seconds() < _GEX_REFRESH_SECONDS
+            ):
+                return self._brandon_gex_profile
 
         api_key = os.environ.get(self.brandon_polygon_api_key_env)
         if not api_key:
@@ -881,70 +932,102 @@ class BrandonHydraStrategy(HydraStrategy):
         if spot <= 0:
             return self._brandon_gex_profile  # keep last good profile if spot momentarily 0
 
-        try:
-            # 2-pass fetch: chain endpoint for OI (returns Greeks-stripped on
-            # Starter), then per-contract endpoint for Greeks/IV on the most
-            # liquid strikes near spot. See gex_provider.fetch_polygon_chain_with_greeks.
-            contracts = gex_provider.fetch_polygon_chain_with_greeks(
-                underlying=self.brandon_polygon_underlying,
-                expiry=expiry_date,
-                api_key=api_key,
-                max_pages=4,
-                oi_threshold=50,
-                spot=spot,
-                spot_window_pct=0.05,
-                max_contracts_to_hydrate=80,
-            )
-            try:
-                from shared.market_hours import US_EASTERN, get_us_market_time
-                now_et = get_us_market_time()
-                expiry_close_et = US_EASTERN.localize(
-                    datetime.combine(expiry_date, datetime.min.time()).replace(hour=16)
+        # Layer 3: fresh fetch under cross-variant lock. The lock makes two
+        # variants entering the same scheduled slot reuse one Polygon fetch
+        # instead of issuing two — and gives them identical inputs so their
+        # strike decisions can't diverge from chain-snapshot noise.
+        with gex_shared_cache.fetch_lock():
+            # After acquiring the lock, check the shared cache once more — a
+            # sibling variant may have just refreshed it. Skip this on
+            # force_refresh: caller explicitly wants a brand-new fetch.
+            if not force_refresh:
+                shared = gex_shared_cache.load_shared_profile(
+                    underlying=self.brandon_polygon_underlying,
+                    expiry=expiry_date,
+                    max_age_seconds=_GEX_REFRESH_SECONDS,
                 )
-            except Exception:
-                from datetime import timezone as _tz
-                now_et = datetime.now(_tz.utc)
-                expiry_close_et = datetime.combine(
-                    expiry_date, datetime.min.time(), tzinfo=_tz.utc
-                ).replace(hour=20)
-            t_years = max(
-                gex_provider.time_to_expiry_years(now_et, expiry_close_et),
-                1.0 / (365.0 * 24.0 * 60.0),
-            )
-            profile = gex_provider.build_profile(
-                contracts, spot=spot, expiry=expiry_date, time_to_expiry=t_years
-            )
-        except Exception as exc:
-            logger.warning("Brandon GEX fetch failed: %s", exc)
-            self._brandon_gex_failure_at = now
-            return self._brandon_gex_profile  # keep last good profile if any
+                if shared is not None:
+                    self._brandon_gex_profile = shared
+                    self._brandon_gex_profile_fetched_at = now
+                    logger.info(
+                        "Brandon GEX: reusing sibling variant's just-fetched profile from shared cache"
+                    )
+                    return shared
 
-        self._brandon_gex_profile = profile
-        self._brandon_gex_profile_fetched_at = now
-        self._brandon_gex_failure_at = None
-        # Surface chain coverage so a sudden gap (e.g., Polygon dropping Greeks
-        # on most strikes) shows up in the journal. Normal: dropped few. If
-        # this number spikes, GEX cluster strength is being underestimated.
-        chain_total = len(contracts)
-        with_greeks_or_iv = sum(
-            1 for c in contracts
-            if (c.get("greeks") or {}).get("gamma") is not None
-            or c.get("implied_volatility") is not None
-        )
-        contributed = len(profile.strikes)
-        dropped = chain_total - contributed
-        logger.info(
-            "Brandon GEX profile refreshed: spot=%.2f, %d strikes contributed, "
-            "%d positive / %d negative clusters; chain=%d, hydrated_with_greeks_or_iv=%d, dropped=%d",
-            profile.spot,
-            contributed,
-            len(profile.positive_clusters(min_strength_pct=self.brandon_decel_min_pct)),
-            len(profile.negative_clusters(min_strength_pct=self.brandon_accel_min_pct)),
-            chain_total,
-            with_greeks_or_iv,
-            dropped,
-        )
-        return profile
+            try:
+                # 2-pass fetch: chain endpoint for OI (Greeks-stripped on
+                # Starter), then per-contract endpoint for Greeks/IV on the
+                # most liquid strikes near spot.
+                contracts = gex_provider.fetch_polygon_chain_with_greeks(
+                    underlying=self.brandon_polygon_underlying,
+                    expiry=expiry_date,
+                    api_key=api_key,
+                    max_pages=4,
+                    oi_threshold=50,
+                    spot=spot,
+                    spot_window_pct=0.05,
+                    max_contracts_to_hydrate=80,
+                )
+                try:
+                    from shared.market_hours import US_EASTERN, get_us_market_time
+                    now_et = get_us_market_time()
+                    expiry_close_et = US_EASTERN.localize(
+                        datetime.combine(expiry_date, datetime.min.time()).replace(hour=16)
+                    )
+                except Exception:
+                    from datetime import timezone as _tz
+                    now_et = datetime.now(_tz.utc)
+                    expiry_close_et = datetime.combine(
+                        expiry_date, datetime.min.time(), tzinfo=_tz.utc
+                    ).replace(hour=20)
+                t_years = max(
+                    gex_provider.time_to_expiry_years(now_et, expiry_close_et),
+                    1.0 / (365.0 * 24.0 * 60.0),
+                )
+                profile = gex_provider.build_profile(
+                    contracts, spot=spot, expiry=expiry_date, time_to_expiry=t_years
+                )
+            except Exception as exc:
+                logger.warning("Brandon GEX fetch failed: %s", exc)
+                self._brandon_gex_failure_at = now
+                return self._brandon_gex_profile  # keep last good profile if any
+
+            self._brandon_gex_profile = profile
+            self._brandon_gex_profile_fetched_at = now
+            self._brandon_gex_failure_at = None
+
+            # Publish for sibling variants. Failure is silent — the caller
+            # still got its profile in-process; the sibling will fetch its
+            # own next time around.
+            gex_shared_cache.save_shared_profile(
+                profile, underlying=self.brandon_polygon_underlying
+            )
+
+            # Surface chain coverage so a sudden gap (e.g., Polygon dropping
+            # Greeks on most strikes) shows up in the journal. Normal: dropped
+            # few. If this number spikes, GEX cluster strength is being
+            # underestimated.
+            chain_total = len(contracts)
+            with_greeks_or_iv = sum(
+                1 for c in contracts
+                if (c.get("greeks") or {}).get("gamma") is not None
+                or c.get("implied_volatility") is not None
+            )
+            contributed = len(profile.strikes)
+            dropped = chain_total - contributed
+            logger.info(
+                "Brandon GEX profile refreshed (force=%s): spot=%.2f, %d strikes contributed, "
+                "%d positive / %d negative clusters; chain=%d, hydrated_with_greeks_or_iv=%d, dropped=%d",
+                force_refresh,
+                profile.spot,
+                contributed,
+                len(profile.positive_clusters(min_strength_pct=self.brandon_decel_min_pct)),
+                len(profile.negative_clusters(min_strength_pct=self.brandon_accel_min_pct)),
+                chain_total,
+                with_greeks_or_iv,
+                dropped,
+            )
+            return profile
 
     # ------------------------------------------------------------------
     # Helpers
