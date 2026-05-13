@@ -359,7 +359,7 @@ Remove tasks:
 
 Old market-data line: $11.50/mo (single CBOE Streaming Market Indexes assumption). **CORRECTION**: $3-6/mo non-pro for *both* SPX and VIX subscriptions + OPRA. Most commission-waivable above $30/mo activity, so net cost approaches $3-5/mo.
 
-Old commission line: $52/round-trip for 10c IC. **CONFIRMED**: $90-94/round-trip when including the Cboe SPX Index Option Surcharge that wasn't in the prior model. Still vastly better than Saxo (~$200+ per round-trip).
+Old commission line: $52/round-trip for 10c IC. **CONFIRMED**: $90-94/round-trip when including the Cboe SPX Index Option Surcharge that wasn't in the prior model. Saxo at $2.50/leg/contract bundled = $200/round-trip for the same 10c IC. **Net savings: ~$109.56 per IC round-trip (~55%), or ~$54.90 per IC on the worthless-expiry path.** Earlier "75% reduction" claim was wrong — that compared IB's bare commission line ($0.65/contract) against Saxo's bundled rate, ignoring the $0.45/contract Cboe Index Option Surcharge IB unbundles.
 
 ---
 

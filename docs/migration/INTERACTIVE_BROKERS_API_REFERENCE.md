@@ -157,7 +157,7 @@ Code must:
 3. **Tighter NBBO** — IB is on more routes than Saxo, typically 0.05-0.10 tighter on the spread.
 4. **Drop Polygon Starter** — IB OPRA gives streaming bid/ask + Model Greeks + OI per strike. Saves $29/mo and eliminates one dependency.
 5. **Lower latency** — TCP socket vs Saxo's HTTPS round-trip. 5-50ms vs 100-300ms typical.
-6. **Lower commissions** — IBKR Pro tiered ~$0.65/contract vs Saxo's ~$2.50/leg. For a 10c IC: ~$26 vs ~$100 round-trip. **~75% commission reduction.** This is the biggest line-item improvement.
+6. **Lower commissions** — IBKR Pro Fixed all-in ~$1.13/contract (commission $0.65 + Cboe SPX Index Option Surcharge $0.45 + OCC/CBOE TPS/regulatory ~$0.03) vs Saxo $2.50/leg/contract bundled. For a 10c IC: $90.44 vs $200 round-trip (open+close), or $45.10 vs $100 if it expires worthless. **~55% commission reduction.** (Earlier drafts said ~75%; that compared IB's commission line in isolation against Saxo's bundled rate — fixed 2026-05-13. The $0.45/contract Cboe Index Option Surcharge nearly doubles the IB cost back up from the bare commission.)
 7. **Section 1256 60/40 tax treatment** for SPX index options if we ever become US-tax-resident (currently EU-tax, so this is theoretical).
 
 ## What IB takes away that Saxo had

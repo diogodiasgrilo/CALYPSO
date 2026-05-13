@@ -36,7 +36,7 @@
 - **Replace Saxo entirely.** Every call to `shared.saxo_client.SaxoClient` must route to an IBKR equivalent.
 - **Preserve all current bot logic.** HYDRA's strategy code, MEIC, the dry-run harness, dashboard — these are NOT touched. Only the broker-facing adapter changes.
 - **Drop Polygon Options Starter** ($29/mo) — IB OPRA gives us streaming bid/ask + Model Greeks + per-strike OI in one feed.
-- **Cut commission costs ~75%** — IB Pro tiered ($0.65/contract) vs Saxo ($2.50/leg) saves ~$75 per IC round-trip at 10c.
+- **Cut commission costs ~55%** — IB Pro Fixed all-in ~$1.13/contract (commission $0.65 + Cboe SPX Index Option Surcharge $0.45 + ~$0.03 regulatory/clearing) vs Saxo $2.50/leg/contract bundled. Saves ~$109.56 per IC round-trip at 10c ($90.44 vs $200). On worthless-expiry path: ~$54.90 saved ($45.10 vs $100). (Earlier drafts overstated this at ~75% by comparing IB's bare commission line against Saxo's bundled rate — the $0.45/contract Cboe Index Option Surcharge that IB unbundles brings the net cost back up.)
 - **Tighter NBBO + native CBOE Complex Order Book routing** — better fills on 4-leg iron condors.
 
 ### Non-goals (deferred to a future phase)
@@ -767,7 +767,7 @@ If operator misses the push:
 - [ ] No "BRANDON-GEX-ADJ SKIP" rate change vs Saxo baseline (rules out chain-data quality drift)
 
 ### Month 1
-- [ ] Commission savings vs Saxo measured (expected ~75% reduction)
+- [ ] Commission savings vs Saxo measured (expected ~55% reduction; $109.56/IC round-trip at 10c on the TP/stop path; $54.90/IC on worthless-expiry path)
 - [ ] Fill quality measured (mid-price slippage)
 - [ ] Polygon Options Starter unsubscribed → savings $29/mo realized
 - [ ] No gateway-uptime issues > 99.5%
