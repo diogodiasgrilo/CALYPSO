@@ -309,21 +309,32 @@ class StreamingBroker(Protocol):
 
 ### 5.1 Tasks (in order)
 
-#### A.1 Fork `ibind` locally + swap `pyCrypto` → `pycryptodome` (~30 min)
+#### A.1 ~~Fork ibind~~ — **already safe, no work needed** (verified 2026-05-14)
 
-`ibind`'s OAuth 1.0a code uses `pyCrypto` (unmaintained, known CVEs). IBKR provided that code; IBKR hasn't updated it. **Hard requirement before any live use**.
+**Earlier plan was based on outdated information.** The prior research file `06_oauth_and_2fa_answers.md` cited the ibind wiki claim that "ibind uses pyCrypto with known CVEs" — verifying this against ibind 0.1.23's actual package metadata showed the opposite.
 
+Verification:
 ```
-git clone https://github.com/Voyz/ibind.git ~/code/ibind
-cd ~/code/ibind
-# Inspect ibind/oauth/oauth1a.py imports
-# Replace `from Crypto.X import Y` → `from Cryptodome.X import Y`
-# pycryptodome is API-compatible with pyCrypto
-# Run ibind's own test suite to verify no regression
-pip install -e .  # install fork in editable mode into the CALYPSO venv
+$ pip show ibind | grep Requires
+Requires-Dist: pycryptodome>=3.21; extra == "oauth"
+
+$ python -c "import Crypto; print(Crypto.__version__)"
+3.23.0
 ```
 
-Track the swap as a single commit in our fork. If upstream `ibind` ever switches to `cryptography` natively, we drop the fork.
+- ibind's `[oauth]` extra explicitly requires `pycryptodome` (the maintained fork), NOT `pycrypto` (the abandoned one).
+- `pycryptodome` provides the `Crypto.*` import namespace for backwards compatibility — so `from Crypto.Cipher import PKCS1_v1_5` in ibind/oauth/oauth1a.py resolves to pycryptodome, not pycrypto.
+- pycrypto's last release was 2.6.1 (2014); pycrypto never reached 3.x. The installed `Crypto` module's version `3.23.0` is unambiguously pycryptodome.
+
+**Conclusion**: ibind upstream is already secure. We install via standard `pip install ibind[oauth]` — no fork, no patches, no maintenance burden.
+
+The verification step takes 30 seconds:
+```python
+# In our test suite / smoke test
+import Crypto
+assert Crypto.__version__.startswith("3."), f"Unexpected Crypto: {Crypto.__version__}"
+# If ibind ever pulls in pyCrypto by mistake (or via transitive dep), this fails fast.
+```
 
 #### A.2 Set up `shared/ib_client.py` scaffold (~1 day)
 
@@ -929,7 +940,7 @@ See §A.5 above — full StreamingManager class.
 |---|---|---|---|
 | **OAuth 1.0a activation takes > 2 weeks** | Medium | Medium (delays Phase A integration test) | Built 2 weeks of slack into Phase 0; email IBKR API support at day 14 |
 | **IBKR closes OAuth 1.0a retail self-service** | Low | High (forces re-architecture to Gateway path) | We're already registered (CALYPSOPP). Keep Gateway+IBC fallback plan in `research_scratch/04_*.md`. |
-| **pyCrypto CVE in ibind** | Medium | High (auth-layer RCE) | **Pre-go-live hard requirement**: fork ibind, swap to pycryptodome. Tracked as Phase A.1 |
+| ~~pyCrypto CVE in ibind~~ | **N/A — verified safe 2026-05-14** | n/a | ibind 0.1.23 actually depends on `pycryptodome>=3.21` (the maintained fork), not pyCrypto. Wiki text was misleading. Add `import Crypto; assert Crypto.__version__.startswith("3.")` as a fast-fail smoke test. |
 | **`smd` topic auto-termination at 15 min** | High (it happens every day) | Medium (data starvation if not refreshed) | StreamingManager rotates `umd → smd` every 13 min (Phase A.5) |
 | **conidex sign convention mistake** | Medium during dev | High (wrong side, wrong direction) | Reverse-engineer from ibind examples; unit-test conidex builder explicitly; test all 4 directions on paper before live |
 | **CP API "reply prompt" not handled** | Low (ibind handles it) | Medium (orders silently rejected) | Use ibind's `answers` parameter with sensible defaults; log every reply prompt seen for monitoring |
