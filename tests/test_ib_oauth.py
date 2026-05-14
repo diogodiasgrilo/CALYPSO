@@ -65,7 +65,8 @@ class TestExtractDHPrime:
 
     def test_returns_lowercase_hex_only(self, real_paper_dhparam):
         prime = extract_dh_prime(real_paper_dhparam)
-        assert prime.islower() or prime.replace("0", "").replace("1", "").replace("2", "").replace("3", "").replace("4", "").replace("5", "").replace("6", "").replace("7", "").replace("8", "").replace("9", "") == ""  # all hex digit chars in lowercase
+        # No uppercase hex letters anywhere
+        assert prime == prime.lower()
         assert all(c in "0123456789abcdef" for c in prime), "non-hex chars present"
 
     def test_no_separators_or_whitespace(self, real_paper_dhparam):
@@ -177,7 +178,7 @@ class TestValidateSecrets:
             self._base_creds(consumer_key="calypsopp").validate_secrets()
 
     def test_too_long_consumer_key_rejected(self):
-        with pytest.raises(ValueError, match="1-9 chars"):
+        with pytest.raises(ValueError, match="at most 9 chars"):
             self._base_creds(consumer_key="TOOLONGKEY").validate_secrets()
 
     def test_empty_access_token_rejected(self):
@@ -188,10 +189,20 @@ class TestValidateSecrets:
         with pytest.raises(ValueError, match="non-empty"):
             self._base_creds(access_token_secret="").validate_secrets()
 
-    def test_consumer_key_with_digit_rejected(self):
-        # 9 chars but contains a digit — IBKR portal accepts A-Z only
-        with pytest.raises(ValueError, match="A-Z"):
-            self._base_creds(consumer_key="CALYPSO01").validate_secrets()
+    def test_consumer_key_with_lowercase_rejected(self):
+        # Lowercase still fails — IBKR's portal silently uppercases at
+        # registration, but our validate_secrets is strict so callers
+        # see the canonical key. (Digits now ALLOWED, see next test.)
+        with pytest.raises(ValueError, match="uppercase"):
+            self._base_creds(consumer_key="calypso").validate_secrets()
+
+    def test_consumer_key_with_digit_accepted(self):
+        # Per relaxed regex ^[A-Z0-9]+$ — alphanumeric is OK.
+        self._base_creds(consumer_key="CALYPSO01").validate_secrets()
+
+    def test_consumer_key_with_lowercase_letter_rejected(self):
+        with pytest.raises(ValueError, match="uppercase"):
+            self._base_creds(consumer_key="CALYPSOa").validate_secrets()
 
 
 class TestValidatePaths:

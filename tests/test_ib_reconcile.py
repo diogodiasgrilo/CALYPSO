@@ -174,15 +174,25 @@ class TestApplyDecisions:
         cancel_fn.assert_called_once_with("abc")
         assert out["cancel"] == ["abc"]
 
-    def test_cancel_fn_failure_logged(self, caplog):
+    def test_cancel_fn_returning_false_excluded_from_output_and_logged_error(
+        self, caplog,
+    ):
+        """When cancel_fn returns False (broker rejected the cancel), the
+        order is NOT recorded in the cancel-success list AND an ERROR log
+        is emitted so the operator can see it."""
         result = classify_orders(
             broker_orders=[{"orderId": "abc", "status": "Submitted"}],
             state_orders=[],
         )
         cancel_fn = MagicMock(return_value=False)
-        out = apply_decisions(result, cancel_fn=cancel_fn)
+        import logging
+        with caplog.at_level(logging.ERROR):
+            out = apply_decisions(result, cancel_fn=cancel_fn)
         # FAILED entry is NOT in cancel list (it didn't succeed)
         assert out["cancel"] == []
+        # And we did log the failure at ERROR
+        assert any("CANCEL" in r.message and "FAILED" in r.message
+                   for r in caplog.records)
 
     def test_lookup_calls_lookup_fn(self):
         result = classify_orders(
@@ -246,6 +256,94 @@ class TestApplyDecisions:
         cancel_fn.assert_not_called()
         # But the would-be cancel is still tracked in output
         assert out["cancel"] == ["abc"]
+
+    def test_cancel_fn_raising_propagates(self):
+        """If the caller's cancel handler crashes, apply_decisions does
+        NOT swallow — the operator must see the failure. (No try/except
+        is wrapped around cancel_fn; this pins the contract.)"""
+        result = classify_orders(
+            broker_orders=[{"orderId": "abc", "status": "Submitted"}],
+            state_orders=[],
+        )
+        cancel_fn = MagicMock(side_effect=RuntimeError("broker timeout"))
+        with pytest.raises(RuntimeError, match="broker timeout"):
+            apply_decisions(result, cancel_fn=cancel_fn)
+
+    def test_reattach_fn_raising_propagates(self):
+        """Same contract for reattach_fn — caller-side exceptions surface."""
+        result = classify_orders(
+            broker_orders=[{"orderId": "abc", "status": "Submitted"}],
+            state_orders=[{"order_id": "abc", "status": "PreSubmitted"}],
+        )
+        cancel_fn = MagicMock()
+        reattach_fn = MagicMock(side_effect=RuntimeError("state file corrupted"))
+        with pytest.raises(RuntimeError, match="state file corrupted"):
+            apply_decisions(
+                result, cancel_fn=cancel_fn, reattach_fn=reattach_fn,
+            )
+
+
+class TestOrderRecordMalformed:
+    def test_non_numeric_filled_field_raises(self):
+        """Defensive: if the broker / state file ever returns 'filled' as
+        a non-numeric string, OrderRecord.from_broker_dict raises ValueError
+        at parse time. This surfaces the data-quality issue rather than
+        silently coercing to 0 (which would mis-classify the order's state)."""
+        with pytest.raises(ValueError):
+            OrderRecord.from_broker_dict({
+                "orderId": "abc", "status": "Submitted",
+                "filled": "not_a_number",
+            })
+
+    def test_alternate_id_keys_accepted(self):
+        """orderID (capital D) and 'id' fallbacks per from_broker_dict."""
+        rec1 = OrderRecord.from_broker_dict({"orderID": "abc"})
+        assert rec1.order_id == "abc"
+        rec2 = OrderRecord.from_broker_dict({"id": "def"})
+        assert rec2.order_id == "def"
+
+
+class TestReconcileEdgeCases:
+    def test_reattach_fn_none_still_logs(self):
+        """When reattach_fn is None, REATTACH items are still listed in
+        the output (so caller can see the unhandled cases) but no side
+        effect occurs."""
+        result = classify_orders(
+            broker_orders=[{"orderId": "abc", "status": "Submitted"}],
+            state_orders=[{"order_id": "abc", "status": "PreSubmitted"}],
+        )
+        out = apply_decisions(result, cancel_fn=MagicMock(), reattach_fn=None)
+        assert out["reattach"] == ["abc"]
+
+    def test_duplicate_orderid_in_broker_keeps_one(self):
+        """Defensive: if broker_orders has the same id twice, the second
+        entry overwrites the first in broker_by_id — no crash."""
+        result = classify_orders(
+            broker_orders=[
+                {"orderId": "abc", "status": "Submitted"},
+                {"orderId": "abc", "status": "Filled"},
+            ],
+            state_orders=[],
+        )
+        assert result.total == 1  # deduped by order_id
+        # Last writer wins → status=Filled → SKIP
+        assert result.only_broker[0].action == ReconcileAction.SKIP
+
+    def test_rejected_status_classified_as_terminal(self):
+        """Per the recent ib_reconcile fix: Rejected goes to the SKIP
+        bucket (terminal) rather than CANCEL or LOOKUP_FILL."""
+        result = classify_orders(
+            broker_orders=[{"orderId": "abc", "status": "Rejected"}],
+            state_orders=[],
+        )
+        assert result.only_broker[0].action == ReconcileAction.SKIP
+
+    def test_expired_status_classified_as_terminal(self):
+        result = classify_orders(
+            broker_orders=[],
+            state_orders=[{"order_id": "abc", "status": "Expired"}],
+        )
+        assert result.only_state[0].action == ReconcileAction.SKIP
 
 
 # ─── End-to-end scenario test ──────────────────────────────────────────────

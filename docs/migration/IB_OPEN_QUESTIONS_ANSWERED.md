@@ -1,19 +1,24 @@
 # IB Migration — Open Questions, Answered
 
-> **Status**: All 6 open questions from the migration plan resolved via research (May 2026). One finding is architecture-changing: **OAuth 1.0a first-party retail works gateway-free**, which eliminates the IB Gateway + IBC + weekly phone tap from our deployment.
+> **Status**: 10 open questions resolved — the original 6 (Q1–Q6) plus four follow-ups (Q7–Q10) added on the 2026-05-14 deep-dive into CP API combo orders, streaming, margin, and error lifecycle. One finding is architecture-changing: **OAuth 1.0a first-party retail works gateway-free**, which eliminates the IB Gateway + IBC + weekly phone tap from our deployment.
 >
 > **Action**: this doc supersedes the "open questions" section at the bottom of `INTERACTIVE_BROKERS_API_REFERENCE.md` and changes Phase 1 of `SAXO_TO_IB_MIGRATION_PLAN.md`. The migration plan has been amended accordingly.
 >
-> **Compiled**: 2026-05-13.
+> **Compiled**: 2026-05-13; **last updated**: 2026-05-14.
 >
 > **Deep-dive scratch files** (verbatim agent research):
 > - [`06_oauth_and_2fa_answers.md`](./research_scratch/06_oauth_and_2fa_answers.md) — Q1 + Q4
 > - [`07_key_rotation_and_index_sub.md`](./research_scratch/07_key_rotation_and_index_sub.md) — Q2 + Q3
 > - [`08_orf_and_ledger_usd.md`](./research_scratch/08_orf_and_ledger_usd.md) — Q5 + Q6
+> - [`09_cpapi_combo_orders.md`](./research_scratch/09_cpapi_combo_orders.md) — Q7 (combos)
+> - [`10_cpapi_streaming.md`](./research_scratch/10_cpapi_streaming.md) — Q8 (streaming)
+> - [`11_cpapi_margin_account.md`](./research_scratch/11_cpapi_margin_account.md) — Q9 + Q10 (margin / portfolio_summary throttling)
+> - [`12_ibind_errors_lifecycle.md`](./research_scratch/12_ibind_errors_lifecycle.md) — error-class catalogue + breaker policy
+> - [`13_invalid_consumer_diagnosis.md`](./research_scratch/13_invalid_consumer_diagnosis.md) — registration / activation latency
 
 ---
 
-## TL;DR — the 6 answers
+## TL;DR — the 10 answers
 
 | # | Question | Answer | Migration impact |
 |---|---|---|---|
@@ -22,7 +27,7 @@
 | 3 | Cboe Streaming Market Indexes monthly fee | **~$1.50/mo non-pro for VIX only.** **SPX is a SEPARATE subscription** (CME S&P Indexes, ~$1.50-3/mo). **Total ~$3-5/mo for SPX + VIX live.** | Cost model + data-sub list correction |
 | 4 | Unattended week+ session for retail live? | **TWS/Gateway path: NO** (weekly Sunday IBKR Mobile tap is enforced, no documented bypass). **OAuth 1.0a path: YES** (long-lived tokens, SDK rotates the 24h live-session-token cryptographically — no phone, no browser). | Drives the architecture choice in Q1 |
 | 5 | 2026 ORF on Cboe for SPX, sell-side | **$0.0023/contract**, effective Jan 2 – Jun 30 2026. Reverts to $0.0017 on Jul 1 unless extended. Section 31 = $20.60/$M of notional sales (post-Apr 4 2026). **The dominant fee is the $0.45 CBOE SPX Index Option Surcharge (both sides)** — ~200× the ORF. | Cost-model line items locked in |
-| 6 | EUR-base account, live USD-tradable | **No single field gives this directly.** Use `reqAccountSummaryAsync(group="All", tags="AvailableFunds,$LEDGER:USD")`, compute `usd_tradable = EUR_AvailableFunds × ExchangeRate@USD + USD_CashBalance`. **Critical: refreshes every 3 minutes, NOT per fill.** Bot must reserve margin client-side between ticks. | Pre-trade BP gate design |
+| 6 | EUR-base account, live USD-tradable | **SUPERSEDED — see Q10.** Original answer (now obsolete) recommended `reqAccountSummaryAsync` with a 3-minute throttle. Under CP API + ibind we use `portfolio_summary` + `get_ledger` with **no 3-minute throttle** (TWS API's restriction does NOT carry over). See Q10 for the current design. | Pre-trade BP gate design (see Q10) |
 
 ---
 
@@ -57,13 +62,9 @@ When you authenticate via OAuth 1.0a, the **access token + access token secret**
 > "The goal of the authorization flow is to establish automatically-expiring live session tokens without requiring user re-authorization."
 > — [IBKR OAuth design PDF, 2018](https://www.interactivebrokers.com/webtradingapi/oauth.pdf) (still authoritative for 1.0a in 2026)
 
-### The catch — and it's a serious one
+### The "pyCrypto catch" — verified safe 2026-05-14 (no action needed)
 
-The `ibind` OAuth 1.0a implementation uses **`pyCrypto`**, which is unmaintained with known security vulnerabilities. From the wiki:
-
-> "The OAuth 1.0a implementation is based on code provided directly by IBKR. This implementation relies on the pyCrypto library, which is no longer actively maintained and has known security vulnerabilities. While this approach ensures compatibility with IBKR's OAuth process, it may pose security risks. Users should be aware that IBKR has not provided an official update or alternative implementation."
-
-Action: **fork `ibind` and replace `pyCrypto` with `pycryptodome` (active fork, API-compatible)** before going live. This is a single-file change in `ibind/oauth/oauth1a.py`. Alternatively, do our own minimal OAuth 1.0a signing in `shared/ib_client.py` using `cryptography` (the modern Python primitive) — IBKR's algorithm is RSA-SHA256 PKCS1v15 + HMAC-SHA256, well-defined in their [2018 spec PDF](https://www.interactivebrokers.com/webtradingapi/oauth.pdf).
+The ibind wiki page once warned that the OAuth 1.0a implementation relied on `pyCrypto` (unmaintained, known CVEs). **Verifying against ibind 0.1.23's actual package metadata flipped this**: `ibind[oauth]` explicitly requires `pycryptodome>=3.21` — pycryptodome is the maintained fork that exposes the same `Crypto.*` import namespace, so the wiki text was misleading. We verify at startup via `shared.ib_oauth.assert_safe_crypto_backend()` (asserts `Crypto.__version__` is the pycryptodome line, not legacy 2.x pyCrypto). No fork needed.
 
 ### Activation latency
 
@@ -204,6 +205,8 @@ The ORF rate filing expires June 30, 2026. A new methodology is under SEC review
 
 ## Q6 detail — EUR base, USD options, live tradable
 
+> ⚠️ **SUPERSEDED — see Q10 (2026-05-14 update at bottom).** The TWS-API-based code in this section (ib_async / `reqAccountSummaryAsync` / 3-minute throttle) describes the OLD architecture before the migration pivot to CP API + ibind. Under the current design, throttle is gone and the call surface is `portfolio_summary` + `get_ledger`. Kept here for the historical reasoning only; do not implement against this code.
+
 ### The hard truth
 
 **There is no single `accountSummary` tag that returns the live USD-tradable amount directly.** The TWS data model exposes:
@@ -324,7 +327,7 @@ GCE VM
 ### Code changes in the plan
 
 - **`shared/ib_client.py`** uses `ibind` (or a hand-rolled OAuth 1.0a client) instead of `ib_async`. The SDK choice flips.
-- **`Voyz/ibind` v0.1.23 (April 2025)** is the canonical retail OAuth 1.0a SDK. Fork it locally and **replace `pyCrypto` with `pycryptodome`** for security.
+- **`Voyz/ibind` v0.1.23 (April 2025)** is the canonical retail OAuth 1.0a SDK. **No fork needed** — its `[oauth]` extra already requires `pycryptodome>=3.21` (the maintained fork that exposes the same `Crypto.*` namespace). We assert this at startup via `assert_safe_crypto_backend()`. Earlier wiki warnings about pyCrypto were misleading and corrected 2026-05-14.
 - All combo / order / market-data calls now go through `ibind.IbkrClient` REST methods, not `ib_async.IB` socket methods.
 - **WebSocket streaming**: `ibind` has WebSocket support but is REST-first. For high-frequency monitoring (every 2-15s tick) over WebSocket, may need to extend it. For our typical cadence this is fine.
 
@@ -350,7 +353,7 @@ Remove tasks:
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | IBKR revokes OAuth 1.0a retail self-service access | Low | High (forces re-architecture mid-flight) | Keep IB Gateway + IBC code path documented in `research_scratch/04_*.md` as fallback. Be prepared for a 2-week emergency rebuild. |
-| `pyCrypto` security vulnerability in `ibind` causes a CVE-level issue | Medium | High (RCE in our auth layer) | **Replace `pyCrypto` with `pycryptodome` before going live** (fork `ibind`). Track upstream `ibind` issue. |
+| ~~`pyCrypto` security vulnerability in `ibind`~~ — verified safe 2026-05-14 | n/a | n/a | ibind 0.1.23 already requires `pycryptodome>=3.21`. `assert_safe_crypto_backend()` is the startup tripwire if anything ever installs legacy pyCrypto instead. |
 | OAuth 1.0a activation delay > 2 weeks | Medium | Medium (delays Phase 1 start) | Build 2 weeks of slack into the timeline. Start OAuth registration on day 1 of Phase 0. |
 | `accountSummary` 3-min cadence missed in pre-trade gate | High at launch | High (over-leverage) | Reserve margin client-side after every order placement; use `whatIfOrder` as the authoritative pre-trade check. |
 | IBKR closes OAuth 1.0a self-service to new individual accounts | Low (we already have an account in plan) | Medium | Register OAuth credentials in Phase 0, well before any policy change could affect us. |

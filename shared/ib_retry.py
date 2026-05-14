@@ -34,7 +34,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
-from typing import Callable, Optional, Type
+from typing import Callable, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -235,8 +235,21 @@ def retry_with_backoff(
         policy: RetryPolicy instance (uses defaults if None)
         breaker: CircuitBreaker instance; if OPEN at call time, the wrapped
                  function raises CircuitBreakerOpen WITHOUT calling.
+
+    Breaker semantics — PINNED:
+      • Only **retryable** exceptions (HTTP 429/5xx + transient network
+        errors per `RetryPolicy.is_retryable`) record a breaker failure.
+      • Non-retryable exceptions (auth, validation, programmer errors)
+        propagate immediately and **do NOT** record a breaker failure —
+        the breaker is for "broker is degraded", not "caller did
+        something wrong". This means sustained 4xx errors will surface
+        each call but won't trip the breaker; that is intentional.
     """
     pol = policy or RetryPolicy()
+    if pol.max_attempts < 1:
+        raise ValueError(
+            f"retry_with_backoff: max_attempts must be >= 1, got {pol.max_attempts}"
+        )
     if breaker is not None:
         pol = RetryPolicy(
             max_attempts=pol.max_attempts,
@@ -250,7 +263,6 @@ def retry_with_backoff(
         @wraps(fn)
         def wrapper(*args, **kwargs):
             br = pol.breaker
-            last_exc: Optional[Exception] = None
             for attempt in range(1, pol.max_attempts + 1):
                 if br is not None and not br.allow_request():
                     raise CircuitBreakerOpen(
@@ -262,7 +274,6 @@ def retry_with_backoff(
                         br.record_success()
                     return result
                 except Exception as exc:
-                    last_exc = exc
                     is_retryable = pol.is_retryable(exc)
                     if br is not None and is_retryable:
                         br.record_failure()
@@ -281,8 +292,10 @@ def retry_with_backoff(
                         name, attempt, pol.max_attempts, exc, delay,
                     )
                     time.sleep(delay)
-            # Shouldn't reach here; guard for type checker
-            raise last_exc  # type: ignore[misc]
+            # Unreachable: the loop always exits via return or raise.
+            raise RuntimeError(  # pragma: no cover
+                "retry_with_backoff: invariant violated — loop exited without raise/return"
+            )
         return wrapper
     return decorator
 

@@ -5,9 +5,9 @@
 > **Current state**: Phase 0 ~70% complete. Paper OAuth registered with consumer key `CALYPSOPP` on 2026-05-14 (activation pending ~Sunday 2026-05-17). Variants A/B/C still running Saxo dry-run on the VM — nothing touched. Build of `shared/ib_client.py` (Phase A) starts now during the activation wait.
 >
 > **Companion docs**:
-> - [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md) — the 6 prior open questions, all answered
+> - [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md) — 10 open questions (Q1–Q6 + Q7–Q10 follow-ups), all answered
 > - [`INTERACTIVE_BROKERS_API_REFERENCE.md`](./INTERACTIVE_BROKERS_API_REFERENCE.md) — IB API encyclopedia
-> - `research_scratch/01-12*.md` — verbatim agent research chapters (12 files, ~5,500 lines)
+> - `research_scratch/01-13*.md` — verbatim agent research chapters (13 files, ~6,200 lines)
 
 ---
 
@@ -279,7 +279,9 @@ class BrokerInterface(ABC):
     @abstractmethod
     async def get_quote(self, symbol: str, asset_type: str = "option") -> Optional[QuoteSnapshot]: ...
     @abstractmethod
-    async def get_account_summary(self, currency: str = "USD") -> dict: ...
+    async def get_account_info(self) -> dict: ...
+    @abstractmethod
+    async def get_balance(self, currency: str = "USD") -> dict: ...
     @abstractmethod
     async def what_if_order(self, request: IronCondorRequest) -> dict: ...
 
@@ -342,7 +344,9 @@ assert Crypto.__version__.startswith("3."), f"Unexpected Crypto: {Crypto.__versi
 # shared/ib_client.py
 """IB adapter for CALYPSO — Phase A standalone module.
 
-Wraps Voyz/ibind 0.1.23+ (forked locally to swap pyCrypto→pycryptodome).
+Wraps Voyz/ibind 0.1.23+ (no fork needed — ibind already depends on
+pycryptodome>=3.21; we add an `assert_safe_crypto_backend()` guard at
+startup to fail fast if pyCrypto ever sneaks in via transitive dep).
 Provides the same public surface as SaxoClient where applicable so that
 the Phase B broker abstraction can wrap either one transparently.
 
@@ -488,14 +492,16 @@ class StreamingManager:
 
     def subscribe_quote(self, conid: int, fields: list[int] = None):
         """Subscribe to a conid's market data. Auto-refreshes every 13 min."""
-        fields = fields or [31, 84, 86, 88, 85, 7635, 7308, 7309, 7310, 7311, 7633]
+        fields = fields or [31, 84, 86, 88, 85, 7635, 7308, 7309, 7310, 7311, 7633, 7638]
         # 31=last, 84=bid, 86=ask, 88=bid_size, 85=ask_size,
-        # 7635=mark, 7308-7311=delta/gamma/theta/vega, 7633=IV
+        # 7635=mark, 7308-7311=delta/gamma/theta/vega, 7633=IV, 7638=OI
         self._subscriptions[conid] = fields
-        self.ws.send_subscription(f"smd+{conid}", {"fields": [str(f) for f in fields]})
+        # NOTE: ibind's IbkrSubscriptionProcessor prepends 's'/'u' to the
+        # channel internally — pass bare "md+{conid}", NOT "smd+{conid}".
+        self.ws.subscribe(channel=f"md+{conid}", data={"fields": [str(f) for f in fields]})
 
     def unsubscribe_quote(self, conid: int):
-        self.ws.send_subscription(f"umd+{conid}", {})
+        self.ws.unsubscribe(channel=f"md+{conid}")
         self._subscriptions.pop(conid, None)
         self.snapshots.pop(conid, None)
 
@@ -503,16 +509,16 @@ class StreamingManager:
         while not self._stop_event.wait(self.REFRESH_INTERVAL_S):
             for conid, fields in list(self._subscriptions.items()):
                 try:
-                    self.ws.send_subscription(f"umd+{conid}", {})
+                    self.ws.unsubscribe(channel=f"md+{conid}")
                     time.sleep(0.5)
-                    self.ws.send_subscription(f"smd+{conid}", {"fields": [str(f) for f in fields]})
+                    self.ws.subscribe(channel=f"md+{conid}", data={"fields": [str(f) for f in fields]})
                 except Exception as exc:
                     logger.warning("smd refresh failed for conid %s: %s", conid, exc)
 ```
 
-#### A.6 Order-status WebSocket subscription (~half day)
+#### A.6 Order-status WebSocket subscription — **DEFERRED to post-A.10**
 
-Subscribe `sor` topic. Maintain `self._order_states[order_id] = {status, filled, remaining}`. `get_order_status(order_id)` reads from this cache; doesn't need an HTTP round-trip.
+**Status (2026-05-14):** Not implemented. `IBClient.get_order_status(order_id)` currently HTTP-polls via `ibind.IbkrClient.order_status()`. The `sor`-topic cache is a P2 optimization that avoids the round-trip; safe to defer until paper smoke (A.10) demands lower-latency status checks. When implemented, `sor` cache lives on `StreamingManager` (mirroring the smd refresh pattern) and `get_order_status` delegates there with HTTP fallback.
 
 #### A.7 Reconcile on (re)connect (~half day)
 
@@ -525,7 +531,7 @@ async def _reconcile_on_connect(self):
     """
     open_orders = await self._client.get_open_orders()
     positions = await self.get_positions()
-    # Three cases (per migration plan §4.4 spec):
+    # Three cases (per migration plan §A.7 spec below):
     # 1. Order in broker but not in our state — orphan (log + cancel for safety)
     # 2. Order in our state but not in broker — likely filled or cancelled mid-crash
     # 3. Both — re-attach by order_id
@@ -571,16 +577,28 @@ This is the gate to Phase B.
 
 ### 5.2 Phase A deliverables
 
+Updated 2026-05-14 to reflect the actual shipped layout (A.6 sor-cache deferred; ib_secrets.py replaced by `~/ibkr-oauth/` for now; `ib_reconcile.py` + `ib_retry.py` + `ib_constants.py` added).
+
 | File | Lines (est.) | Purpose |
 |---|---|---|
-| `shared/ib_client.py` | ~2000 | Full SaxoClient parity via ibind |
-| `shared/ib_streaming.py` | ~300 | StreamingManager with smd refresh |
-| `shared/ib_oauth.py` | ~200 | OAuth1aConfig loader, DH prime extractor |
-| `shared/ib_secrets.py` | ~150 | GCP Secret Manager integration for tokens + key files |
-| `tests/test_ib_client.py` | ~1500 | Unit tests, all mocked |
-| `tests/test_ib_streaming.py` | ~400 | Streaming manager tests |
-| `tests/integration/test_ib_paper_smoke.py` | ~300 | Live paper integration test |
-| **Total** | **~4850** | |
+| `shared/ib_client.py` | ~1,500 | Full SaxoClient parity via ibind |
+| `shared/ib_streaming.py` | ~390 | StreamingManager with smd refresh + tick cache |
+| `shared/ib_oauth.py` | ~230 | OAuth1aConfig loader, DH prime extractor, `assert_safe_crypto_backend` |
+| `shared/ib_reconcile.py` | ~310 | Broker/state order reconciliation (A.7) |
+| `shared/ib_retry.py` | ~300 | CircuitBreaker + retry_with_backoff (A.8) |
+| `shared/ib_constants.py` | ~50 | Field codes + SPREAD_TEMPLATE_CONID (shared by client + streaming) |
+| `tests/test_ib_client*.py` | ~1,300 | Connect / read / write / lifecycle tests |
+| `tests/test_ib_streaming.py` | ~410 | Streaming manager tests |
+| `tests/test_ib_oauth.py` | ~290 | Credentials + crypto-backend tests |
+| `tests/test_ib_reconcile.py` | ~330 | Reconcile classify/apply tests |
+| `tests/test_ib_retry.py` | ~290 | Breaker + retry tests |
+| `tests/integration/test_ib_paper_smoke.py` | ~300 | Live paper integration test (Phase A.10, gated on OAuth activation) |
+| ~~`shared/ib_secrets.py`~~ | n/a | **Deferred to Phase B.** Currently keys live under `~/ibkr-oauth/{paper,live}/`; Secret Manager wiring lands once the abstraction layer is in place. |
+| **Total** | **~5,400** | (excluding integration smoke) |
+
+### 5.3 Rollback
+
+Phase A is **zero-risk**: nothing is deployed and HYDRA imports remain untouched. Rollback = delete `shared/ib_*.py` + `tests/test_ib_*.py`. No state changes, no DB changes, no live broker calls. Saxo dry-run on the VM continues unchanged.
 
 ---
 
@@ -625,6 +643,10 @@ Replace `self.saxo_client` → `self.broker` throughout `bots/hydra/strategy.py`
 Deploy refactored HYDRA to VM. Variants A/B/C should continue exactly as before (no config change → defaults to `broker: "saxo"`). Compare day-N entries pre vs post-refactor — must be byte-identical.
 
 This is the proof that the abstraction was lossless. If anything diverges, roll back and investigate before proceeding.
+
+### 6.5 Rollback
+
+Phase B introduces the broker abstraction but HYDRA still trades through Saxo via `SaxoBrokerAdapter`. Rollback = revert the abstraction commits OR set `BROKER=saxo` env-var (codepath stays untouched). State files unchanged; no broker-side artifacts. Preserve the rollback commit SHA in the deploy log so we know what to revert to.
 
 ---
 
@@ -681,6 +703,10 @@ After 5 trading days of parallel running, audit:
 
 Discrepancies surface DATA differences (e.g., IB's NBBO tighter than Saxo's) more than LOGIC differences (logic is identical — same code, just different broker).
 
+### 7.4 Rollback
+
+IB variants are paper-only in Phase C, but their orders live on paper IBKR books. Rollback = stop the `*_ibkr` systemd services + flatten any working paper orders (`hydra-ibkr cancel-all`). State files are separate per-variant — flattening doesn't disturb the live Saxo variants. Preserve the IB paper state files for forensics before deleting.
+
 ---
 
 ## 8. Phase D — Cut B/C from Saxo to IB
@@ -736,6 +762,10 @@ If something breaks: re-enable `hydra.service`. Saxo position state should be em
 7. Close Saxo account (or leave funded as backup broker for one quarter)
 8. Update CLAUDE.md broker references
 
+### 10.2 Rollback
+
+**Phase F is irreversible by design** — once Saxo code and credentials are deleted, recovering would mean re-implementing the SaxoBrokerAdapter against a re-opened Saxo account. Only run Phase F after Phase E has been clean for ≥ 4 weeks. Closing the Saxo account is optional in step 7; leaving it funded for one quarter is the recommended back-out path if a previously-undetected IB issue surfaces within the warranty window. The git commit deleting saxo_client.py is the formal point of no return.
+
 ---
 
 ## 11. Saxo → IB call-site mapping
@@ -757,28 +787,31 @@ Every Saxo public method gets an IB equivalent via `ibind`. Method signatures ma
 | `get_closed_position_price(uic)` | `IBClient.get_closed_position_price(conid)` | `GET /iserver/account/trades` filtered |
 | `place_order(...)` | `IBClient.place_order(contract, action, qty, type, limit)` | `POST /iserver/account/{acct}/orders` |
 | `place_emergency_order(...)` | `IBClient.place_market_order(...)` | `POST /iserver/account/{acct}/orders` (orderType=MKT) |
-| `place_limit_order_with_timeout(...)` | `IBClient.place_limit_with_timeout(...)` | place + poll status + cancel on timeout |
+| `place_limit_order_with_timeout(...)` | `IBClient.place_limit_with_timeout(...)` — **Phase B follow-up; not yet in ib_client.py** | place + poll status + cancel on timeout |
 | `cancel_order(order_id)` | `IBClient.cancel_order(order_id)` | `DELETE /iserver/account/{acct}/order/{order_id}` |
-| `get_order_status(order_id)` | `IBClient.get_order_status(order_id)` | WebSocket `sor` cache OR `GET /iserver/account/orders` |
-| `get_open_orders()` | `IBClient.get_open_orders()` | `GET /iserver/account/orders` |
+| `get_order_status(order_id)` | `IBClient.get_order_status(order_id)` — currently HTTP-polls; `sor` cache is deferred (A.6) | `GET /iserver/account/orders` today; WebSocket `sor` cache post-A.10 |
+| `get_open_orders()` | `IBClient.get_open_orders()` | `GET /iserver/account/orders` (with `force=true` pre-flight) |
 | `check_order_filled_by_activity(...)` | **DELETE** | No race on CP API — order status is broker-authoritative |
-| `get_chart_data(symbol, ...)` | `IBClient.get_chart_data(...)` | `GET /iserver/marketdata/history` |
+| `get_chart_data(symbol, ...)` | `IBClient.get_chart_data(...)` | `GET /iserver/marketdata/history` (by-conid route after qualify_contract) |
 | `get_fx_rate('USD', 'EUR')` | `IBClient.get_fx_rate('USD', 'EUR')` | From `get_ledger()` `exchangerate` field |
-| `start_price_streaming(uics)` | `IBClient.subscribe_quotes(conids)` | WebSocket `smd+{conid}` via StreamingManager |
-| `subscribe_to_option(uic)` | `IBClient.subscribe_option(conid)` | Same — WebSocket smd |
-| `is_websocket_healthy()` | `IBClient.is_stream_healthy()` | `IbkrWsClient.connected` + last-tick age |
-| `is_heartbeat_alive(N)` | `IBClient.last_tick_age()` | StreamingManager's last-received-tick timestamp |
-| `stop_price_streaming()` | `IBClient.unsubscribe_all()` | Loop `umd+{conid}` for all subscribed |
+| `start_price_streaming(uics)` | `IBClient.streaming.subscribe_quote(conid)` (via `.streaming` lazy property) | WebSocket `md+{conid}` via StreamingManager |
+| `subscribe_to_option(uic)` | `IBClient.streaming.subscribe_option(conid)` (via `.streaming`) | Same — WebSocket md+ |
+| `is_websocket_healthy()` | `IBClient.streaming.is_healthy()` / `is_ws_connected()` (via `.streaming`) | `IbkrWsClient.connected` + last-tick age (strict) or WS-only (lightweight) |
+| `is_heartbeat_alive(N)` | `IBClient.streaming.last_tick_age(conid)` (via `.streaming`) | StreamingManager's last-received-tick timestamp |
+| `stop_price_streaming()` | `IBClient.streaming.unsubscribe_all()` (via `.streaming`) | Loop `md+{conid}` unsubscribes for all subscribed |
 
 ### 11.1 NEW IB-only methods (no Saxo equivalent)
 
-| Method | Why we need it |
-|---|---|
-| `IBClient.place_iron_condor(...)` | Centerpiece — 4-leg combo via `conidex` string |
-| `IBClient.place_vertical_spread(...)` | 2-leg spread (one-sided entries OR closing one side) |
-| `IBClient.what_if_order(request)` | Pre-trade margin check — replaces our ORDER-004 BP gate with broker-authoritative numbers |
-| `IBClient.qualify_contract(...)` | `secdef/info` wrapper; cache conids by (symbol, expiry, strike, right) |
-| `IBClient.tickle()` | Background thread to keep CP API session warm (~60s cadence) |
+| Method | Why we need it | Status |
+|---|---|---|
+| `IBClient.place_iron_condor(...)` | Centerpiece — 4-leg combo via `conidex` string | ✅ shipped (A.4) |
+| `IBClient.place_vertical_spread(...)` | 2-leg spread (one-sided entries OR closing one side) | ✅ shipped (A.4) |
+| `IBClient.what_if_order(request)` | Pre-trade margin check — replaces ORDER-004 BP gate with broker-authoritative numbers | ✅ shipped (A.4) |
+| `IBClient.qualify_contract(...)` | `secdef/info` wrapper; cache conids by (symbol, expiry, strike, right) | ✅ shipped (A.3) |
+| `IBClient.reconcile_orders(...)` | Broker/state order reconciliation on (re)connect | ✅ shipped (A.7) |
+| `IBClient.check_auth_status()` | Authoritative round-trip to /iserver/auth/status | ✅ shipped (A.3) |
+| `IBClient.tickle()` | Background thread to keep CP API session warm (~60s cadence) | 🟡 Phase B follow-up — ibind's Tickler thread already runs internally |
+| `IBClient.get_closed_position_price(conid)` | Look up exit fill price for already-flat positions | 🟡 Phase B follow-up |
 
 ---
 
@@ -1020,7 +1053,7 @@ async def _on_disconnect():
 - [ ] Existing HYDRA test suite still passing after Phase B refactor
 - [ ] Integration smoke against paper IB: connect, reconcile, subscribe, place 1c IC, cancel, whatif, disconnect — all pass
 - [ ] Phase C variants ran on paper IB for ≥ 10 trading days, zero incidents
-- [ ] ibind forked + pyCrypto → pycryptodome swapped
+- [x] ibind 0.1.23 crypto backend verified safe (pycryptodome) via `assert_safe_crypto_backend()` — no fork needed (2026-05-14)
 - [ ] Reconciliation tested by killing bot mid-order, verified clean recovery
 
 ### Strategy & risk
@@ -1099,7 +1132,7 @@ async def _on_disconnect():
 | Fully separate state for IB variants | 2026-05-14 | Zero cross-contamination; easy comparison |
 | OAuth 1.0a + ibind (not Gateway + IBC) | 2026-05-13 | Eliminates Sunday phone tap, Docker process, etc. |
 | ibind 0.1.23 over 0.2.1rc | 2026-05-13 | Stable release; 0.2.1 still RC |
-| Fork ibind + swap pyCrypto → pycryptodome | 2026-05-13 | Pre-go-live hard requirement |
+| ~~Fork ibind + swap pyCrypto → pycryptodome~~ — superseded 2026-05-14 by A.1's `assert_safe_crypto_backend()` (ibind 0.1.23 already uses pycryptodome) | 2026-05-13 | Original requirement; no longer needed after verification |
 | `tradingClass='SPXW'` for 0DTE | 2026-05-13 | Required for PM-settled weeklies |
 | Drop Polygon Options Starter | 2026-05-13 | IB OPRA gives streaming bid/ask + Greeks + OI in one feed |
 | IBKR Pro mandatory (not Lite) | 2026-05-13 | Lite ineligible for Web API trading endpoint |

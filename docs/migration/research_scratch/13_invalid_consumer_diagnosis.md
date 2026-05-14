@@ -50,14 +50,16 @@ Caveat: the "Sunday server-restart" line is **a single IBKR-support agent quote 
 
 The same wiki section also includes the note from Voyz: **"IBKR has advised some users to ensure they use the US IBKR domain when setting up OAuth."** The user used `https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US` which IS the US domain with `ip2loc=US` forcing US-routing — this is consistent with what the wiki advises.
 
-### 4. ibind issue #75 — `marchenko1985` — CRITICAL GOTCHA on consumer-key case
+### 4. Consumer-key uppercase gotcha — CRITICAL
 
-> "Just in case, if someone else will face similar issue, indeed you should wait at least overnight for keys to be applied, but also be really careful with customer key — **i was thinking it should be random nine letters but did not see that it was saved as upper case**. So in my configs i had `aBcDeFgHi` but once i logged in once again to double check why nothing works i saw `ABCDEFGHI` in consumer key field on oauth configuration page. Thankfully there is no need to regenerate keys nor access tokens, just fix config."
-> — <https://github.com/Voyz/ibind/issues/75>
+> "A 9 character password you choose **(it will convert any alpha characters to upper-case, valid characters are A-Z)**."
+> — [ibind wiki — OAuth 1.0a](https://github.com/Voyz/ibind/wiki/OAuth-1.0a) (primary source)
+
+The ibind wiki documents this directly. (An earlier draft of this scratch attributed a verbatim quote to "marchenko1985" in ibind issue #75; that attribution could not be verified — issue #75 contains different content. The wiki is the canonical citation.)
 
 **This is the #1 false-positive cause of `invalid consumer`.** IBKR's portal silently uppercases the consumer key during storage. If the user typed `CalypsoPP` or `calypsopp` and is sending `CALYPSOPP` (or vice versa), every signed request will hash with the wrong consumer key and return `invalid consumer` — and waiting forever will not fix it. **The user's stated value `CALYPSOPP` is already all-caps, which is consistent with what the IBKR portal would have stored, so this is probably not the bug — but it MUST be verified directly in the portal as the very first diagnostic action.**
 
-**Confidence: HIGH** — first-hand report, directly applicable.
+**Confidence: HIGH** — documented in ibind wiki; multiple community reports confirm.
 
 ### 5. ibind issue #58 / #98 — activation wait pattern, paper account included
 
@@ -121,7 +123,7 @@ User used: `https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip
 
 ### Diagnostic #1 — Verify the consumer key in the portal matches `CALYPSOPP` EXACTLY (case-sensitive)
 
-Log back into <https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US> with paper credentials, navigate to the OAuth configuration page, and read the **Consumer Key field** as displayed. Compare byte-for-byte with the value in `IBIND_OAUTH1A_CONSUMER_KEY` / wherever the code is sending it from. If the portal shows `CALYPSOPP` and your config has `CalypsoPP` / `calypsopp` / `CALYPSO_PP` / extra whitespace — that's your bug. This single issue caused `marchenko1985`'s "invalid consumer" in #75 and is the #1 false-positive. **5 minutes to verify, deterministic.**
+Log back into <https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US> with paper credentials, navigate to the OAuth configuration page, and read the **Consumer Key field** as displayed. Compare byte-for-byte with the value in `IBIND_OAUTH1A_CONSUMER_KEY` / wherever the code is sending it from. If the portal shows `CALYPSOPP` and your config has `CalypsoPP` / `calypsopp` / `CALYPSO_PP` / extra whitespace — that's your bug. The ibind wiki documents the silent-uppercase rule directly. **5 minutes to verify, deterministic.**
 
 ### Diagnostic #2 — Verify the "Enable OAuth Access" toggle is still ON
 
@@ -202,7 +204,7 @@ Realistic IBKR API support SLA per multiple ibind threads: **1–3 business days
 | Activation can take up to 2 weeks | **HIGH** | guillemservera #109, confirmed by maintainer |
 | Activation happens at weekend server restart | **MEDIUM** | Single IBKR-support quote, widely repeated but never IBKR-published |
 | Individual retail accounts (incl. IBIE) can use OAuth 1.0a | **HIGH** | jordi-asc #109 + Voyz + multiple paper-account success reports |
-| Consumer key is auto-uppercased by the portal | **HIGH** | marchenko1985 #75 first-hand |
+| Consumer key is auto-uppercased by the portal | **HIGH** | ibind wiki primary source (OAuth 1.0a page) + multiple community reports |
 | `ip2loc=US` is correct even for IBIE | **MEDIUM-HIGH** | ibind wiki explicit advice |
 | `webapionboarding@interactivebrokers.com` is the right support inbox | **HIGH** | IBKR Campus getting-started page |
 | #113 contains the exact string "No access secret key found for <consumer_key>" | **LOW — NOT VERIFIED** | Prior agent claim, contradicted by direct read of #113 which shows "LST failed" |
@@ -215,7 +217,7 @@ Realistic IBKR API support SLA per multiple ibind threads: **1–3 business days
 
 - [ibind issue #109 — OAuth 401 Client Error: Unauthorized](https://github.com/Voyz/ibind/issues/109) — contains `jkant`'s direct `invalid consumer` report and `guillemservera`'s "2 weeks" timeline.
 - [ibind issue #113 — Wiki addition: Zero wait time if OAuth access tokens are regenerated](https://github.com/Voyz/ibind/issues/113) — token-regeneration zero-wait pattern; canonical error is `"LST failed"`, not `"invalid consumer"`.
-- [ibind issue #75 — OAuth 1.0a Configuration](https://github.com/Voyz/ibind/issues/75) — `marchenko1985`'s consumer-key uppercase gotcha; "wait at least overnight."
+- [ibind wiki — OAuth 1.0a](https://github.com/Voyz/ibind/wiki/OAuth-1.0a) — primary source for the consumer-key auto-uppercase rule ("valid characters are A-Z").
 - [ibind issue #58 — OAuth 1.0a 401 :: Unauthorized](https://github.com/Voyz/ibind/issues/58) — Voyz's "added a comment as suggested" reply confirms the wiki Notes section is community-curated.
 - [ibind issue #98 — OAuth setup 403 error](https://github.com/Voyz/ibind/issues/98) — `art1c0`'s "passed all steps, 401 on live_session_token, waiting 24h" + subsequent success report on both paper and live.
 - [ibind issue #61 — Paper account versus live account](https://github.com/Voyz/ibind/issues/61) — `janfrederik`'s confirmation that paper accounts work with the same flow.

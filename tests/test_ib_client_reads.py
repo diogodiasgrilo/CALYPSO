@@ -209,6 +209,23 @@ class TestGetQuote:
         call = mock_ibkr.live_marketdata_snapshot.call_args
         assert call.kwargs["fields"] == [FIELD_DELTA, FIELD_IV]
 
+    def test_empty_response_returns_raw_envelope(self, connected_client):
+        """If IBKR returns an empty payload after the pre-flight, expose
+        the raw response under 'raw' so callers can see what happened."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([])
+        q = client.get_quote(12345)
+        # No row → no parsed fields; conid echoed
+        assert q["conid"] == 12345
+
+    def test_preflight_calls_endpoint_twice(self, connected_client):
+        """ibind requires a pre-flight; verify we call live_marketdata_snapshot
+        twice per fresh quote (first primes, second returns real data)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([{}])
+        client.get_quote(12345)
+        assert mock_ibkr.live_marketdata_snapshot.call_count == 2
+
 
 class TestGetQuotesBatch:
     def test_batches_up_to_100(self, connected_client):
@@ -233,6 +250,11 @@ class TestGetQuotesBatch:
         client, mock_ibkr = connected_client
         assert client.get_quotes_batch([]) == []
         mock_ibkr.live_marketdata_snapshot.assert_not_called()
+
+    def test_more_than_50_fields_rejected(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(IBClientError, match="max 50 fields"):
+            client.get_quotes_batch([1, 2, 3], fields=[str(i) for i in range(51)])
 
 
 class TestGetVixPrice:
@@ -328,27 +350,87 @@ class TestGetBalance:
         assert bal["tradable"] == 50000.0
         assert bal["exchange_rate"] == 1.0
 
+    def test_exchange_rate_zero_raises(self, connected_client):
+        """exchangerate=0 means the ledger row is unusable — bail loudly
+        rather than silently miscalculate the USD-tradable amount."""
+        from shared.ib_client import IBClientError
+        client, mock_ibkr = connected_client
+        mock_ibkr.portfolio_summary.return_value = _mk_result({
+            "availablefunds": {"amount": "50000.0", "currency": "EUR"},
+        })
+        mock_ibkr.get_ledger.return_value = _mk_result({
+            "EUR": {"cashbalance": 50000.0, "isbase": True, "exchangerate": 1.0},
+            "USD": {"cashbalance": 0.0, "isbase": False, "exchangerate": 0.0},
+        })
+        with pytest.raises(IBClientError, match="exchangerate"):
+            client.get_balance("USD")
+
+    def test_exchange_rate_nan_raises(self, connected_client):
+        """NaN exchange_rate is also unusable — same loud-bail policy."""
+        from shared.ib_client import IBClientError
+        client, mock_ibkr = connected_client
+        mock_ibkr.portfolio_summary.return_value = _mk_result({
+            "availablefunds": {"amount": "50000.0", "currency": "EUR"},
+        })
+        mock_ibkr.get_ledger.return_value = _mk_result({
+            "EUR": {"cashbalance": 50000.0, "isbase": True, "exchangerate": 1.0},
+            "USD": {"cashbalance": 0.0, "isbase": False, "exchangerate": float("nan")},
+        })
+        with pytest.raises(IBClientError, match="exchangerate"):
+            client.get_balance("USD")
+
+    def test_base_currency_falls_back_to_ledger_when_summary_missing(
+        self, connected_client,
+    ):
+        """If portfolio_summary doesn't include availablefunds.currency,
+        the base currency is inferred from get_ledger's `isbase=True` row."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.portfolio_summary.return_value = _mk_result({
+            # No 'currency' key on availablefunds
+            "availablefunds": {"amount": "50000.0"},
+        })
+        mock_ibkr.get_ledger.return_value = _mk_result({
+            "EUR": {"cashbalance": 50000.0, "isbase": True, "exchangerate": 1.0},
+        })
+        bal = client.get_balance("EUR")
+        # _guess_base_currency picked EUR from the ledger's isbase row
+        assert bal["base_currency"] == "EUR"
+        assert bal["tradable"] == 50000.0
+
 
 class TestGetPositions:
     def test_returns_flat_list_across_pages(self, connected_client):
         client, mock_ibkr = connected_client
-        # Page 0: 30 entries (full page → fetch next)
-        page_0 = [{"conid": i} for i in range(30)]
-        # Page 1: 5 entries (partial → done)
-        page_1 = [{"conid": i} for i in range(30, 35)]
+        # ibind/IBKR returns up to 100 positions per page. Page 0 = full
+        # (100) → fetch next; page 1 = partial (5) → done.
+        page_0 = [{"conid": i} for i in range(100)]
+        page_1 = [{"conid": i} for i in range(100, 105)]
         mock_ibkr.positions.side_effect = [
             _mk_result(page_0),
             _mk_result(page_1),
         ]
         all_pos = client.get_positions()
-        assert len(all_pos) == 35
+        assert len(all_pos) == 105
         assert all_pos[0]["conid"] == 0
-        assert all_pos[-1]["conid"] == 34
+        assert all_pos[-1]["conid"] == 104
 
     def test_empty_account(self, connected_client):
         client, mock_ibkr = connected_client
         mock_ibkr.positions.return_value = _mk_result([])
         assert client.get_positions() == []
+
+    def test_max_pages_cap_protects_against_infinite_loop(self, connected_client):
+        """Defensive cap: 50 pages × 100 = 5000 positions. If IBKR's
+        endpoint were ever to return full pages indefinitely (impossible
+        in practice but possible under malformed mocks), the loop bails."""
+        client, mock_ibkr = connected_client
+        # Always return a full 100-row page — without the cap, the loop
+        # would never terminate.
+        mock_ibkr.positions.return_value = _mk_result(
+            [{"conid": i} for i in range(100)]
+        )
+        out = client.get_positions()
+        assert len(out) == 50 * 100  # exactly max_pages * page_size
 
 
 class TestGetFxRate:
@@ -361,6 +443,16 @@ class TestGetFxRate:
         client, mock_ibkr = connected_client
         mock_ibkr.currency_exchange_rate.return_value = _mk_result(1.085)
         assert client.get_fx_rate("EUR", "USD") == 1.085
+
+    def test_returns_none_on_empty_response(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.currency_exchange_rate.return_value = _mk_result({})
+        assert client.get_fx_rate("EUR", "USD") is None
+
+    def test_returns_none_on_unparseable_scalar(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.currency_exchange_rate.return_value = _mk_result("not_a_number")
+        assert client.get_fx_rate("EUR", "USD") is None
 
 
 # ─── Options chain ─────────────────────────────────────────────────────────
@@ -432,16 +524,25 @@ class TestGetOrderStatus:
 class TestGetChartData:
     def test_returns_bars(self, connected_client):
         client, mock_ibkr = connected_client
+        # Prime qualify_contract's cache so get_chart_data resolves SPX→conid
+        # without hitting search_contract_by_symbol.
+        # qualify_contract cache key shape: (symbol, expiry_iso|None, strike, right, trading_class, sec_type)
+        client._conid_cache[("SPX", None, None, None, "SPXW", "IND")] = 416904
         bars = [{"t": 1, "o": 100, "h": 101, "l": 99, "c": 100.5}]
-        mock_ibkr.marketdata_history_by_symbol.return_value = _mk_result({"data": bars})
+        mock_ibkr.marketdata_history_by_conid.return_value = _mk_result({"data": bars})
         out = client.get_chart_data("SPX", bar="1min", period="1d")
         assert out == bars
+        # Verify we routed through the by-conid path (NOT by-symbol)
+        kw = mock_ibkr.marketdata_history_by_conid.call_args.kwargs
+        assert kw["conid"] == "416904"
 
     def test_default_args(self, connected_client):
         client, mock_ibkr = connected_client
-        mock_ibkr.marketdata_history_by_symbol.return_value = _mk_result({"data": []})
+        # qualify_contract cache key shape: (symbol, expiry_iso|None, strike, right, trading_class, sec_type)
+        client._conid_cache[("SPX", None, None, None, "SPXW", "IND")] = 416904
+        mock_ibkr.marketdata_history_by_conid.return_value = _mk_result({"data": []})
         client.get_chart_data("SPX")
-        kw = mock_ibkr.marketdata_history_by_symbol.call_args.kwargs
+        kw = mock_ibkr.marketdata_history_by_conid.call_args.kwargs
         assert kw["bar"] == "1min"
         assert kw["period"] == "1d"
         assert kw["outside_rth"] is False

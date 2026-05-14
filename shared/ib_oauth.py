@@ -74,18 +74,28 @@ class IBKRCredentials:
                 )
 
     def validate_secrets(self) -> None:
-        """Raise ValueError if any required secret is empty or obviously bad."""
-        if not self.consumer_key or len(self.consumer_key) > 9:
+        """Raise ValueError if any required secret is empty or obviously bad.
+
+        IBKR's self-service portal documents the consumer key as 1-9 chars
+        A-Z (per https://github.com/Voyz/ibind/wiki/OAuth-1.0a). The portal
+        silently uppercases any lowercase input at registration time. We
+        accept A-Z plus 0-9 to leave room for any future relaxation IBKR
+        applies — the actual identity check is server-side.
+        """
+        if not self.consumer_key:
+            raise ValueError("consumer_key must be non-empty")
+        if len(self.consumer_key) > 9:
             raise ValueError(
-                f"consumer_key must be 1-9 chars A-Z; got {self.consumer_key!r}"
+                f"consumer_key must be at most 9 chars; got {len(self.consumer_key)}"
             )
-        if not self.consumer_key.isalpha() or not self.consumer_key.isupper():
+        if not re.fullmatch(r"[A-Z0-9]+", self.consumer_key):
             raise ValueError(
-                f"consumer_key must be uppercase A-Z only; got {self.consumer_key!r}"
+                f"consumer_key must be uppercase A-Z / 0-9 only; got "
+                f"{self.consumer_key!r}"
             )
         if not self.access_token or not self.access_token_secret:
             raise ValueError(
-                f"access_token / access_token_secret must be non-empty"
+                "access_token / access_token_secret must be non-empty"
             )
 
 
@@ -100,12 +110,19 @@ def extract_dh_prime(dhparam_path: Path) -> str:
     """
     if not dhparam_path.exists():
         raise FileNotFoundError(f"DH params file missing: {dhparam_path}")
-    proc = subprocess.run(
-        ["openssl", "dhparam", "-in", str(dhparam_path), "-text"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["openssl", "dhparam", "-in", str(dhparam_path), "-text"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"openssl dhparam timed out reading {dhparam_path} (10s limit) — "
+            "file may be corrupted or unreadable"
+        ) from exc
     match = re.search(
         r"(?:prime|P):\s*((?:\s*[0-9a-fA-F:]+\s*)+)",
         proc.stdout,

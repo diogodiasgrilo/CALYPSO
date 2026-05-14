@@ -52,8 +52,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
-from datetime import date, datetime
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import date
 from typing import Iterable, Optional
 
 from ibind import IbkrClient, OrderRequest, QuestionType  # module-level so tests can patch cleanly
@@ -67,40 +69,34 @@ from shared.ib_oauth import (
 logger = logging.getLogger(__name__)
 
 
-# ─── Field code constants (CP API live_marketdata_snapshot) ─────────────────
-# See module docstring for the full list.
+# ─── Field code constants + spread template ─────────────────────────────────
+# Sourced from shared/ib_constants.py so ib_streaming.py can import the same
+# canonical set without circling back through ib_client.
 
-FIELD_LAST = "31"
-FIELD_BID = "84"
-FIELD_ASK = "86"
-FIELD_BID_SIZE = "88"
-FIELD_ASK_SIZE = "85"
-FIELD_MARK = "7635"
-FIELD_DELTA = "7308"
-FIELD_GAMMA = "7309"
-FIELD_THETA = "7310"
-FIELD_VEGA = "7311"
-FIELD_IV = "7633"
-FIELD_OI = "7638"
-FIELD_AVAILABILITY = "6509"
-
-DEFAULT_QUOTE_FIELDS = [
+from shared.ib_constants import (  # noqa: E402
     FIELD_LAST, FIELD_BID, FIELD_ASK, FIELD_BID_SIZE, FIELD_ASK_SIZE,
-    FIELD_MARK, FIELD_AVAILABILITY,
-]
-DEFAULT_GREEKS_FIELDS = [
-    FIELD_DELTA, FIELD_GAMMA, FIELD_THETA, FIELD_VEGA, FIELD_IV, FIELD_OI,
-]
-DEFAULT_OPTION_QUOTE_FIELDS = DEFAULT_QUOTE_FIELDS + DEFAULT_GREEKS_FIELDS
+    FIELD_MARK, FIELD_DELTA, FIELD_GAMMA, FIELD_THETA, FIELD_VEGA,
+    FIELD_IV, FIELD_OI, FIELD_AVAILABILITY,
+    DEFAULT_QUOTE_FIELDS, DEFAULT_GREEKS_FIELDS, DEFAULT_OPTION_QUOTE_FIELDS,
+    SPREAD_TEMPLATE_CONID,
+)
 
 
 # ─── Order placement constants ──────────────────────────────────────────────
 
-# IBKR's published USD spread template conid — used as the prefix in the
-# `conidex` field for USD multi-leg combos (iron condors, vertical spreads).
-# Verified in research_scratch/09_cpapi_combo_orders.md against IBKR Campus
-# combo-order docs + ibind/examples/rest_06_options_chain.py.
-SPREAD_TEMPLATE_CONID = 28812380
+# Locale-independent uppercase 3-letter month names for IBKR's secdef month
+# format (e.g. 'MAY26'). datetime.strftime('%b') is locale-dependent and
+# emits 'MAI'/'MAGGIO'/'MAI' on non-English VMs — that would be rejected
+# by IBKR's secdef endpoint at runtime.
+_IB_MONTHS = (
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+)
+
+
+def _ib_month_str(d: date) -> str:
+    """Format a date as IBKR's 3-letter-month + 2-digit year, e.g. 'MAY26'."""
+    return f"{_IB_MONTHS[d.month - 1]}{d.year % 100:02d}"
 
 # Default answers for IBKR's order-reply prompts. Caller can override per-call.
 #
@@ -285,10 +281,23 @@ class IBClient:
         # ssodh/init inside ibind on construction; verify by checking
         # authentication status).
         # Stage 3: explicit auth/status check.
+        #
+        # We pass compete=True (ibind's default) at init time, which means
+        # the new session should *steal* ownership from any prior session.
+        # Race: ssodh/init can return before IBKR has finished swapping
+        # ownership, so the first auth/status read sometimes still shows
+        # competing=true. Per research_scratch/12_ibind_errors_lifecycle.md
+        # §5, retry once after a 5s pause before declaring failure.
         try:
-            with self._call_lock:
-                status_result = self._client.authentication_status()
-            status_data = getattr(status_result, "data", {}) or {}
+            status_data = self._read_auth_status()
+            if status_data.get("competing"):
+                logger.warning(
+                    "Auth status: competing=true post-init; sleeping 5s "
+                    "then retrying once (race with ssodh/init handoff)"
+                )
+                time.sleep(5.0)
+                status_data = self._read_auth_status()
+
             authenticated = bool(status_data.get("authenticated", False))
             connected = bool(status_data.get("connected", False))
             competing = bool(status_data.get("competing", False))
@@ -323,6 +332,23 @@ class IBClient:
         )
         return True
 
+    def _read_auth_status(self) -> dict:
+        """One-shot auth/status read. Returns the `data` dict (empty if missing)."""
+        with self._call_lock:
+            status_result = self._client.authentication_status()
+        return getattr(status_result, "data", {}) or {}
+
+    def check_auth_status(self) -> dict:
+        """Authoritative live check — round-trips to IBKR's auth/status.
+
+        Use when `is_connected()` (cheap, last-known) isn't strong enough,
+        e.g. before placing a real-money order after a long idle period.
+        Returns the raw status dict (`authenticated`, `connected`,
+        `competing`, etc.). Does NOT auto-reconnect; caller decides.
+        """
+        self._require_connected()
+        return self._read_auth_status()
+
     def _discover_account_id(self) -> str:
         """Look up the IBKR account ID via portfolio_accounts.
 
@@ -355,36 +381,49 @@ class IBClient:
         and WS client if they were spun up. Idempotent — safe to call
         even if connect() failed partway through.
         """
+        # Track partial-teardown failures so operators (and monitoring) see
+        # when a disconnect didn't fully clean up. Anything > 0 means the
+        # session may still be live on IBKR's side or a thread is still
+        # running locally.
+        unclean = 0
+
         # Tear down streaming first (cleanly unsubscribes all conids)
         if self._streaming is not None:
             try:
                 self._streaming.stop()
             except Exception as exc:
-                logger.warning("StreamingManager stop failed: %s", exc)
+                unclean += 1
+                logger.error("StreamingManager stop failed: %s", exc)
             self._streaming = None
         if self._ws_client is not None:
             try:
                 if hasattr(self._ws_client, "shutdown"):
                     self._ws_client.shutdown()
             except Exception as exc:
-                logger.warning("WS client shutdown failed: %s", exc)
+                unclean += 1
+                logger.error("WS client shutdown failed: %s", exc)
             self._ws_client = None
 
-        if not self._client:
-            return
-        try:
-            with self._call_lock:
-                # ibind's shutdown stops the Tickler thread + clears session
-                if hasattr(self._client, "stop_tickler"):
-                    self._client.stop_tickler()
-                if hasattr(self._client, "close_session"):
-                    self._client.close_session()
-        except Exception as exc:
-            logger.warning("IBClient disconnect cleanup non-fatal error: %s", exc)
-        finally:
-            self._connected = False
-            self._conid_cache.clear()
-            logger.info("IBClient disconnected")
+        if self._client:
+            try:
+                with self._call_lock:
+                    # ibind 0.1.23: IbkrClient.close() runs oauth_shutdown()
+                    # (which calls stop_tickler + logout) and then the parent
+                    # RestClient.close(). No separate close_session() exists.
+                    self._client.close()
+            except Exception as exc:
+                unclean += 1
+                logger.error("IBClient session close failed: %s", exc)
+
+        self._connected = False
+        self._conid_cache.clear()
+        if unclean:
+            logger.error(
+                "IBClient disconnect completed with %d unclean step(s); "
+                "session may still be live on IBKR's side", unclean,
+            )
+        else:
+            logger.info("IBClient disconnected cleanly")
 
     def is_connected(self) -> bool:
         """Cheap check — returns last-known state. Does NOT round-trip to IBKR.
@@ -514,14 +553,47 @@ class IBClient:
                 return self._conid_cache[cache_key]
 
             # Step 1: resolve underlying conid
+            underlying_sec_type = "IND" if sec_type == "OPT" else sec_type
             search_result = self._client.search_contract_by_symbol(
                 symbol=symbol,
-                sec_type="IND" if sec_type == "OPT" else sec_type,
+                sec_type=underlying_sec_type,
             )
             candidates = self._unwrap(search_result) or []
+            if not isinstance(candidates, list):
+                candidates = [candidates]
             if not candidates:
                 raise IBClientError(f"No contract found for symbol={symbol}")
-            underlying_conid = candidates[0].get("conid") if isinstance(candidates, list) else None
+            # iserver/secdef/search is a fuzzy free-text lookup — for SPX it
+            # can return SPX, SPXW, SPX-related variants in arbitrary order.
+            # Tighten with an exchange filter (CBOE for our index/option
+            # universe) and secType match where available.
+            filtered = [
+                d for d in candidates
+                if isinstance(d, dict)
+                and (
+                    not d.get("secType")
+                    or d.get("secType", "").upper() == underlying_sec_type.upper()
+                )
+                and (
+                    not d.get("exchange")
+                    or d.get("exchange", "").upper() == "CBOE"
+                )
+            ]
+            chosen = filtered or candidates
+            if len(chosen) > 1:
+                # Ambiguous match — log but pick the first; better to surface
+                # than fail. Production should pin a known conid.
+                logger.warning(
+                    "qualify_contract(%s, %s): %d underlying candidates after "
+                    "filtering, picking first (%r). Pin a known conid via "
+                    "IBConfig if this is the wrong contract.",
+                    symbol, underlying_sec_type, len(chosen), chosen[0],
+                )
+            underlying_conid = (
+                chosen[0].get("conid")
+                or chosen[0].get("conidEx")
+                if isinstance(chosen[0], dict) else None
+            )
             if not underlying_conid:
                 raise IBClientError(
                     f"Unexpected contract search response shape: {candidates!r}"
@@ -533,7 +605,7 @@ class IBClient:
                     raise IBClientError(
                         "Option qualification needs expiry, strike, right"
                     )
-                month = expiry.strftime("%b%y").upper()  # e.g. 'MAY26'
+                month = _ib_month_str(expiry)  # e.g. 'MAY26'
                 secdef_result = self._client.search_secdef_info_by_conid(
                     conid=str(underlying_conid),
                     sec_type="OPT",
@@ -554,7 +626,14 @@ class IBClient:
                         f"No {trading_class} option matched: symbol={symbol} "
                         f"expiry={expiry} strike={strike} right={right}"
                     )
-                conid = matches[0]["conid"]
+                # Defensive: response shape varies — prefer 'conid', fall
+                # back to 'conidEx' (some endpoints return one or the other).
+                first = matches[0]
+                conid = first.get("conid") or first.get("conidEx")
+                if not conid:
+                    raise IBClientError(
+                        f"Option secdef response missing conid/conidEx: {first!r}"
+                    )
             else:
                 conid = underlying_conid
 
@@ -563,6 +642,25 @@ class IBClient:
             return conid
 
     # ─── Quotes (read methods) ────────────────────────────────────────────
+
+    def _snapshot_with_preflight(self, conids: str, fields: list[str]):
+        """Call live_marketdata_snapshot with the required pre-flight.
+
+        ibind's own docstring (MarketdataMixin.live_marketdata_snapshot):
+        *"A pre-flight request must be made prior to ever receiving data."*
+        ibind's `live_marketdata_snapshot_by_symbol` handles this by calling
+        the endpoint twice. We do the same at the conid-by-id level — first
+        call primes IBKR's snapshot cache, second call returns real data.
+
+        `self._client.portfolio_accounts()` (the other ibind-documented
+        pre-flight, "/iserver/accounts must be called prior to .../snapshot")
+        is satisfied once per session by IBClient.connect()'s account-id
+        discovery.
+        """
+        with self._call_lock:
+            self._client.live_marketdata_snapshot(conids=conids, fields=fields)
+            result = self._client.live_marketdata_snapshot(conids=conids, fields=fields)
+        return self._unwrap(result) or []
 
     def get_quote(
         self,
@@ -583,11 +681,7 @@ class IBClient:
         """
         self._require_connected()
         fields = list(fields) if fields else DEFAULT_QUOTE_FIELDS
-        with self._call_lock:
-            result = self._client.live_marketdata_snapshot(
-                conids=str(conid), fields=fields,
-            )
-        data = self._unwrap(result) or []
+        data = self._snapshot_with_preflight(str(conid), fields)
         # IBKR returns a list with one entry per conid
         if isinstance(data, list) and data:
             row = data[0]
@@ -617,12 +711,15 @@ class IBClient:
         if not conids:
             return []
         fields = list(fields) if fields else DEFAULT_QUOTE_FIELDS
-        with self._call_lock:
-            result = self._client.live_marketdata_snapshot(
-                conids=",".join(str(c) for c in conids),
-                fields=fields,
+        # CP API caps fields at 50 per query (per IBKR's late-2024 Web API
+        # changelog quoted in research_scratch/10_cpapi_streaming.md §4.3).
+        if len(fields) > 50:
+            raise IBClientError(
+                f"get_quotes_batch: max 50 fields per call, got {len(fields)}"
             )
-        data = self._unwrap(result) or []
+        data = self._snapshot_with_preflight(
+            ",".join(str(c) for c in conids), fields,
+        )
         rows = data if isinstance(data, list) else [data]
         # IBKR doesn't guarantee response order matches request order;
         # parse each row, key by conid for caller's convenience.
@@ -649,12 +746,7 @@ class IBClient:
         SaxoClient.get_option_greeks() equivalent.
         """
         self._require_connected()
-        with self._call_lock:
-            result = self._client.live_marketdata_snapshot(
-                conids=str(conid),
-                fields=DEFAULT_OPTION_QUOTE_FIELDS,
-            )
-        data = self._unwrap(result) or []
+        data = self._snapshot_with_preflight(str(conid), DEFAULT_OPTION_QUOTE_FIELDS)
         row = data[0] if isinstance(data, list) and data else (data or {})
         return self._parse_quote_row(row, conid, include_greeks=True)
 
@@ -766,15 +858,25 @@ class IBClient:
             # cashbalance + exchangerate (rate from CURRENCY to base, or
             # base to CURRENCY — needs verification per agent 11)
             row = ledger.get(currency, {}) if isinstance(ledger, dict) else {}
-            exchange_rate = float(row.get("exchangerate", 0)) or 1.0
+            raw_rate = row.get("exchangerate", 0)
+            try:
+                exchange_rate = float(raw_rate)
+            except (TypeError, ValueError):
+                exchange_rate = 0.0
+            # NaN check: NaN != NaN, so this catches it cleanly
+            if exchange_rate != exchange_rate or exchange_rate <= 0:
+                raise IBClientError(
+                    f"get_balance({currency!r}): ledger row missing or has "
+                    f"invalid exchangerate (got {raw_rate!r}). Cannot compose "
+                    f"{base_currency}-base to {currency}-tradable. Re-check "
+                    "ledger response shape against IBKR docs (Phase A.10 "
+                    "verifies direction on live paper account)."
+                )
             cash_in_target = float(row.get("cashbalance", 0) or 0)
             # Empirical default: assume `exchangerate` is base-per-target
             # (i.e., 1 USD = ER EUR). USD_tradable = EUR_avail / ER + USD_cash.
             # Will be confirmed/inverted in Phase A.10 smoke test.
-            if exchange_rate > 0:
-                tradable = base_avail / exchange_rate + cash_in_target
-            else:
-                tradable = cash_in_target
+            tradable = base_avail / exchange_rate + cash_in_target
 
         return {
             "tradable": tradable,
@@ -820,8 +922,10 @@ class IBClient:
                 break
             batch = data if isinstance(data, list) else [data]
             all_positions.extend(batch)
-            # IBKR returns up to 30 per page; if we got fewer, we're done
-            if len(batch) < 30:
+            # ibind/IBKR's CP API positions endpoint returns up to 100 per
+            # page (per ibind portfolio_mixin docstring). If we get fewer,
+            # we've reached the last page.
+            if len(batch) < 100:
                 break
             page += 1
         return all_positions
@@ -869,7 +973,7 @@ class IBClient:
         self._require_connected()
         # Resolve underlying conid first
         underlying_conid = self.qualify_contract(symbol, sec_type="IND")
-        month = expiry.strftime("%b%y").upper()
+        month = _ib_month_str(expiry)
         with self._call_lock:
             result = self._client.search_strikes_by_conid(
                 conid=str(underlying_conid),
@@ -893,9 +997,18 @@ class IBClient:
         """All live orders on this account.
 
         SaxoClient.get_open_orders() equivalent. Returns raw ibind shape.
+
+        Per ibind OrderMixin.live_orders docstring: *"set 'force=true' in
+        a follow-up call to clear any cached behavior."* The first call
+        primes IBKR (and per the doc returns a blank array as part of the
+        cache-clear); the second call is the authoritative response.
+        Critical for reconcile_orders — without it, the broker side can
+        come back empty on a fresh session and cause state-only orders to
+        be mis-classified as LOOKUP_FILL.
         """
         self._require_connected()
         with self._call_lock:
+            self._client.live_orders(account_id=self.account_id, force=True)
             result = self._client.live_orders(account_id=self.account_id)
         data = self._unwrap(result) or {}
         # ibind returns {"orders": [...]} wrapping
@@ -936,9 +1049,14 @@ class IBClient:
         SaxoClient.get_chart_data() equivalent.
         """
         self._require_connected()
+        # ibind's marketdata_history_by_symbol routes through
+        # stock_conid_by_symbol(), which only resolves equities — index
+        # symbols like 'SPX' / 'VIX' return no match. Resolve the conid
+        # ourselves first (sec_type='IND') and call the by-conid variant.
+        conid = self.qualify_contract(symbol, sec_type="IND")
         with self._call_lock:
-            result = self._client.marketdata_history_by_symbol(
-                symbol=symbol,
+            result = self._client.marketdata_history_by_conid(
+                conid=str(conid),
                 bar=bar,
                 period=period,
                 outside_rth=outside_rth,
@@ -951,13 +1069,29 @@ class IBClient:
     # ─── Order placement (write methods) ──────────────────────────────────
 
     @staticmethod
-    def _round_to_increment(price: float, increment: float = 0.05) -> float:
-        """Round price to nearest CBOE-allowed increment.
+    def _round_to_increment(price: float, increment: float) -> float:
+        """Round price to the caller-specified tick increment.
 
         SPX options combo orders must use $0.05 net-credit increments on the
-        CBOE Complex Order Book. Non-conforming prices are rejected outright.
+        CBOE Complex Order Book (Cboe U.S. Options Complex Book Process,
+        Jan 2026). Non-conforming prices are rejected outright. Equities
+        and many single-leg options use $0.01 — callers must pick the
+        right increment per instrument (no safe default for mixed-asset
+        order paths).
         """
         return round(price / increment) * increment
+
+    @staticmethod
+    def _ensure_coid(coid: Optional[str]) -> str:
+        """Return the caller's client_order_id, or a fresh one if None.
+
+        A client_order_id (cOID) is the only safe way to make order
+        placement retryable — if the request times out before IBKR's ACK,
+        a retry with the SAME cOID is deduplicated server-side; a retry
+        WITHOUT a cOID would double-fill. Generate one if the caller
+        didn't pass one so retry_with_backoff is safe by default.
+        """
+        return coid or f"CAL_{uuid.uuid4().hex[:12]}"
 
     @staticmethod
     def build_ic_conidex(
@@ -1058,6 +1192,7 @@ class IBClient:
 
         conidex = self.build_ic_conidex(sc, lc, sp, lp)
         price = self._round_to_increment(net_credit_limit, 0.05)
+        coid = self._ensure_coid(coid)
 
         order = OrderRequest(
             conid=None,
@@ -1066,17 +1201,17 @@ class IBClient:
             side="SELL",           # SHORT IC = SELL the combo
             order_type="LMT",
             price=price,           # POSITIVE = credit received (IBKR convention)
-            quantity=contracts,
+            quantity=float(contracts),
             tif=tif,
             acct_id=self.account_id,
             coid=coid,
         )
         logger.info(
-            "IC place: %s %s expiry=%s C:%.0f/%.0f P:%.0f/%.0f x%d net_credit=%.2f tif=%s",
+            "IC place: %s %s expiry=%s C:%.0f/%.0f P:%.0f/%.0f x%d net_credit=%.2f tif=%s coid=%s",
             symbol, trading_class, expiry,
             short_call_strike, long_call_strike,
             short_put_strike, long_put_strike,
-            contracts, price, tif,
+            contracts, price, tif, coid,
         )
 
         return self._submit_order(order, answers=answers)
@@ -1117,6 +1252,7 @@ class IBClient:
         l = self.qualify_contract(symbol, expiry, long_strike,  right, trading_class)
         conidex = self.build_vertical_conidex(s, l)
         price = self._round_to_increment(net_credit_limit, 0.05)
+        coid = self._ensure_coid(coid)
 
         order = OrderRequest(
             conid=None,
@@ -1125,15 +1261,15 @@ class IBClient:
             side=action,
             order_type="LMT",
             price=price,
-            quantity=contracts,
+            quantity=float(contracts),
             tif=tif,
             acct_id=self.account_id,
             coid=coid,
         )
         logger.info(
-            "Vertical place: %s %s expiry=%s %s short:%.0f long:%.0f x%d price=%.2f side=%s",
+            "Vertical place: %s %s expiry=%s %s short:%.0f long:%.0f x%d price=%.2f side=%s coid=%s",
             symbol, trading_class, expiry, right,
-            short_strike, long_strike, contracts, price, action,
+            short_strike, long_strike, contracts, price, action, coid,
         )
 
         return self._submit_order(order, answers=answers)
@@ -1148,11 +1284,19 @@ class IBClient:
         tif: str = "DAY",
         coid: Optional[str] = None,
         answers: Optional[dict] = None,
+        price_increment: float = 0.05,
     ) -> dict:
         """Place a single-leg order.
 
         Used for single options or stock orders. For multi-leg combos use
         place_iron_condor / place_vertical_spread.
+
+        Args:
+            price_increment: tick size for price rounding. Defaults to 0.05
+                (correct for SPX/SPXW single-leg option orders, which is
+                HYDRA's universe today). For equities or sub-$1 stocks,
+                pass 0.01. Pass 0 to skip rounding entirely (caller has
+                already chosen a tick-conforming price).
 
         SaxoClient.place_order() equivalent.
         """
@@ -1162,13 +1306,16 @@ class IBClient:
         if side not in ("BUY", "SELL"):
             raise IBClientError(f"side must be 'BUY' or 'SELL', got {side!r}")
 
-        # Round price to $0.05 only for combo / SPX options
-        rounded_price = self._round_to_increment(price, 0.05) if price is not None else None
+        if price is None or price_increment <= 0:
+            rounded_price = price
+        else:
+            rounded_price = self._round_to_increment(price, price_increment)
+        coid = self._ensure_coid(coid)
 
         order = OrderRequest(
             conid=int(conid),
             side=side,
-            quantity=quantity,
+            quantity=float(quantity),
             order_type=order_type,
             price=rounded_price,
             tif=tif,
@@ -1176,10 +1323,10 @@ class IBClient:
             coid=coid,
         )
         logger.info(
-            "Order place: conid=%d %s %d %s @ %s tif=%s",
+            "Order place: conid=%d %s %d %s @ %s tif=%s coid=%s",
             conid, side, quantity, order_type,
-            f"{rounded_price:.2f}" if rounded_price else "MKT",
-            tif,
+            f"{rounded_price:.2f}" if rounded_price is not None else "MKT",
+            tif, coid,
         )
 
         return self._submit_order(order, answers=answers)
@@ -1222,33 +1369,49 @@ class IBClient:
             logger.info("Order cancel: order_id=%s", order_id)
             return True
         except IBClientError as exc:
-            logger.warning("Order cancel failed for %s: %s", order_id, exc)
+            # P0 trading-safety event: a working order we couldn't cancel
+            # is a stuck-position risk. Caller must escalate.
+            logger.error("Order cancel failed for %s: %s", order_id, exc)
             return False
 
     def modify_order(
         self,
         order_id: str,
+        *,
+        side: str,
+        quantity: int,
         price: Optional[float] = None,
-        quantity: Optional[int] = None,
+        order_type: str = "LMT",
+        conid: Optional[int] = None,
         answers: Optional[dict] = None,
     ) -> dict:
-        """Modify a working order's price or quantity.
+        """Modify a working order's price (and/or quantity).
 
         IBKR's modify_order replaces the previous order instance (not amend);
-        order_id stays the same but other fields can change.
+        order_id stays the same but other fields are re-submitted. Per ibind
+        docs (OrderMixin.modify_order): *"The content should mirror the
+        content of the original order."* So the caller must pass the
+        original side + quantity (and optionally the conid for single-leg
+        orders) — we do not invent placeholders.
+
+        For combo modifications (BAG/conidex orders), pass the original
+        `conid=None` and the IBKR `order_id` already identifies the combo.
         """
         self._require_connected()
-        # Build a partial order request — ibind merges with existing state
-        if price is None and quantity is None:
-            raise IBClientError("modify_order needs at least price or quantity")
+        if not side:
+            raise IBClientError("modify_order requires side ('BUY' or 'SELL')")
+        if quantity is None or quantity <= 0:
+            raise IBClientError("modify_order requires a positive quantity")
 
-        rounded_price = self._round_to_increment(price, 0.05) if price is not None else None
+        rounded_price = (
+            self._round_to_increment(price, 0.05) if price is not None else None
+        )
 
         order = OrderRequest(
-            conid=None,
-            side="SELL",        # required by dataclass; ignored on modify
-            quantity=quantity or 0,
-            order_type="LMT",
+            conid=conid,
+            side=str(side).upper(),
+            quantity=float(quantity),
+            order_type=order_type,
             price=rounded_price,
             acct_id=self.account_id,
         )
@@ -1260,8 +1423,10 @@ class IBClient:
                 account_id=self.account_id,
             )
         data = self._unwrap(result) or {}
-        logger.info("Order modify: order_id=%s price=%s qty=%s",
-                    order_id, rounded_price, quantity)
+        logger.info(
+            "Order modify: order_id=%s side=%s qty=%s price=%s",
+            order_id, side, quantity, rounded_price,
+        )
         return data if isinstance(data, dict) else (data[0] if data else {})
 
     def what_if_order(
@@ -1309,9 +1474,21 @@ class IBClient:
                 account_id=self.account_id,
             )
         data = self._unwrap(result) or {}
-        # ibind returns a list (one entry per leg or one per submission)
+        # ibind returns a list when the order resolves to multiple entries
+        # (one per leg for combos, one per child for OCA brackets). We
+        # promote the first entry to the top-level dict for caller
+        # convenience and stash the remaining entries under "_legs" so
+        # nothing is silently dropped — callers that need per-leg fill
+        # tracking can read order["_legs"].
         if isinstance(data, list):
-            data = data[0] if data else {}
+            if not data:
+                data = {}
+            elif len(data) == 1:
+                data = data[0]
+            else:
+                head, *rest = data
+                data = dict(head) if isinstance(head, dict) else {"_first": head}
+                data["_legs"] = rest
         return data
 
     # ─── Streaming (Phase A.5 integration) ────────────────────────────────
@@ -1337,11 +1514,17 @@ class IBClient:
         # use_oauth=True + access_token tells the WS to authenticate from
         # the same OAuth context. base_route default `/v1/api/ws` matches
         # the cloud endpoint (no local gateway).
+        #
+        # unwrap_market_data=False keeps the inner payload's numeric CP-API
+        # field codes ("31", "84", "7308", …) instead of ibind's remapped
+        # human names — StreamingManager._handle_tick filters on numeric
+        # keys, and the rest of IBClient reads field codes directly.
         ws = IbkrWsClient(
             ibkr_client=self._client,
             account_id=self.account_id,
             use_oauth=True,
             access_token=self.cfg.credentials.access_token,
+            unwrap_market_data=False,
             start=True,
         )
         self._ws_client = ws

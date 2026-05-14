@@ -6,6 +6,7 @@ use case (1 SPX index + 1 VIX index + 4–28 open SPX option contracts,
 sampled at 2–15 s).
 
 **Date:** May 2026
+**Last Updated:** 2026-05-14
 **Library version target:** `ibind` 0.1.23 with OAuth 1.0a
 **Verdict up front:** WebSocket is the right primary path. The
 widely-quoted "5 concurrent subscriptions" rumor is real but applies

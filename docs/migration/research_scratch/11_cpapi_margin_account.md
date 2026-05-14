@@ -1,6 +1,7 @@
 # 11 — CP API Margin & Account Surface via ibind
 
 **Status:** Research scratch, May 2026
+**Last Updated:** 2026-05-14
 **Scope:** Pre-trade margin check (whatif), account/balance queries, per-currency
 ledger, positions, open orders, order status push, reply prompts — all via
 `ibind` 0.1.23 + OAuth 1.0a against Client Portal Web API v1.0 ("CPAPI 1.0").

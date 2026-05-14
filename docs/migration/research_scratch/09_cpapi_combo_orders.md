@@ -1,5 +1,7 @@
 # 09 — CP API Combo Orders for SPX Iron Condors via ibind
 
+**Last Updated:** 2026-05-14
+
 **Research brief for the CALYPSO Saxo→IB migration, second pivot: TWS API → Client Portal Web API ("CP API") accessed through OAuth 1.0a + the `Voyz/ibind` Python client (v0.1.23). Replaces the `BAG`/`ComboLeg[]`/`smartComboRoutingParams` material from `03_ib_orders_positions.md` §3 with the CP API equivalent.**
 
 All citations dated **2026-05-13**. Primary sources are the IBKR Campus

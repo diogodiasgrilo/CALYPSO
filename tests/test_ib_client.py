@@ -129,7 +129,10 @@ class TestIBClientConnect:
         with patch("shared.ib_client.IbkrClient",
                    side_effect=Exception("401 Unauthorized: invalid consumer")):
             client = IBClient(paper_config)
-            with pytest.raises(IBAuthError, match="pre-activation OR wrong consumer key"):
+            # Loose match: the IBAuthError message must reference 'invalid
+            # consumer'. Phrasing of the surrounding diagnostic is allowed
+            # to change without breaking this test.
+            with pytest.raises(IBAuthError, match="invalid consumer"):
                 client.connect()
             assert not client.is_connected()
 
@@ -182,6 +185,61 @@ class TestIBClientConnect:
             assert client.account_id == "DU0000001"
             mock_ibkr_client.portfolio_accounts.assert_not_called()
 
+    def test_multi_account_warns_and_picks_first(
+        self, paper_config, mock_ibkr_client, caplog,
+    ):
+        """If portfolio_accounts returns multiple accounts, pick [0] but
+        log a warning so the operator pins via IBConfig.account_id."""
+        mock_ibkr_client.portfolio_accounts.return_value.data = [
+            {"accountId": "DU1111111"},
+            {"accountId": "DU2222222"},
+        ]
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
+            client = IBClient(paper_config)
+            import logging
+            with caplog.at_level(logging.WARNING):
+                client.connect()
+            assert client.account_id == "DU1111111"
+            assert any("multiple accounts" in r.message for r in caplog.records)
+
+    def test_authenticated_true_connected_false_raises(
+        self, paper_config, mock_ibkr_client,
+    ):
+        """Mirror case to test_auth_status_not_authenticated: authenticated
+        flips true but connected stayed false. Still must raise."""
+        mock_ibkr_client.authentication_status.return_value.data = {
+            "authenticated": True,
+            "connected": False,
+            "competing": False,
+        }
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
+            client = IBClient(paper_config)
+            with pytest.raises(IBAuthError, match="Auth status check failed"):
+                client.connect()
+
+    def test_competing_retries_once_after_5s_then_succeeds(
+        self, paper_config, mock_ibkr_client,
+    ):
+        """First read shows competing=true (ssodh/init still mid-handoff);
+        we sleep 5s and re-read; second read is clean and connect succeeds."""
+        from unittest.mock import MagicMock as MM
+        first_status = MM(); first_status.data = {
+            "authenticated": True, "connected": True, "competing": True,
+        }
+        second_status = MM(); second_status.data = {
+            "authenticated": True, "connected": True, "competing": False,
+        }
+        mock_ibkr_client.authentication_status.side_effect = [first_status, second_status]
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client), \
+             patch("shared.ib_client.time.sleep") as mock_sleep:
+            client = IBClient(paper_config)
+            client.connect()
+            assert client.is_connected()
+            # 5s sleep was triggered
+            mock_sleep.assert_called_once_with(5.0)
+            # auth_status called twice
+            assert mock_ibkr_client.authentication_status.call_count == 2
+
 
 class TestIBClientDisconnect:
     def test_disconnect_before_connect_is_safe(self, paper_config):
@@ -197,15 +255,64 @@ class TestIBClientDisconnect:
             assert client.is_connected()
             client.disconnect()
             assert not client.is_connected()
-            mock_ibkr_client.stop_tickler.assert_called_once()
+            # ibind 0.1.23: IbkrClient.close() runs oauth_shutdown() which
+            # internally calls stop_tickler + logout. We invoke close()
+            # directly, not stop_tickler().
+            mock_ibkr_client.close.assert_called_once()
 
     def test_disconnect_swallows_cleanup_errors(self, paper_config, mock_ibkr_client):
         """Errors during shutdown shouldn't propagate."""
-        mock_ibkr_client.stop_tickler.side_effect = Exception("network gone")
+        mock_ibkr_client.close.side_effect = Exception("network gone")
         with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             client.connect()
             client.disconnect()  # no raise
+            assert not client.is_connected()
+
+    def test_disconnect_stops_streaming_if_started(self, paper_config, mock_ibkr_client):
+        """If StreamingManager was started (via .streaming lazy access),
+        disconnect() must call .stop() on it."""
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
+            client = IBClient(paper_config)
+            client.connect()
+            # Simulate a started streaming manager
+            fake_streaming = MagicMock()
+            client._streaming = fake_streaming
+            client.disconnect()
+            fake_streaming.stop.assert_called_once()
+            # _streaming is cleared after teardown
+            assert client._streaming is None
+
+    def test_disconnect_shuts_down_ws_client_if_present(
+        self, paper_config, mock_ibkr_client,
+    ):
+        """ws_client.shutdown() must be called if the WS was spun up."""
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
+            client = IBClient(paper_config)
+            client.connect()
+            fake_ws = MagicMock()
+            client._ws_client = fake_ws
+            client.disconnect()
+            fake_ws.shutdown.assert_called_once()
+            assert client._ws_client is None
+
+    def test_disconnect_streaming_stop_raise_does_not_block_ws_teardown(
+        self, paper_config, mock_ibkr_client,
+    ):
+        """A failure mid-teardown (streaming.stop raises) must still let
+        ws_client.shutdown + client.close run, and the final state still
+        reaches _connected = False."""
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
+            client = IBClient(paper_config)
+            client.connect()
+            fake_streaming = MagicMock()
+            fake_streaming.stop.side_effect = RuntimeError("smd unsub failed")
+            fake_ws = MagicMock()
+            client._streaming = fake_streaming
+            client._ws_client = fake_ws
+            client.disconnect()  # no raise
+            fake_streaming.stop.assert_called_once()
+            fake_ws.shutdown.assert_called_once()
             assert not client.is_connected()
 
 

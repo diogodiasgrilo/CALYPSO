@@ -5,7 +5,7 @@ persistent**. If our bot crashes mid-order, the order is still live on
 IBKR's books when we reconnect. We must NOT blindly resubmit; we must
 cross-check against our state file and reconcile.
 
-Three cases enumerated in the migration plan §4.4:
+Three cases enumerated in the migration plan §A.7:
 
   • only_broker: order exists on IBKR's books but NOT in our state file.
     Likely cause: bot restart raced with order placement, and we don't
@@ -133,6 +133,11 @@ TERMINAL_STATUSES = frozenset({
     "Filled", "Cancelled", "ApiCancelled",
     "filled", "cancelled", "api_cancelled",
     "Inactive", "inactive",
+    # IBKR's order monitor returns these as final states too — without
+    # them, a Rejected/Expired order falls into the non-terminal branch
+    # and gets mis-classified as CANCEL / LOOKUP_FILL.
+    "Rejected", "rejected",
+    "Expired", "expired",
 })
 
 

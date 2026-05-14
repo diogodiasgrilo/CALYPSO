@@ -279,3 +279,71 @@ class TestRetryDecorator:
         )(fn)
         wrapped(1, 2, x="y")
         fn.assert_called_once_with(1, 2, x="y")
+
+    def test_max_attempts_zero_raises_at_decorator_entry(self):
+        """A misconfigured RetryPolicy with max_attempts<1 fails loudly at
+        decoration time, not at call time — surfacing the bug early."""
+        with pytest.raises(ValueError, match="max_attempts"):
+            retry_with_backoff(RetryPolicy(max_attempts=0))
+
+    def test_non_retryable_does_not_record_breaker_failure(self):
+        """PINNED policy: non-retryable exceptions (e.g. ValueError for
+        bad input, 401 auth) do NOT record a breaker failure. Pinning the
+        contract so future refactors don't silently change it."""
+        cb = CircuitBreaker(name="t", consecutive_failures_threshold=2)
+        fn = MagicMock(side_effect=ValueError("bad input"))
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=3, base_delay_s=0.001),
+            breaker=cb,
+        )(fn)
+        for _ in range(5):  # plenty of attempts
+            try:
+                wrapped()
+            except ValueError:
+                pass
+        # Even after 5 ValueError raises, breaker stays CLOSED
+        assert cb.state == CircuitState.CLOSED
+
+
+class TestRetryPolicyJitter:
+    def test_delay_never_negative_after_jitter(self):
+        """With jitter_fraction=1.0, the random component spans [-raw, +raw];
+        delay_for_attempt clamps to 0.0 so the caller never sees negative
+        sleeps."""
+        pol = RetryPolicy(base_delay_s=1.0, max_delay_s=10.0, jitter_fraction=1.0)
+        import random
+        random.seed(0)
+        for _ in range(50):
+            d = pol.delay_for_attempt(1)
+            assert d >= 0.0
+
+    def test_jitter_stays_within_bound(self):
+        """Sanity: jittered value never exceeds raw*(1+jitter_fraction)."""
+        pol = RetryPolicy(base_delay_s=1.0, max_delay_s=10.0, jitter_fraction=0.5)
+        import random
+        random.seed(42)
+        for _ in range(50):
+            d = pol.delay_for_attempt(2)  # raw=2.0
+            assert 0.0 <= d <= 2.0 * 1.5
+
+
+class TestCircuitBreakerWindowCutoff:
+    def test_old_failures_outside_window_dont_trip(self):
+        """Failures older than window_seconds should not count toward the
+        rolling failure-rate calc. Force-write outcomes with backdated
+        timestamps and verify the breaker stays closed."""
+        cb = CircuitBreaker(
+            name="t",
+            consecutive_failures_threshold=999,  # disable that branch
+            window_size=10,
+            window_seconds=1.0,
+            failure_rate_threshold=0.5,
+        )
+        # Backdate 10 failures by 5 seconds — they're all outside the window
+        import time as _t
+        old_ts = _t.monotonic() - 5.0
+        for _ in range(10):
+            cb._outcomes.append((old_ts, False))
+        # Now record one fresh success
+        cb.record_success()
+        assert cb.state == CircuitState.CLOSED

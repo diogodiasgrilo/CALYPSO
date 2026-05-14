@@ -67,13 +67,13 @@ RESUBSCRIBE_GAP_S = 0.5
 # need (HYDRA samples every 2-15 sec).
 CONSUME_POLL_S = 0.025
 
-# Default fields subscribed when the caller doesn't specify. Mirrors
-# shared.ib_client.DEFAULT_QUOTE_FIELDS but kept local to avoid an import
-# cycle between ib_streaming and ib_client.
-DEFAULT_QUOTE_FIELDS = ["31", "84", "86", "88", "85", "7635", "6509"]
-DEFAULT_OPTION_FIELDS = DEFAULT_QUOTE_FIELDS + [
-    "7308", "7309", "7310", "7311", "7633", "7638",  # delta/gamma/theta/vega/iv/oi
-]
+# Default fields subscribed when the caller doesn't specify. Sourced from
+# shared.ib_constants — the single source of truth for field-code defaults
+# shared with shared.ib_client. Aliased to keep the local name stable.
+from shared.ib_constants import (
+    DEFAULT_QUOTE_FIELDS,
+    DEFAULT_OPTION_QUOTE_FIELDS as DEFAULT_OPTION_FIELDS,
+)
 
 
 @dataclass
@@ -81,17 +81,21 @@ class TickSnapshot:
     """Last-known tick for a single conid.
 
     Updated by _consume_loop on every incoming WS message. `received_at`
-    is set on update; `last_tick_age()` derives staleness from it.
+    is set on update; `age_seconds()` / `is_stale()` derive freshness.
     """
     conid: int
     fields: dict[str, str] = field(default_factory=dict)
     received_at: Optional[datetime] = None
 
-    def is_stale(self, max_age_seconds: float) -> bool:
+    def age_seconds(self) -> Optional[float]:
+        """Seconds since the last tick, or None if no tick has ever arrived."""
         if self.received_at is None:
-            return True
-        age = (datetime.now(timezone.utc) - self.received_at).total_seconds()
-        return age > max_age_seconds
+            return None
+        return (datetime.now(timezone.utc) - self.received_at).total_seconds()
+
+    def is_stale(self, max_age_seconds: float) -> bool:
+        age = self.age_seconds()
+        return age is None or age > max_age_seconds
 
 
 class StreamingManager:
@@ -213,16 +217,21 @@ class StreamingManager:
 
         Idempotent — re-subscribing to an already-subscribed conid replaces
         the field set in-place (sends umd then smd with new fields).
+
+        Holds the manager lock through the unsubscribe → sleep → subscribe
+        sequence so the refresh loop can't interleave a competing cycle
+        for the same conid mid-flight. Lock is RLock so it's safe even
+        when callers nest into this from already-locked paths.
         """
         conid = int(conid)
         fields = list(fields) if fields else DEFAULT_QUOTE_FIELDS
         with self._lock:
             already = conid in self._subscriptions
             self._subscriptions[conid] = fields
-        if already:
-            self._send_unsubscribe(conid)
-            time.sleep(self._resubscribe_gap_s)
-        self._send_subscribe(conid, fields)
+            if already:
+                self._send_unsubscribe(conid)
+                time.sleep(self._resubscribe_gap_s)
+            self._send_subscribe(conid, fields)
 
     def subscribe_option(
         self,
@@ -261,28 +270,36 @@ class StreamingManager:
     def last_tick_age(self, conid: int) -> Optional[float]:
         """Seconds since last tick for `conid`, or None if never received."""
         snap = self.get_snapshot(conid)
-        if snap is None or snap.received_at is None:
-            return None
-        return (datetime.now(timezone.utc) - snap.received_at).total_seconds()
+        return snap.age_seconds() if snap is not None else None
 
     def active_conids(self) -> list[int]:
         with self._lock:
             return list(self._subscriptions.keys())
 
+    def is_ws_connected(self) -> bool:
+        """Lightweight liveness — True iff the underlying WS is connected.
+
+        Does NOT require any subscription to have produced ticks recently,
+        so this stays True during pre-market / weekend / market-closure
+        when there's nothing for IBKR to push. Use this for "is the pipe
+        alive" checks; use `is_healthy` for "are quotes actually flowing".
+        """
+        try:
+            return bool(self._ws.connected) and self._started
+        except Exception:
+            return False
+
     def is_healthy(self, max_tick_age_seconds: float = 60.0) -> bool:
         """True iff WS is connected AND every subscription has a recent tick.
 
-        Conservative: any unsubscribed-but-still-tracked conid OR any stale
-        snapshot fails the check. Use this for HYDRA's heartbeat-alive gate.
+        Strict: assumes the market is producing ticks. During off-hours
+        every subscription will look stale because IBKR isn't pushing
+        anything — use `is_ws_connected()` instead for off-hours monitors.
+        Use this for HYDRA's in-session heartbeat-alive gate.
         """
-        try:
-            if not self._ws.connected:
-                return False
-        except Exception:
+        if not self.is_ws_connected():
             return False
         with self._lock:
-            if not self._started:
-                return False
             for conid in self._subscriptions.keys():
                 snap = self._snapshots.get(conid)
                 if snap is None or snap.is_stale(max_tick_age_seconds):
@@ -292,16 +309,22 @@ class StreamingManager:
     # ─── Internals ────────────────────────────────────────────────────────
 
     def _send_subscribe(self, conid: int, fields: list[str]) -> None:
+        # ibind's IbkrSubscriptionProcessor.make_subscribe_payload prepends
+        # 's' to whatever channel we pass — so we send the bare "md+{conid}"
+        # and the wire payload becomes "smd+{conid}+...". Passing "smd+..."
+        # here would yield "ssmd+..." and IBKR rejects it.
         try:
-            self._ws.subscribe(channel=f"smd+{conid}", data={"fields": fields})
+            self._ws.subscribe(channel=f"md+{conid}", data={"fields": fields})
             logger.debug("smd+%d subscribed (fields=%s)", conid, fields)
         except Exception as exc:
             logger.error("smd+%d subscribe failed: %s", conid, exc)
             raise
 
     def _send_unsubscribe(self, conid: int) -> None:
+        # Same prefix rule: ibind prepends 'u'. Pass "md+{conid}" so the wire
+        # payload is "umd+{conid}+{}".
         try:
-            self._ws.unsubscribe(channel=f"umd+{conid}")
+            self._ws.unsubscribe(channel=f"md+{conid}")
             logger.debug("umd+%d unsubscribed", conid)
         except Exception as exc:
             # Don't raise on unsubscribe errors — IBKR sometimes returns
@@ -313,6 +336,12 @@ class StreamingManager:
 
         Without this, IBKR auto-kills smd topics after ~15 min. ibind 0.1.23
         does NOT handle this; we own it.
+
+        Each per-conid unsub→sleep→sub sequence is held under the manager
+        lock so a concurrent subscribe_quote() call for the same conid
+        can't interleave its own cycle. Sleeping under a lock is OK here
+        — the RLock has a single owner (this manager), contention is
+        only between the refresh thread and direct API callers.
         """
         while not self._stop_event.wait(self._refresh_interval_s):
             with self._lock:
@@ -321,9 +350,14 @@ class StreamingManager:
                 if self._stop_event.is_set():
                     return
                 try:
-                    self._send_unsubscribe(conid)
-                    time.sleep(self._resubscribe_gap_s)
-                    self._send_subscribe(conid, fields)
+                    with self._lock:
+                        # Re-check membership under the lock — caller may
+                        # have unsubscribed since we snapshotted `items`.
+                        if conid not in self._subscriptions:
+                            continue
+                        self._send_unsubscribe(conid)
+                        time.sleep(self._resubscribe_gap_s)
+                        self._send_subscribe(conid, fields)
                 except Exception as exc:
                     logger.warning(
                         "smd refresh failed for conid %s: %s "
@@ -335,11 +369,17 @@ class StreamingManager:
         if self._queue_accessor is None:
             logger.warning("StreamingManager consume loop: no queue accessor — exiting")
             return
+        # ibind's QueueAccessor.get internally handles queue.Empty and
+        # returns None on timeout, so the loop normally never throws here.
+        # Catch narrowly and log unexpected errors so we don't silently
+        # mask a bug in ibind or a corrupted queue.
         while not self._stop_event.is_set():
             try:
                 msg = self._queue_accessor.get(block=True, timeout=self._consume_poll_s)
-            except Exception:
-                # Empty queue — that's the timeout case
+            except Exception as exc:
+                logger.warning(
+                    "QueueAccessor.get raised unexpectedly (continuing): %s", exc,
+                )
                 continue
             if msg is None:
                 continue
@@ -349,11 +389,33 @@ class StreamingManager:
                 logger.warning("Tick handler error (continuing): %s", exc)
 
     def _handle_tick(self, msg) -> None:
-        """Update the snapshot for the conid in `msg`."""
-        # ibind delivers MARKET_DATA messages as dicts with 'conid' (or 'conidEx')
-        # plus the field codes as top-level keys (e.g., "31": "5500.0").
+        """Update the snapshot for the conid in `msg`.
+
+        Robust to both shapes ibind can deliver in the MARKET_DATA queue:
+
+          • **Wrapped** — `{conid_value: {"conid": ..., "_updated": ...,
+            "topic": "smd+...", "31": "5500.0", "84": "5499.5", ...}}`.
+            This is what ibind's `_preprocess_market_data_message` emits
+            (both with and without `unwrap_market_data`). Production path.
+
+          • **Unwrapped** — `{"conid": ..., "31": "5500.0", ...}`. Used by
+            unit tests and as a defensive fallback.
+
+        We require `unwrap_market_data=False` at the IbkrWsClient
+        construction site (see IBClient.streaming) so the inner payload
+        keeps numeric CP-API field codes (`"31"`, `"84"`, …) rather than
+        ibind's remapped human names (`"last_price"`, `"bid_price"`).
+        """
         if not isinstance(msg, dict):
             return
+        # Unwrap if outer dict is {conid_int: inner_payload}
+        if "conid" not in msg:
+            if len(msg) != 1:
+                return
+            inner = next(iter(msg.values()))
+            if not isinstance(inner, dict):
+                return
+            msg = inner
         conid = msg.get("conid") or msg.get("conidEx")
         if conid is None:
             return
@@ -361,9 +423,11 @@ class StreamingManager:
             conid = int(conid)
         except (TypeError, ValueError):
             return
-        # Filter to just the field codes (drop bookkeeping fields like
-        # 'server_id', 'topic', etc.)
-        fields = {k: v for k, v in msg.items() if k.isdigit() or k == "6509"}
+        # Filter to numeric field codes (drop topic, _updated, server_id, etc.)
+        fields = {
+            k: v for k, v in msg.items()
+            if isinstance(k, str) and (k.isdigit() or k == "6509")
+        }
         with self._lock:
             snap = self._snapshots.get(conid)
             if snap is None:

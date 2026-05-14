@@ -141,17 +141,17 @@ class TestBuildVerticalConidex:
 class TestRoundToIncrement:
     def test_rounds_to_nickel(self):
         # $0.327 → $0.35 (rounded to nearest $0.05)
-        assert IBClient._round_to_increment(0.327) == pytest.approx(0.35)
+        assert IBClient._round_to_increment(0.327, 0.05) == pytest.approx(0.35)
 
     def test_already_on_grid_unchanged(self):
-        assert IBClient._round_to_increment(0.30) == pytest.approx(0.30)
-        assert IBClient._round_to_increment(0.05) == pytest.approx(0.05)
+        assert IBClient._round_to_increment(0.30, 0.05) == pytest.approx(0.30)
+        assert IBClient._round_to_increment(0.05, 0.05) == pytest.approx(0.05)
 
     def test_rounds_down(self):
-        assert IBClient._round_to_increment(0.07) == pytest.approx(0.05)
+        assert IBClient._round_to_increment(0.07, 0.05) == pytest.approx(0.05)
 
     def test_rounds_up(self):
-        assert IBClient._round_to_increment(0.08) == pytest.approx(0.10)
+        assert IBClient._round_to_increment(0.08, 0.05) == pytest.approx(0.10)
 
     def test_custom_increment(self):
         assert IBClient._round_to_increment(0.123, 0.01) == pytest.approx(0.12)
@@ -217,6 +217,65 @@ class TestPlaceIronCondor:
         order_req = mock_ibkr.place_order.call_args.kwargs["order_request"]
         assert order_req.side == "SELL"
         assert order_req.price > 0  # POSITIVE credit
+
+    def test_negative_credit_input_propagates_without_flip(self, connected_client):
+        """Defensive: a caller that mistakenly passes a NEGATIVE net_credit
+        sends a NEGATIVE price to IBKR. For a SHORT IC, this would mean
+        "I'll pay to sell" = immediate fill at any market price = blowup.
+
+        IBClient does NOT silently flip the sign — it trusts the caller's
+        intent and reflects whatever they gave (post-$0.05 rounding). This
+        test pins that contract so future refactors don't accidentally
+        add an abs() that would mask caller bugs upstream.
+        """
+        client, mock_ibkr = connected_client
+        _mock_conid_resolution(mock_ibkr, [1, 2, 3, 4])
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+
+        client.place_iron_condor(
+            expiry=date(2026, 5, 16),
+            short_call_strike=5500, long_call_strike=5505,
+            short_put_strike=5400,  long_put_strike=5395,
+            contracts=10, net_credit_limit=-0.30,
+        )
+        order_req = mock_ibkr.place_order.call_args.kwargs["order_request"]
+        # _round_to_increment preserves sign
+        assert order_req.price == pytest.approx(-0.30)
+        # Side is still SELL — caller's bug surfaces as a misprice, not
+        # a side flip.
+        assert order_req.side == "SELL"
+
+    def test_auto_generates_coid_when_omitted(self, connected_client):
+        """When caller doesn't pass coid, IBClient mints one so the order
+        is dedup-safe under retry. Format: 'CAL_' + hex prefix."""
+        client, mock_ibkr = connected_client
+        _mock_conid_resolution(mock_ibkr, [1, 2, 3, 4])
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+
+        client.place_iron_condor(
+            expiry=date(2026, 5, 16),
+            short_call_strike=5500, long_call_strike=5505,
+            short_put_strike=5400,  long_put_strike=5395,
+            contracts=10, net_credit_limit=0.30,
+        )
+        order_req = mock_ibkr.place_order.call_args.kwargs["order_request"]
+        assert order_req.coid is not None
+        assert order_req.coid.startswith("CAL_")
+
+    def test_caller_coid_passes_through(self, connected_client):
+        client, mock_ibkr = connected_client
+        _mock_conid_resolution(mock_ibkr, [1, 2, 3, 4])
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+
+        client.place_iron_condor(
+            expiry=date(2026, 5, 16),
+            short_call_strike=5500, long_call_strike=5505,
+            short_put_strike=5400,  long_put_strike=5395,
+            contracts=10, net_credit_limit=0.30,
+            coid="my_coid_42",
+        )
+        order_req = mock_ibkr.place_order.call_args.kwargs["order_request"]
+        assert order_req.coid == "my_coid_42"
 
     def test_uses_default_order_answers(self, connected_client):
         client, mock_ibkr = connected_client
@@ -370,6 +429,78 @@ class TestPlaceOrder:
         assert order_req.order_type == "MKT"
         assert order_req.price is None
 
+    def test_coid_auto_generated(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0)
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].coid.startswith("CAL_")
+
+    def test_coid_caller_supplied_passes_through(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0,
+            coid="my_coid",
+        )
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].coid == "my_coid"
+
+    def test_price_increment_zero_skips_rounding(self, connected_client):
+        """Caller can pass price_increment=0 to skip the default $0.05 grid
+        for instruments that use a finer tick (e.g. sub-$1 stocks at $0.01)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT",
+            price=5.37, price_increment=0,
+        )
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(5.37)
+
+    def test_quantity_serialized_as_float(self, connected_client):
+        """OrderRequest.quantity is typed float in ibind; we cast at the
+        call site so the wire payload is deterministic."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(conid=1, side="BUY", quantity=10, order_type="LMT", price=1.0)
+        assert isinstance(
+            mock_ibkr.place_order.call_args.kwargs["order_request"].quantity, float
+        )
+
+
+class TestSubmitOrderResponseShapes:
+    def test_multi_leg_list_promotes_first_and_stashes_rest(self, connected_client):
+        """When ibind returns N entries (combo fills with per-leg detail),
+        the head dict becomes the top-level response and the rest land
+        under '_legs' so nothing is silently dropped."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([
+            {"order_id": "head_id", "filled": 0},
+            {"order_id": "leg2_id", "filled": 0},
+            {"order_id": "leg3_id", "filled": 0},
+        ])
+        out = client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0,
+        )
+        assert out["order_id"] == "head_id"
+        assert "_legs" in out
+        assert len(out["_legs"]) == 2
+
+    def test_single_entry_list_unwraps(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "only"}])
+        out = client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0,
+        )
+        assert out["order_id"] == "only"
+        assert "_legs" not in out
+
+    def test_empty_list_response_yields_empty_dict(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([])
+        out = client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0,
+        )
+        assert out == {}
+
 
 class TestPlaceMarketOrder:
     def test_wraps_place_order_with_mkt(self, connected_client):
@@ -405,25 +536,41 @@ class TestCancelOrder:
 
 
 class TestModifyOrder:
-    def test_requires_price_or_quantity(self, connected_client):
+    def test_requires_side(self, connected_client):
         client, _ = connected_client
-        with pytest.raises(IBClientError, match="at least price or quantity"):
-            client.modify_order("abc123")
+        # side is keyword-only; calling without it triggers TypeError
+        with pytest.raises(TypeError):
+            client.modify_order("abc123", price=0.40)
+
+    def test_requires_positive_quantity(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(IBClientError, match="positive quantity"):
+            client.modify_order("abc123", side="SELL", quantity=0, price=0.40)
 
     def test_price_modification(self, connected_client):
         client, mock_ibkr = connected_client
         mock_ibkr.modify_order.return_value = _mk_result({"order_id": "abc123"})
 
-        client.modify_order("abc123", price=0.40)
-        # ibind got an OrderRequest with the new (rounded) price
+        client.modify_order("abc123", side="SELL", quantity=10, price=0.40)
+        # ibind got an OrderRequest with the new (rounded) price + real
+        # side/qty (not placeholder SELL/0)
         order_req = mock_ibkr.modify_order.call_args.kwargs["order_request"]
         assert order_req.price == pytest.approx(0.40)
+        assert order_req.side == "SELL"
+        assert order_req.quantity == pytest.approx(10.0)
+
+    def test_side_uppercased(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.modify_order.return_value = _mk_result({"order_id": "abc123"})
+        client.modify_order("abc123", side="buy", quantity=5, price=1.00)
+        order_req = mock_ibkr.modify_order.call_args.kwargs["order_request"]
+        assert order_req.side == "BUY"
 
     def test_price_rounded_to_005(self, connected_client):
         client, mock_ibkr = connected_client
         mock_ibkr.modify_order.return_value = _mk_result({"order_id": "abc123"})
 
-        client.modify_order("abc123", price=0.327)
+        client.modify_order("abc123", side="SELL", quantity=10, price=0.327)
         order_req = mock_ibkr.modify_order.call_args.kwargs["order_request"]
         assert order_req.price == pytest.approx(0.35)
 
