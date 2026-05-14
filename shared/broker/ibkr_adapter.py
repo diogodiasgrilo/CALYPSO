@@ -88,15 +88,25 @@ class IBBrokerAdapter(BrokerInterface):
 
     def __init__(self, ib_client):
         self._ib = ib_client
+        self._streaming_proxy = None  # lazy
 
     @property
     def ib(self):
         """Escape hatch for callers needing IB-specific functionality
-        not covered by BrokerInterface (e.g., direct streaming access
-        via .streaming, reconcile_orders, what_if on arbitrary
-        OrderRequests). Phase B.4 should eliminate every direct-IB
-        call site."""
+        not covered by BrokerInterface (e.g., reconcile_orders, what_if
+        on arbitrary OrderRequests). Phase B.5 should eliminate every
+        direct-IB call site."""
         return self._ib
+
+    @property
+    def streaming(self):
+        """StreamingInterface proxy over IBClient.streaming. Lazy —
+        the underlying StreamingManager is itself lazy, so this is
+        cheap to construct."""
+        if self._streaming_proxy is None:
+            from shared.broker.streaming_proxies import IBStreamingProxy
+            self._streaming_proxy = IBStreamingProxy(self._ib)
+        return self._streaming_proxy
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 

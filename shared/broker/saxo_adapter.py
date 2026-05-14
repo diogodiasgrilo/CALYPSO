@@ -105,6 +105,23 @@ class SaxoBrokerAdapter(BrokerInterface):
         # mappings here at boot so the BrokerInterface contract (symbol+
         # expiry+strike) translates cleanly. Keyed by uppercase symbol.
         self._symbol_registry: dict[str, dict] = {}
+        # Streaming proxy — lazy. SaxoClient's WS isn't started until
+        # caller subscribes; the proxy owns the start/stop lifecycle.
+        self._streaming_proxy = None
+
+    @property
+    def streaming(self):
+        """StreamingInterface proxy over SaxoClient's bulk WS streaming.
+
+        Saxo's `start_price_streaming` is bulk; the proxy maintains a
+        per-instrument set internally and restarts streaming when the
+        set changes. Greeks come via REST get_option_greeks — the proxy
+        falls back to subscribe_quote for subscribe_option.
+        """
+        if self._streaming_proxy is None:
+            from shared.broker.streaming_proxies import SaxoStreamingProxy
+            self._streaming_proxy = SaxoStreamingProxy(self._saxo)
+        return self._streaming_proxy
 
     @property
     def saxo(self):

@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared.broker.interface import (
     BrokerInterface,
+    StreamingInterface,
     QuoteSnapshot,
     OrderResult,
     IronCondorRequest,
@@ -29,6 +30,19 @@ from shared.broker.interface import (
     BrokerAuthError,
     BrokerConnectionError,
 )
+
+
+# Minimal StreamingInterface stub used by the FullStub adapter below.
+class _StubStreaming(StreamingInterface):
+    def subscribe_quote(self, instrument_id, fields=None): pass
+    def subscribe_option(self, instrument_id, fields=None): pass
+    def unsubscribe_quote(self, instrument_id): pass
+    def unsubscribe_all(self): pass
+    def get_snapshot(self, instrument_id): return None
+    def last_tick_age(self, instrument_id): return None
+    def is_healthy(self, max_tick_age_seconds=60.0): return True
+    def is_ws_connected(self): return True
+    def active_subscriptions(self): return []
 
 
 # ─── ABC enforcement ────────────────────────────────────────────────────────
@@ -77,8 +91,34 @@ class TestABCEnforcement:
             def what_if_iron_condor(self, request): return {}
             def place_iron_condor(self, request): return OrderResult(order_id="x", status="Submitted")
             def place_vertical_spread(self, request): return OrderResult(order_id="x", status="Submitted")
+            @property
+            def streaming(self): return _StubStreaming()
         adapter = FullStub()
         assert adapter.connect() is True
+        assert isinstance(adapter.streaming, StreamingInterface)
+
+
+class TestStreamingInterfaceABC:
+    """Smoke: StreamingInterface enforces all 9 abstract methods."""
+
+    def test_bare_streaming_interface_uninstantiable(self):
+        with pytest.raises(TypeError):
+            StreamingInterface()  # type: ignore[abstract]
+
+    def test_partial_streaming_subclass_uninstantiable(self):
+        class HalfStream(StreamingInterface):
+            def subscribe_quote(self, instrument_id, fields=None): pass
+            # missing the other 8
+        with pytest.raises(TypeError):
+            HalfStream()  # type: ignore[abstract]
+
+    def test_full_streaming_subclass_instantiates(self):
+        # The _StubStreaming defined at top of file implements all 9
+        s = _StubStreaming()
+        s.subscribe_quote("123")
+        assert s.is_healthy() is True
+        assert s.is_ws_connected() is True
+        assert s.get_snapshot("123") is None
 
 
 # ─── Dataclass shapes ───────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
-# Saxo → Interactive Brokers Migration Plan (v2)
+# Saxo → Interactive Brokers Migration Plan (v3)
 
-> **Major rewrite 2026-05-14.** Architecture pivoted from IB Gateway + `ib_async` to **ibind + OAuth 1.0a**, then refined again into **Option 4 hybrid** (standalone IB client → broker abstraction → parallel variant deploy → gradual cutover). All `ib_async`-based code skeletons and Gateway-deployment instructions in prior versions are obsolete. Latest research (May 13-14) integrated.
+> **v3 amendment (2026-05-14 evening).** Phases A and B both substantially landed in a single intensive build day. Earlier v2 sequencing ("Phase A done, Phase B starts when paper smoke passes") was conservative — once the audit closed on Phase A and tests proved out the IBClient surface, the broker abstraction (Phase B.1–B.4 plus a streaming sub-namespace) followed cleanly without waiting for live broker time. **What's left**: A.10 paper-smoke RUN (gated on OAuth activation Sunday) and Phase B.5 (HYDRA strategy call-site refactor — deliberately deferred so the abstraction can soak).
 >
-> **Current state**: Phase 0 ~70% complete. Paper OAuth registered with consumer key `CALYPSOPP` on 2026-05-14 (activation pending ~Sunday 2026-05-17). Variants A/B/C still running Saxo dry-run on the VM — nothing touched. Build of `shared/ib_client.py` (Phase A) starts now during the activation wait.
+> **Original v2 (2026-05-14 morning):** Architecture pivoted from IB Gateway + `ib_async` to **ibind + OAuth 1.0a**, then refined into **Option 4 hybrid** (standalone IB client → broker abstraction → parallel variant deploy → gradual cutover). All `ib_async`-based code skeletons and Gateway-deployment instructions in prior versions are obsolete.
+>
+> **Current state (2026-05-14 EOD)**: Phase 0 + Phase A.2–A.8 + A.10 skeleton + Phase B.1–B.4 (incl. streaming sub-namespace) **all shipped on `main`**. Paper OAuth registered with consumer key `CALYPSOPP` (activation pending ~Sunday 2026-05-17). Variants A/B/C still on Saxo dry-run on the VM — untouched. Next milestone: paper smoke fires automatically on the next pytest run after OAuth activates.
 >
 > **Companion docs**:
 > - [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md) — 10 open questions (Q1–Q6 + Q7–Q10 follow-ups), all answered
@@ -71,6 +73,37 @@ User-confirmed sub-decisions:
 ---
 
 ## 2. Current status
+
+### Shipped today (2026-05-14, commits 7e046ee..3822e6c..0ca576d..798f98a..38c55ea..streaming) — landed on `main`
+
+| Phase | Status | Commit | Notes |
+|---|---|---|---|
+| A.2 scaffold | ✅ | `c05d54b` | `shared/ib_client.py` + `ib_oauth.py` |
+| A.3 reads | ✅ | `62ff39d` | quote/account/positions/chain/orders/history |
+| A.4 writes | ✅ | `fa08843` | place_iron_condor / vertical / order / cancel / whatif |
+| A.5 streaming | ✅ | `c2e4c4c` | StreamingManager + 13-min smd refresh |
+| A.7 + A.8 | ✅ | `7e046ee` | reconcile_orders + CircuitBreaker + retry_with_backoff |
+| **End-of-day audit closure** | ✅ | `79153eb` | 5 blockers + 8 bugs + 13 risks + 7 nits + 15 doc fixes + 51 new tests |
+| **A.10 paper-smoke skeleton** | ✅ (gated) | `3822e6c` | `tests/integration/test_ib_paper_smoke.py` — 15 tests auto-skip until OAuth activates |
+| **B.1** BrokerInterface ABC | ✅ | `0ca576d` | + 5 dataclasses + 3 exception types |
+| **B.2** SaxoBrokerAdapter | ✅ | `0ca576d` | + status normalization, deferred stubs for combos |
+| **Brandon overlay test flake** | ✅ | `798f98a` | wall-clock-determinism fix (was pre-existing on origin/main) |
+| **B.2.b** SaxoBrokerAdapter combos unblocked | ✅ | `38c55ea` | place_iron_condor via place_multi_leg_order + symbol registry |
+| **B.3** IBBrokerAdapter | ✅ | `38c55ea` | wraps IBClient, native what_if support |
+| **B.4** build_broker() factory | ✅ | `38c55ea` | `BROKER=saxo\|ibkr` env switch |
+| **Streaming sub-namespace** | ✅ | (this commit) | `StreamingInterface` ABC + `IBStreamingProxy` + `SaxoStreamingProxy` |
+
+**Test coverage**: 698 passed + 15 skipped (paper-smoke) across `tests/`. Full IB suite 245/245 green.
+
+### What's left
+
+| Phase | Status | Gate |
+|---|---|---|
+| A.10 RUN | 🟡 | OAuth activation ~Sunday 2026-05-17 (worst case +2 weeks) |
+| A.6 sor cache | 🟡 deferred | post-A.10 if get_order_status HTTP polling is too slow |
+| B.5 HYDRA refactor | 🟡 deferred | `self.client.X` → `self.broker.X` across `bots/hydra/strategy.py` + variants. ~50 call sites, big diff. Deliberately soaks until paper smoke confirms IBClient surface is stable. |
+| Phase C parallel deploy | 🟡 | Gated on B.5 |
+| Phases D / E / F | 🟡 | Sequential cutover, see §8–10 |
 
 ### Phase 0 — Prerequisites (in progress)
 
@@ -604,49 +637,76 @@ Phase A is **zero-risk**: nothing is deployed and HYDRA imports remain untouched
 
 ## 6. Phase B — Introduce broker abstraction in HYDRA
 
-**Window**: starts when Phase A integration smoke passes (estimated 2026-05-22 to 2026-05-28).
+**v3 update (2026-05-14 EOD):** B.1 through B.4 + a streaming sub-namespace shipped same-day as Phase A (commits `0ca576d`, `38c55ea`, streaming). B.5 (HYDRA call-site refactor) is the only outstanding piece. Original window estimate ("2026-05-22 to 2026-05-28") was conservative — the abstraction landed unit-tested on day one.
 
 ### 6.1 Tasks
 
-#### B.1 Define `BrokerInterface` (~half day)
+#### B.1 Define `BrokerInterface` ✅ shipped `0ca576d`
 
-Per §4.4 sketch above. Two parts:
-- `class BrokerInterface(ABC)` — enforced abstract base for trade methods
-- `class StreamingBroker(Protocol)` — duck-typed for utility/streaming
+`shared/broker/interface.py`:
+- `class BrokerInterface(ABC)` — 18 abstract methods covering lifecycle, reads, account, order management, pre-trade, writes
+- `class StreamingInterface(ABC)` — 9 methods for the streaming sub-namespace (subscribe/unsubscribe, get_snapshot, last_tick_age, is_healthy, is_ws_connected, active_subscriptions)
+- 5 dataclasses crossing the boundary: `QuoteSnapshot`, `OrderResult`, `IronCondorRequest`, `VerticalSpreadRequest`, `Position`. `QuoteSnapshot` + `Position` are frozen with `raw` excluded from equality/hash.
+- 3 exception types: `BrokerError`, `BrokerAuthError`, `BrokerConnectionError`.
+- `BrokerInterface.streaming` is an `@property @abstractmethod` returning a `StreamingInterface`.
 
-#### B.2 Implement `SaxoAdapter(BrokerInterface)` (~1 day)
+#### B.2 Implement `SaxoBrokerAdapter(BrokerInterface)` ✅ shipped `0ca576d` + `38c55ea`
 
-Wraps existing `SaxoClient`. Provides a transparent `BrokerInterface` over the existing Saxo surface. **Existing Saxo dry-run must continue working unchanged after this.**
+`shared/broker/saxo_adapter.py`:
+- Easy 1:1 delegations with dict→dataclass normalization for connect/quotes/balance/positions/order-management/fx
+- Saxo status-string normalization: "Working"/"PartiallyFilled"/"Canceled" → canonical "Submitted"/"PartiallyFilled"/"Cancelled"
+- `.saxo` escape hatch for callers needing Saxo-specifics (e.g. iron_fly_0dte's per-leg-sequential safety ordering with verification — that's strategy concern, not adapter)
+- **B.2.b** (`38c55ea`): symbol registry + atomic combo path. `register_underlying(symbol, underlying_uic, option_root_uic)` decouples adapter API from Saxo internals. `place_iron_condor` composes `find_iron_fly_options + place_multi_leg_order`.
+- `what_if_iron_condor` returns self-describing sentinel `{"_status": "not_supported_on_saxo", "_reason": ...}` (Saxo has no native what_if).
+- `SaxoStreamingProxy` wraps Saxo's bulk WS streaming behind the per-instrument-or-bulk `StreamingInterface` contract. Maintains an internal subscription set + restarts WS on changes.
 
-#### B.3 Implement `IbkrAdapter(BrokerInterface)` (~half day)
+#### B.3 Implement `IBBrokerAdapter(BrokerInterface)` ✅ shipped `38c55ea`
 
-Wraps `IBClient` from Phase A. Should be straightforward since `IBClient` was designed with the interface in mind.
+`shared/broker/ibkr_adapter.py`:
+- Mostly 1:1 since IBClient was designed for the abstraction (Phase A.2–A.8)
+- IBKR status normalization: `ApiCancelled` / `Inactive` / `PreSubmitted` → canonical Cancelled / Cancelled / PreSubmitted
+- Native `what_if_iron_condor` — constructs OrderRequest with conidex, delegates to `IBClient.what_if_order`. Returns IBKR's 5-block dict.
+- Error translation: `IBAuthError` → `BrokerAuthError`, `IBConnectionError` → `BrokerConnectionError`, others → `BrokerError`.
+- `.ib` escape hatch for callers needing direct IBClient access (e.g. reconcile_orders, custom what_if).
+- `IBStreamingProxy` wraps `IBClient.streaming` (a StreamingManager) 1:1, translating field-code-keyed `TickSnapshot` → named-field `QuoteSnapshot`.
 
-#### B.4 Factory in `shared/broker/__init__.py` (~half day)
+#### B.4 Factory `build_broker()` ✅ shipped `38c55ea`
+
+`shared/broker/factory.py`:
 
 ```python
-def build_broker(config: dict) -> BrokerInterface:
-    broker_type = config.get("broker", "saxo")  # default to Saxo for backwards compat
-    if broker_type == "saxo":
-        return SaxoAdapter(config)
-    if broker_type == "ibkr":
-        return IbkrAdapter(config)
-    raise ValueError(f"Unknown broker: {broker_type}")
+broker = build_broker()  # reads BROKER= env, defaults to 'saxo'
+broker.connect()
+snap = broker.get_quote("416904")
+broker.streaming.subscribe_quote("416904")
 ```
 
-#### B.5 Refactor HYDRA strategy.py (~2 days, careful work)
+- Case-insensitive + whitespace-tolerant. Accepts `saxo` / `ibkr` / `ib`.
+- Invalid values raise `BrokerError`.
+- Saxo path: caller MUST supply a pre-built `SaxoClient` (auth flow too coupled to per-bot config).
+- IB path: constructs `IBClient` itself from env via `load_credentials() + IBConfig`, OR accepts a pre-built `ib_client`.
 
-Replace `self.saxo_client` → `self.broker` throughout `bots/hydra/strategy.py` and `bots/meic/strategy.py`. Use `build_broker(config)` in `__init__`. Run existing test suite — must stay green.
+#### B.5 Refactor HYDRA strategy.py — **DEFERRED**
 
-#### B.6 Verify Saxo dry-run on VM still works (~half day)
+`self.saxo_client.X` → `self.broker.X` across `bots/hydra/strategy.py` + variants A/B/C + `bots/iron_fly_0dte/strategy.py` + `bots/meic/strategy.py`. ~50 call sites, large diff.
 
-Deploy refactored HYDRA to VM. Variants A/B/C should continue exactly as before (no config change → defaults to `broker: "saxo"`). Compare day-N entries pre vs post-refactor — must be byte-identical.
+Deliberately deferred until:
+1. A.10 paper smoke fires green Sunday (confirms IBClient surface is stable on a real broker)
+2. Optionally, a "B.5.a" minimal slice: refactor only ONE method on ONE bot first to validate the abstraction against real strategy code
 
-This is the proof that the abstraction was lossless. If anything diverges, roll back and investigate before proceeding.
+Once unblocked: ~2 days of careful work. Use existing tests (~700 currently passing) as the parity-net.
+
+#### B.6 Verify Saxo dry-run on VM still works (gated on B.5)
+
+Deploy refactored HYDRA to VM. Variants A/B/C should continue exactly as before (no config change → `BROKER=saxo` is the default). Compare day-N entries pre vs post-refactor — must be byte-identical. This is the proof that the abstraction was lossless. If anything diverges, roll back and investigate before proceeding.
 
 ### 6.5 Rollback
 
-Phase B introduces the broker abstraction but HYDRA still trades through Saxo via `SaxoBrokerAdapter`. Rollback = revert the abstraction commits OR set `BROKER=saxo` env-var (codepath stays untouched). State files unchanged; no broker-side artifacts. Preserve the rollback commit SHA in the deploy log so we know what to revert to.
+Phase B (B.1–B.4) is **zero-risk**: the abstraction is live but nothing imports it yet from HYDRA. Rollback for those = `git revert` the broker commits. Once B.5 lands (HYDRA wired through the adapter), rollback options are:
+- Set `BROKER=saxo` env-var (codepath stays untouched; ships the same Saxo behavior through the adapter)
+- Revert B.5 commits if the abstraction itself proves broken (unlikely given the unit-test coverage)
+
+State files unchanged through B.1–B.4; no broker-side artifacts. Preserve the rollback commit SHA in the deploy log.
 
 ---
 

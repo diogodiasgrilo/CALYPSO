@@ -179,6 +179,87 @@ class Position:
 # ─── BrokerInterface ABC ────────────────────────────────────────────────────
 
 
+# ─── StreamingInterface (sub-namespace) ─────────────────────────────────────
+
+
+class StreamingInterface(ABC):
+    """Real-time market-data streaming surface.
+
+    Exposed on BrokerInterface via the `.streaming` property. Both brokers
+    map onto this shape, but their underlying models differ:
+
+      • IBKR (CP API): per-conid `smd+/umd+` WebSocket subscriptions
+        managed by `shared.ib_streaming.StreamingManager`. Per-instrument
+        subscribe/unsubscribe is the native shape; subscribe_option adds
+        greeks fields to the same channel.
+
+      • Saxo: bulk WebSocket subscription via
+        `SaxoClient.start_price_streaming(list_of_uics, callback)`. The
+        adapter tracks an internal subscription set and restarts streaming
+        when it changes. Greeks come via REST (`get_option_greeks`), not
+        streaming — `subscribe_option` falls through to `subscribe_quote`.
+
+    Either way, callers see a single contract: subscribe, read snapshots,
+    check health.
+    """
+
+    @abstractmethod
+    def subscribe_quote(
+        self,
+        instrument_id: str,
+        fields: Optional[list[str]] = None,
+    ) -> None:
+        """Start streaming quotes for `instrument_id`. Idempotent —
+        re-subscribing replaces the field set in place."""
+
+    @abstractmethod
+    def subscribe_option(
+        self,
+        instrument_id: str,
+        fields: Optional[list[str]] = None,
+    ) -> None:
+        """Subscribe with greeks fields. On brokers without push-greeks
+        (Saxo), falls through to subscribe_quote; callers fetch greeks
+        via REST `get_option_greeks` separately."""
+
+    @abstractmethod
+    def unsubscribe_quote(self, instrument_id: str) -> None:
+        """Stop streaming for `instrument_id`. Idempotent."""
+
+    @abstractmethod
+    def unsubscribe_all(self) -> None:
+        """Tear down every subscription. Manager itself stays running."""
+
+    @abstractmethod
+    def get_snapshot(self, instrument_id: str) -> Optional[QuoteSnapshot]:
+        """Last-known tick for `instrument_id`. None until first tick
+        arrives. NO I/O — reads from local cache populated by the
+        streaming thread."""
+
+    @abstractmethod
+    def last_tick_age(self, instrument_id: str) -> Optional[float]:
+        """Seconds since the last tick for `instrument_id`. None if no
+        tick has ever been received."""
+
+    @abstractmethod
+    def is_healthy(self, max_tick_age_seconds: float = 60.0) -> bool:
+        """STRICT: WS connected AND every subscription has a recent
+        tick. Returns False during off-hours / closed markets — use
+        is_ws_connected for the lightweight "pipe alive" check."""
+
+    @abstractmethod
+    def is_ws_connected(self) -> bool:
+        """LIGHTWEIGHT: just the underlying WebSocket connection state.
+        True even when no ticks are flowing (off-hours)."""
+
+    @abstractmethod
+    def active_subscriptions(self) -> list[str]:
+        """All instrument_ids currently subscribed."""
+
+
+# ─── BrokerInterface ────────────────────────────────────────────────────────
+
+
 class BrokerInterface(ABC):
     """Abstract broker-agnostic surface.
 
@@ -312,3 +393,15 @@ class BrokerInterface(ABC):
     @abstractmethod
     def place_vertical_spread(self, request: VerticalSpreadRequest) -> OrderResult:
         """Place a 2-leg vertical spread (open OR close)."""
+
+    # ─── Streaming sub-namespace ──────────────────────────────────────────
+
+    @property
+    @abstractmethod
+    def streaming(self) -> StreamingInterface:
+        """Real-time market-data streaming surface.
+
+        Returns a StreamingInterface that's safe to use after `connect()`
+        succeeds. Adapters may construct the proxy lazily on first
+        access. Property + @abstractmethod compose so subclasses are
+        forced to implement the access pattern (not just an attribute)."""
