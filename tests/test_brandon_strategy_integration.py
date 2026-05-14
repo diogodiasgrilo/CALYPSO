@@ -803,6 +803,14 @@ class TestOverlayHedgeTracking:
             current_price=6820,
         )
         inst._brandon_get_gex_profile = lambda d, **_kw: self._profile_with_call_accel()
+        # Pin t_years so the Black-Scholes fill estimates are deterministic
+        # regardless of when the test runs. Real prod code uses
+        # `time_to_expiry_years(now_et, close_et)`, which on intraday runs
+        # (< 4 hours to close) makes deep-OTM call premiums underflow to
+        # float64 0.0 — the test's `fill_price > 0` assertion would then
+        # fail purely due to wall-clock timing, not real behavior.
+        # 1 day = 1/365 years gives realistic non-zero premiums.
+        inst._brandon_estimate_t_years_to_close = lambda: 1.0 / 365.0
         e = self._entry()
         inst._brandon_check_overlay(e)
 
