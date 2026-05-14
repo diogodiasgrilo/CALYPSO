@@ -117,25 +117,17 @@ class TestIBConfig:
 
 
 class TestIBClientConnect:
-    @patch("shared.ib_client.IbkrClient", create=True)  # patched at import site below
-    def test_successful_connect_discovers_account(self, _IbkrClient_cls, paper_config, mock_ibkr_client):
-        # Patch the lazy import inside connect()
-        import shared.ib_client as ib_client_mod
-        with patch.object(ib_client_mod, "IbkrClient", return_value=mock_ibkr_client, create=True):
-            # Need to make the import resolve to our mock
-            with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
-                client = IBClient(paper_config)
-                assert client.connect() is True
-                assert client.is_connected()
-                assert client.account_id == "DU1234567"
+    def test_successful_connect_discovers_account(self, paper_config, mock_ibkr_client):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
+            client = IBClient(paper_config)
+            assert client.connect() is True
+            assert client.is_connected()
+            assert client.account_id == "DU1234567"
 
     def test_lst_handshake_invalid_consumer_raises_auth_error(self, paper_config):
         """Pre-activation: ibind raises an exception whose str contains 'invalid consumer'."""
-        with patch.dict("sys.modules", {
-            "ibind": MagicMock(IbkrClient=MagicMock(
-                side_effect=Exception("401 Unauthorized: invalid consumer")
-            ))
-        }):
+        with patch("shared.ib_client.IbkrClient",
+                   side_effect=Exception("401 Unauthorized: invalid consumer")):
             client = IBClient(paper_config)
             with pytest.raises(IBAuthError, match="pre-activation OR wrong consumer key"):
                 client.connect()
@@ -143,11 +135,8 @@ class TestIBClientConnect:
 
     def test_lst_handshake_network_error_raises_connection_error(self, paper_config):
         """Non-401 errors are connection problems, not auth problems."""
-        with patch.dict("sys.modules", {
-            "ibind": MagicMock(IbkrClient=MagicMock(
-                side_effect=ConnectionRefusedError("could not connect to api.ibkr.com")
-            ))
-        }):
+        with patch("shared.ib_client.IbkrClient",
+                   side_effect=ConnectionRefusedError("could not connect to api.ibkr.com")):
             client = IBClient(paper_config)
             with pytest.raises(IBConnectionError, match="LST stage"):
                 client.connect()
@@ -159,7 +148,7 @@ class TestIBClientConnect:
             "connected": True,
             "competing": False,
         }
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             with pytest.raises(IBAuthError, match="Auth status check failed"):
                 client.connect()
@@ -171,7 +160,7 @@ class TestIBClientConnect:
             "connected": True,
             "competing": True,  # someone else is logged in
         }
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             with pytest.raises(IBAuthError, match="competing session"):
                 client.connect()
@@ -179,7 +168,7 @@ class TestIBClientConnect:
     def test_account_discovery_empty_raises_auth_error(self, paper_config, mock_ibkr_client):
         """No accounts visible — likely permission/activation issue."""
         mock_ibkr_client.portfolio_accounts.return_value.data = []
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             with pytest.raises(IBAuthError, match="No managed accounts"):
                 client.connect()
@@ -187,7 +176,7 @@ class TestIBClientConnect:
     def test_pinned_account_id_skips_discovery(self, paper_creds, mock_ibkr_client):
         """If config.account_id is pinned, we don't call portfolio_accounts."""
         cfg = IBConfig(credentials=paper_creds, account_id="DU0000001")
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(cfg)
             client.connect()
             assert client.account_id == "DU0000001"
@@ -202,7 +191,7 @@ class TestIBClientDisconnect:
         assert not client.is_connected()
 
     def test_disconnect_after_connect_clears_state(self, paper_config, mock_ibkr_client):
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             client.connect()
             assert client.is_connected()
@@ -213,7 +202,7 @@ class TestIBClientDisconnect:
     def test_disconnect_swallows_cleanup_errors(self, paper_config, mock_ibkr_client):
         """Errors during shutdown shouldn't propagate."""
         mock_ibkr_client.stop_tickler.side_effect = Exception("network gone")
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             client.connect()
             client.disconnect()  # no raise
@@ -222,7 +211,7 @@ class TestIBClientDisconnect:
 
 class TestContextManager:
     def test_with_block_connects_and_disconnects(self, paper_config, mock_ibkr_client):
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             with IBClient(paper_config) as client:
                 assert client.is_connected()
             assert not client.is_connected()
@@ -233,7 +222,7 @@ class TestContextManager:
 
 class TestProperties:
     def test_client_key_is_saxo_compat_alias_for_account_id(self, paper_config, mock_ibkr_client):
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             client.connect()
             assert client.client_key == client.account_id == "DU1234567"
@@ -272,7 +261,7 @@ class TestRepr:
         assert "account=?" in rep
 
     def test_repr_after_connect_shows_account(self, paper_config, mock_ibkr_client):
-        with patch.dict("sys.modules", {"ibind": MagicMock(IbkrClient=lambda **kw: mock_ibkr_client)}):
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             client.connect()
             rep = repr(client)

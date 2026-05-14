@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ibind.oauth.oauth1a import OAuth1aConfig  # module-level so tests can patch cleanly
+
 
 # Path where the OAuth crypto files live. Override via env var if needed.
 DEFAULT_KEYS_BASE = Path(os.environ.get(
@@ -186,11 +188,8 @@ def load_credentials(
     )
 
 
-def build_oauth1a_config(creds: IBKRCredentials, *, init_brokerage_session: bool = True):
+def build_oauth1a_config(creds: IBKRCredentials, *, init_brokerage_session: bool = True) -> OAuth1aConfig:
     """Build ibind's OAuth1aConfig from validated credentials.
-
-    Imports ibind lazily so this module can be used in environments where
-    ibind isn't installed (tests that only exercise DH extraction etc.).
 
     Args:
         creds: validated IBKRCredentials (caller should have run
@@ -202,8 +201,6 @@ def build_oauth1a_config(creds: IBKRCredentials, *, init_brokerage_session: bool
     Returns:
         ibind.oauth.oauth1a.OAuth1aConfig
     """
-    from ibind.oauth.oauth1a import OAuth1aConfig
-
     creds.validate_paths()
     creds.validate_secrets()
     dh_prime = extract_dh_prime(creds.dh_param_path)
