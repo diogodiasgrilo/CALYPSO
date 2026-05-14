@@ -1,58 +1,113 @@
-# Saxo → Interactive Brokers Migration Plan
+# Saxo → Interactive Brokers Migration Plan (v2)
 
-> **⚠️ ARCHITECTURE UPDATE 2026-05-13 (afternoon)**: Follow-up research resolved all 6 open questions and **pivoted the architecture**. The Phase 1 + 4 + 7 sections below describe the original IB Gateway + `ib_async` + IBC plan; the **production path is now OAuth 1.0a + `ibind` (gateway-free, no weekly phone tap)** per [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md). Gateway path retained as documented fallback if IBKR ever revokes OAuth 1.0a retail self-service. **Read `IB_OPEN_QUESTIONS_ANSWERED.md` "Implications for the migration plan" section before executing Phase 1.**
+> **Major rewrite 2026-05-14.** Architecture pivoted from IB Gateway + `ib_async` to **ibind + OAuth 1.0a**, then refined again into **Option 4 hybrid** (standalone IB client → broker abstraction → parallel variant deploy → gradual cutover). All `ib_async`-based code skeletons and Gateway-deployment instructions in prior versions are obsolete. Latest research (May 13-14) integrated.
 >
-> **Status**: research + plan only. No code changes yet. This document is the prescriptive sequencing for the migration; the companion `INTERACTIVE_BROKERS_API_REFERENCE.md` is the supporting encyclopedia.
+> **Current state**: Phase 0 ~70% complete. Paper OAuth registered with consumer key `CALYPSOPP` on 2026-05-14 (activation pending ~Sunday 2026-05-17). Variants A/B/C still running Saxo dry-run on the VM — nothing touched. Build of `shared/ib_client.py` (Phase A) starts now during the activation wait.
 >
-> **Migration scope**: full replacement of `shared/saxo_client.py` (5,152 lines) and the WebSocket streaming layer with an IBKR equivalent. SDK now: **`ibind` (forked locally to swap pyCrypto → pycryptodome)** for the OAuth 1.0a primary path; `ib_async` retained for the Gateway-fallback path. All four bots that import the Saxo client (`hydra/`, `meic/`, `iron_fly_0dte/`, `delta_neutral/`, `rolling_put_diagonal/`) cut over together.
->
-> **Compiled**: 2026-05-13. **Architecture pivoted**: 2026-05-13 afternoon (Q&A research).
->
-> **Companion**:
-> - [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md) — **READ FIRST** — architecture pivot + 6 verified answers.
-> - [`INTERACTIVE_BROKERS_API_REFERENCE.md`](./INTERACTIVE_BROKERS_API_REFERENCE.md) — IB API encyclopedia.
+> **Companion docs**:
+> - [`IB_OPEN_QUESTIONS_ANSWERED.md`](./IB_OPEN_QUESTIONS_ANSWERED.md) — the 6 prior open questions, all answered
+> - [`INTERACTIVE_BROKERS_API_REFERENCE.md`](./INTERACTIVE_BROKERS_API_REFERENCE.md) — IB API encyclopedia
+> - `research_scratch/01-12*.md` — verbatim agent research chapters (12 files, ~5,500 lines)
 
 ---
 
 ## Table of contents
 
-1. [Goals and non-goals](#1-goals-and-non-goals)
-2. [Saxo surface inventory — what we actually use](#2-saxo-surface-inventory)
-3. [Saxo → IB call-site mapping](#3-saxo--ib-call-site-mapping)
-4. [Target architecture](#4-target-architecture)
-5. [Migration phases](#5-migration-phases)
-6. [Code skeleton — `shared/ib_client.py`](#6-code-skeleton)
-7. [Rollout & cutover](#7-rollout--cutover)
-8. [Risk register](#8-risk-register)
-9. [Pre-flight checklist (before any live cutover)](#9-pre-flight-checklist)
-10. [Post-cutover validation](#10-post-cutover-validation)
+1. [Goals + architecture decision (Option 4)](#1-goals--architecture-decision-option-4)
+2. [Current status (what's done as of 2026-05-14)](#2-current-status)
+3. [Saxo surface inventory — what we actually use](#3-saxo-surface-inventory)
+4. [Target architecture — broker abstraction + parallel variants](#4-target-architecture)
+5. [Phase A — Build standalone `shared/ib_client.py`](#5-phase-a-build-ib-client)
+6. [Phase B — Introduce broker abstraction in HYDRA](#6-phase-b-broker-abstraction)
+7. [Phase C — Deploy IB variants in parallel](#7-phase-c-parallel-variants)
+8. [Phase D — Cut B/C from Saxo to IB](#8-phase-d-cut-bc-to-ib)
+9. [Phase E — Cut A live to IB](#9-phase-e-cut-a-live)
+10. [Phase F — Saxo decommission](#10-phase-f-decommission)
+11. [Saxo → IB call-site mapping](#11-saxo-ib-call-site-mapping)
+12. [Code skeletons (ibind + conidex combo + ws streaming)](#12-code-skeletons)
+13. [Risk register](#13-risk-register)
+14. [Cutover SOPs](#14-cutover-sops)
+15. [Pre-flight checklist (before any live cutover)](#15-pre-flight-checklist)
+16. [Post-cutover validation](#16-post-cutover-validation)
+17. [Appendix — IBKR error code dictionary](#17-appendix-error-codes)
 
 ---
 
-## 1. Goals and non-goals
+## 1. Goals + architecture decision (Option 4)
 
 ### Goals
 
-- **Replace Saxo entirely.** Every call to `shared.saxo_client.SaxoClient` must route to an IBKR equivalent.
-- **Preserve all current bot logic.** HYDRA's strategy code, MEIC, the dry-run harness, dashboard — these are NOT touched. Only the broker-facing adapter changes.
-- **Drop Polygon Options Starter** ($29/mo) — IB OPRA gives us streaming bid/ask + Model Greeks + per-strike OI in one feed.
-- **Cut commission costs ~55%** — IB Pro Fixed all-in ~$1.13/contract (commission $0.65 + Cboe SPX Index Option Surcharge $0.45 + ~$0.03 regulatory/clearing) vs Saxo $2.50/leg/contract bundled. Saves ~$109.56 per IC round-trip at 10c ($90.44 vs $200). On worthless-expiry path: ~$54.90 saved ($45.10 vs $100). (Earlier drafts overstated this at ~75% by comparing IB's bare commission line against Saxo's bundled rate — the $0.45/contract Cboe Index Option Surcharge that IB unbundles brings the net cost back up.)
-- **Tighter NBBO + native CBOE Complex Order Book routing** — better fills on 4-leg iron condors.
+- **Replace Saxo entirely** with IB for HYDRA (the only live-tradable bot today; other bots are kill-switched).
+- **Preserve HYDRA's strategy code** — only the broker-facing adapter changes. Variants A/B/C strategy logic stays untouched.
+- **Run Saxo and IB variants in parallel during cutover** — Saxo variants keep running unchanged on their existing systemd services; new IB variants are NEW services with NEW state files. Zero risk to current dry-run during build.
+- **Cut commission costs ~55%** (verified — corrected from prior 75% claim).
+- **Drop Polygon Options Starter** ($29/mo savings — IB OPRA gives streaming bid/ask + Greeks + OI).
+- **Eliminate the weekly Sunday phone tap** by using OAuth 1.0a Web API (not IB Gateway).
 
-### Non-goals (deferred to a future phase)
+### Non-goals (deferred)
 
-- Refactoring HYDRA strategy logic (out of scope).
-- Migrating to Portfolio Margin (requires $110K equity floor; not yet).
-- Section 1256 60/40 US tax optimization (we're EU-tax-resident).
-- Building a fancy reconnection state machine beyond `ib_async.Watchdog` (start simple).
+- Refactoring HYDRA strategy logic
+- Portfolio Margin (requires $110K NLV)
+- Migrating MEIC / IronFly / DeltaNeutral / RollingPutDiagonal — they're all kill-switched
+- Section 1256 60/40 tax optimization (EU-tax resident; not applicable)
+
+### Architecture decision: Option 4 (hybrid)
+
+We considered four options:
+
+| Option | Description | Verdict |
+|---|---|---|
+| 1. In-place swap | Replace `shared/saxo_client.py` with `shared/ib_client.py`. All bots cut over together. | ❌ Hard cutover, no rollback during build |
+| 2. Whole HYDRA fork | Copy `bots/hydra/` → `bots/hydra_ib/`. ~10K LOC duplicated. | ❌ Maintenance cost too high |
+| 3. Broker abstraction (in-place) | `shared/broker/` interface + adapters. Refactor HYDRA to use abstraction. | ⚠️ Good design but eager refactor risks breaking Saxo dry-run |
+| **4. Hybrid: standalone-first** | Phase A standalone IB module (zero HYDRA changes) → Phase B broker abstraction → Phase C parallel variants → Phase D-F cutover | ✅ **Chosen** — preserves Saxo during build, no duplication, gradual rollout |
+
+User-confirmed sub-decisions:
+- **Full SaxoClient parity** for `shared/ib_client.py` (every method has an equivalent, not MVP)
+- **Enforced ABC** for trade-relevant `BrokerInterface` methods (clear contract, fails loudly)
+- **Duck-typed** for utility methods (`get_chart_data`, `get_fx_rate`)
+- **Fully separate state** for IB variants — `data/variant_a_ibkr/`, separate DBs, separate logs
 
 ---
 
-## 2. Saxo surface inventory
+## 2. Current status
 
-Today's Saxo client is **5,152 lines**, of which the bot code actually exercises this concrete subset (counted via `grep -hE "self.client\.[a-z_]+" bots/`):
+### Phase 0 — Prerequisites (in progress)
 
-### 2.1 Methods called by HYDRA + MEIC
+| Task | Status | Notes |
+|---|---|---|
+| IBKR Pro account opened | ✅ | Existing IBIE (Ireland) account, Malta-based, EUR-base |
+| Account type = Margin (REG-T) | ✅ | Verified via Configure Account Type page |
+| Account is IBKR Pro (not Lite) | ✅ | Verified |
+| Non-Professional subscriber status | ✅ | Verified |
+| IBKR Mobile 2FA enabled (sole method) | ✅ | DSC+ not configured (modern account); optional TOTP backup available |
+| TWS Desktop installed | ✅ | One-time smoke-test tool only |
+| Paper account creation initiated | ✅ | "Will be created next business day" — expect 2026-05-15 |
+| OpenSSL keypairs generated (paper + live) | ✅ | At `~/ibkr-oauth/{paper,live}/`, mode 600 on private files |
+| Global gitignore for keys | ✅ | `~/.gitignore_global` covers `*.pem`, `ibkr-oauth/`, `*_access_token*` |
+| Paper OAuth registered with IBKR | ✅ | Consumer key `CALYPSOPP`, registered 2026-05-14 |
+| Access tokens stored in 1Password | ✅ | Paper entry has access token + secret |
+| Activation poller built + verified | ✅ | `~/ibkr-oauth/poll/check.sh paper` — toolchain confirmed via `id: 19030 invalid consumer` (expected pre-activation response) |
+| **Paper OAuth activation** | ⏳ | **Pending IBKR weekend reset Sunday 2026-05-17** |
+| Live account funding | ⏳ | "Soon" — no specific date |
+| Live OAuth registration | ⏳ | Blocked on live funding |
+| Market data subscriptions | ⏳ | Blocked on live funding (3 subs: CBOE Streaming Market Indexes, CME S&P Indexes, OPRA Top of Book) |
+| TWS smoke test against live data | ⏳ | Blocked on subs activating |
+
+### What's NOT touched (and stays that way through Phase B)
+
+- `shared/saxo_client.py` — untouched
+- `bots/hydra/` — entirely untouched (strategy code, configs, state files)
+- VM systemd services `hydra`, `hydra_variant_b`, `hydra_variant_c` — untouched
+- All HYDRA variants continue running Saxo dry-run on the existing schedule
+
+---
+
+## 3. Saxo surface inventory
+
+The exact subset HYDRA + MEIC parent call against `SaxoClient`, counted via `grep -hE "self.client\.[a-z_]+" bots/`:
+
+### 3.1 Methods called by HYDRA + MEIC (~25 methods)
 
 | Method | Purpose | Hit frequency |
 |---|---|---|
@@ -60,7 +115,7 @@ Today's Saxo client is **5,152 lines**, of which the bot code actually exercises
 | `client_key` (property) | Account identifier | Per order |
 | `get_account_info()` | Account metadata | Startup |
 | `get_balance()` | Live margin / available BP | Every entry decision + per-tick monitoring |
-| `get_quote(uic, asset_type)` | Single instrument quote | SPX (UIC 4913) + VIX (UIC 10606) every monitor tick |
+| `get_quote(uic, asset_type)` | Single instrument quote | SPX + VIX every monitor tick |
 | `get_quotes_batch(uics, asset_type)` | Batch quotes for option legs | Per stop-monitoring tick |
 | `get_vix_price(vix_uic)` | VIX spot (alias for get_quote) | Every tick |
 | `get_option_chain(...)` | Option strike grid for expiry | Per entry |
@@ -82,731 +137,964 @@ Today's Saxo client is **5,152 lines**, of which the bot code actually exercises
 | `is_heartbeat_alive(max_age_seconds)` | Stream heartbeat | Every tick |
 | `stop_price_streaming()` | Tear down stream | EOD |
 
-### 2.2 HTTP endpoints we use (from `_make_request` callers)
-
-```
-GET  /openapi/trade/v1/infoprices         — single quote
-POST /openapi/trade/v1/infoprices/list    — batch quotes
-POST /openapi/trade/v2/orders             — place order
-PUT  /openapi/trade/v2/orders/{order_id}  — modify
-DELETE /openapi/trade/v2/orders/{order_id} — cancel
-POST /openapi/trade/v2/positions/{pos_id} — close position
-POST /openapi/trade/v1/prices/subscriptions — start streaming
-DEL  /openapi/trade/v1/prices/subscriptions/{ctx_id}/{ref_id}
-GET  /openapi/port/v1/positions
-GET  /openapi/port/v1/orders/me
-GET  /openapi/port/v1/orders/{client_key}/{order_id}
-GET  /openapi/port/v1/accounts/me
-GET  /openapi/port/v1/accounts/{account_key}
-GET  /openapi/port/v1/balances
-GET  /openapi/port/v1/closedpositions
-GET  /openapi/ref/v1/instruments
-GET  /openapi/ref/v1/instruments/details
-GET  /openapi/ref/v1/instruments/contractoptionspaces/{root}
-GET  /openapi/chart/v3/charts
-WS   /openapi/streamingws/connect
-```
-
-### 2.3 Streaming subscriptions
-
-- One websocket connection, multiplexed by `ref_id` per subscription
-- Subscriptions: SPX UIC 4913, VIX UIC 10606, ~80 SPX option contracts during entry+monitoring
-- Heartbeat tracked via `_handle_streaming_message` last-message-time
-
----
-
-## 3. Saxo → IB call-site mapping
-
-Every Saxo client method gets a 1:1 IBKR replacement. Method signature stays close to the existing surface so HYDRA / MEIC / dashboard code doesn't change.
-
-| Saxo method | IBKR replacement (`shared/ib_client.py`) | IB API / `ib_async` call |
-|---|---|---|
-| `authenticate()` | `IBClient.connect()` → `Watchdog` keepalive | `IB.connectAsync(host, port, clientId)` — gateway handles auth |
-| `client_key` | `IBClient.account_id` | `IB.managedAccounts()[0]` (or pin from config) |
-| `get_account_info()` | `IBClient.get_account_info()` | `IB.accountSummary()` |
-| `get_balance()` | `IBClient.get_balance(currency='USD')` | `IB.accountSummary(tags='AvailableFunds,BuyingPower,ExcessLiquidity', account=...)` filtered to `$LEDGER:USD` |
-| `get_quote(uic, asset_type)` | `IBClient.get_quote(symbol_or_contract)` | `IB.reqMktData(contract, '', snapshot=True)` — one-shot, releases ticker line |
-| `get_quotes_batch(uics, asset_type)` | `IBClient.get_quotes_batch(contracts)` | Loop with `snapshot=True` OR persist subscriptions if list stable; max 100 streaming |
-| `get_vix_price(...)` | `IBClient.get_vix_price()` | `IB.reqMktData(Index('VIX', 'CBOE'), snapshot=True)` |
-| `get_option_chain(root_uic, expiry)` | `IBClient.get_option_chain(symbol, expiry, trading_class='SPXW')` | `IB.reqSecDefOptParams(...)` for strikes/expiries; then `qualifyContracts` for each strike to get `conId` |
-| `get_option_greeks(uic, asset_type)` | `IBClient.get_option_greeks(contract)` | `IB.reqMktData(opt_contract, genericTickList='106,165,221,225,233', snapshot=False)` → wait for `modelGreeks` ticker |
-| `get_positions(include_greeks=True)` | `IBClient.get_positions()` | `IB.positions()` + per-contract `qualifyContracts` for greek context |
-| `get_closed_position_price(...)` | `IBClient.get_closed_position_price(...)` | `IB.reqExecutions()` filtered by execId / time |
-| `place_order(...)` | `IBClient.place_order(contract, action, qty, order_type, limit_price=...)` | `IB.placeOrder(contract, Order(...))` |
-| `place_emergency_order(...)` | `IBClient.place_market_order(...)` | `IB.placeOrder(contract, MarketOrder(...))` |
-| `place_limit_order_with_timeout(...)` | `IBClient.place_limit_with_timeout(contract, action, qty, limit_price, timeout_sec)` | `placeOrder` with `Order(orderType='LMT', tif='DAY', ...)`, await fill, `cancelOrder` on timeout |
-| `cancel_order(order_id)` | `IBClient.cancel_order(order_id)` | `IB.cancelOrder(Order(orderId=...))` |
-| `get_order_status(order_id)` | `IBClient.get_order_status(order_id)` | Maintain dict from `orderStatusEvent` callbacks |
-| `get_open_orders()` | `IBClient.get_open_orders()` | `IB.reqOpenOrders()` (returns once) or `IB.openOrders()` (cached list) |
-| `check_order_filled_by_activity(...)` | **DELETE** | IB's order status is broker-side authoritative; no race condition equivalent |
-| `get_chart_data(symbol, ...)` | `IBClient.get_chart_data(contract, duration, bar_size)` | `IB.reqHistoricalData(...)` |
-| `get_fx_rate('USD', 'EUR')` | `IBClient.get_fx_rate('USD', 'EUR')` | `IB.reqMktData(Forex('USDEUR'), snapshot=True)` OR account summary FX rate |
-| `start_price_streaming(...)` | `IBClient.subscribe_quotes(contracts)` | Multiple `IB.reqMktData(contract, snapshot=False)` calls; reuses existing connection |
-| `subscribe_to_option(uic, ...)` | `IBClient.subscribe_option(opt_contract)` | `IB.reqMktData(opt_contract, genericTickList='106,165,221,225,233')` |
-| `is_websocket_healthy()` | `IBClient.is_connected()` | `IB.isConnected()` |
-| `is_heartbeat_alive(...)` | `IBClient.last_tick_age()` | Track via Watchdog's last-received-tick timestamp |
-| `stop_price_streaming()` | `IBClient.unsubscribe_all()` | Loop `IB.cancelMktData(contract)` |
-
-### 3.1 NEW IB-only methods (no Saxo equivalent)
-
-| Method | Why we need it |
-|---|---|
-| `IBClient.place_iron_condor(call_short, call_long, put_short, put_long, contracts, net_credit_limit, expiry)` | One-shot 4-leg combo placement via `BAG` contract. Replaces our hand-rolled multi-leg flow. |
-| `IBClient.place_vertical_spread(short, long, contracts, net_credit_limit, side)` | 2-leg spread for one-sided entries OR closing one side of an open IC. Same BAG mechanism, 2 legs. |
-| `IBClient.what_if(order)` | Pre-trade margin check. Returns `initMarginChange`/`maintMarginChange`. **Replaces our ORDER-004 BP-per-IC gate** with broker-authoritative numbers. |
-| `IBClient.qualify(contract)` | `ib_async.qualifyContracts` wrapper. Required before any order on an `Option(...)` — resolves `conId`. |
-
-### 3.2 Methods to delete entirely
+### 3.2 Methods to delete (no IB equivalent needed)
 
 | Saxo method | Why not needed on IB |
 |---|---|
-| `_oauth_authorization_flow`, `_exchange_code_for_token`, `_refresh_access_token` | Gateway handles auth. No OAuth refresh in our code. |
-| `_upgrade_session_for_realtime_data`, `_ensure_session_capabilities` | IB has no session-tier upgrade; data subs are account-level. |
-| `signal_session_downgrade` | No equivalent concept on IB. |
-| `check_order_filled_by_activity` | No race condition — `orderStatusEvent` is authoritative. |
-| The entire WebSocket binary-message decoder (`_decode_binary_ws_message`, `_handle_streaming_message`) | `ib_async` parses ticks natively, exposes typed events. |
+| `_oauth_authorization_flow`, `_exchange_code_for_token`, `_refresh_access_token` | OAuth 1.0a handshake is in `ibind` |
+| `_upgrade_session_for_realtime_data`, `_ensure_session_capabilities` | IB has no session-tier upgrade |
+| `signal_session_downgrade` | No equivalent |
+| `check_order_filled_by_activity` | IB orders are broker-side authoritative; no race |
+| Binary WS message decoder (`_decode_binary_ws_message`, etc.) | `ibind`'s `IbkrWsClient` parses JSON natively |
 
 ---
 
 ## 4. Target architecture
 
-### 4.1 Process topology on the GCE VM
+### 4.1 Three layers
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│ GCE VM (calypso-bot, us-east1-b)                         │
-│                                                           │
-│ ┌─────────────────────┐    ┌─────────────────────────┐  │
-│ │ ib-gateway-paper    │    │ ib-gateway-live          │  │
-│ │ Docker container    │    │ Docker container         │  │
-│ │ Port 127.0.0.1:4002 │    │ Port 127.0.0.1:4001      │  │
-│ │ IBC auto-login      │    │ IBC auto-login           │  │
-│ │ Image: gnzsnz/      │    │ Image: gnzsnz/           │  │
-│ │  ib-gateway:10.45.1e│    │  ib-gateway:10.45.1e     │  │
-│ └─────────────────────┘    └─────────────────────────┘  │
-│           │                          │                    │
-│           │  TCP socket              │                    │
-│           ▼                          ▼                    │
-│ ┌─────────────────────────────────────────────────────┐ │
-│ │ Python bots (systemd services)                       │ │
-│ │   hydra.service        → uses ib-gateway-live        │ │
-│ │   hydra_variant_b      → uses ib-gateway-paper       │ │
-│ │   hydra_variant_c      → uses ib-gateway-paper       │ │
-│ │                                                       │ │
-│ │   shared/ib_client.py — IBClient adapter             │ │
-│ │   shared/saxo_client.py — DELETED post-cutover       │ │
-│ └─────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  HYDRA strategy code (bots/hydra/, unchanged)                │
+│                                                                │
+│  Today:    self.saxo_client.place_order(...)                  │
+│  Phase B:  self.broker.place_iron_condor(...)                 │
+└────────────────────────┬─────────────────────────────────────┘
+                         │
+        ┌────────────────┴────────────────┐
+        │                                  │
+        ▼                                  ▼
+┌──────────────────┐              ┌──────────────────┐
+│ shared/broker/   │              │ shared/broker/   │
+│ saxo_adapter.py  │              │ ibkr_adapter.py  │
+│ wraps SaxoClient │              │ wraps IbkrClient │
+└────────┬─────────┘              └────────┬─────────┘
+         │                                  │
+         ▼                                  ▼
+┌──────────────────┐              ┌──────────────────┐
+│ shared/          │              │ shared/          │
+│ saxo_client.py   │              │ ib_client.py     │
+│ (unchanged,      │              │ (NEW — Phase A)  │
+│  5152 lines)     │              │  wraps ibind     │
+└────────┬─────────┘              └────────┬─────────┘
+         │                                  │
+         │ HTTPS REST + WS                  │ HTTPS REST + WS
+         │ OAuth 2.0 refresh tokens         │ OAuth 1.0a
+         ▼                                  ▼
+   Saxo OpenAPI                       api.ibkr.com (CP API)
+   (US-East GCP egress)               (direct, no Gateway)
 ```
 
-**Key design decisions**:
-- **Two gateways** — paper and live, on different ports. Variants B/C stay on paper indefinitely (their whole purpose is dry-run); variant A is the live trader once we cut over.
-- **127.0.0.1 only** — TWS API has no socket-level auth. Firewall both ports to loopback. **Never expose to public internet.**
-- **Each bot uses a unique `clientId`** to avoid socket conflicts (clientId=1 for variant A live, clientId=2 for variant B paper, clientId=3 for variant C paper).
-- **`ib_async.Watchdog`** wraps each bot's `IB.connect()` — handles automatic reconnect on disconnect, weekly server reset.
-- **IBC handles login** — username/password from Secret Manager, IBKR Mobile push approves the weekly 2FA challenge.
-
-### 4.2 New module layout
+### 4.2 Module layout (post-Phase B)
 
 ```
 shared/
-  ib_client.py              — IBClient class, top-level adapter (~1500-2000 LOC est.)
-  ib_contracts.py           — SPX/SPXW/VIX contract factories, conId cache
-  ib_streaming.py           — quote subscription manager, ticker-line accounting
-  ib_orders.py              — order placement helpers (single, vertical, IC combo)
-  ib_account.py             — account summary, EUR/USD ledger handling
-  ib_watchdog.py            — Watchdog wrapper, disconnect/reconnect lifecycle
+  saxo_client.py              ← unchanged
+  ib_client.py                ← NEW (Phase A): wraps ibind, full Saxo parity
+  broker/
+    __init__.py               ← factory: build_broker(config) → BrokerInterface
+    interface.py              ← enforced ABC for trade methods, duck-typed for utility
+    saxo_adapter.py           ← thin wrapper exposing SaxoClient via BrokerInterface
+    ibkr_adapter.py           ← thin wrapper exposing IbkrClient via BrokerInterface
 deploy/
-  ib-gateway-paper.service  — systemd unit for paper gateway
-  ib-gateway-live.service   — systemd unit for live gateway
-  docker-compose-ib.yml     — IB Gateway Docker compose (paper + live)
-  ibc-config-paper.ini      — IBC config for paper account
-  ibc-config-live.ini       — IBC config for live account
+  hydra.service               ← unchanged (variant A, Saxo)
+  hydra_variant_b.service     ← unchanged (variant B, Saxo)
+  hydra_variant_c.service     ← unchanged (variant C, Saxo)
+  hydra_variant_a_ibkr.service  ← NEW (Phase C): variant A, IB
+  hydra_variant_b_ibkr.service  ← NEW (Phase C): variant B, IB
+  hydra_variant_c_ibkr.service  ← NEW (Phase C): variant C, IB
+bots/hydra/config/
+  config_variant_b.json       ← unchanged (Saxo)
+  config_variant_c.json       ← unchanged (Saxo)
+  config_variant_a_ibkr.json  ← NEW (Phase C): {"broker": "ibkr", ...}
+  config_variant_b_ibkr.json  ← NEW (Phase C)
+  config_variant_c_ibkr.json  ← NEW (Phase C)
+data/
+  variant_b/                  ← unchanged (Saxo state)
+  variant_c/                  ← unchanged
+  variant_a_ibkr/             ← NEW (Phase C): separate state, separate DB
+  variant_b_ibkr/             ← NEW
+  variant_c_ibkr/             ← NEW
 ```
 
-`shared/saxo_client.py` gets **deleted** entirely post-cutover. Bots that need a broker swap their import:
+### 4.3 Per-variant config gains one key
+
+```json
+{
+  "broker": "ibkr",                          // NEW; defaults to "saxo" if missing
+  "ibkr": {
+    "oauth": {
+      "consumer_key": "CALYPSOPP",
+      "access_token_secret_name": "ibkr-paper-oauth",  // GCP Secret Manager
+      "encryption_key_path": "/opt/calypso/secrets/paper/private_encryption.pem",
+      "signature_key_path": "/opt/calypso/secrets/paper/private_signature.pem",
+      "dh_param_path": "/opt/calypso/secrets/paper/dhparam.pem"
+    }
+  },
+  "strategy": { ... }                        // unchanged
+}
+```
+
+Existing Saxo variant configs need NO modification — they're treated as `broker: "saxo"` by default. Adding the explicit `"broker": "saxo"` key is optional but recommended for clarity.
+
+### 4.4 BrokerInterface (Phase B sketch)
 
 ```python
-# Before
-from shared.saxo_client import SaxoClient
-client = SaxoClient(config)
+# shared/broker/interface.py
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import date
+from typing import Optional, Protocol
 
-# After
-from shared.ib_client import IBClient
-client = IBClient(config)
-```
+@dataclass
+class QuoteSnapshot:
+    bid: Optional[float]; ask: Optional[float]; last: Optional[float]
+    mid: Optional[float]; timestamp: str; currency: str = "USD"
 
-The IBClient class exposes the **same public method names** as SaxoClient where possible, so HYDRA / MEIC / dashboard code keeps working with minimal patches.
+@dataclass
+class OrderResult:
+    order_id: str; status: str  # "Submitted", "Filled", "Cancelled", "Rejected"
+    filled_qty: int = 0; avg_fill_price: Optional[float] = None
+    reject_reason: Optional[str] = None
 
-### 4.3 Connection lifecycle
+@dataclass
+class IronCondorRequest:
+    expiry: date
+    short_call_strike: float; long_call_strike: float
+    short_put_strike: float;  long_put_strike: float
+    contracts: int; net_credit_limit: float
+    timeout_seconds: int = 60
+    non_guaranteed: bool = True  # entry: True; stop-out close: False
 
-```
-[bot startup]
-   │
-   ▼
-[ib_async.Watchdog(IB(), host='127.0.0.1', port=4002, clientId=1).start()]
-   │
-   ▼
-[IB.connectAsync() → connected event]
-   │
-   ▼
-[register orderStatusEvent / errorEvent / disconnectedEvent callbacks]
-   │
-   ▼
-[on_connect: reqOpenOrders() + reqPositions() to reconcile state]
-   │
-   ▼
-[subscribe_quotes(SPX, VIX, open_legs)]
-   │
-   ▼
-[main loop: heartbeats, entry decisions, stop monitoring]
-   │
-   ▼ [on disconnect]
-[Watchdog auto-reconnects; on_connect re-runs reconciliation]
-```
+class BrokerInterface(ABC):
+    """Trade-relevant methods — must be implemented by every broker adapter."""
 
-### 4.4 Order-state reconciliation on reconnect
+    @abstractmethod
+    async def connect(self) -> bool: ...
+    @abstractmethod
+    def is_connected(self) -> bool: ...
+    @abstractmethod
+    def disconnect(self) -> None: ...
 
-This is the biggest behavior difference from Saxo. On IB, orders are **broker-side persistent** — if the bot crashes mid-order, the order is still live on IBKR's books when we reconnect.
+    @abstractmethod
+    async def get_quote(self, symbol: str, asset_type: str = "option") -> Optional[QuoteSnapshot]: ...
+    @abstractmethod
+    async def get_account_summary(self, currency: str = "USD") -> dict: ...
+    @abstractmethod
+    async def what_if_order(self, request: IronCondorRequest) -> dict: ...
 
-```python
-async def reconcile_on_connect():
-    # 1. Pull all open orders from broker
-    open_orders = await ib.reqOpenOrdersAsync()
-    # 2. Cross-reference against state file
-    state_open = {e.order_id for e in daily_state.entries if e.is_active()}
-    broker_open = {o.orderId for o in open_orders}
-    # 3. Three cases:
-    only_broker = broker_open - state_open  # orphan on broker — likely our restart raced
-    only_state  = state_open - broker_open  # state thinks open but broker doesn't — likely filled or cancelled mid-crash
-    both        = broker_open & state_open  # normal — re-attach
-    # Handle each: orphan → log + cancel (safer than leaving naked), only_state → query reqExecutions to find fill
+    @abstractmethod
+    async def place_iron_condor(self, request: IronCondorRequest) -> OrderResult: ...
+    @abstractmethod
+    async def cancel_order(self, order_id: str) -> bool: ...
+    @abstractmethod
+    async def get_open_orders(self) -> list[OrderResult]: ...
+    @abstractmethod
+    async def get_positions(self) -> list[dict]: ...
+
+
+class StreamingBroker(Protocol):
+    """Duck-typed methods for streaming — not all brokers implement all variants."""
+    def subscribe_quote(self, symbol: str) -> None: ...
+    def unsubscribe_quote(self, symbol: str) -> None: ...
+    def is_stream_healthy(self) -> bool: ...
 ```
 
 ---
 
-## 5. Migration phases
+## 5. Phase A — Build standalone `shared/ib_client.py`
 
-### Phase 0 — Prerequisites (week 1)
+**Window**: NOW through paper OAuth activation (~2026-05-17 to 2026-05-21).
+**Risk**: zero. Doesn't touch HYDRA. No deploys.
 
-Tasks:
-- [ ] Open IBKR Pro account (EU resident, EUR base, REG-T retail) — KYC, funding ~$50K
-- [ ] Activate paper trading account
-- [ ] Subscribe to market data: US Securities Snapshot Bundle ($10/mo, waived ≥$30 commissions), OPRA Top-of-Book ($1.50/mo, waived ≥$20), Cboe Streaming Market Indexes (~$3-6 for non-pros, **confirm exact name with IBKR**)
-- [ ] Enable "IB Key Security via IBKR Mobile" 2FA (only)
-- [ ] Confirm OAuth Self-Service Portal access for OAuth 2.0 path (future option)
+### 5.1 Tasks (in order)
 
-Verification:
-- [ ] Log in to TWS desktop, verify SPX option chain renders with live (not delayed) quotes
-- [ ] Verify `Option('SPX', '20260520', 5500, 'C', 'CBOE', tradingClass='SPXW')` resolves in TWS
+#### A.1 Fork `ibind` locally + swap `pyCrypto` → `pycryptodome` (~30 min)
 
-### Phase 1 — IB Gateway deployment on a dev VM (week 2)
+`ibind`'s OAuth 1.0a code uses `pyCrypto` (unmaintained, known CVEs). IBKR provided that code; IBKR hasn't updated it. **Hard requirement before any live use**.
 
-Goal: get IB Gateway running headless with auto-login, before touching any bot code.
+```
+git clone https://github.com/Voyz/ibind.git ~/code/ibind
+cd ~/code/ibind
+# Inspect ibind/oauth/oauth1a.py imports
+# Replace `from Crypto.X import Y` → `from Cryptodome.X import Y`
+# pycryptodome is API-compatible with pyCrypto
+# Run ibind's own test suite to verify no regression
+pip install -e .  # install fork in editable mode into the CALYPSO venv
+```
 
-Tasks:
-- [ ] Provision dev GCE VM (`calypso-ib-dev`, e2-medium, Debian 12)
-- [ ] Install Docker
-- [ ] Pull `ghcr.io/gnzsnz/ib-gateway:10.45.1e`
-- [ ] Configure IBC via `config.ini`:
-  - `IbLoginId`, `IbPassword` (from Secret Manager)
-  - `TradingMode=paper`
-  - `IbDir=/opt/ibc`
-  - `JtsDir=/root/Jts`
-  - `AutoRestartTime=01:30` (Sunday 01:30 ET — covers weekly server reset)
-- [ ] Mount volume for `Jts/` settings + logs
-- [ ] Open port 127.0.0.1:4002 (paper); never 0.0.0.0
-- [ ] systemd unit with `Restart=always`, `RestartSec=60s`
+Track the swap as a single commit in our fork. If upstream `ibind` ever switches to `cryptography` natively, we drop the fork.
 
-Verification:
-- [ ] `nc 127.0.0.1 4002` returns the IBKR banner
-- [ ] Test connect from Python: `IB().connect('127.0.0.1', 4002, clientId=99)`
-- [ ] Watch IBC logs verify Sunday auto-restart completes cleanly
-
-### Phase 2 — Build `shared/ib_client.py` adapter (weeks 3-5)
-
-Goal: complete IB adapter matching the Saxo public surface, passing unit tests against a mocked `ib_async.IB`.
-
-Subphases:
-- **2a** — Connection + auth: `IBClient.connect()`, `disconnect()`, Watchdog wiring, reconnect-test
-- **2b** — Account queries: `get_account_info`, `get_balance` (with `$LEDGER:USD`), `client_key`
-- **2c** — Contract resolution: `ib_contracts.py` — SPX/SPXW/VIX factories, qualifyContracts cache
-- **2d** — Quotes: `get_quote`, `get_quotes_batch`, `get_vix_price` (snapshot mode for one-shot, streaming for monitoring)
-- **2e** — Option chain + greeks: `get_option_chain`, `get_option_greeks`
-- **2f** — Positions + orders queries: `get_positions`, `get_open_orders`, `get_order_status`
-- **2g** — Order placement: `place_order`, `place_limit_order_with_timeout`, `cancel_order`
-- **2h** — **The big one — `place_iron_condor`**: 4-leg BAG construction, net-credit limit, `qualifyContracts` for each leg, `smartComboRoutingParams=[("NonGuaranteed", "1")]` on entry
-- **2i** — Streaming: `subscribe_quotes`, `unsubscribe`, heartbeat tracking
-- **2j** — Historical bars: `get_chart_data`
-- **2k** — Order-state reconciliation: `reconcile_on_connect` per §4.4
-
-Tests: unit tests with mocked `IB` against the existing `tests/test_brandon_*` patterns; integration tests against paper gateway.
-
-### Phase 3 — Shadow-mode parity (weeks 6-7)
-
-Goal: run IBClient ALONGSIDE SaxoClient on the same bot, comparing outputs without acting.
-
-Implementation:
-- Add a `SHADOW_BROKER=ib` env var to HYDRA
-- In dry-run mode, both clients are queried for every quote, position, and order intent
-- A new logger writes a side-by-side diff (Saxo result vs IB result) to `data/broker_shadow_diff.jsonl`
-- After 5 trading days, audit the diff log: where do quotes disagree? Where do positions disagree?
-
-Acceptance criteria for advancing:
-- [ ] Quote disagreement < 0.05 typical, < 0.20 worst-case (IB is usually tighter than Saxo)
-- [ ] Zero position-reconciliation failures across 5 days
-- [ ] All Brandon GEX-ADJ / delta-target picks produce the same strikes on both sides
-- [ ] No IB-side gateway disconnects unrecovered for > 60 seconds
-- [ ] Weekly server reset survived once cleanly
-
-### Phase 4 — Paper-trading cutover for B and C (week 8)
-
-Goal: variants B and C cut over fully to IB paper. Variant A stays on Saxo as the control.
-
-Tasks:
-- [ ] Update `bots/hydra/main.py` to instantiate `IBClient` when `HYDRA_VARIANT_ID in {b, c}`
-- [ ] Delete the Saxo-shadow code path
-- [ ] Run for 5 trading days; compare against historical Saxo-based B/C performance
-- [ ] **STOP and re-evaluate** if B/C performance materially diverges from historical
-
-### Phase 5 — Live cutover for A (week 9)
-
-Goal: variant A (live trading) cuts from Saxo live to IB live.
-
-Pre-flight (everything in §9 must pass):
-- [ ] Live IBKR Pro account funded
-- [ ] Live data subscriptions active
-- [ ] Live `ib-gateway-live` Docker container running on port 4001
-- [ ] IBC + IBKR Mobile push verified for live login
-- [ ] B/C have been on IB paper for ≥2 weeks with no incidents
-- [ ] All Saxo positions closed cleanly (or migrated — but cleaner to close)
-- [ ] Saxo client kept as dead code for 4 weeks pre-deletion (rollback window)
-
-Tasks:
-- [ ] Flip `HYDRA_VARIANT_ID=a` config to use IBClient on port 4001
-- [ ] Run dry-run for 1 day on IB live (paper-like behavior but real IB connection)
-- [ ] Enable `dry_run=false` for live trading
-
-### Phase 6 — Saxo decommission (week 12+)
-
-After 4 weeks of stable IB-live operation:
-- [ ] Delete `shared/saxo_client.py`
-- [ ] Delete Saxo OAuth secrets from Secret Manager
-- [ ] Close Saxo account (or leave funded as backup broker)
-- [ ] Update CLAUDE.md broker references
-
----
-
-## 6. Code skeleton
-
-A minimal `shared/ib_client.py` to anchor Phase 2. Not production-ready — illustrative.
+#### A.2 Set up `shared/ib_client.py` scaffold (~1 day)
 
 ```python
-"""IB adapter for CALYPSO — replaces shared/saxo_client.py.
+# shared/ib_client.py
+"""IB adapter for CALYPSO — Phase A standalone module.
 
-Public API mirrors SaxoClient where possible so HYDRA/MEIC/dashboard code
-sees minimal changes. Built on ib_async 2.1+ (the maintained successor to
-ib_insync). Connects to IB Gateway running locally on the VM.
+Wraps Voyz/ibind 0.1.23+ (forked locally to swap pyCrypto→pycryptodome).
+Provides the same public surface as SaxoClient where applicable so that
+the Phase B broker abstraction can wrap either one transparently.
 
-See docs/migration/SAXO_TO_IB_MIGRATION_PLAN.md for the full migration spec.
+Not imported by HYDRA yet (Phase A is standalone). Phase B introduces
+the broker abstraction and wires HYDRA through it.
 """
 
 from __future__ import annotations
-import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date
+from pathlib import Path
 from typing import Optional
 
-from ib_async import (
-    IB, Watchdog, Contract, Option, Index, Forex, Stock,
-    Order, LimitOrder, MarketOrder, ComboLeg,
-    util,
-)
+from ibind import IbkrClient, IbkrWsClient, OrderRequest
+from ibind.oauth.oauth1a import OAuth1aConfig
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class IBConfig:
-    host: str = "127.0.0.1"
-    port: int = 4001              # 4001 live gateway, 4002 paper, 7496/7497 TWS
-    client_id: int = 1
-    account_id: Optional[str] = None   # pinned from config; if None, use managedAccounts()[0]
-    readonly: bool = False
-    timeout_seconds: float = 30.0
+    """Loaded from secret manager + config file."""
+    consumer_key: str
+    access_token: str
+    access_token_secret: str
+    dh_prime: str  # hex string extracted from dhparam.pem
+    encryption_key_path: Path
+    signature_key_path: Path
+    account_id: Optional[str] = None  # discovered via managedAccounts if None
+    tickle_interval_seconds: int = 60
 
 
 class IBClient:
-    """Top-level IBKR adapter — replaces SaxoClient.
+    """Top-level IBKR adapter — wraps ibind for OAuth 1.0a Web API."""
 
-    Construction does NOT connect — call `connect()`. Watchdog handles
-    reconnect transparently after initial connection.
+    def __init__(self, config: IBConfig):
+        self.cfg = config
+        self._client: Optional[IbkrClient] = None
+        self._ws: Optional[IbkrWsClient] = None
+        # Account state caches updated by WebSocket
+        self._smd_subscriptions: dict[int, dict] = {}   # conid → last tick
+        self._conid_cache: dict[tuple, int] = {}        # (symbol, expiry, strike, right) → conid
+        # ... (full method set per §11 mapping)
+```
+
+#### A.3 Implement read-only methods (~2 days)
+
+In order of HYDRA usage frequency:
+1. `connect()`, `disconnect()`, `is_connected()`, `_tickle_loop()`
+2. `_brokerage_session_init()` — calls `/iserver/auth/ssodh/init`, retries on competing
+3. `get_account_summary()` + currency-aware USD-tradable computation (2-step: portfolio_summary + get_ledger)
+4. `get_quote(symbol)` — REST snapshot fallback
+5. `get_quotes_batch(symbols)` — REST snapshot, max 100 conids per call
+6. `get_vix_price()` — convenience wrapper for VIX index
+7. `get_option_chain(expiry, trading_class='SPXW')` — `secdef/search` → `secdef/strikes` → `secdef/info`
+8. `get_option_greeks(conid)` — REST snapshot with fields 7308-7311, 7633
+9. `get_positions()` — paginated `portfolio/{account}/positions`
+10. `get_open_orders()` — `iserver/account/orders`
+11. `get_order_status(order_id)` — filter from open orders
+12. `get_chart_data(symbol, duration, bar_size)` — `iserver/marketdata/history`
+13. `get_fx_rate(from_ccy, to_ccy)` — read from ledger or quote
+
+#### A.4 Implement write methods (~2 days)
+
+1. `place_iron_condor(request)` — **the centerpiece**. Constructs the `conidex` string per the agent 9 finding:
+
+```python
+async def place_iron_condor(
+    self, expiry: date,
+    short_call_strike: float, long_call_strike: float,
+    short_put_strike: float, long_put_strike: float,
+    contracts: int, net_credit_limit: float,
+    non_guaranteed: bool = True,
+) -> OrderResult:
+    # 1. Resolve conids for the 4 legs (cached after first call)
+    sc = await self._resolve_conid("SPX", expiry, short_call_strike, "C")
+    lc = await self._resolve_conid("SPX", expiry, long_call_strike, "C")
+    sp = await self._resolve_conid("SPX", expiry, short_put_strike, "P")
+    lp = await self._resolve_conid("SPX", expiry, long_put_strike, "P")
+
+    # 2. Build conidex string. Format: "{spread_template_conid};;;{leg1_conid}/{ratio},..."
+    #    28812380 = IBKR's USD spread template conid (universal for USD multi-leg combos)
+    #    Negative ratio = SELL leg; positive ratio = BUY leg
+    conidex = (
+        f"28812380;;;{sc}/-1,{lc}/1,{sp}/-1,{lp}/1"
+    )
+
+    # 3. Round limit to $0.05 increments (CBOE COB requirement)
+    price = round(net_credit_limit * 20) / 20
+
+    # 4. Build order. For SHORT iron condor: side="SELL", positive price = credit received.
+    #    Counter-intuitive but IBKR's documented convention.
+    order = OrderRequest(
+        conid=None,
+        conidex=conidex,
+        sec_type="BAG",
+        side="SELL",
+        order_type="LMT",
+        price=price,
+        quantity=contracts,
+        tif="DAY",
+        acct_id=self.account_id,
+    )
+
+    # 5. Place + handle reply prompts (ibind handle_questions auto-confirms via answers dict)
+    result = await self._client.place_order(
+        order_request=order,
+        answers=DEFAULT_ANSWERS,    # auto-confirm safety prompts
+        account_id=self.account_id,
+    )
+    return self._parse_order_result(result)
+```
+
+2. `place_vertical_spread(request)` — same conidex pattern with 2 legs (for one-sided entries + stop-out closes)
+3. `place_limit_order_with_timeout(...)` — wrapper: places, polls status, cancels on timeout
+4. `cancel_order(order_id)` — `DELETE /iserver/account/{accountId}/order/{orderId}`
+5. `place_emergency_order(...)` — market-order fallback for stops
+6. `what_if_order(request)` — `POST /iserver/account/{accountId}/orders/whatif` — returns 5 blocks (`amount`, `equity`, `initial`, `maintenance`, `position`) in EUR-base, each with `current`/`change`/`after` keys
+
+#### A.5 WebSocket streaming subscription manager (~1 day)
+
+Critical detail from agent 10 research: **`smd` topics silently auto-terminate after ~15 min**. ibind 0.1.23 does NOT auto-refresh. We must implement a `umd → smd` cycle ourselves.
+
+```python
+class StreamingManager:
+    """Manages WebSocket subscriptions to market data with auto-refresh.
+
+    Background thread cycles each subscription every ~13 minutes (under the
+    15-min auto-termination ceiling) by sending umd+conid then smd+conid.
+    Caller code reads from self.snapshots[conid] which is updated on every
+    tick.
     """
 
-    def __init__(self, config: dict | IBConfig):
-        if isinstance(config, dict):
-            ibcfg = config.get("ibkr", {})
-            self.cfg = IBConfig(
-                host=ibcfg.get("host", "127.0.0.1"),
-                port=int(ibcfg.get("port", 4001)),
-                client_id=int(ibcfg.get("client_id", 1)),
-                account_id=ibcfg.get("account_id"),
-                readonly=bool(ibcfg.get("readonly", False)),
-            )
-        else:
-            self.cfg = config
-        self.ib = IB()
-        self.watchdog: Optional[Watchdog] = None
-        self._contract_cache: dict[tuple, Contract] = {}
-        self._connected = False
+    REFRESH_INTERVAL_S = 13 * 60   # 13 min — safely under IBKR's 15-min auto-termination
 
-    # ─── Connection / lifecycle ──────────────────────────────────────────
+    def __init__(self, ws_client: IbkrWsClient):
+        self.ws = ws_client
+        self.snapshots: dict[int, dict] = {}      # conid → latest fields
+        self._subscriptions: dict[int, list[int]] = {}  # conid → field codes subscribed
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
 
-    async def connect(self) -> bool:
-        """Connect to IB Gateway via Watchdog. Auto-reconnects on disconnect."""
-        try:
-            self.watchdog = Watchdog(
-                self.ib,
-                host=self.cfg.host,
-                port=self.cfg.port,
-                clientId=self.cfg.client_id,
-                appStartupTime=15,
-                appTimeout=20,
-                retryDelay=2,
-                readonly=self.cfg.readonly,
-            )
-            self.ib.connectedEvent += self._on_connect
-            self.ib.disconnectedEvent += self._on_disconnect
-            self.ib.errorEvent += self._on_error
-            self.watchdog.start()
-            await asyncio.sleep(self.cfg.timeout_seconds)
-            self._connected = self.ib.isConnected()
-            return self._connected
-        except Exception as exc:
-            logger.exception("IB connect failed: %s", exc)
-            return False
+    def subscribe_quote(self, conid: int, fields: list[int] = None):
+        """Subscribe to a conid's market data. Auto-refreshes every 13 min."""
+        fields = fields or [31, 84, 86, 88, 85, 7635, 7308, 7309, 7310, 7311, 7633]
+        # 31=last, 84=bid, 86=ask, 88=bid_size, 85=ask_size,
+        # 7635=mark, 7308-7311=delta/gamma/theta/vega, 7633=IV
+        self._subscriptions[conid] = fields
+        self.ws.send_subscription(f"smd+{conid}", {"fields": [str(f) for f in fields]})
 
-    async def _on_connect(self):
-        logger.info("IB connected to %s:%s clientId=%s",
-                    self.cfg.host, self.cfg.port, self.cfg.client_id)
-        # Reconcile state: pull open orders + positions, cross-check state file
-        await self._reconcile_on_connect()
+    def unsubscribe_quote(self, conid: int):
+        self.ws.send_subscription(f"umd+{conid}", {})
+        self._subscriptions.pop(conid, None)
+        self.snapshots.pop(conid, None)
 
-    async def _on_disconnect(self):
-        logger.warning("IB disconnected — Watchdog will reconnect")
-        self._connected = False
-
-    def _on_error(self, reqId: int, errorCode: int, errorString: str, contract: Optional[Contract]):
-        # IB error codes: 200=ambiguous contract, 201=order rejected, 502=connection failure, etc.
-        if errorCode in (2104, 2106, 2158):  # market-data-farm-connection-OK informational
-            return
-        logger.warning("IB error %d (req %d): %s", errorCode, reqId, errorString)
-
-    def is_connected(self) -> bool:
-        return self.ib.isConnected()
-
-    async def _reconcile_on_connect(self):
-        open_orders = await self.ib.reqOpenOrdersAsync()
-        positions = await self.ib.reqPositionsAsync()
-        logger.info("IB reconcile: %d open orders, %d positions",
-                    len(open_orders), len(positions))
-        # … cross-check against daily_state file (see §4.4)
-
-    @property
-    def account_id(self) -> str:
-        if self.cfg.account_id:
-            return self.cfg.account_id
-        managed = self.ib.managedAccounts()
-        if not managed:
-            raise RuntimeError("No managed accounts available — gateway not authenticated?")
-        return managed[0]
-
-    @property
-    def client_key(self) -> str:
-        """Saxo-compat alias for account_id."""
-        return self.account_id
-
-    # ─── Contract factories ──────────────────────────────────────────────
-
-    def spx_index(self) -> Index:
-        return Index("SPX", "CBOE")
-
-    def vix_index(self) -> Index:
-        return Index("VIX", "CBOE")
-
-    def spxw_option(self, expiry: date, strike: float, right: str) -> Option:
-        """SPXW (weekly/daily, PM-settled) — use for 0DTE."""
-        return Option(
-            symbol="SPX",
-            lastTradeDateOrContractMonth=expiry.strftime("%Y%m%d"),
-            strike=strike,
-            right=right,           # 'C' or 'P'
-            exchange="CBOE",
-            tradingClass="SPXW",   # CRITICAL — distinguishes from monthly AM-settled SPX
-            currency="USD",
-        )
-
-    async def qualify(self, contract: Contract) -> Contract:
-        """Resolve a contract to its conId. Cached by (symbol, expiry, strike, right)."""
-        key = (contract.symbol, getattr(contract, "lastTradeDateOrContractMonth", ""),
-               getattr(contract, "strike", 0), getattr(contract, "right", ""),
-               getattr(contract, "tradingClass", ""))
-        if key in self._contract_cache:
-            return self._contract_cache[key]
-        qualified = await self.ib.qualifyContractsAsync(contract)
-        if not qualified or not qualified[0].conId:
-            raise RuntimeError(f"Failed to qualify contract: {contract}")
-        self._contract_cache[key] = qualified[0]
-        return qualified[0]
-
-    # ─── Quotes ──────────────────────────────────────────────────────────
-
-    async def get_quote(self, contract: Contract, snapshot: bool = True) -> Optional[dict]:
-        """One-shot or streaming quote. Returns dict with bid/ask/last/mid."""
-        c = await self.qualify(contract)
-        ticker = self.ib.reqMktData(c, "", snapshot=snapshot, regulatorySnapshot=False)
-        # Wait for the snapshot to populate (~1-2s)
-        for _ in range(20):
-            await asyncio.sleep(0.1)
-            if ticker.bid > 0 or ticker.ask > 0 or ticker.last > 0:
-                break
-        return {
-            "bid": ticker.bid if ticker.bid > 0 else None,
-            "ask": ticker.ask if ticker.ask > 0 else None,
-            "last": ticker.last if ticker.last > 0 else None,
-            "mid": (ticker.bid + ticker.ask) / 2 if (ticker.bid > 0 and ticker.ask > 0) else None,
-            "volume": ticker.volume,
-            "timestamp": ticker.time.isoformat() if ticker.time else None,
-        }
-
-    # ─── Iron condor (THE big one) ──────────────────────────────────────
-
-    async def place_iron_condor(
-        self,
-        expiry: date,
-        short_call_strike: float, long_call_strike: float,
-        short_put_strike: float, long_put_strike: float,
-        contracts: int,
-        net_credit_limit: float,
-        non_guaranteed: bool = True,        # True for entry, False for stop-out closes
-    ) -> Order:
-        """Place a 4-leg SPX iron condor as a single BAG combo order.
-
-        Args:
-            net_credit_limit: minimum acceptable net credit per spread (positive number).
-                              The order is BUY of a synthetic "negative spread" — we pay -credit,
-                              but in TWS terms we express it as a LIMIT BUY at -net_credit.
-                              See ib_async docs + IBKR Campus "Trading 0DTE Options" example.
-            non_guaranteed: True = SmartComboRouting accepts legging risk for better fills.
-                            False = atomic complex-order-book fill (safer for closes).
-        """
-        # 1. Qualify each leg to get conIds
-        sc = await self.qualify(self.spxw_option(expiry, short_call_strike, "C"))
-        lc = await self.qualify(self.spxw_option(expiry, long_call_strike, "C"))
-        sp = await self.qualify(self.spxw_option(expiry, short_put_strike, "P"))
-        lp = await self.qualify(self.spxw_option(expiry, long_put_strike, "P"))
-
-        # 2. Build the BAG combo contract
-        bag = Contract(
-            symbol="SPX",
-            secType="BAG",
-            exchange="CBOE",
-            currency="USD",
-            comboLegs=[
-                ComboLeg(conId=sc.conId, ratio=1, action="SELL", exchange="CBOE"),
-                ComboLeg(conId=lc.conId, ratio=1, action="BUY",  exchange="CBOE"),
-                ComboLeg(conId=sp.conId, ratio=1, action="SELL", exchange="CBOE"),
-                ComboLeg(conId=lp.conId, ratio=1, action="BUY",  exchange="CBOE"),
-            ],
-        )
-
-        # 3. Round limit price to $0.05 increments (CBOE requirement)
-        limit_price = round(-net_credit_limit * 20) / 20  # negative = we receive credit
-
-        # 4. Place the order
-        order = LimitOrder(
-            action="BUY",          # buying the combo means we receive the credit
-            totalQuantity=contracts,
-            lmtPrice=limit_price,
-            orderType="LMT",
-            tif="DAY",
-            smartComboRoutingParams=[("NonGuaranteed", "1" if non_guaranteed else "0")],
-        )
-        trade = self.ib.placeOrder(bag, order)
-        logger.info("IC placed: expiry=%s C:%g/%g P:%g/%g x%d @ net %.2f credit",
-                    expiry, short_call_strike, long_call_strike,
-                    short_put_strike, long_put_strike, contracts, net_credit_limit)
-        return trade
+    def _refresh_loop(self):
+        while not self._stop_event.wait(self.REFRESH_INTERVAL_S):
+            for conid, fields in list(self._subscriptions.items()):
+                try:
+                    self.ws.send_subscription(f"umd+{conid}", {})
+                    time.sleep(0.5)
+                    self.ws.send_subscription(f"smd+{conid}", {"fields": [str(f) for f in fields]})
+                except Exception as exc:
+                    logger.warning("smd refresh failed for conid %s: %s", conid, exc)
 ```
 
-This is a sketch — the full module will be ~1500-2000 LOC, with all the methods from the §3 mapping table.
+#### A.6 Order-status WebSocket subscription (~half day)
+
+Subscribe `sor` topic. Maintain `self._order_states[order_id] = {status, filled, remaining}`. `get_order_status(order_id)` reads from this cache; doesn't need an HTTP round-trip.
+
+#### A.7 Reconcile on (re)connect (~half day)
+
+```python
+async def _reconcile_on_connect(self):
+    """Pull open orders + positions + cross-check against state file.
+
+    Critical: IB orders are broker-side persistent. If we crashed mid-order,
+    the order is still live. We MUST reconcile, not blindly resubmit.
+    """
+    open_orders = await self._client.get_open_orders()
+    positions = await self.get_positions()
+    # Three cases (per migration plan §4.4 spec):
+    # 1. Order in broker but not in our state — orphan (log + cancel for safety)
+    # 2. Order in our state but not in broker — likely filled or cancelled mid-crash
+    # 3. Both — re-attach by order_id
+    ...
+```
+
+#### A.8 Retry + circuit breaker (~half day)
+
+Per agent 12 finding: ibind retries network errors only (3× linear backoff). 429/5xx is OUR responsibility. Pattern:
+
+- Outer exponential-with-jitter retry on `{429, 500, 502, 503, 504}`
+- Per-endpoint-family circuit breakers (`oauth`, `session`, `marketdata`, `orders`, `portfolio`)
+- Open on 5 consecutive failures OR ≥50% over 20-req / 60-s window
+- Half-open probe every 30s
+- 401 handler bypasses breaker, triggers single-flight `_brokerage_session_init()` reinit
+- **Never retry order placement** without a client-side order ID dedup (CP API has `cOID` — use it)
+
+#### A.9 Unit tests against mocks (~1 day)
+
+`tests/test_ib_client.py` — mock `IbkrClient` responses, verify our wrappers:
+- conidex construction (4 leg orders → correct string format)
+- $0.05 increment rounding
+- USD-tradable computation for EUR-base
+- whatif response parsing
+- Order status reconciliation on reconnect
+- smd refresh cycle timing
+
+Aim for 80%+ line coverage. No live IBKR calls in this suite.
+
+#### A.10 Integration smoke test on paper (after activation)
+
+Once paper activates (estimated 2026-05-17 to 05-21):
+- Connect to paper
+- Reconcile (should find 0 positions, 0 orders)
+- Subscribe to SPX index quote — verify ticks
+- Subscribe to one 0DTE SPX option — verify Greeks
+- Place a $0.05 1-contract IC (well OTM, will expire worthless)
+- Cancel it
+- Whatif a 10-lot IC, verify margin numbers
+- Disconnect cleanly
+
+This is the gate to Phase B.
+
+### 5.2 Phase A deliverables
+
+| File | Lines (est.) | Purpose |
+|---|---|---|
+| `shared/ib_client.py` | ~2000 | Full SaxoClient parity via ibind |
+| `shared/ib_streaming.py` | ~300 | StreamingManager with smd refresh |
+| `shared/ib_oauth.py` | ~200 | OAuth1aConfig loader, DH prime extractor |
+| `shared/ib_secrets.py` | ~150 | GCP Secret Manager integration for tokens + key files |
+| `tests/test_ib_client.py` | ~1500 | Unit tests, all mocked |
+| `tests/test_ib_streaming.py` | ~400 | Streaming manager tests |
+| `tests/integration/test_ib_paper_smoke.py` | ~300 | Live paper integration test |
+| **Total** | **~4850** | |
 
 ---
 
-## 7. Rollout & cutover
+## 6. Phase B — Introduce broker abstraction in HYDRA
 
-### 7.1 Cutover order
+**Window**: starts when Phase A integration smoke passes (estimated 2026-05-22 to 2026-05-28).
 
+### 6.1 Tasks
+
+#### B.1 Define `BrokerInterface` (~half day)
+
+Per §4.4 sketch above. Two parts:
+- `class BrokerInterface(ABC)` — enforced abstract base for trade methods
+- `class StreamingBroker(Protocol)` — duck-typed for utility/streaming
+
+#### B.2 Implement `SaxoAdapter(BrokerInterface)` (~1 day)
+
+Wraps existing `SaxoClient`. Provides a transparent `BrokerInterface` over the existing Saxo surface. **Existing Saxo dry-run must continue working unchanged after this.**
+
+#### B.3 Implement `IbkrAdapter(BrokerInterface)` (~half day)
+
+Wraps `IBClient` from Phase A. Should be straightforward since `IBClient` was designed with the interface in mind.
+
+#### B.4 Factory in `shared/broker/__init__.py` (~half day)
+
+```python
+def build_broker(config: dict) -> BrokerInterface:
+    broker_type = config.get("broker", "saxo")  # default to Saxo for backwards compat
+    if broker_type == "saxo":
+        return SaxoAdapter(config)
+    if broker_type == "ibkr":
+        return IbkrAdapter(config)
+    raise ValueError(f"Unknown broker: {broker_type}")
 ```
-Phase 4: B/C → IB paper      (low risk, dry-run only)
-   ↓
-[2 weeks observation]
-   ↓
-Phase 5: A → IB live          (real money)
-   ↓
-[4 weeks observation, Saxo dead-code kept]
-   ↓
-Phase 6: Delete Saxo code     (point of no return)
-```
 
-### 7.2 Rollback plan
+#### B.5 Refactor HYDRA strategy.py (~2 days, careful work)
 
-At each phase, the previous broker integration stays functional. Specifically:
+Replace `self.saxo_client` → `self.broker` throughout `bots/hydra/strategy.py` and `bots/meic/strategy.py`. Use `build_broker(config)` in `__init__`. Run existing test suite — must stay green.
 
-- **Phase 4 rollback**: revert variant config to `BROKER=saxo` env var; restart.
-- **Phase 5 rollback**: same — variant A's config flips back to SaxoClient. Saxo account must stay funded during the 4-week observation window.
-- **Phase 6 rollback**: NOT POSSIBLE after this point. Don't enter Phase 6 until everything is rock-solid.
+#### B.6 Verify Saxo dry-run on VM still works (~half day)
 
-### 7.3 Weekly server reset SOP
+Deploy refactored HYDRA to VM. Variants A/B/C should continue exactly as before (no config change → defaults to `broker: "saxo"`). Compare day-N entries pre vs post-refactor — must be byte-identical.
 
-Every Sunday:
-1. IBC's `AutoRestartTime=01:30` triggers Gateway restart
-2. IBKR Mobile push notification sent to operator phone
-3. **Operator must approve within ~3 minutes** or login fails
-4. After approve: Gateway re-establishes session
-5. `ib_async.Watchdog` reconnects all bots
-6. `_reconcile_on_connect()` re-syncs state
-
-If operator misses the push:
-- Gateway stays unauthenticated
-- Bots show "disconnected" on dashboard
-- No new orders place
-- Existing orders stay live on IBKR's books (broker-side persistence)
-- Markets don't reopen until Monday — there's a recovery window
-
-**Calendar reminder**: every Sunday at 01:30 ET, the operator's phone must be reachable.
+This is the proof that the abstraction was lossless. If anything diverges, roll back and investigate before proceeding.
 
 ---
 
-## 8. Risk register
+## 7. Phase C — Deploy IB variants in parallel
+
+**Window**: after Phase B Saxo verification (estimated 2026-05-29 onward, gated on live OAuth activation).
+
+### 7.1 Tasks
+
+#### C.1 Create IBKR variant configs (~half day)
+
+`bots/hydra/config/config_variant_{a,b,c}_ibkr.json` — clone the existing variant configs and add the `"broker": "ibkr"` + `"ibkr": {...}` block. Strategy parameters identical to Saxo counterparts.
+
+#### C.2 New systemd unit files (~half day)
+
+`deploy/hydra_variant_{a,b,c}_ibkr.service` — clone existing units, change config path, change data dir, unique clientId. NOT systemd auto-enabled; manually started.
+
+#### C.3 New data directories on VM (~half day)
+
+`data/variant_{a,b,c}_ibkr/` — empty state, separate DB. No risk of polluting Saxo variant state.
+
+#### C.4 Start IBKR paper variants (B and C first)
+
+```
+sudo systemctl start hydra_variant_b_ibkr hydra_variant_c_ibkr
+```
+
+A_ibkr deferred until live funded. Verify connection, reconciliation, first heartbeats.
+
+### 7.2 Parallel deployment topology
+
+```
+After Phase C:
+
+VM systemd services:
+  hydra.service                     ← variant A, SAXO live  (unchanged)
+  hydra_variant_b.service           ← variant B, SAXO dry   (unchanged)
+  hydra_variant_c.service           ← variant C, SAXO dry   (unchanged)
+  hydra_variant_a_ibkr.service      ← NEW: variant A, IBKR paper (until live funded)
+  hydra_variant_b_ibkr.service      ← NEW: variant B, IBKR paper
+  hydra_variant_c_ibkr.service      ← NEW: variant C, IBKR paper
+
+  6 processes total, all independent, all writing to separate data dirs.
+  ZERO cross-talk. ZERO risk to existing Saxo variants.
+```
+
+### 7.3 Parity comparison
+
+After 5 trading days of parallel running, audit:
+- Strike selection: does variant A_ibkr pick the same strikes as variant A on the same chain? (Should be 100% if chain data agrees.)
+- GEX cluster detection: same clusters on both sides?
+- Entry timing: same slots fire?
+- TP / breach / stop decisions: same disposition?
+
+Discrepancies surface DATA differences (e.g., IB's NBBO tighter than Saxo's) more than LOGIC differences (logic is identical — same code, just different broker).
+
+---
+
+## 8. Phase D — Cut B/C from Saxo to IB
+
+**Window**: after 10 trading days of clean Phase C parallel running (~mid-June 2026).
+
+### 8.1 Tasks
+
+1. Stop `hydra_variant_b.service` and `hydra_variant_c.service` (Saxo side)
+2. `systemctl disable` both
+3. Verify `hydra_variant_b_ibkr.service` and `hydra_variant_c_ibkr.service` continue
+4. Variant A remains on Saxo live until Phase E
+
+Rollback: re-enable the Saxo services. Their state files are intact. Resumes within minutes.
+
+---
+
+## 9. Phase E — Cut A live to IB
+
+**Window**: after Phase D + live OAuth activation + live data subs confirmed working (~late June 2026).
+
+### 9.1 Pre-flight (all must pass)
+
+See §15 below — every item in the pre-flight checklist must be green.
+
+### 9.2 Cutover
+
+1. Manual one-day "drill" — run variant A_ibkr in dry-run for one full day; confirm everything works
+2. Set `dry_run: false` in `config_variant_a_ibkr.json`
+3. Restart `hydra_variant_a_ibkr.service`
+4. **MANUAL APPROVAL GATE on first 10 live orders** — Telegram alert, operator confirms each
+5. Stop `hydra.service` (Saxo live)
+6. Variant A now trading on IB live
+
+### 9.3 Rollback (within first 30 days)
+
+If something breaks: re-enable `hydra.service`. Saxo position state should be empty (we'd have closed everything before cutover) but the systemd unit + auth tokens are intact.
+
+---
+
+## 10. Phase F — Saxo decommission
+
+**Window**: 4 weeks after Phase E with no incidents (~late July 2026).
+
+### 10.1 Tasks
+
+1. Delete `shared/saxo_client.py`
+2. Delete `shared/broker/saxo_adapter.py`
+3. Delete `hydra.service`, `hydra_variant_b.service`, `hydra_variant_c.service` from `deploy/`
+4. Delete `bots/hydra/config/config_variant_{b,c}.json` (old Saxo configs)
+5. Delete `data/variant_b/`, `data/variant_c/` archives
+6. Remove Saxo OAuth secrets from Secret Manager
+7. Close Saxo account (or leave funded as backup broker for one quarter)
+8. Update CLAUDE.md broker references
+
+---
+
+## 11. Saxo → IB call-site mapping
+
+Every Saxo public method gets an IB equivalent via `ibind`. Method signatures match where reasonable so HYDRA / MEIC strategy code minimally changes after Phase B refactor.
+
+| Saxo method | `shared/ib_client.py` equivalent | Underlying CP API endpoint / ibind call |
+|---|---|---|
+| `authenticate()` | `IBClient.connect()` | OAuth 1.0a handshake via ibind (`OAuth1aConfig` init) |
+| `client_key` | `IBClient.account_id` | `client.portfolio_accounts()[0]["accountId"]` |
+| `get_account_info()` | `IBClient.get_account_info()` | `GET /portfolio/accounts` |
+| `get_balance(currency='USD')` | `IBClient.get_balance(currency='USD')` | `GET /portfolio/{acct}/summary` + `GET /portfolio/{acct}/ledger`; compute USD-tradable |
+| `get_quote(uic)` | `IBClient.get_quote(symbol)` | `GET /iserver/marketdata/snapshot` (REST) OR WebSocket `smd+{conid}` (cache) |
+| `get_quotes_batch(uics)` | `IBClient.get_quotes_batch(contracts)` | `GET /iserver/marketdata/snapshot?conids=...` (max 100/call) |
+| `get_vix_price()` | `IBClient.get_vix_price()` | `get_quote("VIX", asset_type="index")` |
+| `get_option_chain(root, expiry)` | `IBClient.get_option_chain(symbol, expiry, trading_class='SPXW')` | `secdef/search` → `secdef/strikes` → `secdef/info` chain |
+| `get_option_greeks(uic)` | `IBClient.get_option_greeks(conid)` | snapshot with fields 7308 (delta), 7309 (gamma), 7310 (theta), 7311 (vega), 7633 (IV) |
+| `get_positions()` | `IBClient.get_positions()` | `GET /portfolio/{acct}/positions/{page}` (paginated) |
+| `get_closed_position_price(uic)` | `IBClient.get_closed_position_price(conid)` | `GET /iserver/account/trades` filtered |
+| `place_order(...)` | `IBClient.place_order(contract, action, qty, type, limit)` | `POST /iserver/account/{acct}/orders` |
+| `place_emergency_order(...)` | `IBClient.place_market_order(...)` | `POST /iserver/account/{acct}/orders` (orderType=MKT) |
+| `place_limit_order_with_timeout(...)` | `IBClient.place_limit_with_timeout(...)` | place + poll status + cancel on timeout |
+| `cancel_order(order_id)` | `IBClient.cancel_order(order_id)` | `DELETE /iserver/account/{acct}/order/{order_id}` |
+| `get_order_status(order_id)` | `IBClient.get_order_status(order_id)` | WebSocket `sor` cache OR `GET /iserver/account/orders` |
+| `get_open_orders()` | `IBClient.get_open_orders()` | `GET /iserver/account/orders` |
+| `check_order_filled_by_activity(...)` | **DELETE** | No race on CP API — order status is broker-authoritative |
+| `get_chart_data(symbol, ...)` | `IBClient.get_chart_data(...)` | `GET /iserver/marketdata/history` |
+| `get_fx_rate('USD', 'EUR')` | `IBClient.get_fx_rate('USD', 'EUR')` | From `get_ledger()` `exchangerate` field |
+| `start_price_streaming(uics)` | `IBClient.subscribe_quotes(conids)` | WebSocket `smd+{conid}` via StreamingManager |
+| `subscribe_to_option(uic)` | `IBClient.subscribe_option(conid)` | Same — WebSocket smd |
+| `is_websocket_healthy()` | `IBClient.is_stream_healthy()` | `IbkrWsClient.connected` + last-tick age |
+| `is_heartbeat_alive(N)` | `IBClient.last_tick_age()` | StreamingManager's last-received-tick timestamp |
+| `stop_price_streaming()` | `IBClient.unsubscribe_all()` | Loop `umd+{conid}` for all subscribed |
+
+### 11.1 NEW IB-only methods (no Saxo equivalent)
+
+| Method | Why we need it |
+|---|---|
+| `IBClient.place_iron_condor(...)` | Centerpiece — 4-leg combo via `conidex` string |
+| `IBClient.place_vertical_spread(...)` | 2-leg spread (one-sided entries OR closing one side) |
+| `IBClient.what_if_order(request)` | Pre-trade margin check — replaces our ORDER-004 BP gate with broker-authoritative numbers |
+| `IBClient.qualify_contract(...)` | `secdef/info` wrapper; cache conids by (symbol, expiry, strike, right) |
+| `IBClient.tickle()` | Background thread to keep CP API session warm (~60s cadence) |
+
+---
+
+## 12. Code skeletons
+
+### 12.1 OAuth 1.0a config loader
+
+```python
+# shared/ib_oauth.py
+import os, re, subprocess
+from pathlib import Path
+from ibind.oauth.oauth1a import OAuth1aConfig
+
+def extract_dh_prime(dhparam_path: Path) -> str:
+    """Extract DH prime as hex from a dhparam PEM file."""
+    result = subprocess.run(
+        ["openssl", "dhparam", "-in", str(dhparam_path), "-text"],
+        capture_output=True, text=True, check=True,
+    )
+    match = re.search(r"(?:prime|P):\s*((?:\s*[0-9a-fA-F:]+\s*)+)", result.stdout)
+    if not match:
+        raise ValueError(f"No DH prime in {dhparam_path}")
+    return re.sub(r"[\s:]", "", match.group(1))
+
+def load_oauth_config(env_dir: Path, access_token: str, access_token_secret: str,
+                     consumer_key: str) -> OAuth1aConfig:
+    """Build ibind's OAuth1aConfig from a credentials directory.
+
+    env_dir contains: private_signature.pem, private_encryption.pem, dhparam.pem
+    Secrets (access_token, access_token_secret, consumer_key) come from caller
+    (typically GCP Secret Manager via shared/ib_secrets.py).
+    """
+    return OAuth1aConfig(
+        access_token=access_token,
+        access_token_secret=access_token_secret,
+        consumer_key=consumer_key,
+        dh_prime=extract_dh_prime(env_dir / "dhparam.pem"),
+        encryption_key_fp=str(env_dir / "private_encryption.pem"),
+        signature_key_fp=str(env_dir / "private_signature.pem"),
+        init_brokerage_session=True,   # auto-call /iserver/auth/ssodh/init
+        maintain_oauth=True,            # auto-tickle
+    )
+```
+
+### 12.2 Iron condor placement (the centerpiece)
+
+```python
+# shared/ib_client.py (excerpt)
+from ibind import OrderRequest
+
+SPREAD_TEMPLATE_CONID = 28812380  # IBKR's USD spread template — universal for USD multi-leg
+
+async def place_iron_condor(
+    self,
+    expiry: date,
+    short_call_strike: float, long_call_strike: float,
+    short_put_strike: float, long_put_strike: float,
+    contracts: int, net_credit_limit: float,
+    non_guaranteed: bool = True,
+) -> OrderResult:
+    """Place a 4-leg SPX iron condor as a single net-credit limit combo.
+
+    For SHORT IC: side="SELL", positive `price` = credit received.
+    (IBKR's counter-intuitive but consistent rule — see
+    https://www.ibkrguides.com/traderworkstation/notes-on-combination-orders.htm)
+
+    non_guaranteed=True → entry (legging risk OK for fill probability)
+    non_guaranteed=False → stop-out close (atomic; do NOT leave us naked)
+    Atomic-fill enforcement on CP API: no direct flag — we monitor via WebSocket
+    `sor` topic and place per-leg market-order fallbacks if 1-3 legs fill but the
+    spread doesn't complete within N seconds. See §A.5 / `StreamingManager`.
+    """
+    # 1. Resolve conids (cached by qualify_contract)
+    sc = await self.qualify_contract("SPX", expiry, short_call_strike, "C", trading_class="SPXW")
+    lc = await self.qualify_contract("SPX", expiry, long_call_strike,  "C", trading_class="SPXW")
+    sp = await self.qualify_contract("SPX", expiry, short_put_strike,  "P", trading_class="SPXW")
+    lp = await self.qualify_contract("SPX", expiry, long_put_strike,   "P", trading_class="SPXW")
+
+    # 2. Build conidex. Negative ratio = SELL leg; positive = BUY leg.
+    conidex = (
+        f"{SPREAD_TEMPLATE_CONID};;;"
+        f"{sc}/-1,{lc}/1,{sp}/-1,{lp}/1"
+    )
+
+    # 3. Round to $0.05 (CBOE COB requirement; carries over from TWS path)
+    price = round(net_credit_limit * 20) / 20
+
+    # 4. Build order
+    order = OrderRequest(
+        conid=None,
+        conidex=conidex,
+        sec_type="BAG",
+        side="SELL",      # SHORT IC = SELL the combo
+        order_type="LMT",
+        price=price,      # POSITIVE for credit received (counter-intuitive — see docstring)
+        quantity=contracts,
+        tif="DAY",
+        acct_id=self.account_id,
+    )
+
+    # 5. Submit + handle ibind reply prompts automatically
+    result = await self._client.place_order(
+        order_request=order,
+        answers=DEFAULT_ANSWERS,
+        account_id=self.account_id,
+    )
+    return self._parse_order_result(result)
+```
+
+### 12.3 USD-tradable for EUR-base account
+
+```python
+async def get_balance(self, currency: str = "USD") -> dict:
+    """Returns live tradable amount in `currency`, plus diagnostics.
+
+    For EUR-base + USD-trade: computes `eur_avail / eur_per_usd + usd_cash`
+    from the ledger. CP API has NO 3-minute throttle (unlike TWS), so we can
+    poll at 1Hz — but bot should still reserve margin client-side after each
+    order placement since the underlying risk engine updates at ~3s.
+    """
+    summary = await self._client.portfolio_summary(self.account_id)
+    ledger = await self._client.get_ledger(self.account_id)
+
+    base_currency = summary.get("availablefunds", {}).get("currency", "EUR")
+    base_available = float(summary["availablefunds"]["amount"])
+
+    if currency == base_currency:
+        return {"tradable": base_available, "currency": currency, "base_currency": base_currency}
+
+    # Cross-currency view
+    currency_row = ledger.get(currency, {})
+    exchange_rate = float(currency_row.get("exchangerate", 0))
+    cash_balance = float(currency_row.get("cashbalance", 0))
+
+    # NB: exchange-rate direction (base-per-quote vs quote-per-base) needs
+    # empirical verification on first live call — IBKR docs are ambiguous.
+    # See research_scratch/11_cpapi_margin_account.md for the test plan.
+    tradable_in_target = base_available / exchange_rate + cash_balance if exchange_rate > 0 else cash_balance
+
+    return {
+        "tradable": tradable_in_target,
+        "currency": currency,
+        "base_currency": base_currency,
+        "base_available": base_available,
+        "exchange_rate": exchange_rate,
+        "cash_in_target": cash_balance,
+    }
+```
+
+### 12.4 WebSocket subscription with auto-refresh
+
+See §A.5 above — full StreamingManager class.
+
+---
+
+## 13. Risk register
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Weekly 2FA push missed | Medium | High (bot offline Sunday→Monday) | Calendar alert + backup operator with phone access. Multi-device IBKR Mobile login. |
-| Gateway hangs / requires manual login | Medium | High | IBC handles 95% of cases; remaining 5% require SSH-into-VM + manual restart. Document the runbook. |
-| `ib_async` library breaking change | Low | Medium | Pin version (`ib_async==2.1.0`), test before upgrading. |
-| IBKR API breaking change (TWS API version) | Low | Medium | Stay 1-2 versions behind latest, monitor IBKR API Changelog. |
-| Combo order partial fill (one side fills, other doesn't) | Medium with `NonGuaranteed=1` | High (left naked short) | Use `NonGuaranteed=0` on stop-out closes (atomic); accept legging risk only on entries where we have safety nets. |
-| 100-ticker streaming limit hit | Low under normal operation | Medium (data starvation) | Reserve 60 tickers for monitoring, use snapshot mode for chain scans, alert if >80 tickers active. |
-| EUR-USD margin mis-calculation | Low | High (over-leverage) | Use `$LEDGER:USD` summary; cross-check with `whatIf` pre-trade. |
-| IBKR account flagged for pattern day trader rules | Low (we're trading defined-risk spreads on 0DTE — usually not day-trades by SEC def) | Medium | Stay below 4 day-trades/5-day window on margin account; switch to cash account if PDT becomes an issue. |
-| OPRA subscription accidentally lapsed | Low | High (quotes go 15-min delayed silently) | Monitor `marketDataType` field on every ticker; alert if any return 3 (delayed). |
-| Real money loss during cutover bug | High during week 9 | Catastrophic | 2 weeks of paper-mode for B/C BEFORE live. Manual approval gate on first live order. Dashboard kill-switch. |
+| **OAuth 1.0a activation takes > 2 weeks** | Medium | Medium (delays Phase A integration test) | Built 2 weeks of slack into Phase 0; email IBKR API support at day 14 |
+| **IBKR closes OAuth 1.0a retail self-service** | Low | High (forces re-architecture to Gateway path) | We're already registered (CALYPSOPP). Keep Gateway+IBC fallback plan in `research_scratch/04_*.md`. |
+| **pyCrypto CVE in ibind** | Medium | High (auth-layer RCE) | **Pre-go-live hard requirement**: fork ibind, swap to pycryptodome. Tracked as Phase A.1 |
+| **`smd` topic auto-termination at 15 min** | High (it happens every day) | Medium (data starvation if not refreshed) | StreamingManager rotates `umd → smd` every 13 min (Phase A.5) |
+| **conidex sign convention mistake** | Medium during dev | High (wrong side, wrong direction) | Reverse-engineer from ibind examples; unit-test conidex builder explicitly; test all 4 directions on paper before live |
+| **CP API "reply prompt" not handled** | Low (ibind handles it) | Medium (orders silently rejected) | Use ibind's `answers` parameter with sensible defaults; log every reply prompt seen for monitoring |
+| **CP API rate limit hit (429)** | Low at our cadence | Medium | Outer exponential-with-jitter retry; per-endpoint circuit breakers (Phase A.8) |
+| **Brokerage session dies (6-min idle)** | Low (Tickler runs 60s) | Medium | ibind Tickler thread; 401 handler reinits via single-flight `/iserver/auth/ssodh/init` |
+| **Combo partial fill on stop-out close** | Medium (CP API has no atomic-fill flag) | High (left naked short on one side) | Monitor `sor` topic; if 1-3 legs fill but spread incomplete within 10s, fire per-leg market closes on remaining |
+| **whatif response in wrong currency** | Low | Medium (mis-sized orders) | Empirically verify on first paper trade; validate against `get_balance()` numbers |
+| **Account summary cadence assumption (3-min from TWS) carried over to CP API** | Medium (will hit this if we copy-paste TWS logic) | Medium | CP API has NO 3-min throttle. Documented explicitly in §12.3 |
+| **ibind 0.1.23 has known shortcomings** | Confirmed (research_scratch/12) | Medium | Wrap with our own retry + circuit breaker. Watch for ibind 0.2.x stable release (currently 0.2.1rc9 on PyPI). |
+| **Sunday phone tap missed** | n/a | n/a | Eliminated by OAuth 1.0a path |
+| **Pre-trade margin numbers wrong for EUR-base** | Medium during dev | High (over-leverage) | Use `whatif` as authoritative; cross-check against `get_balance("USD")`; pad by 5% buffer on first-2-week live trading |
+| **Activation poller returns false positive** | Medium per agent 12 | High (we'd start coding before real activation) | Fixed in Phase A.0 — upgrade poller to 3-step check (LST → ssodh/init → auth/status) |
 
 ---
 
-## 9. Pre-flight checklist
+## 14. Cutover SOPs
+
+### 14.1 No more weekly Sunday phone tap
+
+With OAuth 1.0a, the SDK auto-rotates the 24h live session token every day via cryptographic handshake. No human in the loop.
+
+The only operator touch points:
+- **One-time**: OAuth registration in the IBKR portal (done for paper, pending for live)
+- **Periodic**: 12-month self-imposed key rotation via Message Center ticket (per §IB_OPEN_QUESTIONS_ANSWERED.md Q2)
+- **Exception**: if IBKR forces re-auth for any reason — alerts trigger Telegram, operator handles within business hours
+
+### 14.2 Daily session lifecycle
+
+```
+00:00 ET  — Live session token expires
+00:00 ET  — ibind detects expiry, performs OAuth 1.0a handshake
+00:00 ET  — New live session token issued (~5s)
+00:00 ET  — ibind calls /iserver/auth/ssodh/init to reopen brokerage session
+00:00 ET  — Tickler resumes (every 60s)
+24h cycle — no human touch
+```
+
+### 14.3 Disconnect recovery
+
+```python
+# Pseudocode for what shared/ib_client.py implements
+async def _on_disconnect():
+    logger.warning("CP API disconnected — attempting reconnect")
+    backoff = 1.0
+    while True:
+        try:
+            await self.connect()
+            await self._reconcile_on_connect()
+            await self._resubscribe_all_market_data()
+            logger.info("Reconnected + reconciled")
+            return
+        except Exception as exc:
+            logger.error("Reconnect failed: %s — backoff %.1fs", exc, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
+```
+
+---
+
+## 15. Pre-flight checklist
 
 **Do NOT cut over variant A to live until ALL of these are checked:**
 
 ### IBKR account & data
 - [ ] IBKR Pro live account funded ($50K+)
-- [ ] Paper trading account active
-- [ ] Market data subscriptions: US Securities Snapshot Bundle, OPRA Top-of-Book, Cboe Streaming Market Indexes — billing visible, all active
-- [ ] Real-time SPX quote verified (not 15-min delayed) in TWS desktop
-- [ ] Real-time SPX option chain verified (SPXW trading class)
-- [ ] IBKR Mobile 2FA enabled, push notifications working on operator phone
-
-### Gateway & deployment
-- [ ] `ib-gateway-paper` Docker container running, healthy, port 4002
-- [ ] `ib-gateway-live` Docker container running, healthy, port 4001
-- [ ] Both bound to `127.0.0.1` only; firewall verified (no external access)
-- [ ] IBC `config.ini` correct for both paper and live (Trading Mode, login ID, auto-restart time)
-- [ ] Sunday weekly auto-restart tested successfully ≥1 time
+- [ ] Paper account active with OAuth 1.0a credentials (consumer key `CALYPSOPP`)
+- [ ] Live OAuth 1.0a credentials registered + activated (different consumer key from paper)
+- [ ] Both OAuth credentials in 1Password + GCP Secret Manager (2 backup copies)
+- [ ] Market data subs: CBOE Streaming Market Indexes (VIX), CME S&P Indexes (SPX), OPRA Top of Book — all active, billing visible
+- [ ] Real-time SPX + VIX + SPXW 0DTE chain confirmed in TWS desktop
 
 ### Code & tests
-- [ ] `shared/ib_client.py` complete; all methods from §3 mapping table implemented
-- [ ] Unit tests passing (≥80% coverage on IBClient)
-- [ ] Integration tests against paper gateway passing
-- [ ] Shadow-mode (Phase 3) ran ≥5 trading days, diff log audited
-- [ ] Phase 4 paper-trading for B/C ran ≥10 trading days, no incidents
-- [ ] Reconcile-on-connect tested by killing bot mid-order, verified clean recovery
+- [ ] `shared/ib_client.py` complete (Phase A)
+- [ ] `shared/broker/{interface,saxo_adapter,ibkr_adapter}.py` complete (Phase B)
+- [ ] `tests/test_ib_client.py` ≥ 80% coverage, all passing
+- [ ] `tests/test_ib_streaming.py` covers smd refresh cycle, passing
+- [ ] Existing HYDRA test suite still passing after Phase B refactor
+- [ ] Integration smoke against paper IB: connect, reconcile, subscribe, place 1c IC, cancel, whatif, disconnect — all pass
+- [ ] Phase C variants ran on paper IB for ≥ 10 trading days, zero incidents
+- [ ] ibind forked + pyCrypto → pycryptodome swapped
+- [ ] Reconciliation tested by killing bot mid-order, verified clean recovery
 
 ### Strategy & risk
-- [ ] HYDRA strategy code unchanged (only broker adapter swapped)
-- [ ] Per-IC max-loss calculation matches IB's `whatIfOrder` margin
-- [ ] Commission costs recomputed for IBKR Pro tiered structure; min_pnl_per_ic bounds re-tuned
-- [ ] Dry-run mode tested on IB paper for ≥3 days
+- [ ] Per-IC margin via `whatif` matches our pre-trade BP gate within 5%
+- [ ] Commission costs recomputed for IBKR Pro tiered structure
+- [ ] `min_pnl_per_ic` / `max_pnl_per_ic` sanity bounds re-tuned for IB pricing
+- [ ] Dry-run mode tested on IB paper for ≥ 3 days
 - [ ] Manual approval gate enabled for first 10 live entries
+- [ ] Combo partial-fill fallback (per-leg market closes) tested
 
 ### Operations
-- [ ] WATCHMAN audit protocol updated to verify IB-side health (replace Saxo checks)
-- [ ] Dashboard shows IB gateway status + last-tick timestamp
-- [ ] Telegram alerts wired for IB disconnect, 2FA challenge needed, order rejected
-- [ ] On-call runbook documented for: Sunday 2FA tap, gateway restart, "panic close all"
+- [ ] WATCHMAN audit protocol updated to check IB-side health
+- [ ] Dashboard shows IB session status, live session token age, last `sor` tick
+- [ ] Telegram alerts wired for: OAuth re-auth required, reply prompt unanswered, order rejected
+- [ ] On-call runbook documented for: combo partial fill, OAuth handshake fail, IBKR weekly maintenance window
 - [ ] Saxo account still funded as rollback safety net
+- [ ] GCP Secret Manager has all IBKR secrets (access tokens, key files mirrored)
 
 ---
 
-## 10. Post-cutover validation
+## 16. Post-cutover validation
 
 ### Day 1
-- [ ] All 3 variants connected to IB Gateway
-- [ ] SPX + VIX quotes streaming
+- [ ] All 3 IBKR variants connected, reconciled
+- [ ] SPX + VIX quotes streaming, last-tick age < 30s
 - [ ] Entry slots fire on schedule
 - [ ] First IC placed cleanly (manual approval)
 - [ ] First TP / stop fires correctly
-- [ ] EOD settlement reconciles
+- [ ] EOD reconciliation passes
 
 ### Week 1
 - [ ] Daily P&L matches expectation (within slippage tolerance)
-- [ ] No unexpected position drift on reconnect
-- [ ] Sunday auto-restart survived
+- [ ] No `smd` refresh failures (StreamingManager rotates as expected)
+- [ ] No 401 / re-auth events
 - [ ] Dashboard shows accurate live positions
-- [ ] No "BRANDON-GEX-ADJ SKIP" rate change vs Saxo baseline (rules out chain-data quality drift)
+- [ ] "BRANDON-GEX-ADJ SKIP" rate matches Saxo baseline (rules out chain-data drift)
 
 ### Month 1
-- [ ] Commission savings vs Saxo measured (expected ~55% reduction; $109.56/IC round-trip at 10c on the TP/stop path; $54.90/IC on worthless-expiry path)
-- [ ] Fill quality measured (mid-price slippage)
-- [ ] Polygon Options Starter unsubscribed → savings $29/mo realized
-- [ ] No gateway-uptime issues > 99.5%
-- [ ] All operator-friction items documented for runbook
+- [ ] Commission savings measured (~55% reduction expected)
+- [ ] Fill quality measured (mid-price slippage vs Saxo)
+- [ ] Polygon Options Starter unsubscribed → $29/mo saved
+- [ ] CP API uptime > 99.5%
+- [ ] All operator-friction items documented in runbook
 
 ### Quarter 1
 - [ ] Saxo account closed (or archived)
-- [ ] `shared/saxo_client.py` deleted from repo
+- [ ] `shared/saxo_client.py` deleted
 - [ ] CLAUDE.md broker references updated
 - [ ] Migration retrospective written
 
 ---
 
-## Appendix A — Decision log
+## 17. Appendix — IBKR error code dictionary
+
+| Code | Meaning | Recoverable? | Common cause |
+|---|---|---|---|
+| `19030` | Invalid consumer | ⏳ wait | OAuth credential registered but not activated; clears on weekly server reset |
+| `200` | Order error / contract ambiguous | Sometimes | Ambiguous symbol resolution; specify exchange + tradingClass |
+| `201` | Order rejected | Sometimes | Margin, trading permissions, RTH restriction |
+| `202` | Order cancelled | Yes | Normal cancellation |
+| `502` | Couldn't connect to TWS | No | n/a on CP API path |
+| `504` | Not connected | No | Brokerage session expired; reinit via `/iserver/auth/ssodh/init` |
+| `401 Unauthorized` | Pre-activation OR token expired | Sometimes | If credential pre-activation: wait. If token expired: re-handshake. |
+| HTTP 429 | Rate limited | Yes | Back off (exponential+jitter); fewer concurrent requests |
+| HTTP 500/502/503/504 | IBKR server error | Yes | Retry with backoff |
+
+---
+
+## Appendix B — Decision log
 
 | Decision | Date | Rationale |
 |---|---|---|
-| Pick `ib_async` over `ib_insync` | 2026-05-13 | `ib_insync` author deceased early 2024, library inactive since Dec 2023. `ib_async` is the maintained successor under `ib-api-reloaded`, supports Python 3.10-3.14. |
-| Pick TWS API / IB Gateway over Web API OAuth 2.0 | 2026-05-13 | Web API OAuth 2.0 is beta as of May 2026 AND retail live trading still requires the Client Portal Gateway per IBKR's own docs. Revisit when IBKR ships gateway-free retail trading. |
-| Pick `ghcr.io/gnzsnz/ib-gateway:10.45.1e` Docker image | 2026-05-13 | Stable, bundles IBC 3.23.0, well-maintained by `gnzsnz`. |
-| Use single BAG contract for iron condor (not 2 separate spread orders) | 2026-05-13 | Native CBOE Complex Order Book routing, better fills, atomic close-out option. Mature in TWS API. |
-| Keep Python-side credit-based stop logic | 2026-05-13 | Native IB stop orders unreliable on illiquid options per IBKR + community consensus. Current code is industry-standard for 0DTE. |
-| Drop Polygon Options Starter | 2026-05-13 | IB OPRA includes streaming bid/ask + Model Greeks + per-strike OI in one feed. Polygon only wins for historical chain replay (not used live). Saves $29/mo. |
-| Mandate IBKR Pro (not Lite) | 2026-05-13 | Lite ineligible for Web API trading endpoint; Lite is PFOF-routed (no SmartRouting). Pro is mandatory. |
+| Option 4 hybrid architecture (standalone → abstraction → parallel) | 2026-05-14 | Preserves Saxo dry-run during build; no code duplication; gradual rollout |
+| Full SaxoClient parity for ib_client.py | 2026-05-14 | Avoids missing-method surprises during Phase B integration |
+| Enforced ABC for trade methods, duck-typed for utility | 2026-05-14 | Clear contract where it matters; flexibility where it doesn't |
+| Fully separate state for IB variants | 2026-05-14 | Zero cross-contamination; easy comparison |
+| OAuth 1.0a + ibind (not Gateway + IBC) | 2026-05-13 | Eliminates Sunday phone tap, Docker process, etc. |
+| ibind 0.1.23 over 0.2.1rc | 2026-05-13 | Stable release; 0.2.1 still RC |
+| Fork ibind + swap pyCrypto → pycryptodome | 2026-05-13 | Pre-go-live hard requirement |
+| `tradingClass='SPXW'` for 0DTE | 2026-05-13 | Required for PM-settled weeklies |
+| Drop Polygon Options Starter | 2026-05-13 | IB OPRA gives streaming bid/ask + Greeks + OI in one feed |
+| IBKR Pro mandatory (not Lite) | 2026-05-13 | Lite ineligible for Web API trading endpoint |
+| `28812380` USD spread template conid for combos | 2026-05-14 | Documented IBKR convention for USD multi-leg combos |
+| Keep Python-side credit-based stops | 2026-05-13 | Native IB stop orders unreliable on illiquid options |
 
 ---
 
-## Appendix B — Where to find help
-
-- **IBKR API support**: `api-solutions@interactivebrokers.com` — confirm open questions in §6 of `INTERACTIVE_BROKERS_API_REFERENCE.md`
-- **IBKR Campus docs**: https://www.interactivebrokers.com/campus/ibkr-api-page/ibkr-api-home/
-- **TWS API reference**: https://interactivebrokers.github.io/tws-api/
-- **`ib_async` docs**: https://ib-api-reloaded.github.io/ib_async/
-- **`ib_async` GitHub**: https://github.com/ib-api-reloaded/ib_async
-- **IBC**: https://github.com/IbcAlpha/IBC
-- **Docker image**: https://github.com/gnzsnz/ib-gateway-docker
-- **0DTE on IB blog**: https://www.interactivebrokers.com/campus/ibkr-quant-news/trading-0dte-options-with-the-ibkr-native-api/
-- **CBOE SPXW spec**: https://www.cboe.com/tradable_products/sp_500/spx_weekly_options/specifications/
-
----
-
-**Last updated**: 2026-05-13. Update on every phase advancement.
+**Last updated**: 2026-05-14. Major rewrite (Option 4 + CP API specifics).

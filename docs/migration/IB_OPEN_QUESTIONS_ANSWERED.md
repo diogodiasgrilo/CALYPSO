@@ -383,3 +383,136 @@ This doc is a snapshot of May 2026 research. Re-validate before any major migrat
 - **On any IBKR Campus changelog entry mentioning retail OAuth**: re-evaluate the OAuth 1.0a vs 2.0 decision.
 
 **Last compiled**: 2026-05-13 by 3 parallel research agents + direct primary-source verification (PyPI, GitHub raw, CBOE PDFs, SEC fee advisories).
+
+---
+
+## 2026-05-14 update — 4 more questions answered (CP API specifics)
+
+After committing to the OAuth 1.0a + ibind architecture, four NEW technical questions surfaced. All resolved via parallel research (4 agents). Findings integrated into the rewritten migration plan; key items below for direct reference.
+
+### Q7 — How exactly does a 4-leg SPX iron condor express on CP API?
+
+**Single `POST /iserver/account/{accountId}/orders` with a `conidex` string.** Format:
+
+```
+28812380;;;{short_call_conid}/-1,{long_call_conid}/1,{short_put_conid}/-1,{long_put_conid}/1
+```
+
+- `28812380` is IBKR's **USD spread template conid** — universal for USD multi-leg combos
+- Three semicolons are a literal grammar requirement
+- Each leg's ratio sign carries direction: negative = SELL, positive = BUY
+
+Order body for SHORT IC:
+- `side: "SELL"`
+- `orderType: "LMT"`
+- `price: 0.30` — **POSITIVE** when SELLing-to-receive a credit (counter-intuitive but documented IBKR convention; see [TWS Notes on Combination Orders](https://www.ibkrguides.com/traderworkstation/notes-on-combination-orders.htm))
+- `tif: "DAY"`
+- `quantity: 10` — number of SPREADS, not legs
+
+In ibind:
+```python
+client.place_order(OrderRequest(
+    conid=None, conidex=conidex, sec_type="BAG",
+    side="SELL", order_type="LMT", price=0.30,
+    quantity=10, tif="DAY", acct_id=account_id,
+), answers=DEFAULT_ANSWERS, account_id=account_id)
+```
+
+**Critical gap**: CP API has **no direct equivalent of TWS's `smartComboRoutingParams=[("NonGuaranteed", "1")]`**. Atomic-fill enforcement on stop-out closes (where we MUST avoid being left naked short) requires client-side monitoring via `sor` WebSocket + per-leg market-order fallbacks if 1-3 legs fill but the spread doesn't complete.
+
+Source: `research_scratch/09_cpapi_combo_orders.md` (verified against ibind/examples/rest_06_options_chain.py).
+
+### Q8 — Can we stream SPX + VIX + 30 option legs over CP API WebSocket?
+
+**Yes — the "5 concurrent subscriptions" rumor was a myth.** Per ibind issue #100: the 5-subscription cap applies to HISTORICAL data (`hmds`), not real-time market data (`smd`). Real-time `smd` rides the standard 100-line IBKR market-data quota; 30 lines is comfortably inside.
+
+ibind + OAuth 1.0a connects directly to `wss://api.ibkr.com/v1/api/ws?oauth_token=<TOK>` — no local CP Gateway needed.
+
+**Critical gotcha**: `smd` topics **silently auto-terminate after ~15 minutes**. The WebSocket stays healthy; only that conid's ticks stop. ibind 0.1.23 does NOT auto-refresh. We must implement `umd→smd` rotation every ~13 min ourselves. Documented in migration plan §A.5 (`StreamingManager` class).
+
+Field codes for our use case (from `ibind/client/ibkr_definitions.py`):
+- 31 = last, 84 = bid, 86 = ask, 88 = bid_size, 85 = ask_size, 7635 = mark
+- 7308 = delta, 7309 = gamma, 7310 = theta, 7311 = vega
+- **7633 (NOT 7283) = IV per strike**
+- 7638 = open interest
+- 6509 = availability flag (`R`=real-time, `D`=delayed, `Z`=stale)
+
+Source: `research_scratch/10_cpapi_streaming.md` (verified against ibind/client/ibkr_ws_client.py).
+
+### Q9 — How do we do pre-trade margin check (`whatif` equivalent) on CP API?
+
+**Endpoint**: `POST /iserver/account/{accountId}/orders/whatif`. Payload is identical to `place_order` but with `whatif: true`.
+
+Response returns five blocks:
+- `amount` — order size
+- `equity` — equity (current / change / after)
+- `initial` — initial margin (current / change / after)
+- `maintenance` — maintenance margin (current / change / after)
+- `position` — position size (current / change / after)
+
+**All values returned in account base currency (EUR for us)**, as strings with embedded currency suffix like `"+4,500.00"`. Requires parsing.
+
+No risk-warning prompts fire on `whatif`, so no `answers` parameter needed.
+
+For our pre-trade BP gate (replaces SaxoClient's ORDER-004 check):
+```python
+result = await ib_client.what_if_order(ic_request)
+required_margin_eur = parse_amount(result["initial"]["change"])
+available_eur = await ib_client.get_balance(currency="EUR")
+if required_margin_eur > available_eur["tradable"] * 0.95:  # 5% safety buffer
+    return SKIP  # margin gate
+```
+
+Source: `research_scratch/11_cpapi_margin_account.md`.
+
+### Q10 — Live USD-tradable on an EUR-base account via CP API?
+
+**No single field**. Two-step computation:
+
+```python
+summary = await client.portfolio_summary(account_id)
+ledger = await client.get_ledger(account_id)
+
+eur_available = float(summary["availablefunds"]["amount"])  # in EUR
+usd_row = ledger["USD"]
+eur_per_usd = float(usd_row["exchangerate"])    # **direction needs first-call verification**
+usd_cash = float(usd_row["cashbalance"])
+
+usd_tradable = eur_available / eur_per_usd + usd_cash
+```
+
+**Caveat to verify on first paper trade**: the `exchangerate` direction (base-per-quote vs quote-per-base) is not unambiguously documented. Verify empirically on first live call.
+
+**Update cadence — this is the BIG correction from prior TWS-based assumption**:
+
+| Source | Cadence | Notes |
+|---|---|---|
+| TWS `reqAccountSummary` | 3 minutes (hard throttle) | Client-side cadence enforced by the API |
+| **CP API `portfolio_summary` / `get_ledger`** | **No documented throttle** | Can poll at 1Hz if needed |
+| CP API WebSocket `ssd` (summary), `sld` (ledger), `spl` (P&L) | **Sub-second push** on changes | Event-driven, much faster than polling |
+
+The TWS 3-minute throttle DOES NOT carry over to CP API. The underlying risk engine still updates at ~3s, so polling faster than that is pointless — but the API itself doesn't throttle.
+
+Recommended pattern: WebSocket for hot updates + HTTP poll every 10-30s as fail-safe re-sync.
+
+Source: `research_scratch/11_cpapi_margin_account.md`.
+
+---
+
+## 2026-05-14 update — activation poller correctness audit
+
+Per `research_scratch/12_ibind_errors_lifecycle.md`, the original poller had a partial-success blind spot. A successful `/oauth/live_session_token` response is **necessary but not sufficient** for "fully activated for trading".
+
+**Corrected 3-step check** (now wired into `~/ibkr-oauth/poll/poll.py`):
+
+1. **LST issued** — `POST /oauth/live_session_token` returns 200 with `diffie_hellman_response`, `live_session_token_signature`, `live_session_token_expiration`
+2. **Brokerage session opens** — `POST /iserver/auth/ssodh/init` returns `authenticated: true, connected: true`
+3. **Auth status confirms** — `GET /iserver/auth/status` returns `authenticated && connected && !competing`
+
+Today's poll output (`id: 19030, error: invalid consumer`) failed at step 1, which is what we expected pre-activation. After Sunday's server reset, we expect step 1 to succeed; we'll then see steps 2 + 3 outcome separately.
+
+The activation poller will be updated as part of Phase A.0 (before any other code work).
+
+---
+
+**Last updated**: 2026-05-14. Added Q7-Q10 (CP API specifics) + activation poller audit.
