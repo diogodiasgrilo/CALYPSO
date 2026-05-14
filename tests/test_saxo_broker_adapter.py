@@ -387,44 +387,160 @@ class TestGetFxRate:
 # ─── Deferred stubs ─────────────────────────────────────────────────────────
 
 
-class TestDeferredStubs:
-    """These methods raise NotImplementedError with actionable text. The
-    tests pin the failure mode so callers see the same error message
-    until the stub is implemented in Phase B.2.b / B.4."""
+class TestSymbolRegistry:
+    """Phase B.2.b — register_underlying() unlocks option_chain,
+    chart_data, place_iron_condor, place_vertical_spread."""
 
+    def test_unregistered_symbol_raises_broker_error_on_chain(self, adapter):
+        with pytest.raises(BrokerError, match="not registered"):
+            adapter.get_option_chain("UNKNOWN", date(2026, 5, 16))
+
+    def test_unregistered_symbol_raises_on_chart(self, adapter):
+        with pytest.raises(BrokerError, match="not registered"):
+            adapter.get_chart_data("UNKNOWN")
+
+    def test_register_uppercases_symbol(self, adapter):
+        adapter.register_underlying("spx", 6469910, 128)
+        # Now lookups under "SPX" work without re-uppercasing at the call site
+        adapter._registry_entry("SPX")
+        adapter._registry_entry("spx")
+        adapter._registry_entry("sPx")
+
+
+class TestGetOptionChain:
+    def test_returns_sorted_unique_strikes(self, adapter, mock_saxo):
+        adapter.register_underlying("SPX", 6469910, 128)
+        mock_saxo.get_option_chain.return_value = [
+            {"Strike": 5400},
+            {"Strike": 5500},
+            {"Strike": 5500},   # duplicate
+            {"StrikePrice": 5450},  # alternate key
+        ]
+        strikes = adapter.get_option_chain("SPX", date(2026, 5, 16))
+        assert strikes == [5400.0, 5450.0, 5500.0]
+
+    def test_empty_response_returns_empty(self, adapter, mock_saxo):
+        adapter.register_underlying("SPX", 6469910, 128)
+        mock_saxo.get_option_chain.return_value = None
+        assert adapter.get_option_chain("SPX", date(2026, 5, 16)) == []
+
+
+class TestGetChartData:
+    def test_delegates_with_registered_uic(self, adapter, mock_saxo):
+        adapter.register_underlying("SPX", 6469910, 128)
+        bars = [{"t": 1, "o": 100, "h": 101, "l": 99, "c": 100.5}]
+        mock_saxo.get_chart_data.return_value = bars
+        out = adapter.get_chart_data("SPX", bar="1min", period="1d")
+        assert out == bars
+        kw = mock_saxo.get_chart_data.call_args.kwargs
+        assert kw["uic"] == 6469910
+        assert kw["asset_type"] == "StockIndexOption"
+
+
+class TestPlaceIronCondor:
     @pytest.fixture
     def ic_req(self):
         return IronCondorRequest(
-            expiry=date(2026, 5, 16),
+            expiry=date.today(),  # 0DTE
             short_call_strike=5500, long_call_strike=5505,
             short_put_strike=5400,  long_put_strike=5395,
             contracts=1, net_credit_limit=0.30,
         )
 
-    @pytest.fixture
-    def vs_req(self):
-        return VerticalSpreadRequest(
+    def test_resolves_uics_and_submits_4_legs(self, adapter, mock_saxo, ic_req):
+        adapter.register_underlying("SPX", 6469910, 128)
+        mock_saxo.find_iron_fly_options.return_value = {
+            "short_call": {"uic": 111},
+            "long_call":  {"uic": 222},
+            "short_put":  {"uic": 333},
+            "long_put":   {"uic": 444},
+        }
+        mock_saxo.place_multi_leg_order.return_value = {
+            "OrderId": "combo_42", "Status": "Working",
+        }
+        result = adapter.place_iron_condor(ic_req)
+        assert isinstance(result, OrderResult)
+        assert result.order_id == "combo_42"
+        assert result.status == "Submitted"  # 'Working' normalized
+        assert result.is_combo is True
+        # 4 legs submitted with correct directions
+        legs = mock_saxo.place_multi_leg_order.call_args.kwargs["legs"]
+        assert len(legs) == 4
+        # Longs are buys, shorts are sells
+        buys = [l for l in legs if l["buy_sell"] == "Buy"]
+        sells = [l for l in legs if l["buy_sell"] == "Sell"]
+        assert len(buys) == 2 and len(sells) == 2
+        assert {l["uic"] for l in buys} == {222, 444}   # long_call + long_put
+        assert {l["uic"] for l in sells} == {111, 333}  # short_call + short_put
+
+    def test_unregistered_symbol_raises_broker_error(self, adapter, ic_req):
+        with pytest.raises(BrokerError, match="not registered"):
+            adapter.place_iron_condor(ic_req)
+
+    def test_find_iron_fly_options_none_raises(self, adapter, mock_saxo, ic_req):
+        adapter.register_underlying("SPX", 6469910, 128)
+        mock_saxo.find_iron_fly_options.return_value = None
+        with pytest.raises(BrokerError, match="no UICs"):
+            adapter.place_iron_condor(ic_req)
+
+    def test_place_multi_leg_order_none_raises(self, adapter, mock_saxo, ic_req):
+        adapter.register_underlying("SPX", 6469910, 128)
+        mock_saxo.find_iron_fly_options.return_value = {
+            "short_call": {"uic": 1}, "long_call": {"uic": 2},
+            "short_put": {"uic": 3}, "long_put": {"uic": 4},
+        }
+        mock_saxo.place_multi_leg_order.return_value = None
+        with pytest.raises(BrokerError, match="order rejected"):
+            adapter.place_iron_condor(ic_req)
+
+    def test_per_leg_response_captured_when_present(self, adapter, mock_saxo, ic_req):
+        adapter.register_underlying("SPX", 6469910, 128)
+        mock_saxo.find_iron_fly_options.return_value = {
+            "short_call": {"uic": 1}, "long_call": {"uic": 2},
+            "short_put": {"uic": 3}, "long_put": {"uic": 4},
+        }
+        mock_saxo.place_multi_leg_order.return_value = {
+            "OrderId": "combo_42", "Status": "Working",
+            "Orders": [
+                {"OrderId": "leg_1", "Status": "Working"},
+                {"OrderId": "leg_2", "Status": "Working"},
+                {"OrderId": "leg_3", "Status": "Working"},
+                {"OrderId": "leg_4", "Status": "Working"},
+            ],
+        }
+        result = adapter.place_iron_condor(ic_req)
+        assert len(result.legs) == 4
+        assert result.legs[0].order_id == "leg_1"
+
+
+class TestPlaceVerticalSpreadStillDeferred:
+    """Phase B.4 follow-up — Saxo's symbol→UIC lookup for 2-leg verticals
+    needs a strike-pair API that doesn't exist as a 1:1 helper. Pinning
+    the current contract so callers know it's not silently broken."""
+
+    def test_raises_broker_error_with_next_step(self, adapter):
+        adapter.register_underlying("SPX", 6469910, 128)
+        req = VerticalSpreadRequest(
             expiry=date(2026, 5, 16),
             short_strike=5500, long_strike=5505, right="C",
             contracts=1, net_credit_limit=0.30,
         )
+        with pytest.raises(BrokerError, match="find_strangle_options"):
+            adapter.place_vertical_spread(req)
 
-    def test_what_if_iron_condor_raises(self, adapter, ic_req):
-        with pytest.raises(NotImplementedError, match="ORDER-004"):
-            adapter.what_if_iron_condor(ic_req)
 
-    def test_place_iron_condor_raises(self, adapter, ic_req):
-        with pytest.raises(NotImplementedError, match="find_iron_fly_options"):
-            adapter.place_iron_condor(ic_req)
+class TestWhatIfReturnsSentinel:
+    """Saxo has no native what_if. We return a self-describing sentinel
+    dict so callers can detect the no-op explicitly."""
 
-    def test_place_vertical_spread_raises(self, adapter, vs_req):
-        with pytest.raises(NotImplementedError, match="composition"):
-            adapter.place_vertical_spread(vs_req)
-
-    def test_get_option_chain_raises(self, adapter):
-        with pytest.raises(NotImplementedError, match="symbol.*uic"):
-            adapter.get_option_chain("SPX", date(2026, 5, 16))
-
-    def test_get_chart_data_raises(self, adapter):
-        with pytest.raises(NotImplementedError, match="Symbol.*UIC"):
-            adapter.get_chart_data("SPX")
+    def test_returns_sentinel_dict(self, adapter):
+        req = IronCondorRequest(
+            expiry=date(2026, 5, 16),
+            short_call_strike=5500, long_call_strike=5505,
+            short_put_strike=5400,  long_put_strike=5395,
+            contracts=1, net_credit_limit=0.30,
+        )
+        result = adapter.what_if_iron_condor(req)
+        assert isinstance(result, dict)
+        assert result["_status"] == "not_supported_on_saxo"
+        assert "_reason" in result

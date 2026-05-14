@@ -99,19 +99,62 @@ class SaxoBrokerAdapter(BrokerInterface):
         # symbol-keyed VIX lookup the way IBKR does. If unset,
         # get_vix_price returns None rather than raising.
         self._vix_uic: Optional[int] = None
+        # symbol → (underlying_uic, option_root_uic, asset_type) registry.
+        # Saxo's option-chain / chart-data / find_iron_fly_options APIs
+        # require UIC integers, not symbol strings — callers register
+        # mappings here at boot so the BrokerInterface contract (symbol+
+        # expiry+strike) translates cleanly. Keyed by uppercase symbol.
+        self._symbol_registry: dict[str, dict] = {}
 
     @property
     def saxo(self):
         """Escape hatch for callers needing Saxo-specific functionality
         not yet covered by the BrokerInterface (e.g., streaming subscribe,
-        position close, find_iron_fly_options composition). Use sparingly
-        — every direct-Saxo call site is a Phase B.4 cleanup target."""
+        position close, per-leg sequential order placement with retry).
+        Use sparingly — every direct-Saxo call site is a Phase B.4 cleanup
+        target."""
         return self._saxo
 
     def set_vix_uic(self, uic: int) -> None:
         """Configure the Saxo UIC for the VIX index. Must be called once
         at boot time before `get_vix_price()` is usable."""
         self._vix_uic = int(uic)
+
+    def register_underlying(
+        self,
+        symbol: str,
+        underlying_uic: int,
+        option_root_uic: int,
+        asset_type: str = "StockIndexOption",
+    ) -> None:
+        """Register a symbol→UIC mapping for option / chart lookups.
+
+        Args:
+            symbol: e.g. "SPX" — uppercased for storage
+            underlying_uic: Saxo UIC for the underlying instrument
+                (e.g. SPX index ~6469910 in some Saxo setups)
+            option_root_uic: Saxo's option-root UIC (e.g. SPXW = 128)
+                — used by find_iron_fly_options / get_option_chain.
+            asset_type: Saxo asset type string. Default
+                "StockIndexOption" matches SPX 0DTE; equity options use
+                "StockOption", FX options use "FxOption", etc.
+        """
+        self._symbol_registry[symbol.upper()] = {
+            "underlying_uic": int(underlying_uic),
+            "option_root_uic": int(option_root_uic),
+            "asset_type": asset_type,
+        }
+
+    def _registry_entry(self, symbol: str) -> dict:
+        """Look up a registered symbol; raise BrokerError if not registered."""
+        entry = self._symbol_registry.get(symbol.upper())
+        if entry is None:
+            raise BrokerError(
+                f"SaxoBrokerAdapter: symbol {symbol!r} not registered. "
+                f"Call register_underlying({symbol!r}, underlying_uic, "
+                f"option_root_uic) at boot time before option/chart lookups."
+            )
+        return entry
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
@@ -205,14 +248,29 @@ class SaxoBrokerAdapter(BrokerInterface):
         return self._to_quote_snapshot(instrument_id, raw)
 
     def get_option_chain(self, underlying_symbol: str, expiry: date) -> list[float]:
-        # Saxo's get_option_chain wants the underlying UIC + option-root UIC;
-        # both are resolved by the caller historically. For the abstraction
-        # to be useful we'd need a symbol-to-uic lookup. Defer cleanly.
-        raise NotImplementedError(
-            "SaxoBrokerAdapter.get_option_chain: Saxo's chain lookup needs "
-            "underlying_uic + option_root_uic, not symbol+expiry. Add a "
-            "symbol→uic registry on the adapter (Phase B.4) before wiring."
+        """Returns available strikes for `underlying_symbol` on `expiry`.
+
+        Requires the symbol to be registered via `register_underlying()`
+        because Saxo's API needs UICs, not symbols.
+        """
+        entry = self._registry_entry(underlying_symbol)
+        raw = self._saxo.get_option_chain(
+            underlying_uic=entry["underlying_uic"],
+            option_root_uic=entry["option_root_uic"],
+            expiry_date=expiry,
         )
+        if not raw:
+            return []
+        # Saxo returns a list of strike-keyed dicts; normalize to floats.
+        strikes: list[float] = []
+        for entry_dict in raw:
+            sk = entry_dict.get("Strike") or entry_dict.get("StrikePrice")
+            if sk is not None:
+                try:
+                    strikes.append(float(sk))
+                except (TypeError, ValueError):
+                    continue
+        return sorted(set(strikes))
 
     def get_chart_data(
         self,
@@ -221,12 +279,15 @@ class SaxoBrokerAdapter(BrokerInterface):
         period: str = "1d",
         outside_rth: bool = False,
     ) -> list[dict]:
-        # Saxo's get_chart_data takes uic + time-window params; adapter
-        # needs a symbol→uic resolver. Mirror get_option_chain's gap.
-        raise NotImplementedError(
-            "SaxoBrokerAdapter.get_chart_data: Saxo wants UIC + horizon, "
-            "not symbol+bar+period. Symbol→UIC resolution lands in Phase B.4."
+        """Historical OHLCV bars. Requires registered symbol→UIC mapping."""
+        entry = self._registry_entry(symbol)
+        raw = self._saxo.get_chart_data(
+            uic=entry["underlying_uic"],
+            asset_type=entry["asset_type"],
+            horizon=bar,
+            count=1440 if period == "1d" else 5000,  # crude mapping
         )
+        return raw if isinstance(raw, list) else []
 
     def get_fx_rate(self, source: str, target: str) -> Optional[float]:
         try:
@@ -318,30 +379,117 @@ class SaxoBrokerAdapter(BrokerInterface):
         # response as success (None / empty dict / exception = failure).
         return bool(result)
 
-    # ─── Deferred stubs ───────────────────────────────────────────────────
+    # ─── Pre-trade (still deferred — see docstring) ───────────────────────
 
     def what_if_iron_condor(self, request: IronCondorRequest) -> dict:
-        raise NotImplementedError(
+        """Saxo has no native what_if endpoint. Returns an empty dict so
+        callers don't break the contract; strategies that need a
+        broker-authoritative pre-trade gate must use IBBrokerAdapter or
+        keep their existing client-side ORDER-004 BP check.
+
+        Returns: `{"_status": "not_supported_on_saxo", "_reason": ...}`
+        so the empty-dict case is self-describing.
+        """
+        logger.debug(
             "SaxoBrokerAdapter.what_if_iron_condor: Saxo has no native "
-            "pre-trade margin endpoint. CALYPSO uses a client-side "
-            "ORDER-004 BP gate via external_price_feed. Wire that "
-            "through this method in Phase B.4 once IBBrokerAdapter "
-            "(B.3) sets the contract expectation."
+            "what_if; returning sentinel. Use IBBrokerAdapter for "
+            "broker-authoritative margin checks."
         )
+        return {
+            "_status": "not_supported_on_saxo",
+            "_reason": "Saxo Bank's /trade/v2/orders/precheck does not "
+                       "compose 4-leg combo margin in a single call; "
+                       "strategies must continue using client-side "
+                       "ORDER-004 BP gates.",
+        }
+
+    # ─── Writes — atomic combo placement via place_multi_leg_order ────────
 
     def place_iron_condor(self, request: IronCondorRequest) -> OrderResult:
-        raise NotImplementedError(
-            "SaxoBrokerAdapter.place_iron_condor: existing CALYPSO flow "
-            "composes this from find_iron_fly_options + place_multi_leg_order "
-            "(see bots/iron_fly_0dte/strategy.py). The composition needs to "
-            "be lifted into this adapter — Phase B.2.b. Until then, callers "
-            "that need iron-condor placement must continue to go through "
-            "saxo_client directly via the .saxo escape hatch."
+        """Place a 4-leg short iron condor as a single multi-leg order.
+
+        This is the ATOMIC COMBO path: legs go to Saxo in one request,
+        broker-side atomic-fill semantics. Strategies that want per-leg
+        sequential placement (e.g., iron_fly_0dte's longs-first safety
+        ordering with verification) should continue using the `.saxo`
+        escape hatch to call `place_order_with_retry` directly — that's
+        a strategy choice, not a broker abstraction concern.
+
+        Requires the underlying symbol to be registered via
+        `register_underlying()` so UICs can be resolved.
+        """
+        entry = self._registry_entry(request.underlying_symbol)
+        # Step 1: resolve all 4 leg UICs via find_iron_fly_options
+        iron_fly = self._saxo.find_iron_fly_options(
+            underlying_uic=entry["underlying_uic"],
+            atm_strike=request.short_call_strike,  # for IC, "ATM" is the short call
+            upper_wing_strike=request.long_call_strike,
+            lower_wing_strike=request.long_put_strike,
+            target_dte_min=0,
+            target_dte_max=(request.expiry - date.today()).days + 1,
+            option_root_uic=entry["option_root_uic"],
         )
+        if not iron_fly:
+            raise BrokerError(
+                f"SaxoBrokerAdapter.place_iron_condor: find_iron_fly_options "
+                f"returned no UICs for {request.underlying_symbol} expiry="
+                f"{request.expiry} strikes "
+                f"SC={request.short_call_strike}/LC={request.long_call_strike}/"
+                f"SP={request.short_put_strike}/LP={request.long_put_strike}"
+            )
+        sc_uic = iron_fly["short_call"]["uic"]
+        sp_uic = iron_fly["short_put"]["uic"]
+        lc_uic = iron_fly["long_call"]["uic"]
+        lp_uic = iron_fly["long_put"]["uic"]
+
+        # Step 2: build legs — Saxo wants {"uic", "asset_type", "buy_sell", "amount"}
+        legs = [
+            {"uic": lc_uic, "asset_type": entry["asset_type"], "buy_sell": "Buy",  "amount": request.contracts},
+            {"uic": lp_uic, "asset_type": entry["asset_type"], "buy_sell": "Buy",  "amount": request.contracts},
+            {"uic": sc_uic, "asset_type": entry["asset_type"], "buy_sell": "Sell", "amount": request.contracts},
+            {"uic": sp_uic, "asset_type": entry["asset_type"], "buy_sell": "Sell", "amount": request.contracts},
+        ]
+        try:
+            response = self._saxo.place_multi_leg_order(
+                legs=legs,
+                duration_type="DayOrder" if request.tif == "DAY" else request.tif,
+            )
+        except Exception as exc:
+            raise BrokerError(
+                f"SaxoBrokerAdapter.place_iron_condor: place_multi_leg_order "
+                f"raised: {exc}"
+            ) from exc
+        if not response:
+            raise BrokerError(
+                "SaxoBrokerAdapter.place_iron_condor: place_multi_leg_order "
+                "returned None — order rejected by broker"
+            )
+        result = self._to_order_result(response)
+        result.is_combo = True
+        # If Saxo returned per-leg order ids, capture them
+        per_leg = response.get("Orders") if isinstance(response, dict) else None
+        if per_leg:
+            result.legs = [self._to_order_result(o) for o in per_leg]
+        return result
 
     def place_vertical_spread(self, request: VerticalSpreadRequest) -> OrderResult:
-        raise NotImplementedError(
-            "SaxoBrokerAdapter.place_vertical_spread: same as place_iron_condor "
-            "— composition lives in strategy code today; lift to adapter in "
-            "Phase B.2.b."
+        """Place a 2-leg vertical spread atomically.
+
+        Like place_iron_condor, this is the combo path. action='SELL'
+        opens a short spread (collect credit); 'BUY' closes one.
+        """
+        entry = self._registry_entry(request.underlying_symbol)
+        # Saxo doesn't have a 2-leg helper — resolve UICs via the same
+        # find_iron_fly_options + the strikes-on-one-side, OR via
+        # find_strangle_options. For simplicity here, callers are
+        # expected to know UICs already and reach via .saxo for the
+        # underlying UIC resolution. To keep the BrokerInterface
+        # contract honest, raise BrokerError with explicit next step.
+        raise BrokerError(
+            "SaxoBrokerAdapter.place_vertical_spread: Saxo's symbol→UIC "
+            "lookup for a 2-leg spread needs a strike-pair-specific call "
+            "(find_strangle_options or similar). Wire that translation "
+            "in Phase B.4 when HYDRA's vertical-spread paths are "
+            "actually exercised on Saxo. Until then, strategies place "
+            "verticals via .saxo + place_multi_leg_order directly."
         )
