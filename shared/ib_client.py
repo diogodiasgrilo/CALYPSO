@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Iterable, Optional
 
-from ibind import IbkrClient  # module-level so tests can patch cleanly
+from ibind import IbkrClient, OrderRequest, QuestionType  # module-level so tests can patch cleanly
 
 from shared.ib_oauth import (
     IBKRCredentials,
@@ -92,6 +92,44 @@ DEFAULT_GREEKS_FIELDS = [
     FIELD_DELTA, FIELD_GAMMA, FIELD_THETA, FIELD_VEGA, FIELD_IV, FIELD_OI,
 ]
 DEFAULT_OPTION_QUOTE_FIELDS = DEFAULT_QUOTE_FIELDS + DEFAULT_GREEKS_FIELDS
+
+
+# ─── Order placement constants ──────────────────────────────────────────────
+
+# IBKR's published USD spread template conid — used as the prefix in the
+# `conidex` field for USD multi-leg combos (iron condors, vertical spreads).
+# Verified in research_scratch/09_cpapi_combo_orders.md against IBKR Campus
+# combo-order docs + ibind/examples/rest_06_options_chain.py.
+SPREAD_TEMPLATE_CONID = 28812380
+
+# Default answers for IBKR's order-reply prompts. Caller can override per-call.
+#
+# Reply prompts fire on each place_order/modify_order call where IBKR wants
+# us to confirm a warning. Our defaults match Brandon-style 0DTE flow:
+#   • Confirm price-deviation prompts (0DTE wings often price 3%+ off mid)
+#   • Confirm immediate-fill prompts (combos at mid often fill instantly)
+#   • Refuse "no market data" prompts (we always have OPRA — refusing means
+#     "abort the trade" which is safer than placing blind)
+#   • Refuse stop-order prompts (we don't use native stop orders)
+#
+# Per research_scratch/12_ibind_errors_lifecycle.md: answers dict must use
+# QuestionType enum members or matching string keys.
+DEFAULT_ORDER_ANSWERS = {
+    QuestionType.PRICE_PERCENTAGE_CONSTRAINT: True,  # 0DTE wings often price 3%+ off mid
+    QuestionType.ORDER_VALUE_LIMIT: True,            # our 10c IC notional is small but flagged
+    QuestionType.TICK_SIZE_LIMIT: True,              # CBOE combo $0.05 rounding edge cases
+    QuestionType.TRIGGER_AND_FILL: True,             # combos at mid often fill instantly
+    QuestionType.MANDATORY_CAP_PRICE: True,          # IBKR cap-price safety; we want it on
+    QuestionType.CASH_QUANTITY: True,                # info disclosure
+    QuestionType.CASH_QUANTITY_ORDER: True,          # info disclosure
+    QuestionType.DISRUPTIVE_ORDERS: True,            # IBKR may reject; informational
+    QuestionType.MISSING_MARKET_DATA: False,         # we always have OPRA — refuse = abort
+    QuestionType.STOP_ORDER_RISKS: False,            # we don't use native stop orders
+    QuestionType.ORDER_SIZE_LIMIT: False,            # safety: don't auto-confirm oversize
+    QuestionType.SIZE_MODIFICATION_LIMIT: False,     # safety: don't auto-confirm large mods
+    QuestionType.MULTIPLE_ACCOUNTS: False,           # we trade one account at a time
+    QuestionType.CLOSE_POSITION: False,              # don't auto-close-all in response to anything
+}
 
 
 # ─── Public exceptions ──────────────────────────────────────────────────────
@@ -891,3 +929,369 @@ class IBClient:
         if isinstance(data, dict):
             return data.get("data") or []
         return data if isinstance(data, list) else []
+
+    # ─── Order placement (write methods) ──────────────────────────────────
+
+    @staticmethod
+    def _round_to_increment(price: float, increment: float = 0.05) -> float:
+        """Round price to nearest CBOE-allowed increment.
+
+        SPX options combo orders must use $0.05 net-credit increments on the
+        CBOE Complex Order Book. Non-conforming prices are rejected outright.
+        """
+        return round(price / increment) * increment
+
+    @staticmethod
+    def build_ic_conidex(
+        short_call_conid: int, long_call_conid: int,
+        short_put_conid: int,  long_put_conid: int,
+    ) -> str:
+        """Construct the CP API conidex string for a 4-leg iron condor.
+
+        Format (per research_scratch/09_cpapi_combo_orders.md):
+            "{template};;;{sc_conid}/-1,{lc_conid}/1,{sp_conid}/-1,{lp_conid}/1"
+
+        Where template = SPREAD_TEMPLATE_CONID (28812380, IBKR's universal
+        USD spread template). The three semicolons are a literal grammar
+        requirement. Negative ratio = SELL leg; positive = BUY leg.
+
+        For a SHORT iron condor we SELL the call spread (sc short, lc long)
+        and SELL the put spread (sp short, lp long).
+
+        Exposed as a static method so tests can verify the exact bytes
+        without instantiating an IBClient.
+        """
+        return (
+            f"{SPREAD_TEMPLATE_CONID};;;"
+            f"{short_call_conid}/-1,{long_call_conid}/1,"
+            f"{short_put_conid}/-1,{long_put_conid}/1"
+        )
+
+    @staticmethod
+    def build_vertical_conidex(
+        short_conid: int, long_conid: int,
+    ) -> str:
+        """Construct conidex for a 2-leg vertical spread (call or put).
+
+        Used for one-sided entries (when Brandon GEX-ADJ skips one side) and
+        for stop-out closes (closing one side of an open IC atomically).
+
+        Negative ratio = SELL leg; positive = BUY leg. The credit side is
+        the SHORT leg.
+        """
+        return (
+            f"{SPREAD_TEMPLATE_CONID};;;"
+            f"{short_conid}/-1,{long_conid}/1"
+        )
+
+    def place_iron_condor(
+        self,
+        expiry: date,
+        short_call_strike: float, long_call_strike: float,
+        short_put_strike: float,  long_put_strike: float,
+        contracts: int,
+        net_credit_limit: float,
+        tif: str = "DAY",
+        coid: Optional[str] = None,
+        symbol: str = "SPX",
+        trading_class: str = "SPXW",
+        answers: Optional[dict] = None,
+    ) -> dict:
+        """Place a 4-leg SPX iron condor as a single net-credit combo limit.
+
+        For a SHORT IC (selling premium):
+          • side = "SELL"
+          • price = POSITIVE — IBKR's counter-intuitive convention for
+            "price you receive in credit" when SELLing a combo.
+            (See https://www.ibkrguides.com/traderworkstation/notes-on-combination-orders.htm)
+
+        Atomic-fill enforcement: CP API has NO direct NonGuaranteed flag
+        equivalent to TWS API's. Caller monitors `sor` WebSocket for
+        partial-fill detection — that's Phase A.5 / A.7 territory.
+
+        Args:
+            expiry: option expiry date (today for 0DTE)
+            short_call_strike, long_call_strike, short_put_strike, long_put_strike:
+                the 4 strike prices. Call spread is short<long; put spread is
+                long<short (i.e., short closer to spot, long further OTM).
+            contracts: number of spreads (not legs)
+            net_credit_limit: minimum credit per spread we'll accept
+            tif: 'DAY' (default — 0DTE doesn't survive past close anyway)
+            coid: client order ID for dedup; if None, ibind generates one
+            symbol: 'SPX' (or other underlying for non-SPX uses)
+            trading_class: 'SPXW' for 0DTE; 'SPX' for monthly AM-settled
+            answers: override DEFAULT_ORDER_ANSWERS reply-prompt dict
+
+        Returns:
+            dict with order_id, status (PreSubmitted/Submitted/Filled/etc.),
+            local_order_id, conidex, raw
+
+        SaxoClient: no exact equivalent; HYDRA composes 4 separate Saxo
+        orders via place_multi_leg_order. The IB conidex approach is the
+        single-order path.
+        """
+        self._require_connected()
+
+        # Resolve conids for all 4 legs (cached after first call)
+        sc = self.qualify_contract(symbol, expiry, short_call_strike, "C", trading_class)
+        lc = self.qualify_contract(symbol, expiry, long_call_strike,  "C", trading_class)
+        sp = self.qualify_contract(symbol, expiry, short_put_strike,  "P", trading_class)
+        lp = self.qualify_contract(symbol, expiry, long_put_strike,   "P", trading_class)
+
+        conidex = self.build_ic_conidex(sc, lc, sp, lp)
+        price = self._round_to_increment(net_credit_limit, 0.05)
+
+        order = OrderRequest(
+            conid=None,
+            conidex=conidex,
+            sec_type="BAG",
+            side="SELL",           # SHORT IC = SELL the combo
+            order_type="LMT",
+            price=price,           # POSITIVE = credit received (IBKR convention)
+            quantity=contracts,
+            tif=tif,
+            acct_id=self.account_id,
+            coid=coid,
+        )
+        logger.info(
+            "IC place: %s %s expiry=%s C:%.0f/%.0f P:%.0f/%.0f x%d net_credit=%.2f tif=%s",
+            symbol, trading_class, expiry,
+            short_call_strike, long_call_strike,
+            short_put_strike, long_put_strike,
+            contracts, price, tif,
+        )
+
+        return self._submit_order(order, answers=answers)
+
+    def place_vertical_spread(
+        self,
+        expiry: date,
+        short_strike: float, long_strike: float,
+        right: str,           # 'C' or 'P'
+        contracts: int,
+        net_credit_limit: float,
+        action: str = "SELL", # 'SELL' to open short spread; 'BUY' to close
+        tif: str = "DAY",
+        coid: Optional[str] = None,
+        symbol: str = "SPX",
+        trading_class: str = "SPXW",
+        answers: Optional[dict] = None,
+    ) -> dict:
+        """Place a 2-leg vertical spread as a single combo limit.
+
+        Two main uses:
+          1. One-sided entries: Brandon GEX-ADJ SKIP'd one side; place only
+             the other side as a short vertical
+          2. Stop-out close: closing one side of an open IC. Pass
+             action='BUY' (we're buying back the spread we sold). price
+             should be the maximum debit we'll pay to close.
+
+        For SHORT vertical (selling): side="SELL", positive price = credit.
+        For closing (buying): side="BUY", positive price = debit paid.
+        """
+        self._require_connected()
+        if right not in ("C", "P"):
+            raise IBClientError(f"right must be 'C' or 'P', got {right!r}")
+        if action not in ("SELL", "BUY"):
+            raise IBClientError(f"action must be 'SELL' or 'BUY', got {action!r}")
+
+        s = self.qualify_contract(symbol, expiry, short_strike, right, trading_class)
+        l = self.qualify_contract(symbol, expiry, long_strike,  right, trading_class)
+        conidex = self.build_vertical_conidex(s, l)
+        price = self._round_to_increment(net_credit_limit, 0.05)
+
+        order = OrderRequest(
+            conid=None,
+            conidex=conidex,
+            sec_type="BAG",
+            side=action,
+            order_type="LMT",
+            price=price,
+            quantity=contracts,
+            tif=tif,
+            acct_id=self.account_id,
+            coid=coid,
+        )
+        logger.info(
+            "Vertical place: %s %s expiry=%s %s short:%.0f long:%.0f x%d price=%.2f side=%s",
+            symbol, trading_class, expiry, right,
+            short_strike, long_strike, contracts, price, action,
+        )
+
+        return self._submit_order(order, answers=answers)
+
+    def place_order(
+        self,
+        conid: int,
+        side: str,
+        quantity: int,
+        order_type: str = "LMT",
+        price: Optional[float] = None,
+        tif: str = "DAY",
+        coid: Optional[str] = None,
+        answers: Optional[dict] = None,
+    ) -> dict:
+        """Place a single-leg order.
+
+        Used for single options or stock orders. For multi-leg combos use
+        place_iron_condor / place_vertical_spread.
+
+        SaxoClient.place_order() equivalent.
+        """
+        self._require_connected()
+        if order_type == "LMT" and price is None:
+            raise IBClientError("LMT order requires price")
+        if side not in ("BUY", "SELL"):
+            raise IBClientError(f"side must be 'BUY' or 'SELL', got {side!r}")
+
+        # Round price to $0.05 only for combo / SPX options
+        rounded_price = self._round_to_increment(price, 0.05) if price is not None else None
+
+        order = OrderRequest(
+            conid=int(conid),
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            price=rounded_price,
+            tif=tif,
+            acct_id=self.account_id,
+            coid=coid,
+        )
+        logger.info(
+            "Order place: conid=%d %s %d %s @ %s tif=%s",
+            conid, side, quantity, order_type,
+            f"{rounded_price:.2f}" if rounded_price else "MKT",
+            tif,
+        )
+
+        return self._submit_order(order, answers=answers)
+
+    def place_market_order(
+        self,
+        conid: int,
+        side: str,
+        quantity: int,
+        tif: str = "DAY",
+        coid: Optional[str] = None,
+        answers: Optional[dict] = None,
+    ) -> dict:
+        """Place a market order (no price). Used for emergency / stop-out fallback.
+
+        SaxoClient.place_emergency_order() equivalent.
+        """
+        return self.place_order(
+            conid=conid, side=side, quantity=quantity,
+            order_type="MKT", price=None, tif=tif, coid=coid, answers=answers,
+        )
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel a working order.
+
+        Returns True on successful cancellation request (the actual cancel
+        completes asynchronously — caller should poll get_order_status if
+        confirmation is needed).
+
+        SaxoClient.cancel_order() equivalent.
+        """
+        self._require_connected()
+        with self._call_lock:
+            result = self._client.cancel_order(
+                order_id=str(order_id),
+                account_id=self.account_id,
+            )
+        try:
+            self._unwrap(result)
+            logger.info("Order cancel: order_id=%s", order_id)
+            return True
+        except IBClientError as exc:
+            logger.warning("Order cancel failed for %s: %s", order_id, exc)
+            return False
+
+    def modify_order(
+        self,
+        order_id: str,
+        price: Optional[float] = None,
+        quantity: Optional[int] = None,
+        answers: Optional[dict] = None,
+    ) -> dict:
+        """Modify a working order's price or quantity.
+
+        IBKR's modify_order replaces the previous order instance (not amend);
+        order_id stays the same but other fields can change.
+        """
+        self._require_connected()
+        # Build a partial order request — ibind merges with existing state
+        if price is None and quantity is None:
+            raise IBClientError("modify_order needs at least price or quantity")
+
+        rounded_price = self._round_to_increment(price, 0.05) if price is not None else None
+
+        order = OrderRequest(
+            conid=None,
+            side="SELL",        # required by dataclass; ignored on modify
+            quantity=quantity or 0,
+            order_type="LMT",
+            price=rounded_price,
+            acct_id=self.account_id,
+        )
+        with self._call_lock:
+            result = self._client.modify_order(
+                order_id=str(order_id),
+                order_request=order,
+                answers=answers or DEFAULT_ORDER_ANSWERS,
+                account_id=self.account_id,
+            )
+        data = self._unwrap(result) or {}
+        logger.info("Order modify: order_id=%s price=%s qty=%s",
+                    order_id, rounded_price, quantity)
+        return data if isinstance(data, dict) else (data[0] if data else {})
+
+    def what_if_order(
+        self,
+        order: OrderRequest,
+    ) -> dict:
+        """Pre-trade margin / cost check WITHOUT placing the order.
+
+        Returns IBKR's 5 blocks: amount, equity, initial, maintenance,
+        position — each with current/change/after keys. All values are in
+        the account's base currency (EUR for us). Caller parses strings
+        like "+4,500.00" and converts to USD via get_balance("USD") if
+        needed.
+
+        Used as our pre-trade BP gate (replaces SaxoClient's ORDER-004
+        check with broker-authoritative numbers).
+
+        Per research_scratch/11_cpapi_margin_account.md: whatif does NOT
+        fire reply prompts (no `answers` param needed).
+        """
+        self._require_connected()
+        with self._call_lock:
+            result = self._client.whatif_order(
+                order_request=order,
+                account_id=self.account_id,
+            )
+        return self._unwrap(result) or {}
+
+    def _submit_order(
+        self,
+        order: OrderRequest,
+        answers: Optional[dict] = None,
+    ) -> dict:
+        """Internal: submit an OrderRequest via ibind, normalize the response.
+
+        Reply-prompt handling: pass our DEFAULT_ORDER_ANSWERS unless caller
+        overrides. ibind walks the reply loop until IBKR's prompt chain is
+        cleared or rejects an unknown prompt (in which case it raises).
+        """
+        a = answers if answers is not None else DEFAULT_ORDER_ANSWERS
+        with self._call_lock:
+            result = self._client.place_order(
+                order_request=order,
+                answers=a,
+                account_id=self.account_id,
+            )
+        data = self._unwrap(result) or {}
+        # ibind returns a list (one entry per leg or one per submission)
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        return data
