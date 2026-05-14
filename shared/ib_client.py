@@ -225,6 +225,8 @@ class IBClient:
     def __init__(self, config: IBConfig):
         self.cfg = config
         self._client = None  # type: ignore[assignment]  # set by connect()
+        self._ws_client = None  # lazy: created on first streaming use
+        self._streaming = None  # lazy: created on first streaming use
         self._connected = False
         self._account_id: Optional[str] = config.account_id
         # Lock for serializing ibind calls across threads.
@@ -349,9 +351,25 @@ class IBClient:
     def disconnect(self) -> None:
         """Tear down the brokerage session cleanly.
 
-        Calls ibind's logout/shutdown if available. Idempotent — safe to call
+        Calls ibind's logout/shutdown if available. Stops the StreamingManager
+        and WS client if they were spun up. Idempotent — safe to call
         even if connect() failed partway through.
         """
+        # Tear down streaming first (cleanly unsubscribes all conids)
+        if self._streaming is not None:
+            try:
+                self._streaming.stop()
+            except Exception as exc:
+                logger.warning("StreamingManager stop failed: %s", exc)
+            self._streaming = None
+        if self._ws_client is not None:
+            try:
+                if hasattr(self._ws_client, "shutdown"):
+                    self._ws_client.shutdown()
+            except Exception as exc:
+                logger.warning("WS client shutdown failed: %s", exc)
+            self._ws_client = None
+
         if not self._client:
             return
         try:
@@ -1295,3 +1313,88 @@ class IBClient:
         if isinstance(data, list):
             data = data[0] if data else {}
         return data
+
+    # ─── Streaming (Phase A.5 integration) ────────────────────────────────
+
+    @property
+    def streaming(self):
+        """Lazy: create + start StreamingManager on first access.
+
+        First access spins up an IbkrWsClient pointed at the live OAuth
+        session, plus a StreamingManager around it. Subsequent reads return
+        the cached instance.
+
+        Returns None until connect() has been called.
+        """
+        if not self._connected:
+            return None
+        if self._streaming is not None:
+            return self._streaming
+        from ibind import IbkrWsClient
+        from shared.ib_streaming import StreamingManager
+
+        # Build the WS client tied to our IbkrClient's auth state.
+        # use_oauth=True + access_token tells the WS to authenticate from
+        # the same OAuth context. base_route default `/v1/api/ws` matches
+        # the cloud endpoint (no local gateway).
+        ws = IbkrWsClient(
+            ibkr_client=self._client,
+            account_id=self.account_id,
+            use_oauth=True,
+            access_token=self.cfg.credentials.access_token,
+            start=True,
+        )
+        self._ws_client = ws
+        self._streaming = StreamingManager(ws)
+        self._streaming.start()
+        logger.info("IBClient: streaming subsystem started")
+        return self._streaming
+
+    # ─── Reconcile (Phase A.7 integration) ────────────────────────────────
+
+    def reconcile_orders(
+        self,
+        state_orders: list,
+        *,
+        dry_run: bool = False,
+        reattach_fn=None,
+        lookup_fn=None,
+    ) -> dict:
+        """Cross-check broker open orders vs our state file; apply decisions.
+
+        Per migration plan §4.4: IB orders are broker-side persistent. If
+        bot crashed mid-order, the order is still live on IBKR's side when
+        we reconnect. This function handles the three reconcile cases:
+
+          • only_broker (orphan)  → CANCEL for safety
+          • only_state (gone)     → LOOKUP_FILL via lookup_fn (if provided)
+          • both                  → REATTACH via reattach_fn (if provided)
+
+        Args:
+            state_orders: list of dicts from caller's state file. Each must
+                have at least 'order_id' (or 'orderId').
+            dry_run: if True, log + return decisions but no side effects.
+            reattach_fn: optional callable(order_id, broker_record) → None
+                invoked for each REATTACH decision. If None, REATTACH items
+                are logged only.
+            lookup_fn: optional callable(order_id) → None invoked for each
+                LOOKUP_FILL decision. If None, LOOKUP items are logged only.
+
+        Returns:
+            dict mapping action → list of order_ids:
+                {"cancel": [...], "lookup": [...], "reattach": [...], "skip": [...]}
+        """
+        self._require_connected()
+        from shared.ib_reconcile import classify_orders, apply_decisions
+
+        broker_orders = self.get_open_orders()
+        result = classify_orders(broker_orders, state_orders)
+        logger.info("IBClient reconcile: %s", result.summary())
+
+        return apply_decisions(
+            result,
+            cancel_fn=self.cancel_order,
+            lookup_fn=lookup_fn,
+            reattach_fn=reattach_fn,
+            dry_run=dry_run,
+        )
