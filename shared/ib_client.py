@@ -149,6 +149,130 @@ _TERMINAL_ORDER_STATUSES = frozenset({
 })
 
 
+# ─── Position normalization ────────────────────────────────────────────────
+# IBKR's `portfolio/{account}/positions/{page}` endpoint returns flat dicts
+# per position with broker-specific field names (`conid`, `position`,
+# `lastTradingDay`, `putOrCall`, `avgCost`, etc.). Strategy code wants a
+# stable schema that doesn't lock in IBKR field naming + handles option
+# metadata uniformly. `_normalize_position_dict` is the single seam.
+
+
+def _normalize_position_dict(raw_position: dict) -> dict:
+    """Convert IBKR's portfolio_positions response entry into a stable shape.
+
+    HYDRA's strategy code expects flat keys (`instrument_id`, `quantity`,
+    `side`, `expiry`, `strike`, `right`) that don't lock in IBKR's field
+    naming. This helper does the translation in one place so the call
+    sites stay clean. Saxo's nested `PositionBase.OptionsData.*` pattern
+    is gone — IBKR's flat dict makes this a single pass.
+
+    Args:
+        raw_position: one entry from `IBClient.get_positions()` (which is
+            the IBKR `portfolio/{accountId}/positions/{page}` shape after
+            ibind unwrapping)
+
+    Returns:
+        dict with keys:
+          instrument_id: int (IBKR conid)
+          symbol: str (e.g. "SPX" / "SPXW" / "")
+          asset_type: str ("OPT" / "STK" / "IND" / "BAG" / "FUT" / "")
+          quantity: int (signed — negative means short)
+          side: "LONG" | "SHORT" | "FLAT"
+          avg_cost: Optional[float]
+          market_price: Optional[float]
+          market_value: Optional[float]
+          unrealized_pnl: Optional[float]
+          currency: str (default "USD" when broker omits)
+          # Option-only (None for non-options or when broker omits):
+          expiry: Optional[date]
+          strike: Optional[float]
+          right: Optional[str] ("C" or "P")
+          raw: dict (preserved IBKR response for fields we didn't normalize)
+
+    Raises:
+        ValueError: `raw_position` is not a dict, or has no `conid`
+            (conid is the only field we treat as required — without it
+            there's no instrument identity)
+    """
+    if not isinstance(raw_position, dict):
+        raise ValueError(
+            f"raw_position must be a dict, got {type(raw_position).__name__}"
+        )
+    conid = raw_position.get("conid")
+    if conid is None:
+        raise ValueError(f"position missing conid: {raw_position!r}")
+
+    # Signed quantity. IBKR uses float in the wire format but the
+    # strategy always works in whole contracts; cast to int. Defensive
+    # against string/bool/None — those become 0.
+    quantity_raw = raw_position.get("position", 0)
+    try:
+        quantity = int(float(quantity_raw))
+    except (TypeError, ValueError):
+        quantity = 0
+
+    side = "SHORT" if quantity < 0 else ("LONG" if quantity > 0 else "FLAT")
+
+    def _to_float_or_none(key: str) -> Optional[float]:
+        v = raw_position.get(key)
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    # Symbol: prefer the explicit `ticker` field; fall back to the first
+    # whitespace-delimited token of `contractDesc` (e.g. "SPXW 20MAY26
+    # 5500 P" → "SPXW"). Empty string when both are missing — caller
+    # decides whether that's an error in their context.
+    symbol = (raw_position.get("ticker") or "").strip()
+    if not symbol:
+        desc = (raw_position.get("contractDesc") or "").strip()
+        symbol = desc.split()[0] if desc else ""
+
+    # Right: IBKR uses "P"/"C" or "PUT"/"CALL" depending on endpoint
+    # version. Normalize both. Bad/unknown values → None (defensive,
+    # don't silently mis-label).
+    right_raw = (raw_position.get("putOrCall") or "").strip().upper()
+    if right_raw == "PUT":
+        right = "P"
+    elif right_raw == "CALL":
+        right = "C"
+    elif right_raw in ("P", "C"):
+        right = right_raw
+    else:
+        right = None
+
+    # Expiry: IBKR delivers as YYYYMMDD string in `lastTradingDay`.
+    # contractDesc parsing is intentionally NOT attempted — too fragile
+    # across IBKR's format variations across asset classes.
+    expiry: Optional[date] = None
+    ltd_str = str(raw_position.get("lastTradingDay") or "").strip()
+    if len(ltd_str) == 8:
+        try:
+            expiry = date(int(ltd_str[:4]), int(ltd_str[4:6]), int(ltd_str[6:8]))
+        except (ValueError, TypeError):
+            expiry = None
+
+    return {
+        "instrument_id": int(conid),
+        "symbol": symbol,
+        "asset_type": (raw_position.get("assetClass") or "").upper(),
+        "quantity": quantity,
+        "side": side,
+        "avg_cost": _to_float_or_none("avgCost"),
+        "market_price": _to_float_or_none("mktPrice"),
+        "market_value": _to_float_or_none("mktValue"),
+        "unrealized_pnl": _to_float_or_none("unrealizedPnl"),
+        "currency": raw_position.get("currency") or "USD",
+        "expiry": expiry,
+        "strike": _to_float_or_none("strike"),
+        "right": right,
+        "raw": raw_position,
+    }
+
+
 def _build_fill_result_dict(
     *,
     order_id: str,

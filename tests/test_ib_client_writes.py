@@ -515,6 +515,259 @@ class TestPlaceMarketOrder:
         assert order_req.price is None
 
 
+# ─── Position normalization ────────────────────────────────────────────────
+
+
+class TestNormalizePositionDict:
+    """Unit tests for the module-level _normalize_position_dict helper.
+
+    IBKR's portfolio_positions response is flat but uses broker-specific
+    field naming (`conid`, `position`, `putOrCall`, `lastTradingDay`,
+    etc.). Strategy code shouldn't lock in IBKR's vocabulary — the
+    normalizer translates to a stable schema. These tests pin the
+    contract.
+    """
+
+    # ─── Standard option position shapes ───────────────────────────────
+
+    def test_short_call_with_full_option_fields(self):
+        """Canonical SPXW short call position with all IBKR option fields."""
+        from datetime import date as date_cls
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 883539497,
+            "ticker": "SPXW",
+            "contractDesc": "SPXW 20260518 5800 C",
+            "assetClass": "OPT",
+            "position": -1.0,            # short = negative
+            "avgCost": 2.50,
+            "mktPrice": 0.05,
+            "mktValue": -5.0,
+            "unrealizedPnl": 245.0,
+            "currency": "USD",
+            "lastTradingDay": "20260518",
+            "strike": 5800.0,
+            "putOrCall": "C",
+        })
+        assert out["instrument_id"] == 883539497
+        assert out["symbol"] == "SPXW"
+        assert out["asset_type"] == "OPT"
+        assert out["quantity"] == -1
+        assert out["side"] == "SHORT"
+        assert out["avg_cost"] == pytest.approx(2.50)
+        assert out["market_price"] == pytest.approx(0.05)
+        assert out["market_value"] == pytest.approx(-5.0)
+        assert out["unrealized_pnl"] == pytest.approx(245.0)
+        assert out["currency"] == "USD"
+        assert out["expiry"] == date_cls(2026, 5, 18)
+        assert out["strike"] == pytest.approx(5800.0)
+        assert out["right"] == "C"
+
+    def test_long_put_position(self):
+        from datetime import date as date_cls
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 873614067,
+            "ticker": "SPXW",
+            "assetClass": "OPT",
+            "position": 1.0,             # long = positive
+            "avgCost": 1.10,
+            "lastTradingDay": "20260518",
+            "strike": 5195.0,
+            "putOrCall": "P",
+        })
+        assert out["quantity"] == 1
+        assert out["side"] == "LONG"
+        assert out["right"] == "P"
+        assert out["strike"] == pytest.approx(5195.0)
+        assert out["expiry"] == date_cls(2026, 5, 18)
+
+    def test_index_position_has_no_option_fields(self):
+        """SPX index position — option-specific fields all None."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 416904,
+            "ticker": "SPX",
+            "assetClass": "IND",
+            "position": 0.0,  # indices are non-tradable; "position" is informational
+            "currency": "USD",
+        })
+        assert out["instrument_id"] == 416904
+        assert out["asset_type"] == "IND"
+        assert out["side"] == "FLAT"
+        assert out["expiry"] is None
+        assert out["strike"] is None
+        assert out["right"] is None
+
+    def test_stock_position_no_option_fields(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 76792991,
+            "ticker": "AAPL",
+            "assetClass": "STK",
+            "position": 100,
+            "avgCost": 175.0,
+        })
+        assert out["asset_type"] == "STK"
+        assert out["quantity"] == 100
+        assert out["side"] == "LONG"
+        assert out["expiry"] is None
+        assert out["strike"] is None
+        assert out["right"] is None
+
+    # ─── Side derivation from signed quantity ──────────────────────────
+
+    def test_zero_quantity_is_flat(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": 0})
+        assert out["quantity"] == 0
+        assert out["side"] == "FLAT"
+
+    def test_negative_quantity_is_short(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": -5})
+        assert out["side"] == "SHORT"
+
+    def test_positive_quantity_is_long(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": 5})
+        assert out["side"] == "LONG"
+
+    def test_float_quantity_cast_to_int(self):
+        """IBKR wire format uses float for `position`. We always work in
+        whole contracts → cast to int. Fractional positions don't exist
+        in our universe (no crypto, no fractional shares)."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": 3.0})
+        assert out["quantity"] == 3
+        assert isinstance(out["quantity"], int)
+
+    # ─── Required field validation ─────────────────────────────────────
+
+    def test_missing_conid_raises(self):
+        from shared.ib_client import _normalize_position_dict
+        with pytest.raises(ValueError, match="missing conid"):
+            _normalize_position_dict({"position": 1, "ticker": "AAPL"})
+
+    def test_non_dict_input_raises(self):
+        from shared.ib_client import _normalize_position_dict
+        with pytest.raises(ValueError, match="must be a dict"):
+            _normalize_position_dict([{"conid": 1}])
+        with pytest.raises(ValueError, match="must be a dict"):
+            _normalize_position_dict(None)
+
+    # ─── Right normalization (P/C variants) ────────────────────────────
+
+    def test_right_put_full_word_normalizes_to_P(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "putOrCall": "PUT"})
+        assert out["right"] == "P"
+
+    def test_right_call_full_word_normalizes_to_C(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "putOrCall": "CALL"})
+        assert out["right"] == "C"
+
+    def test_right_lowercase_is_normalized(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "putOrCall": "p"})
+        assert out["right"] == "P"
+
+    def test_right_invalid_value_becomes_none(self):
+        """Defensive: don't silently mis-label a position with garbage."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "putOrCall": "X"})
+        assert out["right"] is None
+
+    # ─── Expiry parsing ────────────────────────────────────────────────
+
+    def test_expiry_parsed_from_lastTradingDay(self):
+        from datetime import date as date_cls
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 1, "lastTradingDay": "20260518",
+        })
+        assert out["expiry"] == date_cls(2026, 5, 18)
+
+    def test_expiry_missing_field_returns_none(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1})
+        assert out["expiry"] is None
+
+    def test_expiry_malformed_field_returns_none(self):
+        """Defensive parsing: bad input → None, not an exception."""
+        from shared.ib_client import _normalize_position_dict
+        for bad_value in ("not-a-date", "2026-05-18", "20260518X", "x"):
+            out = _normalize_position_dict({
+                "conid": 1, "lastTradingDay": bad_value,
+            })
+            assert out["expiry"] is None, f"Bad value should yield None: {bad_value!r}"
+
+    # ─── Symbol extraction ─────────────────────────────────────────────
+
+    def test_symbol_prefers_ticker(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 1, "ticker": "SPX", "contractDesc": "Different Description",
+        })
+        assert out["symbol"] == "SPX"
+
+    def test_symbol_falls_back_to_contractDesc_first_word(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 1, "contractDesc": "SPXW 20260518 5800 C",
+        })
+        assert out["symbol"] == "SPXW"
+
+    def test_symbol_empty_when_both_missing(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1})
+        assert out["symbol"] == ""
+
+    # ─── Numeric field defensive parsing ───────────────────────────────
+
+    def test_missing_numeric_fields_become_none(self):
+        """Status-only responses (no fills yet) won't have price fields."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": 1})
+        assert out["avg_cost"] is None
+        assert out["market_price"] is None
+        assert out["market_value"] is None
+        assert out["unrealized_pnl"] is None
+
+    def test_malformed_numeric_fields_become_none(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 1, "avgCost": "not-a-number", "mktPrice": "",
+        })
+        assert out["avg_cost"] is None
+        assert out["market_price"] is None
+
+    # ─── Defaults + preservation ───────────────────────────────────────
+
+    def test_currency_defaults_to_USD(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1})
+        assert out["currency"] == "USD"
+
+    def test_asset_class_uppercased(self):
+        """IBKR sometimes returns lowercase; normalize for caller convenience."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "assetClass": "opt"})
+        assert out["asset_type"] == "OPT"
+
+    def test_raw_preserved(self):
+        """Callers needing fields we didn't normalize can drop down to `raw`."""
+        from shared.ib_client import _normalize_position_dict
+        raw = {
+            "conid": 1, "position": 1,
+            "exchange": "CBOE", "ticker": "SPX",
+            "customField": "preserve-this",
+        }
+        out = _normalize_position_dict(raw)
+        assert out["raw"] is raw  # same object
+
+
 # ─── place_and_wait_for_fill ───────────────────────────────────────────────
 
 
