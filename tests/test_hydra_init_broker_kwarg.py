@@ -88,3 +88,243 @@ class TestHydraInitBrokerKwarg:
         instance = HydraStrategy.__new__(HydraStrategy)
         instance.broker = None
         assert instance.broker is None
+
+
+class TestNormalizeChartBar:
+    """Unit tests for HydraStrategy._normalize_chart_bar staticmethod
+    (Phase NEW-2 commit 7a). Validates that IB and Saxo bar shapes
+    converge on the same normalized dict so downstream ATR/EMA code is
+    broker-independent."""
+
+    # ─── IB bar normalization ──────────────────────────────────────────
+
+    def test_ib_standard_bar(self):
+        out = HydraStrategy._normalize_chart_bar(
+            {"o": 5500.0, "h": 5510.0, "l": 5495.0, "c": 5505.5, "v": 12000, "t": 1779129743000},
+            source="ib",
+        )
+        assert out == {
+            "open": 5500.0, "high": 5510.0, "low": 5495.0,
+            "close": 5505.5, "volume": 12000, "timestamp_ms": 1779129743000,
+        }
+
+    def test_ib_missing_fields_become_zero(self):
+        out = HydraStrategy._normalize_chart_bar({}, source="ib")
+        assert out["open"] == 0.0
+        assert out["close"] == 0.0
+        assert out["volume"] == 0
+        assert out["timestamp_ms"] == 0
+
+    def test_ib_string_numbers_coerced(self):
+        """IBKR sometimes sends numeric strings — coerce defensively."""
+        out = HydraStrategy._normalize_chart_bar(
+            {"o": "5500.0", "c": "5505", "v": "100"},
+            source="ib",
+        )
+        assert out["open"] == 5500.0
+        assert out["close"] == 5505.0
+        assert out["volume"] == 100
+
+    def test_ib_bad_values_become_safe_defaults(self):
+        out = HydraStrategy._normalize_chart_bar(
+            {"o": "not-a-number", "c": None, "v": ""},
+            source="ib",
+        )
+        assert out["open"] == 0.0
+        assert out["close"] == 0.0
+        assert out["volume"] == 0
+
+    # ─── Saxo bar normalization ────────────────────────────────────────
+
+    def test_saxo_cfd_bid_keys(self):
+        """SPX CFD chart bars use the Bid-suffixed key set."""
+        out = HydraStrategy._normalize_chart_bar(
+            {
+                "OpenBid": 5500.0, "HighBid": 5510.0,
+                "LowBid": 5495.0, "CloseBid": 5505.5,
+                "Volume": 12000,
+            },
+            source="saxo",
+        )
+        assert out["open"] == 5500.0
+        assert out["high"] == 5510.0
+        assert out["low"] == 5495.0
+        assert out["close"] == 5505.5
+        assert out["volume"] == 12000
+
+    def test_saxo_non_cfd_falls_back_to_plain_keys(self):
+        """Non-CFD instruments may use Open/High/Low/Close without Bid suffix."""
+        out = HydraStrategy._normalize_chart_bar(
+            {"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5},
+            source="saxo",
+        )
+        assert out["open"] == 100.0
+        assert out["close"] == 100.5
+
+    def test_saxo_prefers_bid_over_plain_when_both_present(self):
+        """If both OpenBid and Open are present, prefer OpenBid (CFD source)."""
+        out = HydraStrategy._normalize_chart_bar(
+            {"OpenBid": 5500.0, "Open": 9999.0},  # plain is garbage
+            source="saxo",
+        )
+        assert out["open"] == 5500.0
+
+    def test_saxo_missing_fields_become_zero(self):
+        out = HydraStrategy._normalize_chart_bar({}, source="saxo")
+        assert out["open"] == 0.0
+        assert out["close"] == 0.0
+        assert out["volume"] == 0
+
+    def test_saxo_timestamp_ms_is_always_zero(self):
+        """Saxo's "Time" field is an ISO string; we don't parse it
+        because downstream code doesn't need the timestamp. Pinning
+        this so future-me notices if a caller starts depending on it."""
+        out = HydraStrategy._normalize_chart_bar(
+            {"Time": "2026-05-19T14:30:00Z", "CloseBid": 5500.0},
+            source="saxo",
+        )
+        assert out["timestamp_ms"] == 0
+
+    # ─── Source validation ─────────────────────────────────────────────
+
+    def test_unknown_source_raises(self):
+        with pytest.raises(ValueError, match="unknown source"):
+            HydraStrategy._normalize_chart_bar({"c": 1.0}, source="bloomberg")
+
+    # ─── Convergence: IB and Saxo bars should produce identical output ───
+
+    def test_ib_and_saxo_converge_on_same_shape(self):
+        """A bar with same OHLC values from both brokers must normalize
+        to identical output (except timestamp, intentionally)."""
+        ib_in = {"o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 100}
+        saxo_in = {"OpenBid": 1.0, "HighBid": 2.0, "LowBid": 0.5,
+                   "CloseBid": 1.5, "Volume": 100}
+        ib_out = HydraStrategy._normalize_chart_bar(ib_in, source="ib")
+        saxo_out = HydraStrategy._normalize_chart_bar(saxo_in, source="saxo")
+        # Match on price + volume (timestamp differs intentionally)
+        for k in ("open", "high", "low", "close", "volume"):
+            assert ib_out[k] == saxo_out[k], f"diverge on {k!r}"
+
+
+class TestReadRecentBars:
+    """Unit tests for HydraStrategy._read_recent_bars method.
+
+    Tests both broker paths (IB and Saxo) using a __new__-constructed
+    HydraStrategy with manually-set self.broker, self.client, and a few
+    config attrs."""
+
+    def _make_bare_strategy(self, broker=None, client=None):
+        """Construct a HydraStrategy that bypasses __init__. Sets only
+        the attributes _read_recent_bars actually reads."""
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        s.underlying_uic = 4913  # SPX CFD UIC (legacy Saxo)
+        return s
+
+    # ─── IB path (broker is set) ───────────────────────────────────────
+
+    def test_ib_path_returns_normalized_bars(self):
+        fake_broker = MagicMock()
+        fake_broker.get_chart_data.return_value = [
+            {"o": 5500.0, "h": 5510.0, "l": 5495.0, "c": 5505.0, "v": 100, "t": 1000},
+            {"o": 5505.0, "h": 5515.0, "l": 5500.0, "c": 5510.0, "v": 110, "t": 2000},
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        bars = s._read_recent_bars(horizon_min=1, count=10)
+        assert bars is not None
+        assert len(bars) == 2
+        assert bars[0]["close"] == 5505.0
+        assert bars[1]["close"] == 5510.0
+        # IBKR get_chart_data was called with SPX + bar/period args
+        call_kwargs = fake_broker.get_chart_data.call_args.kwargs
+        assert call_kwargs["symbol"] == "SPX"
+        assert call_kwargs["bar"] == "1min"
+
+    def test_ib_path_slices_to_requested_count(self):
+        """When broker returns more bars than requested, we take the
+        most recent N (slice -count:)."""
+        fake_broker = MagicMock()
+        fake_broker.get_chart_data.return_value = [
+            {"c": float(i)} for i in range(20)  # 20 bars: closes 0-19
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        bars = s._read_recent_bars(horizon_min=1, count=5)
+        assert len(bars) == 5
+        # Last 5 of 0-19 → closes 15, 16, 17, 18, 19
+        assert [b["close"] for b in bars] == [15.0, 16.0, 17.0, 18.0, 19.0]
+
+    def test_ib_path_empty_response_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_chart_data.return_value = []
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_recent_bars(horizon_min=1, count=10) is None
+
+    def test_ib_path_exception_returns_none(self):
+        """Fetch failures shouldn't raise — chart data is best-effort."""
+        fake_broker = MagicMock()
+        fake_broker.get_chart_data.side_effect = RuntimeError("connection blip")
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_recent_bars(horizon_min=1, count=10) is None
+
+    # ─── Saxo path (broker is None — legacy) ───────────────────────────
+
+    def test_saxo_path_returns_normalized_bars(self):
+        fake_client = MagicMock()
+        fake_client.get_chart_data.return_value = {
+            "Data": [
+                {"OpenBid": 5500.0, "HighBid": 5510.0, "LowBid": 5495.0,
+                 "CloseBid": 5505.0, "Volume": 100},
+            ],
+        }
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        bars = s._read_recent_bars(horizon_min=1, count=10)
+        assert bars is not None
+        assert len(bars) == 1
+        assert bars[0]["close"] == 5505.0
+        # Saxo path used the legacy CFD args
+        call_kwargs = fake_client.get_chart_data.call_args.kwargs
+        assert call_kwargs["uic"] == 4913
+        assert call_kwargs["asset_type"] == "CfdOnIndex"
+
+    def test_saxo_path_no_data_key_returns_none(self):
+        fake_client = MagicMock()
+        fake_client.get_chart_data.return_value = {}  # no "Data" key
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_recent_bars(horizon_min=1, count=10) is None
+
+    def test_saxo_path_null_response_returns_none(self):
+        fake_client = MagicMock()
+        fake_client.get_chart_data.return_value = None
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_recent_bars(horizon_min=1, count=10) is None
+
+    def test_saxo_path_exception_returns_none(self):
+        fake_client = MagicMock()
+        fake_client.get_chart_data.side_effect = RuntimeError("saxo blip")
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_recent_bars(horizon_min=1, count=10) is None
+
+    # ─── Both paths produce same normalized output ─────────────────────
+
+    def test_ib_and_saxo_paths_produce_equivalent_shape(self):
+        """Critical invariant: regardless of broker, downstream ATR/EMA
+        code consumes the same `bar["close"]` access pattern."""
+        ib_broker = MagicMock()
+        ib_broker.get_chart_data.return_value = [
+            {"o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 100, "t": 999},
+        ]
+        saxo_client = MagicMock()
+        saxo_client.get_chart_data.return_value = {
+            "Data": [{"OpenBid": 1.0, "HighBid": 2.0, "LowBid": 0.5,
+                      "CloseBid": 1.5, "Volume": 100}],
+        }
+        s_ib = self._make_bare_strategy(broker=ib_broker)
+        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
+
+        ib_bars = s_ib._read_recent_bars(horizon_min=1, count=10)
+        saxo_bars = s_saxo._read_recent_bars(horizon_min=1, count=10)
+
+        assert ib_bars is not None and saxo_bars is not None
+        for k in ("open", "high", "low", "close", "volume"):
+            assert ib_bars[0][k] == saxo_bars[0][k], f"diverge on {k!r}"

@@ -1432,18 +1432,159 @@ class HydraStrategy(MEICStrategy):
             self._scouting_active = False
             self._cached_chart_bars = None
 
-    def _refresh_chart_data_for_scouting(self):
-        """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result."""
+    @staticmethod
+    def _normalize_chart_bar(raw_bar: Dict[str, Any], source: str) -> Dict[str, Any]:
+        """Translate a broker-raw chart bar into HYDRA's normalized shape.
+
+        Returns a dict with keys:
+          open, high, low, close: float (0.0 if missing/bad)
+          volume: int (0 if missing/bad)
+          timestamp_ms: int (epoch ms, 0 if missing or unparseable)
+
+        Args:
+            raw_bar: the bar dict from the broker's chart endpoint
+            source: "ib" or "saxo" — selects which field-name map applies
+                "ib"   → IBClient.get_chart_data returns flat list with
+                         lowercase compact keys (o/h/l/c/v/t per entry)
+                "saxo" → SaxoClient's CFD chart returns Bid-suffixed keys
+                         (OpenBid/HighBid/LowBid/CloseBid/Volume) with
+                         non-Bid fallback for non-CFD instruments.
+
+        Defensive: missing/null/empty/malformed values gracefully degrade
+        to 0 rather than raising. Caller filters out zero-priced bars
+        downstream (see ATR + EMA loops).
+
+        Static so it's unit-testable without HydraStrategy construction.
+        """
+        def _f(v) -> float:
+            if v is None or v == "":
+                return 0.0
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _i(v) -> int:
+            if v is None or v == "":
+                return 0
+            try:
+                return int(float(v))
+            except (TypeError, ValueError):
+                return 0
+
+        if source == "ib":
+            return {
+                "open": _f(raw_bar.get("o")),
+                "high": _f(raw_bar.get("h")),
+                "low": _f(raw_bar.get("l")),
+                "close": _f(raw_bar.get("c")),
+                "volume": _i(raw_bar.get("v")),
+                "timestamp_ms": _i(raw_bar.get("t")),
+            }
+        if source == "saxo":
+            # CFD bars use Bid-suffixed keys; non-CFD bars use the plain
+            # OHLC names. Try Bid first per the existing Saxo trend code.
+            return {
+                "open": _f(raw_bar.get("OpenBid") or raw_bar.get("Open")),
+                "high": _f(raw_bar.get("HighBid") or raw_bar.get("High")),
+                "low": _f(raw_bar.get("LowBid") or raw_bar.get("Low")),
+                "close": _f(raw_bar.get("CloseBid") or raw_bar.get("Close")),
+                "volume": _i(raw_bar.get("Volume")),
+                # Saxo's "Time" field is an ISO string; skip parsing —
+                # HYDRA's downstream code (ATR/EMA) doesn't use the
+                # timestamp anyway. If a future caller needs it, parse
+                # here.
+                "timestamp_ms": 0,
+            }
+        raise ValueError(f"_normalize_chart_bar: unknown source {source!r}")
+
+    def _read_recent_bars(
+        self,
+        *,
+        horizon_min: int,
+        count: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fetch the most recent `count` OHLC bars at `horizon_min` granularity.
+
+        Returns a list of normalized bars (see _normalize_chart_bar for
+        shape) ordered oldest-first. Returns None on fetch failure or
+        empty broker response — caller falls back to NEUTRAL trend / 0
+        ATR score.
+
+        Broker dispatch (2026-05-19 transition):
+        - If self.broker is set (IBClient): translates IBKR's flat list +
+          compact key format to the normalized shape. The IBKR `period`
+          parameter is a lookback window; we request a buffer beyond
+          `count` minutes then slice the last N bars.
+        - Else: falls back to self.client (Saxo) — the legacy CFD chart
+          API call. Both paths return identical shape after normalization.
+
+        Errors are logged and converted to None — chart fetch is best-
+        effort, not a trading-blocking dependency.
+        """
         try:
+            if self.broker is not None:
+                # IB path: 1-min bars over a window large enough to
+                # cover `count` entries. IBKR's `period` accepts
+                # "Nmin" / "Nh" / etc. — we use a generous window
+                # then slice.
+                bar_arg = (
+                    f"{horizon_min}min" if horizon_min < 60
+                    else f"{max(horizon_min // 60, 1)}h"
+                )
+                # Request count + buffer for resilience (closed-market
+                # gaps, partial bars). 60-min floor handles short
+                # lookbacks; "1h" period would be too narrow.
+                period_minutes = max(count * horizon_min + 10, 60)
+                period_arg = f"{period_minutes}min"
+                raw_bars = self.broker.get_chart_data(
+                    symbol="SPX", bar=bar_arg, period=period_arg,
+                    outside_rth=False,
+                )
+                if not raw_bars:
+                    return None
+                tail = raw_bars[-count:] if len(raw_bars) > count else raw_bars
+                return [
+                    self._normalize_chart_bar(b, source="ib")
+                    for b in tail
+                    if isinstance(b, dict)
+                ]
+            # Saxo legacy path — still uses self.client (set by MEIC
+            # parent class from saxo_client constructor arg)
             chart_data = self.client.get_chart_data(
-                uic=self.underlying_uic, asset_type="CfdOnIndex",
-                horizon=self.chart_horizon_minutes, count=self.chart_bars_count
+                uic=self.underlying_uic,
+                asset_type="CfdOnIndex",
+                horizon=horizon_min,
+                count=count,
             )
-            if chart_data and "Data" in chart_data:
-                self._cached_chart_bars = chart_data["Data"]
-                self._cached_chart_time = get_us_market_time()
+            if not chart_data or "Data" not in chart_data:
+                return None
+            return [
+                self._normalize_chart_bar(b, source="saxo")
+                for b in chart_data["Data"]
+                if isinstance(b, dict)
+            ]
         except Exception as e:
-            logger.warning(f"MKT-031: Chart data fetch failed: {e}")
+            logger.warning(
+                f"_read_recent_bars: chart fetch failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
+    def _refresh_chart_data_for_scouting(self):
+        """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
+
+        Stores NORMALIZED bars (keys: open/high/low/close/volume/timestamp_ms)
+        in self._cached_chart_bars — broker-independent shape so downstream
+        ATR/EMA code doesn't need to know whether IB or Saxo provided them.
+        """
+        bars = self._read_recent_bars(
+            horizon_min=self.chart_horizon_minutes,
+            count=self.chart_bars_count,
+        )
+        if bars:
+            self._cached_chart_bars = bars
+            self._cached_chart_time = get_us_market_time()
 
     # =========================================================================
     # MKT-031: SMART ENTRY WINDOWS — Scoring Engine
@@ -1493,10 +1634,11 @@ class HydraStrategy(MEICStrategy):
 
         bars = self._cached_chart_bars
 
-        # Saxo CFD data uses HighBid/LowBid/CloseBid, fallback to High/Low/Close
-        highs = [b.get("HighBid") or b.get("High", 0) for b in bars]
-        lows = [b.get("LowBid") or b.get("Low", 0) for b in bars]
-        closes = [b.get("CloseBid") or b.get("Close", 0) for b in bars]
+        # Cached bars are normalized by _read_recent_bars — keys are
+        # open/high/low/close/volume/timestamp_ms regardless of broker.
+        highs = [b.get("high", 0) for b in bars]
+        lows = [b.get("low", 0) for b in bars]
+        closes = [b.get("close", 0) for b in bars]
 
         # Filter zero prices
         valid = [(h, l, c) for h, l, c in zip(highs, lows, closes) if h > 0 and l > 0 and c > 0]
@@ -2723,27 +2865,26 @@ class HydraStrategy(MEICStrategy):
             return TrendSignal.NEUTRAL
 
         try:
-            # Fetch 1-minute bars for SPX (via US500.I CFD)
-            chart_data = self.client.get_chart_data(
-                uic=self.underlying_uic,
-                asset_type="CfdOnIndex",  # US500.I is a CFD
-                horizon=self.chart_horizon_minutes,
-                count=self.chart_bars_count
+            # Fetch 1-minute bars for SPX via the active broker.
+            # `bars` are normalized — keys: open/high/low/close/volume/
+            # timestamp_ms — broker-independent shape.
+            bars = self._read_recent_bars(
+                horizon_min=self.chart_horizon_minutes,
+                count=self.chart_bars_count,
             )
 
-            if not chart_data or "Data" not in chart_data:
+            if not bars:
                 logger.warning("Could not fetch chart data for trend detection")
                 return TrendSignal.NEUTRAL
 
-            bars = chart_data["Data"]
             if len(bars) < self.ema_long_period:
                 logger.warning(f"Insufficient bars for EMA: {len(bars)} < {self.ema_long_period}")
                 return TrendSignal.NEUTRAL
 
-            # Extract close prices (Saxo CFD data uses CloseBid, not Close)
+            # Extract close prices from normalized bars
             closes = []
             for bar in bars:
-                close = bar.get("CloseBid") or bar.get("Close") or 0
+                close = bar.get("close") or 0
                 if close > 0:
                     closes.append(close)
 
