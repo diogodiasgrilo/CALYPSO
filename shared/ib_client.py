@@ -126,6 +126,76 @@ def _snapshot_has_data(payload) -> bool:
     return False
 
 
+# ─── place_and_wait_for_fill tuning ────────────────────────────────────────
+# Building block used by HYDRA's strategy-level retry loops (progressive-
+# chase entry placement, stop-loss escalation). Encapsulates the
+# place → poll-status → return-when-done pattern so callers don't
+# re-implement polling for every retry level.
+_DEFAULT_FILL_TIMEOUT_S = 30.0
+_DEFAULT_FILL_POLL_INTERVAL_S = 0.5
+
+# Order status strings IBKR returns that mean the order is in a terminal
+# state (won't work anymore). Compared lowercase. `pendingcancel` is
+# intentionally NOT here — a cancel-in-progress order can still fill, so
+# we keep polling until we see an actually-terminal status.
+_TERMINAL_ORDER_STATUSES = frozenset({
+    "filled",
+    "cancelled",
+    "api_cancelled",        # IBKR variant for cancels initiated by us
+    "rejected",
+    "inactive",             # broker decided the order won't work
+    "expired",              # TIF expired
+    "presubmitted_cancelled",  # rare race during cancel propagation
+})
+
+
+def _build_fill_result_dict(
+    *,
+    order_id: str,
+    raw: dict,
+    status: str,
+) -> dict:
+    """Build the normalized result dict returned by place_and_wait_for_fill.
+
+    Extracted as a module-level helper so the field-name defensive lookup
+    logic is unit-testable independent of the place+poll loop. IBKR's
+    order status response uses inconsistent field names across endpoints
+    (snake_case vs camelCase, `filled` vs `filledQuantity`, etc.); we
+    accept several variants.
+    """
+    filled_qty_raw = (
+        raw.get("filled_quantity")
+        or raw.get("filledQuantity")
+        or raw.get("filled")
+        or 0
+    )
+    try:
+        filled_quantity = int(float(filled_qty_raw))
+    except (TypeError, ValueError):
+        filled_quantity = 0
+
+    avg_price_raw = (
+        raw.get("avg_fill_price")
+        or raw.get("avgPrice")
+        or raw.get("average_price")
+        or raw.get("avgFillPrice")
+    )
+    try:
+        avg_fill_price: Optional[float] = (
+            float(avg_price_raw) if avg_price_raw is not None and avg_price_raw != "" else None
+        )
+    except (TypeError, ValueError):
+        avg_fill_price = None
+
+    return {
+        "order_id": order_id,
+        "status": status,
+        "filled_quantity": filled_quantity,
+        "avg_fill_price": avg_fill_price,
+        "raw": raw,
+    }
+
+
 # ─── Order placement constants ──────────────────────────────────────────────
 
 # Locale-independent uppercase 3-letter month names for IBKR's secdef month
@@ -1593,6 +1663,151 @@ class IBClient:
         return self.place_order(
             conid=conid, side=side, quantity=quantity,
             order_type="MKT", price=None, tif=tif, coid=coid, answers=answers,
+        )
+
+    def place_and_wait_for_fill(
+        self,
+        *,
+        conid: int,
+        side: str,
+        quantity: int,
+        order_type: str = "LMT",
+        limit_price: Optional[float] = None,
+        timeout_seconds: float = _DEFAULT_FILL_TIMEOUT_S,
+        poll_interval_s: float = _DEFAULT_FILL_POLL_INTERVAL_S,
+        tif: str = "DAY",
+        coid: Optional[str] = None,
+        answers: Optional[dict] = None,
+        price_increment: float = 0.05,
+    ) -> dict:
+        """Place an order and poll until it reaches a terminal state or timeout.
+
+        Building block for strategy-level retry loops. The strategy (e.g.
+        HYDRA's progressive-chase entry placement, stop-loss escalation)
+        owns the "what retry level to try next" decision; this method owns
+        the place → poll-until-done mechanics inside one attempt.
+
+        On timeout the order remains WORKING in IBKR's book — caller
+        decides whether to cancel it, wait longer, or escalate (e.g.
+        switch to a market order at a higher retry level).
+
+        Args:
+            conid: IBKR contract ID for the instrument
+            side: "BUY" or "SELL"
+            quantity: number of contracts (positive integer)
+            order_type: "LMT" or "MKT"
+            limit_price: required when order_type=="LMT"; ignored for MKT
+            timeout_seconds: max wall-clock time to wait for terminal
+                status (default 30s — calibrated to typical SPXW combo
+                fill behavior on paper + live)
+            poll_interval_s: seconds between status polls (default 0.5s
+                — fast enough to catch fills promptly, slow enough to
+                stay under IBKR's polling rate limits even when multiple
+                orders are being placed)
+            tif: time-in-force ("DAY" default; 0DTE trades don't survive
+                past close anyway)
+            coid: client_order_id for retry-safety; auto-generated if None
+                (see _ensure_coid)
+            answers: override DEFAULT_ORDER_ANSWERS reply-prompt map
+            price_increment: tick size for limit price rounding (default
+                0.05 — SPX/SPXW single-leg tick; pass 0.01 for equities)
+
+        Returns:
+            dict with keys:
+              order_id: str
+              status: "filled" | "cancelled" | "rejected" | "inactive" |
+                      "expired" | "timed_out"
+              filled_quantity: int (best-effort from status response)
+              avg_fill_price: Optional[float]
+              raw: dict (last status response, or place response if no
+                         polling was needed)
+
+        Raises:
+            ValueError: invalid args (LMT without price, non-positive
+                quantity, invalid side)
+            IBClientError: place_order failed, response missing order_id,
+                or status polling raised a non-retryable error (e.g.
+                auth failure mid-polling)
+        """
+        # Validate args before any I/O so misuse fails fast.
+        if quantity <= 0:
+            raise ValueError(f"quantity must be positive, got {quantity}")
+        if side not in ("BUY", "SELL"):
+            raise ValueError(f"side must be 'BUY' or 'SELL', got {side!r}")
+        if order_type == "LMT" and limit_price is None:
+            raise ValueError("LMT order_type requires limit_price")
+
+        # Place the order. place_order handles _ensure_coid + tick
+        # rounding + retry/breaker via _ib_call.
+        place_resp = self.place_order(
+            conid=conid,
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            price=limit_price,
+            tif=tif,
+            coid=coid,
+            answers=answers,
+            price_increment=price_increment,
+        )
+        order_id = place_resp.get("order_id") or place_resp.get("id")
+        if not order_id:
+            raise IBClientError(
+                f"place_order returned no order_id: {place_resp!r}"
+            )
+
+        # Sometimes the place response itself carries a terminal status
+        # (instant fills on MKT orders; reject responses for invalid orders).
+        # Short-circuit before polling to save an extra HTTP round-trip.
+        initial_status = (place_resp.get("status") or "").lower()
+        if initial_status in _TERMINAL_ORDER_STATUSES:
+            return _build_fill_result_dict(
+                order_id=str(order_id), raw=place_resp, status=initial_status,
+            )
+
+        # Poll for terminal state. Each poll is its own _ib_call with
+        # retry+breaker; transient 429/5xx are absorbed automatically.
+        deadline = time.monotonic() + timeout_seconds
+        last_status_resp: dict = place_resp
+        while time.monotonic() < deadline:
+            try:
+                status_resp = self.get_order_status(str(order_id))
+            except IBClientError as exc:
+                # IBKR's misuse of 503 for "not found" means the order was
+                # purged after reaching a terminal state. Sunday's diagnostic
+                # taught us this pattern. is_retryable doesn't retry these,
+                # so the exception surfaces here — treat as cancelled-and-
+                # purged from the caller's perspective (order is no longer
+                # working). Other IBClientErrors propagate as real failures.
+                msg = str(exc).lower()
+                if any(p in msg for p in ("is not found", "no longer found")):
+                    return _build_fill_result_dict(
+                        order_id=str(order_id),
+                        raw=last_status_resp,
+                        status="cancelled",
+                    )
+                raise
+
+            last_status_resp = status_resp or {}
+            status = (
+                last_status_resp.get("status")
+                or last_status_resp.get("order_status")
+                or ""
+            ).lower()
+            if status in _TERMINAL_ORDER_STATUSES:
+                return _build_fill_result_dict(
+                    order_id=str(order_id),
+                    raw=last_status_resp,
+                    status=status,
+                )
+            time.sleep(poll_interval_s)
+
+        # Timed out — order still working. Caller decides next step.
+        # Surface the last observed status response in `raw` for debugging.
+        return _build_fill_result_dict(
+            order_id=str(order_id),
+            raw=last_status_resp,
+            status="timed_out",
         )
 
     def cancel_order(self, order_id: str) -> bool:

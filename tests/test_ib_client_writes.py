@@ -515,6 +515,292 @@ class TestPlaceMarketOrder:
         assert order_req.price is None
 
 
+# ─── place_and_wait_for_fill ───────────────────────────────────────────────
+
+
+class TestBuildFillResultDict:
+    """Unit tests for the module-level _build_fill_result_dict helper.
+
+    IBKR's order status response uses inconsistent field names across
+    endpoints (snake_case vs camelCase, `filled` vs `filledQuantity`,
+    etc.). The helper accepts several variants — these tests pin which.
+    """
+
+    def test_extracts_filled_quantity_and_avg_price_camelcase(self):
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"filledQuantity": "3", "avgPrice": "5.25"},
+            status="filled",
+        )
+        assert out["order_id"] == "abc"
+        assert out["status"] == "filled"
+        assert out["filled_quantity"] == 3
+        assert out["avg_fill_price"] == 5.25
+
+    def test_extracts_snake_case_variants(self):
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"filled_quantity": 5, "avg_fill_price": 1.10},
+            status="filled",
+        )
+        assert out["filled_quantity"] == 5
+        assert out["avg_fill_price"] == pytest.approx(1.10)
+
+    def test_accepts_filled_and_average_price_variants(self):
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"filled": 2, "average_price": "0.40"},
+            status="filled",
+        )
+        assert out["filled_quantity"] == 2
+        assert out["avg_fill_price"] == pytest.approx(0.40)
+
+    def test_accepts_avgfillprice_variant(self):
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"avgFillPrice": 7.0},
+            status="filled",
+        )
+        assert out["avg_fill_price"] == pytest.approx(7.0)
+
+    def test_missing_fields_become_zero_and_none(self):
+        """Status responses for non-filled states often omit fill info."""
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"status": "Submitted"},  # no fill fields
+            status="timed_out",
+        )
+        assert out["filled_quantity"] == 0
+        assert out["avg_fill_price"] is None
+
+    def test_bad_values_dont_crash(self):
+        """Defensive: malformed responses shouldn't raise. Bad int → 0, bad float → None."""
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"filledQuantity": "not-a-number", "avgPrice": "also-bad"},
+            status="filled",
+        )
+        assert out["filled_quantity"] == 0
+        assert out["avg_fill_price"] is None
+
+    def test_raw_response_preserved_for_diagnostics(self):
+        """Callers may need fields we didn't normalize — raw stays intact."""
+        from shared.ib_client import _build_fill_result_dict
+        raw = {"filledQuantity": 1, "avgPrice": 1.0, "customField": "preserve-me"}
+        out = _build_fill_result_dict(order_id="abc", raw=raw, status="filled")
+        assert out["raw"] is raw  # same object, not a copy
+
+
+class TestPlaceAndWaitForFill:
+    """Building block for HYDRA's strategy-level retry loops.
+
+    Encapsulates place → poll-status → return-when-done so callers don't
+    re-implement polling at every retry level. Polling timing is mocked
+    via patching `time.sleep` / `time.monotonic`.
+    """
+
+    # ─── Input validation ──────────────────────────────────────────────
+
+    def test_quantity_must_be_positive(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(ValueError, match="quantity must be positive"):
+            client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=0, order_type="MKT",
+            )
+
+    def test_side_must_be_buy_or_sell(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(ValueError, match="side must be"):
+            client.place_and_wait_for_fill(
+                conid=1, side="HODL", quantity=1, order_type="MKT",
+            )
+
+    def test_lmt_requires_limit_price(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(ValueError, match="LMT order_type requires limit_price"):
+            client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1, order_type="LMT",
+            )
+
+    def test_place_response_without_order_id_raises(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{}])  # no order_id field
+        with pytest.raises(IBClientError, match="place_order returned no order_id"):
+            client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1, order_type="MKT",
+            )
+
+    # ─── Happy paths ───────────────────────────────────────────────────
+
+    def test_lmt_fills_on_first_poll(self, connected_client):
+        """Order placed, first status poll shows Filled. No retry needed."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result(
+            [{"order_id": "order-1", "order_status": "Submitted"}]
+        )
+        mock_ibkr.order_status.return_value = _mk_result({
+            "status": "Filled", "filledQuantity": 1, "avgPrice": 2.50,
+        })
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=12345, side="SELL", quantity=1,
+                order_type="LMT", limit_price=2.50,
+            )
+        assert result["order_id"] == "order-1"
+        assert result["status"] == "filled"
+        assert result["filled_quantity"] == 1
+        assert result["avg_fill_price"] == pytest.approx(2.50)
+
+    def test_mkt_fills_immediately_in_place_response_no_polling(
+        self, connected_client,
+    ):
+        """If place_order's response already carries status=Filled, we
+        return immediately without making any status-poll HTTP calls."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{
+            "order_id": "order-mkt-1",
+            "status": "Filled",
+            "filledQuantity": 5,
+            "avgPrice": 1.10,
+        }])
+        with patch("shared.ib_client.time.sleep") as mock_sleep:
+            result = client.place_and_wait_for_fill(
+                conid=12345, side="BUY", quantity=5, order_type="MKT",
+            )
+        assert result["status"] == "filled"
+        assert result["filled_quantity"] == 5
+        # Critical: no polling occurred → order_status mock never called
+        mock_ibkr.order_status.assert_not_called()
+        # And no sleep either
+        mock_sleep.assert_not_called()
+
+    def test_pendingcancel_is_NOT_terminal_keeps_polling(
+        self, connected_client,
+    ):
+        """`pendingcancel` means cancel-in-progress but order could still
+        fill. We must keep polling until truly terminal."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result(
+            [{"order_id": "order-x"}]
+        )
+        # First poll: PendingCancel (not terminal). Second poll: Filled.
+        mock_ibkr.order_status.side_effect = [
+            _mk_result({"status": "PendingCancel"}),
+            _mk_result({"status": "Filled", "filledQuantity": 1, "avgPrice": 3.0}),
+        ]
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=12345, side="SELL", quantity=1,
+                order_type="LMT", limit_price=3.0,
+            )
+        assert result["status"] == "filled"
+        # Two polls happened (PendingCancel → keep going → Filled)
+        assert mock_ibkr.order_status.call_count == 2
+
+    # ─── Terminal-not-filled paths ────────────────────────────────────
+
+    def test_rejected_order_returns_status_rejected(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result(
+            [{"order_id": "x", "order_status": "Submitted"}]
+        )
+        mock_ibkr.order_status.return_value = _mk_result({"status": "Rejected"})
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1,
+                order_type="LMT", limit_price=1.0,
+            )
+        assert result["status"] == "rejected"
+        assert result["filled_quantity"] == 0
+        assert result["avg_fill_price"] is None
+
+    def test_inactive_is_terminal(self, connected_client):
+        """IBKR-specific 'Inactive' status — broker decided not to work
+        the order. Treated as terminal so we don't poll forever."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        mock_ibkr.order_status.return_value = _mk_result({"status": "Inactive"})
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1,
+                order_type="LMT", limit_price=1.0,
+            )
+        assert result["status"] == "inactive"
+
+    def test_purged_order_503_not_found_treated_as_cancelled(
+        self, connected_client,
+    ):
+        """IBKR's misuse of 503 for permanent errors: when get_order_status
+        raises with 'is not found', the order was purged after reaching
+        terminal state. Return status=cancelled (no longer working)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        # Status query raises with the IBKR 503 'not found' pattern
+        mock_ibkr.order_status.side_effect = IBClientError(
+            "ibind error: 503 Service Unavailable :: "
+            '{"error":"Order x is not found","statusCode":503}'
+        )
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1,
+                order_type="LMT", limit_price=1.0,
+            )
+        assert result["status"] == "cancelled"
+
+    def test_non_permanent_ibclient_error_during_poll_propagates(
+        self, connected_client,
+    ):
+        """A real failure mid-polling (e.g. auth error) must NOT be
+        swallowed — propagate so the caller can escalate."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        mock_ibkr.order_status.side_effect = IBClientError(
+            "auth failure — token expired"
+        )
+        with patch("shared.ib_client.time.sleep"):
+            with pytest.raises(IBClientError, match="auth failure"):
+                client.place_and_wait_for_fill(
+                    conid=1, side="BUY", quantity=1,
+                    order_type="LMT", limit_price=1.0,
+                )
+
+    # ─── Timeout path ──────────────────────────────────────────────────
+
+    def test_times_out_when_status_never_terminal(self, connected_client):
+        """If the order never reaches a terminal status within the timeout,
+        return status='timed_out'. The order remains WORKING on IBKR's
+        side — caller decides whether to cancel or escalate.
+
+        Implementation note: `time.monotonic` is patched with an
+        unlimited counter rather than a fixed list because the breaker
+        layer (record_success on each successful poll) also calls
+        monotonic, so a fixed-length iter would exhaust unpredictably.
+        Counter step (0.05s) × deadline (0.5s) ensures the loop exits
+        after ~10 monotonic calls regardless of how many are consumed
+        by the breaker."""
+        import itertools
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        mock_ibkr.order_status.return_value = _mk_result({"status": "Submitted"})
+        counter = itertools.count(start=100.0, step=0.05)
+        with patch("shared.ib_client.time.sleep"), \
+             patch("shared.ib_client.time.monotonic", side_effect=lambda: next(counter)):
+            result = client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1,
+                order_type="LMT", limit_price=1.0,
+                timeout_seconds=0.5,
+            )
+        assert result["status"] == "timed_out"
+        # We polled at least once and saw Submitted in `raw`
+        assert (result["raw"].get("status") or "").lower() == "submitted"
+
+
 # ─── cancel_order ──────────────────────────────────────────────────────────
 
 
