@@ -505,8 +505,18 @@ Before any code changes on the branch:
 
 After writing this plan, I audited it against the actual code + verified ibind's internals. 8 corrections:
 
-### 11.1 — Tighten MEIC method list via call-chain audit (not all 35)
-HYDRA's grep shows it doesn't directly call `place_emergency_order`, `place_limit_order_with_timeout`, `place_market_order_immediate`, or `place_order_with_retry`. Those are MEIC's internal helpers chained via methods like `_place_option_order` / `_close_position_with_retry`. **Phase NEW-2 commit 1 must do a call-chain audit** to identify the ~15-25 methods HYDRA's code actually traverses, not "all 35 MEIC methods". This shrinks the port surface meaningfully.
+### 11.1 — Tighten MEIC method list via call-chain audit ✅ DONE 2026-05-19
+
+Phase NEW-2 commit 1 completed the call-chain audit. See [HYDRA_MEIC_CALL_CHAIN_AUDIT.md](HYDRA_MEIC_CALL_CHAIN_AUDIT.md).
+
+**Result**: HYDRA reaches **101 of MEIC's 160 methods** (not 35 as I'd guessed, not 15-25 as I'd revised). 4,473 LOC of MEIC code must be ported into the standalone HydraStrategy class.
+
+**Scope impact**:
+- HYDRA strategy.py grows: 11,143 → ~15,500 LOC
+- Repo net deletion still substantial: ~38K LOC deleted, ~4,500 LOC added → ~33K LOC net shrinkage
+- Days estimate revised: **9 → 12-15 working days realistic**
+
+The 14 explicit `super()` delegations are the strict surface contract (Section A of audit). The other 87 methods are pure inherited dependencies — silently broken if not ported.
 
 ### 11.2 — State file schema migration (was missed)
 HYDRA's `data/hydra_state.json` stores `uic` fields. The Dashboard backend reads these. After cutover they'd be IBKR `conid` integers — same data, semantically different name. **Decision: rename `uic` → `instrument_id` everywhere** (state file, dashboard, logs). Adds:
