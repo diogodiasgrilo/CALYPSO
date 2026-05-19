@@ -43,6 +43,13 @@ from dataclasses import dataclass
 from enum import Enum
 
 from shared.saxo_client import SaxoClient, BuySell
+# IBClient is the broker for the IB-only rewrite. Imported during the
+# transition phase so HydraStrategy can accept an optional `broker`
+# kwarg without forcing a separate construction path. Once MEIC
+# inheritance is removed (later in the rewrite), saxo_client import dies
+# with it and only IBClient remains. See
+# docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md §11.4 for sequence.
+from shared.ib_client import IBClient
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_early_close_day
 from shared.technical_indicators import get_current_ema, calculate_atr
@@ -277,18 +284,39 @@ class HydraStrategy(MEICStrategy):
         config: Dict[str, Any],
         logger_service: Any,
         dry_run: bool = False,
-        alert_service: Optional[AlertService] = None
+        alert_service: Optional[AlertService] = None,
+        *,
+        broker: Optional[IBClient] = None,
     ):
         """
         Initialize the HYDRA strategy.
 
         Args:
-            saxo_client: Authenticated Saxo API client
+            saxo_client: Authenticated Saxo API client (used by inherited
+                MEIC methods — `self.client` on the parent class).
+                Will be removed when MEIC inheritance is dropped later in
+                the rewrite.
             config: Strategy configuration dictionary
             logger_service: Trade logging service
             dry_run: If True, simulate trades without placing real orders
             alert_service: Optional AlertService for Telegram/Email notifications
+            broker: NEW (2026-05-19 rewrite, keyword-only). The IB-only
+                broker client used by HYDRA's own (non-inherited)
+                methods. When None (default), HYDRA falls back to the
+                inherited `self.client` (Saxo) path for backward
+                compatibility during the transition. Once all read +
+                write paths in HYDRA are ported to use `self.broker`,
+                this becomes the only active path and saxo_client +
+                MEIC inheritance are removed. See
+                docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md.
         """
+        # IB-only broker (2026-05-19 rewrite). Stored on self BEFORE the
+        # super().__init__() call so any ported HYDRA methods that fire
+        # during MEIC's parent init (e.g. recovery hooks HYDRA overrides)
+        # can branch on self.broker is None vs not. Doesn't affect
+        # behavior when broker=None — inherited code still uses self.client.
+        self.broker: Optional[IBClient] = broker
+
         # Initialize trend filter config BEFORE calling super().__init__
         # because parent __init__ calls methods that might need these values
         self.trend_config = config.get("trend_filter", {})
