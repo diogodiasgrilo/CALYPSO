@@ -81,6 +81,50 @@ from shared.ib_constants import (  # noqa: E402
     SPREAD_TEMPLATE_CONID,
 )
 
+# Phase A.8 — retry + per-family circuit breaker primitives. Wired into
+# every ibind call via the _ib_call() helper below. Lifecycle methods
+# (connect/disconnect) stay un-wrapped: they have specialized error
+# translation and are one-shot per session.
+from shared.ib_retry import (  # noqa: E402
+    CircuitBreaker,
+    CircuitBreakerOpen,
+    RetryPolicy,
+    retry_with_backoff,
+)
+
+
+# ─── Snapshot warmup tuning (Fix #2026-05-18) ──────────────────────────────
+# IBKR's /iserver/marketdata/snapshot endpoint needs more than one warmup
+# poll for a fresh-this-session conid before it starts returning populated
+# price fields. Empirically (Monday 2026-05-18 paper smoke): the FIRST data
+# call after preflight returned metadata-only; LATER session calls returned
+# populated data immediately. We poll up to 8 × 250ms = 2s after the
+# preflight before giving up. Tunable if HYDRA's tick budget needs adjusting.
+_SNAPSHOT_MAX_WARMUP_POLLS = 8
+_SNAPSHOT_POLL_INTERVAL_S = 0.25
+# Keys IBKR returns in the snapshot row that are pure metadata (not market
+# data). If a snapshot row contains ONLY these keys, the cache isn't warm.
+_SNAPSHOT_METADATA_KEYS = frozenset({"conid", "conidEx", "_updated"})
+
+
+def _snapshot_has_data(payload) -> bool:
+    """True if the snapshot payload has at least one row with at least one
+    non-metadata field. Used to decide whether to continue warmup polling.
+    """
+    if not payload:
+        return False
+    rows = payload if isinstance(payload, list) else [payload]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        # Any key beyond {conid, conidEx, _updated} means a price/Greek field
+        # is populated. The IBKR field-code keys are short numeric strings
+        # like "31", "84", "7308" — those count as data here.
+        for key in row.keys():
+            if key not in _SNAPSHOT_METADATA_KEYS:
+                return True
+    return False
+
 
 # ─── Order placement constants ──────────────────────────────────────────────
 
@@ -231,6 +275,18 @@ class IBClient:
         # conid cache for qualify_contract — cleared on disconnect.
         # Key: (symbol, expiry_iso, strike, right, trading_class, sec_type)
         self._conid_cache: dict[tuple, int] = {}
+        # Phase A.8 — retry + per-family circuit breakers. RetryPolicy
+        # defaults: 6 attempts (initial + 5 retries), 1s base, 30s cap,
+        # 0.5 jitter, retryable on HTTP 429/5xx + transient network errors.
+        # Per-family breakers default to 5 consecutive failures OR ≥50%
+        # rate over 20-request / 60s window, 30s half-open probe.
+        # Exposed via the retry_policy / circuit_breakers properties so
+        # tests + operators can introspect or force_reset.
+        self._retry_policy = RetryPolicy()
+        self._breakers: dict[str, CircuitBreaker] = {
+            family: CircuitBreaker(name=f"ib.{family}")
+            for family in ("oauth", "session", "portfolio", "market", "orders")
+        }
 
     # ─── Connection lifecycle ──────────────────────────────────────────────
 
@@ -240,9 +296,13 @@ class IBClient:
         Returns True on success; raises IBAuthError or IBConnectionError on
         failure. After return, client is ready to place orders and read data.
 
-        Phase A version: synchronous, blocks until all 3 stages pass or fails.
-        No automatic retry — caller decides whether to retry. Phase A.8 will
-        add an outer retry+circuit-breaker layer.
+        Lifecycle methods (this connect() + disconnect()) are intentionally
+        NOT wrapped by the Phase A.8 retry+breaker layer: they translate
+        ibind exceptions into IBAuthError vs IBConnectionError with bespoke
+        logic that doesn't compose cleanly with generic retry, and they
+        only run once per session. Post-connect API calls DO route through
+        retry+breaker via _ib_call(). Caller decides whether to retry
+        connect() itself on failure.
         """
         assert_safe_crypto_backend()
 
@@ -333,7 +393,18 @@ class IBClient:
         return True
 
     def _read_auth_status(self) -> dict:
-        """One-shot auth/status read. Returns the `data` dict (empty if missing)."""
+        """One-shot auth/status read. Returns the `data` dict (empty if missing).
+
+        NOT routed through _ib_call: this helper is deliberately tolerant
+        of ibind responses that lack the standard Result shape (`.error`
+        may be missing entirely on a half-initialized session during the
+        ssodh/init handoff). _unwrap would raise on that; we want to
+        return {} so connect()'s own competing-session retry loop can
+        decide what to do. connect() already retries this race once after
+        5s, and `authentication_status` is a low-cost session endpoint —
+        the Phase A.8 retry+breaker layer would not meaningfully improve
+        reliability here.
+        """
         with self._call_lock:
             status_result = self._client.authentication_status()
         return getattr(status_result, "data", {}) or {}
@@ -356,9 +427,9 @@ class IBClient:
         Uxxxx* (live) account. Multi-account setups need to pin via
         IBConfig.account_id.
         """
-        with self._call_lock:
-            result = self._client.portfolio_accounts()
-        data = getattr(result, "data", []) or []
+        data = self._ib_call(
+            "portfolio", self._client.portfolio_accounts,
+        ) or []
         if not data:
             raise IBAuthError(
                 "No managed accounts returned by IBKR — likely an account "
@@ -501,6 +572,69 @@ class IBClient:
             raise IBClientError(f"ibind error: {err}")
         return getattr(result, "data", result)
 
+    def _ib_call(self, family: str, fn, *args, **kwargs):
+        """Run an ibind call through retry + per-family circuit breaker + unwrap.
+
+        Every API call from public IBClient methods should route through here.
+        `family` selects which CircuitBreaker tracks the call:
+
+            'oauth'     — token refresh / handshake (rare; lifecycle is
+                          NOT wrapped — see connect() docstring)
+            'session'   — auth/status, tickle (high-frequency keep-alive)
+            'portfolio' — accounts, summary, positions, ledger, FX
+            'market'    — quotes, snapshots, chains, greeks, history,
+                          contract search (secdef)
+            'orders'    — place, cancel, modify, status, live_orders,
+                          whatif
+
+        Concurrency: each retry attempt re-acquires `self._call_lock` for
+        the duration of the ibind call only; backoff sleeps happen OUTSIDE
+        the lock so other threads can use the client between attempts.
+        Tests can introspect / reset breakers via `circuit_breakers`.
+
+        Non-retryable exceptions (auth, validation, bad request) propagate
+        immediately and do NOT record a breaker failure — the breaker is
+        for "broker is degraded", not "caller did something wrong".
+        """
+        try:
+            breaker = self._breakers[family]
+        except KeyError as exc:
+            raise IBClientError(
+                f"unknown circuit-breaker family {family!r}; "
+                f"expected one of {sorted(self._breakers)}"
+            ) from exc
+
+        def call_with_lock():
+            with self._call_lock:
+                return fn(*args, **kwargs)
+
+        wrapped = retry_with_backoff(
+            policy=self._retry_policy, breaker=breaker,
+        )(call_with_lock)
+        return self._unwrap(wrapped())
+
+    @property
+    def retry_policy(self) -> RetryPolicy:
+        """The shared RetryPolicy applied to every _ib_call.
+
+        Mutate in place to tune for a specific deployment (e.g. tests can
+        set max_attempts=1 to disable retries; production may shorten
+        backoff in latency-sensitive paths).
+        """
+        return self._retry_policy
+
+    @property
+    def circuit_breakers(self) -> dict[str, CircuitBreaker]:
+        """Defensive copy of the per-family CircuitBreaker registry.
+
+        Use `client.circuit_breakers['market'].force_reset()` to clear an
+        OPEN breaker manually (operator action / test setup). The returned
+        dict is a shallow copy but the CircuitBreaker instances are the
+        live ones — mutating their state via record_*/force_reset affects
+        future calls.
+        """
+        return dict(self._breakers)
+
     # ─── Contract qualification (conid cache) ─────────────────────────────
 
     def qualify_contract(
@@ -552,36 +686,64 @@ class IBClient:
             if cache_key in self._conid_cache:
                 return self._conid_cache[cache_key]
 
-            # Step 1: resolve underlying conid
+            # Step 1: resolve underlying conid. Outer lock is RLock so
+            # _ib_call's re-acquisition is free; backoff sleeps inside
+            # _ib_call do hold the outer lock here (blocks duplicate
+            # qualify_contract for the same key — desired) but only the
+            # _call_lock, which serializes ibind anyway.
             underlying_sec_type = "IND" if sec_type == "OPT" else sec_type
-            search_result = self._client.search_contract_by_symbol(
+            candidates = self._ib_call(
+                "market", self._client.search_contract_by_symbol,
                 symbol=symbol,
                 sec_type=underlying_sec_type,
-            )
-            candidates = self._unwrap(search_result) or []
+            ) or []
             if not isinstance(candidates, list):
                 candidates = [candidates]
             if not candidates:
                 raise IBClientError(f"No contract found for symbol={symbol}")
             # iserver/secdef/search is a fuzzy free-text lookup — for SPX it
-            # can return SPX, SPXW, SPX-related variants in arbitrary order.
-            # Tighten with an exchange filter (CBOE for our index/option
-            # universe) and secType match where available.
-            filtered = [
-                d for d in candidates
-                if isinstance(d, dict)
-                and (
-                    not d.get("secType")
-                    or d.get("secType", "").upper() == underlying_sec_type.upper()
-                )
-                and (
-                    not d.get("exchange")
-                    or d.get("exchange", "").upper() == "CBOE"
-                )
-            ]
-            chosen = filtered or candidates
+            # returns the SPX conid plus several other "SPX-flavored" rows
+            # (US/foreign variants, ETF wrappers, etc.). Two-pass filter:
+            #
+            #   1. STRICT: inspect each candidate's `sections` array
+            #      (IBKR's authoritative secType/exchange mapping for a
+            #      conid) — pick rows that explicitly publish the
+            #      requested secType on CBOE.
+            #   2. LOOSE (fallback): match top-level secType/exchange if
+            #      present. Tolerant of partial responses + test mocks
+            #      that only stub `conid`.
+            #
+            # 2026-05-16 paper-smoke observation: live IBKR responses lack
+            # top-level `secType`/`exchange` on SPX, so the old loose
+            # filter passed 5 candidates and we picked the first by luck.
+            # The strict pass nails the right conid deterministically.
+            def _strict_match(d: dict) -> bool:
+                sections = d.get("sections") or []
+                for s in sections:
+                    if not isinstance(s, dict):
+                        continue
+                    if (s.get("secType") or "").upper() != underlying_sec_type.upper():
+                        continue
+                    if "CBOE" in (s.get("exchange") or "").upper():
+                        return True
+                return False
+
+            def _loose_match(d: dict) -> bool:
+                if not isinstance(d, dict):
+                    return False
+                sec = (d.get("secType") or "").upper()
+                if sec and sec != underlying_sec_type.upper():
+                    return False
+                exch = (d.get("exchange") or "").upper()
+                if exch and "CBOE" not in exch:
+                    return False
+                return True
+
+            strict = [d for d in candidates if isinstance(d, dict) and _strict_match(d)]
+            loose = [d for d in candidates if _loose_match(d)]
+            chosen = strict or loose or candidates
             if len(chosen) > 1:
-                # Ambiguous match — log but pick the first; better to surface
+                # Still ambiguous — log but pick the first; better to surface
                 # than fail. Production should pin a known conid.
                 logger.warning(
                     "qualify_contract(%s, %s): %d underlying candidates after "
@@ -606,25 +768,66 @@ class IBClient:
                         "Option qualification needs expiry, strike, right"
                     )
                 month = _ib_month_str(expiry)  # e.g. 'MAY26'
-                secdef_result = self._client.search_secdef_info_by_conid(
+                secdef_data = self._ib_call(
+                    "market", self._client.search_secdef_info_by_conid,
                     conid=str(underlying_conid),
                     sec_type="OPT",
                     month=month,
                     exchange="CBOE",
                     strike=str(strike),
                     right=right.upper(),
-                )
-                secdef_data = self._unwrap(secdef_result) or []
-                # Filter by trading_class
+                ) or []
+                # Two-axis filter: trading_class (SPXW vs SPX) AND exact
+                # expiry date. SPXW publishes Mon/Wed/Fri (and now daily)
+                # weeklies within a single month — matching on month
+                # alone (the IBKR query parameter) returns a list with
+                # multiple expiries. We must pick the one matching the
+                # caller-requested `expiry` exactly, else we can land on
+                # an already-expired conid (cause of the 2026-05-16
+                # paper-smoke `whatif → "Order is already expired"` 500).
+                #
+                # IBKR's secdef response shape for an option uses
+                # `maturityDate` formatted as YYYYMMDD. Defensive: also
+                # accept `expirationDate` / `expiry` since field naming
+                # varies across IBKR endpoints + ibind versions.
+                want_yyyymmdd = expiry.strftime("%Y%m%d")
+                rows = secdef_data if isinstance(secdef_data, list) else [secdef_data]
+
+                def _matches_expiry(d: dict) -> bool:
+                    """True if d's expiry matches the requested date, OR if
+                    no expiry field is present (back-compat with mocks +
+                    partial responses).
+                    """
+                    for key in ("maturityDate", "expirationDate", "expiry"):
+                        val = d.get(key)
+                        if val:
+                            return str(val) == want_yyyymmdd
+                    return True  # field absent — preserve legacy behavior
+
+                def _matches_trading_class(d: dict) -> bool:
+                    tc = d.get("tradingClass", "")
+                    return tc == trading_class or trading_class.upper() == tc.upper()
+
                 matches = [
-                    d for d in (secdef_data if isinstance(secdef_data, list) else [secdef_data])
-                    if (d.get("tradingClass") == trading_class
-                        or trading_class.upper() == d.get("tradingClass", "").upper())
+                    d for d in rows
+                    if isinstance(d, dict)
+                    and _matches_trading_class(d)
+                    and _matches_expiry(d)
                 ]
                 if not matches:
+                    # Surface the exact expiry mismatch reason so production
+                    # debugging doesn't have to introspect raw responses.
+                    available_expiries = sorted({
+                        str(d.get("maturityDate")
+                            or d.get("expirationDate")
+                            or d.get("expiry") or "?")
+                        for d in rows if isinstance(d, dict)
+                    })
                     raise IBClientError(
                         f"No {trading_class} option matched: symbol={symbol} "
-                        f"expiry={expiry} strike={strike} right={right}"
+                        f"expiry={expiry} (want maturityDate={want_yyyymmdd}) "
+                        f"strike={strike} right={right}. "
+                        f"Available expiries in chain: {available_expiries}"
                     )
                 # Defensive: response shape varies — prefer 'conid', fall
                 # back to 'conidEx' (some endpoints return one or the other).
@@ -656,11 +859,41 @@ class IBClient:
         pre-flight, "/iserver/accounts must be called prior to .../snapshot")
         is satisfied once per session by IBClient.connect()'s account-id
         discovery.
+
+        **Warmup polling (fix for 2026-05-18 Monday smoke failure):**
+        IBKR's snapshot endpoint for a freshly-queried conid (first time
+        this session) often returns ONLY metadata (`conid`, `conidEx`,
+        `_updated`) with all price fields absent on the second call, even
+        in active market hours. Subsequent calls populate. We poll the
+        snapshot endpoint up to `_SNAPSHOT_MAX_WARMUP_POLLS` times after
+        the preflight, sleeping `_SNAPSHOT_POLL_INTERVAL_S` between each,
+        until any non-metadata field appears. Returns whatever the LAST
+        call produced (may still be metadata-only if the conid genuinely
+        has no entitlement / is stale — caller checks via _parse_quote_row).
+
+        ibind's own `live_marketdata_snapshot_by_symbol` also calls the
+        endpoint twice but doesn't warmup-poll; we needed this in
+        production because HYDRA reads quotes on demand and a silent
+        all-None response would break credit estimation + stop monitoring.
         """
-        with self._call_lock:
-            self._client.live_marketdata_snapshot(conids=conids, fields=fields)
-            result = self._client.live_marketdata_snapshot(conids=conids, fields=fields)
-        return self._unwrap(result) or []
+        # Pre-flight
+        self._ib_call(
+            "market", self._client.live_marketdata_snapshot,
+            conids=conids, fields=fields,
+        )
+
+        # Data call + warmup polling — return on first populated response
+        data = None
+        for attempt in range(_SNAPSHOT_MAX_WARMUP_POLLS):
+            data = self._ib_call(
+                "market", self._client.live_marketdata_snapshot,
+                conids=conids, fields=fields,
+            )
+            if _snapshot_has_data(data):
+                return data
+            if attempt < _SNAPSHOT_MAX_WARMUP_POLLS - 1:
+                time.sleep(_SNAPSHOT_POLL_INTERVAL_S)
+        return data or []
 
     def get_quote(
         self,
@@ -726,16 +959,25 @@ class IBClient:
         return [self._parse_quote_row(r, r.get("conid")) for r in rows]
 
     def get_vix_price(self) -> Optional[float]:
-        """Latest VIX index price (mid of bid/ask, or last as fallback).
+        """Latest VIX index price. Tries mid (bid/ask average) → last → mark.
 
-        SaxoClient.get_vix_price() equivalent — returns a single float, not
-        the full quote dict.
+        Fix 2026-05-18 (Monday smoke diagnostic): VIX over IBKR's snapshot
+        endpoint delivers ONLY `mark` (field 7635) for the cash index —
+        no bid/ask (so no mid), no last (because VIX is a calculated index
+        with no trade prints, not a tradable instrument). Without the
+        mark-fallback, `get_vix_price()` returned None even with subs
+        fully active, which would silently break HYDRA's VIX-regime
+        decisions + stop monitoring on the IB cutover.
+
+        SaxoClient.get_vix_price() equivalent — returns a single float.
         """
         conid = self.qualify_contract("VIX", sec_type="IND")
         q = self.get_quote(conid)
         if q.get("mid") is not None:
             return q["mid"]
-        return q.get("last")
+        if q.get("last") is not None:
+            return q["last"]
+        return q.get("mark")
 
     def get_option_greeks(self, conid: int) -> dict:
         """Snapshot of delta/gamma/theta/vega/IV/OI for an option.
@@ -801,11 +1043,10 @@ class IBClient:
         SaxoClient.get_account_info() equivalent.
         """
         self._require_connected()
-        with self._call_lock:
-            result = self._client.portfolio_account_information(
-                account_id=self.account_id,
-            )
-        return self._unwrap(result) or {}
+        return self._ib_call(
+            "portfolio", self._client.portfolio_account_information,
+            account_id=self.account_id,
+        ) or {}
 
     def get_balance(self, currency: str = "USD") -> dict:
         """Live tradable amount in `currency`, plus diagnostics.
@@ -834,15 +1075,14 @@ class IBClient:
               raw_ledger: unmodified get_ledger
         """
         self._require_connected()
-        with self._call_lock:
-            summary_result = self._client.portfolio_summary(
-                account_id=self.account_id,
-            )
-            ledger_result = self._client.get_ledger(
-                account_id=self.account_id,
-            )
-        summary = self._unwrap(summary_result) or {}
-        ledger = self._unwrap(ledger_result) or {}
+        summary = self._ib_call(
+            "portfolio", self._client.portfolio_summary,
+            account_id=self.account_id,
+        ) or {}
+        ledger = self._ib_call(
+            "portfolio", self._client.get_ledger,
+            account_id=self.account_id,
+        ) or {}
 
         # Summary uses keys like {"availablefunds": {"amount": ..., "currency": ...}}
         avail = summary.get("availablefunds") or {}
@@ -913,11 +1153,10 @@ class IBClient:
         page = 0
         max_pages = 50  # safety cap
         while page < max_pages:
-            with self._call_lock:
-                result = self._client.positions(
-                    account_id=self.account_id, page=page,
-                )
-            data = self._unwrap(result)
+            data = self._ib_call(
+                "portfolio", self._client.positions,
+                account_id=self.account_id, page=page,
+            )
             if not data:
                 break
             batch = data if isinstance(data, list) else [data]
@@ -939,11 +1178,13 @@ class IBClient:
         SaxoClient.get_fx_rate() equivalent.
         """
         self._require_connected()
-        with self._call_lock:
-            result = self._client.currency_exchange_rate(
-                source=source, target=target,
-            )
-        data = self._unwrap(result)
+        # FX rate quote — portfolio breaker (currency math is a portfolio
+        # concern, not a market-data one — keeps the market-data breaker
+        # focused on snapshot/chain volume).
+        data = self._ib_call(
+            "portfolio", self._client.currency_exchange_rate,
+            source=source, target=target,
+        )
         if isinstance(data, dict):
             rate = data.get("rate") or data.get(f"{source}_{target}")
             return float(rate) if rate else None
@@ -974,14 +1215,13 @@ class IBClient:
         # Resolve underlying conid first
         underlying_conid = self.qualify_contract(symbol, sec_type="IND")
         month = _ib_month_str(expiry)
-        with self._call_lock:
-            result = self._client.search_strikes_by_conid(
-                conid=str(underlying_conid),
-                sec_type="OPT",
-                month=month,
-                exchange="CBOE",
-            )
-        data = self._unwrap(result) or {}
+        data = self._ib_call(
+            "market", self._client.search_strikes_by_conid,
+            conid=str(underlying_conid),
+            sec_type="OPT",
+            month=month,
+            exchange="CBOE",
+        ) or {}
         # Response shape: {"call": [strikes], "put": [strikes]}
         if isinstance(data, dict):
             calls = data.get("call") or data.get("calls") or []
@@ -1007,10 +1247,16 @@ class IBClient:
         be mis-classified as LOOKUP_FILL.
         """
         self._require_connected()
-        with self._call_lock:
-            self._client.live_orders(account_id=self.account_id, force=True)
-            result = self._client.live_orders(account_id=self.account_id)
-        data = self._unwrap(result) or {}
+        # Cache-clear preflight + real read, each independently
+        # retry+breaker wrapped (see _snapshot_with_preflight rationale).
+        self._ib_call(
+            "orders", self._client.live_orders,
+            account_id=self.account_id, force=True,
+        )
+        data = self._ib_call(
+            "orders", self._client.live_orders,
+            account_id=self.account_id,
+        ) or {}
         # ibind returns {"orders": [...]} wrapping
         if isinstance(data, dict):
             return data.get("orders") or []
@@ -1022,9 +1268,10 @@ class IBClient:
         SaxoClient.get_order_status() equivalent.
         """
         self._require_connected()
-        with self._call_lock:
-            result = self._client.order_status(order_id=str(order_id))
-        return self._unwrap(result) or {}
+        return self._ib_call(
+            "orders", self._client.order_status,
+            order_id=str(order_id),
+        ) or {}
 
     # ─── Historical bars ─────────────────────────────────────────────────
 
@@ -1054,14 +1301,13 @@ class IBClient:
         # symbols like 'SPX' / 'VIX' return no match. Resolve the conid
         # ourselves first (sec_type='IND') and call the by-conid variant.
         conid = self.qualify_contract(symbol, sec_type="IND")
-        with self._call_lock:
-            result = self._client.marketdata_history_by_conid(
-                conid=str(conid),
-                bar=bar,
-                period=period,
-                outside_rth=outside_rth,
-            )
-        data = self._unwrap(result) or {}
+        data = self._ib_call(
+            "market", self._client.marketdata_history_by_conid,
+            conid=str(conid),
+            bar=bar,
+            period=period,
+            outside_rth=outside_rth,
+        ) or {}
         if isinstance(data, dict):
             return data.get("data") or []
         return data if isinstance(data, list) else []
@@ -1352,25 +1598,67 @@ class IBClient:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a working order.
 
-        Returns True on successful cancellation request (the actual cancel
-        completes asynchronously — caller should poll get_order_status if
-        confirmation is needed).
+        Returns:
+            True if (a) IBKR accepted the cancel request, OR (b) the order
+                  is already in a terminal state (filled / cancelled /
+                  purged from records) — both satisfy the caller's intent
+                  "this order is no longer working".
+            False on transient errors, breaker-open, or other unexpected
+                  failures where the order MAY still be working — caller
+                  must escalate (P0 trading-safety event).
 
         SaxoClient.cancel_order() equivalent.
+
+        **Already-terminal handling (Fix 2026-05-18 paper smoke):**
+        If the order was filled / cancelled / purged between when the
+        caller decided to cancel and when our DELETE arrived, IBKR returns
+        HTTP 400 (or 503) with `{"error":"...Order is filled or canceled"}`.
+        The Sunday `is_retryable` fix already prevents wasteful retries on
+        this pattern, but the exception still propagated past this method's
+        catch (only caught IBClientError + CircuitBreakerOpen, not ibind's
+        ExternalBrokerError). We now also catch the broader case + inspect
+        the message: if it indicates "already terminal", return True
+        because the caller's goal ("order no longer working") is achieved.
+        Genuine 4xx/5xx without these markers still returns False.
         """
         self._require_connected()
-        with self._call_lock:
-            result = self._client.cancel_order(
+        # Routed through _ib_call for retry+breaker on transient 429/5xx —
+        # a transient cancel failure here would otherwise leave a working
+        # order in the market (P0 trading-safety event).
+        try:
+            self._ib_call(
+                "orders", self._client.cancel_order,
                 order_id=str(order_id),
                 account_id=self.account_id,
             )
-        try:
-            self._unwrap(result)
             logger.info("Order cancel: order_id=%s", order_id)
             return True
-        except IBClientError as exc:
-            # P0 trading-safety event: a working order we couldn't cancel
-            # is a stuck-position risk. Caller must escalate.
+        except CircuitBreakerOpen as exc:
+            # Breaker tripped — order may still be working; caller must
+            # escalate. Don't pretend success.
+            logger.error("Order cancel failed for %s: breaker OPEN — %s", order_id, exc)
+            return False
+        except Exception as exc:
+            # Inspect the exception message for already-terminal patterns.
+            # Includes IBClientError, ibind's ExternalBrokerError, requests
+            # HTTPError, and anything else that surfaces from the cancel
+            # call below the retry layer.
+            msg = str(exc).lower()
+            for terminal_pattern in (
+                "is filled or cancel",   # exact ibind/IBKR phrasing (covers ed and 'ed)
+                "already filled",
+                "already cancel",        # covers "cancelled" + "canceled"
+                "is not found",          # purged after terminal state
+                "no longer found",
+            ):
+                if terminal_pattern in msg:
+                    logger.info(
+                        "Order cancel: order_id=%s already in terminal state "
+                        "(%s) — treating as cancel-success since the order "
+                        "is no longer working", order_id, terminal_pattern,
+                    )
+                    return True
+            # Genuine failure — order may still be working, escalate.
             logger.error("Order cancel failed for %s: %s", order_id, exc)
             return False
 
@@ -1415,14 +1703,13 @@ class IBClient:
             price=rounded_price,
             acct_id=self.account_id,
         )
-        with self._call_lock:
-            result = self._client.modify_order(
-                order_id=str(order_id),
-                order_request=order,
-                answers=answers or DEFAULT_ORDER_ANSWERS,
-                account_id=self.account_id,
-            )
-        data = self._unwrap(result) or {}
+        data = self._ib_call(
+            "orders", self._client.modify_order,
+            order_id=str(order_id),
+            order_request=order,
+            answers=answers or DEFAULT_ORDER_ANSWERS,
+            account_id=self.account_id,
+        ) or {}
         logger.info(
             "Order modify: order_id=%s side=%s qty=%s price=%s",
             order_id, side, quantity, rounded_price,
@@ -1448,12 +1735,11 @@ class IBClient:
         fire reply prompts (no `answers` param needed).
         """
         self._require_connected()
-        with self._call_lock:
-            result = self._client.whatif_order(
-                order_request=order,
-                account_id=self.account_id,
-            )
-        return self._unwrap(result) or {}
+        return self._ib_call(
+            "orders", self._client.whatif_order,
+            order_request=order,
+            account_id=self.account_id,
+        ) or {}
 
     def _submit_order(
         self,
@@ -1467,13 +1753,16 @@ class IBClient:
         cleared or rejects an unknown prompt (in which case it raises).
         """
         a = answers if answers is not None else DEFAULT_ORDER_ANSWERS
-        with self._call_lock:
-            result = self._client.place_order(
-                order_request=order,
-                answers=a,
-                account_id=self.account_id,
-            )
-        data = self._unwrap(result) or {}
+        # Retry is safe here because _ensure_coid guarantees every order
+        # carries a client_order_id (cOID) — IBKR dedupes server-side on
+        # cOID, so a timed-out place that secretly succeeded won't double
+        # fill on retry. See _ensure_coid docstring.
+        data = self._ib_call(
+            "orders", self._client.place_order,
+            order_request=order,
+            answers=a,
+            account_id=self.account_id,
+        ) or {}
         # ibind returns a list when the order resolves to multiple entries
         # (one per leg for combos, one per child for OCA brackets). We
         # promote the first entry to the top-level dict for caller

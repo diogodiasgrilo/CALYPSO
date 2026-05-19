@@ -170,6 +170,61 @@ class TestRetryPolicy:
         pol = RetryPolicy()
         assert not pol.is_retryable(ValueError("bad input"))
 
+    # ─── IBKR 5xx-misuse patterns (discovered 2026-05-17 paper smoke) ──
+    # IBKR returns 5xx status codes for several conditions that are
+    # semantically permanent (404-equivalent). is_retryable MUST treat
+    # these as non-retryable to avoid wasting backoff budget and tripping
+    # the orders breaker on transient lookups.
+
+    def test_ibkr_503_order_not_found_is_NOT_retryable(self):
+        """get_order_status({purged_id}) returns 503 with body
+        '{"error":"Order X is not found","statusCode":503}'. Despite the
+        503, the order will never come back — short-circuit immediately.
+        """
+        pol = RetryPolicy()
+        exc = Exception(
+            "IbkrClient: response error :: 503 :: Service Unavailable :: "
+            '{"error":"Order 893931734 is not found","statusCode":503}'
+        )
+        assert not pol.is_retryable(exc), (
+            "503-with-'is not found'-body must NOT retry — it's IBKR's "
+            "misuse of 503 for what's logically a 404"
+        )
+
+    def test_ibkr_cancel_on_terminated_order_is_NOT_retryable(self):
+        """Cancelling an already-filled/cancelled order returns
+        '400 Bad Request' (sometimes 503) with body containing
+        'Order is filled or canceled'. Don't retry."""
+        pol = RetryPolicy()
+        exc = Exception(
+            "IbkrClient: response error :: 400 :: Bad Request :: "
+            '{"error":"Order Message:\\nSELL 1 Combo\\nOrder is filled or canceled"}'
+        )
+        assert not pol.is_retryable(exc)
+
+    def test_ibkr_already_cancelled_variants_NOT_retryable(self):
+        """Both spellings: 'cancel' (US) and 'cancelled' substring catches."""
+        pol = RetryPolicy()
+        for msg in (
+            "503 Service Unavailable: order is already cancelled",
+            "503 Service Unavailable: order is already canceled",
+            "400 Bad Request: already filled",
+        ):
+            assert not pol.is_retryable(Exception(msg)), (
+                f"Should not retry permanent-error variant: {msg!r}"
+            )
+
+    def test_generic_503_still_retryable(self):
+        """Don't over-correct — a vanilla 503 without a known permanent-error
+        body still indicates transient server issue and SHOULD retry."""
+        pol = RetryPolicy()
+        assert pol.is_retryable(Exception("503 Service Unavailable")), (
+            "Plain 503 without permanent-error body must still retry"
+        )
+        assert pol.is_retryable(Exception(
+            "503 Service Unavailable: temporary upstream failure"
+        ))
+
     def test_delay_grows_exponentially(self):
         pol = RetryPolicy(base_delay_s=1.0, jitter_fraction=0.0)
         # No jitter for deterministic test

@@ -187,9 +187,35 @@ class RetryPolicy:
 
     def is_retryable(self, exc: Exception) -> bool:
         """Override-able predicate. Default: retry HTTP 429/5xx + transient
-        network errors.
+        network errors — EXCEPT for IBKR's known 5xx-misuse patterns where
+        the status code is 5xx but the response body indicates a permanent
+        error (effectively a 4xx semantically).
+
+        Discovered 2026-05-17 via paper smoke diagnostic: IBKR's
+        `/iserver/account/order/status/{orderId}` returns
+        `503 Service Unavailable` with body
+        `{"error":"Order X is not found","statusCode":503}` for orders that
+        don't exist in IBKR's database (purged after a terminal state +
+        short retention). Retrying these wastes ~20s of backoff and trips
+        the orders breaker, blocking subsequent legitimate calls. Same
+        misuse-of-503 pattern shows up for "already filled or canceled"
+        responses to a cancel on a terminated order. Both must propagate
+        immediately as non-retryable.
         """
         msg = str(exc).lower()
+
+        # IBKR permanent-error patterns served via 5xx — short-circuit
+        # BEFORE the generic 5xx match so they don't get retried.
+        for permanent_pattern in (
+            "is not found",          # /order/status/{id} on purged order
+            "no longer found",       # variant
+            "already filled",        # cancel on filled order
+            "already cancel",        # cancel on cancelled order ("canceled" too)
+            "order is filled or canceled",  # exact ibind/IBKR phrasing
+        ):
+            if permanent_pattern in msg:
+                return False
+
         if any(t in msg for t in (
             "429", "rate limit",
             "500", "502", "503", "504",

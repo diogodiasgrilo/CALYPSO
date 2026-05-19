@@ -61,9 +61,11 @@ def connected_client(paper_creds):
     mock_ibkr = MagicMock()
     auth_status = MagicMock()
     auth_status.data = {"authenticated": True, "connected": True, "competing": False}
+    auth_status.error = None  # Phase A.8: _ib_call → _unwrap checks .error
     mock_ibkr.authentication_status.return_value = auth_status
     portfolio_result = MagicMock()
     portfolio_result.data = [{"accountId": "DU1234567"}]
+    portfolio_result.error = None
     mock_ibkr.portfolio_accounts.return_value = portfolio_result
 
     with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr):
@@ -523,13 +525,73 @@ class TestCancelOrder:
         assert client.cancel_order("abc123") is True
         mock_ibkr.cancel_order.assert_called_with(order_id="abc123", account_id="DU1234567")
 
-    def test_returns_false_on_ibind_error(self, connected_client):
+    def test_returns_false_on_genuine_ibind_error(self, connected_client):
+        """Genuine failure (e.g. network/auth) → False so caller escalates
+        the P0 risk that a working order couldn't be cancelled."""
         client, mock_ibkr = connected_client
         result = MagicMock()
         result.data = None
-        result.error = "order already filled"
+        result.error = "network unreachable"
         mock_ibkr.cancel_order.return_value = result
         assert client.cancel_order("abc123") is False
+
+    # ─── Already-terminal handling (Fix 2026-05-18 paper smoke) ────────
+    # IBKR returns 4xx/5xx with body indicating the order is already in
+    # a terminal state. The caller's intent ("order no longer working")
+    # is satisfied even though OUR cancel arrived too late — return True.
+
+    def test_returns_true_when_order_already_filled_or_canceled(
+        self, connected_client,
+    ):
+        """The exact IBKR phrase from Mon 2026-05-18 paper smoke:
+        '400 Bad Request: {"error":"Order Message:\\nSELL 1 Combo\\nOrder
+        is filled or canceled"}'. cancel_order must treat this as success
+        because the order is no longer working — caller's intent met."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.cancel_order.side_effect = Exception(
+            "IbkrClient: response error :: 400 :: Bad Request :: "
+            '{"error":"Order Message:\\nSELL 1 Combo\\nOrder is filled or canceled"}'
+        )
+        assert client.cancel_order("417709432") is True
+
+    def test_returns_true_when_order_already_cancelled(self, connected_client):
+        """Variants of the same idea — IBKR may report 'already cancelled'
+        in slightly different ways."""
+        client, mock_ibkr = connected_client
+        for err_msg in (
+            "503 Service Unavailable: order is already cancelled",
+            "400 Bad Request: order already canceled",
+            "ibind error: order is already filled",
+        ):
+            mock_ibkr.cancel_order.side_effect = Exception(err_msg)
+            assert client.cancel_order("abc123") is True, (
+                f"Should treat as success: {err_msg!r}"
+            )
+
+    def test_returns_true_when_order_purged_not_found(self, connected_client):
+        """503 with 'is not found' body = IBKR purged the order after a
+        terminal state. Sunday's smoke uncovered this via the
+        check_order.py diagnostic; cancel_order should treat same as
+        already-cancelled (order is no longer working)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.cancel_order.side_effect = Exception(
+            "IbkrClient: response error :: 503 :: Service Unavailable :: "
+            '{"error":"Order 893931734 is not found","statusCode":503}'
+        )
+        assert client.cancel_order("893931734") is True
+
+    def test_returns_false_when_breaker_open(self, connected_client):
+        """Breaker-open means the order MAY still be working — DON'T
+        pretend success. Caller must escalate."""
+        from shared.ib_retry import CircuitBreakerOpen
+        client, mock_ibkr = connected_client
+        # Trip the orders breaker manually
+        br = client.circuit_breakers["orders"]
+        for _ in range(br.consecutive_failures_threshold):
+            br.record_failure()
+        assert client.cancel_order("abc123") is False
+        # And ibind wasn't called (short-circuited)
+        mock_ibkr.cancel_order.assert_not_called()
 
 
 # ─── modify_order ──────────────────────────────────────────────────────────

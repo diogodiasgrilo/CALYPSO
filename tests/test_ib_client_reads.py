@@ -27,6 +27,7 @@ from shared.ib_client import (
     FIELD_BID,
     FIELD_ASK,
     FIELD_LAST,
+    FIELD_MARK,
     FIELD_DELTA,
     FIELD_IV,
     IBClient,
@@ -70,9 +71,11 @@ def connected_client(paper_creds):
     mock_ibkr = MagicMock()
     auth_status = MagicMock()
     auth_status.data = {"authenticated": True, "connected": True, "competing": False}
+    auth_status.error = None  # Phase A.8: _ib_call → _unwrap checks .error
     mock_ibkr.authentication_status.return_value = auth_status
     portfolio_result = MagicMock()
     portfolio_result.data = [{"accountId": "DU1234567"}]
+    portfolio_result.error = None
     mock_ibkr.portfolio_accounts.return_value = portfolio_result
 
     cfg = IBConfig(credentials=paper_creds)
@@ -146,6 +149,116 @@ class TestQualifyContract:
         )
         assert conid == 222
 
+    def test_option_filters_by_exact_expiry_when_chain_has_multiple_weeklies(
+        self, connected_client,
+    ):
+        """SPXW chain returns multiple weeklies for the queried month; we
+        must pick the one matching the caller's exact expiry, not the
+        first one. Regression for the 2026-05-16 paper-smoke `whatif →
+        "Order is already expired"` failure: month=MAY26 returned conids
+        for already-expired Fri May 15 weekly + upcoming Mon May 18; old
+        filter took the first (= expired), 500'd on whatif."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+        mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result([
+            # Already-expired Friday weekly (the "land mine")
+            {"conid": 111, "tradingClass": "SPXW", "maturityDate": "20260515"},
+            # The one we want (Monday weekly)
+            {"conid": 222, "tradingClass": "SPXW", "maturityDate": "20260518"},
+            # A later weekly we should NOT pick
+            {"conid": 333, "tradingClass": "SPXW", "maturityDate": "20260520"},
+        ])
+        conid = client.qualify_contract(
+            "SPX", expiry=date(2026, 5, 18), strike=5500, right="C",
+            trading_class="SPXW",
+        )
+        assert conid == 222, (
+            f"Expected Mon 5/18 weekly conid 222, got {conid} — "
+            f"expiry filter is not picking the exact requested date"
+        )
+
+    def test_option_expiry_filter_supports_alternative_field_names(
+        self, connected_client,
+    ):
+        """Defensive: ibind/IBKR endpoints publish expiry under varying
+        field names. Filter should accept `maturityDate`, `expirationDate`,
+        and `expiry`."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+        # Use `expirationDate` instead of `maturityDate`
+        mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result([
+            {"conid": 444, "tradingClass": "SPXW", "expirationDate": "20260515"},  # wrong day
+            {"conid": 555, "tradingClass": "SPXW", "expirationDate": "20260518"},  # right day
+        ])
+        conid = client.qualify_contract(
+            "SPX", expiry=date(2026, 5, 18), strike=5500, right="C",
+            trading_class="SPXW",
+        )
+        assert conid == 555
+
+    def test_option_no_match_for_requested_expiry_raises_with_available_list(
+        self, connected_client,
+    ):
+        """When no row matches the caller's expiry, raise with a clear
+        diagnostic listing what IBKR did return (so debugging doesn't
+        require introspecting raw responses)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+        mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result([
+            {"conid": 111, "tradingClass": "SPXW", "maturityDate": "20260515"},
+            {"conid": 222, "tradingClass": "SPXW", "maturityDate": "20260520"},
+        ])
+        with pytest.raises(IBClientError) as excinfo:
+            client.qualify_contract(
+                "SPX", expiry=date(2026, 5, 18),  # neither row matches
+                strike=5500, right="C", trading_class="SPXW",
+            )
+        msg = str(excinfo.value)
+        assert "20260518" in msg, f"Expected requested date in error: {msg!r}"
+        assert "20260515" in msg, f"Expected available expiry in error: {msg!r}"
+        assert "20260520" in msg, f"Expected available expiry in error: {msg!r}"
+
+    def test_option_expiry_filter_back_compat_when_field_absent(
+        self, connected_client,
+    ):
+        """Test mocks (and some legacy IBKR endpoints) omit the expiry
+        field entirely. In that case, fall through and accept the row —
+        preserves all prior tests' assumptions."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+        mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result(
+            [{"conid": 777, "tradingClass": "SPXW"}]  # no maturityDate
+        )
+        conid = client.qualify_contract(
+            "SPX", expiry=date(2026, 5, 18), strike=5500, right="C",
+            trading_class="SPXW",
+        )
+        assert conid == 777
+
+    def test_underlying_index_strict_filter_picks_cboe_ind_from_sections(
+        self, connected_client,
+    ):
+        """Live IBKR responses don't always set top-level secType/exchange.
+        Strict pass should use the `sections` array to pick the right
+        candidate. Regression for the 2026-05-16 noisy
+        '5 underlying candidates after filtering' warning."""
+        client, mock_ibkr = connected_client
+        # 3 candidates — only the middle one publishes IND on CBOE in its
+        # sections array. The strict pass must pick it deterministically.
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([
+            {"conid": 100, "sections": [{"secType": "STK", "exchange": "NYSE"}]},
+            {"conid": 416904, "sections": [
+                {"secType": "IND", "exchange": "CBOE;"},
+                {"secType": "OPT", "exchange": "SMART;CBOE"},
+            ]},
+            {"conid": 200, "sections": [{"secType": "WAR", "exchange": "FWB"}]},
+        ])
+        conid = client.qualify_contract("SPX", sec_type="IND")
+        assert conid == 416904, (
+            f"Strict-pass filter should pick the IND-on-CBOE candidate "
+            f"deterministically, got {conid}"
+        )
+
     def test_option_missing_trading_class_raises(self, connected_client):
         client, mock_ibkr = connected_client
         mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
@@ -210,21 +323,94 @@ class TestGetQuote:
         assert call.kwargs["fields"] == [FIELD_DELTA, FIELD_IV]
 
     def test_empty_response_returns_raw_envelope(self, connected_client):
-        """If IBKR returns an empty payload after the pre-flight, expose
-        the raw response under 'raw' so callers can see what happened."""
+        """If IBKR returns an empty payload after the pre-flight + warmup,
+        expose the raw response under 'raw' so callers can see what happened.
+        Mocks time.sleep to keep the test fast despite the warmup loop."""
         client, mock_ibkr = connected_client
         mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([])
-        q = client.get_quote(12345)
+        with patch("shared.ib_client.time.sleep"):
+            q = client.get_quote(12345)
         # No row → no parsed fields; conid echoed
         assert q["conid"] == 12345
 
-    def test_preflight_calls_endpoint_twice(self, connected_client):
+    def test_preflight_then_data_call_short_circuits_when_populated(
+        self, connected_client,
+    ):
         """ibind requires a pre-flight; verify we call live_marketdata_snapshot
-        twice per fresh quote (first primes, second returns real data)."""
+        exactly twice when the first DATA call returns populated fields
+        (no warmup polling needed). This is the happy path."""
         client, mock_ibkr = connected_client
-        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([{}])
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([
+            {"conid": 12345, FIELD_LAST: "5.30"},  # has a real field
+        ])
         client.get_quote(12345)
+        # 1 preflight + 1 data call (data populated immediately → no warmup)
         assert mock_ibkr.live_marketdata_snapshot.call_count == 2
+
+    def test_warmup_polls_until_fields_populate(self, connected_client):
+        """Fix 2026-05-18: IBKR's snapshot endpoint sometimes returns
+        metadata-only for a freshly-queried conid. We poll until a real
+        field appears OR we exhaust the warmup budget. Regression for the
+        Monday paper-smoke failure where `test_get_quote_spx_index`
+        returned all-None on the first call but populated on later calls.
+        """
+        client, mock_ibkr = connected_client
+        # First 3 data calls return metadata-only; 4th returns populated
+        metadata_only = _mk_result([{"conid": 12345, "_updated": 123}])
+        populated = _mk_result([{"conid": 12345, FIELD_LAST: "5.30"}])
+        # Preflight (1) + 3 metadata-only + 1 populated = 5 calls
+        mock_ibkr.live_marketdata_snapshot.side_effect = [
+            metadata_only,  # preflight
+            metadata_only, metadata_only, metadata_only,  # warmup polls 1-3
+            populated,                                     # warmup poll 4 → done
+        ]
+        with patch("shared.ib_client.time.sleep") as mock_sleep:
+            q = client.get_quote(12345)
+        assert q["last"] == 5.30
+        # 1 preflight + 4 data attempts = 5 total
+        assert mock_ibkr.live_marketdata_snapshot.call_count == 5
+        # 3 sleeps between the 4 data attempts (none after the successful one)
+        assert mock_sleep.call_count == 3
+
+    def test_warmup_gives_up_after_max_polls(self, connected_client):
+        """If snapshot never populates within the warmup budget, return
+        the last (empty) response rather than hanging forever. Caller
+        receives None fields and can decide what to do."""
+        client, mock_ibkr = connected_client
+        # Always return metadata-only (simulates a stale/unentitled conid)
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([
+            {"conid": 12345, "_updated": 123},
+        ])
+        with patch("shared.ib_client.time.sleep"):
+            q = client.get_quote(12345)
+        # All fields end up None — quote parser couldn't find any
+        assert q["bid"] is None
+        assert q["last"] is None
+        # 1 preflight + 8 warmup polls = 9 total (matches _SNAPSHOT_MAX_WARMUP_POLLS)
+        assert mock_ibkr.live_marketdata_snapshot.call_count == 9
+
+    def test_warmup_detects_data_in_any_row(self, connected_client):
+        """Batch snapshot: if ANY of the rows has a populated field,
+        consider the cache warm. Prevents waiting forever when one
+        instrument is illiquid but others are fine."""
+        client, mock_ibkr = connected_client
+        # First call: both rows metadata-only
+        meta_pair = _mk_result([
+            {"conid": 111, "_updated": 1}, {"conid": 222, "_updated": 1},
+        ])
+        # Second: one populated, one still metadata-only — counts as warm
+        mixed_pair = _mk_result([
+            {"conid": 111, FIELD_BID: "1.0"}, {"conid": 222, "_updated": 1},
+        ])
+        mock_ibkr.live_marketdata_snapshot.side_effect = [
+            meta_pair,  # preflight
+            meta_pair,  # warmup poll 1
+            mixed_pair, # warmup poll 2 → exits
+        ]
+        with patch("shared.ib_client.time.sleep"):
+            rows = client.get_quotes_batch([111, 222])
+        assert any(r.get("bid") == 1.0 for r in rows)
+        assert mock_ibkr.live_marketdata_snapshot.call_count == 3
 
 
 class TestGetQuotesBatch:
@@ -273,6 +459,31 @@ class TestGetVixPrice:
             "conid": 13455, FIELD_LAST: "17.95",
         }])
         assert client.get_vix_price() == 17.95
+
+    def test_falls_back_to_mark_when_no_bid_ask_no_last(self, connected_client):
+        """Fix 2026-05-18 Monday paper smoke: IBKR's snapshot endpoint
+        delivers VIX as ONLY field 7635 (mark) — no bid/ask/last because
+        VIX is a calculated index with no trade prints. Without this
+        fallback, get_vix_price() returned None despite mark being
+        populated, silently breaking HYDRA's VIX-regime decisions and
+        stop monitoring on the IB cutover."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 13455}])
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([{
+            "conid": 13455, FIELD_MARK: "18.69",
+        }])
+        assert client.get_vix_price() == 18.69
+
+    def test_returns_none_when_all_price_fields_missing(self, connected_client):
+        """Defensive: if IBKR returns no usable price field at all,
+        get_vix_price returns None (caller must handle)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 13455}])
+        with patch("shared.ib_client.time.sleep"):
+            mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([{
+                "conid": 13455,  # no price fields
+            }])
+            assert client.get_vix_price() is None
 
 
 class TestGetOptionGreeks:
