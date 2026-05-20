@@ -1571,6 +1571,76 @@ class HydraStrategy(MEICStrategy):
             )
             return None
 
+    def _read_option_quote(self, instrument_id) -> Optional[Dict[str, Any]]:
+        """Fetch a single option's quote from the active broker, returning
+        normalized fields.
+
+        Returns dict or None on fetch failure / no data:
+            {
+              "bid": Optional[float],   # best bid; None if not quoted
+              "ask": Optional[float],   # best ask; None if not quoted
+              "last": Optional[float],  # last traded; None if no trades
+              "mid": Optional[float],   # (bid+ask)/2; None if either side missing
+              "mark": Optional[float],  # broker's mark; None on Saxo (only IBKR provides)
+            }
+
+        Broker dispatch (2026-05-19 transition):
+        - self.broker set: IBClient.get_quote returns a flat dict already
+          in normalized shape — we just slice the price fields we use.
+        - self.broker None: SaxoClient returns nested {"Quote": {"Bid":
+          ...}} with occasional top-level fallback; we extract via the
+          defensive lookup pattern HYDRA's existing code uses.
+
+        Why None instead of 0.0 for missing fields: a 0 bid is
+        semantically different from "no bid available". Callers must
+        null-check before computing spreads or comparing thresholds.
+        """
+        def _f(v):
+            if v is None or v == "":
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            if self.broker is not None:
+                raw = self.broker.get_quote(int(instrument_id))
+                if not raw:
+                    return None
+                return {
+                    "bid": _f(raw.get("bid")),
+                    "ask": _f(raw.get("ask")),
+                    "last": _f(raw.get("last")),
+                    "mid": _f(raw.get("mid")),
+                    "mark": _f(raw.get("mark")),
+                }
+            # Saxo path — nested {"Quote": {...}} with top-level fallback
+            raw = self.client.get_quote(
+                instrument_id, asset_type="StockIndexOption",
+            )
+            if not raw:
+                return None
+            nested = raw.get("Quote") or {}
+            return {
+                "bid": _f(nested.get("Bid") or raw.get("Bid")),
+                "ask": _f(nested.get("Ask") or raw.get("Ask")),
+                "last": _f(
+                    nested.get("LastTraded")
+                    or raw.get("LastTraded")
+                ),
+                # Saxo doesn't deliver mid or mark; downstream computes
+                # mid from bid+ask if it needs one
+                "mid": None,
+                "mark": None,
+            }
+        except Exception as e:
+            logger.warning(
+                f"_read_option_quote({instrument_id}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
     def _refresh_chart_data_for_scouting(self):
         """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
 
@@ -2136,10 +2206,8 @@ class HydraStrategy(MEICStrategy):
                 # expire worthless at 4 PM, so closing them wastes API calls for ~$0 value.
                 if leg_name.startswith("long") and uic:
                     try:
-                        quote = self.client.get_quote(uic, asset_type="StockIndexOption")
-                        bid = 0
-                        if quote:
-                            bid = quote.get("Quote", {}).get("Bid", 0) or quote.get("Bid", 0) or 0
+                        quote = self._read_option_quote(uic)
+                        bid = (quote or {}).get("bid") or 0
                         if bid <= 0:
                             logger.info(
                                 f"  Fix #81: Skipping {leg_name} close for Entry #{entry.entry_number} "
@@ -5787,14 +5855,14 @@ class HydraStrategy(MEICStrategy):
                 self._save_state_to_disk()
                 return False  # Not sold by us, but accounted for
 
-            # Fetch quote for bid price
-            quote = self.client.get_quote(long_uic, asset_type="StockIndexOption")
+            # Fetch quote for bid price (broker-agnostic via _read_option_quote)
+            quote = self._read_option_quote(long_uic)
             if not quote:
                 logger.debug(f"MKT-033: No quote for Entry #{entry.entry_number} long {side} UIC {long_uic}")
                 return False
 
-            bid = quote.get("Quote", {}).get("Bid", 0)
-            if not bid or bid <= 0:
+            bid = quote.get("bid") or 0
+            if bid <= 0:
                 return False
 
             # Guard: invalid open price (recovery/fill lookup failure) — skip to avoid false profit

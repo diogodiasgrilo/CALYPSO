@@ -328,3 +328,155 @@ class TestReadRecentBars:
         assert ib_bars is not None and saxo_bars is not None
         for k in ("open", "high", "low", "close", "volume"):
             assert ib_bars[0][k] == saxo_bars[0][k], f"diverge on {k!r}"
+
+
+class TestReadOptionQuote:
+    """Unit tests for HydraStrategy._read_option_quote method (commit 7b).
+
+    Same two-broker dispatch as _read_recent_bars. IBClient.get_quote
+    returns a flat dict already in normalized shape; Saxo returns
+    {"Quote": {"Bid": ..., "Ask": ..., "LastTraded": ...}} nested with
+    occasional top-level fallback. Helper unifies the shape so call
+    sites do `quote.get("bid")` regardless of broker.
+    """
+
+    def _make_bare_strategy(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        return s
+
+    # ─── IB path ───────────────────────────────────────────────────────
+
+    def test_ib_path_returns_normalized_dict(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quote.return_value = {
+            "bid": 2.50, "ask": 2.55, "last": 2.52,
+            "mid": 2.525, "mark": 2.53,
+        }
+        s = self._make_bare_strategy(broker=fake_broker)
+        quote = s._read_option_quote(883539497)
+        assert quote == {
+            "bid": 2.50, "ask": 2.55, "last": 2.52,
+            "mid": 2.525, "mark": 2.53,
+        }
+        # Confirms IB path: get_quote called with int conid, no asset_type
+        fake_broker.get_quote.assert_called_once_with(883539497)
+
+    def test_ib_path_instrument_id_string_cast_to_int(self):
+        """IBClient.get_quote expects int conid; defensive cast."""
+        fake_broker = MagicMock()
+        fake_broker.get_quote.return_value = {"bid": 1.0}
+        s = self._make_bare_strategy(broker=fake_broker)
+        s._read_option_quote("883539497")
+        fake_broker.get_quote.assert_called_once_with(883539497)
+
+    def test_ib_path_empty_response_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quote.return_value = {}
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_quote(12345) is None
+
+    def test_ib_path_missing_fields_become_none(self):
+        """Off-hours / unentitled responses may have only some fields."""
+        fake_broker = MagicMock()
+        fake_broker.get_quote.return_value = {"bid": 1.0}  # no ask/last/etc
+        s = self._make_bare_strategy(broker=fake_broker)
+        quote = s._read_option_quote(12345)
+        assert quote["bid"] == 1.0
+        assert quote["ask"] is None
+        assert quote["last"] is None
+        assert quote["mid"] is None
+        assert quote["mark"] is None
+
+    def test_ib_path_exception_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quote.side_effect = RuntimeError("conn dropped")
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_quote(12345) is None
+
+    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
+
+    def test_saxo_path_nested_quote_block(self):
+        """Saxo's typical response: {"Quote": {"Bid": ..., "Ask": ...}}."""
+        fake_client = MagicMock()
+        fake_client.get_quote.return_value = {
+            "Quote": {"Bid": 2.50, "Ask": 2.55, "LastTraded": 2.52},
+        }
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        quote = s._read_option_quote(12345678)
+        assert quote["bid"] == 2.50
+        assert quote["ask"] == 2.55
+        assert quote["last"] == 2.52
+        # Saxo never provides mid/mark
+        assert quote["mid"] is None
+        assert quote["mark"] is None
+        # Confirms Saxo path: asset_type="StockIndexOption" passed through
+        call_kwargs = fake_client.get_quote.call_args.kwargs
+        assert call_kwargs["asset_type"] == "StockIndexOption"
+
+    def test_saxo_path_top_level_fallback(self):
+        """Some Saxo responses put Bid at top level instead of nested.
+        Legacy HYDRA's defensive lookup tried both — preserve that."""
+        fake_client = MagicMock()
+        fake_client.get_quote.return_value = {"Bid": 2.50, "Ask": 2.55}
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        quote = s._read_option_quote(12345)
+        assert quote["bid"] == 2.50
+        assert quote["ask"] == 2.55
+
+    def test_saxo_path_null_response_returns_none(self):
+        fake_client = MagicMock()
+        fake_client.get_quote.return_value = None
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_quote(12345) is None
+
+    def test_saxo_path_exception_returns_none(self):
+        fake_client = MagicMock()
+        fake_client.get_quote.side_effect = RuntimeError("saxo failure")
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_quote(12345) is None
+
+    # ─── Defensive parsing ─────────────────────────────────────────────
+
+    def test_string_prices_coerced_to_float(self):
+        """Both brokers occasionally return numeric strings."""
+        fake_broker = MagicMock()
+        fake_broker.get_quote.return_value = {"bid": "2.50", "ask": "2.55"}
+        s = self._make_bare_strategy(broker=fake_broker)
+        quote = s._read_option_quote(12345)
+        assert quote["bid"] == 2.50
+        assert quote["ask"] == 2.55
+
+    def test_bad_values_become_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quote.return_value = {
+            "bid": "not-a-number", "ask": "", "last": None,
+        }
+        s = self._make_bare_strategy(broker=fake_broker)
+        quote = s._read_option_quote(12345)
+        assert quote["bid"] is None
+        assert quote["ask"] is None
+        assert quote["last"] is None
+
+    # ─── Cross-broker convergence ──────────────────────────────────────
+
+    def test_ib_and_saxo_paths_produce_equivalent_bid_ask_last(self):
+        """Critical invariant: bid/ask/last fields match across brokers
+        when underlying instrument data is the same."""
+        ib_broker = MagicMock()
+        ib_broker.get_quote.return_value = {
+            "bid": 2.50, "ask": 2.55, "last": 2.52,
+        }
+        saxo_client = MagicMock()
+        saxo_client.get_quote.return_value = {
+            "Quote": {"Bid": 2.50, "Ask": 2.55, "LastTraded": 2.52},
+        }
+        s_ib = self._make_bare_strategy(broker=ib_broker)
+        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
+
+        ib_quote = s_ib._read_option_quote(12345)
+        saxo_quote = s_saxo._read_option_quote(12345)
+
+        for k in ("bid", "ask", "last"):
+            assert ib_quote[k] == saxo_quote[k], f"diverge on {k!r}"
