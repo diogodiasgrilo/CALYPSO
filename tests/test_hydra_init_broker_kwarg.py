@@ -2074,3 +2074,59 @@ class TestCheckAfterHoursSettlement:
         result = s.check_after_hours_settlement()
         assert result is False
         assert s._settlement_reconciliation_complete is False
+
+
+class TestGetBrokerPnlForEntry:
+    """F4.7 — _get_broker_pnl_for_entry sums unrealized P&L by conid
+    (instrument_id) instead of Saxo PositionId, excluding stopped sides."""
+
+    def _make(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.client = None
+        return s
+
+    def test_sums_non_stopped_sides(self):
+        s = self._make()
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        positions = [
+            {"instrument_id": 101, "unrealized_pnl": -50.0},
+            {"instrument_id": 102, "unrealized_pnl": 10.0},
+            {"instrument_id": 103, "unrealized_pnl": -30.0},
+            {"instrument_id": 104, "unrealized_pnl": 5.0},
+        ]
+        assert s._get_broker_pnl_for_entry(entry, positions=positions) == -65.0
+
+    def test_excludes_stopped_side(self):
+        s = self._make()
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        entry.call_side_stopped = True  # call legs must be excluded
+        positions = [
+            {"instrument_id": 101, "unrealized_pnl": -999.0},  # excluded
+            {"instrument_id": 102, "unrealized_pnl": -999.0},  # excluded
+            {"instrument_id": 103, "unrealized_pnl": -30.0},
+            {"instrument_id": 104, "unrealized_pnl": 5.0},
+        ]
+        assert s._get_broker_pnl_for_entry(entry, positions=positions) == -25.0
+
+    def test_conid_absent_contributes_zero(self):
+        s = self._make()
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        positions = [{"instrument_id": 101, "unrealized_pnl": -50.0}]
+        assert s._get_broker_pnl_for_entry(entry, positions=positions) == -50.0
+
+    def test_none_positions_fetches_fresh(self):
+        s = self._make()
+        entry = _FakeReconcileEntry(sc=101)
+        s._read_open_positions = MagicMock(return_value=[
+            {"instrument_id": 101, "unrealized_pnl": -12.0},
+        ])
+        assert s._get_broker_pnl_for_entry(entry) == -12.0
+        s._read_open_positions.assert_called_once()
+
+    def test_exception_falls_back_to_entry_unrealized(self):
+        s = self._make()
+        entry = _FakeReconcileEntry(sc=101)
+        entry.unrealized_pnl = -77.0
+        s._read_open_positions = MagicMock(side_effect=RuntimeError("boom"))
+        assert s._get_broker_pnl_for_entry(entry) == -77.0

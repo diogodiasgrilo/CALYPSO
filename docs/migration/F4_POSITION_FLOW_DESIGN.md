@@ -199,8 +199,21 @@ further once its internals are mapped in detail.
 - MKT-033 salvage path rewire: F4.3 ✅ committed (7d840ff)
 - POS-003 native conid→quantity reconciliation: F4.4 ✅ committed (bb934f5)
 - FIX #82 overnight check + `strict` param: F4.5 ✅ committed (e5e07a8)
-- POS-004 settlement check: F4.6 ✅ committed
-- P&L sites / recovery / monitoring: F4.7-F4.9 (pending)
+- POS-004 settlement check: F4.6 ✅ committed (012f057)
+- P&L sites: F4.7 ✅ committed
+- recovery / monitoring: F4.8-F4.9 (pending)
+
+### F4.7 — P&L sites
+
+`_get_saxo_pnl_for_entry` → renamed `_get_broker_pnl_for_entry` and
+rewritten to sum `unrealized_pnl` by conid (`instrument_id`) over the
+`_read_open_positions` shape, instead of matching Saxo `PositionId`s
+and reading `PositionView.ProfitLossOnTrade`. Stopped sides are still
+excluded (MKT-025 double-count guard). The snapshot Telegram builder
+fetches positions via `_read_open_positions` and passes the list down.
+Known limitation documented: a genuinely merged conid attributes its
+P&L to each sharing entry (MKT-013/015 deconfliction prevents merges
+in practice). 5 `TestGetBrokerPnlForEntry` tests.
 
 ### F4.6 — POS-004 settlement check
 

@@ -6457,43 +6457,53 @@ class HydraStrategy(MEICStrategy):
                 if entry.long_put_position_id and entry.long_put_uic:
                     self._try_sell_long_leg(entry, "put", open_positions)
 
-    def _get_saxo_pnl_for_entry(self, entry, positions=None):
-        """MKT-025: Exclude stopped sides' positions from Saxo P&L lookup.
+    def _get_broker_pnl_for_entry(self, entry, positions=None):
+        """MKT-025: Exclude stopped sides' positions from broker P&L lookup.
 
-        When MKT-025 stops only the short leg, the long leg remains open on Saxo.
-        Its ProfitLossOnTrade would double-count loss already in total_realized_pnl.
-        Only include positions for non-stopped sides.
+        When MKT-025 stops only the short leg, the long leg remains open.
+        Its unrealized P&L would double-count a loss already booked into
+        total_realized_pnl — so only non-stopped sides are summed.
+
+        F4.7: matches legs by conid (``instrument_id``) against the
+        broker-agnostic :meth:`_read_open_positions` shape, not by Saxo
+        ``PositionId``. Note: if two entries genuinely share a conid (a
+        merge — which MKT-013/015 strike deconfliction works to
+        prevent), the merged position's P&L is attributed to each — a
+        known limitation of any post-merge per-entry attribution.
+
+        Args:
+            entry: the entry to price.
+            positions: pre-fetched :meth:`_read_open_positions` list, or
+                None to fetch fresh.
+
+        Returns:
+            float — summed unrealized P&L of the entry's open legs.
         """
         try:
             if positions is None:
-                positions = self.client.get_positions()
+                positions = self._read_open_positions()
+
+            # conids of legs on non-stopped sides
+            conids = set()
+            if not entry.call_side_stopped:
+                for leg in ("short_call", "long_call"):
+                    uic = getattr(entry, f"{leg}_uic", None)
+                    if uic:
+                        conids.add(uic)
+            if not entry.put_side_stopped:
+                for leg in ("short_put", "long_put"):
+                    uic = getattr(entry, f"{leg}_uic", None)
+                    if uic:
+                        conids.add(uic)
 
             total_pnl = 0.0
-            position_ids = []
-
-            # Only include position IDs for non-stopped sides
-            if not entry.call_side_stopped:
-                if entry.short_call_position_id:
-                    position_ids.append(entry.short_call_position_id)
-                if entry.long_call_position_id:
-                    position_ids.append(entry.long_call_position_id)
-            if not entry.put_side_stopped:
-                if entry.short_put_position_id:
-                    position_ids.append(entry.short_put_position_id)
-                if entry.long_put_position_id:
-                    position_ids.append(entry.long_put_position_id)
-
             for pos in positions:
-                pos_id = str(pos.get("PositionId", ""))
-                if pos_id in position_ids:
-                    pos_view = pos.get("PositionView", {})
-                    pnl = pos_view.get("ProfitLossOnTrade", 0) or 0
-                    total_pnl += pnl
-
+                if pos.get("instrument_id") in conids:
+                    total_pnl += pos.get("unrealized_pnl") or 0
             return total_pnl
 
         except Exception as e:
-            logger.debug(f"Error getting Saxo P&L for Entry #{entry.entry_number}: {e}")
+            logger.debug(f"Error getting broker P&L for Entry #{entry.entry_number}: {e}")
             return entry.unrealized_pnl
 
     def _calculate_stop_levels_hydra(self, entry: HydraIronCondorEntry):
@@ -7450,11 +7460,9 @@ class HydraStrategy(MEICStrategy):
         lines.append("")
         lines.append(f"━━━ Entries {completed}/{total_entries} | Active {active_count} ━━━")
 
-        # Fetch positions once for P&L calculations
-        try:
-            positions = self.client.get_positions()
-        except Exception:
-            positions = []
+        # Fetch positions once for P&L calculations (F4.7: broker-agnostic;
+        # _read_open_positions returns [] on failure — no try/except needed).
+        positions = self._read_open_positions()
 
         # Per-entry details
         for entry in self.daily_state.entries:
@@ -7518,7 +7526,7 @@ class HydraStrategy(MEICStrategy):
             )
 
             # Credit, P&L, cushion line
-            entry_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions)
+            entry_pnl = self._get_broker_pnl_for_entry(entry, positions=positions)
             pnl_sign = "+" if entry_pnl >= 0 else ""
 
             # Cushion percentages (same logic as get_detailed_position_status)
@@ -7572,7 +7580,7 @@ class HydraStrategy(MEICStrategy):
         # P&L summary (use already-fetched positions to avoid second API call)
         realized = self.daily_state.total_realized_pnl
         unrealized = sum(
-            self._get_saxo_pnl_for_entry(e, positions=positions)
+            self._get_broker_pnl_for_entry(e, positions=positions)
             for e in self.daily_state.active_entries
         )
         commission = self.daily_state.total_commission
