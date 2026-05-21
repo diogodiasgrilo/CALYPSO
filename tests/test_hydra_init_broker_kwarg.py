@@ -17,7 +17,7 @@ from __future__ import annotations
 import inspect
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1571,3 +1571,154 @@ class TestPositionIsOpen:
     def test_empty_positions_returns_false(self):
         s = self._make_bare_strategy()
         assert s._position_is_open(100, positions=[]) is False
+
+
+class _FakeSalvageEntry:
+    """Minimal entry stub for MKT-033 long-salvage tests (F4.3)."""
+
+    def __init__(self):
+        self.entry_number = 1
+        self.contracts = 1
+        self.long_call_uic = 111
+        self.long_call_position_id = "pc1"
+        self.long_call_fill_price = 1.0
+        self.call_long_sold = False
+        self.call_long_sold_revenue = 0.0
+        self.long_put_uic = 222
+        self.long_put_position_id = "pp1"
+        self.long_put_fill_price = 1.0
+        self.put_long_sold = False
+        self.put_long_sold_revenue = 0.0
+        self.close_commission = 0.0
+        self.call_side_stopped = True
+        self.put_side_stopped = False
+
+
+class TestTrySellLongLegReconciliation:
+    """F4.3 — _try_sell_long_leg's leg-existence check now uses the
+    quantity-aware _position_is_open instead of a Saxo PositionId set."""
+
+    def _make_strategy(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.client = MagicMock()
+        s.registry = MagicMock()
+        s.dry_run = False
+        s._save_state_to_disk = MagicMock()
+        s.daily_state = MagicMock()
+        s.daily_state.total_realized_pnl = 0.0
+        s.daily_state.total_commission = 0.0
+        s.commission_per_leg = 2.5
+        return s
+
+    def test_dry_run_returns_false(self):
+        s = self._make_strategy()
+        s.dry_run = True
+        assert s._try_sell_long_leg(_FakeSalvageEntry(), "call") is False
+
+    def test_already_sold_returns_false(self):
+        s = self._make_strategy()
+        entry = _FakeSalvageEntry()
+        entry.call_long_sold = True
+        assert s._try_sell_long_leg(entry, "call") is False
+
+    def test_no_long_uic_returns_false(self):
+        s = self._make_strategy()
+        entry = _FakeSalvageEntry()
+        entry.long_call_uic = None
+        assert s._try_sell_long_leg(entry, "call") is False
+
+    def test_position_open_check_uses_position_is_open(self):
+        """When the long leg still exists, the method proceeds past the
+        external-close branch to the quote fetch."""
+        s = self._make_strategy()
+        s._position_is_open = MagicMock(return_value=True)
+        s._read_option_quote = MagicMock(return_value=None)  # bail at quote
+        entry = _FakeSalvageEntry()
+        open_positions = [{"instrument_id": 111, "right": "C", "quantity": 1}]
+        result = s._try_sell_long_leg(entry, "call", open_positions)
+        assert result is False
+        s._position_is_open.assert_called_once_with(
+            111, right="C", positions=open_positions
+        )
+        # proceeded past external-close branch → tried to fetch a quote
+        s._read_option_quote.assert_called_once_with(111)
+
+    def test_put_side_uses_p_right(self):
+        s = self._make_strategy()
+        s._position_is_open = MagicMock(return_value=True)
+        s._read_option_quote = MagicMock(return_value=None)
+        entry = _FakeSalvageEntry()
+        entry.put_side_stopped = True
+        s._try_sell_long_leg(entry, "put", [])
+        s._position_is_open.assert_called_once_with(
+            222, right="P", positions=[]
+        )
+
+    def test_position_gone_marks_externally_closed(self):
+        """When _position_is_open is False and no closing price is
+        found, the long is marked sold with $0 revenue."""
+        s = self._make_strategy()
+        s._position_is_open = MagicMock(return_value=False)
+        s.client.get_closed_position_price.return_value = None
+        entry = _FakeSalvageEntry()
+        result = s._try_sell_long_leg(entry, "call", [])
+        assert result is False
+        assert entry.call_long_sold is True
+        assert entry.call_long_sold_revenue == 0.0
+        s._save_state_to_disk.assert_called_once()
+
+
+class TestCheckLongLegSalvageRewire:
+    """F4.3 — _check_long_salvage now prefetches via the broker-
+    agnostic _read_open_positions and hands the list to each
+    _try_sell_long_leg call."""
+
+    def _make_strategy(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.client = MagicMock()
+        s.dry_run = False
+        s.long_salvage_enabled = True
+        s._try_sell_long_leg = MagicMock(return_value=False)
+        return s
+
+    def _entry(self):
+        e = _FakeSalvageEntry()
+        e.call_side_stopped = True
+        e.put_side_stopped = False
+        return e
+
+    def test_prefetches_positions_and_passes_list_down(self):
+        s = self._make_strategy()
+        positions = [{"instrument_id": 111, "right": "C", "quantity": 1}]
+        s._read_open_positions = MagicMock(return_value=positions)
+        s.daily_state = MagicMock()
+        s.daily_state.entries = [self._entry()]
+        # force market hours so the time-gate doesn't skip
+        market_open = get_us_market_time_stub()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=market_open):
+            s._check_long_salvage()
+        s._read_open_positions.assert_called_once()
+        # _try_sell_long_leg got the prefetched list (call side stopped)
+        s._try_sell_long_leg.assert_called_once_with(
+            s.daily_state.entries[0], "call", positions
+        )
+
+    def test_empty_positions_skips_salvage(self):
+        s = self._make_strategy()
+        s._read_open_positions = MagicMock(return_value=[])
+        s.daily_state = MagicMock()
+        s.daily_state.entries = [self._entry()]
+        market_open = get_us_market_time_stub()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=market_open):
+            s._check_long_salvage()
+        s._try_sell_long_leg.assert_not_called()
+
+
+def get_us_market_time_stub():
+    """A datetime safely inside 9:30-16:00 ET regular session."""
+    from datetime import datetime
+    return datetime(2026, 5, 21, 11, 0, 0)

@@ -130,12 +130,23 @@ estimation — they belong here in F4. Both rewire to
 |---|---|
 | F4.1 | `_read_open_positions` broker-agnostic helper + unit tests (both paths) |
 | F4.2 | `_position_is_open` quantity-aware predicate + unit tests |
-| F4.3 | Rewire the 5 id-set sites (`_try_sell_long_leg`, salvage prefetch, POS-003, FIX #82, POS-004) |
-| F4.4 | Rewire the 2 P&L sites (`_get_saxo_pnl_for_entry`, snapshot Telegram) |
-| F4.5 | Rewire `_recover_positions_from_saxo` (full reconstruction) |
-| F4.6 | Rewire `_batch_update_entry_prices` monitoring quotes ×2 |
+| F4.3 | MKT-033 salvage path — `_try_sell_long_leg` + `_check_long_salvage` (clean helper swap) |
+| F4.4 | POS-003 hourly reconciliation (logic rewrite to quantity-aware) |
+| F4.5 | POS-004 settlement check + FIX #82 overnight-position check |
+| F4.6 | Rewire the 2 P&L sites (`_get_saxo_pnl_for_entry`, snapshot Telegram) |
+| F4.7 | Rewire `_recover_positions_from_saxo` (full reconstruction) |
+| F4.8 | Rewire `_batch_update_entry_prices` monitoring quotes ×2 |
 
-`_recover_positions_from_saxo` (F4.5) is the heaviest — it may split
+**Re-scoped from the original 6-commit plan**: the 5 id-set sites do
+NOT all collapse into one commit. The MKT-033 salvage path (F4.3) is a
+clean I/O swap — `_try_sell_long_leg` just needs the existence check
+swapped to `_position_is_open`. But POS-003 / POS-004 / FIX #82 (F4.4,
+F4.5) reconcile against `entry.all_position_ids` and the Position
+Registry — both `PositionId`-keyed — so they are genuine
+**reconciliation-logic rewrites**, not mechanical swaps, and each
+earns its own commit.
+
+`_recover_positions_from_saxo` (F4.7) is the heaviest — it may split
 further once its internals are mapped in detail.
 
 ## 7. Out of scope for F4
@@ -148,8 +159,19 @@ further once its internals are mapped in detail.
 ## Implementation status
 
 - `_read_open_positions` broker-agnostic helper: F4.1 ✅ committed (573c5f3)
-- `_position_is_open` predicate: F4.2 ✅ committed
-- id-set / P&L / recovery / monitoring rewires: F4.3-F4.6 (pending)
+- `_position_is_open` predicate: F4.2 ✅ committed (2d63619)
+- MKT-033 salvage path rewire: F4.3 ✅ committed
+- POS-003 / POS-004 / FIX #82 / P&L / recovery / monitoring: F4.4-F4.8 (pending)
+
+### F4.3 — MKT-033 salvage path rewired
+
+`_try_sell_long_leg`'s leg-existence check switched from a Saxo
+`PositionId` set-membership test to the quantity-aware
+`_position_is_open(long_uic, right=…)`. Its `valid_pos_ids` set param
+became an `open_positions` list (a `_read_open_positions` result).
+`_check_long_salvage` prefetches once via `_read_open_positions` and
+hands the list down. 8 tests across `TestTrySellLongLegReconciliation`
++ `TestCheckLongLegSalvageRewire`.
 
 ### F4.2 — `_position_is_open` shipped
 

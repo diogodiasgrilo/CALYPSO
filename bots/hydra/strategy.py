@@ -6126,7 +6126,7 @@ class HydraStrategy(MEICStrategy):
     # MKT-033: LONG LEG SALVAGE (SELL PROFITABLE LONGS AFTER SHORT STOP)
     # =========================================================================
 
-    def _try_sell_long_leg(self, entry, side: str, valid_pos_ids: set = None) -> bool:
+    def _try_sell_long_leg(self, entry, side: str, open_positions: list = None) -> bool:
         """
         MKT-033: Sell the surviving long leg if profitable after short stop.
 
@@ -6143,6 +6143,9 @@ class HydraStrategy(MEICStrategy):
         Args:
             entry: HydraIronCondorEntry with stopped side
             side: "call" or "put" — the side whose short was stopped
+            open_positions: optional pre-fetched _read_open_positions()
+                list, so a multi-entry salvage sweep fetches once. None
+                lets _position_is_open fetch fresh.
 
         Returns:
             bool: True if long was sold successfully
@@ -6170,15 +6173,14 @@ class HydraStrategy(MEICStrategy):
             return False
 
         try:
-            # Verify position still exists in Saxo (may have been manually closed)
-            if valid_pos_ids is not None:
-                pos_exists = str(long_pos_id) in valid_pos_ids
-            else:
-                positions = self.client.get_positions()
-                pos_exists = any(
-                    str(p.get("PositionId", "")) == str(long_pos_id)
-                    for p in positions
-                )
+            # Verify the long leg still exists on the broker (may have been
+            # manually closed). F4.2: quantity-aware check via the
+            # broker-agnostic _position_is_open — works for Saxo's per-leg
+            # PositionId model AND IBKR's conid-keyed merged positions.
+            right = "C" if side == "call" else "P"
+            pos_exists = self._position_is_open(
+                long_uic, right=right, positions=open_positions
+            )
             if not pos_exists:
                 logger.info(
                     f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} "
@@ -6422,24 +6424,23 @@ class HydraStrategy(MEICStrategy):
         if now.hour < 9 or (now.hour == 9 and now.minute < 30) or now.hour >= 16:
             return
 
-        # Fetch positions once for all long salvage checks (avoid N API calls)
-        try:
-            all_positions = self.client.get_positions()
-            valid_pos_ids = {str(p.get("PositionId", "")) for p in all_positions}
-        except Exception as e:
-            logger.warning(f"MKT-033: Could not fetch positions: {e}")
+        # Fetch positions once for all long salvage checks (avoid N API calls).
+        # F4.1: broker-agnostic — _read_open_positions returns [] on failure.
+        open_positions = self._read_open_positions()
+        if not open_positions:
+            logger.warning("MKT-033: No open positions returned — skipping salvage sweep")
             return
 
         for entry in self.daily_state.entries:
             # Check call side: short stopped, long still open and unsold
             if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False):
                 if entry.long_call_position_id and entry.long_call_uic:
-                    self._try_sell_long_leg(entry, "call", valid_pos_ids)
+                    self._try_sell_long_leg(entry, "call", open_positions)
 
             # Check put side: short stopped, long still open and unsold
             if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False):
                 if entry.long_put_position_id and entry.long_put_uic:
-                    self._try_sell_long_leg(entry, "put", valid_pos_ids)
+                    self._try_sell_long_leg(entry, "put", open_positions)
 
     def _get_saxo_pnl_for_entry(self, entry, positions=None):
         """MKT-025: Exclude stopped sides' positions from Saxo P&L lookup.
