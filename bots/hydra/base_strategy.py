@@ -3772,8 +3772,16 @@ class MEICStrategy:
             expiry: Expiry date (YYYY-MM-DD)
 
         Returns:
-            Option UIC or None if not found
+            Option instrument id (IBKR conid / Saxo UIC) or None.
         """
+        # F7.6 — broker-agnostic. The IB path resolves the conid through
+        # _read_option_chain (F3.2); the Saxo body below is dormant on
+        # the standalone branch and is deleted in P4.
+        if self.broker is not None:
+            call_map, put_map = self._read_option_chain(expiry, [float(strike)])
+            id_map = call_map if put_call == "Call" else put_map
+            return id_map.get(float(strike)) or id_map.get(strike)
+
         # Query option chain
         chain_response = self.client.get_option_chain(
             option_root_id=self.option_root_uic,
@@ -8609,16 +8617,17 @@ class MEICStrategy:
                 strike += adjustment
                 continue
 
-            # Check quote for liquidity
-            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
-            if not quote or "Quote" not in quote:
+            # Check quote for liquidity (F7.6: broker-agnostic via
+            # _read_option_quote — returns normalized {bid, ask, ...}).
+            quote = self._read_option_quote(uic)
+            if not quote:
                 # No quote - try adjusted strike
                 adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
                 strike += adjustment
                 continue
 
-            bid = quote["Quote"].get("Bid") or 0
-            ask = quote["Quote"].get("Ask") or 0
+            bid = quote.get("bid") or 0
+            ask = quote.get("ask") or 0
 
             # Check if liquid (has bid AND ask)
             if bid > 0 and ask > 0:
@@ -8695,14 +8704,15 @@ class MEICStrategy:
                 long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
                 continue
 
-            # Check quote for liquidity
-            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
-            if not quote or "Quote" not in quote:
+            # Check quote for liquidity (F7.6: broker-agnostic via
+            # _read_option_quote — normalized {bid, ask, ...}).
+            quote = self._read_option_quote(uic)
+            if not quote:
                 long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
                 continue
 
-            bid = quote["Quote"].get("Bid") or 0
-            ask = quote["Quote"].get("Ask") or 0
+            bid = quote.get("bid") or 0
+            ask = quote.get("ask") or 0
 
             # Check if liquid
             if bid > 0 and ask > 0:
