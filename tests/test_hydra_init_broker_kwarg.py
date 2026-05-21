@@ -958,3 +958,129 @@ class TestSnapEntryStrikesToChain:
         candidates = s._read_option_chain.call_args.args[1]
         assert len(candidates) == 14  # only sc + lc → 2 × 7
         assert all(c > 0 for c in candidates)
+
+
+class _FakeTighteningEntry:
+    """Minimal entry stub for MKT-020/022 progressive-tightening tests."""
+
+    def __init__(self, sc, lc, sp, lp, num=1, call_only=False, put_only=False):
+        self.short_call_strike = sc
+        self.long_call_strike = lc
+        self.short_put_strike = sp
+        self.long_put_strike = lp
+        self.entry_number = num
+        self.call_only = call_only
+        self.put_only = put_only
+
+
+class TestProgressiveCallTightening:
+    """F3.5 — _apply_progressive_call_tightening (MKT-020) now sources
+    its chain via _read_option_chain (F3.2) and its quotes via
+    _read_option_quotes_batch (F3.4). Tests focus on the rewired I/O;
+    the tightening arithmetic itself is unchanged from the Saxo era."""
+
+    # Chain covering shorts 6825-6840 + longs 6875-6890 (conid == strike).
+    _CHAIN = {
+        6840.0: 6840, 6835.0: 6835, 6830.0: 6830, 6825.0: 6825,
+        6890.0: 6890, 6885.0: 6885, 6880.0: 6880, 6875.0: 6875,
+    }
+
+    def _make_strategy(self, chain=None, quotes=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = MagicMock()
+        s.current_price = 6800.0
+        s.current_vix = 15.0
+        s.min_call_otm_distance = 25
+        s.min_viable_credit_per_side = 100  # cents — $1.00
+        s.call_credit_floor = 90
+        s.brandon_disable_progressive_tightening = False
+        s._get_vix_adjusted_spread_width = MagicMock(return_value=50)
+        s._read_option_chain = MagicMock(
+            return_value=(self._CHAIN if chain is None else chain, {})
+        )
+        s._read_option_quotes_batch = MagicMock(return_value=quotes or {})
+        s._log_safety_event = MagicMock()
+        s._adjust_for_strike_conflicts = MagicMock()
+        s._adjust_for_same_strike_overlap = MagicMock()
+        s._adjust_for_long_strike_overlap = MagicMock()
+        return s
+
+    # short legs priced rich enough to tighten to 6830 (otm 30), the
+    # first viable strike scanning inward from 6840 (otm 40).
+    _QUOTES_TIGHTEN = {
+        6840: {"bid": 1.15, "ask": 1.25},  # mid 1.20 → credit 70  (non-viable)
+        6835: {"bid": 1.25, "ask": 1.35},  # mid 1.30 → credit 80  (non-viable)
+        6830: {"bid": 1.95, "ask": 2.05},  # mid 2.00 → credit 150 (viable)
+        6825: {"bid": 1.95, "ask": 2.05},
+        6890: {"bid": 0.45, "ask": 0.55},  # long legs — mid 0.50
+        6885: {"bid": 0.45, "ask": 0.55},
+        6880: {"bid": 0.45, "ask": 0.55},
+        6875: {"bid": 0.45, "ask": 0.55},
+    }
+
+    def test_calls_read_option_chain_with_scan_strikes(self):
+        s = self._make_strategy(quotes=self._QUOTES_TIGHTEN)
+        entry = _FakeTighteningEntry(sc=6840, lc=6890, sp=6700, lp=6650)
+        s._apply_progressive_call_tightening(entry)
+        scan_strikes = s._read_option_chain.call_args.args[1]
+        # 4 candidates (otm 40/35/30/25) × (short + long)
+        assert set(scan_strikes) == {
+            6840.0, 6835.0, 6830.0, 6825.0,
+            6890.0, 6885.0, 6880.0, 6875.0,
+        }
+
+    def test_calls_read_option_quotes_batch_with_resolved_ids(self):
+        s = self._make_strategy(quotes=self._QUOTES_TIGHTEN)
+        entry = _FakeTighteningEntry(sc=6840, lc=6890, sp=6700, lp=6650)
+        s._apply_progressive_call_tightening(entry)
+        batch_ids = s._read_option_quotes_batch.call_args.args[0]
+        assert set(batch_ids) == {
+            6840, 6835, 6830, 6825, 6890, 6885, 6880, 6875,
+        }
+
+    def test_tightens_to_first_viable_closer_strike(self):
+        """Reads lowercase bid/ask from the F3.4 quote shape, scans
+        inward, tightens the short call to the first viable strike."""
+        s = self._make_strategy(quotes=self._QUOTES_TIGHTEN)
+        entry = _FakeTighteningEntry(sc=6840, lc=6890, sp=6700, lp=6650)
+        result = s._apply_progressive_call_tightening(entry)
+        assert result is True
+        assert entry.short_call_strike == 6830.0
+        assert entry.long_call_strike == 6880.0
+
+    def test_already_viable_at_widest_returns_false(self):
+        """When the widest (initial) strike already clears the credit
+        gate, no tightening happens."""
+        quotes = dict(self._QUOTES_TIGHTEN)
+        quotes[6840] = {"bid": 1.95, "ask": 2.05}  # mid 2.00 → credit 150
+        s = self._make_strategy(quotes=quotes)
+        entry = _FakeTighteningEntry(sc=6840, lc=6890, sp=6700, lp=6650)
+        result = s._apply_progressive_call_tightening(entry)
+        assert result is False
+        assert entry.short_call_strike == 6840  # unchanged
+
+    def test_empty_chain_returns_false(self):
+        s = self._make_strategy(chain={}, quotes=self._QUOTES_TIGHTEN)
+        entry = _FakeTighteningEntry(sc=6840, lc=6890, sp=6700, lp=6650)
+        assert s._apply_progressive_call_tightening(entry) is False
+        s._read_option_quotes_batch.assert_not_called()
+
+    def test_empty_quotes_returns_false(self):
+        s = self._make_strategy(quotes={})
+        entry = _FakeTighteningEntry(sc=6840, lc=6890, sp=6700, lp=6650)
+        assert s._apply_progressive_call_tightening(entry) is False
+
+    def test_skips_when_call_only(self):
+        s = self._make_strategy(quotes=self._QUOTES_TIGHTEN)
+        entry = _FakeTighteningEntry(sc=6840, lc=6890, sp=6700, lp=6650,
+                                     call_only=True)
+        assert s._apply_progressive_call_tightening(entry) is False
+        s._read_option_chain.assert_not_called()
+
+    def test_skips_when_brandon_disable_flag(self):
+        s = self._make_strategy(quotes=self._QUOTES_TIGHTEN)
+        s.brandon_disable_progressive_tightening = True
+        entry = _FakeTighteningEntry(sc=6840, lc=6890, sp=6700, lp=6650)
+        assert s._apply_progressive_call_tightening(entry) is False
+        s._read_option_chain.assert_not_called()

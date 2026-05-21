@@ -190,8 +190,19 @@ limit with 20% headroom**. The A.8 retry+breaker absorbs any rare 429.
   F3.1 ✅ committed (8092ae9)
 - `HydraStrategy._read_option_chain`: F3.2 ✅ committed (7f78afd)
 - MKT-045 chain-snapping rewrite: F3.3 ✅ committed (0c47544)
-- `HydraStrategy._read_option_quotes_batch`: F3.4 ✅ committed
-- MKT-020/022 rewrites + greeks: F3.5-F3.7 (pending)
+- `HydraStrategy._read_option_quotes_batch`: F3.4 ✅ committed (e90e108)
+- MKT-020 call-tightening rewrite: F3.5 ✅ committed
+- MKT-022 rewrite + greeks: F3.6-F3.7 (pending)
+
+### F3.5 — MKT-020 call-tightening rewired
+
+`_apply_progressive_call_tightening` now sources its call chain via
+`_read_option_chain` (F3.2) and its batch quotes via
+`_read_option_quotes_batch` (F3.4). Candidate set = every short + long
+strike across the inward scan range, resolved in one batch. Quote
+parsing switched from Saxo's nested `{"Quote": {"Bid"}}` to the
+normalized lowercase `bid`/`ask` shape. Tightening arithmetic
+unchanged. 8 `TestProgressiveCallTightening` tests.
 
 ### F3.4 — `_read_option_quotes_batch` shipped
 
