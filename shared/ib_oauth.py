@@ -194,11 +194,15 @@ def load_credentials(
         .validate_paths() + .validate_secrets() if needed.
     """
     keys_dir = _keys_dir(environment)
+    # .strip() the secrets: env vars set by copy-paste routinely carry a
+    # trailing newline/space, which silently corrupts the OAuth signature
+    # (or trips the consumer_key length check). A genuine IBKR
+    # consumer-key / token has no surrounding whitespace.
     return IBKRCredentials(
         environment=environment,
-        consumer_key=consumer_key or os.environ.get("IBIND_OAUTH1A_CONSUMER_KEY", ""),
-        access_token=access_token or os.environ.get("IBIND_OAUTH1A_ACCESS_TOKEN", ""),
-        access_token_secret=access_token_secret or os.environ.get("IBIND_OAUTH1A_ACCESS_TOKEN_SECRET", ""),
+        consumer_key=(consumer_key or os.environ.get("IBIND_OAUTH1A_CONSUMER_KEY", "")).strip(),
+        access_token=(access_token or os.environ.get("IBIND_OAUTH1A_ACCESS_TOKEN", "")).strip(),
+        access_token_secret=(access_token_secret or os.environ.get("IBIND_OAUTH1A_ACCESS_TOKEN_SECRET", "")).strip(),
         private_signature_path=keys_dir / "private_signature.pem",
         private_encryption_path=keys_dir / "private_encryption.pem",
         dh_param_path=keys_dir / "dhparam.pem",
