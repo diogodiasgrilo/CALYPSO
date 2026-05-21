@@ -115,6 +115,41 @@ UIC). On IBKR it correctly handles the merged-position default.
 The POS-003 / POS-004 / FIX-#82 reconciliation logic is rewritten in
 terms of `_position_is_open` instead of `PositionId` set differences.
 
+### 4a. POS-003: native conid→quantity reconciliation (F4.4 decision)
+
+`_position_is_open` answers "is *this* leg open" but has a blind spot:
+if two entries share conid X (a merge) and one entry's short closes,
+the net quantity is still non-zero, so a per-leg check says "open".
+For the hourly reconciliation safety net that blind spot is a real
+correctness gap.
+
+**Decision (approved 2026-05-21)**: do NOT shim IBKR into Saxo's
+per-leg `PositionId` model. Model positions the way IBKR actually
+represents them — `conid → signed net quantity` — and reconcile by
+*aggregate quantity*:
+
+- `_expected_position_quantities()` → `{conid: net_qty}` summed across
+  every active entry's still-tracked legs (uncleared `*_uic`). Shorts
+  negative, longs positive. Two entries on one conid sum naturally, so
+  a merge is **not** a discrepancy.
+- `_actual_position_quantities(positions)` → `{conid: net_qty}` summed
+  from `_read_open_positions()`.
+- A discrepancy is any conid where `expected != actual`. Dict
+  arithmetic — no `PositionId`, no registry.
+- `_handle_position_discrepancies()` cleans up only the *unambiguous*
+  case (a conid mapped to exactly one tracked leg, broker quantity
+  zero → clear the `*_uic`, mark a vanished short side stopped).
+  Ambiguous (multi-leg conid) or partial (non-zero leftover) →
+  alert-only, no auto-mutation.
+- Defensive: an empty `_read_open_positions()` while legs are expected
+  is treated as a fetch failure (skip), never a mass close.
+
+This is strictly more correct than per-leg `_position_is_open`
+(catches the merge blind spot), broker-agnostic (Saxo merges too), and
+needs no Position Registry — which is vestigial in a single-bot world
+and slated for deletion in the dead-code phase. The registry-coupled
+`unexpected` half of the old POS-003 is dropped.
+
 ## 5. `_batch_update_entry_prices` monitoring quotes (deferred from F3)
 
 Two `get_quotes_batch` calls (dry-run path + live path) refresh per-leg
@@ -160,8 +195,20 @@ further once its internals are mapped in detail.
 
 - `_read_open_positions` broker-agnostic helper: F4.1 ✅ committed (573c5f3)
 - `_position_is_open` predicate: F4.2 ✅ committed (2d63619)
-- MKT-033 salvage path rewire: F4.3 ✅ committed
-- POS-003 / POS-004 / FIX #82 / P&L / recovery / monitoring: F4.4-F4.8 (pending)
+- MKT-033 salvage path rewire: F4.3 ✅ committed (7d840ff)
+- POS-003 native conid→quantity reconciliation: F4.4 ✅ committed
+- POS-004 / FIX #82 / P&L / recovery / monitoring: F4.5-F4.8 (pending)
+
+### F4.4 — POS-003 native conid→quantity reconciliation
+
+`_check_hourly_reconciliation` rewritten in the conid→quantity model
+(see §4a). Three new helpers: `_expected_position_quantities`,
+`_actual_position_quantities`, `_handle_position_discrepancies`. The
+old `PositionId` set arithmetic, `_handle_missing_positions` call, and
+registry-coupled `unexpected` check are gone. 21 tests across
+`TestExpectedPositionQuantities` / `TestActualPositionQuantities` /
+`TestHandlePositionDiscrepancies` / `TestHourlyReconciliationBody` —
+including an explicit merged-position-is-not-a-discrepancy test.
 
 ### F4.3 — MKT-033 salvage path rewired
 

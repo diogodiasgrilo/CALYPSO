@@ -1722,3 +1722,205 @@ def get_us_market_time_stub():
     """A datetime safely inside 9:30-16:00 ET regular session."""
     from datetime import datetime
     return datetime(2026, 5, 21, 11, 0, 0)
+
+
+class _FakeReconcileEntry:
+    """Minimal entry stub for F4.4 POS-003 reconciliation tests."""
+
+    def __init__(self, num=1, contracts=1, sc=None, lc=None, sp=None, lp=None):
+        self.entry_number = num
+        self.contracts = contracts
+        self.short_call_uic = sc
+        self.long_call_uic = lc
+        self.short_put_uic = sp
+        self.long_put_uic = lp
+        self.call_side_stopped = False
+        self.put_side_stopped = False
+
+
+class TestExpectedPositionQuantities:
+    """F4.4 — _expected_position_quantities aggregates tracked legs into
+    a {conid: signed_net_qty} map."""
+
+    def _strategy(self, entries):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.daily_state = MagicMock()
+        s.daily_state.active_entries = entries
+        return s
+
+    def test_full_ic_entry_four_conids(self):
+        s = self._strategy([
+            _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104),
+        ])
+        assert s._expected_position_quantities() == {
+            101: -1, 102: 1, 103: -1, 104: 1,
+        }
+
+    def test_cleared_uic_excluded(self):
+        """A leg whose *_uic was cleared (closed) contributes nothing."""
+        s = self._strategy([
+            _FakeReconcileEntry(sc=101, lc=102, sp=None, lp=None),
+        ])
+        assert s._expected_position_quantities() == {101: -1, 102: 1}
+
+    def test_same_conid_two_entries_summed(self):
+        s = self._strategy([
+            _FakeReconcileEntry(num=1, sc=101, lc=102),
+            _FakeReconcileEntry(num=2, sc=101, lc=102),
+        ])
+        assert s._expected_position_quantities() == {101: -2, 102: 2}
+
+    def test_contract_scaling(self):
+        s = self._strategy([
+            _FakeReconcileEntry(contracts=3, sc=101, lc=102),
+        ])
+        assert s._expected_position_quantities() == {101: -3, 102: 3}
+
+    def test_no_entries_empty(self):
+        s = self._strategy([])
+        assert s._expected_position_quantities() == {}
+
+
+class TestActualPositionQuantities:
+    """F4.4 — _actual_position_quantities sums broker rows per conid."""
+
+    def test_sums_per_conid(self):
+        out = HydraStrategy._actual_position_quantities([
+            {"instrument_id": 101, "quantity": -1},
+            {"instrument_id": 102, "quantity": 1},
+        ])
+        assert out == {101: -1, 102: 1}
+
+    def test_multiple_rows_same_conid_summed(self):
+        """Saxo can return several rows for one merged conid."""
+        out = HydraStrategy._actual_position_quantities([
+            {"instrument_id": 101, "quantity": -1},
+            {"instrument_id": 101, "quantity": -1},
+        ])
+        assert out == {101: -2}
+
+    def test_none_instrument_id_skipped(self):
+        out = HydraStrategy._actual_position_quantities([
+            {"instrument_id": None, "quantity": -1},
+            {"instrument_id": 101, "quantity": -1},
+        ])
+        assert out == {101: -1}
+
+    def test_empty_returns_empty(self):
+        assert HydraStrategy._actual_position_quantities([]) == {}
+
+
+class TestHandlePositionDiscrepancies:
+    """F4.4 — _handle_position_discrepancies cleans up unambiguous
+    vanished legs, leaves ambiguous ones for manual review."""
+
+    def _strategy(self, entries):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.daily_state = MagicMock()
+        s.daily_state.active_entries = entries
+        return s
+
+    def test_single_short_leg_gone_cleared_and_stopped(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._strategy([entry])
+        s._handle_position_discrepancies({101: (-1, 0)})
+        assert entry.short_call_uic is None
+        assert entry.call_side_stopped is True
+
+    def test_single_long_leg_gone_cleared_no_stop_flag(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._strategy([entry])
+        s._handle_position_discrepancies({102: (1, 0)})
+        assert entry.long_call_uic is None
+        # a long vanishing does not "stop" a side
+        assert entry.call_side_stopped is False
+
+    def test_multi_leg_conid_left_alone(self):
+        """A conid shared by two entries (merge) is ambiguous — no
+        auto-mutation."""
+        e1 = _FakeReconcileEntry(num=1, sc=101)
+        e2 = _FakeReconcileEntry(num=2, sc=101)
+        s = self._strategy([e1, e2])
+        s._handle_position_discrepancies({101: (-2, -1)})
+        assert e1.short_call_uic == 101
+        assert e2.short_call_uic == 101
+        assert e1.call_side_stopped is False
+        assert e2.call_side_stopped is False
+
+    def test_unexpected_nonzero_quantity_left_alone(self):
+        """conid still shows a non-zero (partial/unexpected) quantity —
+        not a clean vanish, leave for manual review."""
+        entry = _FakeReconcileEntry(sc=101)
+        s = self._strategy([entry])
+        s._handle_position_discrepancies({101: (-1, 3)})
+        assert entry.short_call_uic == 101
+        assert entry.call_side_stopped is False
+
+
+class TestHourlyReconciliationBody:
+    """F4.4 — _check_hourly_reconciliation conid→quantity orchestration."""
+
+    def _strategy(self, entries, open_positions):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.dry_run = False
+        s._last_reconciliation_time = None
+        s.BOT_NAME = "HYDRA"
+        s.contracts_per_entry = 1
+        s.daily_state = MagicMock()
+        s.daily_state.active_entries = entries
+        s.alert_service = MagicMock()
+        s._save_state_to_disk = MagicMock()
+        s._read_open_positions = MagicMock(return_value=open_positions)
+        return s
+
+    def _run(self, s):
+        from datetime import datetime
+        with patch("bots.meic.strategy.is_market_open", return_value=True), \
+             patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 5, 21, 11, 0, 0)):
+            s._check_hourly_reconciliation()
+
+    def test_empty_actual_treated_as_fetch_failure(self):
+        """Broker returns nothing while we expect legs → skip, no alert."""
+        s = self._strategy(
+            [_FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)],
+            open_positions=[],
+        )
+        self._run(s)
+        s.alert_service.send_alert.assert_not_called()
+
+    def test_matched_positions_no_alert(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._strategy([entry], open_positions=[
+            {"instrument_id": 101, "quantity": -1},
+            {"instrument_id": 102, "quantity": 1},
+            {"instrument_id": 103, "quantity": -1},
+            {"instrument_id": 104, "quantity": 1},
+        ])
+        self._run(s)
+        s.alert_service.send_alert.assert_not_called()
+
+    def test_vanished_short_call_alerts_and_cleans_up(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        # broker is missing conid 101 (short call vanished)
+        s = self._strategy([entry], open_positions=[
+            {"instrument_id": 102, "quantity": 1},
+            {"instrument_id": 103, "quantity": -1},
+            {"instrument_id": 104, "quantity": 1},
+        ])
+        self._run(s)
+        s.alert_service.send_alert.assert_called_once()
+        assert entry.short_call_uic is None
+        assert entry.call_side_stopped is True
+
+    def test_merged_position_is_not_a_discrepancy(self):
+        """Two entries short conid 101 → expected -2; broker shows one
+        merged row qty -2 → reconciles cleanly, no alert."""
+        e1 = _FakeReconcileEntry(num=1, sc=101)
+        e2 = _FakeReconcileEntry(num=2, sc=101)
+        s = self._strategy([e1, e2], open_positions=[
+            {"instrument_id": 101, "quantity": -2},
+        ])
+        self._run(s)
+        s.alert_service.send_alert.assert_not_called()

@@ -9687,16 +9687,104 @@ class HydraStrategy(MEICStrategy):
 
         return None
 
+    def _expected_position_quantities(self) -> Dict[Any, int]:
+        """Net contract quantity HYDRA expects open per conid (F4.4).
+
+        Sums every active entry's still-tracked legs — short legs
+        negative, long legs positive. A leg whose ``*_uic`` has been
+        cleared (closed / settled / sold) contributes nothing. Two
+        entries on the same conid sum naturally, so a merged broker
+        position reconciles cleanly instead of looking "missing".
+        See ``docs/migration/F4_POSITION_FLOW_DESIGN.md`` §4.
+
+        Returns:
+            ``{conid: signed_net_quantity}``.
+        """
+        expected: Dict[Any, int] = {}
+        for entry in self.daily_state.active_entries:
+            contracts = getattr(entry, "contracts", 1) or 1
+            for leg in ("short_call", "long_call", "short_put", "long_put"):
+                uic = getattr(entry, f"{leg}_uic", None)
+                if not uic:
+                    continue
+                sign = -1 if leg.startswith("short") else 1
+                expected[uic] = expected.get(uic, 0) + sign * contracts
+        return expected
+
+    @staticmethod
+    def _actual_position_quantities(
+        positions: List[Dict[str, Any]],
+    ) -> Dict[Any, int]:
+        """Net contract quantity the broker actually shows per conid (F4.4).
+
+        Sums the signed quantities from :meth:`_read_open_positions`.
+        IBKR already returns one row per conid; Saxo may return several
+        rows for a merged conid — summing handles both.
+        """
+        actual: Dict[Any, int] = {}
+        for p in positions:
+            conid = p.get("instrument_id")
+            if conid is None:
+                continue
+            actual[conid] = actual.get(conid, 0) + (p.get("quantity") or 0)
+        return actual
+
+    def _handle_position_discrepancies(
+        self, discrepant: Dict[Any, tuple]
+    ) -> None:
+        """Clean up entry state for conids the broker no longer backs (F4.4).
+
+        For a conid mapped to exactly ONE tracked leg whose broker
+        quantity has dropped to zero, the leg has genuinely vanished —
+        clear its ``*_uic`` and, if it was a short, mark that side
+        stopped (it can no longer be monitored). A conid mapped to
+        several tracked legs (a cross-entry merge) or showing a partial
+        / unexpected non-zero quantity is left for manual review —
+        auto-mutating an ambiguous discrepancy is worse than alerting a
+        human.
+        """
+        for conid, (exp_qty, act_qty) in discrepant.items():
+            legs = [
+                (entry, leg)
+                for entry in self.daily_state.active_entries
+                for leg in ("short_call", "long_call", "short_put", "long_put")
+                if getattr(entry, f"{leg}_uic", None) == conid
+            ]
+            if len(legs) != 1:
+                logger.warning(
+                    f"POS-003: conid {conid} maps to {len(legs)} tracked "
+                    f"legs — ambiguous, leaving for manual review"
+                )
+                continue
+            entry, leg = legs[0]
+            if act_qty != 0:
+                logger.warning(
+                    f"POS-003: Entry #{entry.entry_number} {leg} (conid "
+                    f"{conid}) shows unexpected quantity {act_qty} — leaving "
+                    f"for manual review"
+                )
+                continue
+            logger.warning(
+                f"POS-003: Entry #{entry.entry_number} {leg} (conid {conid}) "
+                f"missing on the broker — clearing it and marking it closed"
+            )
+            setattr(entry, f"{leg}_uic", None)
+            if leg == "short_call":
+                entry.call_side_stopped = True
+            elif leg == "short_put":
+                entry.put_side_stopped = True
+
     def _check_hourly_reconciliation(self):
         """
         POS-003: Perform hourly position reconciliation during market hours.
 
         OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
 
-        Compares expected positions vs actual Saxo positions to detect:
-        - Early assignment
-        - Manual intervention
-        - Orphaned positions
+        Rewritten for the IBKR-native conid→quantity model (F4.4): the
+        broker is reconciled by net contract quantity per conid, not by
+        Saxo per-leg PositionId set arithmetic. Detects early
+        assignment, manual intervention, and vanished legs. See
+        ``docs/migration/F4_POSITION_FLOW_DESIGN.md``.
         """
         # Path-B dry-run skip (2026-04-27): DRY_* IDs never exist in Saxo by
         # design — reconciliation would mark every dry leg as missing.
@@ -9720,44 +9808,70 @@ class HydraStrategy(MEICStrategy):
         self._last_reconciliation_time = now
 
         try:
-            # Get actual positions from Saxo
-            actual_positions = self.client.get_positions()
-            actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
+            # POS-003 in the IBKR-native conid→quantity model (F4.4):
+            # compare the net contract quantity HYDRA expects open at
+            # each conid against the broker's actual net quantity. A
+            # same-conid merge across entries is NOT a discrepancy — the
+            # contributions sum to the broker's net.
+            expected = self._expected_position_quantities()
+            if not expected:
+                return  # no tracked legs — nothing to reconcile
 
-            # Get expected positions from our tracking
-            expected_position_ids = set()
-            for entry in self.daily_state.active_entries:
-                expected_position_ids.update(entry.all_position_ids)
+            actual_positions = self._read_open_positions()
+            if not actual_positions:
+                # Empty during market hours while we expect open legs is
+                # a fetch failure, not a mass close — never alert/clean
+                # on it (would false-flag every leg as vanished).
+                logger.warning(
+                    "POS-003: broker returned no positions but HYDRA "
+                    "expects open legs — treating as a fetch failure, "
+                    "skipping this cycle"
+                )
+                return
 
-            # Check for missing positions (closed manually or assigned)
-            missing = expected_position_ids - actual_position_ids
-            if missing:
-                logger.warning(f"POS-003: {len(missing)} expected positions NOT FOUND in Saxo!")
-                logger.warning(f"  Missing IDs: {missing}")
+            actual = self._actual_position_quantities(actual_positions)
+            discrepant = {
+                conid: (exp_qty, actual.get(conid, 0))
+                for conid, exp_qty in expected.items()
+                if actual.get(conid, 0) != exp_qty
+            }
 
-                # This is serious - positions may have been manually closed
+            if discrepant:
+                logger.warning(
+                    f"POS-003: {len(discrepant)} conid(s) mismatch the "
+                    f"broker's quantity"
+                )
+                for conid, (exp_qty, act_qty) in discrepant.items():
+                    logger.warning(
+                        f"  conid {conid}: expected {exp_qty}, "
+                        f"broker shows {act_qty}"
+                    )
                 self.alert_service.send_alert(
                     alert_type=AlertType.CRITICAL_INTERVENTION,
                     title="Position Mismatch Detected",
-                    message=f"{len(missing)} {self.BOT_NAME} positions missing from Saxo. Manual intervention suspected.",
+                    message=(
+                        f"{len(discrepant)} {self.BOT_NAME} conid(s) "
+                        f"mismatch the broker's position quantity. Manual "
+                        f"intervention suspected."
+                    ),
                     priority=AlertPriority.HIGH,
-                    details={"missing_ids": list(missing)},
+                    details={
+                        "discrepancies": {
+                            str(c): {"expected": e, "actual": a}
+                            for c, (e, a) in discrepant.items()
+                        }
+                    },
                     contracts=self.contracts_per_entry,
                 )
-
-                # Clean up registry and daily state
-                self._handle_missing_positions(missing)
-
-            # Check for unexpected positions (assigned, etc.)
-            my_registry_positions = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
-            unexpected = (actual_position_ids & my_registry_positions) - expected_position_ids
-            if unexpected:
-                logger.warning(f"POS-003: {len(unexpected)} unexpected {self.BOT_NAME} positions found")
+                self._handle_position_discrepancies(discrepant)
 
             # Persist state after reconciliation
             self._save_state_to_disk()
 
-            logger.info(f"POS-003: Reconciliation complete - {len(expected_position_ids)} expected, {len(actual_position_ids & my_registry_positions)} found")
+            logger.info(
+                f"POS-003: Reconciliation complete — {len(expected)} "
+                f"conid(s) expected, {len(discrepant)} mismatched"
+            )
 
         except Exception as e:
             logger.error(f"POS-003: Reconciliation failed: {e}")
