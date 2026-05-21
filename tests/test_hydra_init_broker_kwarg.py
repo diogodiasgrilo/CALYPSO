@@ -2488,3 +2488,40 @@ class TestReadClosedPositionPrice:
         fake_broker.get_closed_position_price.return_value = None
         s = self._make(broker=fake_broker)
         assert s._read_closed_position_price(12345, buy_or_sell="Sell") is None
+
+
+class TestVerifySettlementPnl:
+    """F5.5 — _verify_settlement_pnl_from_saxo (Fix #87) skips on the
+    IBKR path: the CP Web API has no real-time closed-positions P&L
+    report. The Saxo legacy path is unchanged."""
+
+    def _make(self, broker=None, dry_run=False):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.dry_run = dry_run
+        s.client = MagicMock()
+        s.daily_state = MagicMock()
+        s.daily_state.total_realized_pnl = 500.0
+        s.daily_state.total_commission = 20.0
+        return s
+
+    def test_ib_path_skips_without_touching_pnl(self):
+        s = self._make(broker=MagicMock(), dry_run=False)
+        s._verify_settlement_pnl_from_saxo()
+        # no Saxo report call, no P&L mutation
+        s.client._make_request.assert_not_called()
+        assert s.daily_state.total_realized_pnl == 500.0
+
+    def test_dry_run_skips(self):
+        s = self._make(broker=None, dry_run=True)
+        s._verify_settlement_pnl_from_saxo()
+        s.client._make_request.assert_not_called()
+        assert s.daily_state.total_realized_pnl == 500.0
+
+    def test_saxo_path_still_queries_report(self):
+        """broker=None + live → the legacy Saxo verification runs."""
+        s = self._make(broker=None, dry_run=False)
+        s.client.client_key = "ck"
+        s.client._make_request.return_value = None  # no report → early return
+        s._verify_settlement_pnl_from_saxo()
+        s.client._make_request.assert_called_once()

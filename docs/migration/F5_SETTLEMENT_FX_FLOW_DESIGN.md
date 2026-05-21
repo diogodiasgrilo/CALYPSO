@@ -1,6 +1,6 @@
 # F5 — Settlement / FX Flow: IBKR Design
 
-**Status**: ⏳ in progress — design approved; F5.1 (probe script) committed; F5.2–F5.5 pending the probe run
+**Status**: ✅ implemented — F5.1–F5.5 committed
 **Date**: 2026-05-21
 **Predecessors**: F3 (option chain) ✅, F4 (position flow) ✅
 
@@ -121,7 +121,19 @@ places its first live order.
 | F5.2 | `IBClient.get_closed_position_price` built on the probe + doc schema + unit tests — ✅ done |
 | F5.3 | `HydraStrategy._read_fx_rate` + `_read_closed_position_price` helpers + tests — ✅ done |
 | F5.4 | Rewire the 3 close-price sites + the FX site — ✅ done |
-| F5.5 | `_verify_settlement_pnl_from_saxo` — IBKR rework (option A/B/C, decided post-probe) |
+| F5.5 | `_verify_settlement_pnl_from_saxo` — IBKR rework — ✅ done (IB path = logged skip; DEF-6) |
+
+**F5 complete.** Every Saxo-coupled settlement/FX call in HYDRA flow
+code now routes through a broker-agnostic helper or is a documented
+broker-aware skip. F5.5 resolved to **option C for the IB path** (a
+logged, honest skip) rather than B — IBKR's CP Web API has no
+real-time per-day closed-positions P&L report, and building option B
+(account-summary realized-P&L delta) needs a balance-field probe + a
+start-of-day baseline hook that is disproportionate for a
+verification-only, dry-run-skipped path. Tracked as DEF-6 with a
+pre-live-cutover trigger. POS-004 (F4.6) still verifies leg-level
+settlement on IBKR; only the settled-P&L-*value* cross-check is
+deferred.
 
 ## 7. Decision record (resolved)
 

@@ -10358,22 +10358,44 @@ class HydraStrategy(MEICStrategy):
 
     def _verify_settlement_pnl_from_saxo(self):
         """
-        Fix #87: Verify total P&L against Saxo's closedpositions report.
+        Fix #87: Verify total P&L against the broker's closed-positions
+        report at settlement.
 
-        The bot calculates P&L from: stop close costs + assumed expired credits.
-        But expired options may settle at non-zero (near-ATM at settlement).
-        Saxo's /cs/v1/reports/closedPositions has actual PnLAccountCurrency
-        for every closed position including settlements.
+        The bot calculates P&L from stop close costs + assumed expired
+        credits. But an expired option can settle at non-zero (ITM /
+        near-ATM at settlement). On Saxo, `/cs/v1/reports/closedPositions`
+        gives actual `PnLAccountCurrency` per closed position, so a
+        mismatch can be detected and corrected.
 
-        If Saxo's total differs from our calculated total, apply a correction
-        to total_realized_pnl. This runs once at settlement time.
+        F5.5 — IBKR path: skipped. IBKR's Client Portal Web API has no
+        real-time per-day closed-positions P&L report; per-position
+        realized P&L lives only in Portfolio Analyst / Flex queries,
+        which are not real-time. The position-LEVEL settlement check
+        (POS-004 / `check_after_hours_settlement`) still verifies every
+        tracked leg actually settled; only the settled-P&L-VALUE
+        cross-check is unavailable. Tracked as DEF-6.
+
+        The ``_from_saxo`` suffix in the name is legacy — kept to avoid
+        churning the single caller / any inherited dispatch.
         """
-        # Path-B dry-run skip (2026-04-27): no real Saxo closures exist for
-        # DRY_* positions, so the closedpositions report has nothing matching
-        # our entry UICs. The "verification" would always conclude our P&L is
-        # off by the entire dry P&L and try to correct it to zero.
+        # Path-B dry-run skip (2026-04-27): no real broker closures exist
+        # for DRY_* positions, so the report has nothing matching our
+        # entry instrument ids. The "verification" would always conclude
+        # our P&L is off by the entire dry P&L and try to correct to zero.
         if self.dry_run:
             return
+
+        # F5.5 — IB path: no CP-Web-API equivalent of Saxo's
+        # closedPositions report (see docstring + DEF-6).
+        if self.broker is not None:
+            logger.info(
+                "Fix #87: settlement P&L value-verification skipped on the "
+                "IBKR path — the CP Web API has no real-time closed-"
+                "positions P&L report (DEF-6). Leg-level settlement is "
+                "still verified by POS-004."
+            )
+            return
+
         try:
             from shared.market_hours import get_us_market_time
             today = get_us_market_time().strftime("%Y-%m-%d")

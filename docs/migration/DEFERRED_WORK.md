@@ -135,6 +135,35 @@ defining what (if anything) replaces `*_position_id`.
 **Trigger**: the IB entry-placement flow rewrite — migrate
 `_process_expired_credits` to the conid→quantity model at the same time.
 
+## DEF-6: settlement P&L value-verification (Fix #87) has no IBKR equivalent
+
+**What**: `_verify_settlement_pnl_from_saxo` (Fix #87) cross-checks the
+bot's computed daily P&L against Saxo's `/cs/v1/reports/closedPositions`
+report (`PnLAccountCurrency` per closed position) and corrects
+`total_realized_pnl` on a mismatch — catching the case where a 0DTE
+option settles ITM at non-zero. F5.5 made it a logged skip on the IB
+path: IBKR's Client Portal Web API has **no real-time per-day
+closed-positions P&L report**. Per-position realized P&L lives only in
+Portfolio Analyst / Flex queries, which are not real-time.
+
+**What still works on IBKR**: POS-004 (`check_after_hours_settlement`,
+F4.6) verifies every tracked leg actually settled (position-level).
+What's lost is the settled-P&L-*value* cross-check.
+
+**Why deferred**: the F5 design (§3) leaned option **B** — an
+account-summary realized-P&L delta (start-of-day vs end-of-day). That
+needs (a) a probe of IBKR's balance/summary fields to find a usable
+realized-P&L field, and (b) a start-of-day baseline-capture hook in
+the entry path. Disproportionate to build now for a verification-only,
+dry-run-skipped nicety — and shipping a guessed verification would not
+be world-class.
+
+**Trigger**: before the live IBKR cutover — probe `get_balance()` /
+account-summary for a "today realized P&L" field; if one exists,
+implement option B (snapshot at first entry, compare at settlement);
+if not, accept POS-004's leg-level check as sufficient and retire
+Fix #87 on IBKR explicitly.
+
 ## How to maintain this doc
 
 - When deferring something, add an entry here with the trigger.
