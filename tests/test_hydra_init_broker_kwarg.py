@@ -1895,7 +1895,12 @@ class TestHourlyReconciliationBody:
 
     def _run(self, s):
         from datetime import datetime
-        with patch("bots.meic.strategy.is_market_open", return_value=True), \
+        # _check_hourly_reconciliation imports is_market_open from
+        # bots.hydra.base_strategy (post-P1 reparent) — patch it there,
+        # not bots.meic.strategy. Patching the wrong module left the
+        # real is_market_open live → the test passed only during real
+        # market hours.
+        with patch("bots.hydra.base_strategy.is_market_open", return_value=True), \
              patch("bots.hydra.strategy.get_us_market_time",
                    return_value=datetime(2026, 5, 21, 11, 0, 0)):
             s._check_hourly_reconciliation()
