@@ -73,6 +73,21 @@ def main() -> int:
         client.connect()
         raw = client._client  # the underlying ibind IbkrClient
 
+        # /iserver/account/trades requires the brokerage session to be
+        # initialized via /iserver/accounts first — without it IBKR
+        # returns 500 "Please query /accounts first". connect() only
+        # primed /portfolio/accounts (a different endpoint), so prime
+        # /iserver/accounts explicitly here. F5.2's IBClient method will
+        # need the same priming.
+        print("\n=== Priming /iserver/accounts (receive_brokerage_accounts) ===")
+        t0 = time.monotonic()
+        try:
+            pr = raw.receive_brokerage_accounts()
+            _summarize("PRIME: receive_brokerage_accounts",
+                       pr, time.monotonic() - t0)
+        except Exception as exc:
+            print(f"PRIME raised: {type(exc).__name__}: {exc}")
+
         # 1. trades() with no args — the default lookback window.
         t0 = time.monotonic()
         try:
