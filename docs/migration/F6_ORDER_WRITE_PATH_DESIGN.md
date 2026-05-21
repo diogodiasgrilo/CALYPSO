@@ -1,6 +1,6 @@
 # F6 — Order Write-Path Flow: IBKR Design
 
-**Status**: 📋 design — awaiting approval before implementation
+**Status**: ✅ implemented — F6.1–F6.6 committed
 **Date**: 2026-05-21
 **Predecessors**: F1–F5 ✅ (read/reconciliation/settlement), P1 ✅
 (reparent), P2-partial ✅.

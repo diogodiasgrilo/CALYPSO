@@ -6403,8 +6403,13 @@ class HydraStrategy(MEICStrategy):
             long_open_price = entry.long_put_fill_price
             already_sold = getattr(entry, 'put_long_sold', False)
 
-        # Guard: already sold, no position, or no UIC
-        if already_sold or not long_pos_id or not long_uic:
+        # Guard: already sold, or no long-leg instrument id.
+        # DEF-3: gate on long_uic only — long_pos_id is None on IBKR
+        # (no per-leg position id); gating on it would dead-code MKT-033
+        # in live IBKR mode. The downstream _close_position_with_retry
+        # keys on uic on the IB path, and registry.unregister(None) is
+        # caught, so a None long_pos_id is harmless here.
+        if already_sold or not long_uic:
             return False
 
         try:
@@ -6668,14 +6673,17 @@ class HydraStrategy(MEICStrategy):
             return
 
         for entry in self.daily_state.entries:
-            # Check call side: short stopped, long still open and unsold
+            # Check call side: short stopped, long still open and unsold.
+            # DEF-3: gate on the long leg's instrument id (*_uic) only —
+            # IBKR has no per-leg position id, so gating on
+            # *_position_id would dead-code MKT-033 in live IBKR mode.
             if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False):
-                if entry.long_call_position_id and entry.long_call_uic:
+                if entry.long_call_uic:
                     self._try_sell_long_leg(entry, "call", open_positions)
 
             # Check put side: short stopped, long still open and unsold
             if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False):
-                if entry.long_put_position_id and entry.long_put_uic:
+                if entry.long_put_uic:
                     self._try_sell_long_leg(entry, "put", open_positions)
 
     def _get_broker_pnl_for_entry(self, entry, positions=None):
@@ -10383,6 +10391,44 @@ class HydraStrategy(MEICStrategy):
         self._vix_regime_applied = True
         logger.info(f"VIX regime applied: VIX={vix:.1f}, regime={regime}/{len(self.vix_regime_breakpoints)}")
 
+    def _side_positions_gone(
+        self, entry, side: str,
+        open_positions: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """True when BOTH legs of ``side`` ("call"/"put") are settled /
+        gone from the broker (DEF-5).
+
+        - Dry-run: True — Path-B synthetic positions settle at EOD.
+        - IBKR (``self.broker`` set): a leg is gone when its ``*_uic`` is
+          already cleared OR the broker shows no open position at that
+          conid (``_position_is_open``, F4.2). This is robust whether or
+          not POS-004 has cleared ``*_uic`` yet, and IBKR has no per-leg
+          position id to key on.
+        - Saxo (legacy): both ``*_position_id`` missing / settled.
+
+        Replaces the old ``_position_is_settled(*_position_id)`` pair,
+        which on IBKR was always True (``*_position_id`` is never set) —
+        it would have marked a still-open leg expired the moment POS-004
+        ran. See ``docs/migration/DEFERRED_WORK.md`` DEF-5.
+        """
+        if self.dry_run:
+            return True
+
+        def _leg_gone(uic) -> bool:
+            if not uic:
+                return True  # already cleared on settlement
+            return not self._position_is_open(uic, positions=open_positions)
+
+        if self.broker is not None:
+            return (
+                _leg_gone(getattr(entry, f"short_{side}_uic", None))
+                and _leg_gone(getattr(entry, f"long_{side}_uic", None))
+            )
+        return (
+            self._position_is_settled(getattr(entry, f"short_{side}_position_id", None))
+            and self._position_is_settled(getattr(entry, f"long_{side}_position_id", None))
+        )
+
     def _process_expired_credits(self) -> float:
         """
         FIX #77: Process entries with un-finalized sides as expired.
@@ -10404,12 +10450,20 @@ class HydraStrategy(MEICStrategy):
         expired_call_credit = 0.0
         expired_put_credit = 0.0
 
+        # DEF-5: one broker snapshot for the whole sweep — _side_positions_gone
+        # consults it via _position_is_open. None in dry-run / Saxo mode
+        # (those paths don't query the broker).
+        open_positions = (
+            self._read_open_positions()
+            if (self.broker is not None and not self.dry_run)
+            else None
+        )
+
         for entry in self.daily_state.entries:
             # Check call side
             call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
-            call_positions_gone = (
-                self._position_is_settled(entry.short_call_position_id)
-                and self._position_is_settled(entry.long_call_position_id)
+            call_positions_gone = self._side_positions_gone(
+                entry, "call", open_positions,
             )
 
             if call_had_positions and call_positions_gone:
@@ -10435,9 +10489,8 @@ class HydraStrategy(MEICStrategy):
 
             # Check put side
             put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
-            put_positions_gone = (
-                self._position_is_settled(entry.short_put_position_id)
-                and self._position_is_settled(entry.long_put_position_id)
+            put_positions_gone = self._side_positions_gone(
+                entry, "put", open_positions,
             )
 
             if put_had_positions and put_positions_gone:

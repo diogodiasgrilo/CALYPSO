@@ -3023,3 +3023,83 @@ class TestF6OrphanCancel:
             )
         assert ok is True
         s._cancel_order.assert_called_with("orphan-c")
+
+
+class TestSidePositionsGone:
+    """F6.6 / DEF-5 — _side_positions_gone detects a settled side via
+    the conid (broker query), not the Saxo-only *_position_id."""
+
+    def _make(self, broker=None, dry_run=False):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = None
+        s.dry_run = dry_run
+        return s
+
+    def test_dry_run_always_gone(self):
+        s = self._make(broker=MagicMock(), dry_run=True)
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        assert s._side_positions_gone(entry, "call") is True
+
+    def test_ib_both_uics_cleared_is_gone(self):
+        s = self._make(broker=MagicMock())
+        entry = _FakeReconcileEntry(sc=None, lc=None, sp=103, lp=104)
+        assert s._side_positions_gone(entry, "call", []) is True
+
+    def test_ib_open_conid_not_gone(self):
+        s = self._make(broker=MagicMock())
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s._position_is_open = MagicMock(return_value=True)  # broker shows it
+        assert s._side_positions_gone(entry, "call", []) is False
+
+    def test_ib_uic_set_but_broker_flat_is_gone(self):
+        s = self._make(broker=MagicMock())
+        entry = _FakeReconcileEntry(sc=101, lc=None, sp=103, lp=104)
+        s._position_is_open = MagicMock(return_value=False)  # broker shows nothing
+        assert s._side_positions_gone(entry, "call", []) is True
+
+    def test_saxo_open_position_ids_not_gone(self):
+        s = self._make(broker=None)
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        entry.short_call_position_id = "saxo-1"  # real id → not settled
+        entry.long_call_position_id = "saxo-2"
+        assert s._side_positions_gone(entry, "call") is False
+
+    def test_saxo_cleared_position_ids_gone(self):
+        s = self._make(broker=None)
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        # *_position_id default None → _position_is_settled → True
+        assert s._side_positions_gone(entry, "call") is True
+
+
+class TestMkt033GateDef3:
+    """F6.6 / DEF-3 — MKT-033 salvage gates on the long leg's *_uic,
+    not the Saxo-only *_position_id (which is None on IBKR)."""
+
+    def test_salvage_fires_with_none_position_id(self):
+        """An entry with long_call_uic set but long_call_position_id None
+        (the IBKR shape) still reaches _try_sell_long_leg."""
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.client = MagicMock()
+        s.dry_run = False
+        s.long_salvage_enabled = True
+        s._try_sell_long_leg = MagicMock(return_value=False)
+        s._read_open_positions = MagicMock(return_value=[
+            {"instrument_id": 111, "right": "C", "quantity": 1},
+        ])
+        entry = _FakeSalvageEntry()
+        entry.call_side_stopped = True
+        entry.put_side_stopped = False
+        entry.long_call_uic = 111
+        entry.long_call_position_id = None  # IBKR: no per-leg id
+        s.daily_state = MagicMock()
+        s.daily_state.entries = [entry]
+        market_open = get_us_market_time_stub()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=market_open):
+            s._check_long_salvage()
+        # DEF-3: gated on long_call_uic, so salvage still fires
+        s._try_sell_long_leg.assert_called_once()
+        _args = s._try_sell_long_leg.call_args.args
+        assert _args[0] is entry and _args[1] == "call"

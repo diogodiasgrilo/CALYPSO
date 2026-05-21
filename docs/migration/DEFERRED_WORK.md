@@ -79,6 +79,11 @@ unit tests + integration test against paper account).
 
 ## DEF-3: MKT-033 long-leg salvage gated on the Saxo-only `*_position_id`
 
+> ✅ **RESOLVED — F6.6.** `_try_sell_long_leg` and `_check_long_salvage`
+> now gate on the long leg's `*_uic` (broker-agnostic instrument id),
+> not `*_position_id`. The downstream `_close_position_with_retry`
+> keys on the conid on the IB path (F6.3). MKT-033 now fires on IBKR.
+
 **What**: `_try_sell_long_leg` guards with `not long_pos_id` and
 `_check_long_salvage` gates each call on `entry.long_call_position_id
 and entry.long_call_uic`. F4.3 correctly swapped the *existence check*
@@ -119,6 +124,14 @@ conid→quantity model (it can reuse `_expected_position_quantities` —
 the F4.4 machinery) or removed.
 
 ## DEF-5: `_process_expired_credits` settlement detection on `*_position_id`
+
+> ✅ **RESOLVED — F6.6.** New `_side_positions_gone(entry, side)`
+> detects a settled side in the conid→quantity model: dry-run → always
+> gone; IBKR → each leg gone when its `*_uic` is cleared OR the broker
+> shows nothing open at that conid (`_position_is_open`); Saxo → the
+> legacy `_position_is_settled(*_position_id)` pair. `_process_expired_credits`
+> now uses it, so on IBKR a still-open leg is no longer marked expired
+> the moment POS-004 runs.
 
 **What**: F4.6 rewrote POS-004 to detect settlement via the
 conid→quantity model (`*_uic` cleared), but it then calls
@@ -174,4 +187,11 @@ Fix #87 on IBKR explicitly.
 
 ## Resolved
 
-(none yet — populated as we work through DEF-N items)
+- **DEF-3** — MKT-033 salvage gate → `*_uic`. Resolved in F6.6
+  (commit on the `hydra-ibkr-standalone` branch).
+- **DEF-5** — `_process_expired_credits` settlement detection →
+  conid-model `_side_positions_gone`. Resolved in F6.6.
+
+DEF-1 / DEF-2 are superseded by the F5 design (F5.2 / F5.5). DEF-4
+(STATE-002) and DEF-6 (settlement P&L value-verification) remain open
+— see their entries above.
