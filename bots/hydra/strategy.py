@@ -1534,9 +1534,17 @@ class HydraStrategy(MEICStrategy):
                 )
                 # Request count + buffer for resilience (closed-market
                 # gaps, partial bars). 60-min floor handles short
-                # lookbacks; "1h" period would be too narrow.
+                # lookbacks.
                 period_minutes = max(count * horizon_min + 10, 60)
-                period_arg = f"{period_minutes}min"
+                # IBKR's CP API caps the "min" period unit at 30; a
+                # larger lookback MUST be expressed in hours (1-8h) or
+                # it is rejected and the IB-path chart fetch silently
+                # fails (→ NEUTRAL trend / 0 ATR for the whole session).
+                if period_minutes <= 30:
+                    period_arg = f"{period_minutes}min"
+                else:
+                    period_hours = min((period_minutes + 59) // 60, 8)
+                    period_arg = f"{period_hours}h"
                 raw_bars = self.broker.get_chart_data(
                     symbol="SPX", bar=bar_arg, period=period_arg,
                     outside_rth=False,
@@ -6793,7 +6801,11 @@ class HydraStrategy(MEICStrategy):
                         self._simulate_hydra_entry_prices(entry)
                     return
                 for uic, targets in uic_map.items():
-                    quote = quotes.get(uic) or {}
+                    quote = quotes.get(uic)
+                    if not quote:
+                        # Per-leg quote miss — keep this leg's prior price
+                        # rather than stamping a bogus 0.0.
+                        continue
                     mid_price = self._quote_mid(quote)
                     bid = quote.get("bid") or None
                     ask = quote.get("ask") or None
@@ -6833,7 +6845,11 @@ class HydraStrategy(MEICStrategy):
 
         # Distribute prices + preserve bid/ask as transient attributes
         for uic, targets in uic_map.items():
-            quote = quotes.get(uic) or {}
+            quote = quotes.get(uic)
+            if not quote:
+                # Per-leg quote miss — keep this leg's prior price rather
+                # than stamping a bogus 0.0 onto a monitored position.
+                continue
             mid_price = self._quote_mid(quote)
             # Raw bid/ask for calibration capture (v6 schema)
             bid = quote.get("bid") or None
@@ -11361,11 +11377,26 @@ class HydraStrategy(MEICStrategy):
                 self._reconcile_recovered_entries_with_broker()
 
             active = len(self.daily_state.active_entries)
+
+            # Restore the state-machine state from the recovered entries.
+            # CRITICAL: without this the bot stays at the __init__ default
+            # (IDLE) after a mid-day restart — the main loop would never
+            # enter _handle_monitoring and a challenged short would run
+            # UNMONITORED. The pre-F4.8 recovery set this; the rewrite
+            # must too.
+            if active > 0:
+                self.state = MEICState.MONITORING
+            elif self._next_entry_index < len(self.entry_times):
+                self.state = MEICState.WAITING_FIRST_ENTRY
+            else:
+                self.state = MEICState.DAILY_COMPLETE
+
             logger.info("=" * 60)
             logger.info(
                 f"RECOVERY COMPLETE: {len(self.daily_state.entries)} entr(ies) "
                 f"restored from the state file, {active} still active"
             )
+            logger.info(f"  State: {self.state.value}")
             logger.info(f"  Realized P&L: ${self.daily_state.total_realized_pnl:.2f}")
             logger.info(f"  Next entry index: {self._next_entry_index}")
             logger.info("=" * 60)

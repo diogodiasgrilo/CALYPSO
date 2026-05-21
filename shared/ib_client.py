@@ -1182,8 +1182,17 @@ class IBClient:
                     if raw_conid:
                         resolved[(strike, right)] = int(raw_conid)
                 return resolved
+            except CircuitBreakerOpen:
+                # Broker-down — must NOT be swallowed as "strike absent".
+                # Propagate so the whole batch aborts and the caller can
+                # tell a degraded broker from a genuinely empty chain.
+                raise
             except Exception as exc:
-                logger.warning(
+                # A genuine per-strike failure (e.g. 400 "strike not
+                # listed at this expiry") — omit that strike, keep the
+                # batch. Debug, not warning: _read_option_chain pre-snaps
+                # candidates to real strikes so this is normal noise.
+                logger.debug(
                     "qualify_option_strikes: strike %s failed (%s: %s) — "
                     "omitted from result", strike,
                     type(exc).__name__, exc,
@@ -1317,8 +1326,13 @@ class IBClient:
         )
         rows = data if isinstance(data, list) else [data]
         # IBKR doesn't guarantee response order matches request order;
-        # parse each row, key by conid for caller's convenience.
-        return [self._parse_quote_row(r, r.get("conid")) for r in rows]
+        # parse each row, key by conid for caller's convenience. Guard
+        # the conid lookup — a non-dict row (e.g. a string error element)
+        # must degrade through _parse_quote_row, not AttributeError here.
+        return [
+            self._parse_quote_row(r, r.get("conid") if isinstance(r, dict) else None)
+            for r in rows
+        ]
 
     def get_vix_price(self) -> Optional[float]:
         """Latest VIX index price. Tries mid (bid/ask average) → last → mark.

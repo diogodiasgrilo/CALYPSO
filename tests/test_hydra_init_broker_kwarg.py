@@ -25,6 +25,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bots.hydra.strategy import HydraStrategy
+from bots.meic.strategy import MEICState
 from shared.ib_client import IBClient
 
 
@@ -241,6 +242,15 @@ class TestReadRecentBars:
         call_kwargs = fake_broker.get_chart_data.call_args.kwargs
         assert call_kwargs["symbol"] == "SPX"
         assert call_kwargs["bar"] == "1min"
+        # period must respect IBKR's CP API unit ranges: the "min" unit
+        # caps at 30, so a >30min lookback must be expressed in hours.
+        period = call_kwargs["period"]
+        if period.endswith("min"):
+            assert int(period[:-3]) <= 30, f"min-unit period {period!r} exceeds IBKR's 30 cap"
+        elif period.endswith("h"):
+            assert 1 <= int(period[:-1]) <= 8, f"hour-unit period {period!r} out of IBKR 1-8h range"
+        else:
+            assert period.endswith("d"), f"unexpected period unit: {period!r}"
 
     def test_ib_path_slices_to_requested_count(self):
         """When broker returns more bars than requested, we take the
@@ -1736,6 +1746,12 @@ class _FakeReconcileEntry:
         self.long_put_uic = lp
         self.call_side_stopped = False
         self.put_side_stopped = False
+        # Legacy per-leg position ids — None by default; POS-004
+        # settlement clears them alongside the *_uic fields.
+        self.short_call_position_id = None
+        self.long_call_position_id = None
+        self.short_put_position_id = None
+        self.long_put_position_id = None
 
 
 class TestExpectedPositionQuantities:
@@ -2037,6 +2053,8 @@ class TestCheckAfterHoursSettlement:
 
     def test_all_conids_settled_marks_complete(self):
         entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        entry.short_call_position_id = "p-sc"  # legacy ids set pre-settle
+        entry.long_put_position_id = "p-lp"
         s = self._make_strategy([entry])
         s.registry.get_positions.return_value = {"id1"}
         # broker shows nothing — every conid expired
@@ -2044,9 +2062,11 @@ class TestCheckAfterHoursSettlement:
         result = s.check_after_hours_settlement()
         assert result is True
         assert s._settlement_reconciliation_complete is True
-        # settled legs' uics cleared
+        # settled legs' uics AND legacy position ids both cleared
         assert entry.short_call_uic is None
         assert entry.long_put_uic is None
+        assert entry.short_call_position_id is None
+        assert entry.long_put_position_id is None
         s._process_expired_credits.assert_called_once()
 
     def test_positions_still_open_returns_false(self):
@@ -2204,7 +2224,43 @@ class TestRecoverPositions:
         s._save_state_to_disk = MagicMock()
         s._reconcile_recovered_entries_with_broker = MagicMock()
         s._log_safety_event = MagicMock()
+        # state-machine fields the recovery must restore (the F4.8
+        # CRITICAL fix). entry_times: only len() is consulted.
+        s.state = MEICState.IDLE
+        s.entry_times = [None, None, None]
         return s
+
+    def test_active_entries_set_state_monitoring(self):
+        """CRITICAL: recovery with live entries must leave state =
+        MONITORING — otherwise the main loop never enters
+        _handle_monitoring and stops go unchecked."""
+        s = self._make()
+        s._load_state_file_history = MagicMock(return_value=True)
+        entry = _FakeReconcileEntry(sc=101)
+        s.daily_state.entries = [entry]
+        s.daily_state.active_entries = [entry]
+        s._recover_positions_from_saxo()
+        assert s.state == MEICState.MONITORING
+
+    def test_no_active_entries_slots_left_sets_waiting(self):
+        s = self._make()
+        s._load_state_file_history = MagicMock(return_value=True)
+        entry = _FakeReconcileEntry(sc=101)
+        s.daily_state.entries = [entry]      # loaded
+        s.daily_state.active_entries = []    # all done
+        s._next_entry_index = 1              # < len(entry_times)=3
+        s._recover_positions_from_saxo()
+        assert s.state == MEICState.WAITING_FIRST_ENTRY
+
+    def test_no_active_entries_all_slots_used_sets_daily_complete(self):
+        s = self._make()
+        s._load_state_file_history = MagicMock(return_value=True)
+        entry = _FakeReconcileEntry(sc=101)
+        s.daily_state.entries = [entry]
+        s.daily_state.active_entries = []
+        s._next_entry_index = 3              # == len(entry_times)
+        s._recover_positions_from_saxo()
+        assert s.state == MEICState.DAILY_COMPLETE
 
     def test_no_state_file_starts_fresh(self):
         s = self._make()
