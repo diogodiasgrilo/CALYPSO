@@ -2964,3 +2964,62 @@ class TestUnwindPartialEntryIb:
         entry.entry_number = 1
         s._unwind_partial_entry([("short_call", "p1", 101)], entry)
         s._close_leg_order.assert_not_called()
+
+
+class TestF6OrphanCancel:
+    """F6.5 — the IBKR retry loops cancel an unfilled order before
+    retrying. place_and_wait_for_fill leaves a timed-out order WORKING;
+    without the cancel it could fill late → orphaned / double leg."""
+
+    def _place_strategy(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s.dry_run = False
+        s.contracts_per_entry = 1
+        s._max_absolute_slippage = 5.0
+        s._validate_order_size = MagicMock(return_value=(True, None))
+        s._monitor_fill_slippage = MagicMock()
+        return s
+
+    def test_place_cancels_unfilled_order_before_retry(self):
+        from shared.saxo_client import BuySell
+        s = self._place_strategy()
+        s._read_option_chain = MagicMock(return_value=({6800.0: 1}, {}))
+        s._read_option_quote = MagicMock(return_value={"bid": 2.5, "ask": 2.6})
+        s._place_leg_order = MagicMock(side_effect=[
+            {"filled": False, "order_id": "orphan-1"},  # attempt 1: working
+            {"filled": True, "fill_price": 2.55, "order_id": "o2"},
+        ])
+        s._cancel_order = MagicMock(return_value=True)
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            out = s._place_option_order_ib(
+                6800.0, "Call", BuySell.SELL, "2026-05-21", "ref",
+            )
+        assert out is not None  # filled on attempt 2
+        s._cancel_order.assert_called_with("orphan-1")
+
+    def _close_strategy(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s.dry_run = False
+        s.contracts_per_entry = 1
+        s.alert_service = MagicMock()
+        s._log_safety_event = MagicMock()
+        return s
+
+    def test_close_cancels_unfilled_order_before_retry(self):
+        s = self._close_strategy()
+        s._close_leg_order = MagicMock(side_effect=[
+            {"filled": False, "order_id": "orphan-c"},  # attempt 1: working
+            {"filled": True, "fill_price": 0.40, "order_id": "c2"},
+        ])
+        s._position_is_open = MagicMock(return_value=True)
+        s._cancel_order = MagicMock(return_value=True)
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            ok, fill, oid = s._close_position_with_retry_ib(
+                None, "short_call", uic=12345,
+            )
+        assert ok is True
+        s._cancel_order.assert_called_with("orphan-c")

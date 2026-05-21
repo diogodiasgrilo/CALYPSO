@@ -3346,7 +3346,18 @@ class MEICStrategy:
                     "fill_price": fill_price,
                 }
 
-            # Not filled — delay before the next retry level.
+            # Not filled. The order may still be WORKING in IBKR's book
+            # (place_and_wait_for_fill leaves a timed-out order live) —
+            # cancel it before the next attempt, otherwise it could fill
+            # late and leave us with a stale / orphaned leg.
+            if result and result.get("order_id"):
+                logger.info(
+                    f"  Cancelling unfilled order {result['order_id']} "
+                    f"before retry"
+                )
+                self._cancel_order(result["order_id"])
+
+            # Delay before the next retry level.
             if attempt < len(PROGRESSIVE_RETRY_SEQUENCE) - 1:
                 logger.warning(
                     f"  ⚠ {leg_description} not filled — retrying "
@@ -4810,6 +4821,11 @@ class MEICStrategy:
                     f"EMERGENCY-001: close {leg_name} attempt {attempt_num} "
                     f"did not fill — retrying..."
                 )
+                # Cancel the unfilled close order before retrying — a
+                # timed-out market order stays WORKING and could fill
+                # late, double-closing the leg.
+                if res and res.get("order_id"):
+                    self._cancel_order(res["order_id"])
                 if attempt_num == 1:
                     self.alert_service.send_alert(
                         alert_type=AlertType.EMERGENCY_CLOSE,
