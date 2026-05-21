@@ -3103,3 +3103,83 @@ class TestMkt033GateDef3:
         s._try_sell_long_leg.assert_called_once()
         _args = s._try_sell_long_leg.call_args.args
         assert _args[0] is entry and _args[1] == "call"
+
+
+class TestReadIndexPrice:
+    """F7.1 — _read_index_price: SPX/VIX spot from the active broker."""
+
+    def _make(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        s.underlying_uic = 4913
+        s.vix_uic = 10606
+        return s
+
+    def test_ib_spx_via_qualify_and_quote(self):
+        b = MagicMock()
+        b.qualify_contract.return_value = 416904
+        b.get_quote.return_value = {"mid": 6800.5, "last": 6800.0}
+        s = self._make(broker=b)
+        assert s._read_index_price("SPX") == 6800.5
+        b.qualify_contract.assert_called_once_with("SPX", sec_type="IND")
+        b.get_quote.assert_called_once_with(416904)
+
+    def test_ib_spx_falls_back_to_last(self):
+        b = MagicMock()
+        b.qualify_contract.return_value = 1
+        b.get_quote.return_value = {"mid": None, "last": 6799.0}
+        s = self._make(broker=b)
+        assert s._read_index_price("SPX") == 6799.0
+
+    def test_ib_vix_uses_get_vix_price(self):
+        b = MagicMock()
+        b.get_vix_price.return_value = 18.4
+        s = self._make(broker=b)
+        assert s._read_index_price("VIX") == 18.4
+        b.get_vix_price.assert_called_once()
+        b.qualify_contract.assert_not_called()
+
+    def test_saxo_vix(self):
+        c = MagicMock()
+        c.get_vix_price.return_value = 17.0
+        s = self._make(broker=None, client=c)
+        assert s._read_index_price("VIX") == 17.0
+        c.get_vix_price.assert_called_once_with(10606)
+
+    def test_exception_returns_none(self):
+        b = MagicMock()
+        b.get_vix_price.side_effect = RuntimeError("blip")
+        s = self._make(broker=b)
+        assert s._read_index_price("VIX") is None
+
+
+class TestReadAccountBalance:
+    """F7.1 — _read_account_balance: ORDER-004 balance, keyed with the
+    field names _check_buying_power reads."""
+
+    def _make(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        return s
+
+    def test_ib_maps_tradable_to_margin_field(self):
+        b = MagicMock()
+        b.get_balance.return_value = {"tradable": 22354.67, "currency": "USD"}
+        s = self._make(broker=b)
+        out = s._read_account_balance()
+        assert out["MarginAvailableForTrading"] == 22354.67
+        assert out["_raw"]["currency"] == "USD"
+
+    def test_saxo_passthrough(self):
+        c = MagicMock()
+        c.get_balance.return_value = {"MarginAvailableForTrading": 5000.0}
+        s = self._make(broker=None, client=c)
+        assert s._read_account_balance() == {"MarginAvailableForTrading": 5000.0}
+
+    def test_exception_returns_empty(self):
+        b = MagicMock()
+        b.get_balance.side_effect = RuntimeError("down")
+        s = self._make(broker=b)
+        assert s._read_account_balance() == {}

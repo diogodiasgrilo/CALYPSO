@@ -2043,6 +2043,71 @@ class HydraStrategy(MEICStrategy):
             )
             return None
 
+    def _read_index_price(self, symbol: str) -> Optional[float]:
+        """Spot price of an index (``"SPX"`` / ``"VIX"``) from the
+        active broker (F7.1). None on failure.
+
+        Broker dispatch:
+        - ``self.broker`` set: VIX → ``IBClient.get_vix_price`` (it has
+          the mark-fallback); other indexes → resolve the index conid
+          (``qualify_contract`` sec_type="IND") then ``get_quote`` and
+          take mid → last → mark.
+        - ``self.broker`` None: ``SaxoClient.get_quote`` on the CFD UIC
+          (SPX = ``underlying_uic``) / ``get_vix_price`` on
+          ``vix_uic``; the legacy Saxo path.
+
+        Used by GAP-C ``_update_market_data`` (sets ``current_price`` /
+        VIX) and GAP-E ``_check_market_halt``.
+        """
+        try:
+            if self.broker is not None:
+                if symbol.upper() == "VIX":
+                    return self.broker.get_vix_price()
+                conid = self.broker.qualify_contract(symbol, sec_type="IND")
+                q = self.broker.get_quote(conid)
+                if not q:
+                    return None
+                return q.get("mid") or q.get("last") or q.get("mark")
+            # Saxo legacy path
+            if symbol.upper() == "VIX":
+                return self.client.get_vix_price(self.vix_uic)
+            quote = self.client.get_quote(
+                self.underlying_uic, asset_type="CfdOnIndex",
+            )
+            return self._extract_price(quote, context=symbol) if quote else None
+        except Exception as e:
+            logger.warning(
+                f"_read_index_price({symbol}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
+    def _read_account_balance(self) -> Dict[str, Any]:
+        """Account balance from the active broker (F7.1), keyed with the
+        field names :meth:`_check_buying_power` (ORDER-004) reads.
+        ``{}`` on failure.
+
+        IB path maps ``IBClient.get_balance()['tradable']`` to
+        ``MarginAvailableForTrading``. IBKR's balance does not surface
+        per-position margin-used / utilization — ``_check_buying_power``
+        ``.get()``s those with a 0 default, so omitting them merely
+        zeroes a diagnostic log line. Saxo path passes the raw balance
+        dict through unchanged.
+        """
+        try:
+            if self.broker is not None:
+                bal = self.broker.get_balance() or {}
+                return {
+                    "MarginAvailableForTrading": bal.get("tradable"),
+                    "_raw": bal,
+                }
+            return self.client.get_balance() or {}
+        except Exception as e:
+            logger.warning(
+                f"_read_account_balance failed ({type(e).__name__}: {e})"
+            )
+            return {}
+
     # ──────────────────────────────────────────────────────────────────
     # F6 — order WRITE-path helpers (IBKR)
     #
