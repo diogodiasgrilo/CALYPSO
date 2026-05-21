@@ -1641,6 +1641,96 @@ class HydraStrategy(MEICStrategy):
             )
             return None
 
+    def _read_option_quotes_batch(
+        self,
+        instrument_ids: List,
+    ) -> Dict[Any, Dict[str, Any]]:
+        """Fetch many option quotes from the active broker in one batch.
+
+        Returns ``{instrument_id: {"bid","ask","last","mid","mark"}}`` —
+        the same per-quote shape as :meth:`_read_option_quote`, keyed by
+        instrument id. Instruments the broker returns nothing for are
+        simply absent from the result. Returns ``{}`` on a batch-level
+        failure (the MKT-020/022 call sites already handle empty maps).
+
+        Broker dispatch (F3 of the IB-only rewrite):
+        - ``self.broker`` set: ``IBClient.get_quotes_batch`` returns a
+          list of flat normalized dicts. The CP API caps a batch at 100
+          conids, so this chunks at 100/call and re-keys by conid.
+        - ``self.broker`` None: ``SaxoClient.get_quotes_batch`` returns
+          ``{uic: {"Quote": {...}}}``; this flattens it to the
+          normalized shape with the same defensive Bid/Ask lookup the
+          legacy MKT-020/022 code used.
+
+        Why None (not 0.0) for missing fields: a 0 bid means something
+        different from "not quoted". Callers null-check before computing
+        spreads — see :meth:`_read_option_quote`.
+
+        Args:
+            instrument_ids: IBKR conids (broker path) or Saxo UICs
+                (legacy path), typically from :meth:`_read_option_chain`.
+
+        Returns:
+            ``{instrument_id: {bid, ask, last, mid, mark}}``.
+        """
+        def _f(v):
+            if v is None or v == "":
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        if not instrument_ids:
+            return {}
+
+        out: Dict[Any, Dict[str, Any]] = {}
+        try:
+            if self.broker is not None:
+                # IB path — chunk at 100 conids (CP API batch cap).
+                conids = [int(i) for i in instrument_ids]
+                for start in range(0, len(conids), 100):
+                    chunk = conids[start:start + 100]
+                    rows = self.broker.get_quotes_batch(chunk) or []
+                    for row in rows:
+                        cid = row.get("conid")
+                        if cid is None:
+                            continue
+                        out[int(cid)] = {
+                            "bid": _f(row.get("bid")),
+                            "ask": _f(row.get("ask")),
+                            "last": _f(row.get("last")),
+                            "mid": _f(row.get("mid")),
+                            "mark": _f(row.get("mark")),
+                        }
+                return out
+
+            # Saxo legacy path — {uic: {"Quote": {...}}}
+            raw = self.client.get_quotes_batch(
+                list(instrument_ids), asset_type="StockIndexOption",
+            ) or {}
+            for uic, entry in raw.items():
+                entry = entry or {}
+                nested = entry.get("Quote") or {}
+                out[uic] = {
+                    "bid": _f(nested.get("Bid") or entry.get("Bid")),
+                    "ask": _f(nested.get("Ask") or entry.get("Ask")),
+                    "last": _f(
+                        nested.get("LastTraded") or entry.get("LastTraded")
+                    ),
+                    # Saxo delivers neither mid nor mark — see
+                    # _read_option_quote for the same note.
+                    "mid": None,
+                    "mark": None,
+                }
+            return out
+        except Exception as e:
+            logger.warning(
+                f"_read_option_quotes_batch failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return {}
+
     def _refresh_chart_data_for_scouting(self):
         """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
 

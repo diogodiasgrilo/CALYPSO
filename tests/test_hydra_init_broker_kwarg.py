@@ -698,6 +698,160 @@ class TestReadOptionChain:
         assert ib_put == saxo_put == {6735.0: 222}
 
 
+class TestReadOptionQuotesBatch:
+    """Unit tests for HydraStrategy._read_option_quotes_batch (F3.4).
+
+    Batch sibling of _read_option_quote. IB path: IBClient.get_quotes_
+    batch returns a list of flat normalized dicts, chunked at 100 conids
+    and re-keyed by conid. Saxo path: nested {uic: {"Quote": {...}}}
+    flattened to the same per-quote shape.
+    """
+
+    def _make_bare_strategy(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        return s
+
+    # ─── IB path ───────────────────────────────────────────────────────
+
+    def test_ib_path_returns_dict_keyed_by_conid(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quotes_batch.return_value = [
+            {"conid": 111, "bid": 2.50, "ask": 2.55, "last": 2.52,
+             "mid": 2.525, "mark": 2.53},
+            {"conid": 222, "bid": 1.10, "ask": 1.15, "last": 1.12,
+             "mid": 1.125, "mark": 1.13},
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        out = s._read_option_quotes_batch([111, 222])
+        assert out[111] == {"bid": 2.50, "ask": 2.55, "last": 2.52,
+                            "mid": 2.525, "mark": 2.53}
+        assert out[222]["bid"] == 1.10
+        fake_broker.get_quotes_batch.assert_called_once_with([111, 222])
+
+    def test_ib_path_chunks_at_100_conids(self):
+        """CP API caps a batch at 100 conids — larger sets are chunked."""
+        fake_broker = MagicMock()
+        fake_broker.get_quotes_batch.side_effect = (
+            lambda chunk: [{"conid": c, "bid": 1.0} for c in chunk]
+        )
+        s = self._make_bare_strategy(broker=fake_broker)
+        out = s._read_option_quotes_batch(list(range(1, 151)))  # 150 conids
+        assert len(out) == 150
+        assert fake_broker.get_quotes_batch.call_count == 2
+        first = fake_broker.get_quotes_batch.call_args_list[0].args[0]
+        second = fake_broker.get_quotes_batch.call_args_list[1].args[0]
+        assert len(first) == 100 and len(second) == 50
+
+    def test_ib_path_string_conids_cast_to_int(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quotes_batch.return_value = [{"conid": 111, "bid": 1.0}]
+        s = self._make_bare_strategy(broker=fake_broker)
+        out = s._read_option_quotes_batch(["111"])
+        fake_broker.get_quotes_batch.assert_called_once_with([111])
+        assert 111 in out
+
+    def test_ib_path_missing_fields_become_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quotes_batch.return_value = [{"conid": 111, "bid": 1.0}]
+        s = self._make_bare_strategy(broker=fake_broker)
+        out = s._read_option_quotes_batch([111])
+        assert out[111]["bid"] == 1.0
+        assert out[111]["ask"] is None
+        assert out[111]["mid"] is None
+        assert out[111]["mark"] is None
+
+    def test_ib_path_rows_without_conid_skipped(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quotes_batch.return_value = [
+            {"conid": 111, "bid": 1.0},
+            {"bid": 2.0},  # no conid — can't key it, skip
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        out = s._read_option_quotes_batch([111, 222])
+        assert list(out.keys()) == [111]
+
+    def test_ib_path_string_prices_coerced(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quotes_batch.return_value = [
+            {"conid": 111, "bid": "2.50", "ask": "2.55"},
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        out = s._read_option_quotes_batch([111])
+        assert out[111]["bid"] == 2.50
+        assert out[111]["ask"] == 2.55
+
+    def test_ib_path_exception_returns_empty(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quotes_batch.side_effect = RuntimeError("conn blip")
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_quotes_batch([111]) == {}
+
+    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
+
+    def test_saxo_path_nested_quote_blocks(self):
+        fake_client = MagicMock()
+        fake_client.get_quotes_batch.return_value = {
+            101: {"Quote": {"Bid": 2.50, "Ask": 2.55, "LastTraded": 2.52}},
+            102: {"Quote": {"Bid": 1.10, "Ask": 1.15, "LastTraded": 1.12}},
+        }
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        out = s._read_option_quotes_batch([101, 102])
+        assert out[101]["bid"] == 2.50
+        assert out[101]["ask"] == 2.55
+        assert out[101]["last"] == 2.52
+        assert out[101]["mid"] is None
+        assert out[101]["mark"] is None
+        call_kwargs = fake_client.get_quotes_batch.call_args.kwargs
+        assert call_kwargs["asset_type"] == "StockIndexOption"
+
+    def test_saxo_path_top_level_fallback(self):
+        """Some Saxo rows put Bid at top level instead of nested."""
+        fake_client = MagicMock()
+        fake_client.get_quotes_batch.return_value = {
+            101: {"Bid": 2.50, "Ask": 2.55},
+        }
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        out = s._read_option_quotes_batch([101])
+        assert out[101]["bid"] == 2.50
+        assert out[101]["ask"] == 2.55
+
+    def test_saxo_path_null_response_returns_empty(self):
+        fake_client = MagicMock()
+        fake_client.get_quotes_batch.return_value = None
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_quotes_batch([101]) == {}
+
+    def test_saxo_path_exception_returns_empty(self):
+        fake_client = MagicMock()
+        fake_client.get_quotes_batch.side_effect = RuntimeError("saxo down")
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_quotes_batch([101]) == {}
+
+    # ─── Shared behavior ───────────────────────────────────────────────
+
+    def test_empty_input_returns_empty(self):
+        s = self._make_bare_strategy(broker=MagicMock())
+        assert s._read_option_quotes_batch([]) == {}
+
+    def test_ib_and_saxo_paths_produce_equivalent_bid_ask_last(self):
+        ib_broker = MagicMock()
+        ib_broker.get_quotes_batch.return_value = [
+            {"conid": 101, "bid": 2.50, "ask": 2.55, "last": 2.52},
+        ]
+        saxo_client = MagicMock()
+        saxo_client.get_quotes_batch.return_value = {
+            101: {"Quote": {"Bid": 2.50, "Ask": 2.55, "LastTraded": 2.52}},
+        }
+        s_ib = self._make_bare_strategy(broker=ib_broker)
+        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
+        ib_out = s_ib._read_option_quotes_batch([101])
+        saxo_out = s_saxo._read_option_quotes_batch([101])
+        for k in ("bid", "ask", "last"):
+            assert ib_out[101][k] == saxo_out[101][k], f"diverge on {k!r}"
+
+
 class _FakeMKT045Entry:
     """Minimal entry stub for _snap_entry_strikes_to_chain tests.
 

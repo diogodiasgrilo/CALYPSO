@@ -138,9 +138,16 @@ F3 is too big for one commit. Proposed sequence, each tested + green:
 | F3.1 | `IBClient.qualify_option_strikes` batch resolver + unit tests (mocked secdef) |
 | F3.2 | `HydraStrategy._read_option_chain` broker-agnostic helper + unit tests (both paths) |
 | F3.3 | Rewrite MKT-045 chain-snapping site to use `_read_option_chain` |
-| F3.4 | Rewrite MKT-020 call-tightening site (chain + batch quotes) |
-| F3.5 | Rewrite MKT-022 put-tightening site (chain + batch quotes) |
-| F3.6 | Rewrite the `get_option_greeks` site + remaining chain-coupled batch quote |
+| F3.4 | `HydraStrategy._read_option_quotes_batch` broker-agnostic batch-quote helper + unit tests |
+| F3.5 | Rewrite MKT-020 call-tightening site (chain + batch quotes) |
+| F3.6 | Rewrite MKT-022 put-tightening site (chain + batch quotes) |
+| F3.7 | Rewrite the `get_option_greeks` site + remaining chain-coupled batch quote |
+
+`_read_option_quotes_batch` was promoted to its own commit (F3.4) —
+like `_read_option_chain` (F3.2) it's shared infrastructure consumed
+by both MKT-020 and MKT-022, so it earns an isolated, separately-
+tested commit rather than being folded into the first call-site
+rewrite.
 
 ## 6. Multi-expiry strikes — confirmed, handled
 
@@ -181,8 +188,21 @@ limit with 20% headroom**. The A.8 retry+breaker absorbs any rare 429.
 
 - `_ib_call` `_serialize` kwarg + `IBClient.qualify_option_strikes`:
   F3.1 ✅ committed (8092ae9)
-- `HydraStrategy._read_option_chain`: F3.2 ✅ committed
-- MKT-045/020/022 rewrites + greeks: F3.3-F3.6 (pending)
+- `HydraStrategy._read_option_chain`: F3.2 ✅ committed (7f78afd)
+- MKT-045 chain-snapping rewrite: F3.3 ✅ committed (0c47544)
+- `HydraStrategy._read_option_quotes_batch`: F3.4 ✅ committed
+- MKT-020/022 rewrites + greeks: F3.5-F3.7 (pending)
+
+### F3.4 — `_read_option_quotes_batch` shipped
+
+Broker-agnostic batch-quote helper on `HydraStrategy`. Returns
+`{instrument_id: {bid, ask, last, mid, mark}}` — the same per-quote
+shape as `_read_option_quote`. IB path: `IBClient.get_quotes_batch`
+list result, chunked at 100 conids (CP API cap), re-keyed by conid.
+Saxo path: nested `{uic: {"Quote": {...}}}` flattened with the legacy
+defensive Bid/Ask lookup. `{}` on batch failure. 13 unit tests cover
+both paths + chunking, missing-conid skip, coercion, failure
+isolation, cross-broker convergence.
 
 ### F3.2 — `_read_option_chain` shipped
 
