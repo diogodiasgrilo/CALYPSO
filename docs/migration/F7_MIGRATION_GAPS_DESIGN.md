@@ -1,6 +1,6 @@
 # F7 — Migration Gaps: the methods F1–F6 missed
 
-**Status**: 📋 design — must complete before P4 (Saxo purge)
+**Status**: ✅ implemented — F7.1–F7.7 committed. P4 unblocked.
 **Date**: 2026-05-21
 **Source**: the P4 Saxo-reference audit (2026-05-21) found these.
 
@@ -72,6 +72,26 @@ thin helper:
 
 Each broker-branches `if self.broker is not None:` like F1–F6; the
 Saxo branch is then deleted by P4. After F7, P4 can purge cleanly.
+
+### F7.7 resolution (2026-05-21)
+
+- **GAP-G** `_verify_entry_fill_prices` — broker-branched: the IB path
+  reads `_read_open_positions`, keys `price_lookup` by `str(conid)` and
+  the legs by `*_uic`, and uses `avg_cost` as the actual fill price
+  (the IBKR equivalent of Saxo `PositionBase.OpenPrice`).
+- **GAP-A** `_spawn_async_early_close_fill_correction` — gated
+  `if self.broker is not None: return`. IBKR closes route through
+  `place_and_wait_for_fill`, which polls to a terminal state and
+  returns the actual `avg_fill_price` synchronously — there is no
+  Saxo activity-stream sync lag, so no deferred correction is needed.
+  (MKT-018 early close is also disabled.)
+- `_get_total_saxo_pnl` — broker-branched: the IB path sums
+  `_get_broker_pnl_for_entry` (conid-keyed, MKT-025 aware) per active
+  entry off a single `_read_open_positions` fetch. Both callers are
+  inside MKT-018 (disabled) — a correctness-preservation rewire so
+  P4's `self.client` removal cannot break it.
+
+All Saxo branches above stay inline (dormant) and are deleted by P4.
 
 ## 5. Why F1–F6 missed these
 

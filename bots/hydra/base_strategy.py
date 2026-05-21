@@ -3927,27 +3927,48 @@ class MEICStrategy:
             entry: IronCondorEntry with all legs filled and position IDs set
         """
         try:
-            positions = self.client.get_positions(include_greeks=False)
-            if not positions:
-                logger.warning("FIX-70: Could not fetch positions for entry price verification")
-                return
+            # GAP-G (F7.7): broker-agnostic. IB keys the price lookup by
+            # conid (str) and the legs by *_uic — IBKR has no per-leg
+            # position id, and `avg_cost` is its actual execution price
+            # (the equivalent of Saxo's PositionBase.OpenPrice). The Saxo
+            # body stays inline (dormant, deleted in P4).
+            if self.broker is not None:
+                positions = self._read_open_positions()
+                if not positions:
+                    logger.warning("FIX-70: Could not fetch positions for entry price verification")
+                    return
+                price_lookup = {
+                    str(p["instrument_id"]): p["avg_cost"]
+                    for p in positions
+                    if p.get("instrument_id") is not None
+                    and (p.get("avg_cost") or 0) > 0
+                }
+                legs = [
+                    ("short_call_uic", "short_call"),
+                    ("long_call_uic", "long_call"),
+                    ("short_put_uic", "short_put"),
+                    ("long_put_uic", "long_put"),
+                ]
+            else:
+                positions = self.client.get_positions(include_greeks=False)
+                if not positions:
+                    logger.warning("FIX-70: Could not fetch positions for entry price verification")
+                    return
 
-            # Build lookup: position_id -> OpenPrice
-            price_lookup = {}
-            for pos in positions:
-                pos_id = str(pos.get("PositionId", ""))
-                open_price = pos.get("PositionBase", {}).get("OpenPrice", 0)
-                if pos_id and open_price > 0:
-                    price_lookup[pos_id] = open_price
+                # Build lookup: position_id -> OpenPrice
+                price_lookup = {}
+                for pos in positions:
+                    pos_id = str(pos.get("PositionId", ""))
+                    open_price = pos.get("PositionBase", {}).get("OpenPrice", 0)
+                    if pos_id and open_price > 0:
+                        price_lookup[pos_id] = open_price
 
-            # Define legs to verify: (position_id_attr, price_role, leg_name)
-            # price_role: "short_call", "long_call", "short_put", "long_put"
-            legs = [
-                ("short_call_position_id", "short_call"),
-                ("long_call_position_id", "long_call"),
-                ("short_put_position_id", "short_put"),
-                ("long_put_position_id", "long_put"),
-            ]
+                legs = [
+                    ("short_call_position_id", "short_call"),
+                    ("long_call_position_id", "long_call"),
+                    ("short_put_position_id", "short_put"),
+                    ("long_put_position_id", "long_put"),
+                ]
 
             corrections = {}  # leg_name -> actual_price from PositionBase.OpenPrice
 
@@ -7413,14 +7434,28 @@ class MEICStrategy:
 
     def _get_total_saxo_pnl(self) -> float:
         """
-        Get total unrealized P&L for all active entries from Saxo.
+        Get total broker unrealized P&L for all active entries.
 
-        FIX (2026-02-03): Use Saxo's authoritative P&L instead of mid-price calc.
+        FIX (2026-02-03): Use the broker's authoritative P&L instead of a
+        mid-price calc.
+
+        GAP-A (F7.7): broker-agnostic. The IB path sums
+        :meth:`_get_broker_pnl_for_entry` (conid-keyed, MKT-025 aware) per
+        entry off a single :meth:`_read_open_positions` fetch. The Saxo
+        body stays inline (dormant, deleted in P4). Both callers in HYDRA
+        (early-close P&L) are inside MKT-018, which is disabled — this is
+        a correctness-preservation rewire, not a hot path.
 
         Returns:
             Total unrealized P&L in dollars
         """
         try:
+            if self.broker is not None:
+                positions = self._read_open_positions()
+                return sum(
+                    self._get_broker_pnl_for_entry(entry, positions=positions)
+                    for entry in self.daily_state.active_entries
+                )
             # Fetch positions once and reuse for all entries
             positions = self.client.get_positions()
             total = 0.0
@@ -7428,7 +7463,7 @@ class MEICStrategy:
                 total += self._get_saxo_pnl_for_entry(entry, positions=positions)
             return total
         except Exception as e:
-            logger.debug(f"Error getting total Saxo P&L: {e}")
+            logger.debug(f"Error getting total broker P&L: {e}")
             # Fall back to mid-price calculation
             return sum(e.unrealized_pnl for e in self.daily_state.active_entries)
 

@@ -2899,7 +2899,17 @@ class HydraStrategy(MEICStrategy):
 
         Same pattern as FIX #75's _spawn_async_fill_correction but handles multiple
         entries/sides at once. Non-blocking — main loop continues immediately.
+
+        GAP-A (F7.7): on the IBKR path this is a no-op. IBKR closes route
+        through ``place_and_wait_for_fill``, which polls to a terminal
+        state and returns the actual ``avg_fill_price`` synchronously —
+        there is no Saxo-style activity-stream sync lag, so no deferred
+        correction is ever needed. (MKT-018 early close is also disabled.)
+        The Saxo body below stays inline (dormant, deleted in P4).
         """
+        if self.broker is not None:
+            return
+
         def worker():
             try:
                 logger.info(

@@ -3270,3 +3270,161 @@ class TestEstimateEntryCreditIb:
         s._read_option_chain = MagicMock(side_effect=RuntimeError("boom"))
         entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650)
         assert s._estimate_entry_credit_ib(entry) == (0.0, 0.0)
+
+
+# =============================================================================
+# F7.7 — GAP-G / GAP-A: _verify_entry_fill_prices, _get_total_saxo_pnl,
+# _spawn_async_early_close_fill_correction broker-agnostic.
+# =============================================================================
+
+
+class _FakeFillVerifyEntry:
+    """Minimal entry stub for _verify_entry_fill_prices (FIX-70 / GAP-G)."""
+
+    def __init__(self, *, sc_uic, lc_uic, sp_uic, lp_uic,
+                 call_credit, put_credit, contracts=1, num=1):
+        self.short_call_uic = sc_uic
+        self.long_call_uic = lc_uic
+        self.short_put_uic = sp_uic
+        self.long_put_uic = lp_uic
+        # Saxo-path attrs (unused on the IB branch, present for parity)
+        self.short_call_position_id = None
+        self.long_call_position_id = None
+        self.short_put_position_id = None
+        self.long_put_position_id = None
+        self.call_spread_credit = call_credit
+        self.put_spread_credit = put_credit
+        self.contracts = contracts
+        self.entry_number = num
+        self.short_call_fill_price = None
+        self.long_call_fill_price = None
+        self.short_put_fill_price = None
+        self.long_put_fill_price = None
+
+
+class TestVerifyEntryFillPricesIb:
+    """F7.7 / GAP-G — _verify_entry_fill_prices on the IBKR path keys the
+    price lookup by conid (str) and reads avg_cost as the actual fill."""
+
+    def _make(self, positions):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s._read_open_positions = MagicMock(return_value=positions)
+        return s
+
+    def test_price_improvement_updates_both_credits(self):
+        # avg_cost differs from the recorded credit → correction applied.
+        positions = [
+            {"instrument_id": 11, "avg_cost": 2.10},  # short call
+            {"instrument_id": 12, "avg_cost": 0.40},  # long call
+            {"instrument_id": 13, "avg_cost": 2.30},  # short put
+            {"instrument_id": 14, "avg_cost": 0.50},  # long put
+        ]
+        s = self._make(positions)
+        entry = _FakeFillVerifyEntry(
+            sc_uic=11, lc_uic=12, sp_uic=13, lp_uic=14,
+            call_credit=150.0, put_credit=160.0)
+        s._verify_entry_fill_prices(entry)
+        assert entry.call_spread_credit == (2.10 - 0.40) * 100  # 170
+        assert entry.put_spread_credit == (2.30 - 0.50) * 100   # 180
+        assert entry.short_call_fill_price == 2.10
+        assert entry.long_put_fill_price == 0.50
+
+    def test_contracts_scales_credit(self):
+        positions = [
+            {"instrument_id": 11, "avg_cost": 2.00},
+            {"instrument_id": 12, "avg_cost": 0.50},
+            {"instrument_id": 13, "avg_cost": 2.00},
+            {"instrument_id": 14, "avg_cost": 0.50},
+        ]
+        s = self._make(positions)
+        entry = _FakeFillVerifyEntry(
+            sc_uic=11, lc_uic=12, sp_uic=13, lp_uic=14,
+            call_credit=0.0, put_credit=0.0, contracts=10)
+        s._verify_entry_fill_prices(entry)
+        assert entry.call_spread_credit == (2.00 - 0.50) * 100 * 10  # 1500
+
+    def test_no_positions_leaves_credits_untouched(self):
+        s = self._make([])
+        entry = _FakeFillVerifyEntry(
+            sc_uic=11, lc_uic=12, sp_uic=13, lp_uic=14,
+            call_credit=150.0, put_credit=160.0)
+        s._verify_entry_fill_prices(entry)
+        assert entry.call_spread_credit == 150.0
+        assert entry.put_spread_credit == 160.0
+
+    def test_missing_conid_skips_that_leg(self):
+        # only call legs resolve; put legs have no matching position
+        positions = [
+            {"instrument_id": 11, "avg_cost": 2.10},
+            {"instrument_id": 12, "avg_cost": 0.40},
+        ]
+        s = self._make(positions)
+        entry = _FakeFillVerifyEntry(
+            sc_uic=11, lc_uic=12, sp_uic=13, lp_uic=14,
+            call_credit=150.0, put_credit=160.0)
+        s._verify_entry_fill_prices(entry)
+        assert entry.call_spread_credit == pytest.approx(170.0)  # corrected
+        assert entry.put_spread_credit == 160.0    # untouched
+
+    def test_exception_is_swallowed(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s._read_open_positions = MagicMock(side_effect=RuntimeError("boom"))
+        entry = _FakeFillVerifyEntry(
+            sc_uic=11, lc_uic=12, sp_uic=13, lp_uic=14,
+            call_credit=150.0, put_credit=160.0)
+        s._verify_entry_fill_prices(entry)  # must not raise
+        assert entry.call_spread_credit == 150.0
+
+
+class TestGetTotalBrokerPnl:
+    """F7.7 / GAP-A — _get_total_saxo_pnl sums _get_broker_pnl_for_entry
+    on the IBKR path off a single _read_open_positions fetch."""
+
+    def _make(self, entries):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s.daily_state = MagicMock()
+        s.daily_state.active_entries = entries
+        return s
+
+    def test_sums_per_entry_broker_pnl(self):
+        e1, e2 = object(), object()
+        s = self._make([e1, e2])
+        s._read_open_positions = MagicMock(return_value=[{"x": 1}])
+        s._get_broker_pnl_for_entry = MagicMock(side_effect=[25.0, -10.0])
+        assert s._get_total_saxo_pnl() == 15.0
+        # positions fetched once, reused for both entries
+        s._read_open_positions.assert_called_once()
+
+    def test_empty_entries_returns_zero(self):
+        s = self._make([])
+        s._read_open_positions = MagicMock(return_value=[])
+        assert s._get_total_saxo_pnl() == 0.0
+
+    def test_exception_falls_back_to_mid_price(self):
+        e1 = MagicMock()
+        e1.unrealized_pnl = 42.0
+        s = self._make([e1])
+        s._read_open_positions = MagicMock(side_effect=RuntimeError("down"))
+        assert s._get_total_saxo_pnl() == 42.0
+
+
+class TestSpawnAsyncEarlyCloseFillCorrectionIb:
+    """F7.7 / GAP-A — on the IBKR path the early-close async fill
+    correction is a no-op (place_and_wait_for_fill returns the actual
+    fill synchronously, so there is no Saxo-style sync lag to correct)."""
+
+    def test_ib_path_is_noop(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s._pending_fill_corrections = []
+        s._spawn_async_early_close_fill_correction(
+            [("entry", "call", "short_call", "oid", 11)])
+        # no thread spawned, nothing queued
+        assert s._pending_fill_corrections == []
