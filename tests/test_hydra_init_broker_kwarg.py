@@ -696,3 +696,111 @@ class TestReadOptionChain:
         saxo_call, saxo_put = s_saxo._read_option_chain("2026-05-21", [6735.0])
         assert ib_call == saxo_call == {6735.0: 111}
         assert ib_put == saxo_put == {6735.0: 222}
+
+
+class _FakeMKT045Entry:
+    """Minimal entry stub for _snap_entry_strikes_to_chain tests.
+
+    A plain object (not MagicMock) so ``getattr(entry, '_call_uic_map',
+    None)`` returns None when the attribute is absent — a MagicMock
+    would return a truthy mock and defeat the cache short-circuit."""
+
+    def __init__(self, sc, lc, sp, lp, num=1):
+        self.short_call_strike = sc
+        self.long_call_strike = lc
+        self.short_put_strike = sp
+        self.long_put_strike = lp
+        self.entry_number = num
+
+
+class TestSnapEntryStrikesToChain:
+    """F3.3 — _snap_entry_strikes_to_chain (MKT-045) now sources its
+    chain through _read_option_chain instead of a direct Saxo
+    get_option_chain call. Tests focus on the rewired chain-fetch
+    block; strike-snapping arithmetic itself is covered by the
+    _snap_to_chain_strike / _snap_long_for_spread staticmethod tests."""
+
+    def _make_strategy(self, chain_return):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()  # presence irrelevant — _read_option_chain mocked
+        s.client = MagicMock()
+        s._read_option_chain = MagicMock(return_value=chain_return)
+        s._log_safety_event = MagicMock()
+        s._adjust_for_strike_conflicts = MagicMock()
+        s._adjust_for_same_strike_overlap = MagicMock()
+        s._adjust_for_long_strike_overlap = MagicMock()
+        return s
+
+    def test_candidates_are_four_strikes_plus_neighborhood(self):
+        """Candidate set = the entry's 4 strikes, each expanded to a
+        ±15pt neighborhood in 5pt steps (7 points each)."""
+        s = self._make_strategy(({6800.0: 1}, {6700.0: 2}))
+        entry = _FakeMKT045Entry(sc=6800, lc=6850, sp=6700, lp=6650)
+        s._snap_entry_strikes_to_chain(entry)
+        candidates = s._read_option_chain.call_args.args[1]
+        assert len(candidates) == 28  # 4 strikes × 7 points
+        for base in (6800, 6850, 6700, 6650):
+            for d in (-15, -10, -5, 0, 5, 10, 15):
+                assert float(base + d) in candidates
+
+    def test_expiry_passed_as_date_string(self):
+        s = self._make_strategy(({6800.0: 1}, {6700.0: 2}))
+        entry = _FakeMKT045Entry(6800, 6850, 6700, 6650)
+        s._snap_entry_strikes_to_chain(entry)
+        expiry_arg = s._read_option_chain.call_args.args[0]
+        assert isinstance(expiry_arg, str)
+        assert expiry_arg.count("-") == 2  # "YYYY-MM-DD"
+
+    def test_empty_chain_returns_false(self):
+        s = self._make_strategy(({}, {}))
+        entry = _FakeMKT045Entry(6800, 6850, 6700, 6650)
+        assert s._snap_entry_strikes_to_chain(entry) is False
+
+    def test_precomputed_maps_skip_chain_fetch(self):
+        """If the entry already carries its UIC maps (set by MKT-020/022
+        earlier in the pipeline), MKT-045 reuses them — no chain call."""
+        s = self._make_strategy(({}, {}))
+        entry = _FakeMKT045Entry(6800, 6850, 6700, 6650)
+        entry._call_uic_map = {6800.0: 1, 6850.0: 2}
+        entry._put_uic_map = {6700.0: 3, 6650.0: 4}
+        s._snap_entry_strikes_to_chain(entry)
+        s._read_option_chain.assert_not_called()
+
+    def test_chain_maps_stored_on_entry(self):
+        call_map = {6800.0: 11, 6850.0: 12}
+        put_map = {6700.0: 13, 6650.0: 14}
+        s = self._make_strategy((call_map, put_map))
+        entry = _FakeMKT045Entry(6800, 6850, 6700, 6650)
+        s._snap_entry_strikes_to_chain(entry)
+        assert entry._call_uic_map == call_map
+        assert entry._put_uic_map == put_map
+
+    def test_snaps_short_strike_to_nearest_chain_strike(self):
+        """A short strike off the chain snaps to the nearest real one
+        and the method reports a change + logs the safety event."""
+        s = self._make_strategy(
+            ({6800.0: 1, 6850.0: 2}, {6700.0: 3, 6650.0: 4})
+        )
+        entry = _FakeMKT045Entry(sc=6797, lc=6850, sp=6700, lp=6650)
+        changed = s._snap_entry_strikes_to_chain(entry)
+        assert changed is True
+        assert entry.short_call_strike == 6800.0
+        s._log_safety_event.assert_called_once()
+
+    def test_no_change_when_strikes_already_on_chain(self):
+        s = self._make_strategy(
+            ({6800.0: 1, 6850.0: 2}, {6700.0: 3, 6650.0: 4})
+        )
+        entry = _FakeMKT045Entry(6800, 6850, 6700, 6650)
+        changed = s._snap_entry_strikes_to_chain(entry)
+        assert changed is False
+        s._log_safety_event.assert_not_called()
+
+    def test_zero_strikes_excluded_from_candidates(self):
+        """Unset (0/None) strikes contribute no candidates."""
+        s = self._make_strategy(({6800.0: 1}, {}))
+        entry = _FakeMKT045Entry(sc=6800, lc=6850, sp=0, lp=0)
+        s._snap_entry_strikes_to_chain(entry)
+        candidates = s._read_option_chain.call_args.args[1]
+        assert len(candidates) == 14  # only sc + lc → 2 × 7
+        assert all(c > 0 for c in candidates)

@@ -3407,29 +3407,27 @@ class HydraStrategy(MEICStrategy):
             expiry = self._get_todays_expiry()
             if not expiry:
                 return False
-            try:
-                chain_resp = self.client.get_option_chain(
-                    option_root_id=self.option_root_uic,
-                    expiry_dates=[expiry]
-                )
-            except Exception as e:
-                logger.warning(f"MKT-045: Option chain fetch failed: {e}")
+            # Candidate set: the entry's 4 strikes plus a ±15pt
+            # neighborhood (5pt steps). The IB path of _read_option_chain
+            # resolves conids only for the candidates it's given, so the
+            # neighborhood gives iteration-2 re-snapping (after overlap
+            # shifts below) real strikes to land on. The Saxo path
+            # ignores candidate_strikes and returns the full chain — its
+            # behavior here is unchanged.
+            base_strikes = [
+                entry.short_call_strike, entry.long_call_strike,
+                entry.short_put_strike, entry.long_put_strike,
+            ]
+            candidates = []
+            for base in base_strikes:
+                if not base or base <= 0:
+                    continue
+                for delta in range(-15, 20, 5):
+                    candidates.append(float(base + delta))
+            call_map, put_map = self._read_option_chain(expiry, candidates)
+            if not call_map and not put_map:
+                logger.warning("MKT-045: Option chain returned no strikes")
                 return False
-            if not chain_resp:
-                return False
-            option_space = chain_resp.get("OptionSpace", [])
-            if not option_space:
-                return False
-            specific_options = option_space[0].get("SpecificOptions", [])
-            call_map = {}
-            put_map = {}
-            for opt in specific_options:
-                strike = opt.get("StrikePrice", 0)
-                pc = opt.get("PutCall", "")
-                if pc == "Call":
-                    call_map[strike] = opt.get("Uic")
-                elif pc == "Put":
-                    put_map[strike] = opt.get("Uic")
             entry._call_uic_map = call_map
             entry._put_uic_map = put_map
 
