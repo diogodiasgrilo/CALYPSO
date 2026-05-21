@@ -1486,3 +1486,88 @@ class TestReadOpenPositions:
         assert set(ib_p.keys()) == set(saxo_p.keys())
         for k in ("instrument_id", "quantity", "side", "right"):
             assert ib_p[k] == saxo_p[k], f"diverge on {k!r}"
+
+
+class TestPositionIsOpen:
+    """Unit tests for HydraStrategy._position_is_open (F4.2) — the
+    quantity-aware reconciliation primitive that replaces Saxo's
+    PositionId set-membership checks."""
+
+    def _make_bare_strategy(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.client = None
+        return s
+
+    _POSITIONS = [
+        {"instrument_id": 100, "right": "C", "quantity": -1},
+        {"instrument_id": 200, "right": "P", "quantity": -2},  # merged
+        {"instrument_id": 300, "right": "C", "quantity": 0},   # flat
+    ]
+
+    def test_open_position_found(self):
+        s = self._make_bare_strategy()
+        assert s._position_is_open(100, positions=self._POSITIONS) is True
+
+    def test_position_not_found(self):
+        s = self._make_bare_strategy()
+        assert s._position_is_open(999, positions=self._POSITIONS) is False
+
+    def test_right_filter_match(self):
+        s = self._make_bare_strategy()
+        assert s._position_is_open(
+            100, right="C", positions=self._POSITIONS
+        ) is True
+
+    def test_right_filter_mismatch(self):
+        s = self._make_bare_strategy()
+        assert s._position_is_open(
+            100, right="P", positions=self._POSITIONS
+        ) is False
+
+    def test_merged_position_counts_as_open(self):
+        """A same-strike merge (quantity -2) is still open at min 1."""
+        s = self._make_bare_strategy()
+        assert s._position_is_open(200, positions=self._POSITIONS) is True
+
+    def test_min_abs_qty_threshold(self):
+        s = self._make_bare_strategy()
+        # conid 200 has |qty|=2 — open at min 2, conid 100 has |qty|=1
+        assert s._position_is_open(
+            200, positions=self._POSITIONS, min_abs_qty=2
+        ) is True
+        assert s._position_is_open(
+            100, positions=self._POSITIONS, min_abs_qty=2
+        ) is False
+
+    def test_flat_position_not_open(self):
+        s = self._make_bare_strategy()
+        assert s._position_is_open(300, positions=self._POSITIONS) is False
+
+    def test_none_instrument_id_returns_false(self):
+        s = self._make_bare_strategy()
+        assert s._position_is_open(None, positions=self._POSITIONS) is False
+
+    def test_string_vs_int_id_tolerated(self):
+        """instrument_id comparison is type-tolerant (str vs int)."""
+        s = self._make_bare_strategy()
+        assert s._position_is_open("100", positions=self._POSITIONS) is True
+        positions = [{"instrument_id": "100", "right": "C", "quantity": -1}]
+        assert s._position_is_open(100, positions=positions) is True
+
+    def test_none_positions_fetches_fresh(self):
+        """positions=None triggers a _read_open_positions fetch."""
+        s = self._make_bare_strategy()
+        s._read_open_positions = MagicMock(return_value=self._POSITIONS)
+        assert s._position_is_open(100) is True
+        s._read_open_positions.assert_called_once()
+
+    def test_prefetched_positions_skip_fetch(self):
+        s = self._make_bare_strategy()
+        s._read_open_positions = MagicMock()
+        s._position_is_open(100, positions=self._POSITIONS)
+        s._read_open_positions.assert_not_called()
+
+    def test_empty_positions_returns_false(self):
+        s = self._make_bare_strategy()
+        assert s._position_is_open(100, positions=[]) is False

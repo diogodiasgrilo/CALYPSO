@@ -1893,6 +1893,53 @@ class HydraStrategy(MEICStrategy):
             )
             return []
 
+    def _position_is_open(
+        self,
+        instrument_id,
+        *,
+        right: Optional[str] = None,
+        positions: Optional[List[Dict[str, Any]]] = None,
+        min_abs_qty: int = 1,
+    ) -> bool:
+        """True if the broker shows an open option position at
+        ``instrument_id`` with absolute quantity >= ``min_abs_qty``.
+
+        The F4 reconciliation primitive. Saxo gave every leg a stable
+        per-leg ``PositionId`` and reconciliation was set membership;
+        IBKR positions are conid-keyed with a signed *net* quantity
+        (same-strike legs merge into one row). This predicate answers
+        the quantity question — the form both brokers can answer — and
+        replaces the Saxo ``PositionId in actual_ids`` checks. See
+        ``docs/migration/F4_POSITION_FLOW_DESIGN.md`` §4.
+
+        Args:
+            instrument_id: IBKR conid / Saxo UIC of the leg. None → False.
+            right: optional ``"C"``/``"P"`` filter — when given, a
+                position only counts if its right matches. Defensive; a
+                conid already implies a right on IBKR.
+            positions: a pre-fetched :meth:`_read_open_positions` list,
+                to avoid a re-fetch when checking many legs. None fetches
+                fresh.
+            min_abs_qty: minimum ``|quantity|`` to count as open
+                (default 1).
+
+        Returns:
+            True if a matching open position is found.
+        """
+        if instrument_id is None:
+            return False
+        if positions is None:
+            positions = self._read_open_positions()
+        target = str(instrument_id)
+        for p in positions:
+            if str(p.get("instrument_id")) != target:
+                continue
+            if right is not None and p.get("right") != right:
+                continue
+            if abs(p.get("quantity") or 0) >= min_abs_qty:
+                return True
+        return False
+
     def _refresh_chart_data_for_scouting(self):
         """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
 

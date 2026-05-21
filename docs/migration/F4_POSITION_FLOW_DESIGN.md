@@ -147,9 +147,18 @@ further once its internals are mapped in detail.
 
 ## Implementation status
 
-- `_read_open_positions` broker-agnostic helper: F4.1 ✅ committed
-- `_position_is_open` predicate: F4.2 (pending)
+- `_read_open_positions` broker-agnostic helper: F4.1 ✅ committed (573c5f3)
+- `_position_is_open` predicate: F4.2 ✅ committed
 - id-set / P&L / recovery / monitoring rewires: F4.3-F4.6 (pending)
+
+### F4.2 — `_position_is_open` shipped
+
+Quantity-aware reconciliation primitive. `_position_is_open(id, *,
+right=None, positions=None, min_abs_qty=1)` → True when the broker
+shows `|quantity| >= min_abs_qty` at `id`. Type-tolerant id compare,
+optional `right` filter, optional pre-fetched `positions` list to
+avoid re-fetching when checking many legs. 12 `TestPositionIsOpen`
+tests.
 
 ### F4.1 — `_read_open_positions` shipped
 
