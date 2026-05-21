@@ -3982,18 +3982,31 @@ class MEICStrategy:
             priority=AlertPriority.CRITICAL
         )
 
-        # Attempt to close the naked short using market order (not DELETE endpoint)
-        # CRITICAL FIX (2026-02-03): Saxo DELETE endpoint returns 404 for SPX options
+        # Attempt to close the naked short using a market order.
+        # Naked shorts need BUY to close.
         try:
-            # Naked shorts need BUY to close
-            result = self.client.place_emergency_order(
-                uic=uic,
-                asset_type="StockIndexOption",
-                buy_sell=BuySell.BUY,
-                amount=self.contracts_per_entry,
-                order_type=OrderType.MARKET,
-                to_open_close="ToClose"
-            )
+            # F6.4 — IBKR path via _close_leg_order; Saxo path inline
+            # (dormant, deleted in P4). `result` is normalized to the
+            # Saxo {"OrderId": …}/None shape so the downstream registry
+            # + logging logic stays broker-agnostic.
+            if self.broker is not None:
+                _res = self._close_leg_order(
+                    instrument_id=uic, side="BUY",
+                    quantity=self.contracts_per_entry,
+                )
+                result = (
+                    {"OrderId": _res.get("order_id")}
+                    if _res.get("filled") else None
+                )
+            else:
+                result = self.client.place_emergency_order(
+                    uic=uic,
+                    asset_type="StockIndexOption",
+                    buy_sell=BuySell.BUY,
+                    amount=self.contracts_per_entry,
+                    order_type=OrderType.MARKET,
+                    to_open_close="ToClose"
+                )
             if result:
                 logger.info(f"Closed naked short {pos_id} via order {result.get('OrderId')}")
                 try:
@@ -4037,19 +4050,34 @@ class MEICStrategy:
         for leg_name, pos_id, uic in filled_legs:
             if pos_id and uic:
                 try:
-                    # CRITICAL FIX (2026-02-03): Use market order instead of DELETE endpoint
-                    # Determine direction: short positions need BUY to close, long positions need SELL
-                    # v8: unwinding a leg from the CURRENT entry — use entry.contracts
-                    # (equal to self.contracts_per_entry at placement time but explicit).
-                    buy_sell = BuySell.BUY if leg_name.startswith("short") else BuySell.SELL
-                    result = self.client.place_emergency_order(
-                        uic=uic,
-                        asset_type="StockIndexOption",
-                        buy_sell=buy_sell,
-                        amount=entry.contracts,
-                        order_type=OrderType.MARKET,
-                        to_open_close="ToClose"
-                    )
+                    # Market-order close. Determine direction: short
+                    # positions need BUY to close, long positions SELL.
+                    # v8: unwinding a leg from the CURRENT entry — use
+                    # entry.contracts (explicit, == config at placement).
+                    # F6.4 — IBKR path via _close_leg_order; Saxo inline
+                    # (dormant, deleted in P4). `result` normalized to the
+                    # Saxo {"OrderId": …}/None shape.
+                    if self.broker is not None:
+                        _res = self._close_leg_order(
+                            instrument_id=uic,
+                            side=("BUY" if leg_name.startswith("short")
+                                  else "SELL"),
+                            quantity=entry.contracts,
+                        )
+                        result = (
+                            {"OrderId": _res.get("order_id")}
+                            if _res.get("filled") else None
+                        )
+                    else:
+                        buy_sell = BuySell.BUY if leg_name.startswith("short") else BuySell.SELL
+                        result = self.client.place_emergency_order(
+                            uic=uic,
+                            asset_type="StockIndexOption",
+                            buy_sell=buy_sell,
+                            amount=entry.contracts,
+                            order_type=OrderType.MARKET,
+                            to_open_close="ToClose"
+                        )
                     if result:
                         try:
                             self.registry.unregister(pos_id)

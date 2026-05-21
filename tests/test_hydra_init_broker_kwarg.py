@@ -2884,3 +2884,83 @@ class TestClosePositionWithRetryIb:
         out = s._close_position_with_retry("pid", "short_call", uic=12345)
         assert out == (True, 1.0, "x")
         s._close_position_with_retry_ib.assert_called_once()
+
+
+class TestHandleNakedShortIb:
+    """F6.4 — _handle_naked_short closes a naked short via _close_leg_order
+    on the IBKR path (BUY-to-close)."""
+
+    def _make(self, dry_run=False):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s.dry_run = dry_run
+        s.contracts_per_entry = 1
+        s.registry = MagicMock()
+        s.alert_service = MagicMock()
+        s._log_safety_event = MagicMock()
+        s._trigger_critical_intervention = MagicMock()
+        return s
+
+    def test_ib_close_filled(self):
+        s = self._make()
+        s._close_leg_order = MagicMock(return_value={
+            "filled": True, "order_id": "n1",
+        })
+        s._handle_naked_short(("short_call", "pid", 12345))
+        s._close_leg_order.assert_called_once_with(
+            instrument_id=12345, side="BUY", quantity=1,
+        )
+        s.registry.unregister.assert_called_once_with("pid")
+        s._trigger_critical_intervention.assert_not_called()
+
+    def test_ib_close_not_filled_triggers_intervention(self):
+        s = self._make()
+        s._close_leg_order = MagicMock(return_value={"filled": False})
+        s._handle_naked_short(("short_put", "pid", 999))
+        s._trigger_critical_intervention.assert_called_once()
+
+    def test_dry_run_no_close(self):
+        s = self._make(dry_run=True)
+        s._close_leg_order = MagicMock()
+        s._handle_naked_short(("short_call", "pid", 12345))
+        s._close_leg_order.assert_not_called()
+
+
+class TestUnwindPartialEntryIb:
+    """F6.4 — _unwind_partial_entry closes each filled leg via
+    _close_leg_order on the IBKR path."""
+
+    def _make(self, dry_run=False):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s.dry_run = dry_run
+        s.contracts_per_entry = 1
+        s.registry = MagicMock()
+        return s
+
+    def test_ib_unwinds_each_leg_with_correct_side(self):
+        s = self._make()
+        s._close_leg_order = MagicMock(return_value={
+            "filled": True, "order_id": "u1",
+        })
+        entry = MagicMock()
+        entry.contracts = 1
+        entry.entry_number = 3
+        s._unwind_partial_entry(
+            [("short_call", "p1", 101), ("long_put", "p2", 202)], entry,
+        )
+        assert s._close_leg_order.call_count == 2
+        sides = {c.kwargs["instrument_id"]: c.kwargs["side"]
+                 for c in s._close_leg_order.call_args_list}
+        assert sides[101] == "BUY"   # short → BUY to close
+        assert sides[202] == "SELL"  # long → SELL to close
+
+    def test_dry_run_no_close(self):
+        s = self._make(dry_run=True)
+        s._close_leg_order = MagicMock()
+        entry = MagicMock()
+        entry.entry_number = 1
+        s._unwind_partial_entry([("short_call", "p1", 101)], entry)
+        s._close_leg_order.assert_not_called()
