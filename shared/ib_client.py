@@ -1571,6 +1571,123 @@ class IBClient:
                 return None
         return None
 
+    def get_closed_position_price(
+        self,
+        conid: int,
+        *,
+        buy_or_sell: str,
+        days: int = 1,
+    ) -> Optional[dict]:
+        """Closing execution price for a position at ``conid``.
+
+        Scans recent trade executions (`/iserver/account/trades`) and
+        returns the MOST RECENT execution at ``conid`` matching the
+        requested side.
+
+        SaxoClient.get_closed_position_price() equivalent — returns the
+        same ``{"closing_price": ...}`` shape the HYDRA call sites read.
+
+        Args:
+            conid: the instrument's IBKR conid.
+            buy_or_sell: ``"Buy"`` or ``"Sell"`` — the direction of the
+                CLOSING trade (closing a short is a Buy; closing a long
+                is a Sell). Saxo-terminology kwarg; mapped to IBKR's
+                ``"B"``/``"S"``.
+            days: lookback window in days; IBKR caps this at 7.
+
+        Returns:
+            ``{"closing_price": float, "amount": int|None,
+            "buy_or_sell": "Buy"|"Sell", "execution_time": str|None,
+            "conid": int, "execution_id": str|None, "raw": dict}`` for
+            the most recent matching execution, or None when there is no
+            match / on a fetch failure.
+
+        Field shape note: the per-record fields (`conid`, `side`,
+        `price`, `size`, `trade_time`, `trade_time_r`) are taken from
+        IBKR's documented `/iserver/account/trades` schema. The F5.1
+        probe confirmed the endpoint + the `/iserver/accounts` priming
+        requirement but the paper account had no execution history, so
+        the exact field names are doc-sourced — hence the defensive
+        multi-variant lookups below. Verify against a real execution
+        once HYDRA places its first live order.
+        """
+        self._require_connected()
+
+        want = (buy_or_sell or "").strip().upper()
+        if want in ("BUY", "B"):
+            ibkr_side = "B"
+        elif want in ("SELL", "S"):
+            ibkr_side = "S"
+        else:
+            raise IBClientError(
+                f"get_closed_position_price: buy_or_sell must be "
+                f"'Buy' or 'Sell', got {buy_or_sell!r}"
+            )
+
+        # /iserver/account/trades returns 500 'Please query /accounts
+        # first' unless the brokerage session was primed via
+        # /iserver/accounts (F5.1 probe finding). connect() only primes
+        # /portfolio/accounts — a different endpoint — so prime here.
+        self._ib_call("portfolio", self._client.receive_brokerage_accounts)
+
+        days = max(1, min(int(days), 7))  # IBKR caps the lookback at 7
+        data = self._ib_call(
+            "portfolio", self._client.trades, days=str(days),
+        ) or []
+        rows = data if isinstance(data, list) else []
+
+        target = str(conid)
+        matches: list[dict] = []
+        for rec in rows:
+            if not isinstance(rec, dict):
+                continue
+            rec_conid = rec.get("conid") or rec.get("conidEx")
+            if str(rec_conid) != target:
+                continue
+            rec_side = str(rec.get("side") or "").strip().upper()
+            norm = (
+                "B" if rec_side in ("B", "BUY")
+                else ("S" if rec_side in ("S", "SELL") else "")
+            )
+            if norm != ibkr_side:
+                continue
+            matches.append(rec)
+
+        if not matches:
+            return None
+
+        # Most recent execution wins — trade_time_r is an epoch (ms).
+        def _recency(r: dict) -> float:
+            try:
+                return float(r.get("trade_time_r"))
+            except (TypeError, ValueError):
+                return 0.0
+
+        matches.sort(key=_recency, reverse=True)
+        best = matches[0]
+
+        try:
+            closing_price = float(best.get("price"))
+        except (TypeError, ValueError):
+            return None
+        if closing_price <= 0:
+            return None
+
+        try:
+            amount: Optional[int] = int(float(best.get("size")))
+        except (TypeError, ValueError):
+            amount = None
+
+        return {
+            "closing_price": closing_price,
+            "amount": amount,
+            "buy_or_sell": "Buy" if ibkr_side == "B" else "Sell",
+            "execution_time": best.get("trade_time"),
+            "conid": conid,
+            "execution_id": best.get("execution_id"),
+            "raw": best,
+        }
+
     # ─── Options chain ────────────────────────────────────────────────────
 
     def get_option_chain(

@@ -998,3 +998,126 @@ class TestGetChartData:
         assert kw["bar"] == "1min"
         assert kw["period"] == "1d"
         assert kw["outside_rth"] is False
+
+
+# ─── get_closed_position_price (F5.2) ──────────────────────────────────────
+
+
+def _trade(conid=12345, side="S", price="2.55", size="1",
+           trade_time="20260521-14:30:00", trade_time_r=1779000000000,
+           execution_id="exec-1"):
+    """A doc-shaped /iserver/account/trades execution record."""
+    return {
+        "conid": conid, "side": side, "price": price, "size": size,
+        "trade_time": trade_time, "trade_time_r": trade_time_r,
+        "execution_id": execution_id, "symbol": "SPX", "sec_type": "OPT",
+    }
+
+
+class TestGetClosedPositionPrice:
+    """F5.2 — IBClient.get_closed_position_price scans /iserver/account/
+    trades for the most recent execution at a conid + side. Field shape
+    is doc-sourced (F5.1 probe found the paper account had no trade
+    history) — hence defensive lookups."""
+
+    def test_matching_sell_returns_closing_price(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([_trade(side="S", price="2.55")])
+        out = client.get_closed_position_price(12345, buy_or_sell="Sell")
+        assert out["closing_price"] == 2.55
+        assert out["buy_or_sell"] == "Sell"
+        assert out["conid"] == 12345
+        assert out["amount"] == 1
+
+    def test_matching_buy(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([_trade(side="B", price="1.10")])
+        out = client.get_closed_position_price(12345, buy_or_sell="Buy")
+        assert out["closing_price"] == 1.10
+        assert out["buy_or_sell"] == "Buy"
+
+    def test_conid_mismatch_returns_none(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([_trade(conid=99999)])
+        assert client.get_closed_position_price(12345, buy_or_sell="Sell") is None
+
+    def test_side_mismatch_returns_none(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([_trade(side="B")])
+        assert client.get_closed_position_price(12345, buy_or_sell="Sell") is None
+
+    def test_most_recent_execution_wins(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([
+            _trade(price="2.00", trade_time_r=1779000000000),
+            _trade(price="2.99", trade_time_r=1779009999999),  # newer
+            _trade(price="2.50", trade_time_r=1779005000000),
+        ])
+        out = client.get_closed_position_price(12345, buy_or_sell="Sell")
+        assert out["closing_price"] == 2.99
+
+    def test_empty_trades_returns_none(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([])
+        assert client.get_closed_position_price(12345, buy_or_sell="Sell") is None
+
+    def test_invalid_buy_or_sell_raises(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(IBClientError, match="buy_or_sell"):
+            client.get_closed_position_price(12345, buy_or_sell="Hold")
+
+    def test_days_clamped_to_max_7(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([])
+        client.get_closed_position_price(12345, buy_or_sell="Sell", days=99)
+        assert mock_ibkr.trades.call_args.kwargs["days"] == "7"
+
+    def test_session_primed_before_trades(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([])
+        client.get_closed_position_price(12345, buy_or_sell="Sell")
+        # /iserver/accounts priming is required before /iserver/account/trades
+        assert mock_ibkr.receive_brokerage_accounts.called
+        assert mock_ibkr.trades.called
+
+    def test_price_string_coerced(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([_trade(price="3.14")])
+        out = client.get_closed_position_price(12345, buy_or_sell="Sell")
+        assert out["closing_price"] == 3.14
+
+    def test_nonpositive_price_returns_none(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([_trade(price="0")])
+        assert client.get_closed_position_price(12345, buy_or_sell="Sell") is None
+
+    def test_non_dict_rows_skipped(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([
+            "garbage-string-row",
+            _trade(price="2.55"),
+        ])
+        out = client.get_closed_position_price(12345, buy_or_sell="Sell")
+        assert out["closing_price"] == 2.55
+
+    def test_conidex_fallback(self, connected_client):
+        """A record keyed by conidEx instead of conid still matches."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        rec = _trade()
+        del rec["conid"]
+        rec["conidEx"] = 12345
+        mock_ibkr.trades.return_value = _mk_result([rec])
+        out = client.get_closed_position_price(12345, buy_or_sell="Sell")
+        assert out["closing_price"] == 2.55

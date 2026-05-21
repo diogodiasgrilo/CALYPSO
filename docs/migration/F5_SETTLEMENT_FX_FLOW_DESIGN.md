@@ -89,21 +89,47 @@ _read_closed_position_price(instrument_id, *, buy_or_sell) -> Optional[dict]
 The 3 close-price sites and the 1 FX site then become broker-agnostic
 one-liners, the same pattern as F3/F4.
 
-## 5. Commit breakdown for F5
+## 5. F5.1 probe results (run 2026-05-21, paper account)
+
+`scripts/probe_ibkr_trades.py` run outcome:
+- ✅ **`/iserver/account/trades` is reachable** — returns a JSON
+  `list`, no error.
+- ✅ **Session priming is mandatory** — the first run failed with
+  `500 "Please query /accounts first"`; calling
+  `receive_brokerage_accounts()` (the `/iserver/accounts` endpoint)
+  first fixes it. `connect()` only primes `/portfolio/accounts` — a
+  different endpoint. `get_closed_position_price` primes explicitly.
+- ✅ **`days` param accepted** — `days=1` and `days=7` both succeed.
+- ⚠️ **Zero trade records** — the paper account has no execution
+  history (HYDRA runs dry-run, places no real orders), so the probe
+  could NOT capture a real record's field shape or confirm same-day
+  0DTE visibility.
+
+**Consequence**: F5.2's per-record field names (`conid`, `side`,
+`price`, `size`, `trade_time`, `trade_time_r`) are taken from IBKR's
+documented `/iserver/account/trades` schema, with defensive
+multi-variant lookups — the same pattern the codebase already uses for
+IBKR field-name uncertainty (`_build_fill_result_dict`,
+`_normalize_position_dict`). Flagged for live-verification when HYDRA
+places its first live order.
+
+## 6. Commit breakdown for F5
 
 | Commit | Scope |
 |---|---|
-| F5.1 | Probe `/iserver/account/trades` on paper — verify shape (read-only diagnostic) |
-| F5.2 | `IBClient.get_closed_position_price` built on verified behavior + unit tests |
+| F5.1 | Probe `/iserver/account/trades` on paper (read-only diagnostic) — ✅ done |
+| F5.2 | `IBClient.get_closed_position_price` built on the probe + doc schema + unit tests — ✅ done |
 | F5.3 | `HydraStrategy._read_fx_rate` + `_read_closed_position_price` helpers + tests |
 | F5.4 | Rewire the 3 close-price sites + the FX site |
 | F5.5 | `_verify_settlement_pnl_from_saxo` — IBKR rework (option A/B/C, decided post-probe) |
 
-## 6. Decision requested
+## 7. Decision record (resolved)
 
+Approved 2026-05-21:
 1. The probe-first approach for IBKR trade-execution history (F5.1).
 2. The `_read_fx_rate` / `_read_closed_position_price` helper pair.
 3. Fix #87 direction — provisional **B** (account-summary realized-P&L
-   delta), confirmed after the probe.
-
-Once approved, F5.1 (the probe) starts.
+   delta); confirmed at F5.5.
+4. Post-probe: since the paper account had no trade history, F5.2 is
+   built against IBKR's documented schema with defensive field lookups
+   rather than empirically-verified field names (see §5).
