@@ -54,6 +54,7 @@ import logging
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterable, Optional
@@ -766,7 +767,7 @@ class IBClient:
             raise IBClientError(f"ibind error: {err}")
         return getattr(result, "data", result)
 
-    def _ib_call(self, family: str, fn, *args, **kwargs):
+    def _ib_call(self, family: str, fn, *args, _serialize: bool = True, **kwargs):
         """Run an ibind call through retry + per-family circuit breaker + unwrap.
 
         Every API call from public IBClient methods should route through here.
@@ -781,10 +782,24 @@ class IBClient:
             'orders'    — place, cancel, modify, status, live_orders,
                           whatif
 
-        Concurrency: each retry attempt re-acquires `self._call_lock` for
-        the duration of the ibind call only; backoff sleeps happen OUTSIDE
-        the lock so other threads can use the client between attempts.
-        Tests can introspect / reset breakers via `circuit_breakers`.
+        Concurrency: by default each retry attempt re-acquires
+        `self._call_lock` for the duration of the ibind call only;
+        backoff sleeps happen OUTSIDE the lock so other threads can use
+        the client between attempts. Tests can introspect / reset
+        breakers via `circuit_breakers`.
+
+        `_serialize` (keyword-only, default True): when True, the ibind
+        call is wrapped in `self._call_lock` — ibind's IbkrClient is
+        documented as not thread-safe so calls are serialized across
+        threads. Set False ONLY for read-only endpoints that have been
+        EMPIRICALLY verified safe for concurrent use. Currently the only
+        such caller is `qualify_option_strikes`, whose concurrent
+        `search_secdef_info_by_conid` calls were proven safe by
+        scripts/probe_ibkr_chain.py PROBE 7 (6 concurrent calls, 6.0×
+        concurrency, zero cross-thread data corruption). Do NOT set
+        False for write paths or for endpoints that mutate ibind's
+        internal state — the retry + breaker still apply, but the
+        serialization guard is gone.
 
         Non-retryable exceptions (auth, validation, bad request) propagate
         immediately and do NOT record a breaker failure — the breaker is
@@ -798,13 +813,17 @@ class IBClient:
                 f"expected one of {sorted(self._breakers)}"
             ) from exc
 
-        def call_with_lock():
-            with self._call_lock:
-                return fn(*args, **kwargs)
+        def _invoke():
+            if _serialize:
+                with self._call_lock:
+                    return fn(*args, **kwargs)
+            # Concurrent path — no lock. Caller is responsible for having
+            # verified the endpoint is concurrency-safe.
+            return fn(*args, **kwargs)
 
         wrapped = retry_with_backoff(
             policy=self._retry_policy, breaker=breaker,
-        )(call_with_lock)
+        )(_invoke)
         return self._unwrap(wrapped())
 
     @property
@@ -1037,6 +1056,155 @@ class IBClient:
             conid = int(conid)
             self._conid_cache[cache_key] = conid
             return conid
+
+    def qualify_option_strikes(
+        self,
+        *,
+        symbol: str,
+        expiry: date,
+        strikes: Iterable[float],
+        trading_class: str = "SPXW",
+        max_workers: int = 8,
+    ) -> dict[tuple[float, str], int]:
+        """Batch-resolve conids for many (strike, right) pairs at one expiry.
+
+        F3 of the IB-only HYDRA rewrite. HYDRA's MKT-020/022 strike-
+        tightening scan needs conids for a range of candidate strikes.
+        IBKR has no full-chain endpoint (probe: `secdef_info` requires a
+        strike) and rejects CSV strike lists, so resolution is
+        per-strike. This method parallelizes that across a bounded
+        thread pool.
+
+        Args:
+            symbol: underlying, e.g. "SPX"
+            expiry: the exact option expiry to resolve for
+            strikes: candidate strike prices (deduplicated internally)
+            trading_class: "SPXW" for 0DTE PM-settled weeklies
+            max_workers: thread-pool size. Default 8 — keeps the burst
+                under IBKR's verified 10 req/s global rate limit with
+                20% headroom (see docs/migration/F3_OPTION_CHAIN_DESIGN.md
+                §8). Capped internally at len(strikes).
+
+        Returns:
+            dict mapping (strike, right) -> conid for every (strike,
+            "C") and (strike, "P") that has a listed option at the exact
+            `expiry`. Strikes with no option listed at that expiry are
+            simply absent — callers detect "not tradable today" via
+            absence rather than an exception.
+
+        Concurrency: each per-strike `secdef_info` call runs through
+        `_ib_call(..., _serialize=False)` — the lock-free concurrent
+        path proven safe by scripts/probe_ibkr_chain.py PROBE 7. Retry
+        + circuit breaker still apply per call. A single strike's
+        failure is logged and that strike omitted; it does NOT abort
+        the batch.
+
+        Side effect: every resolved conid is written into the shared
+        `_conid_cache` using the SAME key format as `qualify_contract`,
+        so a later `qualify_contract(symbol, expiry, strike, right,
+        trading_class)` for any resolved strike is a cache hit (zero
+        API calls). This makes HYDRA's entries #2 and #3 near-instant
+        after entry #1 warms the cache.
+
+        Raises:
+            IBClientError: not connected, or the underlying-symbol
+                resolution failed (a hard prerequisite). Per-strike
+                option-resolution failures do NOT raise.
+        """
+        self._require_connected()
+        unique_strikes = sorted({float(s) for s in strikes})
+        if not unique_strikes:
+            return {}
+
+        # Resolve the underlying conid ONCE (cached after first call).
+        # This is a normal serialized _ib_call — happens before the
+        # parallel section.
+        underlying_conid = self.qualify_contract(symbol, sec_type="IND")
+        month = _ib_month_str(expiry)
+        want_yyyymmdd = expiry.strftime("%Y%m%d")
+        expiry_iso = expiry.isoformat()
+
+        def _cache_key(strike: float, right: str) -> tuple:
+            # Mirror qualify_contract's key exactly so cross-method
+            # cache hits work. sec_type is always "OPT" here.
+            return (symbol, expiry_iso, strike, right, trading_class, "OPT")
+
+        def _resolve_one(strike: float) -> dict[tuple[float, str], int]:
+            """Resolve both rights for one strike. Returns the matched
+            (strike, right) -> conid entries. Never raises — failures
+            are logged and yield an empty dict for that strike."""
+            try:
+                # Cache short-circuit: if BOTH rights are already
+                # cached, skip the API call entirely. (One right cached
+                # isn't enough — the secdef call returns both anyway.)
+                cached: dict[tuple[float, str], int] = {}
+                with self._call_lock:
+                    for right in ("C", "P"):
+                        ck = _cache_key(strike, right)
+                        if ck in self._conid_cache:
+                            cached[(strike, right)] = self._conid_cache[ck]
+                if len(cached) == 2:
+                    return cached
+
+                # One secdef_info call resolves BOTH rights for the
+                # strike (probe 4). _serialize=False → concurrent path.
+                secdef_data = self._ib_call(
+                    "market", self._client.search_secdef_info_by_conid,
+                    _serialize=False,
+                    conid=str(underlying_conid), sec_type="OPT",
+                    month=month, exchange="CBOE", strike=str(strike),
+                ) or []
+                rows = secdef_data if isinstance(secdef_data, list) else [secdef_data]
+
+                resolved: dict[tuple[float, str], int] = {}
+                for d in rows:
+                    if not isinstance(d, dict):
+                        continue
+                    # Trading-class filter (SPXW vs SPX monthly)
+                    tc = d.get("tradingClass", "")
+                    if not (tc == trading_class
+                            or trading_class.upper() == tc.upper()):
+                        continue
+                    # Exact-expiry filter — a strike can be listed across
+                    # many May expiries (probe 7: strike 6750 had 7).
+                    mat = str(
+                        d.get("maturityDate")
+                        or d.get("expirationDate")
+                        or d.get("expiry")
+                        or ""
+                    )
+                    if mat and mat != want_yyyymmdd:
+                        continue
+                    right = (d.get("right") or "").strip().upper()
+                    if right not in ("C", "P"):
+                        continue
+                    raw_conid = d.get("conid") or d.get("conidEx")
+                    if raw_conid:
+                        resolved[(strike, right)] = int(raw_conid)
+                return resolved
+            except Exception as exc:
+                logger.warning(
+                    "qualify_option_strikes: strike %s failed (%s: %s) — "
+                    "omitted from result", strike,
+                    type(exc).__name__, exc,
+                )
+                return {}
+
+        # Parallel resolution. ThreadPoolExecutor.map preserves input
+        # order, but order doesn't matter — we merge into one dict.
+        workers = min(max_workers, len(unique_strikes))
+        results: dict[tuple[float, str], int] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for partial in pool.map(_resolve_one, unique_strikes):
+                results.update(partial)
+
+        # Populate the shared conid cache so later qualify_contract
+        # calls for these strikes are cache hits.
+        with self._call_lock:
+            for (strike, right), conid in results.items():
+                self._conid_cache[_cache_key(strike, right)] = conid
+
+        return results
 
     # ─── Quotes (read methods) ────────────────────────────────────────────
 

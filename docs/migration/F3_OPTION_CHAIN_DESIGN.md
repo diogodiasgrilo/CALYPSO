@@ -142,20 +142,47 @@ F3 is too big for one commit. Proposed sequence, each tested + green:
 | F3.5 | Rewrite MKT-022 put-tightening site (chain + batch quotes) |
 | F3.6 | Rewrite the `get_option_greeks` site + remaining chain-coupled batch quote |
 
-## 6. Open risk
+## 6. Multi-expiry strikes — confirmed, handled
 
-The probe used a representative strike (6745) that happened to be
-listed only for the May 29 expiry. We have NOT yet verified the
-behavior for a strike that exists across multiple May weeklies — does
-`secdef_info(strike, month)` then return >2 entries (multiple
-expiries × 2 rights)? If so, the maturityDate filter handles it
-correctly (we already filter), but the result list is longer. This is
-benign — the filter is the safety net — but worth confirming during
-F3.1's integration test against paper.
+The 2026-05-21 extended probe (PROBE 7) confirmed a strike CAN return
+many entries: strike 6750 right=C returned **7 entries** — listed
+across 7 different May expiries. The `maturityDate == expiry` filter
+handles this correctly: even a 7-entry response yields the 1 entry for
+our target expiry. No design change — the filter is the safety net.
 
-Mitigation: F3.1's implementation filters by `maturityDate == expiry`
-unconditionally, so even a multi-expiry response yields the correct
-subset. No design change needed; just noted for test coverage.
+## 7. PROBE 6 + 7 results (2026-05-21 extended run)
+
+- **PROBE 6 — CSV multi-strike**: ❌ NOT supported. `secdef_info` with
+  `strike="6730.0,6735.0,6740.0"` → `500 Internal Server Error:
+  Invalid Strike=...`. We cannot batch strikes into one call.
+- **PROBE 7 — concurrent secdef thread-safety**: ✅ CONFIRMED SAFE.
+  6 concurrent `search_secdef_info_by_conid` calls fired from 6 threads
+  through ONE ibind client: wall-clock 1.85s vs 11.05s serial sum =
+  **6.0× concurrency factor**, and every response was strike-correct
+  (no cross-thread data corruption). ibind's REST path handles
+  concurrent secdef reads cleanly.
+
+**Design consequence**: F3 uses genuine parallelism via a ThreadPool,
+but the secdef calls must bypass `IBClient._call_lock` (which would
+serialize them). `_ib_call` gains a `_serialize` kwarg (default True =
+unchanged behavior); the batch resolver passes `_serialize=False`.
+This is safe ONLY for the read-only secdef batch — verified by PROBE 7
+— not a general license to drop the lock elsewhere.
+
+## 8. Rate-limit safety (verified)
+
+IBKR Client Portal Web API global limit: **10 requests/second**
+(verified — `/iserver/secdef/info` is not in the per-endpoint table so
+it inherits the 10/s global). 429 → 10-minute IP penalty box; repeat →
+permanent block. `max_workers=8` → ~8 req/s peak burst, **under the 10
+limit with 20% headroom**. The A.8 retry+breaker absorbs any rare 429.
+
+## 9. Implementation status
+
+- `_ib_call` `_serialize` kwarg + `IBClient.qualify_option_strikes`:
+  F3.1 (in progress)
+- `HydraStrategy._read_option_chain`: F3.2
+- MKT-045/020/022 rewrites + greeks: F3.3-F3.6
 
 ## 7. Decision requested
 

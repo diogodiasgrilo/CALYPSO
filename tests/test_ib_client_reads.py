@@ -283,6 +283,247 @@ class TestQualifyContract:
             client.qualify_contract("SPX", sec_type="IND")
 
 
+# ─── qualify_option_strikes (F3.1 batch resolver) ──────────────────────────
+
+
+class TestQualifyOptionStrikes:
+    """Tests for IBClient.qualify_option_strikes — the F3 batch conid
+    resolver. Parallelizes per-strike secdef_info calls across a thread
+    pool; each call resolves both rights; results filtered by exact
+    expiry + trading class; conid cache populated for cross-method hits.
+    """
+
+    _EXPIRY = date(2026, 5, 20)         # → month "MAY26", yyyymmdd 20260520
+
+    def _setup_underlying(self, mock_ibkr):
+        """Make qualify_contract('SPX', IND) resolve to a fixed conid."""
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([
+            {"conid": 416904, "sections": [
+                {"secType": "IND", "exchange": "CBOE;"},
+            ]},
+        ])
+
+    @staticmethod
+    def _secdef_entry(strike, right, *, conid, maturity="20260520",
+                      trading_class="SPXW"):
+        return {
+            "conid": conid, "strike": strike, "right": right,
+            "tradingClass": trading_class, "maturityDate": maturity,
+            "secType": "OPT", "exchange": "CBOE",
+        }
+
+    # ─── Basic resolution ──────────────────────────────────────────────
+
+    def test_resolves_both_rights_per_strike(self, connected_client):
+        """One secdef call per strike returns C+P; result maps both."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+
+        def fake_secdef(**kw):
+            s = float(kw["strike"])
+            return _mk_result([
+                self._secdef_entry(s, "C", conid=int(s) * 10 + 1),
+                self._secdef_entry(s, "P", conid=int(s) * 10 + 2),
+            ])
+        mock_ibkr.search_secdef_info_by_conid.side_effect = fake_secdef
+
+        result = client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500, 5510],
+        )
+        assert result == {
+            (5500.0, "C"): 55001, (5500.0, "P"): 55002,
+            (5510.0, "C"): 55101, (5510.0, "P"): 55102,
+        }
+
+    def test_empty_strikes_returns_empty_no_api_calls(self, connected_client):
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+        result = client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[],
+        )
+        assert result == {}
+        mock_ibkr.search_secdef_info_by_conid.assert_not_called()
+
+    def test_duplicate_strikes_resolved_once(self, connected_client):
+        """Input [5500, 5500, 5510] → 5500 is resolved a single time."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+
+        def fake_secdef(**kw):
+            s = float(kw["strike"])
+            return _mk_result([self._secdef_entry(s, "C", conid=int(s))])
+        mock_ibkr.search_secdef_info_by_conid.side_effect = fake_secdef
+
+        client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500, 5500, 5510],
+        )
+        # 2 distinct strikes → 2 secdef calls, not 3
+        assert mock_ibkr.search_secdef_info_by_conid.call_count == 2
+
+    # ─── Filtering ─────────────────────────────────────────────────────
+
+    def test_filters_by_exact_expiry(self, connected_client):
+        """A strike listed across multiple expiries — only the target
+        maturityDate is kept (probe 7: strike 6750 had 7 expiries)."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+
+        def fake_secdef(**kw):
+            s = float(kw["strike"])
+            return _mk_result([
+                self._secdef_entry(s, "C", conid=1, maturity="20260518"),  # wrong
+                self._secdef_entry(s, "C", conid=2, maturity="20260520"),  # target
+                self._secdef_entry(s, "C", conid=3, maturity="20260522"),  # wrong
+                self._secdef_entry(s, "P", conid=4, maturity="20260520"),  # target
+            ])
+        mock_ibkr.search_secdef_info_by_conid.side_effect = fake_secdef
+
+        result = client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500],
+        )
+        # Only the 20260520 entries survive
+        assert result == {(5500.0, "C"): 2, (5500.0, "P"): 4}
+
+    def test_filters_by_trading_class(self, connected_client):
+        """SPX monthly (tradingClass='SPX') entries dropped — we want SPXW."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+
+        def fake_secdef(**kw):
+            s = float(kw["strike"])
+            return _mk_result([
+                self._secdef_entry(s, "C", conid=1, trading_class="SPX"),   # drop
+                self._secdef_entry(s, "C", conid=2, trading_class="SPXW"),  # keep
+            ])
+        mock_ibkr.search_secdef_info_by_conid.side_effect = fake_secdef
+
+        result = client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500],
+        )
+        assert result == {(5500.0, "C"): 2}
+
+    def test_strike_with_no_expiry_match_is_absent(self, connected_client):
+        """A strike not listed at the target expiry → simply absent
+        (no exception — callers detect via absence)."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+
+        def fake_secdef(**kw):
+            # all entries are for a different expiry
+            return _mk_result([
+                self._secdef_entry(5500.0, "C", conid=1, maturity="20260101"),
+            ])
+        mock_ibkr.search_secdef_info_by_conid.side_effect = fake_secdef
+
+        result = client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500],
+        )
+        assert result == {}
+
+    def test_conidEx_fallback(self, connected_client):
+        """Some secdef rows carry conidEx instead of conid."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+        mock_ibkr.search_secdef_info_by_conid.side_effect = lambda **kw: _mk_result([
+            {"conidEx": 99001, "strike": 5500.0, "right": "C",
+             "tradingClass": "SPXW", "maturityDate": "20260520"},
+        ])
+        result = client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500],
+        )
+        assert result == {(5500.0, "C"): 99001}
+
+    # ─── Failure isolation ─────────────────────────────────────────────
+
+    def test_one_strike_failure_does_not_abort_batch(self, connected_client):
+        """A single strike's secdef call raising must NOT kill the batch
+        — that strike is omitted, the rest resolve."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+
+        def fake_secdef(**kw):
+            s = float(kw["strike"])
+            if s == 5510.0:
+                raise RuntimeError("secdef blew up for 5510")
+            return _mk_result([self._secdef_entry(s, "C", conid=int(s))])
+        mock_ibkr.search_secdef_info_by_conid.side_effect = fake_secdef
+
+        result = client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500, 5510, 5520],
+        )
+        # 5510 omitted; 5500 + 5520 resolved
+        assert result == {(5500.0, "C"): 5500, (5520.0, "C"): 5520}
+
+    def test_unconnected_raises(self, paper_creds):
+        client = IBClient(IBConfig(credentials=paper_creds))
+        with pytest.raises(IBClientError, match="not connected"):
+            client.qualify_option_strikes(
+                symbol="SPX", expiry=self._EXPIRY, strikes=[5500],
+            )
+
+    # ─── Cache behavior ────────────────────────────────────────────────
+
+    def test_populates_conid_cache_in_qualify_contract_format(
+        self, connected_client,
+    ):
+        """Resolved conids land in _conid_cache with the SAME key format
+        qualify_contract uses, so cross-method cache hits work."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+        mock_ibkr.search_secdef_info_by_conid.side_effect = lambda **kw: _mk_result([
+            self._secdef_entry(float(kw["strike"]), "C", conid=7777),
+        ])
+        client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500],
+        )
+        # qualify_contract's key: (symbol, expiry_iso, strike, right, tc, sec_type)
+        expected_key = ("SPX", "2026-05-20", 5500.0, "C", "SPXW", "OPT")
+        assert client._conid_cache.get(expected_key) == 7777
+
+    def test_cache_short_circuit_skips_api_when_both_rights_cached(
+        self, connected_client,
+    ):
+        """If both C+P for a strike are already cached, no secdef call."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+        # Pre-populate cache for strike 5500, both rights
+        client._conid_cache[("SPX", "2026-05-20", 5500.0, "C", "SPXW", "OPT")] = 111
+        client._conid_cache[("SPX", "2026-05-20", 5500.0, "P", "SPXW", "OPT")] = 222
+
+        result = client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500],
+        )
+        assert result == {(5500.0, "C"): 111, (5500.0, "P"): 222}
+        # Both rights cached → secdef endpoint never hit
+        mock_ibkr.search_secdef_info_by_conid.assert_not_called()
+
+    def test_cross_method_cache_hit_with_qualify_contract(
+        self, connected_client,
+    ):
+        """After qualify_option_strikes resolves a strike, a subsequent
+        qualify_contract for the same (strike, right) is a cache hit —
+        zero additional secdef calls."""
+        client, mock_ibkr = connected_client
+        self._setup_underlying(mock_ibkr)
+        mock_ibkr.search_secdef_info_by_conid.side_effect = lambda **kw: _mk_result([
+            self._secdef_entry(float(kw["strike"]), "C", conid=4242),
+            self._secdef_entry(float(kw["strike"]), "P", conid=4243),
+        ])
+        client.qualify_option_strikes(
+            symbol="SPX", expiry=self._EXPIRY, strikes=[5500],
+        )
+        calls_after_batch = mock_ibkr.search_secdef_info_by_conid.call_count
+
+        # qualify_contract for the SAME strike+right should hit cache
+        conid = client.qualify_contract(
+            "SPX", expiry=self._EXPIRY, strike=5500.0, right="C",
+            trading_class="SPXW",
+        )
+        assert conid == 4242
+        # No new secdef call — it was a cache hit
+        assert mock_ibkr.search_secdef_info_by_conid.call_count == calls_after_batch
+
+
 # ─── Quotes ────────────────────────────────────────────────────────────────
 
 
