@@ -27,7 +27,8 @@ For capital-constrained accounts, this hybrid combines both concepts in one bot.
 Author: Trading Bot Developer
 Date: 2026-02-04
 
-Based on: bots/meic/strategy.py (MEIC v1.2.9)
+Base class: bots/hydra/base_strategy.py (HYDRA-owned; originally MEIC
+v1.2.9, relocated into the HYDRA package by the standalone rewrite).
 See docs/HYDRA_STRATEGY_SPECIFICATION.md for full HYDRA details.
 See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
 """
@@ -56,7 +57,7 @@ from shared.technical_indicators import get_current_ema, calculate_atr
 from shared.event_calendar import is_fomc_t_plus_one
 
 # Import the base MEIC classes we need
-from bots.meic.strategy import (
+from bots.hydra.base_strategy import (
     MEICStrategy,
     MEICState,
     IronCondorEntry,
@@ -9772,7 +9773,7 @@ class HydraStrategy(MEICStrategy):
         Returns:
             Error message if inconsistent, None if OK
         """
-        from bots.meic.strategy import MEICState
+        from bots.hydra.base_strategy import MEICState
 
         active_entries = len(self.daily_state.active_entries)
         my_positions = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
@@ -9911,7 +9912,7 @@ class HydraStrategy(MEICStrategy):
         if self.dry_run:
             return
 
-        from bots.meic.strategy import is_market_open, RECONCILIATION_INTERVAL_MINUTES
+        from bots.hydra.base_strategy import is_market_open, RECONCILIATION_INTERVAL_MINUTES
 
         if not is_market_open():
             return
@@ -10002,7 +10003,7 @@ class HydraStrategy(MEICStrategy):
 
         OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
         """
-        from bots.meic.strategy import MEICDailyState
+        from bots.hydra.base_strategy import MEICDailyState
 
         logger.info("Resetting for new trading day")
 

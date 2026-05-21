@@ -25,7 +25,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bots.hydra.strategy import HydraStrategy
-from bots.meic.strategy import MEICState
+# MEICState comes from HYDRA's own base now (post-P1 reparent) — importing
+# it from bots.meic.strategy would yield a DIFFERENT enum class object,
+# making `s.state == MEICState.MONITORING` a cross-class comparison.
+from bots.hydra.base_strategy import MEICState
 from shared.ib_client import IBClient
 
 
