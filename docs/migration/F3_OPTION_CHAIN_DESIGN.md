@@ -191,8 +191,16 @@ limit with 20% headroom**. The A.8 retry+breaker absorbs any rare 429.
 - `HydraStrategy._read_option_chain`: F3.2 ✅ committed (7f78afd)
 - MKT-045 chain-snapping rewrite: F3.3 ✅ committed (0c47544)
 - `HydraStrategy._read_option_quotes_batch`: F3.4 ✅ committed (e90e108)
-- MKT-020 call-tightening rewrite: F3.5 ✅ committed
-- MKT-022 rewrite + greeks: F3.6-F3.7 (pending)
+- MKT-020 call-tightening rewrite: F3.5 ✅ committed (1c80f32)
+- MKT-022 put-tightening rewrite: F3.6 ✅ committed
+- `get_option_greeks` site + credit-estimation batch quote: F3.7 (pending)
+
+### F3.6 — MKT-022 put-tightening rewired
+
+`_apply_progressive_put_tightening` rewired identically to F3.5 —
+chain via `_read_option_chain`, quotes via `_read_option_quotes_batch`,
+lowercase `bid`/`ask` parsing. 8 `TestProgressivePutTightening` tests
+mirror the call-side suite.
 
 ### F3.5 — MKT-020 call-tightening rewired
 

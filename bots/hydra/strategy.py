@@ -3883,37 +3883,24 @@ class HydraStrategy(MEICStrategy):
         if not candidates:
             return False
 
-        # Fetch option chain ONCE to get UICs for all candidate strikes
-        try:
-            chain_response = self.client.get_option_chain(
-                option_root_id=self.option_root_uic,
-                expiry_dates=[expiry]
-            )
-        except Exception as e:
-            logger.warning(f"MKT-022: Option chain fetch failed: {e}")
+        # Resolve the put chain through the broker-agnostic reader
+        # (F3.2). Candidate set = every short + long strike across the
+        # inward scan range, so the IB path resolves all conids in one
+        # parallel batch and the Saxo path returns the full chain.
+        scan_strikes = []
+        for _, short_s, long_s in candidates:
+            scan_strikes.append(float(short_s))
+            scan_strikes.append(float(long_s))
+        _, put_uic_map = self._read_option_chain(expiry, scan_strikes)
+        if not put_uic_map:
+            logger.warning("MKT-022: Option chain returned no put strikes")
             return False
-
-        if not chain_response:
-            return False
-
-        option_space = chain_response.get("OptionSpace", [])
-        if not option_space:
-            return False
-
-        # Build strike -> UIC mapping for puts from the chain
-        put_uic_map = {}
-        specific_options = option_space[0].get("SpecificOptions", [])
-        for opt in specific_options:
-            strike = opt.get("StrikePrice", 0)
-            put_call = opt.get("PutCall", "")
-            if put_call == "Put":
-                put_uic_map[strike] = opt.get("Uic")
 
         entry._put_uic_map = put_uic_map
 
-        # Collect UICs for all candidate strikes, snapping to nearest chain
-        # strike when exact 5pt increments don't exist (Saxo uses 25pt spacing
-        # far OTM — same issue as MKT-020 calls).
+        # Collect instrument ids for all candidate strikes, snapping to the
+        # nearest chain strike when exact 5pt increments don't exist (far
+        # OTM uses 25pt spacing — same issue as MKT-020 calls).
         candidate_uics = []  # [(otm, short_s, long_s, short_uic, long_uic), ...]
         all_uics = []
         seen_pairs = set()  # Avoid duplicate pairs after snapping
@@ -3941,14 +3928,14 @@ class HydraStrategy(MEICStrategy):
                 all_uics.append(long_uic)
 
         if not all_uics:
-            logger.warning("MKT-022: No UICs found for candidate put strikes")
+            logger.warning("MKT-022: No instrument ids found for candidate put strikes")
             return False
 
-        # Batch fetch quotes for all candidates (1 API call)
-        try:
-            quotes = self.client.get_quotes_batch(all_uics, asset_type="StockIndexOption")
-        except Exception as e:
-            logger.warning(f"MKT-022: Batch quote fetch failed: {e}")
+        # Batch fetch quotes for all candidates (1 API call) via the
+        # broker-agnostic helper (F3.4).
+        quotes = self._read_option_quotes_batch(all_uics)
+        if not quotes:
+            logger.warning("MKT-022: Batch quote fetch returned nothing")
             return False
 
         # Phase 1: Compute credits for all candidates (quotes already batch-fetched)
@@ -3957,15 +3944,13 @@ class HydraStrategy(MEICStrategy):
             if not short_uic or not long_uic:
                 continue
 
-            short_quote = quotes.get(short_uic, {})
-            long_quote = quotes.get(long_uic, {}) if long_uic else {}
+            short_quote = quotes.get(short_uic) or {}
+            long_quote = (quotes.get(long_uic) or {}) if long_uic else {}
 
-            sq = short_quote.get("Quote", {})
-            lq = long_quote.get("Quote", {})
-            short_bid = sq.get("Bid", 0) or 0
-            short_ask = sq.get("Ask", 0) or 0
-            long_bid = lq.get("Bid", 0) or 0
-            long_ask = lq.get("Ask", 0) or 0
+            short_bid = short_quote.get("bid") or 0
+            short_ask = short_quote.get("ask") or 0
+            long_bid = long_quote.get("bid") or 0
+            long_ask = long_quote.get("ask") or 0
 
             if short_bid <= 0 or short_ask <= 0:
                 continue  # Short illiquid, skip
