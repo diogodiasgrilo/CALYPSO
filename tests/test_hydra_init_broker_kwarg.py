@@ -2130,3 +2130,126 @@ class TestGetBrokerPnlForEntry:
         entry.unrealized_pnl = -77.0
         s._read_open_positions = MagicMock(side_effect=RuntimeError("boom"))
         assert s._get_broker_pnl_for_entry(entry) == -77.0
+
+
+class TestReconcileRecoveredEntriesWithBroker:
+    """F4.8 — _reconcile_recovered_entries_with_broker cross-checks
+    state-file-recovered entries against the broker (conid→quantity)."""
+
+    def _make(self, entries):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.daily_state = MagicMock()
+        s.daily_state.active_entries = entries
+        s._handle_position_discrepancies = MagicMock()
+        s._save_state_to_disk = MagicMock()
+        return s
+
+    def test_fetch_failure_skips_gracefully(self):
+        """strict fetch raises → cross-check skipped, no state mutation."""
+        s = self._make([_FakeReconcileEntry(sc=101)])
+        s._read_open_positions = MagicMock(side_effect=RuntimeError("outage"))
+        s._reconcile_recovered_entries_with_broker()
+        s._handle_position_discrepancies.assert_not_called()
+        s._save_state_to_disk.assert_not_called()
+
+    def test_discrepancy_triggers_handler(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._make([entry])
+        # broker missing conid 101 — a vanished short call
+        s._read_open_positions = MagicMock(return_value=[
+            {"instrument_id": 102, "quantity": 1},
+            {"instrument_id": 103, "quantity": -1},
+            {"instrument_id": 104, "quantity": 1},
+        ])
+        s._reconcile_recovered_entries_with_broker()
+        s._handle_position_discrepancies.assert_called_once()
+        s._save_state_to_disk.assert_called_once()
+
+    def test_no_discrepancy_no_handler(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._make([entry])
+        s._read_open_positions = MagicMock(return_value=[
+            {"instrument_id": 101, "quantity": -1},
+            {"instrument_id": 102, "quantity": 1},
+            {"instrument_id": 103, "quantity": -1},
+            {"instrument_id": 104, "quantity": 1},
+        ])
+        s._reconcile_recovered_entries_with_broker()
+        s._handle_position_discrepancies.assert_not_called()
+
+    def test_no_expected_returns_early(self):
+        s = self._make([])  # no entries → nothing expected
+        s._read_open_positions = MagicMock(return_value=[])
+        s._reconcile_recovered_entries_with_broker()
+        s._handle_position_discrepancies.assert_not_called()
+
+
+class TestRecoverPositions:
+    """F4.8 — _recover_positions_from_saxo rewritten state-file-
+    authoritative: the state file reconstructs entries, the broker is
+    the cross-check (live only)."""
+
+    def _make(self, dry_run=True):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.dry_run = dry_run
+        s.BOT_NAME = "HYDRA"
+        s.contracts_per_entry = 1
+        s._next_entry_index = 0
+        s.daily_state = MagicMock()
+        s.daily_state.total_realized_pnl = 0.0
+        s.daily_state.date = None
+        s.alert_service = MagicMock()
+        s._save_state_to_disk = MagicMock()
+        s._reconcile_recovered_entries_with_broker = MagicMock()
+        s._log_safety_event = MagicMock()
+        return s
+
+    def test_no_state_file_starts_fresh(self):
+        s = self._make()
+        s._load_state_file_history = MagicMock(return_value=False)
+        s.daily_state.entries = []
+        assert s._recover_positions_from_saxo() is False
+        s._reconcile_recovered_entries_with_broker.assert_not_called()
+
+    def test_loaded_with_entries_dry_run_skips_broker_check(self):
+        s = self._make(dry_run=True)
+        s._load_state_file_history = MagicMock(return_value=True)
+        entry = _FakeReconcileEntry(sc=101)
+        s.daily_state.entries = [entry]
+        s.daily_state.active_entries = [entry]
+        result = s._recover_positions_from_saxo()
+        assert result is True
+        # dry-run: no broker cross-check, no recovery alert
+        s._reconcile_recovered_entries_with_broker.assert_not_called()
+        s.alert_service.send_alert.assert_not_called()
+
+    def test_loaded_live_runs_broker_check_and_alerts(self):
+        s = self._make(dry_run=False)
+        s._load_state_file_history = MagicMock(return_value=True)
+        entry = _FakeReconcileEntry(sc=101)
+        s.daily_state.entries = [entry]
+        s.daily_state.active_entries = [entry]
+        s._recover_positions_from_saxo()
+        s._reconcile_recovered_entries_with_broker.assert_called_once()
+        s.alert_service.send_alert.assert_called_once()
+
+    def test_loaded_but_no_entries_returns_false(self):
+        s = self._make()
+        s._load_state_file_history = MagicMock(return_value=True)
+        s.daily_state.entries = []
+        assert s._recover_positions_from_saxo() is False
+
+    def test_exception_returns_false(self):
+        s = self._make()
+        s._load_state_file_history = MagicMock(side_effect=RuntimeError("boom"))
+        s.daily_state.entries = []
+        assert s._recover_positions_from_saxo() is False
+
+    def test_date_set_on_daily_state(self):
+        s = self._make()
+        s._load_state_file_history = MagicMock(return_value=False)
+        s.daily_state.entries = []
+        s._recover_positions_from_saxo()
+        assert s.daily_state.date is not None

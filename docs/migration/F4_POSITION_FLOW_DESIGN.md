@@ -150,6 +150,41 @@ needs no Position Registry — which is vestigial in a single-bot world
 and slated for deletion in the dead-code phase. The registry-coupled
 `unexpected` half of the old POS-003 is dropped.
 
+### 4b. `_recover_positions_from_saxo`: state-file-authoritative (F4.8)
+
+The old live recovery (`not dry_run`) rebuilt entries by querying the
+broker, mapping positions→entries through the Position Registry, and
+*guessing* each entry's structure from whatever legs were live
+(`_reconstruct_entry_from_positions`). That guess is the documented
+root cause of the Fix #65 / #67 recovery-bug history.
+
+**Decision**: recovery must be 100% live-ready (a `dry_run`→live flag
+flip must yield a correct bot — "dead in dry-run" ≠ "delete it"). But
+the fix is the *correct* design, not a faithful port of the flawed
+one. HYDRA's own **state file is the authoritative entry source** — it
+already carries every field (strikes, credits, stop levels, status
+flags, instrument ids, contracts, fill prices) and
+`_load_state_file_history` already rebuilds full entries from it. The
+broker is the **reconciliation cross-check**, not the source of truth.
+
+New `_recover_positions_from_saxo` (name kept only so the inherited
+MEIC `__init__` dispatches to the override):
+
+1. `_load_state_file_history()` — authoritative reconstruction of
+   today's entries + P&L + counters (dry-run and live alike).
+2. live only — `_reconcile_recovered_entries_with_broker()`: the F4.4
+   conid→quantity cross-check (`_expected/_actual_position_quantities`
+   + `_handle_position_discrepancies`). A leg the broker no longer
+   shows open is marked closed. `_read_open_positions(strict=True)` so
+   a fetch failure can't masquerade as "everything closed" and wipe
+   live legs.
+3. no Position Registry, no `_group_positions_by_entry`, no
+   `_reconstruct_entry_from_positions` guessing.
+
+~680 lines collapse to ~130. `_recover_from_state_file_uics`,
+`_group_positions_by_entry`, and HYDRA's `_reconstruct_entry_from_positions`
+override become dead — removed in the dead-code phase.
+
 ## 5. `_batch_update_entry_prices` monitoring quotes (deferred from F3)
 
 Two `get_quotes_batch` calls (dry-run path + live path) refresh per-leg
@@ -200,8 +235,21 @@ further once its internals are mapped in detail.
 - POS-003 native conid→quantity reconciliation: F4.4 ✅ committed (bb934f5)
 - FIX #82 overnight check + `strict` param: F4.5 ✅ committed (e5e07a8)
 - POS-004 settlement check: F4.6 ✅ committed (012f057)
-- P&L sites: F4.7 ✅ committed
-- recovery / monitoring: F4.8-F4.9 (pending)
+- P&L sites: F4.7 ✅ committed (1e82533)
+- `_recover_positions_from_saxo` state-file rewrite: F4.8 ✅ committed
+- `_batch_update_entry_prices` monitoring quotes: F4.9 (pending)
+
+### F4.8 — recovery rewritten state-file-authoritative
+
+See §4b. `_recover_positions_from_saxo` rewritten: state file is the
+authoritative entry source (`_load_state_file_history`), broker is the
+conid→quantity cross-check (`_reconcile_recovered_entries_with_broker`,
+live only). ~680 lines → ~130. No registry, no position-structure
+guessing. 14 tests (`TestRecoverPositions` +
+`TestReconcileRecoveredEntriesWithBroker`); 2 obsolete Brandon
+integration tests rewritten to the new contract. `_recover_from_state_file_uics`
+/ `_group_positions_by_entry` / `_reconstruct_entry_from_positions`
+left dead for the dead-code phase.
 
 ### F4.7 — P&L sites
 

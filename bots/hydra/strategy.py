@@ -11249,678 +11249,127 @@ class HydraStrategy(MEICStrategy):
             logger.warning(f"Could not load state file history: {e}")
             return False
 
-    def _recover_positions_from_saxo(self) -> bool:
-        """
-        Override to use HYDRA bot name in registry queries and logging.
+    def _reconcile_recovered_entries_with_broker(self) -> None:
+        """F4.8 — cross-check state-file-recovered entries against the broker.
 
-        This is the main recovery method that queries Saxo API for positions
-        and uses the Position Registry to identify which belong to HYDRA.
+        After :meth:`_load_state_file_history` reconstructs today's
+        entries, this verifies each still-tracked leg against the
+        broker's actual open positions using the F4.4 conid→quantity
+        machinery. Any leg the broker no longer shows open settled / was
+        closed while the bot was down — :meth:`_handle_position_discrepancies`
+        clears it and marks a vanished short side stopped.
+
+        Uses ``_read_open_positions(strict=True)``: a fetch failure must
+        NOT look like "everything closed" (that would wrongly wipe live
+        legs), so on failure the cross-check is skipped and the
+        state-file entries stand as-is.
+        """
+        try:
+            open_positions = self._read_open_positions(strict=True)
+        except Exception as e:
+            logger.warning(
+                f"POSITION RECOVERY: broker cross-check skipped — position "
+                f"fetch failed ({type(e).__name__}: {e}). Entries restored "
+                f"from the state file as-is."
+            )
+            return
+
+        expected = self._expected_position_quantities()
+        if not expected:
+            return
+        actual = self._actual_position_quantities(open_positions)
+        discrepant = {
+            conid: (exp_qty, actual.get(conid, 0))
+            for conid, exp_qty in expected.items()
+            if actual.get(conid, 0) != exp_qty
+        }
+        if discrepant:
+            logger.warning(
+                f"POSITION RECOVERY: {len(discrepant)} conid(s) differ from "
+                f"the broker — reconciling tracked legs"
+            )
+            self._handle_position_discrepancies(discrepant)
+            self._save_state_to_disk()
+
+    def _recover_positions_from_saxo(self) -> bool:
+        """Recover today's trading session after a bot restart.
+
+        F4.8 — rewritten state-file-authoritative. HYDRA's own state
+        file is the authoritative reconstruction of today's entries: it
+        carries every field (strikes, credits, stop levels, status
+        flags, instrument ids, contract counts, fill prices).
+        :meth:`_load_state_file_history` rebuilds them directly. The
+        broker is then the *reconciliation cross-check* — any leg the
+        broker no longer shows open is marked closed.
+
+        This replaces the former Saxo design that rebuilt entries by
+        guessing their structure from whatever legs were live (the root
+        cause of the Fix #65 / #67 recovery-bug history) and depended on
+        the Position Registry. The method keeps its ``_from_saxo`` name
+        only so the inherited MEIC ``__init__`` dispatches to this
+        override; it no longer talks to Saxo. See
+        ``docs/migration/F4_POSITION_FLOW_DESIGN.md`` §4b.
 
         Returns:
-            bool: True if positions were recovered, False if starting fresh
+            True if at least one still-active entry was recovered,
+            False if there is nothing to recover (a fresh session).
         """
-        # Path-B dry-run skip (2026-04-27): no real Saxo positions exist in dry
-        # mode (DRY_* IDs only). The original comment claimed the dry session
-        # "continues from disk" — that was wrong. Returning False here without
-        # calling `_load_state_file_history()` left `daily_state.entries` empty
-        # in memory; the next state-save then clobbered today's entries on
-        # disk. Live demonstration: 2026-05-05 11:31 ET restart wiped variant A's
-        # 10:45 IC and variant C's 11:16 put-only entry from the journal even
-        # though both were on disk pre-shutdown. Fix: explicitly load today's
-        # state from disk in dry-run mode so a mid-day restart preserves the
-        # session.
-        if self.dry_run:
-            logger.info("Path-B: dry-run — loading HYDRA state from disk (no Saxo recovery in dry mode)")
-            self._load_state_file_history()
-            return False
-
         logger.info("=" * 60)
-        logger.info("POSITION RECOVERY: Querying Saxo API for source of truth...")
+        logger.info("POSITION RECOVERY: reconstructing today's session from the state file...")
         logger.info("=" * 60)
 
         today = get_us_market_time().strftime("%Y-%m-%d")
 
         try:
-            # Step 1: Get ALL positions from Saxo
-            all_positions = self.client.get_positions()
-            if not all_positions:
-                logger.info("No positions found in Saxo account")
-                # FIX #41: Still load historical data from state file
-                self._load_state_file_history()
-                self.daily_state.date = today
-                return False
-
-            logger.info(f"Found {len(all_positions)} total positions in account")
-
-            # Step 2: Get valid position IDs and clean up registry orphans
-            valid_ids = {str(p.get("PositionId")) for p in all_positions}
-            if not self.dry_run:
-                try:
-                    orphans = self.registry.cleanup_orphans(valid_ids)
-                    if orphans:
-                        logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
-                        self._log_safety_event("ORPHAN_CLEANUP", f"Removed {len(orphans)} orphaned positions from registry")
-                except Exception as e:
-                    logger.error(f"Registry error during orphan cleanup: {e}")
-            else:
-                logger.debug("Skipping orphan cleanup in dry-run mode")
-
-            # Step 3: Get HYDRA positions from registry (using class constant)
-            my_position_ids = self.registry.get_positions(self.BOT_NAME)
-            if not my_position_ids:
-                logger.info(f"No {self.BOT_NAME} positions in registry")
-                # FIX #41: Still load historical data from state file
-                self._load_state_file_history()
-                self.daily_state.date = today
-                return False
-
-            logger.info(f"Found {len(my_position_ids)} {self.BOT_NAME} positions in registry")
-
-            # Step 4: Filter Saxo positions to just HYDRA positions
-            hydra_positions = []
-            for pos in all_positions:
-                pos_id = str(pos.get("PositionId"))
-                if pos_id in my_position_ids:
-                    hydra_positions.append(pos)
-
-            if not hydra_positions:
-                logger.warning(f"Registry says we have {self.BOT_NAME} positions but none found in Saxo! Cleaning registry...")
-                for pos_id in my_position_ids:
-                    try:
-                        self.registry.unregister(pos_id)
-                    except Exception as e:
-                        logger.error(f"Registry error unregistering {pos_id}: {e}")
-                self._log_safety_event("REGISTRY_CLEARED", f"All {self.BOT_NAME} positions removed - not found in Saxo")
-                # FIX #41: Still load historical data from state file
-                self._load_state_file_history()
-                self.daily_state.date = today
-                return False
-
-            logger.info(f"Matched {len(hydra_positions)} positions to {self.BOT_NAME} in Saxo")
-
-            # Step 5: Group positions by entry number using registry metadata
-            entries_by_number = self._group_positions_by_entry(hydra_positions, my_position_ids)
-
-            if not entries_by_number:
-                logger.warning("Could not group positions into entries via registry - trying UIC fallback...")
-                entries_by_number = self._recover_from_state_file_uics(all_positions)
-                if not entries_by_number:
-                    logger.warning("UIC-based recovery also failed - manual review needed")
-                    self._log_safety_event("RECOVERY_FAILED", "Could not reconstruct entries from positions or UICs", "Manual Review Needed")
-                    self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
-                    return False
-                else:
-                    logger.info(f"UIC-based recovery succeeded: found {len(entries_by_number)} entries")
-
-            # Step 6: Reconstruct IronCondorEntry objects
-            recovered_entries = []
-            for entry_num, positions in entries_by_number.items():
-                entry = self._reconstruct_entry_from_positions(entry_num, positions)
-                if entry:
-                    recovered_entries.append(entry)
-                    logger.info(
-                        f"  Entry #{entry_num}: "
-                        f"SC={entry.short_call_strike} LC={entry.long_call_strike} "
-                        f"SP={entry.short_put_strike} LP={entry.long_put_strike}"
-                    )
-
-            if not recovered_entries:
-                logger.warning("Failed to reconstruct any entries from Saxo positions")
-                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
-                return False
-
-            # Step 7: Update local state to match Saxo
-            today = get_us_market_time().strftime("%Y-%m-%d")
-
-            # Load existing state file to preserve realized P&L
-            preserved_realized_pnl = 0.0
-            preserved_put_stops = 0
-            preserved_call_stops = 0
-            preserved_double_stops = 0
-            preserved_total_commission = 0.0
-            # Fix #65: Preserve additional counters from state file
-            preserved_total_credit_received = 0.0
-            preserved_entries_completed = 0
-            preserved_entries_failed = 0
-            preserved_entries_skipped = 0
-            preserved_one_sided_entries = 0
-            preserved_trend_overrides = 0
-            preserved_credit_gate_skips = 0
-            preserved_stops_avoided_mkt036 = 0
-            preserved_entry_credits = {}
-            preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
-            preserved_market_ohlc = {}
-            preserved_pnl_history = []  # Dashboard P&L curve
-            preserved_early_close_triggered = False  # MKT-018
-            preserved_early_close_time = None  # MKT-018
-            preserved_early_close_pnl = None  # MKT-018
-            preserved_roc_gate_triggered = False  # MKT-021
-            preserved_vix_gate_resolved = False  # MKT-034
-            preserved_vix_gate_start_slot = 0  # MKT-034
-            preserved_next_entry_index = 0
-            try:
-                if os.path.exists(self.state_file):
-                    with open(self.state_file, "r") as f:
-                        saved_state = json.load(f)
-                        if saved_state.get("date") == today:
-                            preserved_realized_pnl = saved_state.get("total_realized_pnl", 0.0)
-                            preserved_put_stops = saved_state.get("put_stops_triggered", 0)
-                            preserved_call_stops = saved_state.get("call_stops_triggered", 0)
-                            preserved_double_stops = saved_state.get("double_stops", 0)
-                            preserved_total_commission = saved_state.get("total_commission", 0.0)
-                            # Fix #65: Also preserve total_credit_received and other counters
-                            preserved_total_credit_received = saved_state.get("total_credit_received", 0.0)
-                            preserved_entries_completed = saved_state.get("entries_completed", 0)
-                            preserved_entries_failed = saved_state.get("entries_failed", 0)
-                            preserved_entries_skipped = saved_state.get("entries_skipped", 0)
-                            preserved_one_sided_entries = saved_state.get("one_sided_entries", 0)
-                            preserved_trend_overrides = saved_state.get("trend_overrides", 0)
-                            preserved_credit_gate_skips = saved_state.get("credit_gate_skips", 0)
-                            preserved_stops_avoided_mkt036 = saved_state.get("stops_avoided_mkt036", 0)
-                            preserved_market_ohlc = saved_state.get("market_data_ohlc", {})
-                            preserved_pnl_history = saved_state.get("pnl_history", [])
-                            # MKT-018: Preserve early close state
-                            preserved_early_close_triggered = saved_state.get("early_close_triggered", False)
-                            ec_time_str = saved_state.get("early_close_time")
-                            if ec_time_str:
-                                try:
-                                    from datetime import datetime as dt_cls
-                                    preserved_early_close_time = dt_cls.fromisoformat(ec_time_str)
-                                except (ValueError, TypeError):
-                                    pass
-                            preserved_early_close_pnl = saved_state.get("early_close_pnl")
-                            # MKT-021: Preserve ROC gate state
-                            preserved_roc_gate_triggered = saved_state.get("roc_gate_triggered", False)
-                            # MKT-034: Preserve VIX gate state
-                            preserved_vix_gate_resolved = saved_state.get("vix_gate_resolved", False)
-                            preserved_vix_gate_start_slot = saved_state.get("vix_gate_start_slot", 0)
-                            preserved_next_entry_index = saved_state.get("next_entry_index", 0)
-                            for entry_data in saved_state.get("entries", []):
-                                entry_num = entry_data.get("entry_number")
-                                if entry_num:
-                                    preserved_entry_credits[entry_num] = {
-                                        "call_credit": entry_data.get("call_spread_credit", 0),
-                                        "put_credit": entry_data.get("put_spread_credit", 0),
-                                        "call_stop": entry_data.get("call_side_stop", 0),
-                                        "put_stop": entry_data.get("put_side_stop", 0),
-                                        "short_call_strike": entry_data.get("short_call_strike", 0),
-                                        "long_call_strike": entry_data.get("long_call_strike", 0),
-                                        "short_put_strike": entry_data.get("short_put_strike", 0),
-                                        "long_put_strike": entry_data.get("long_put_strike", 0),
-                                        "call_side_stopped": entry_data.get("call_side_stopped", False),
-                                        "put_side_stopped": entry_data.get("put_side_stopped", False),
-                                        "call_side_expired": entry_data.get("call_side_expired", False),
-                                        "put_side_expired": entry_data.get("put_side_expired", False),
-                                        "call_side_skipped": entry_data.get("call_side_skipped", False),
-                                        "put_side_skipped": entry_data.get("put_side_skipped", False),
-                                        "open_commission": entry_data.get("open_commission", 0),
-                                        "close_commission": entry_data.get("close_commission", 0),
-                                        # HYDRA specific fields (Fix #40)
-                                        "call_only": entry_data.get("call_only", False),
-                                        "put_only": entry_data.get("put_only", False),
-                                        "trend_signal": entry_data.get("trend_signal"),
-                                        # Fix #49: Preserve override_reason for correct logging
-                                        "override_reason": entry_data.get("override_reason"),
-                                        # Fix #67: Preserve UICs for merged position recovery
-                                        "long_call_uic": entry_data.get("long_call_uic"),
-                                        "long_put_uic": entry_data.get("long_put_uic"),
-                                        "short_call_uic": entry_data.get("short_call_uic"),
-                                        "short_put_uic": entry_data.get("short_put_uic"),
-                                        # MKT-018: Early close marker
-                                        "early_closed": entry_data.get("early_closed", False),
-                                        # Entry time and fill prices (for /entry display)
-                                        "entry_time": entry_data.get("entry_time"),
-                                        "short_call_fill_price": entry_data.get("short_call_fill_price", 0),
-                                        "long_call_fill_price": entry_data.get("long_call_fill_price", 0),
-                                        "short_put_fill_price": entry_data.get("short_put_fill_price", 0),
-                                        "long_put_fill_price": entry_data.get("long_put_fill_price", 0),
-                                        # MKT-033: Long salvage flags
-                                        "call_long_sold": entry_data.get("call_long_sold", False),
-                                        "put_long_sold": entry_data.get("put_long_sold", False),
-                                        "call_long_sold_revenue": entry_data.get("call_long_sold_revenue", 0.0),
-                                        "put_long_sold_revenue": entry_data.get("put_long_sold_revenue", 0.0),
-                                        # Actual stop debit (for dashboard per-entry P&L accuracy)
-                                        "actual_call_stop_debit": entry_data.get("actual_call_stop_debit", 0.0),
-                                        "actual_put_stop_debit": entry_data.get("actual_put_stop_debit", 0.0),
-                                        # MKT-036: Breach counts (NOT breach_time — reset on restart)
-                                        "call_breach_count": entry_data.get("call_breach_count", 0),
-                                        "put_breach_count": entry_data.get("put_breach_count", 0),
-                                        # MKT-041: Cushion recovery danger flags
-                                        "call_hit_danger": entry_data.get("call_hit_danger", False),
-                                        "put_hit_danger": entry_data.get("put_hit_danger", False),
-                                        # Stop timestamps (for dashboard stop markers)
-                                        "call_stop_time": entry_data.get("call_stop_time", ""),
-                                        "put_stop_time": entry_data.get("put_stop_time", ""),
-                                        # v8: preserve the contract count this entry was OPENED at.
-                                        # Critical when config flips mid-day (1c→2c): stops, spread
-                                        # values, P&L, commissions must stay at the original contract
-                                        # count for entries already in the market.
-                                        # v8 null-safe: `or` instead of default arg so JSON null or 0 also
-                                        # falls back to current config (both are invalid for live entries).
-                                        "contracts": entry_data.get("contracts") or self.contracts_per_entry,
-                                    }
-                                    # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
-                                    # A side is "done" if it was stopped OR expired OR skipped
-                                    call_stopped = entry_data.get("call_side_stopped", False)
-                                    put_stopped = entry_data.get("put_side_stopped", False)
-                                    call_expired = entry_data.get("call_side_expired", False)
-                                    put_expired = entry_data.get("put_side_expired", False)
-                                    call_skipped = entry_data.get("call_side_skipped", False)
-                                    put_skipped = entry_data.get("put_side_skipped", False)
-                                    call_only = entry_data.get("call_only", False)
-                                    put_only = entry_data.get("put_only", False)
-
-                                    call_done = call_stopped or call_expired or call_skipped
-                                    put_done = put_stopped or put_expired or put_skipped
-
-                                    is_fully_done = False
-                                    if call_only and call_done:
-                                        is_fully_done = True
-                                    elif put_only and put_done:
-                                        is_fully_done = True
-                                    elif not call_only and not put_only and call_done and put_done:
-                                        is_fully_done = True
-
-                                    if is_fully_done:
-                                        preserved_stopped_entries.append(entry_data)
-
-                            logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
-                                       f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}, "
-                                       f"stopped_entries={len(preserved_stopped_entries)}")
-            except Exception as e:
-                logger.warning(f"Could not load state file for preservation: {e}")
-
-            # Apply preserved credits, stop levels, and strikes to recovered entries
-            for entry in recovered_entries:
-                if entry.entry_number in preserved_entry_credits:
-                    saved = preserved_entry_credits[entry.entry_number]
-                    # v8: restore original contract count BEFORE restoring stop levels.
-                    # _reconstruct_entry_from_positions set entry.contracts to current
-                    # config; that's wrong if config flipped while this entry was open.
-                    # saved["contracts"] is the count at the time the entry was placed —
-                    # use it so spread_value / stop_level / commission all stay consistent.
-                    # v8 null-safe: `or` falls back on None (JSON null), 0, and missing alike.
-                    # Bug E-6 scenario: state file with "contracts": null from a crash mid-write
-                    # would otherwise set entry.contracts = None → TypeError in all downstream math.
-                    entry.contracts = saved.get("contracts") or entry.contracts
-                    entry.call_spread_credit = saved["call_credit"]
-                    entry.put_spread_credit = saved["put_credit"]
-                    entry.call_side_stop = saved["call_stop"]
-                    entry.put_side_stop = saved["put_stop"]
-
-                    # Fix #65: Restore ALL status flags from state file (authoritative source)
-                    # The reconstruction code guesses entry types from positions, but the state
-                    # file knows the actual history (e.g., full IC with stopped put vs call-only entry)
-                    entry.call_side_stopped = saved.get("call_side_stopped", False)
-                    entry.put_side_stopped = saved.get("put_side_stopped", False)
-                    entry.call_side_expired = saved.get("call_side_expired", False)
-                    entry.put_side_expired = saved.get("put_side_expired", False)
-                    entry.call_side_skipped = saved.get("call_side_skipped", False)
-                    entry.put_side_skipped = saved.get("put_side_skipped", False)
-                    # Directional-pivot close flags (directional_pivot, introduced 2026-05-01)
-                    entry.call_side_pivot_closed = saved.get("call_side_pivot_closed", False)
-                    entry.put_side_pivot_closed = saved.get("put_side_pivot_closed", False)
-
-                    entry.open_commission = saved.get("open_commission", 0)
-                    entry.close_commission = saved.get("close_commission", 0)
-
-                    # Fix #65: Always restore entry type from state file (authoritative source)
-                    # Without this, a full IC with a stopped put side gets misclassified as
-                    # call_only by _reconstruct_entry_from_positions() (it only sees call positions)
-                    entry.call_only = saved.get("call_only", False)
-                    entry.put_only = saved.get("put_only", False)
-                    if entry.call_only:
-                        logger.info(f"Entry #{entry.entry_number}: Restored as CALL-ONLY from state file")
-                    elif entry.put_only:
-                        logger.info(f"Entry #{entry.entry_number}: Restored as PUT-ONLY from state file")
-                    else:
-                        logger.info(f"Entry #{entry.entry_number}: Restored as FULL IC from state file")
-
-                    # Restore trend signal and override reason if saved
-                    if saved.get("trend_signal"):
-                        try:
-                            entry.trend_signal = TrendSignal(saved["trend_signal"])
-                        except ValueError:
-                            pass  # Invalid trend signal value, ignore
-                    # Fix #65: Restore override_reason for correct logging (was missing)
-                    entry.override_reason = saved.get("override_reason", None)
-                    # MKT-018: Restore early_closed marker
-                    entry.early_closed = saved.get("early_closed", False)
-                    # MKT-033: Restore long salvage flags
-                    entry.call_long_sold = saved.get("call_long_sold", False)
-                    entry.put_long_sold = saved.get("put_long_sold", False)
-                    entry.call_long_sold_revenue = saved.get("call_long_sold_revenue", 0.0)
-                    entry.put_long_sold_revenue = saved.get("put_long_sold_revenue", 0.0)
-                    # Actual stop debit (for dashboard per-entry P&L accuracy)
-                    entry.actual_call_stop_debit = saved.get("actual_call_stop_debit", 0.0)
-                    entry.actual_put_stop_debit = saved.get("actual_put_stop_debit", 0.0)
-                    # Restore stop timestamps (for dashboard stop markers)
-                    entry.call_stop_time = saved.get("call_stop_time", "")
-                    entry.put_stop_time = saved.get("put_stop_time", "")
-                    # MKT-041: Restore cushion recovery danger flags
-                    entry.call_hit_danger = saved.get("call_hit_danger", False)
-                    entry.put_hit_danger = saved.get("put_hit_danger", False)
-
-                    # Restore entry_time and fill prices (for /entry display)
-                    entry_time_str = saved.get("entry_time")
-                    if entry_time_str and not entry.entry_time:
-                        if isinstance(entry_time_str, str):
-                            try:
-                                entry.entry_time = datetime.fromisoformat(entry_time_str)
-                            except ValueError:
-                                pass
-                        else:
-                            entry.entry_time = entry_time_str
-                    if saved.get("short_call_fill_price", 0) > 0 and entry.short_call_fill_price == 0:
-                        entry.short_call_fill_price = saved["short_call_fill_price"]
-                    if saved.get("long_call_fill_price", 0) > 0 and entry.long_call_fill_price == 0:
-                        entry.long_call_fill_price = saved["long_call_fill_price"]
-                    if saved.get("short_put_fill_price", 0) > 0 and entry.short_put_fill_price == 0:
-                        entry.short_put_fill_price = saved["short_put_fill_price"]
-                    if saved.get("long_put_fill_price", 0) > 0 and entry.long_put_fill_price == 0:
-                        entry.long_put_fill_price = saved["long_put_fill_price"]
-
-                    if entry.call_side_stopped and entry.short_call_strike == 0:
-                        entry.short_call_strike = saved.get("short_call_strike", 0)
-                        entry.long_call_strike = saved.get("long_call_strike", 0)
-                        logger.info(f"Entry #{entry.entry_number}: Restored stopped call strikes "
-                                   f"(short={entry.short_call_strike}, long={entry.long_call_strike})")
-                    if entry.put_side_stopped and entry.short_put_strike == 0:
-                        entry.short_put_strike = saved.get("short_put_strike", 0)
-                        entry.long_put_strike = saved.get("long_put_strike", 0)
-                        logger.info(f"Entry #{entry.entry_number}: Restored stopped put strikes "
-                                   f"(short={entry.short_put_strike}, long={entry.long_put_strike})")
-
-                    # Fix #67: Restore missing strikes/UICs for active sides.
-                    # When Saxo merges long positions at the same strike (MKT-015 scenario),
-                    # recovery can't find the older entry's long leg. The state file has
-                    # the correct values from before the merge.
-                    if not entry.call_side_stopped and entry.long_call_strike == 0:
-                        saved_lc_strike = saved.get("long_call_strike", 0)
-                        saved_lc_uic = saved.get("long_call_uic")
-                        if saved_lc_strike:
-                            entry.long_call_strike = saved_lc_strike
-                            if saved_lc_uic:
-                                entry.long_call_uic = saved_lc_uic
-                            logger.warning(
-                                f"Entry #{entry.entry_number}: Restored missing long call from state file "
-                                f"(strike={saved_lc_strike}, uic={saved_lc_uic}) - likely merged position"
-                            )
-                    # Only restore missing long put for entries where the put side was actually active.
-                    # Skip call-only entries (put_side_skipped=True): the state file may have a
-                    # stale long_put_strike from before the entry type was finalized, and restoring
-                    # it would trigger a spurious "Restored missing long put" warning.
-                    if not entry.put_side_stopped and not entry.put_side_skipped and entry.long_put_strike == 0:
-                        saved_lp_strike = saved.get("long_put_strike", 0)
-                        saved_lp_uic = saved.get("long_put_uic")
-                        if saved_lp_strike:
-                            entry.long_put_strike = saved_lp_strike
-                            if saved_lp_uic:
-                                entry.long_put_uic = saved_lp_uic
-                            logger.warning(
-                                f"Entry #{entry.entry_number}: Restored missing long put from state file "
-                                f"(strike={saved_lp_strike}, uic={saved_lp_uic}) - likely merged position"
-                            )
-
-                    logger.info(f"Entry #{entry.entry_number}: Restored credits from state file "
-                               f"(call=${saved['call_credit']:.2f}, put=${saved['put_credit']:.2f}, "
-                               f"stop=${saved['call_stop']:.2f})")
-
-            # FIX #43 (2026-02-05): Reconstruct fully stopped entries that have no live positions
-            recovered_entry_nums = {e.entry_number for e in recovered_entries}
-            for stopped_entry_data in preserved_stopped_entries:
-                entry_num = stopped_entry_data.get("entry_number")
-                if entry_num and entry_num not in recovered_entry_nums:
-                    # Reconstruct HydraIronCondorEntry from saved state data
-                    stopped_entry = HydraIronCondorEntry(entry_number=entry_num)
-                    entry_time_str = stopped_entry_data.get("entry_time")
-                    if entry_time_str and isinstance(entry_time_str, str):
-                        try:
-                            stopped_entry.entry_time = datetime.fromisoformat(entry_time_str)
-                        except ValueError:
-                            stopped_entry.entry_time = None
-                    else:
-                        stopped_entry.entry_time = entry_time_str
-                    stopped_entry.strategy_id = stopped_entry_data.get("strategy_id", f"hydra_{today.replace('-', '')}_{entry_num:03d}")
-
-                    # Strikes
-                    stopped_entry.short_call_strike = stopped_entry_data.get("short_call_strike", 0)
-                    stopped_entry.long_call_strike = stopped_entry_data.get("long_call_strike", 0)
-                    stopped_entry.short_put_strike = stopped_entry_data.get("short_put_strike", 0)
-                    stopped_entry.long_put_strike = stopped_entry_data.get("long_put_strike", 0)
-
-                    # Credits and stops
-                    stopped_entry.call_spread_credit = stopped_entry_data.get("call_spread_credit", 0)
-                    stopped_entry.put_spread_credit = stopped_entry_data.get("put_spread_credit", 0)
-                    stopped_entry.call_side_stop = stopped_entry_data.get("call_side_stop", 0)
-                    stopped_entry.put_side_stop = stopped_entry_data.get("put_side_stop", 0)
-
-                    # Stopped/expired/skipped flags - entry is fully done (FIX #47)
-                    stopped_entry.call_side_stopped = stopped_entry_data.get("call_side_stopped", False)
-                    stopped_entry.put_side_stopped = stopped_entry_data.get("put_side_stopped", False)
-                    stopped_entry.call_side_expired = stopped_entry_data.get("call_side_expired", False)
-                    stopped_entry.put_side_expired = stopped_entry_data.get("put_side_expired", False)
-                    stopped_entry.call_side_skipped = stopped_entry_data.get("call_side_skipped", False)
-                    stopped_entry.put_side_skipped = stopped_entry_data.get("put_side_skipped", False)
-                    # Fix #61: Restore merge flags
-                    stopped_entry.call_side_merged = stopped_entry_data.get("call_side_merged", False)
-                    stopped_entry.put_side_merged = stopped_entry_data.get("put_side_merged", False)
-                    stopped_entry.is_complete = True
-
-                    # Commission
-                    stopped_entry.open_commission = stopped_entry_data.get("open_commission", 0)
-                    stopped_entry.close_commission = stopped_entry_data.get("close_commission", 0)
-
-                    # HYDRA specific: One-sided entry flags
-                    stopped_entry.call_only = stopped_entry_data.get("call_only", False)
-                    stopped_entry.put_only = stopped_entry_data.get("put_only", False)
-                    # Fix #52: Restore contract count (default to current config if not saved)
-                    # v8 null-safe (see E-6): `or` handles None/0/missing uniformly
-                    stopped_entry.contracts = stopped_entry_data.get("contracts") or self.contracts_per_entry
-                    if stopped_entry_data.get("trend_signal"):
-                        try:
-                            stopped_entry.trend_signal = TrendSignal(stopped_entry_data["trend_signal"])
-                        except ValueError:
-                            pass
-
-                    # Fix #49: Restore override_reason for correct logging
-                    stopped_entry.override_reason = stopped_entry_data.get("override_reason", None)
-                    # Fix #59: Restore EMA values for Trades tab logging
-                    stopped_entry.ema_20_at_entry = stopped_entry_data.get("ema_20_at_entry", None)
-                    stopped_entry.ema_40_at_entry = stopped_entry_data.get("ema_40_at_entry", None)
-                    # MKT-018: Restore early_closed marker
-                    stopped_entry.early_closed = stopped_entry_data.get("early_closed", False)
-                    # MKT-033: Long salvage flags (PRE-EXISTING BUG FIX — missing from this path)
-                    stopped_entry.call_long_sold = stopped_entry_data.get("call_long_sold", False)
-                    stopped_entry.put_long_sold = stopped_entry_data.get("put_long_sold", False)
-                    stopped_entry.call_long_sold_revenue = stopped_entry_data.get("call_long_sold_revenue", 0.0)
-                    stopped_entry.put_long_sold_revenue = stopped_entry_data.get("put_long_sold_revenue", 0.0)
-                    # MKT-036: Restore breach counts (NOT breach_time — conservative reset on restart)
-                    stopped_entry.call_breach_count = stopped_entry_data.get("call_breach_count", 0)
-                    stopped_entry.put_breach_count = stopped_entry_data.get("put_breach_count", 0)
-                    # MKT-041: Restore cushion recovery danger flags
-                    stopped_entry.call_hit_danger = stopped_entry_data.get("call_hit_danger", False)
-                    stopped_entry.put_hit_danger = stopped_entry_data.get("put_hit_danger", False)
-                    # Fill prices (for /entry display after restart)
-                    stopped_entry.short_call_fill_price = stopped_entry_data.get("short_call_fill_price", 0)
-                    stopped_entry.long_call_fill_price = stopped_entry_data.get("long_call_fill_price", 0)
-                    stopped_entry.short_put_fill_price = stopped_entry_data.get("short_put_fill_price", 0)
-                    stopped_entry.long_put_fill_price = stopped_entry_data.get("long_put_fill_price", 0)
-                    # Actual stop debit (for dashboard per-entry P&L accuracy)
-                    stopped_entry.actual_call_stop_debit = stopped_entry_data.get("actual_call_stop_debit", 0.0)
-                    stopped_entry.actual_put_stop_debit = stopped_entry_data.get("actual_put_stop_debit", 0.0)
-                    # Stop timestamps (for dashboard stop markers)
-                    stopped_entry.call_stop_time = stopped_entry_data.get("call_stop_time", "")
-                    stopped_entry.put_stop_time = stopped_entry_data.get("put_stop_time", "")
-
-                    # Position IDs are None (positions closed)
-                    stopped_entry.short_call_position_id = None
-                    stopped_entry.long_call_position_id = None
-                    stopped_entry.short_put_position_id = None
-                    stopped_entry.long_put_position_id = None
-
-                    recovered_entries.append(stopped_entry)
-
-                    one_sided_info = ""
-                    if stopped_entry.call_only:
-                        one_sided_info = ", call_only=True"
-                    elif stopped_entry.put_only:
-                        one_sided_info = ", put_only=True"
-                    logger.info(f"FIX #43: Restored fully stopped Entry #{entry_num} from state file "
-                               f"(credit=${stopped_entry.total_credit:.2f}{one_sided_info})")
-
-            # Sort recovered entries by entry number
-            recovered_entries.sort(key=lambda e: e.entry_number)
-
-            # Reset daily state but preserve date
-            self.daily_state = MEICDailyState()
+            # Step 1 — authoritative entry reconstruction from the state
+            # file. _load_state_file_history restores entries, realized
+            # P&L, commission, counters, OHLC and pivot state, and only
+            # accepts a file dated today.
+            loaded = self._load_state_file_history()
             self.daily_state.date = today
-            self.daily_state.entries = recovered_entries
-            self.daily_state.entries_completed = len(recovered_entries)
 
-            # Restore preserved P&L, stop counters, and other state from state file
-            self.daily_state.total_realized_pnl = preserved_realized_pnl
-            self.daily_state.put_stops_triggered = preserved_put_stops
-            self.daily_state.call_stops_triggered = preserved_call_stops
-            self.daily_state.double_stops = preserved_double_stops
-            self.daily_state.total_commission = preserved_total_commission
-            # Fix #65: Restore additional counters that were previously lost on recovery
-            self.daily_state.entries_failed = preserved_entries_failed
-            self.daily_state.entries_skipped = preserved_entries_skipped
-            self.daily_state.one_sided_entries = preserved_one_sided_entries
-            self.daily_state.trend_overrides = preserved_trend_overrides
-            self.daily_state.credit_gate_skips = preserved_credit_gate_skips
-            self.daily_state.stops_avoided_mkt036 = preserved_stops_avoided_mkt036
+            if not loaded or not self.daily_state.entries:
+                logger.info("POSITION RECOVERY: no prior session for today — starting fresh")
+                return False
 
-            # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
-            if preserved_market_ohlc:
-                self.market_data.spx_open = preserved_market_ohlc.get("spx_open", 0.0)
-                self.market_data.spx_high = preserved_market_ohlc.get("spx_high", 0.0)
-                spx_low = preserved_market_ohlc.get("spx_low", 0.0)
-                if spx_low > 0:
-                    self.market_data.spx_low = spx_low
-                self.market_data.vix_open = preserved_market_ohlc.get("vix_open", 0.0)
-                self.market_data.vix_high = preserved_market_ohlc.get("vix_high", 0.0)
-                vix_low = preserved_market_ohlc.get("vix_low", 0.0)
-                if vix_low > 0:
-                    self.market_data.vix_low = vix_low
+            # Step 2 — (live only) cross-check the recovered legs against
+            # the broker. In dry-run there is no broker truth to
+            # reconcile against; the state file IS the truth.
+            if not self.dry_run:
+                self._reconcile_recovered_entries_with_broker()
 
-            # Restore P&L history for dashboard persistence
-            self._pnl_history = preserved_pnl_history
-
-            # Determine next entry index
-            if recovered_entries:
-                max_entry_num = max(e.entry_number for e in recovered_entries)
-                self._next_entry_index = max(max_entry_num, preserved_next_entry_index)
-            else:
-                self._next_entry_index = preserved_next_entry_index
-
-            # MKT-018: Restore early close state
-            self._early_close_triggered = preserved_early_close_triggered
-            self._early_close_time = preserved_early_close_time
-            self._early_close_pnl = preserved_early_close_pnl
-            # MKT-021: Restore ROC gate state
-            self._roc_gate_triggered = preserved_roc_gate_triggered
-            # MKT-034: Restore VIX gate state
-            if preserved_vix_gate_resolved and self.vix_gate_enabled:
-                self._resolve_vix_gate(preserved_vix_gate_start_slot)
-                # _resolve_vix_gate resets _next_entry_index to 0 — restore correct value
-                if recovered_entries:
-                    self._next_entry_index = max(max_entry_num, preserved_next_entry_index)
-                else:
-                    self._next_entry_index = preserved_next_entry_index
-
-            # Set state based on recovered positions
-            # FIX #43 + FIX #47: For one-sided entries, check only the placed side
-            # A side is "done" if stopped, expired, or skipped
-            if recovered_entries:
-                def is_entry_active(entry):
-                    call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped
-                    put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped
-                    if getattr(entry, 'call_only', False):
-                        return not call_done
-                    elif getattr(entry, 'put_only', False):
-                        return not put_done
-                    else:
-                        return not (call_done and put_done)
-
-                active_entries = [e for e in recovered_entries if is_entry_active(e)]
-                if active_entries:
-                    self.state = MEICState.MONITORING
-                elif self._next_entry_index < len(self.entry_times):
-                    self.state = MEICState.WAITING_FIRST_ENTRY
-                else:
-                    self.state = MEICState.DAILY_COMPLETE
-
-            # Fix #65: Use preserved total_credit from state file if available,
-            # rather than recalculating (recalculation depends on correct call_only/put_only flags
-            # which may have been wrong before state file restoration in earlier versions)
-            if preserved_total_credit_received > 0:
-                total_credit = preserved_total_credit_received
-                self.daily_state.total_credit_received = preserved_total_credit_received
-            else:
-                total_credit = sum(e.total_credit for e in recovered_entries)
-                self.daily_state.total_credit_received = total_credit
-
-            # Retroactively calculate commission for entries without commission data
-            # BUG FIX: Use 2 legs for one-sided entries, 4 for full ICs
-            # v8: scale by each entry's own entry.contracts (stamped at creation),
-            # not self.contracts_per_entry — recovered entries may span multiple
-            # contract counts if config flipped during a trading day.
-            if self.daily_state.total_commission == 0 and recovered_entries:
-                retroactive_commission = 0.0
-                for entry in recovered_entries:
-                    if entry.open_commission == 0:
-                        # One-sided entries have 2 legs, full ICs have 4
-                        is_one_sided = getattr(entry, 'call_only', False) or getattr(entry, 'put_only', False)
-                        open_legs = 2 if is_one_sided else 4
-                        entry.open_commission = open_legs * self.commission_per_leg * entry.contracts
-                        retroactive_commission += entry.open_commission
-                    if entry.close_commission == 0:
-                        if entry.call_side_stopped:
-                            close_comm = 2 * self.commission_per_leg * entry.contracts
-                            entry.close_commission += close_comm
-                            retroactive_commission += close_comm
-                        if entry.put_side_stopped:
-                            close_comm = 2 * self.commission_per_leg * entry.contracts
-                            entry.close_commission += close_comm
-                            retroactive_commission += close_comm
-                self.daily_state.total_commission = retroactive_commission
-                if retroactive_commission > 0:
-                    logger.info(f"Retroactively calculated commission: ${retroactive_commission:.2f} "
-                               f"(from {len(recovered_entries)} entries)")
-
+            active = len(self.daily_state.active_entries)
             logger.info("=" * 60)
-            logger.info(f"RECOVERY COMPLETE: {len(recovered_entries)} entries recovered")
-            logger.info(f"  State: {self.state.value}")
+            logger.info(
+                f"RECOVERY COMPLETE: {len(self.daily_state.entries)} entr(ies) "
+                f"restored from the state file, {active} still active"
+            )
+            logger.info(f"  Realized P&L: ${self.daily_state.total_realized_pnl:.2f}")
             logger.info(f"  Next entry index: {self._next_entry_index}")
-            logger.info(f"  Total credit: ${total_credit:.2f}")
             logger.info("=" * 60)
 
-            # Send recovery alert. Recovered entries may span multiple contract
-            # counts (after mid-day flips) — use max(entry.contracts) so the
-            # [Nc] title prefix reflects the most prominent scale for user attention.
-            _recovered_contracts = max(
-                (getattr(e, 'contracts', 1) for e in recovered_entries),
-                default=self.contracts_per_entry,
-            )
-            self.alert_service.send_alert(
-                alert_type=AlertType.POSITION_OPENED,
-                title=f"{self.BOT_NAME} Position Recovery",
-                message=f"Recovered {len(recovered_entries)} iron condor(s) from Saxo API",
-                priority=AlertPriority.MEDIUM,
-                details={
-                    "entries_recovered": len(recovered_entries),
-                    "state": self.state.value,
-                    "total_credit": total_credit
-                },
-                contracts=_recovered_contracts,
-            )
+            # Recovery alert (live only — dry-run restarts stay silent,
+            # matching pre-F4.8 behavior).
+            if active > 0 and not self.dry_run:
+                _recovered_contracts = max(
+                    (getattr(e, "contracts", 1)
+                     for e in self.daily_state.active_entries),
+                    default=self.contracts_per_entry,
+                )
+                self.alert_service.send_alert(
+                    alert_type=AlertType.POSITION_OPENED,
+                    title=f"{self.BOT_NAME} Position Recovery",
+                    message=f"Recovered {active} active iron condor(s) from the state file",
+                    priority=AlertPriority.MEDIUM,
+                    details={
+                        "entries_restored": len(self.daily_state.entries),
+                        "active_entries": active,
+                    },
+                    contracts=_recovered_contracts,
+                )
 
-            # Save recovered state to disk
             self._save_state_to_disk()
-
-            return True
+            return active > 0
 
         except Exception as e:
             logger.error(f"Position recovery failed: {e}")

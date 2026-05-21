@@ -898,43 +898,77 @@ class TestOverlayHedgeTracking:
 
 
 class TestDryRunStateRecovery:
-    """Regression coverage for the 2026-05-05 dry-run state-loss bug.
+    """Regression coverage for the 2026-05-05 dry-run state-loss bug,
+    updated for the F4.8 state-file-authoritative recovery rewrite.
 
-    Pre-fix: a mid-day restart in dry mode short-circuited
-    `_recover_positions_from_saxo` to `return False` without loading the
-    state file. The next state-save then wrote empty entries to disk,
-    silently wiping today's session (variant A's 10:45 IC and variant C's
-    11:16 put-only entry both vanished from the journal). The fix calls
-    `_load_state_file_history()` before returning so today's entries are
-    rehydrated into `daily_state` first.
+    The 2026-05-05 bug: a mid-day dry-run restart returned from
+    `_recover_positions_from_saxo` without loading the state file, so
+    the next save wiped today's session. F4.8 makes
+    `_load_state_file_history` the FIRST step of recovery for BOTH
+    dry-run and live — today's entries are always rehydrated — and the
+    broker is only a cross-check (live only). The method no longer
+    calls `client.get_positions` directly.
     """
 
-    def test_dry_run_loads_state_history_before_returning(self):
-        from bots.hydra.strategy import HydraStrategy
-
+    def _recovery_instance(self, dry_run):
         inst = _make_instance()
+        inst.dry_run = dry_run
+        inst.BOT_NAME = "HYDRA"
+        inst.contracts_per_entry = 1
+        inst._next_entry_index = 0
         inst.client = MagicMock()
-        inst.dry_run = True
-        inst._load_state_file_history = MagicMock(return_value=True)
-
-        result = HydraStrategy._recover_positions_from_saxo(inst)
-
-        assert result is False
-        inst._load_state_file_history.assert_called_once_with()
-
-    def test_live_mode_still_queries_saxo(self):
-        from bots.hydra.strategy import HydraStrategy
-
-        inst = _make_instance()
-        inst.dry_run = False
-        inst.client = MagicMock()
-        inst.client.get_positions.return_value = []
-        inst._load_state_file_history = MagicMock(return_value=False)
+        inst.alert_service = MagicMock()
+        inst._save_state_to_disk = MagicMock()
+        inst._log_safety_event = MagicMock()
+        inst._reconcile_recovered_entries_with_broker = MagicMock()
         inst.daily_state = MagicMock()
+        inst.daily_state.total_realized_pnl = 0.0
+        return inst
+
+    def test_dry_run_loads_state_history(self):
+        from bots.hydra.strategy import HydraStrategy
+
+        inst = self._recovery_instance(dry_run=True)
+        inst._load_state_file_history = MagicMock(return_value=False)
+        inst.daily_state.entries = []
 
         HydraStrategy._recover_positions_from_saxo(inst)
 
-        inst.client.get_positions.assert_called_once_with()
+        inst._load_state_file_history.assert_called_once_with()
+        # dry-run never cross-checks against a broker
+        inst._reconcile_recovered_entries_with_broker.assert_not_called()
+
+    def test_dry_run_with_entries_skips_broker_check(self):
+        from bots.hydra.strategy import HydraStrategy
+
+        inst = self._recovery_instance(dry_run=True)
+        inst._load_state_file_history = MagicMock(return_value=True)
+        fake_entry = MagicMock()
+        fake_entry.contracts = 1
+        inst.daily_state.entries = [fake_entry]
+        inst.daily_state.active_entries = [fake_entry]
+
+        HydraStrategy._recover_positions_from_saxo(inst)
+
+        inst._reconcile_recovered_entries_with_broker.assert_not_called()
+
+    def test_live_mode_cross_checks_against_broker(self):
+        """F4.8: live recovery loads the state file then cross-checks
+        recovered entries against the broker — it no longer calls
+        client.get_positions directly."""
+        from bots.hydra.strategy import HydraStrategy
+
+        inst = self._recovery_instance(dry_run=False)
+        inst._load_state_file_history = MagicMock(return_value=True)
+        fake_entry = MagicMock()
+        fake_entry.contracts = 1
+        inst.daily_state.entries = [fake_entry]
+        inst.daily_state.active_entries = [fake_entry]
+
+        HydraStrategy._recover_positions_from_saxo(inst)
+
+        inst._reconcile_recovered_entries_with_broker.assert_called_once()
+        inst.client.get_positions.assert_not_called()
 
 
 class TestSubclassRelationship:
