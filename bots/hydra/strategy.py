@@ -1731,6 +1731,69 @@ class HydraStrategy(MEICStrategy):
             )
             return {}
 
+    def _read_option_greeks(self, instrument_id) -> Optional[Dict[str, Any]]:
+        """Fetch an option's greeks from the active broker, normalized.
+
+        Returns ``{"delta","gamma","theta","vega","iv","open_interest"}``
+        or None on fetch failure / no data. Greeks are written to the
+        analytics DB only (``trade_entries`` greek columns) — never used
+        for trading decisions, so a None here is harmless.
+
+        Broker dispatch (F3.7 of the IB-only rewrite):
+        - ``self.broker`` set: ``IBClient.get_option_greeks`` already
+          returns lowercase greek fields — sliced directly.
+        - ``self.broker`` None: ``SaxoClient.get_option_greeks`` returns
+          capitalized ``Delta``/``Gamma``/``Theta``/``Vega`` — re-keyed
+          to the normalized lowercase shape.
+
+        Args:
+            instrument_id: IBKR conid (broker path) or Saxo UIC (legacy).
+
+        Returns:
+            ``{delta, gamma, theta, vega, iv, open_interest}`` or None.
+        """
+        def _f(v):
+            if v is None or v == "":
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            if self.broker is not None:
+                raw = self.broker.get_option_greeks(int(instrument_id))
+                if not raw:
+                    return None
+                return {
+                    "delta": _f(raw.get("delta")),
+                    "gamma": _f(raw.get("gamma")),
+                    "theta": _f(raw.get("theta")),
+                    "vega": _f(raw.get("vega")),
+                    "iv": _f(raw.get("iv")),
+                    "open_interest": _f(raw.get("open_interest")),
+                }
+            # Saxo legacy path — capitalized greek keys
+            raw = self.client.get_option_greeks(
+                instrument_id, asset_type="StockIndexOption",
+            )
+            if not raw:
+                return None
+            return {
+                "delta": _f(raw.get("Delta")),
+                "gamma": _f(raw.get("Gamma")),
+                "theta": _f(raw.get("Theta")),
+                "vega": _f(raw.get("Vega")),
+                "iv": _f(raw.get("MidVol")),
+                "open_interest": _f(raw.get("OpenInterest")),
+            }
+        except Exception as e:
+            logger.warning(
+                f"_read_option_greeks({instrument_id}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
     def _refresh_chart_data_for_scouting(self):
         """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
 
@@ -4343,12 +4406,12 @@ class HydraStrategy(MEICStrategy):
             try:
                 quote_uics = [u for u in [entry.short_call_uic, entry.short_put_uic] if u]
                 if quote_uics:
-                    quotes = self.client.get_quotes_batch(quote_uics, asset_type="StockIndexOption")
+                    quotes = self._read_option_quotes_batch(quote_uics)
                     for side_uic, side_name in [(entry.short_call_uic, "call"), (entry.short_put_uic, "put")]:
                         if side_uic and side_uic in quotes:
-                            q = quotes[side_uic].get("Quote", {})
-                            bid = q.get("Bid", 0) or 0
-                            ask = q.get("Ask", 0) or 0
+                            q = quotes[side_uic]
+                            bid = q.get("bid") or 0
+                            ask = q.get("ask") or 0
                             if bid > 0 and ask > 0:
                                 width = round(ask - bid, 4)
                                 if side_name == "call":
@@ -4411,7 +4474,7 @@ class HydraStrategy(MEICStrategy):
                     greeks_data = {}
                     for side, uic in [("call", entry.short_call_uic), ("put", entry.short_put_uic)]:
                         if uic:
-                            g = self.client.get_option_greeks(uic, asset_type="StockIndexOption")
+                            g = self._read_option_greeks(uic)
                             if g:
                                 greeks_data[side] = g
                     if greeks_data:
@@ -4424,7 +4487,7 @@ class HydraStrategy(MEICStrategy):
                                         f"""UPDATE trade_entries SET
                                         delta_{side} = ?, theta_{side} = ?, vega_{side} = ?
                                         WHERE date = ? AND entry_number = ?""",
-                                        (g.get("Delta"), g.get("Theta"), g.get("Vega"),
+                                        (g.get("delta"), g.get("theta"), g.get("vega"),
                                          date_str, entry.entry_number)
                                     )
                             conn.commit()

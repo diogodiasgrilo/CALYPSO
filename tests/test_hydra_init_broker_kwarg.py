@@ -1193,3 +1193,121 @@ class TestProgressivePutTightening:
         entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6760, lp=6710)
         assert s._apply_progressive_put_tightening(entry) is False
         s._read_option_chain.assert_not_called()
+
+
+class TestReadOptionGreeks:
+    """Unit tests for HydraStrategy._read_option_greeks (F3.7).
+
+    IB path: IBClient.get_option_greeks already returns lowercase greek
+    fields. Saxo path: capitalized Delta/Gamma/Theta/Vega re-keyed to
+    the normalized lowercase shape. Greeks are analytics-only — None on
+    failure is harmless."""
+
+    def _make_bare_strategy(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        return s
+
+    # ─── IB path ───────────────────────────────────────────────────────
+
+    def test_ib_path_returns_normalized_greeks(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_greeks.return_value = {
+            "delta": -0.08, "gamma": 0.002, "theta": -1.5,
+            "vega": 0.9, "iv": 0.18, "open_interest": 1200,
+            "bid": 2.5, "ask": 2.6,  # extra quote fields ignored
+        }
+        s = self._make_bare_strategy(broker=fake_broker)
+        g = s._read_option_greeks(883539497)
+        assert g == {"delta": -0.08, "gamma": 0.002, "theta": -1.5,
+                     "vega": 0.9, "iv": 0.18, "open_interest": 1200.0}
+        fake_broker.get_option_greeks.assert_called_once_with(883539497)
+
+    def test_ib_path_string_conid_cast_to_int(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_greeks.return_value = {"delta": -0.1}
+        s = self._make_bare_strategy(broker=fake_broker)
+        s._read_option_greeks("883539497")
+        fake_broker.get_option_greeks.assert_called_once_with(883539497)
+
+    def test_ib_path_empty_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_greeks.return_value = {}
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_greeks(123) is None
+
+    def test_ib_path_missing_fields_become_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_greeks.return_value = {"delta": -0.08}
+        s = self._make_bare_strategy(broker=fake_broker)
+        g = s._read_option_greeks(123)
+        assert g["delta"] == -0.08
+        assert g["gamma"] is None
+        assert g["theta"] is None
+        assert g["open_interest"] is None
+
+    def test_ib_path_string_greeks_coerced(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_greeks.return_value = {
+            "delta": "-0.08", "theta": "-1.5",
+        }
+        s = self._make_bare_strategy(broker=fake_broker)
+        g = s._read_option_greeks(123)
+        assert g["delta"] == -0.08
+        assert g["theta"] == -1.5
+
+    def test_ib_path_exception_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_greeks.side_effect = RuntimeError("conn blip")
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_greeks(123) is None
+
+    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
+
+    def test_saxo_path_capitalized_keys_mapped(self):
+        fake_client = MagicMock()
+        fake_client.get_option_greeks.return_value = {
+            "Delta": -0.08, "Gamma": 0.002, "Theta": -1.5,
+            "Vega": 0.9, "MidVol": 0.18, "OpenInterest": 1200,
+        }
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        g = s._read_option_greeks(12345678)
+        assert g["delta"] == -0.08
+        assert g["gamma"] == 0.002
+        assert g["theta"] == -1.5
+        assert g["vega"] == 0.9
+        assert g["iv"] == 0.18
+        assert g["open_interest"] == 1200.0
+        call_kwargs = fake_client.get_option_greeks.call_args.kwargs
+        assert call_kwargs["asset_type"] == "StockIndexOption"
+
+    def test_saxo_path_null_returns_none(self):
+        fake_client = MagicMock()
+        fake_client.get_option_greeks.return_value = None
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_greeks(123) is None
+
+    def test_saxo_path_exception_returns_none(self):
+        fake_client = MagicMock()
+        fake_client.get_option_greeks.side_effect = RuntimeError("saxo down")
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_greeks(123) is None
+
+    # ─── Cross-broker convergence ──────────────────────────────────────
+
+    def test_ib_and_saxo_paths_converge(self):
+        ib_broker = MagicMock()
+        ib_broker.get_option_greeks.return_value = {
+            "delta": -0.08, "gamma": 0.002, "theta": -1.5, "vega": 0.9,
+        }
+        saxo_client = MagicMock()
+        saxo_client.get_option_greeks.return_value = {
+            "Delta": -0.08, "Gamma": 0.002, "Theta": -1.5, "Vega": 0.9,
+        }
+        s_ib = self._make_bare_strategy(broker=ib_broker)
+        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
+        g_ib = s_ib._read_option_greeks(123)
+        g_saxo = s_saxo._read_option_greeks(123)
+        for k in ("delta", "gamma", "theta", "vega"):
+            assert g_ib[k] == g_saxo[k], f"diverge on {k!r}"

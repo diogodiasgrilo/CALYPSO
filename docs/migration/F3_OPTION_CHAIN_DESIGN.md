@@ -192,8 +192,22 @@ limit with 20% headroom**. The A.8 retry+breaker absorbs any rare 429.
 - MKT-045 chain-snapping rewrite: F3.3 ✅ committed (0c47544)
 - `HydraStrategy._read_option_quotes_batch`: F3.4 ✅ committed (e90e108)
 - MKT-020 call-tightening rewrite: F3.5 ✅ committed (1c80f32)
-- MKT-022 put-tightening rewrite: F3.6 ✅ committed
-- `get_option_greeks` site + credit-estimation batch quote: F3.7 (pending)
+- MKT-022 put-tightening rewrite: F3.6 ✅ committed (897830a)
+- `get_option_greeks` site + `_record_entry_to_db` batch quote: F3.7 ✅ committed
+
+**F3 complete.** The `_batch_update_entry_prices` monitoring quotes
+(`get_quotes_batch` ×2) are intentionally NOT part of F3 — they are
+position-monitoring price refreshes, not chain-coupled credit
+estimation, and belong to the F4 position-monitoring flow.
+
+### F3.7 — greeks + entry-DB batch quote rewired
+
+Added `HydraStrategy._read_option_greeks` — broker-agnostic greeks
+reader returning normalized lowercase
+`{delta,gamma,theta,vega,iv,open_interest}` (IB lowercase passthrough;
+Saxo `Delta`/`Gamma`/… re-keyed). `_record_entry_to_db` now sources
+its bid-ask-width batch quote via `_read_option_quotes_batch` and its
+greeks via `_read_option_greeks`. 10 `TestReadOptionGreeks` tests.
 
 ### F3.6 — MKT-022 put-tightening rewired
 
