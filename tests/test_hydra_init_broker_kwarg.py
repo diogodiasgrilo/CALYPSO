@@ -1996,3 +1996,81 @@ class TestFix82OvernightCheck:
     # F4.5 changed only the *verification* — covered by the two
     # halt-path tests above — and the registry cleanup loop is
     # unchanged from the pre-F4.5 code.
+
+
+class TestCheckAfterHoursSettlement:
+    """F4.6 — check_after_hours_settlement (POS-004) settles tracked
+    legs in the conid→quantity model: a leg is settled when the broker
+    shows zero quantity at its conid."""
+
+    def _make_strategy(self, entries):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.BOT_NAME = "HYDRA"
+        s.registry = MagicMock()
+        s._settlement_reconciliation_complete = False
+        s.daily_state = MagicMock()
+        s.daily_state.entries = entries
+        s.daily_state.active_entries = entries
+        s.daily_state.total_realized_pnl = 100.0
+        s.daily_state.total_commission = 10.0
+        s._pnl_history = []
+        s._process_expired_credits = MagicMock(return_value=0.0)
+        s._save_state_to_disk = MagicMock()
+        s._log_safety_event = MagicMock()
+        return s
+
+    def test_already_complete_empty_registry_returns_true(self):
+        s = self._make_strategy([])
+        s._settlement_reconciliation_complete = True
+        s.registry.get_positions.return_value = set()
+        s._read_open_positions = MagicMock()
+        assert s.check_after_hours_settlement() is True
+        s._read_open_positions.assert_not_called()
+
+    def test_empty_registry_marks_complete(self):
+        s = self._make_strategy([])
+        s.registry.get_positions.return_value = set()
+        assert s.check_after_hours_settlement() is True
+        assert s._settlement_reconciliation_complete is True
+        s._process_expired_credits.assert_called_once()
+
+    def test_all_conids_settled_marks_complete(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._make_strategy([entry])
+        s.registry.get_positions.return_value = {"id1"}
+        # broker shows nothing — every conid expired
+        s._read_open_positions = MagicMock(return_value=[])
+        result = s.check_after_hours_settlement()
+        assert result is True
+        assert s._settlement_reconciliation_complete is True
+        # settled legs' uics cleared
+        assert entry.short_call_uic is None
+        assert entry.long_put_uic is None
+        s._process_expired_credits.assert_called_once()
+
+    def test_positions_still_open_returns_false(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._make_strategy([entry])
+        s.registry.get_positions.return_value = {"id1"}
+        # conid 101 still open on the broker
+        s._read_open_positions = MagicMock(return_value=[
+            {"instrument_id": 101, "quantity": -1},
+        ])
+        result = s.check_after_hours_settlement()
+        assert result is False
+        assert s._settlement_reconciliation_complete is False
+        # the settled conids' legs were still cleared
+        assert entry.long_call_uic is None  # 102 settled
+        assert entry.short_call_uic == 101  # 101 still open — untouched
+
+    def test_fetch_failure_returns_false(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._make_strategy([entry])
+        s.registry.get_positions.return_value = {"id1"}
+        s._read_open_positions = MagicMock(
+            side_effect=RuntimeError("broker outage")
+        )
+        result = s.check_after_hours_settlement()
+        assert result is False
+        assert s._settlement_reconciliation_complete is False

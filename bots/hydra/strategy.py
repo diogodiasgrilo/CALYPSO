@@ -10483,67 +10483,77 @@ class HydraStrategy(MEICStrategy):
         logger.info(f"POS-004: Checking settlement status for {len(my_position_ids)} {self.BOT_NAME} positions...")
 
         try:
-            # Query Saxo for actual positions
-            actual_positions = self.client.get_positions()
-            actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
+            # POS-004 in the IBKR-native conid→quantity model (F4.6):
+            # a tracked leg is "settled" when the broker no longer shows
+            # an open position at its conid. strict=True so a fetch
+            # failure is a genuine error (return False, retry next
+            # heartbeat) — never mistaken for "all settled". At 0DTE
+            # settlement the whole conid expires at once, so a merged
+            # position settles cleanly (net quantity → 0).
+            open_positions = self._read_open_positions(strict=True)
+            actual = self._actual_position_quantities(open_positions)
+            expected = self._expected_position_quantities()
 
-            # Find which of our registered positions still exist
-            still_open = my_position_ids & actual_position_ids
-            settled = my_position_ids - actual_position_ids
+            settled_conids = {
+                conid for conid in expected if actual.get(conid, 0) == 0
+            }
+            still_open_conids = {
+                conid for conid in expected if actual.get(conid, 0) != 0
+            }
 
-            if settled:
-                logger.info(f"POS-004: {len(settled)} positions settled/expired - cleaning up registry")
-
-                # Clean up settled positions from registry
-                for pos_id in settled:
-                    try:
-                        self.registry.unregister(pos_id)
-                        logger.info(f"  Unregistered settled position: {pos_id}")
-                    except Exception as e:
-                        logger.error(f"Registry error unregistering {pos_id}: {e}")
-
-                # Also clean up from daily state entries
-                # Clear BOTH position_id AND uic when options settle
-                for entry in self.daily_state.entries:
-                    for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
-                        pos_id = getattr(entry, f"{leg_name}_position_id")
-                        if pos_id and pos_id in settled:
-                            setattr(entry, f"{leg_name}_position_id", None)
-                            setattr(entry, f"{leg_name}_uic", None)  # Also clear UIC
-                            logger.debug(f"  Cleared {leg_name} position_id and uic from entry #{entry.entry_number}")
-
-                # FIX #43 / FIX #77: Process expired positions and add credit to realized P&L.
-                # Extracted to _process_expired_credits() helper to share with empty-registry path.
-                self._process_expired_credits()
-
-                # Save updated state
-                self._save_state_to_disk()
-
-            if still_open:
-                logger.info(f"POS-004: {len(still_open)} positions still open on Saxo - awaiting settlement")
-                return False
-            else:
-                # All positions settled
-                logger.info(f"POS-004: All {self.BOT_NAME} positions confirmed settled - reconciliation complete")
-                self._settlement_reconciliation_complete = True
-
-                # Fix #84: Add final P&L history point after settlement so dashboard
-                # shows post-settlement P&L (not stale pre-settlement snapshot)
-                final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
-                now = get_us_market_time()
-                time_key = now.strftime("%H:%M")
-                self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
-                logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
-                self._save_state_to_disk()
-
-                # Log safety event
-                self._log_safety_event(
-                    "SETTLEMENT_COMPLETE",
-                    f"All {len(settled) if settled else len(my_position_ids)} positions settled after market close",
-                    "Complete"
+            if settled_conids:
+                logger.info(
+                    f"POS-004: {len(settled_conids)} conid(s) settled/expired "
+                    f"— clearing tracked legs"
                 )
+                # Clear BOTH the uic and (legacy) position_id of every
+                # leg sitting on a settled conid.
+                for entry in self.daily_state.entries:
+                    for leg_name in ("short_call", "long_call", "short_put", "long_put"):
+                        uic = getattr(entry, f"{leg_name}_uic", None)
+                        if uic and uic in settled_conids:
+                            setattr(entry, f"{leg_name}_uic", None)
+                            setattr(entry, f"{leg_name}_position_id", None)
+                            logger.debug(
+                                f"  Cleared {leg_name} from entry "
+                                f"#{entry.entry_number}"
+                            )
 
-                return True
+            # FIX #43 / FIX #77: process expired positions into realized
+            # P&L. Idempotent (guards on *_side_expired) — safe to call
+            # every heartbeat.
+            self._process_expired_credits()
+            if settled_conids:
+                self._save_state_to_disk()
+
+            if still_open_conids:
+                logger.info(
+                    f"POS-004: {len(still_open_conids)} conid(s) still open "
+                    f"on the broker — awaiting settlement"
+                )
+                return False
+
+            # All tracked legs settled
+            logger.info(f"POS-004: All {self.BOT_NAME} positions confirmed settled - reconciliation complete")
+            self._settlement_reconciliation_complete = True
+
+            # Fix #84: Add final P&L history point after settlement so dashboard
+            # shows post-settlement P&L (not stale pre-settlement snapshot)
+            final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
+            now = get_us_market_time()
+            time_key = now.strftime("%H:%M")
+            self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
+            logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
+            self._save_state_to_disk()
+
+            # Log safety event
+            self._log_safety_event(
+                "SETTLEMENT_COMPLETE",
+                f"All {len(settled_conids) if settled_conids else len(my_position_ids)} positions settled after market close",
+                "Complete"
+            )
+
+            return True
 
         except Exception as e:
             logger.error(f"POS-004: Settlement check failed: {e}")

@@ -198,8 +198,21 @@ further once its internals are mapped in detail.
 - `_position_is_open` predicate: F4.2 ✅ committed (2d63619)
 - MKT-033 salvage path rewire: F4.3 ✅ committed (7d840ff)
 - POS-003 native conid→quantity reconciliation: F4.4 ✅ committed (bb934f5)
-- FIX #82 overnight check + `strict` param: F4.5 ✅ committed
-- POS-004 / P&L / recovery / monitoring: F4.6-F4.9 (pending)
+- FIX #82 overnight check + `strict` param: F4.5 ✅ committed (e5e07a8)
+- POS-004 settlement check: F4.6 ✅ committed
+- P&L sites / recovery / monitoring: F4.7-F4.9 (pending)
+
+### F4.6 — POS-004 settlement check
+
+`check_after_hours_settlement` rewritten in the conid→quantity model:
+a tracked leg is settled when the broker shows zero quantity at its
+conid. Reuses `_expected_position_quantities` /
+`_actual_position_quantities` (F4.4). Uses `_read_open_positions(
+strict=True)` so a post-close fetch failure returns False (retry next
+heartbeat) rather than being mistaken for "all settled". Settled legs
+have their `*_uic` + legacy `*_position_id` cleared; expired credits
+processed idempotently. At 0DTE settlement a whole conid expires at
+once, so merges settle cleanly. 5 `TestCheckAfterHoursSettlement` tests.
 
 ### F4.5 — FIX #82 overnight check + `_read_open_positions(strict=)`
 
