@@ -1311,3 +1311,178 @@ class TestReadOptionGreeks:
         g_saxo = s_saxo._read_option_greeks(123)
         for k in ("delta", "gamma", "theta", "vega"):
             assert g_ib[k] == g_saxo[k], f"diverge on {k!r}"
+
+
+class TestReadOpenPositions:
+    """Unit tests for HydraStrategy._read_open_positions (F4.1).
+
+    IB path runs raw IBKR rows through the real _normalize_position_dict
+    and keeps option rows; Saxo path flattens the nested PositionBase /
+    PositionView shape. Both converge on one broker-agnostic dict shape.
+    """
+
+    def _make_bare_strategy(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        return s
+
+    # ─── IB path ───────────────────────────────────────────────────────
+
+    def test_ib_path_returns_normalized_options(self):
+        fake_broker = MagicMock()
+        fake_broker.get_positions.return_value = [
+            {"conid": 883539497, "position": -1, "ticker": "SPXW",
+             "assetClass": "OPT", "putOrCall": "C",
+             "lastTradingDay": "20260521", "strike": 6800,
+             "unrealizedPnl": 12.5},
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        positions = s._read_open_positions()
+        assert len(positions) == 1
+        p = positions[0]
+        assert p["instrument_id"] == 883539497
+        assert p["quantity"] == -1
+        assert p["side"] == "SHORT"
+        assert p["right"] == "C"
+        assert p["strike"] == 6800.0
+        assert p["expiry"] == date(2026, 5, 21)
+        assert p["unrealized_pnl"] == 12.5
+
+    def test_ib_path_filters_non_option_positions(self):
+        fake_broker = MagicMock()
+        fake_broker.get_positions.return_value = [
+            {"conid": 1, "position": 100, "assetClass": "STK"},  # stock
+            {"conid": 883539497, "position": -1, "assetClass": "OPT",
+             "putOrCall": "P"},
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        positions = s._read_open_positions()
+        assert [p["instrument_id"] for p in positions] == [883539497]
+
+    def test_ib_path_skips_unparseable_rows(self):
+        """A row with no conid can't be identified — skip it, keep the
+        rest (failure isolation, same pattern as F3.1)."""
+        fake_broker = MagicMock()
+        fake_broker.get_positions.return_value = [
+            {"position": -1, "assetClass": "OPT"},  # no conid
+            {"conid": 883539497, "position": -1, "assetClass": "OPT",
+             "putOrCall": "C"},
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        positions = s._read_open_positions()
+        assert [p["instrument_id"] for p in positions] == [883539497]
+
+    def test_ib_path_position_id_is_none(self):
+        """IBKR has no per-leg position id."""
+        fake_broker = MagicMock()
+        fake_broker.get_positions.return_value = [
+            {"conid": 883539497, "position": -1, "assetClass": "OPT",
+             "putOrCall": "C"},
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_open_positions()[0]["position_id"] is None
+
+    def test_ib_path_long_quantity_sign(self):
+        fake_broker = MagicMock()
+        fake_broker.get_positions.return_value = [
+            {"conid": 1, "position": 2, "assetClass": "OPT",
+             "putOrCall": "P"},
+        ]
+        s = self._make_bare_strategy(broker=fake_broker)
+        p = s._read_open_positions()[0]
+        assert p["quantity"] == 2
+        assert p["side"] == "LONG"
+
+    def test_ib_path_empty_returns_empty(self):
+        fake_broker = MagicMock()
+        fake_broker.get_positions.return_value = []
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_open_positions() == []
+
+    def test_ib_path_exception_returns_empty(self):
+        fake_broker = MagicMock()
+        fake_broker.get_positions.side_effect = RuntimeError("conn blip")
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_open_positions() == []
+
+    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
+
+    def test_saxo_path_parses_nested_shape(self):
+        fake_client = MagicMock()
+        fake_client.get_positions.return_value = [
+            {"PositionId": "saxo-uuid-1",
+             "PositionBase": {"Uic": 12345678, "Amount": -1,
+                              "AssetType": "StockIndexOption",
+                              "OptionsData": {"Strike": 6800,
+                                              "PutCall": "Call",
+                                              "ExpiryDate": "2026-05-21"}},
+             "PositionView": {"ProfitLossOnTrade": 12.5}},
+        ]
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        positions = s._read_open_positions()
+        assert len(positions) == 1
+        p = positions[0]
+        assert p["instrument_id"] == 12345678
+        assert p["quantity"] == -1
+        assert p["side"] == "SHORT"
+        assert p["right"] == "C"
+        assert p["strike"] == 6800
+        assert p["expiry"] == "2026-05-21"
+        assert p["unrealized_pnl"] == 12.5
+        assert p["position_id"] == "saxo-uuid-1"
+
+    def test_saxo_path_putcall_mapped(self):
+        fake_client = MagicMock()
+        fake_client.get_positions.return_value = [
+            {"PositionId": "p1",
+             "PositionBase": {"Uic": 1, "Amount": -1,
+                              "AssetType": "StockIndexOption",
+                              "OptionsData": {"PutCall": "Put"}}},
+        ]
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_open_positions()[0]["right"] == "P"
+
+    def test_saxo_path_filters_non_options(self):
+        fake_client = MagicMock()
+        fake_client.get_positions.return_value = [
+            {"PositionId": "stk", "PositionBase": {"Uic": 9, "Amount": 100,
+                                                   "AssetType": "Stock"}},
+            {"PositionId": "opt", "PositionBase": {"Uic": 1, "Amount": -1,
+                                                   "AssetType": "StockIndexOption",
+                                                   "OptionsData": {"PutCall": "Call"}}},
+        ]
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        positions = s._read_open_positions()
+        assert [p["position_id"] for p in positions] == ["opt"]
+
+    def test_saxo_path_exception_returns_empty(self):
+        fake_client = MagicMock()
+        fake_client.get_positions.side_effect = RuntimeError("saxo down")
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_open_positions() == []
+
+    # ─── Cross-broker convergence ──────────────────────────────────────
+
+    def test_both_paths_converge_on_shape(self):
+        """Both brokers yield dicts with the same keys so the F4 call
+        sites read them identically."""
+        ib_broker = MagicMock()
+        ib_broker.get_positions.return_value = [
+            {"conid": 1, "position": -1, "assetClass": "OPT",
+             "putOrCall": "C"},
+        ]
+        saxo_client = MagicMock()
+        saxo_client.get_positions.return_value = [
+            {"PositionId": "p1",
+             "PositionBase": {"Uic": 1, "Amount": -1,
+                              "AssetType": "StockIndexOption",
+                              "OptionsData": {"PutCall": "Call"}}},
+        ]
+        s_ib = self._make_bare_strategy(broker=ib_broker)
+        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
+        ib_p = s_ib._read_open_positions()[0]
+        saxo_p = s_saxo._read_open_positions()[0]
+        assert set(ib_p.keys()) == set(saxo_p.keys())
+        for k in ("instrument_id", "quantity", "side", "right"):
+            assert ib_p[k] == saxo_p[k], f"diverge on {k!r}"

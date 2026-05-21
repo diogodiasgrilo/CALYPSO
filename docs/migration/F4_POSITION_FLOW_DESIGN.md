@@ -145,6 +145,21 @@ further once its internals are mapped in detail.
 - The `self.registry.get_positions(...)` calls — that's the local
   file-based PositionRegistry, broker-independent, unchanged.
 
+## Implementation status
+
+- `_read_open_positions` broker-agnostic helper: F4.1 ✅ committed
+- `_position_is_open` predicate: F4.2 (pending)
+- id-set / P&L / recovery / monitoring rewires: F4.3-F4.6 (pending)
+
+### F4.1 — `_read_open_positions` shipped
+
+Broker-agnostic open-option-position reader on `HydraStrategy`. IB
+path runs each raw IBKR row through `_normalize_position_dict` (Phase
+A.10) and keeps `asset_type == "OPT"` rows; `position_id` is None.
+Saxo path flattens the nested `PositionBase`/`PositionView` shape.
+`[]` on fetch failure; unparseable IB rows (no conid) skipped without
+aborting the batch. 13 `TestReadOpenPositions` tests cover both paths.
+
 ## 8. Decision requested
 
 1. The `(conid, right, expected_sign/quantity)` identity model for the

@@ -49,7 +49,7 @@ from shared.saxo_client import SaxoClient, BuySell
 # inheritance is removed (later in the rewrite), saxo_client import dies
 # with it and only IBClient remains. See
 # docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md §11.4 for sequence.
-from shared.ib_client import IBClient
+from shared.ib_client import IBClient, _normalize_position_dict
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_early_close_day
 from shared.technical_indicators import get_current_ema, calculate_atr
@@ -1793,6 +1793,105 @@ class HydraStrategy(MEICStrategy):
                 f"({type(e).__name__}: {e})"
             )
             return None
+
+    def _read_open_positions(self) -> List[Dict[str, Any]]:
+        """All open option positions from the active broker, normalized.
+
+        Returns a list of dicts with stable broker-agnostic keys:
+            instrument_id  : int            # IBKR conid / Saxo UIC
+            quantity       : int            # signed — negative = short
+            side           : str            # "LONG" | "SHORT" | "FLAT"
+            strike         : Optional[float]
+            right          : Optional[str]  # "C" | "P"
+            expiry         : Optional[date] | Optional[str]
+            unrealized_pnl : Optional[float]
+            position_id    : Optional[str]  # Saxo PositionId; None on IBKR
+            raw            : dict           # untouched broker row
+
+        Returns ``[]`` on a fetch failure — every F4 call site treats an
+        empty list as "the broker shows no positions".
+
+        Broker dispatch (F4 of the IB-only rewrite):
+        - ``self.broker`` set: ``IBClient.get_positions()`` returns raw
+          IBKR rows; each is run through ``_normalize_position_dict`` and
+          the option rows kept. IBKR has no per-leg position id, so
+          ``position_id`` is None — F4 reconciliation keys on
+          ``(instrument_id, right, quantity)`` instead (see
+          ``docs/migration/F4_POSITION_FLOW_DESIGN.md``).
+        - ``self.broker`` None: ``SaxoClient.get_positions()`` returns the
+          nested ``PositionBase``/``PositionView`` shape; flattened here.
+          Kept until MEIC inheritance is removed.
+
+        Returns:
+            list of normalized open-option-position dicts.
+        """
+        out: List[Dict[str, Any]] = []
+        try:
+            if self.broker is not None:
+                raw_list = self.broker.get_positions() or []
+                for raw in raw_list:
+                    try:
+                        norm = _normalize_position_dict(raw)
+                    except ValueError as e:
+                        logger.debug(
+                            f"_read_open_positions: skipping unparseable "
+                            f"IB position ({e})"
+                        )
+                        continue
+                    if norm.get("asset_type") != "OPT":
+                        continue  # HYDRA only reconciles option legs
+                    out.append({
+                        "instrument_id": norm["instrument_id"],
+                        "quantity": norm["quantity"],
+                        "side": norm["side"],
+                        "strike": norm.get("strike"),
+                        "right": norm.get("right"),
+                        "expiry": norm.get("expiry"),
+                        "unrealized_pnl": norm.get("unrealized_pnl"),
+                        # IBKR has no per-leg position id — see docstring.
+                        "position_id": None,
+                        "raw": norm.get("raw", raw),
+                    })
+                return out
+
+            # Saxo legacy path — nested PositionBase / PositionView shape
+            raw_list = self.client.get_positions() or []
+            for p in raw_list:
+                pb = p.get("PositionBase", {}) or {}
+                pv = p.get("PositionView", {}) or {}
+                od = pb.get("OptionsData", {}) or {}
+                asset_type = pb.get("AssetType", "")
+                if asset_type not in ("StockIndexOption", "StockOption") and not od:
+                    continue  # not an option leg
+                pc = od.get("PutCall", "")
+                right = "C" if pc == "Call" else ("P" if pc == "Put" else None)
+                amount = pb.get("Amount", 0) or 0
+                try:
+                    quantity = int(amount)
+                except (TypeError, ValueError):
+                    quantity = 0
+                side = (
+                    "SHORT" if quantity < 0
+                    else ("LONG" if quantity > 0 else "FLAT")
+                )
+                pos_id = p.get("PositionId")
+                out.append({
+                    "instrument_id": pb.get("Uic"),
+                    "quantity": quantity,
+                    "side": side,
+                    "strike": od.get("Strike"),
+                    "right": right,
+                    "expiry": od.get("ExpiryDate"),
+                    "unrealized_pnl": pv.get("ProfitLossOnTrade"),
+                    "position_id": str(pos_id) if pos_id is not None else None,
+                    "raw": p,
+                })
+            return out
+        except Exception as e:
+            logger.warning(
+                f"_read_open_positions failed ({type(e).__name__}: {e})"
+            )
+            return []
 
     def _refresh_chart_data_for_scouting(self):
         """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
