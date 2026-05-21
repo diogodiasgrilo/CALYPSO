@@ -2732,10 +2732,10 @@ class HydraStrategy(MEICStrategy):
                                     fill_price = fp
                                     source = "activities"
 
-                        # Tier 2: Closed positions endpoint
+                        # Tier 2: Closed positions endpoint (F5.4 — broker-agnostic)
                         if fill_price is None and uic:
                             buy_or_sell = "Sell" if leg_name.startswith("short") else "Buy"
-                            closed_info = self.client.get_closed_position_price(uic, buy_or_sell=buy_or_sell)
+                            closed_info = self._read_closed_position_price(uic, buy_or_sell=buy_or_sell)
                             if closed_info:
                                 cp = closed_info.get("closing_price")
                                 if cp and cp > 0:
@@ -6288,8 +6288,9 @@ class HydraStrategy(MEICStrategy):
                     f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} "
                     f"(pos {long_pos_id}) no longer in Saxo — detecting external close"
                 )
-                # Look up actual sale price from closedpositions
-                closed = self.client.get_closed_position_price(
+                # Look up actual sale price from closed positions (F5.4 —
+                # broker-agnostic).
+                closed = self._read_closed_position_price(
                     long_uic, buy_or_sell="Sell"
                 )
                 if closed and closed.get("closing_price", 0) > 0:
@@ -9258,16 +9259,14 @@ class HydraStrategy(MEICStrategy):
             today = get_us_market_time().strftime("%Y-%m-%d")
             positions = []
 
-            # Get EUR exchange rate (once per snapshot, not per position)
+            # Get EUR exchange rate (once per snapshot, not per position).
+            # F5.4: broker-agnostic — _read_fx_rate returns None on failure.
             eur_rate = 0
             if self.trade_logger.currency_enabled:
-                try:
-                    eur_rate = self.client.get_fx_rate(
-                        self.trade_logger.base_currency,
-                        self.trade_logger.account_currency
-                    ) or 0
-                except Exception:
-                    eur_rate = 0
+                eur_rate = self._read_fx_rate(
+                    self.trade_logger.base_currency,
+                    self.trade_logger.account_currency,
+                ) or 0
 
             for entry in self.daily_state.entries:
                 is_hydra = isinstance(entry, HydraIronCondorEntry)
@@ -10487,8 +10486,9 @@ class HydraStrategy(MEICStrategy):
             )
 
             try:
-                # Long positions are "Buy" direction; selling them is recorded as "Sell"
-                closed = self.client.get_closed_position_price(
+                # Long positions are "Buy" direction; selling them is
+                # recorded as "Sell". F5.4 — broker-agnostic.
+                closed = self._read_closed_position_price(
                     info["uic"], buy_or_sell="Sell"
                 )
                 if closed and closed.get("closing_price", 0) > 0:

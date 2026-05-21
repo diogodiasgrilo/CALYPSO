@@ -120,7 +120,7 @@ places its first live order.
 | F5.1 | Probe `/iserver/account/trades` on paper (read-only diagnostic) — ✅ done |
 | F5.2 | `IBClient.get_closed_position_price` built on the probe + doc schema + unit tests — ✅ done |
 | F5.3 | `HydraStrategy._read_fx_rate` + `_read_closed_position_price` helpers + tests — ✅ done |
-| F5.4 | Rewire the 3 close-price sites + the FX site |
+| F5.4 | Rewire the 3 close-price sites + the FX site — ✅ done |
 | F5.5 | `_verify_settlement_pnl_from_saxo` — IBKR rework (option A/B/C, decided post-probe) |
 
 ## 7. Decision record (resolved)
