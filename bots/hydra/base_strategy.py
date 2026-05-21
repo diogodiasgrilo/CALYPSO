@@ -5451,17 +5451,19 @@ class MEICStrategy:
     # =========================================================================
 
     def _update_market_data(self):
-        """Update SPX and VIX prices from cache or API."""
-        # US500.I is a CFD that tracks SPX - use CfdOnIndex asset type
-        quote = self.client.get_quote(self.underlying_uic, asset_type="CfdOnIndex")
-        if quote:
-            price = self._extract_price(quote, context="SPX")
-            if price:
-                self.market_data.update_spx(price)
-                self.current_price = price
+        """Update SPX and VIX spot prices from the active broker.
 
-        # VIX - use get_vix_price which has Yahoo Finance fallback
-        vix = self.client.get_vix_price(self.vix_uic)
+        GAP-C (F7.2): rewired to the broker-agnostic `_read_index_price`
+        helper. This sets `self.current_price` (SPX spot, used in every
+        strike calc) and `self.current_vix` — it had no IBKR path
+        before F7.
+        """
+        price = self._read_index_price("SPX")
+        if price:
+            self.market_data.update_spx(price)
+            self.current_price = price
+
+        vix = self._read_index_price("VIX")
         if vix:
             self.market_data.update_vix(vix)
             self.current_vix = vix
@@ -8465,24 +8467,16 @@ class MEICStrategy:
             if not is_market_open():
                 return True, "Market not open"
 
-            # Try to get a quote for SPX - if unavailable, market may be halted
-            quote = self.client.get_quote(self.underlying_uic, asset_type="CfdOnIndex")
-            if not quote:
-                logger.warning("MKT-005: No quote available for SPX - possible market halt")
-                return True, "No SPX quote available"
-
-            # Check for stale quote (no update in 60+ seconds could indicate halt)
-            # This is a heuristic - Saxo doesn't expose trading halt status directly
-            quote_data = quote.get("Quote", {})
-
-            # If we have no bid/ask and no last traded, something is wrong
-            bid = quote_data.get("Bid")
-            ask = quote_data.get("Ask")
-            last = quote_data.get("LastTraded")
-
-            if not bid and not ask and not last:
-                logger.warning("MKT-005: Empty quote data - possible market halt")
-                return True, "Empty quote data"
+            # GAP-E (F7.3): broker-agnostic SPX price. _read_index_price
+            # returns a usable price (mid→last→mark) or None; a None
+            # while the schedule says open is the halt heuristic — no
+            # broker exposes a trading-halt flag directly.
+            price = self._read_index_price("SPX")
+            if not price:
+                logger.warning(
+                    "MKT-005: No SPX price available — possible market halt"
+                )
+                return True, "No SPX price available"
 
             return False, "Market trading normally"
 
