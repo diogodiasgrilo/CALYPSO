@@ -1,6 +1,6 @@
 # F3 — Option Chain / Credit-Estimation Flow: IBKR Design
 
-**Status**: 📋 design — awaiting approval before implementation
+**Status**: ✅ implemented — F3.1–F3.7 committed (see §9)
 **Date**: 2026-05-21
 **Probe evidence**: `scripts/probe_ibkr_chain.py` run 2026-05-21 (log:
 `scripts/probe_chain_*.log`)
@@ -80,10 +80,13 @@ def qualify_option_strikes(
 ```
 
 Design notes:
-- `max_workers=8` keeps us well under IBKR's ~5 req/s sustained guidance
-  while cutting wall-clock ~8×. Tunable.
+- `max_workers=8` keeps the peak burst under IBKR's verified 10 req/s
+  global limit (§8) while cutting wall-clock ~8×. Tunable.
 - Thread-safety: the conid cache writes are dict assignments under the
-  existing `_call_lock`; `_ib_call` already serializes the ibind calls.
+  existing `_call_lock`. The secdef calls themselves run UNSERIALIZED —
+  the batch passes `_serialize=False` to bypass `_call_lock` (that is
+  the whole point of the parallelism). This is safe ONLY because PROBE
+  7 verified concurrent secdef reads are corruption-free — see §7.
 - The method does NOT raise on individual-strike failure — a strike
   that 400s (doesn't exist at that expiry) is logged at debug and
   omitted. Callers see "this strike isn't tradable today" via absence.
@@ -193,7 +196,7 @@ limit with 20% headroom**. The A.8 retry+breaker absorbs any rare 429.
 - `HydraStrategy._read_option_quotes_batch`: F3.4 ✅ committed (e90e108)
 - MKT-020 call-tightening rewrite: F3.5 ✅ committed (1c80f32)
 - MKT-022 put-tightening rewrite: F3.6 ✅ committed (897830a)
-- `get_option_greeks` site + `_record_entry_to_db` batch quote: F3.7 ✅ committed
+- `get_option_greeks` site + `_record_entry_to_db` batch quote: F3.7 ✅ committed (dd27548)
 
 **F3 complete.** The `_batch_update_entry_prices` monitoring quotes
 (`get_quotes_batch` ×2) are intentionally NOT part of F3 — they are
@@ -248,13 +251,14 @@ Saxo path: legacy `get_option_chain` + `OptionSpace` parse, unchanged,
 failure — every call site already handles empty maps. 18 unit tests
 cover both paths + snapping/dedup/tolerance/failure isolation.
 
-## 7. Decision requested
+## 10. Decision record (resolved)
 
-Approve this design? Specifically:
+Approved 2026-05-21 and implemented:
 1. The `qualify_option_strikes` batch-resolver approach (parallel
-   per-strike secdef, both-rights-per-call, expiry-filtered, cached)
-2. `max_workers=8` for the thread pool (vs IBKR's ~5 req/s sustained —
-   bursty but short; tune down if we see 429s)
-3. The 6-commit F3.1-F3.6 breakdown
+   per-strike secdef, both-rights-per-call, expiry-filtered, cached).
+2. `max_workers=8` for the thread pool (IBKR's verified 10 req/s
+   global limit — §8; tune down if 429s appear).
+3. The 7-commit F3.1–F3.7 breakdown (F3.4 `_read_option_quotes_batch`
+   was promoted to its own commit — see §5).
 
-Once approved, F3.1 (IBClient batch resolver) starts.
+Implemented across F3.1–F3.7; see §9 for the per-commit status.

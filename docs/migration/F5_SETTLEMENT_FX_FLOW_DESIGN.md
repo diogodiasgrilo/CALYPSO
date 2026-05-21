@@ -1,6 +1,6 @@
 # F5 — Settlement / FX Flow: IBKR Design
 
-**Status**: 📋 design — awaiting approval before implementation
+**Status**: ⏳ in progress — design approved; F5.1 (probe script) committed; F5.2–F5.5 pending the probe run
 **Date**: 2026-05-21
 **Predecessors**: F3 (option chain) ✅, F4 (position flow) ✅
 

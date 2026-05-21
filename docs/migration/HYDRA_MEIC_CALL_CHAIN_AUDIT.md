@@ -9,6 +9,12 @@
 
 ## Breakdown
 
+> **Note**: the rows below are NOT a clean partition — "HYDRA
+> overrides" and "`super()` delegations" overlap (an override can also
+> call `super()`), so the sub-counts do not sum exactly to 101/160.
+> Read them as overlapping facets of the same method set, not disjoint
+> buckets.
+
 | Category | Count | Action |
 |---|---|---|
 | Reachable from HYDRA via call chain | 101 | Port into standalone HydraStrategy |

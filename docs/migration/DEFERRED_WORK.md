@@ -7,12 +7,20 @@ code.
 
 ---
 
+> **Superseded by F5.** `docs/migration/F5_SETTLEMENT_FX_FLOW_DESIGN.md`
+> is now the concrete plan for DEF-1 and DEF-2: DEF-1 → F5.2
+> (`IBClient.get_closed_position_price`), DEF-2 → F5.5 (Fix #87 rework).
+> F5.1 (the trade-execution probe) is the verification step both
+> entries' "trigger" sections call for. These two entries are kept for
+> history; track active status in the F5 design doc.
+
 ## DEF-1: `IBClient.get_closed_position_price(conid, buy_or_sell)`
 
 **Why HYDRA needs it**: Called from 3 sites in current HYDRA strategy
-(`bots/hydra/strategy.py` lines 2099, 5557, 9615) to get the actual
-closing fill price for a specific position that closed today. Used in
-P&L attribution + Fix #87 settlement reconciliation paths.
+(grep `get_closed_position_price(` — currently ~lines 2670, 6224,
+10415; strategy.py churns, so use the grep anchor not the numbers) to
+get the actual closing fill price for a specific position that closed
+today. Used in P&L attribution + Fix #87 settlement reconciliation.
 
 **Why deferred**: IBKR Client Portal Web API's per-conid closed
 positions endpoint is not clearly documented in publicly accessible
@@ -68,6 +76,64 @@ pointing to this doc. Same as Saxo dry-run skip already does at line
 unit tests + integration test against paper account).
 
 ---
+
+## DEF-3: MKT-033 long-leg salvage gated on the Saxo-only `*_position_id`
+
+**What**: `_try_sell_long_leg` guards with `not long_pos_id` and
+`_check_long_salvage` gates each call on `entry.long_call_position_id
+and entry.long_call_uic`. F4.3 correctly swapped the *existence check*
+to the broker-agnostic `_position_is_open`, but these `*_position_id`
+truthiness guards remain. IBKR has no per-leg position id, so once the
+IB entry-placement flow lands (and `*_position_id` is `None` from
+creation), MKT-033 long salvage will never fire in live IBKR mode —
+forfeiting real directional-day salvage revenue ($5–$65/leg).
+
+**Why deferred, not fixed now**: `_try_sell_long_leg` is `dry_run`-only-
+skipped at its first line, so MKT-033 never runs in the current dry-run
+build. And the method's *downstream* calls — `_close_position_with_retry`,
+`registry.unregister` — are the order-close flow, not yet rewritten for
+IBKR. Flipping only the gate to `long_uic` would make MKT-033 *attempt*
+to run and then hit un-rewritten close code — a half-fix. The correct
+fix lands with the order-close flow.
+
+**Trigger**: the IBKR order-close / entry-placement flow rewrite — at
+that point gate MKT-033 on `long_uic` (broker-agnostic) and verify the
+whole salvage path end-to-end on IBKR.
+
+## DEF-4: STATE-002 `_check_state_consistency` keyed on registry + `PositionId`
+
+**What**: `_check_state_consistency` computes `expected_positions` from
+`sum(len(e.all_position_ids) …)` and compares against the Position
+Registry count. `all_position_ids` is built from `*_position_id`; on
+IBKR those are `None`, so STATE-002 becomes a no-op (no protection) in
+live IBKR mode.
+
+**Why deferred**: The Position Registry is vestigial in a single-bot
+world and F4 §7 explicitly scoped it out — its fate (delete vs keep)
+is decided in the dead-code phase. STATE-002's rewrite belongs with
+that decision.
+
+**Trigger**: the dead-code phase / Position-Registry decision. If the
+registry is retired, STATE-002 should be re-expressed in the
+conid→quantity model (it can reuse `_expected_position_quantities` —
+the F4.4 machinery) or removed.
+
+## DEF-5: `_process_expired_credits` settlement detection on `*_position_id`
+
+**What**: F4.6 rewrote POS-004 to detect settlement via the
+conid→quantity model (`*_uic` cleared), but it then calls
+`_process_expired_credits()`, which still decides "position gone" via
+`_position_is_settled(entry.short_call_position_id)` — the legacy
+`*_position_id` field. POS-004's main path papers over this by clearing
+both `*_uic` and `*_position_id`; the empty-registry path does not.
+Once IB entry placement leaves `*_position_id` `None` from creation,
+the empty-registry path could mark sides expired prematurely.
+
+**Why deferred**: cross-slice — depends on the IB entry-placement flow
+defining what (if anything) replaces `*_position_id`.
+
+**Trigger**: the IB entry-placement flow rewrite — migrate
+`_process_expired_credits` to the conid→quantity model at the same time.
 
 ## How to maintain this doc
 

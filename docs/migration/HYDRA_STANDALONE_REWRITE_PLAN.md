@@ -1,6 +1,6 @@
 # HYDRA Standalone Rewrite — Implementation Plan
 
-**Status**: 📋 DRAFT — awaiting user approval gate (Phase NEW-1 GATE)
+**Status**: ✅ APPROVED & IN PROGRESS — F1–F4 complete, F5 in progress (see §11.9)
 **Created**: 2026-05-19
 **Owner**: Diogo Dias
 
@@ -556,9 +556,14 @@ was an artificial separation of the same work.
 |---|---|---|
 | F1 — Trend/chart | `get_chart_data` ×2 + EMA/ATR parsing | ✅ commit 7a |
 | F2 — Leg quote checks | `get_quote` ×2 (worthless-leg + salvage) | ✅ commit 7b |
-| F3 — Credit estimation / strike tightening | `get_option_chain` ×3 + chain-coupled `get_quotes_batch` ×3 + `get_option_greeks` ×1 + MKT-020/022/045 logic | ⏳ next — see §11.10 |
-| F4 — Position reconcile / recovery | `get_positions` ×8 + `_normalize_position_dict` + state-schema rename | ⏳ |
-| F5 — Settlement / FX | `get_fx_rate` ×1 + closed-positions (DEF-1/2) | ⏳ |
+| F3 — Credit estimation / strike tightening | `get_option_chain` ×3 + chain-coupled `get_quotes_batch` ×3 + `get_option_greeks` ×1 + MKT-020/022/045 logic | ✅ complete — F3.1–F3.7 (see `F3_OPTION_CHAIN_DESIGN.md`) |
+| F4 — Position reconcile / recovery | `get_positions` ×8 + `_normalize_position_dict` + conid→quantity reconciliation | ✅ complete — F4.1–F4.9 (see `F4_POSITION_FLOW_DESIGN.md`) |
+| F5 — Settlement / FX | `get_fx_rate` ×1 + closed-positions (DEF-1/2) | ⏳ in progress — design + F5.1 probe done (see `F5_SETTLEMENT_FX_FLOW_DESIGN.md`) |
+
+> Post-F4 a 5-agent world-class audit ran over all branch commits; the
+> CRITICAL (recovery state-machine) + HIGH (chart `period` range)
+> findings were fixed (commit `5044651`), and two live-readiness gaps
+> were logged in `DEFERRED_WORK.md` (DEF-3/DEF-4).
 
 The commit numbering "7a, 7b, ..." is retired. Subsequent commits are
 labelled by flow (F3, F4, F5) and by MEIC-method-family.
@@ -636,4 +641,4 @@ Approve this updated plan (with §11 corrections applied)?
 
 ---
 
-**Last updated**: 2026-05-19 (Phase NEW-1 audit + self-audit complete, awaiting approval gate)
+**Last updated**: 2026-05-21 (F1–F4 complete, F5 in progress, 5-agent audit + remediation done)

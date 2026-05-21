@@ -1,6 +1,6 @@
 # F4 — Position Reconciliation / Recovery / Monitoring Flow: IBKR Design
 
-**Status**: 📋 design — awaiting approval before implementation
+**Status**: ✅ implemented — F4.1–F4.9 committed (see "Implementation status")
 **Date**: 2026-05-21
 **Predecessor**: F3 (option chain) complete — commits F3.1-F3.7
 
@@ -104,9 +104,12 @@ The 5 id-set sites currently do `str(pos_id) in actual_ids`. They get
 replaced by a single quantity-aware predicate:
 
 ```python
-def _position_is_open(self, conid, right, min_abs_qty=1) -> bool:
-    """True if the broker shows an open option position at `conid`
-    with `right` and |quantity| >= min_abs_qty."""
+# illustrative — see "Implementation status / F4.2" for the final
+# signature (right/positions/min_abs_qty are keyword-only).
+def _position_is_open(self, instrument_id, *, right=None,
+                      positions=None, min_abs_qty=1) -> bool:
+    """True if the broker shows an open option position at
+    `instrument_id` with |quantity| >= min_abs_qty (right optional)."""
 ```
 
 On Saxo this still works (a non-merged leg is just `|qty| >= 1` at its
@@ -181,9 +184,18 @@ MEIC `__init__` dispatches to the override):
 3. no Position Registry, no `_group_positions_by_entry`, no
    `_reconstruct_entry_from_positions` guessing.
 
-~680 lines collapse to ~130. `_recover_from_state_file_uics`,
-`_group_positions_by_entry`, and HYDRA's `_reconstruct_entry_from_positions`
-override become dead — removed in the dead-code phase.
+~680 lines collapse to ~130. **Dead-code consequence** (two distinct
+categories — the dead-code phase must handle them differently):
+- **HYDRA-local overrides now unreachable** — `_reconstruct_entry_from_positions`
+  (`bots/hydra/strategy.py`) and `_recover_from_state_file_uics`
+  (`bots/hydra/strategy.py`). HYDRA's `_recover_positions_from_saxo` no
+  longer calls either. These are HYDRA's own methods and must be
+  explicitly **deleted** from `bots/hydra/strategy.py`.
+- **Inherited MEIC methods HYDRA stopped reaching** — `_group_positions_by_entry`
+  and `_extract_mid_price` live ONLY in `bots/meic/strategy.py`; HYDRA
+  never overrode them. They are still live for MEIC. They are not
+  HYDRA dead code — they die when `bots/meic/` is deleted wholesale
+  (MEIC is a retired bot). Do NOT look for them in `bots/hydra/`.
 
 ## 5. `_batch_update_entry_prices` monitoring quotes (deferred from F3)
 
@@ -237,7 +249,7 @@ further once its internals are mapped in detail.
 - POS-004 settlement check: F4.6 ✅ committed (012f057)
 - P&L sites: F4.7 ✅ committed (1e82533)
 - `_recover_positions_from_saxo` state-file rewrite: F4.8 ✅ committed (03e2406)
-- `_batch_update_entry_prices` monitoring quotes: F4.9 ✅ committed
+- `_batch_update_entry_prices` monitoring quotes: F4.9 ✅ committed (308aaec)
 
 ### F4.9 — `_batch_update_entry_prices` monitoring quotes
 
@@ -254,9 +266,10 @@ no crash. 10 tests (`TestQuoteMid` + `TestBatchUpdateEntryPrices`).
 call in HYDRA's flow code is gone — all position/quote I/O now routes
 through the broker-agnostic helpers (`_read_open_positions`,
 `_read_option_quotes_batch`, `_read_option_quote`, `_read_option_greeks`).
-`_extract_mid_price`, `_recover_from_state_file_uics`,
-`_group_positions_by_entry`, `_reconstruct_entry_from_positions` are
-left dead for the dead-code phase.
+Dead-code left for the dead-code phase: HYDRA-local `_recover_from_state_file_uics`
+and `_reconstruct_entry_from_positions` (delete from `bots/hydra/`);
+the inherited MEIC `_group_positions_by_entry` / `_extract_mid_price`
+are MEIC-only and die with `bots/meic/` (see the F4.8 dead-code note).
 
 ### F4.8 — recovery rewritten state-file-authoritative
 
@@ -345,12 +358,20 @@ Saxo path flattens the nested `PositionBase`/`PositionView` shape.
 `[]` on fetch failure; unparseable IB rows (no conid) skipped without
 aborting the batch. 13 `TestReadOpenPositions` tests cover both paths.
 
-## 8. Decision requested
+## 8. Decision record (resolved)
 
+Approved 2026-05-21 and implemented:
 1. The `(conid, right, expected_sign/quantity)` identity model for the
    IB era (vs Saxo's per-leg `PositionId`) — quantity-aware
    reconciliation as the primary path.
 2. The `_read_open_positions` + `_position_is_open` helper pair.
-3. The 6-commit F4.1-F4.6 breakdown.
+3. The breakdown grew from the original 6 commits to **9 (F4.1–F4.9)**
+   — POS-003/POS-004/FIX-#82 turned out to be genuine reconciliation-
+   logic rewrites rather than mechanical I/O swaps, and each earned its
+   own commit (see §6).
 
-Once approved, F4.1 (`_read_open_positions`) starts.
+Implemented across F4.1–F4.9; see "Implementation status" for the
+per-commit detail. Two follow-up live-readiness gaps surfaced by the
+post-implementation audit are tracked in `DEFERRED_WORK.md` (MKT-033
+salvage gate, STATE-002 consistency check — both still keyed on the
+Saxo-only `*_position_id` / Position Registry).
