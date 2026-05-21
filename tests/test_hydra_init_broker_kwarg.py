@@ -2796,3 +2796,91 @@ class TestPlaceOptionOrderIb:
         )
         assert out == {"uic": 1}
         s._place_option_order_ib.assert_called_once()
+
+
+class TestClosePositionWithRetryIb:
+    """F6.3 — _close_position_with_retry_ib: IBKR leg-close path.
+    place→poll via _close_leg_order; (success, fill_price, order_id)."""
+
+    def _make(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s.dry_run = False
+        s.contracts_per_entry = 1
+        s.alert_service = MagicMock()
+        s._log_safety_event = MagicMock()
+        return s
+
+    def test_fills_first_attempt(self):
+        s = self._make()
+        s._close_leg_order = MagicMock(return_value={
+            "filled": True, "fill_price": 0.40, "order_id": "c1",
+        })
+        ok, fill, oid = s._close_position_with_retry_ib(
+            None, "short_call", uic=12345,
+        )
+        assert ok is True
+        assert fill == 0.40
+        assert oid == "c1"
+        # short leg closes with a BUY
+        assert s._close_leg_order.call_args.kwargs["side"] == "BUY"
+        assert s._close_leg_order.call_args.kwargs["instrument_id"] == 12345
+
+    def test_long_leg_closes_with_sell(self):
+        s = self._make()
+        s._close_leg_order = MagicMock(return_value={
+            "filled": True, "fill_price": 1.0, "order_id": "c2",
+        })
+        s._close_position_with_retry_ib(None, "long_put", uic=999)
+        assert s._close_leg_order.call_args.kwargs["side"] == "SELL"
+
+    def test_no_uic_returns_failure(self):
+        s = self._make()
+        s._close_leg_order = MagicMock()
+        ok, fill, oid = s._close_position_with_retry_ib(
+            None, "short_call", uic=None,
+        )
+        assert (ok, fill, oid) == (False, None, None)
+        s._close_leg_order.assert_not_called()
+
+    def test_dry_run_returns_noop_success(self):
+        s = self._make()
+        s.dry_run = True
+        s._close_leg_order = MagicMock()
+        ok, fill, oid = s._close_position_with_retry_ib(
+            None, "short_call", uic=12345,
+        )
+        assert (ok, fill, oid) == (True, None, None)
+        s._close_leg_order.assert_not_called()
+
+    def test_already_closed_on_retry_short_circuits(self):
+        s = self._make()
+        # attempt 1 doesn't fill; before attempt 2, broker shows nothing
+        s._close_leg_order = MagicMock(return_value={"filled": False})
+        s._position_is_open = MagicMock(return_value=False)
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            ok, fill, oid = s._close_position_with_retry_ib(
+                None, "short_call", uic=12345,
+            )
+        assert ok is True  # already gone → treated as closed
+        s._position_is_open.assert_called()
+
+    def test_all_attempts_fail(self):
+        s = self._make()
+        s._close_leg_order = MagicMock(return_value={"filled": False})
+        s._position_is_open = MagicMock(return_value=True)  # still open
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            ok, fill, oid = s._close_position_with_retry_ib(
+                None, "short_call", uic=12345,
+            )
+        assert (ok, fill, oid) == (False, None, None)
+        # the exhausted-retries path logs the EMERGENCY_CLOSE_FAILED event
+        assert s._log_safety_event.call_args.args[0] == "EMERGENCY_CLOSE_FAILED"
+
+    def test_branch_dispatch_from_close_position_with_retry(self):
+        s = self._make()
+        s._close_position_with_retry_ib = MagicMock(return_value=(True, 1.0, "x"))
+        out = s._close_position_with_retry("pid", "short_call", uic=12345)
+        assert out == (True, 1.0, "x")
+        s._close_position_with_retry_ib.assert_called_once()

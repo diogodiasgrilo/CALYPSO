@@ -4515,6 +4515,14 @@ class MEICStrategy:
             )
             return True, None, None
 
+        # F6.3 — IBKR path. The Saxo body below is dormant on the
+        # standalone branch and is deleted in completion-plan phase P4.
+        if self.broker is not None:
+            return self._close_position_with_retry_ib(
+                position_id, leg_name, uic=uic, entry_number=entry_number,
+                contracts=contracts,
+            )
+
         # v8: resolve contract count. Defense in depth: if caller passes 0 or None, fall
         # back to current config (invalid value likely means caller didn't wire it).
         close_contracts = contracts if contracts else self.contracts_per_entry
@@ -4699,6 +4707,133 @@ class MEICStrategy:
             title="EMERGENCY CLOSE FAILED",
             message=error_msg,
             priority=AlertPriority.CRITICAL
+        )
+        self._log_safety_event("EMERGENCY_CLOSE_FAILED", error_msg, "Failed")
+        return False, None, None
+
+    def _close_position_with_retry_ib(
+        self, position_id: str, leg_name: str, uic: int = None,
+        entry_number: int = None, contracts: Optional[int] = None,
+    ) -> Tuple[bool, Optional[float], Optional[str]]:
+        """IBKR path of :meth:`_close_position_with_retry` (F6.3).
+
+        Far simpler than the Saxo path: :meth:`_close_leg_order` (F6.1)
+        already does place→poll-to-fill and carries the fill price, so
+        there is no separate place / verify / fill-lookup three-step.
+        IBKR settles by conid net quantity — no per-leg position id, no
+        Saxo DELETE-endpoint 404 quirk, no merged-position partial-close
+        math. ``uic`` carries the conid; ``position_id`` is unused on
+        this path (IBKR has none).
+
+        The Saxo path's pre-close spread-wait is intentionally NOT
+        carried over: an emergency close prioritises a certain exit, and
+        ``place_and_wait_for_fill`` already owns the market-order
+        place→poll. The retry delay covers "let the book settle".
+
+        Returns ``(success, fill_price, order_id)`` — the same contract
+        as the Saxo path.
+        """
+        if self.dry_run:
+            logger.warning(
+                f"[DRY RUN] SAFETY-DRY-04b: _close_position_with_retry_ib "
+                f"reached in dry mode for {leg_name} — no close order placed."
+            )
+            return True, None, None
+
+        if not uic:
+            logger.error(
+                f"EMERGENCY-001: cannot close {leg_name} without a conid"
+            )
+            return False, None, None
+
+        close_contracts = contracts if contracts else self.contracts_per_entry
+        # short leg → BUY to close; long leg → SELL to close
+        side = "BUY" if leg_name.startswith("short") else "SELL"
+
+        for attempt in range(EMERGENCY_CLOSE_MAX_ATTEMPTS):
+            attempt_num = attempt + 1
+            try:
+                # Already gone? The broker shows no open quantity at the conid.
+                if attempt > 0 and not self._position_is_open(uic):
+                    logger.info(
+                        f"EMERGENCY-001: {leg_name} (conid {uic}) already "
+                        f"closed — skipping retry"
+                    )
+                    return True, None, None
+
+                logger.info(
+                    f"EMERGENCY-001: Closing {leg_name} via MARKET order "
+                    f"(conid={uic}, {side}, amount={close_contracts})"
+                )
+                res = self._close_leg_order(
+                    instrument_id=uic, side=side, quantity=close_contracts,
+                )
+                if res.get("filled"):
+                    fill_price = res.get("fill_price")
+                    logger.info(
+                        f"EMERGENCY-001: Verified {leg_name} closed on "
+                        f"attempt {attempt_num}, "
+                        + (f"fill_price=${fill_price:.2f}" if fill_price
+                           else "fill_price=unknown")
+                    )
+                    return True, fill_price, res.get("order_id")
+
+                logger.warning(
+                    f"EMERGENCY-001: close {leg_name} attempt {attempt_num} "
+                    f"did not fill — retrying..."
+                )
+                if attempt_num == 1:
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.EMERGENCY_CLOSE,
+                        title="STOP CLOSE FAILED - IMMEDIATE",
+                        message=(
+                            f"First attempt to close {leg_name} did not "
+                            f"fill (conid {uic}). Will retry "
+                            f"{EMERGENCY_CLOSE_MAX_ATTEMPTS - 1} more times."
+                        ),
+                        priority=AlertPriority.HIGH,
+                    )
+
+            except Exception as e:
+                logger.error(
+                    f"EMERGENCY-001: Close {leg_name} attempt {attempt_num} "
+                    f"failed: {e}"
+                )
+                if attempt_num == 1:
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.EMERGENCY_CLOSE,
+                        title="STOP CLOSE EXCEPTION - IMMEDIATE",
+                        message=(
+                            f"Exception closing {leg_name}: {str(e)[:100]}. "
+                            f"conid {uic}. Will retry."
+                        ),
+                        priority=AlertPriority.HIGH,
+                    )
+                elif attempt_num >= 4:
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.EMERGENCY_CLOSE,
+                        title="EMERGENCY CLOSE STRUGGLING",
+                        message=(
+                            f"Failed to close {leg_name} after {attempt_num} "
+                            f"attempts. conid {uic}. Error: {e}"
+                        ),
+                        priority=(AlertPriority.HIGH if attempt_num == 4
+                                  else AlertPriority.CRITICAL),
+                    )
+
+            if attempt < EMERGENCY_CLOSE_MAX_ATTEMPTS - 1:
+                time.sleep(EMERGENCY_CLOSE_RETRY_DELAY_SECONDS)
+
+        error_msg = (
+            f"EMERGENCY-001 CRITICAL: FAILED to close {leg_name} (conid "
+            f"{uic}) after {EMERGENCY_CLOSE_MAX_ATTEMPTS} attempts!"
+        )
+        logger.critical(error_msg)
+        self.alert_service.send_alert(
+            alert_type=AlertType.CIRCUIT_BREAKER,
+            title="EMERGENCY CLOSE FAILED",
+            message=error_msg,
+            priority=AlertPriority.CRITICAL,
         )
         self._log_safety_event("EMERGENCY_CLOSE_FAILED", error_msg, "Failed")
         return False, None, None
