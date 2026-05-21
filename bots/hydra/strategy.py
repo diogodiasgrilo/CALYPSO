@@ -2043,6 +2043,138 @@ class HydraStrategy(MEICStrategy):
             )
             return None
 
+    # ──────────────────────────────────────────────────────────────────
+    # F6 — order WRITE-path helpers (IBKR)
+    #
+    # These wrap IBClient's write primitives. The Saxo write path is NOT
+    # dispatched here — it stays inline in the orchestration methods
+    # (`_place_option_order`, `_close_position_with_retry`, …), which
+    # branch `if self.broker is not None:` to the IB path below. The
+    # Saxo write path is dormant on this branch (dry-run blocks every
+    # write; the migration only ever goes live on IBKR) and is deleted
+    # wholesale in completion-plan phase P4. See
+    # docs/migration/F6_ORDER_WRITE_PATH_DESIGN.md.
+    # ──────────────────────────────────────────────────────────────────
+
+    def _place_leg_order(
+        self,
+        *,
+        instrument_id,
+        side: str,
+        quantity: int,
+        order_type: str = "LMT",
+        limit_price: Optional[float] = None,
+        coid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Place ONE option leg on IBKR; place→poll-to-fill in one call.
+
+        Returns a normalized result dict:
+            ``{success, filled, order_id, fill_price, position_id, raw}``
+        — ``position_id`` is always None (IBKR has no per-leg position
+        id). ``filled`` is True only when the broker reports the full
+        ``quantity`` filled.
+
+        IBKR-only — callers branch on ``self.broker`` first; a None
+        broker is a programming error.
+
+        Args:
+            instrument_id: IBKR conid of the option leg.
+            side: ``"BUY"`` or ``"SELL"``.
+            quantity: contracts (positive int).
+            order_type: ``"LMT"`` or ``"MKT"``.
+            limit_price: required for LMT; ignored for MKT.
+            coid: optional client-order-id for retry-safety.
+        """
+        if self.broker is None:
+            raise RuntimeError(
+                "_place_leg_order is IBKR-only — caller must branch on "
+                "self.broker"
+            )
+        ib_type = "MKT" if str(order_type).upper().startswith("M") else "LMT"
+        try:
+            res = self.broker.place_and_wait_for_fill(
+                conid=int(instrument_id),
+                side=str(side).upper(),
+                quantity=int(quantity),
+                order_type=ib_type,
+                limit_price=limit_price,
+                coid=coid,
+            )
+        except Exception as e:
+            logger.warning(
+                f"_place_leg_order({instrument_id} {side} x{quantity} "
+                f"{ib_type}) failed ({type(e).__name__}: {e})"
+            )
+            return {
+                "success": False, "filled": False, "order_id": None,
+                "fill_price": None, "position_id": None, "raw": None,
+            }
+        filled_qty = res.get("filled_quantity") or 0
+        return {
+            "success": bool(res.get("order_id")),
+            "filled": filled_qty >= int(quantity),
+            "order_id": res.get("order_id"),
+            "fill_price": res.get("avg_fill_price"),
+            "position_id": None,  # IBKR has no per-leg position id
+            "raw": res,
+        }
+
+    def _close_leg_order(
+        self, *, instrument_id, side: str, quantity: int,
+        coid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Close ONE option leg on IBKR with a market order.
+
+        Thin wrapper over :meth:`_place_leg_order` — IBKR has no
+        open/close order flag; a close is just a market order in the
+        opposite direction (``side`` = the close direction: BUY to
+        close a short, SELL to close a long). Same normalized result.
+        """
+        return self._place_leg_order(
+            instrument_id=instrument_id, side=side, quantity=quantity,
+            order_type="MKT", coid=coid,
+        )
+
+    def _cancel_order(self, order_id) -> bool:
+        """Cancel a working order on the active broker. False on failure
+        (broker-agnostic — the cancel/status/open-orders dispatch is
+        cheap and symmetric, unlike the placement path)."""
+        try:
+            if self.broker is not None:
+                return bool(self.broker.cancel_order(str(order_id)))
+            return bool(self.client.cancel_order(order_id))
+        except Exception as e:
+            logger.warning(
+                f"_cancel_order({order_id}) failed ({type(e).__name__}: {e})"
+            )
+            return False
+
+    def _get_order_status(self, order_id) -> Dict[str, Any]:
+        """Current status of an order from the active broker. ``{}`` on
+        failure."""
+        try:
+            if self.broker is not None:
+                return self.broker.get_order_status(str(order_id)) or {}
+            return self.client.get_order_status(order_id) or {}
+        except Exception as e:
+            logger.warning(
+                f"_get_order_status({order_id}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return {}
+
+    def _get_open_orders(self) -> List[Dict[str, Any]]:
+        """All live orders on the active broker. ``[]`` on failure."""
+        try:
+            if self.broker is not None:
+                return self.broker.get_open_orders() or []
+            return self.client.get_open_orders() or []
+        except Exception as e:
+            logger.warning(
+                f"_get_open_orders failed ({type(e).__name__}: {e})"
+            )
+            return []
+
     def _refresh_chart_data_for_scouting(self):
         """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
 

@@ -2528,3 +2528,154 @@ class TestVerifySettlementPnl:
         s.client._make_request.return_value = None  # no report → early return
         s._verify_settlement_pnl_from_saxo()
         s.client._make_request.assert_called_once()
+
+
+class TestPlaceLegOrder:
+    """F6.1 — _place_leg_order places one IBKR option leg via
+    place_and_wait_for_fill and normalizes the result."""
+
+    def _make(self, broker=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = None
+        return s
+
+    def test_filled_order_normalized(self):
+        fake_broker = MagicMock()
+        fake_broker.place_and_wait_for_fill.return_value = {
+            "order_id": "o-1", "status": "filled",
+            "filled_quantity": 2, "avg_fill_price": 2.55, "raw": {},
+        }
+        s = self._make(broker=fake_broker)
+        out = s._place_leg_order(
+            instrument_id=12345, side="BUY", quantity=2,
+            order_type="LMT", limit_price=2.60,
+        )
+        assert out["success"] is True
+        assert out["filled"] is True
+        assert out["order_id"] == "o-1"
+        assert out["fill_price"] == 2.55
+        assert out["position_id"] is None  # IBKR has no per-leg id
+        call = fake_broker.place_and_wait_for_fill.call_args.kwargs
+        assert call["conid"] == 12345
+        assert call["side"] == "BUY"
+        assert call["quantity"] == 2
+        assert call["order_type"] == "LMT"
+        assert call["limit_price"] == 2.60
+
+    def test_partial_fill_not_marked_filled(self):
+        fake_broker = MagicMock()
+        fake_broker.place_and_wait_for_fill.return_value = {
+            "order_id": "o-2", "status": "submitted",
+            "filled_quantity": 1, "avg_fill_price": None, "raw": {},
+        }
+        s = self._make(broker=fake_broker)
+        out = s._place_leg_order(
+            instrument_id=1, side="SELL", quantity=2, order_type="LMT",
+            limit_price=1.0,
+        )
+        assert out["success"] is True   # order placed
+        assert out["filled"] is False   # but only 1 of 2 filled
+
+    def test_market_order_type_translated(self):
+        fake_broker = MagicMock()
+        fake_broker.place_and_wait_for_fill.return_value = {
+            "order_id": "o-3", "filled_quantity": 1, "avg_fill_price": 3.0,
+        }
+        s = self._make(broker=fake_broker)
+        s._place_leg_order(instrument_id=1, side="BUY", quantity=1,
+                           order_type="MKT")
+        assert fake_broker.place_and_wait_for_fill.call_args.kwargs["order_type"] == "MKT"
+
+    def test_exception_returns_failure_dict(self):
+        fake_broker = MagicMock()
+        fake_broker.place_and_wait_for_fill.side_effect = RuntimeError("rejected")
+        s = self._make(broker=fake_broker)
+        out = s._place_leg_order(instrument_id=1, side="BUY", quantity=1,
+                                 order_type="MKT")
+        assert out["success"] is False
+        assert out["filled"] is False
+        assert out["order_id"] is None
+
+    def test_none_broker_raises(self):
+        s = self._make(broker=None)
+        with pytest.raises(RuntimeError, match="IBKR-only"):
+            s._place_leg_order(instrument_id=1, side="BUY", quantity=1,
+                               order_type="MKT")
+
+
+class TestCloseLegOrder:
+    """F6.1 — _close_leg_order is a market-order wrapper of
+    _place_leg_order."""
+
+    def test_delegates_as_market_order(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s.broker.place_and_wait_for_fill.return_value = {
+            "order_id": "c-1", "filled_quantity": 1, "avg_fill_price": 0.40,
+        }
+        out = s._close_leg_order(instrument_id=9, side="BUY", quantity=1)
+        assert out["filled"] is True
+        assert out["fill_price"] == 0.40
+        assert s.broker.place_and_wait_for_fill.call_args.kwargs["order_type"] == "MKT"
+
+
+class TestWriteDispatchHelpers:
+    """F6.1 — _cancel_order / _get_order_status / _get_open_orders are
+    broker-agnostic dispatch + failure guards."""
+
+    def _make(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        return s
+
+    def test_cancel_order_ib(self):
+        b = MagicMock()
+        b.cancel_order.return_value = True
+        s = self._make(broker=b)
+        assert s._cancel_order("o-1") is True
+        b.cancel_order.assert_called_once_with("o-1")
+
+    def test_cancel_order_saxo(self):
+        c = MagicMock()
+        c.cancel_order.return_value = {"ok": 1}
+        s = self._make(broker=None, client=c)
+        assert s._cancel_order("o-1") is True
+
+    def test_cancel_order_exception_false(self):
+        b = MagicMock()
+        b.cancel_order.side_effect = RuntimeError("x")
+        s = self._make(broker=b)
+        assert s._cancel_order("o-1") is False
+
+    def test_get_order_status_ib(self):
+        b = MagicMock()
+        b.get_order_status.return_value = {"status": "Filled"}
+        s = self._make(broker=b)
+        assert s._get_order_status("o-1") == {"status": "Filled"}
+
+    def test_get_order_status_exception_empty(self):
+        b = MagicMock()
+        b.get_order_status.side_effect = RuntimeError("x")
+        s = self._make(broker=b)
+        assert s._get_order_status("o-1") == {}
+
+    def test_get_open_orders_ib(self):
+        b = MagicMock()
+        b.get_open_orders.return_value = [{"orderId": 1}]
+        s = self._make(broker=b)
+        assert s._get_open_orders() == [{"orderId": 1}]
+
+    def test_get_open_orders_saxo(self):
+        c = MagicMock()
+        c.get_open_orders.return_value = [{"OrderId": "s1"}]
+        s = self._make(broker=None, client=c)
+        assert s._get_open_orders() == [{"OrderId": "s1"}]
+
+    def test_get_open_orders_exception_empty(self):
+        b = MagicMock()
+        b.get_open_orders.side_effect = RuntimeError("x")
+        s = self._make(broker=b)
+        assert s._get_open_orders() == []
