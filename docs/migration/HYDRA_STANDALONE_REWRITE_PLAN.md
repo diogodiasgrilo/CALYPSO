@@ -527,14 +527,60 @@ HYDRA's `data/hydra_state.json` stores `uic` fields. The Dashboard backend reads
 `bots/hydra/brandon/strategy.py:762` lazily imports `BuySell` from `shared.saxo_client`. When we delete saxo_client, Brandon breaks. **Fix**: when porting `_place_option_order` (commit ~7), simultaneously update Brandon to use IBClient's string `side="BUY"`/`"SELL"` directly. No enum dependency after.
 
 ### 11.4 — Reorder commits: reads BEFORE MEIC writes port
-Original sequence had reads at step 7, after MEIC method porting. But HYDRA's 28 direct read calls are independent of MEIC inheritance — they can be rewritten earlier. **New order**:
-1. Commits 1-4: IBClient extensions (place_and_wait_for_fill, close_position_with_retry, _normalize_position_dict, get_closed_positions_report, plus state schema migration)
-2. Commit 5: HYDRA __init__ accepts IBClient (still inheriting MEIC, but starts using IBClient for reads)
-3. Commit 6: **Rewrite HYDRA's 28 direct read calls** (independent of MEIC port — quick win)
-4. Commits 7-12: Port MEIC methods HYDRA's call chain actually uses (per §11.1 audit)
-5. Commit 13: Remove `class HydraStrategy(MEICStrategy)` inheritance
-6. Commits 14-17: Deletions + tests
-7. Commits 18-20: Docs sweep + final validation
+Original sequence had reads at step 7, after MEIC method porting. But HYDRA's 28 direct read calls are independent of MEIC inheritance — they can be rewritten earlier.
+
+### 11.9 — COURSE CORRECTION (2026-05-21): retire "28 isolated read swaps", adopt flow-by-flow
+
+After completing the first 2 read rewrites (chart, quote), it became clear the
+"28 isolated read swaps" model in §11.4 was WRONG for the harder reads. The
+reads are NOT independent units — they're entangled inside HYDRA strategy
+flows. Specifically:
+
+- `get_option_chain` ×3 + chain-coupled `get_quotes_batch` ×3 +
+  `get_option_greeks` ×1 form ONE cohesive "credit estimation / strike
+  tightening" flow (MKT-020/022/045). They share data and can't be
+  swapped one-method-at-a-time without broken intermediate states.
+- `get_quotes_batch` ×2 (entry-price-update path) are coupled to the
+  state-schema `uic → instrument_id` rename.
+- `get_positions` ×8 are coupled to the position-dict-shape change.
+
+**New model**: rewrite HYDRA flow-by-flow, where each flow = its reads +
+its logic + its tests, committed as a cohesive unit. This is identical
+in substance to "port the 101 MEIC methods by family" — the reads live
+INSIDE those method families. The §11.4 "reads before MEIC port" split
+was an artificial separation of the same work.
+
+**The five flows**:
+
+| Flow | Contents | Status |
+|---|---|---|
+| F1 — Trend/chart | `get_chart_data` ×2 + EMA/ATR parsing | ✅ commit 7a |
+| F2 — Leg quote checks | `get_quote` ×2 (worthless-leg + salvage) | ✅ commit 7b |
+| F3 — Credit estimation / strike tightening | `get_option_chain` ×3 + chain-coupled `get_quotes_batch` ×3 + `get_option_greeks` ×1 + MKT-020/022/045 logic | ⏳ next — see §11.10 |
+| F4 — Position reconcile / recovery | `get_positions` ×8 + `_normalize_position_dict` + state-schema rename | ⏳ |
+| F5 — Settlement / FX | `get_fx_rate` ×1 + closed-positions (DEF-1/2) | ⏳ |
+
+The commit numbering "7a, 7b, ..." is retired. Subsequent commits are
+labelled by flow (F3, F4, F5) and by MEIC-method-family.
+
+### 11.10 — F3 is NOT deferred (decision 2026-05-21)
+
+An earlier draft proposed deferring F3 (credit-estimation flow) because
+the IBKR `get_option_chain` rewrite needs a design decision: does
+`search_secdef_info_by_conid` return a full strike→conid chain in one
+call, or must we call `qualify_contract` per strike (~40 calls, cached)?
+
+**Decision: do NOT defer.** The unknown is resolvable NOW by probing the
+live IBKR paper account (already working — 15/15 smoke passed). Process:
+1. Run a diagnostic script against IBKR paper that queries `secdef`
+   with + without strike filters, captures the response shape + counts +
+   timing.
+2. Based on the verified behavior, design the `get_option_chain`
+   rewrite properly (1-call vs N-call).
+3. Implement F3 with the verified design + full tests.
+
+This is the world-class approach — verify against reality, then build.
+DEF-3 is therefore NOT created; F3 proceeds in-sequence after the probe.
 
 ### 11.5 — LOC estimate corrected
 My original "5,000–7,000 LOC rewritten" was wrong. Reality: HYDRA strategy.py GROWS from 11,143 → ~12-14K LOC (gains MEIC methods, loses Saxo workarounds). The repo shrinkage comes ENTIRELY from deletions:

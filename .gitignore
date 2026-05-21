@@ -147,3 +147,6 @@ MANIFEST
 !dashboard/frontend/src/components/logs/
 backtest/results/
 backtest/results/sweep_logs/
+
+# Migration probe logs (local diagnostic evidence, not repo artifacts)
+scripts/probe_chain_*.log
