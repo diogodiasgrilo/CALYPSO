@@ -2253,3 +2253,102 @@ class TestRecoverPositions:
         s.daily_state.entries = []
         s._recover_positions_from_saxo()
         assert s.daily_state.date is not None
+
+
+class TestQuoteMid:
+    """F4.9 — _quote_mid derives a mid price from the normalized quote
+    shape: broker mid → (bid+ask)/2 → last → mark → 0.0."""
+
+    def test_prefers_broker_mid(self):
+        assert HydraStrategy._quote_mid(
+            {"bid": 2.0, "ask": 2.2, "mid": 2.05, "last": 9.9}
+        ) == 2.05
+
+    def test_falls_back_to_bid_ask_average(self):
+        assert HydraStrategy._quote_mid(
+            {"bid": 2.0, "ask": 2.2, "mid": None}
+        ) == 2.1
+
+    def test_falls_back_to_last(self):
+        assert HydraStrategy._quote_mid(
+            {"bid": None, "ask": None, "mid": None, "last": 1.7}
+        ) == 1.7
+
+    def test_falls_back_to_mark(self):
+        assert HydraStrategy._quote_mid(
+            {"bid": None, "ask": None, "mid": None, "last": None, "mark": 1.3}
+        ) == 1.3
+
+    def test_empty_quote_returns_zero(self):
+        assert HydraStrategy._quote_mid(None) == 0.0
+        assert HydraStrategy._quote_mid({}) == 0.0
+
+
+class TestBatchUpdateEntryPrices:
+    """F4.9 — _batch_update_entry_prices sources monitoring quotes via
+    the broker-agnostic _read_option_quotes_batch."""
+
+    def _make(self, dry_run):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.dry_run = dry_run
+        s.daily_state = MagicMock()
+        s._simulate_hydra_entry_prices = MagicMock()
+        return s
+
+    _QUOTES = {
+        101: {"bid": 2.0, "ask": 2.1, "mid": 2.05},
+        102: {"bid": 0.5, "ask": 0.6, "mid": 0.55},
+        103: {"bid": 1.0, "ask": 1.1, "mid": 1.05},
+        104: {"bid": 0.3, "ask": 0.4, "mid": 0.35},
+    }
+
+    # ─── live path ─────────────────────────────────────────────────────
+
+    def test_live_distributes_quotes_to_legs(self):
+        s = self._make(dry_run=False)
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s.daily_state.active_entries = [entry]
+        s._read_option_quotes_batch = MagicMock(return_value=self._QUOTES)
+        s._batch_update_entry_prices()
+        assert entry.short_call_price == 2.05
+        assert entry.short_call_bid == 2.0
+        assert entry.short_call_ask == 2.1
+        assert entry.long_put_price == 0.35
+
+    def test_live_empty_quotes_keeps_prior_prices(self):
+        s = self._make(dry_run=False)
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        entry.short_call_price = 9.99  # a prior value
+        s.daily_state.active_entries = [entry]
+        s._read_option_quotes_batch = MagicMock(return_value={})
+        s._batch_update_entry_prices()
+        # fetch failure → skipped this tick, prior price untouched
+        assert entry.short_call_price == 9.99
+
+    def test_live_no_uics_returns_without_fetch(self):
+        s = self._make(dry_run=False)
+        entry = _FakeReconcileEntry(sc=None, lc=None, sp=None, lp=None)
+        s.daily_state.active_entries = [entry]
+        s._read_option_quotes_batch = MagicMock()
+        s._batch_update_entry_prices()
+        s._read_option_quotes_batch.assert_not_called()
+
+    # ─── dry-run path ──────────────────────────────────────────────────
+
+    def test_dry_run_with_uics_uses_real_quotes(self):
+        s = self._make(dry_run=True)
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s.daily_state.active_entries = [entry]
+        s._read_option_quotes_batch = MagicMock(return_value=self._QUOTES)
+        s._batch_update_entry_prices()
+        assert entry.short_call_price == 2.05
+        s._simulate_hydra_entry_prices.assert_not_called()
+
+    def test_dry_run_empty_quotes_falls_back_to_simulation(self):
+        s = self._make(dry_run=True)
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s.daily_state.active_entries = [entry]
+        s._read_option_quotes_batch = MagicMock(return_value={})
+        s._batch_update_entry_prices()
+        s._simulate_hydra_entry_prices.assert_called_once_with(entry)

@@ -1794,6 +1794,25 @@ class HydraStrategy(MEICStrategy):
             )
             return None
 
+    @staticmethod
+    def _quote_mid(quote: Optional[Dict[str, Any]]) -> float:
+        """Mid price from a normalized quote dict.
+
+        Consumes the :meth:`_read_option_quote` / :meth:`_read_option_quotes_batch`
+        shape. Prefers the broker's ``mid`` (IBKR computes it); falls
+        back to ``(bid + ask) / 2`` (Saxo delivers no ``mid``), then to
+        ``last`` / ``mark``. Returns ``0.0`` when nothing is quotable.
+        """
+        if not quote:
+            return 0.0
+        mid = quote.get("mid")
+        if mid is not None:
+            return mid
+        bid, ask = quote.get("bid"), quote.get("ask")
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        return quote.get("last") or quote.get("mark") or 0.0
+
     def _read_open_positions(self, *, strict: bool = False) -> List[Dict[str, Any]]:
         """All open option positions from the active broker, normalized.
 
@@ -6760,28 +6779,28 @@ class HydraStrategy(MEICStrategy):
                     legacy_entries.append(entry)
 
             if uic_map:
-                try:
-                    quotes = self.client.get_quotes_batch(
-                        list(uic_map.keys()), asset_type="StockIndexOption"
+                # F4.9: broker-agnostic batch quotes. _read_option_quotes_batch
+                # returns {} on failure (never raises) — an empty result with
+                # a non-empty uic_map means the fetch failed, so fall back to
+                # simulation, preserving the old try/except behavior.
+                quotes = self._read_option_quotes_batch(list(uic_map.keys()))
+                if not quotes:
+                    logger.warning(
+                        "[DRY RUN] Real-quote batch fetch returned nothing — "
+                        "using simulation"
                     )
-                    for uic, targets in uic_map.items():
-                        quote = quotes.get(uic)
-                        mid_price = self._extract_mid_price(quote) or 0
-                        bid = None
-                        ask = None
-                        if quote and "Quote" in quote:
-                            q = quote["Quote"]
-                            bid = q.get("Bid") or None
-                            ask = q.get("Ask") or None
-                        for entry, leg in targets:
-                            setattr(entry, f"{leg}_price", mid_price)
-                            setattr(entry, f"{leg}_bid", bid)
-                            setattr(entry, f"{leg}_ask", ask)
-                except Exception as e:
-                    logger.warning(f"[DRY RUN] Real-quote batch fetch failed, using simulation: {e}")
                     for entry in self.daily_state.active_entries:
                         self._simulate_hydra_entry_prices(entry)
                     return
+                for uic, targets in uic_map.items():
+                    quote = quotes.get(uic) or {}
+                    mid_price = self._quote_mid(quote)
+                    bid = quote.get("bid") or None
+                    ask = quote.get("ask") or None
+                    for entry, leg in targets:
+                        setattr(entry, f"{leg}_price", mid_price)
+                        setattr(entry, f"{leg}_bid", bid)
+                        setattr(entry, f"{leg}_ask", ask)
 
             # Fall back to simulation for entries without UICs
             for entry in legacy_entries:
@@ -6801,21 +6820,24 @@ class HydraStrategy(MEICStrategy):
         if not uic_map:
             return
 
-        quotes = self.client.get_quotes_batch(
-            list(uic_map.keys()), asset_type="StockIndexOption"
-        )
+        # F4.9: broker-agnostic batch quotes. An empty result with a
+        # non-empty uic_map is a fetch failure — skip this tick's price
+        # update (prior prices stand) rather than writing bogus zeros.
+        quotes = self._read_option_quotes_batch(list(uic_map.keys()))
+        if not quotes:
+            logger.warning(
+                "_batch_update_entry_prices: quote batch returned nothing "
+                "— keeping prior prices for this tick"
+            )
+            return
 
         # Distribute prices + preserve bid/ask as transient attributes
         for uic, targets in uic_map.items():
-            quote = quotes.get(uic)
-            mid_price = self._extract_mid_price(quote) or 0
-            # Extract raw bid/ask for calibration capture (v6 schema)
-            bid = None
-            ask = None
-            if quote and "Quote" in quote:
-                q = quote["Quote"]
-                bid = q.get("Bid") or None
-                ask = q.get("Ask") or None
+            quote = quotes.get(uic) or {}
+            mid_price = self._quote_mid(quote)
+            # Raw bid/ask for calibration capture (v6 schema)
+            bid = quote.get("bid") or None
+            ask = quote.get("ask") or None
             for entry, leg in targets:
                 setattr(entry, f"{leg}_price", mid_price)
                 # Transient bid/ask — written to spread_snapshots each tick

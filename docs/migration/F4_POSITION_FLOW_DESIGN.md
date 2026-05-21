@@ -236,8 +236,27 @@ further once its internals are mapped in detail.
 - FIX #82 overnight check + `strict` param: F4.5 ✅ committed (e5e07a8)
 - POS-004 settlement check: F4.6 ✅ committed (012f057)
 - P&L sites: F4.7 ✅ committed (1e82533)
-- `_recover_positions_from_saxo` state-file rewrite: F4.8 ✅ committed
-- `_batch_update_entry_prices` monitoring quotes: F4.9 (pending)
+- `_recover_positions_from_saxo` state-file rewrite: F4.8 ✅ committed (03e2406)
+- `_batch_update_entry_prices` monitoring quotes: F4.9 ✅ committed
+
+### F4.9 — `_batch_update_entry_prices` monitoring quotes
+
+Both monitoring batch-quote calls (dry-run path + live path) rewired
+from Saxo `client.get_quotes_batch` to the broker-agnostic
+`_read_option_quotes_batch` (F3.4). New `_quote_mid` staticmethod
+derives a mid from the normalized quote shape (broker `mid` →
+`(bid+ask)/2` → `last` → `mark` → 0.0), replacing the Saxo-shaped
+`_extract_mid_price`. Empty result handling: dry-run falls back to
+simulation, live skips the tick (prior prices stand) — no bogus zeros,
+no crash. 10 tests (`TestQuoteMid` + `TestBatchUpdateEntryPrices`).
+
+**F4 complete.** Every direct Saxo `get_positions` / `get_quotes_batch`
+call in HYDRA's flow code is gone — all position/quote I/O now routes
+through the broker-agnostic helpers (`_read_open_positions`,
+`_read_option_quotes_batch`, `_read_option_quote`, `_read_option_greeks`).
+`_extract_mid_price`, `_recover_from_state_file_uics`,
+`_group_positions_by_entry`, `_reconstruct_entry_from_positions` are
+left dead for the dead-code phase.
 
 ### F4.8 — recovery rewritten state-file-authoritative
 
