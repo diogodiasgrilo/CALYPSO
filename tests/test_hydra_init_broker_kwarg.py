@@ -2679,3 +2679,120 @@ class TestWriteDispatchHelpers:
         b.get_open_orders.side_effect = RuntimeError("x")
         s = self._make(broker=b)
         assert s._get_open_orders() == []
+
+
+class TestPlaceOptionOrderIb:
+    """F6.2 — _place_option_order_ib: IBKR path of _place_option_order.
+    Progressive-slippage retry, conid via _read_option_chain, place via
+    _place_leg_order; same {position_id, uic, credit, debit, fill_price}
+    result shape as the Saxo path."""
+
+    def _make(self):
+        from shared.saxo_client import BuySell  # noqa: F401 (used by tests)
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        s.dry_run = False
+        s.contracts_per_entry = 1
+        s._max_absolute_slippage = 5.0
+        s._validate_order_size = MagicMock(return_value=(True, None))
+        s._monitor_fill_slippage = MagicMock()
+        return s
+
+    def test_fills_first_attempt_sell_returns_credit(self):
+        from shared.saxo_client import BuySell
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=({6800.0: 12345}, {}))
+        s._read_option_quote = MagicMock(return_value={"bid": 2.50, "ask": 2.60})
+        s._place_leg_order = MagicMock(return_value={
+            "filled": True, "fill_price": 2.55, "order_id": "o1",
+        })
+        out = s._place_option_order_ib(
+            6800.0, "Call", BuySell.SELL, "2026-05-21", "ref-1",
+        )
+        assert out["uic"] == 12345
+        assert out["position_id"] is None
+        assert out["fill_price"] == 2.55
+        assert out["credit"] == 2.55 * 100  # SELL → credit
+        assert out["debit"] == 0
+        # placed BUY/SELL correctly + as a LIMIT on attempt 1
+        call = s._place_leg_order.call_args.kwargs
+        assert call["side"] == "SELL"
+        assert call["order_type"] == "LMT"
+        assert call["instrument_id"] == 12345
+
+    def test_fills_buy_returns_debit(self):
+        from shared.saxo_client import BuySell
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=({}, {6700.0: 999}))
+        s._read_option_quote = MagicMock(return_value={"bid": 1.0, "ask": 1.1})
+        s._place_leg_order = MagicMock(return_value={
+            "filled": True, "fill_price": 1.05, "order_id": "o2",
+        })
+        out = s._place_option_order_ib(
+            6700.0, "Put", BuySell.BUY, "2026-05-21", "ref-2",
+        )
+        assert out["debit"] == 1.05 * 100  # BUY → debit
+        assert out["credit"] == 0
+        assert s._place_leg_order.call_args.kwargs["side"] == "BUY"
+
+    def test_no_conid_returns_none(self):
+        from shared.saxo_client import BuySell
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=({}, {}))  # empty chain
+        s._read_option_quote = MagicMock()
+        s._place_leg_order = MagicMock()
+        out = s._place_option_order_ib(
+            6800.0, "Call", BuySell.SELL, "2026-05-21", "ref",
+        )
+        assert out is None
+        s._place_leg_order.assert_not_called()
+
+    def test_dry_run_belt_and_braces_returns_none(self):
+        from shared.saxo_client import BuySell
+        s = self._make()
+        s.dry_run = True
+        s._read_option_chain = MagicMock()
+        out = s._place_option_order_ib(
+            6800.0, "Call", BuySell.SELL, "2026-05-21", "ref",
+        )
+        assert out is None
+        s._read_option_chain.assert_not_called()
+
+    def test_order_size_invalid_returns_none(self):
+        from shared.saxo_client import BuySell
+        s = self._make()
+        s._validate_order_size = MagicMock(return_value=(False, "too big"))
+        s._read_option_chain = MagicMock(return_value=({6800.0: 1}, {}))
+        s._read_option_quote = MagicMock()
+        s._place_leg_order = MagicMock()
+        out = s._place_option_order_ib(
+            6800.0, "Call", BuySell.SELL, "2026-05-21", "ref",
+        )
+        assert out is None
+        s._place_leg_order.assert_not_called()
+
+    def test_all_attempts_fail_returns_none(self):
+        from shared.saxo_client import BuySell
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=({6800.0: 1}, {}))
+        s._read_option_quote = MagicMock(return_value={"bid": 2.5, "ask": 2.6})
+        s._place_leg_order = MagicMock(return_value={"filled": False})
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            out = s._place_option_order_ib(
+                6800.0, "Call", BuySell.SELL, "2026-05-21", "ref",
+            )
+        assert out is None
+        # tried every retry level
+        assert s._place_leg_order.call_count >= 1
+
+    def test_branch_dispatch_from_place_option_order(self):
+        """_place_option_order routes to the IB path when broker is set."""
+        from shared.saxo_client import BuySell
+        s = self._make()
+        s._place_option_order_ib = MagicMock(return_value={"uic": 1})
+        out = s._place_option_order(
+            6800.0, "Call", BuySell.SELL, "2026-05-21", "ref",
+        )
+        assert out == {"uic": 1}
+        s._place_option_order_ib.assert_called_once()

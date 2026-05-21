@@ -2988,6 +2988,15 @@ class MEICStrategy:
             )
             return None
 
+        # F6.2 — IBKR path. The Saxo body below is dormant on the
+        # standalone branch (the migration only ever goes live on IBKR)
+        # and is deleted in completion-plan phase P4.
+        if self.broker is not None:
+            return self._place_option_order_ib(
+                strike, put_call, buy_sell, expiry, external_ref,
+                emergency_mode,
+            )
+
         # Get option UIC from chain
         uic = self._get_option_uic(strike, put_call, expiry)
         if not uic:
@@ -3176,6 +3185,179 @@ class MEICStrategy:
 
         # All attempts failed
         logger.error(f"  ✗ {leg_description} failed all {len(PROGRESSIVE_RETRY_SEQUENCE)} attempts")
+        return None
+
+    def _place_option_order_ib(
+        self,
+        strike: float,
+        put_call: str,
+        buy_sell: BuySell,
+        expiry: str,
+        external_ref: str,
+        emergency_mode: bool = False,
+    ) -> Optional[Dict]:
+        """IBKR path of :meth:`_place_option_order` (F6.2).
+
+        Places ONE option leg with the same progressive-slippage retry
+        sequence as the Saxo path — the strategy still owns "what retry
+        level next"; `_place_leg_order` (F6.1) owns the place→poll-to-
+        fill mechanics of one attempt. Spread guards (ORDER-005/006) are
+        pure bid/ask math and carry over unchanged.
+
+        Returns the same shape as the Saxo path —
+        ``{position_id, uic, credit, debit, fill_price}`` on fill, None
+        on total failure. ``position_id`` is None (IBKR has no per-leg
+        id); ``uic`` carries the conid for the entry-object fields.
+
+        Reached only when ``self.broker`` is set, past the SAFETY-DRY-01
+        gate — the belt-and-braces dry-run check below is defense in
+        depth, consistent with the v1.25 SAFETY-DRY philosophy.
+        """
+        if self.dry_run:
+            logger.critical(
+                "[DRY RUN] SAFETY-DRY-01b: _place_option_order_ib reached "
+                "in dry mode — upstream gating bug; no order placed."
+            )
+            return None
+
+        leg_description = f"{put_call} {strike}"
+
+        # Resolve the conid via the broker-agnostic chain reader (F3.2).
+        call_map, put_map = self._read_option_chain(expiry, [float(strike)])
+        id_map = call_map if put_call == "Call" else put_map
+        conid = id_map.get(float(strike)) or id_map.get(strike)
+        if not conid:
+            logger.error(
+                f"_place_option_order_ib: no conid for {leg_description} "
+                f"{expiry}"
+            )
+            return None
+
+        # ORDER-006: order-size validation (broker-agnostic).
+        is_valid, _err = self._validate_order_size(
+            self.contracts_per_entry, leg_description
+        )
+        if not is_valid:
+            logger.error(
+                f"ORDER-006: order size validation failed for {leg_description}"
+            )
+            return None
+
+        side = "BUY" if buy_sell == BuySell.BUY else "SELL"
+
+        # Progressive retry sequence (same as the Saxo path).
+        for attempt, (slippage_percent, is_market) in enumerate(
+            PROGRESSIVE_RETRY_SEQUENCE
+        ):
+            quote = self._read_option_quote(conid)
+            if not quote:
+                logger.warning(
+                    f"  Attempt {attempt + 1}: no quote for {leg_description}"
+                )
+                time.sleep(0.5)
+                continue
+
+            bid = quote.get("bid") or 0
+            ask = quote.get("ask") or 0
+            spread = abs(ask - bid) if bid and ask else 0
+
+            # ORDER-006: bid-ask spread guard (identical math to the Saxo path).
+            if bid > 0:
+                spread_percent = (spread / bid) * 100
+                if bid <= ORDER_006_CHEAP_OPTION_THRESHOLD:
+                    if spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_SKIP:
+                        logger.info(
+                            f"  ORDER-006: cheap wing exempt "
+                            f"({spread_percent:.0f}% spread, ${spread:.2f})"
+                        )
+                elif spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_SKIP:
+                    logger.warning(
+                        f"  ORDER-006: spread {spread_percent:.1f}% too wide "
+                        f"— skipping attempt"
+                    )
+                    continue
+                elif spread_percent >= MAX_BID_ASK_SPREAD_PERCENT_WARNING:
+                    logger.warning(
+                        f"  ORDER-006: wide spread {spread_percent:.1f}%"
+                    )
+
+            mid_price = (bid + ask) / 2 if bid and ask else (ask or bid)
+
+            if is_market:
+                # ORDER-005: absolute-spread guard before a MARKET order.
+                if spread > self._max_absolute_slippage:
+                    logger.critical(
+                        f"  ORDER-005: spread ${spread:.2f} > max "
+                        f"${self._max_absolute_slippage:.2f} — aborting MARKET "
+                        f"for {leg_description}"
+                    )
+                    continue
+                expected_price = mid_price
+                logger.info(
+                    f"  Attempt {attempt + 1}: MARKET order for {leg_description}"
+                )
+                result = self._place_leg_order(
+                    instrument_id=conid, side=side,
+                    quantity=self.contracts_per_entry,
+                    order_type="MKT", coid=external_ref,
+                )
+            else:
+                if slippage_percent > 0:
+                    if buy_sell == BuySell.BUY:
+                        limit_price = mid_price * (1 + slippage_percent / 100)
+                    else:
+                        limit_price = mid_price * (1 - slippage_percent / 100)
+                else:
+                    limit_price = mid_price
+                limit_price = round_to_spx_tick(
+                    limit_price, round_up=(buy_sell == BuySell.BUY)
+                )
+                expected_price = limit_price
+                logger.info(
+                    f"  Attempt {attempt + 1}: LIMIT @ ${limit_price:.2f} "
+                    f"({slippage_percent}% slippage) for {leg_description}"
+                )
+                result = self._place_leg_order(
+                    instrument_id=conid, side=side,
+                    quantity=self.contracts_per_entry,
+                    order_type="LMT", limit_price=limit_price,
+                    coid=external_ref,
+                )
+
+            if result and result.get("filled"):
+                fill_price = result.get("fill_price") or expected_price
+
+                # ORDER-007: fill-price slippage monitoring.
+                self._monitor_fill_slippage(
+                    expected_price=expected_price,
+                    actual_fill_price=fill_price,
+                    buy_sell=buy_sell,
+                    leg_description=leg_description,
+                )
+                logger.info(
+                    f"  ✓ Filled {leg_description} @ ${fill_price:.2f}"
+                )
+                qty_mult = 100 * self.contracts_per_entry
+                return {
+                    "position_id": None,  # IBKR has no per-leg position id
+                    "uic": conid,
+                    "credit": fill_price * qty_mult if buy_sell == BuySell.SELL else 0,
+                    "debit": fill_price * qty_mult if buy_sell == BuySell.BUY else 0,
+                    "fill_price": fill_price,
+                }
+
+            # Not filled — delay before the next retry level.
+            if attempt < len(PROGRESSIVE_RETRY_SEQUENCE) - 1:
+                logger.warning(
+                    f"  ⚠ {leg_description} not filled — retrying "
+                    f"(ORDER-009 {ORDER_RETRY_DELAY_SECONDS}s delay)..."
+                )
+                time.sleep(ORDER_RETRY_DELAY_SECONDS)
+
+        logger.error(
+            f"  ✗ {leg_description} failed all "
+            f"{len(PROGRESSIVE_RETRY_SEQUENCE)} attempts (IBKR)"
+        )
         return None
 
     def _verify_position_exists(self, uic: int, position_id: str, buy_sell: BuySell) -> bool:
