@@ -15,6 +15,7 @@ where it belongs: in the broader rewrite validation phase.
 from __future__ import annotations
 
 import inspect
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -480,3 +481,218 @@ class TestReadOptionQuote:
 
         for k in ("bid", "ask", "last"):
             assert ib_quote[k] == saxo_quote[k], f"diverge on {k!r}"
+
+
+class TestReadOptionChain:
+    """Unit tests for HydraStrategy._read_option_chain (F3.2).
+
+    Two-broker dispatch: the IB path resolves a strike list then
+    batch-resolves conids via qualify_option_strikes (F3.1); the Saxo
+    path parses OptionSpace into the same {strike: id} map shape. Both
+    return ``(call_map, put_map)`` so the MKT-045/020/022 call sites
+    become broker-agnostic in F3.3-F3.5.
+    """
+
+    def _make_bare_strategy(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        s.option_root_uic = 12345  # legacy Saxo SPXW root
+        return s
+
+    # ─── IB path ───────────────────────────────────────────────────────
+
+    def test_ib_path_returns_call_and_put_maps(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = [6730.0, 6735.0, 6740.0]
+        fake_broker.qualify_option_strikes.return_value = {
+            (6735.0, "C"): 111, (6735.0, "P"): 222,
+            (6740.0, "C"): 333, (6740.0, "P"): 444,
+        }
+        s = self._make_bare_strategy(broker=fake_broker)
+        call_map, put_map = s._read_option_chain("2026-05-21", [6735.0, 6740.0])
+        assert call_map == {6735.0: 111, 6740.0: 333}
+        assert put_map == {6735.0: 222, 6740.0: 444}
+
+    def test_ib_path_passes_date_object_to_broker(self):
+        """expiry string is parsed to a date before the broker calls."""
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = [6735.0]
+        fake_broker.qualify_option_strikes.return_value = {(6735.0, "C"): 1}
+        s = self._make_bare_strategy(broker=fake_broker)
+        s._read_option_chain("2026-05-21", [6735.0])
+        fake_broker.get_option_chain.assert_called_once_with(
+            "SPX", date(2026, 5, 21)
+        )
+        qual_kwargs = fake_broker.qualify_option_strikes.call_args.kwargs
+        assert qual_kwargs["symbol"] == "SPX"
+        assert qual_kwargs["expiry"] == date(2026, 5, 21)
+
+    def test_ib_path_snaps_candidate_to_nearest_real_strike(self):
+        """A 5pt-step candidate that isn't a listed strike snaps to the
+        nearest real one before qualify_option_strikes sees it."""
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = [6730.0, 6750.0, 6770.0]
+        fake_broker.qualify_option_strikes.return_value = {(6750.0, "C"): 9}
+        s = self._make_bare_strategy(broker=fake_broker)
+        # 6745 isn't listed — nearest within 25pt is 6750
+        s._read_option_chain("2026-05-21", [6745.0])
+        qual_kwargs = fake_broker.qualify_option_strikes.call_args.kwargs
+        assert qual_kwargs["strikes"] == [6750.0]
+
+    def test_ib_path_drops_candidate_beyond_snap_tolerance(self):
+        """A candidate more than 25pt from any real strike is dropped."""
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = [6700.0, 6800.0]
+        s = self._make_bare_strategy(broker=fake_broker)
+        # 6745 is 45pt from 6700 and 55pt from 6800 — beyond 25pt
+        call_map, put_map = s._read_option_chain("2026-05-21", [6745.0])
+        assert call_map == {} and put_map == {}
+        fake_broker.qualify_option_strikes.assert_not_called()
+
+    def test_ib_path_dedups_candidates_snapping_to_same_strike(self):
+        """Two candidates snapping to one real strike resolve it once."""
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = [6750.0]
+        fake_broker.qualify_option_strikes.return_value = {(6750.0, "C"): 1}
+        s = self._make_bare_strategy(broker=fake_broker)
+        s._read_option_chain("2026-05-21", [6748.0, 6752.0])
+        qual_kwargs = fake_broker.qualify_option_strikes.call_args.kwargs
+        assert qual_kwargs["strikes"] == [6750.0]
+
+    def test_ib_path_empty_strike_list_returns_empty_maps(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = []
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
+
+    def test_ib_path_no_candidates_returns_empty_maps(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = [6735.0]
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_chain("2026-05-21", []) == ({}, {})
+        fake_broker.qualify_option_strikes.assert_not_called()
+
+    def test_ib_path_bad_expiry_returns_empty_maps(self):
+        fake_broker = MagicMock()
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_chain("not-a-date", [6735.0]) == ({}, {})
+        fake_broker.get_option_chain.assert_not_called()
+
+    def test_ib_path_chain_fetch_exception_returns_empty_maps(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.side_effect = RuntimeError("conn blip")
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
+
+    def test_ib_path_qualify_exception_returns_empty_maps(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = [6735.0]
+        fake_broker.qualify_option_strikes.side_effect = RuntimeError("429")
+        s = self._make_bare_strategy(broker=fake_broker)
+        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
+
+    def test_ib_path_partial_qualify_result_handled(self):
+        """qualify_option_strikes omits strikes with no listed option —
+        the maps simply lack those strikes (callers handle absence)."""
+        fake_broker = MagicMock()
+        fake_broker.get_option_chain.return_value = [6735.0, 6740.0]
+        # 6740 resolved both rights; 6735 only a call (put unlisted)
+        fake_broker.qualify_option_strikes.return_value = {
+            (6735.0, "C"): 1,
+            (6740.0, "C"): 2, (6740.0, "P"): 3,
+        }
+        s = self._make_bare_strategy(broker=fake_broker)
+        call_map, put_map = s._read_option_chain("2026-05-21", [6735.0, 6740.0])
+        assert call_map == {6735.0: 1, 6740.0: 2}
+        assert put_map == {6740.0: 3}
+
+    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
+
+    def test_saxo_path_parses_option_space(self):
+        fake_client = MagicMock()
+        fake_client.get_option_chain.return_value = {
+            "OptionSpace": [{
+                "SpecificOptions": [
+                    {"StrikePrice": 6735.0, "PutCall": "Call", "Uic": 101},
+                    {"StrikePrice": 6735.0, "PutCall": "Put", "Uic": 102},
+                    {"StrikePrice": 6740.0, "PutCall": "Call", "Uic": 103},
+                    {"StrikePrice": 6740.0, "PutCall": "Put", "Uic": 104},
+                ],
+            }],
+        }
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        call_map, put_map = s._read_option_chain("2026-05-21", [6735.0])
+        assert call_map == {6735.0: 101, 6740.0: 103}
+        assert put_map == {6735.0: 102, 6740.0: 104}
+
+    def test_saxo_path_ignores_candidate_strikes(self):
+        """The Saxo path returns the full chain regardless of which
+        candidates the caller asked about — a superset is harmless."""
+        fake_client = MagicMock()
+        fake_client.get_option_chain.return_value = {
+            "OptionSpace": [{
+                "SpecificOptions": [
+                    {"StrikePrice": 6735.0, "PutCall": "Call", "Uic": 1},
+                    {"StrikePrice": 9999.0, "PutCall": "Call", "Uic": 2},
+                ],
+            }],
+        }
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        call_map, _ = s._read_option_chain("2026-05-21", [6735.0])
+        # 9999 wasn't requested but is still present
+        assert call_map == {6735.0: 1, 9999.0: 2}
+
+    def test_saxo_path_passes_root_id_and_expiry(self):
+        fake_client = MagicMock()
+        fake_client.get_option_chain.return_value = {"OptionSpace": []}
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        s._read_option_chain("2026-05-21", [6735.0])
+        call_kwargs = fake_client.get_option_chain.call_args.kwargs
+        assert call_kwargs["option_root_id"] == 12345
+        assert call_kwargs["expiry_dates"] == ["2026-05-21"]
+
+    def test_saxo_path_null_response_returns_empty_maps(self):
+        fake_client = MagicMock()
+        fake_client.get_option_chain.return_value = None
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
+
+    def test_saxo_path_empty_option_space_returns_empty_maps(self):
+        fake_client = MagicMock()
+        fake_client.get_option_chain.return_value = {"OptionSpace": []}
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
+
+    def test_saxo_path_exception_returns_empty_maps(self):
+        fake_client = MagicMock()
+        fake_client.get_option_chain.side_effect = RuntimeError("saxo down")
+        s = self._make_bare_strategy(broker=None, client=fake_client)
+        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
+
+    # ─── Cross-broker convergence ──────────────────────────────────────
+
+    def test_ib_and_saxo_paths_produce_same_map_shape(self):
+        """Both brokers yield {strike: instrument_id} dicts so the
+        MKT-020/022/045 call sites read them identically."""
+        ib_broker = MagicMock()
+        ib_broker.get_option_chain.return_value = [6735.0]
+        ib_broker.qualify_option_strikes.return_value = {
+            (6735.0, "C"): 111, (6735.0, "P"): 222,
+        }
+        saxo_client = MagicMock()
+        saxo_client.get_option_chain.return_value = {
+            "OptionSpace": [{
+                "SpecificOptions": [
+                    {"StrikePrice": 6735.0, "PutCall": "Call", "Uic": 111},
+                    {"StrikePrice": 6735.0, "PutCall": "Put", "Uic": 222},
+                ],
+            }],
+        }
+        s_ib = self._make_bare_strategy(broker=ib_broker)
+        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
+
+        ib_call, ib_put = s_ib._read_option_chain("2026-05-21", [6735.0])
+        saxo_call, saxo_put = s_saxo._read_option_chain("2026-05-21", [6735.0])
+        assert ib_call == saxo_call == {6735.0: 111}
+        assert ib_put == saxo_put == {6735.0: 222}

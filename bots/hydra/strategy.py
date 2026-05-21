@@ -3190,6 +3190,133 @@ class HydraStrategy(MEICStrategy):
                 )
                 return ("skip", True, estimated_call, estimated_put)
 
+    def _read_option_chain(
+        self,
+        expiry: str,
+        candidate_strikes: List[float],
+    ) -> Tuple[Dict[float, Any], Dict[float, Any]]:
+        """
+        Broker-agnostic option-chain reader for the credit-estimation flow.
+
+        Returns ``(call_map, put_map)`` — each a ``{strike: instrument_id}``
+        dict, where ``instrument_id`` is an IBKR conid (broker path) or a
+        Saxo UIC (legacy path). Returns ``({}, {})`` on any failure; every
+        caller already handles empty maps gracefully.
+
+        IB path (``self.broker`` set — F3 of the IB-only rewrite):
+          1. ``broker.get_option_chain("SPX", expiry)`` → full strike list
+             (one cheap ``search_strikes_by_conid`` call).
+          2. Each requested candidate is snapped to the nearest real chain
+             strike. HYDRA builds candidates at 5pt steps, but IBKR's
+             ``secdef/info`` rejects strikes that aren't actually listed
+             (25pt spacing far OTM), so candidates must be resolved to
+             real strikes before ``qualify_option_strikes`` will accept
+             them.
+          3. ``broker.qualify_option_strikes()`` batch-resolves conids for
+             the snapped set in parallel (F3.1).
+          4. The maps are keyed by the real (snapped) strikes.
+
+        Saxo path (legacy — kept until MEIC inheritance is removed):
+          one ``client.get_option_chain(option_root_id=, expiry_dates=)``
+          call; ``OptionSpace[0].SpecificOptions`` is parsed into the two
+          maps. The whole chain is returned — ``candidate_strikes`` is
+          ignored on this path because a superset is harmless.
+
+        Args:
+            expiry: 0DTE expiry as ``"YYYY-MM-DD"`` (from
+                :meth:`_get_todays_expiry`).
+            candidate_strikes: Strikes the caller intends to evaluate.
+                Used only by the IB path to bound the conid-resolution
+                batch; the Saxo path returns the full chain regardless.
+
+        Returns:
+            ``(call_map, put_map)`` — ``{strike: instrument_id}`` per right.
+        """
+        if self.broker is not None:
+            # ── IB path ──────────────────────────────────────────────
+            try:
+                expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+            except (ValueError, TypeError) as e:
+                logger.warning(f"_read_option_chain: bad expiry {expiry!r}: {e}")
+                return {}, {}
+
+            try:
+                strike_list = self.broker.get_option_chain("SPX", expiry_date)
+            except Exception as e:
+                logger.warning(
+                    f"_read_option_chain: IB strike-list fetch failed: {e}"
+                )
+                return {}, {}
+            if not strike_list:
+                logger.warning("_read_option_chain: IB returned an empty chain")
+                return {}, {}
+
+            # Snap each requested candidate to the nearest real chain
+            # strike (within 25pt — half the widest far-OTM spacing).
+            snapped: set = set()
+            for cand in candidate_strikes:
+                nearest = min(strike_list, key=lambda s: abs(s - cand))
+                if abs(nearest - cand) <= 25:
+                    snapped.add(nearest)
+            if not snapped:
+                logger.warning(
+                    "_read_option_chain: no candidate strikes snapped to "
+                    "the chain"
+                )
+                return {}, {}
+
+            try:
+                conid_map = self.broker.qualify_option_strikes(
+                    symbol="SPX",
+                    expiry=expiry_date,
+                    strikes=sorted(snapped),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"_read_option_chain: qualify_option_strikes failed: {e}"
+                )
+                return {}, {}
+
+            call_map = {
+                strike: conid
+                for (strike, right), conid in conid_map.items()
+                if right == "C"
+            }
+            put_map = {
+                strike: conid
+                for (strike, right), conid in conid_map.items()
+                if right == "P"
+            }
+            return call_map, put_map
+
+        # ── Saxo legacy path ─────────────────────────────────────────
+        try:
+            chain_resp = self.client.get_option_chain(
+                option_root_id=self.option_root_uic,
+                expiry_dates=[expiry],
+            )
+        except Exception as e:
+            logger.warning(f"_read_option_chain: Saxo chain fetch failed: {e}")
+            return {}, {}
+        if not chain_resp:
+            return {}, {}
+
+        option_space = chain_resp.get("OptionSpace", [])
+        if not option_space:
+            return {}, {}
+        specific_options = option_space[0].get("SpecificOptions", [])
+
+        call_map: Dict[float, Any] = {}
+        put_map: Dict[float, Any] = {}
+        for opt in specific_options:
+            strike = opt.get("StrikePrice", 0)
+            pc = opt.get("PutCall", "")
+            if pc == "Call":
+                call_map[strike] = opt.get("Uic")
+            elif pc == "Put":
+                put_map[strike] = opt.get("Uic")
+        return call_map, put_map
+
     @staticmethod
     def _snap_to_chain_strike(target: float, uic_map: dict, max_snap: int = 15) -> tuple:
         """

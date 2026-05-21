@@ -180,9 +180,20 @@ limit with 20% headroom**. The A.8 retry+breaker absorbs any rare 429.
 ## 9. Implementation status
 
 - `_ib_call` `_serialize` kwarg + `IBClient.qualify_option_strikes`:
-  F3.1 (in progress)
-- `HydraStrategy._read_option_chain`: F3.2
-- MKT-045/020/022 rewrites + greeks: F3.3-F3.6
+  F3.1 ✅ committed (8092ae9)
+- `HydraStrategy._read_option_chain`: F3.2 ✅ committed
+- MKT-045/020/022 rewrites + greeks: F3.3-F3.6 (pending)
+
+### F3.2 — `_read_option_chain` shipped
+
+Broker-agnostic helper on `HydraStrategy`. Returns
+`(call_map, put_map)` — each `{strike: instrument_id}` (IBKR conid or
+Saxo UIC). IB path: 1 strike-list call → snap candidates to real
+strikes (≤25pt) → `qualify_option_strikes` batch → split by right.
+Saxo path: legacy `get_option_chain` + `OptionSpace` parse, unchanged,
+`candidate_strikes` ignored (superset harmless). `({}, {})` on any
+failure — every call site already handles empty maps. 18 unit tests
+cover both paths + snapping/dedup/tolerance/failure isolation.
 
 ## 7. Decision requested
 
