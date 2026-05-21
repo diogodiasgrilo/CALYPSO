@@ -1794,7 +1794,7 @@ class HydraStrategy(MEICStrategy):
             )
             return None
 
-    def _read_open_positions(self) -> List[Dict[str, Any]]:
+    def _read_open_positions(self, *, strict: bool = False) -> List[Dict[str, Any]]:
         """All open option positions from the active broker, normalized.
 
         Returns a list of dicts with stable broker-agnostic keys:
@@ -1821,6 +1821,15 @@ class HydraStrategy(MEICStrategy):
         - ``self.broker`` None: ``SaxoClient.get_positions()`` returns the
           nested ``PositionBase``/``PositionView`` shape; flattened here.
           Kept until MEIC inheritance is removed.
+
+        Args:
+            strict: when False (default) a fetch failure is swallowed and
+                ``[]`` returned — fine for callers that treat empty
+                defensively. When True a fetch failure re-raises, so
+                settlement / overnight checks can tell a real empty
+                account apart from a broker outage and halt
+                conservatively instead of mistaking failure for "all
+                settled".
 
         Returns:
             list of normalized open-option-position dicts.
@@ -1891,6 +1900,12 @@ class HydraStrategy(MEICStrategy):
             logger.warning(
                 f"_read_open_positions failed ({type(e).__name__}: {e})"
             )
+            if strict:
+                # strict callers (settlement / overnight checks) must be
+                # able to tell a fetch failure apart from a genuine empty
+                # account — re-raise so they can halt conservatively
+                # rather than mistake a failure for "all settled".
+                raise
             return []
 
     def _position_is_open(
@@ -9893,18 +9908,22 @@ class HydraStrategy(MEICStrategy):
             logger.error(f"Registry error checking for overnight positions: {e}")
             my_position_ids = set()
         if my_position_ids:
-            # FIX #82: Registry has positions, but they may be stale (already settled on Saxo).
-            # Verify against Saxo before halting - 0DTE options always settle same day.
+            # FIX #82: the (vestigial) Position Registry still lists ids,
+            # but they may be stale (already settled). F4.5: verify
+            # against the broker directly via _read_open_positions —
+            # 0DTE options always settle same day, so anything still open
+            # at the new-day reset is a genuine overnight position. Uses
+            # strict=True so a fetch failure halts conservatively rather
+            # than being mistaken for "0 open".
             try:
-                actual_positions = self.client.get_positions()
-                actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
-                still_open = my_position_ids & actual_position_ids
+                open_positions = self._read_open_positions(strict=True)
 
-                if not still_open:
-                    # Positions are gone from Saxo — registry is stale, clean it up
+                if not open_positions:
+                    # Nothing open on the broker — registry is stale, clean it up
                     logger.info(
-                        f"FIX #82: Registry had {len(my_position_ids)} stale position IDs "
-                        f"but Saxo confirms 0 still open — cleaning up registry"
+                        f"FIX #82: Registry had {len(my_position_ids)} stale "
+                        f"position id(s) but the broker confirms 0 still open "
+                        f"— cleaning up the registry"
                     )
                     for pos_id in my_position_ids:
                         try:
@@ -9913,10 +9932,15 @@ class HydraStrategy(MEICStrategy):
                             logger.error(f"Registry error unregistering stale {pos_id}: {e}")
                     # Fall through to normal reset below
                 else:
-                    # Positions genuinely still open on Saxo — this is a real problem
+                    # Positions genuinely still open — this is a real problem
+                    open_conids = sorted(
+                        {p.get("instrument_id") for p in open_positions},
+                        key=lambda c: (c is None, c),
+                    )
                     error_msg = (
-                        f"CRITICAL: {len(still_open)} {self.BOT_NAME} positions still open on Saxo overnight! "
-                        f"0DTE should expire same day. IDs: {list(still_open)}"
+                        f"CRITICAL: {len(open_positions)} {self.BOT_NAME} option "
+                        f"position(s) still open on the broker overnight! "
+                        f"0DTE should expire same day. Conids: {open_conids}"
                     )
                     logger.critical(error_msg)
                     self.alert_service.send_alert(
@@ -9924,7 +9948,7 @@ class HydraStrategy(MEICStrategy):
                         title=f"{self.BOT_NAME} Overnight Position Detected!",
                         message=error_msg,
                         priority=AlertPriority.CRITICAL,
-                        details={"position_ids": list(still_open)},
+                        details={"conids": open_conids},
                         contracts=self.contracts_per_entry,
                     )
                     # Halt trading - manual intervention required

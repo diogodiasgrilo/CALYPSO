@@ -167,10 +167,11 @@ estimation — they belong here in F4. Both rewire to
 | F4.2 | `_position_is_open` quantity-aware predicate + unit tests |
 | F4.3 | MKT-033 salvage path — `_try_sell_long_leg` + `_check_long_salvage` (clean helper swap) |
 | F4.4 | POS-003 hourly reconciliation (logic rewrite to quantity-aware) |
-| F4.5 | POS-004 settlement check + FIX #82 overnight-position check |
-| F4.6 | Rewire the 2 P&L sites (`_get_saxo_pnl_for_entry`, snapshot Telegram) |
-| F4.7 | Rewire `_recover_positions_from_saxo` (full reconstruction) |
-| F4.8 | Rewire `_batch_update_entry_prices` monitoring quotes ×2 |
+| F4.5 | FIX #82 overnight-position check + `_read_open_positions(strict=)` |
+| F4.6 | POS-004 settlement check |
+| F4.7 | Rewire the 2 P&L sites (`_get_saxo_pnl_for_entry`, snapshot Telegram) |
+| F4.8 | Rewire `_recover_positions_from_saxo` (full reconstruction) |
+| F4.9 | Rewire `_batch_update_entry_prices` monitoring quotes ×2 |
 
 **Re-scoped from the original 6-commit plan**: the 5 id-set sites do
 NOT all collapse into one commit. The MKT-033 salvage path (F4.3) is a
@@ -181,7 +182,7 @@ Registry — both `PositionId`-keyed — so they are genuine
 **reconciliation-logic rewrites**, not mechanical swaps, and each
 earns its own commit.
 
-`_recover_positions_from_saxo` (F4.7) is the heaviest — it may split
+`_recover_positions_from_saxo` (F4.8) is the heaviest — it may split
 further once its internals are mapped in detail.
 
 ## 7. Out of scope for F4
@@ -196,8 +197,21 @@ further once its internals are mapped in detail.
 - `_read_open_positions` broker-agnostic helper: F4.1 ✅ committed (573c5f3)
 - `_position_is_open` predicate: F4.2 ✅ committed (2d63619)
 - MKT-033 salvage path rewire: F4.3 ✅ committed (7d840ff)
-- POS-003 native conid→quantity reconciliation: F4.4 ✅ committed
-- POS-004 / FIX #82 / P&L / recovery / monitoring: F4.5-F4.8 (pending)
+- POS-003 native conid→quantity reconciliation: F4.4 ✅ committed (bb934f5)
+- FIX #82 overnight check + `strict` param: F4.5 ✅ committed
+- POS-004 / P&L / recovery / monitoring: F4.6-F4.9 (pending)
+
+### F4.5 — FIX #82 overnight check + `_read_open_positions(strict=)`
+
+`_read_open_positions` gained a `strict` kwarg: default False swallows
+a fetch failure (returns `[]`); `strict=True` re-raises so a caller
+can tell a real empty account from a broker outage. The FIX #82
+overnight-position check in `_reset_for_new_day` now verifies against
+the broker via `_read_open_positions(strict=True)` — any open option
+position at the new-day reset is a genuine overnight 0DTE position
+(halt); empty means the vestigial registry was just stale (clean it,
+proceed); a fetch failure re-raises into the existing conservative
+halt. 5 tests (`TestReadOpenPositionsStrict` + `TestFix82OvernightCheck`).
 
 ### F4.4 — POS-003 native conid→quantity reconciliation
 

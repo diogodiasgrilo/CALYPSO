@@ -1924,3 +1924,75 @@ class TestHourlyReconciliationBody:
         ])
         self._run(s)
         s.alert_service.send_alert.assert_not_called()
+
+
+class TestReadOpenPositionsStrict:
+    """F4.5 — _read_open_positions(strict=True) re-raises on a fetch
+    failure so settlement/overnight checks can halt conservatively."""
+
+    def _make(self, broker):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = None
+        return s
+
+    def test_strict_reraises_on_failure(self):
+        fake_broker = MagicMock()
+        fake_broker.get_positions.side_effect = RuntimeError("broker outage")
+        s = self._make(fake_broker)
+        with pytest.raises(RuntimeError, match="broker outage"):
+            s._read_open_positions(strict=True)
+
+    def test_non_strict_swallows_failure(self):
+        fake_broker = MagicMock()
+        fake_broker.get_positions.side_effect = RuntimeError("broker outage")
+        s = self._make(fake_broker)
+        assert s._read_open_positions(strict=False) == []
+        assert s._read_open_positions() == []  # default is non-strict
+
+
+class TestFix82OvernightCheck:
+    """F4.5 — the FIX #82 overnight-position check in _reset_for_new_day
+    verifies against the broker via _read_open_positions instead of
+    intersecting Saxo PositionId sets."""
+
+    def _make_strategy(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        s.client = MagicMock()
+        s.registry = MagicMock()
+        s.alert_service = MagicMock()
+        s.BOT_NAME = "HYDRA"
+        s.contracts_per_entry = 1
+        s._critical_intervention_required = False
+        s._critical_intervention_reason = None
+        return s
+
+    def test_overnight_positions_trigger_halt(self):
+        s = self._make_strategy()
+        s.registry.get_positions.return_value = {"stale-1"}
+        s._read_open_positions = MagicMock(return_value=[
+            {"instrument_id": 101, "quantity": -1, "right": "C"},
+        ])
+        s._reset_for_new_day()
+        assert s._critical_intervention_required is True
+        s.alert_service.send_alert.assert_called_once()
+        # strict=True so a fetch failure would be distinguishable
+        s._read_open_positions.assert_called_once_with(strict=True)
+
+    def test_fetch_failure_triggers_conservative_halt(self):
+        s = self._make_strategy()
+        s.registry.get_positions.return_value = {"stale-1"}
+        s._read_open_positions = MagicMock(
+            side_effect=RuntimeError("broker outage")
+        )
+        s._reset_for_new_day()
+        assert s._critical_intervention_required is True
+        s.alert_service.send_alert.assert_called_once()
+
+    # The "no overnight positions → clean registry → proceed to full
+    # reset" path falls through into the whole _reset_for_new_day body
+    # (15+ unrelated state attributes), which is out of F4.5's scope.
+    # F4.5 changed only the *verification* — covered by the two
+    # halt-path tests above — and the registry cleanup loop is
+    # unchanged from the pre-F4.5 code.
