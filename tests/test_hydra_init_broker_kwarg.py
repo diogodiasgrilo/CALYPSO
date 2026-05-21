@@ -3188,3 +3188,85 @@ class TestReadAccountBalance:
         b.get_balance.side_effect = RuntimeError("down")
         s = self._make(broker=b)
         assert s._read_account_balance() == {}
+
+
+class TestEstimateEntryCreditIb:
+    """F7.5 / GAP-B — _estimate_entry_credit_ib resolves leg conids via
+    _read_option_chain, batch-quotes them, computes mid-credit."""
+
+    def _make(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.client = None
+        return s
+
+    _Q = {  # conid → quote; _quote_mid → mid
+        11: {"bid": 1.95, "ask": 2.05},  # mid 2.00
+        12: {"bid": 0.45, "ask": 0.55},  # mid 0.50
+        13: {"bid": 2.15, "ask": 2.25},  # mid 2.20
+        14: {"bid": 0.55, "ask": 0.65},  # mid 0.60
+    }
+
+    def test_full_ic_both_credits(self):
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=(
+            {6900.0: 11, 6950.0: 12}, {6700.0: 13, 6650.0: 14},
+        ))
+        s._read_option_quotes_batch = MagicMock(return_value=self._Q)
+        entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650)
+        call_c, put_c = s._estimate_entry_credit_ib(entry)
+        assert call_c == (2.00 - 0.50) * 100  # 150
+        assert put_c == (2.20 - 0.60) * 100   # 160
+
+    def test_call_only_skips_put(self):
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=(
+            {6900.0: 11, 6950.0: 12}, {},
+        ))
+        s._read_option_quotes_batch = MagicMock(return_value=self._Q)
+        entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650,
+                                     call_only=True)
+        call_c, put_c = s._estimate_entry_credit_ib(entry)
+        assert call_c == 150
+        assert put_c == 0.0
+
+    def test_put_only_skips_call(self):
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=(
+            {}, {6700.0: 13, 6650.0: 14},
+        ))
+        s._read_option_quotes_batch = MagicMock(return_value=self._Q)
+        entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650,
+                                     put_only=True)
+        call_c, put_c = s._estimate_entry_credit_ib(entry)
+        assert call_c == 0.0
+        assert put_c == 160
+
+    def test_call_conids_missing_estimates_put_only(self):
+        s = self._make()
+        # call strikes don't resolve; put strikes do
+        s._read_option_chain = MagicMock(return_value=(
+            {}, {6700.0: 13, 6650.0: 14},
+        ))
+        s._read_option_quotes_batch = MagicMock(return_value=self._Q)
+        entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650)
+        call_c, put_c = s._estimate_entry_credit_ib(entry)
+        assert call_c == 0.0
+        assert put_c == 160
+
+    def test_put_conids_missing_returns_call_estimate(self):
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=(
+            {6900.0: 11, 6950.0: 12}, {},  # put strikes don't resolve
+        ))
+        s._read_option_quotes_batch = MagicMock(return_value=self._Q)
+        entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650)
+        call_c, put_c = s._estimate_entry_credit_ib(entry)
+        assert call_c == 150  # MKT-040 path: call estimate returned
+        assert put_c == 0.0
+
+    def test_exception_returns_zeros(self):
+        s = self._make()
+        s._read_option_chain = MagicMock(side_effect=RuntimeError("boom"))
+        entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650)
+        assert s._estimate_entry_credit_ib(entry) == (0.0, 0.0)

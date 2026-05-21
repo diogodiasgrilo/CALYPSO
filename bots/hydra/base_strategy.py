@@ -2577,6 +2577,11 @@ class MEICStrategy:
             Tuple of (estimated_call_credit, estimated_put_credit) in total dollars
             Returns (0.0, 0.0) if quotes unavailable
         """
+        # GAP-B (F7.5): IBKR path. The Saxo body below is dormant on the
+        # standalone branch and is deleted in P4.
+        if self.broker is not None:
+            return self._estimate_entry_credit_ib(entry)
+
         expiry = self._get_todays_expiry()
         if not expiry:
             logger.warning("Could not get expiry for credit estimation")
@@ -2654,6 +2659,86 @@ class MEICStrategy:
 
         except Exception as e:
             logger.warning(f"Credit estimation failed: {e}")
+            return (0.0, 0.0)
+
+    def _estimate_entry_credit_ib(self, entry: IronCondorEntry) -> Tuple[float, float]:
+        """IBKR path of :meth:`_estimate_entry_credit` (GAP-B / F7.5).
+
+        Resolves the (up to) 4 leg conids in one ``_read_option_chain``
+        read (F3.2), batch-quotes them via ``_read_option_quotes_batch``
+        (F3.4), and computes each spread's mid-credit with ``_quote_mid``
+        (F4.9). Preserves the Saxo path's call_only / put_only side
+        skipping and the "one side's conids missing → estimate / return
+        the other" fallbacks that feed MKT-032/039/040.
+
+        Returns ``(estimated_call_credit, estimated_put_credit)`` in
+        total dollars, ``(0.0, 0.0)`` on failure.
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            logger.warning("Could not get expiry for credit estimation")
+            return (0.0, 0.0)
+
+        try:
+            need_call = not getattr(entry, "put_only", False)
+            need_put = not getattr(entry, "call_only", False)
+
+            # Resolve all needed strikes' conids in one chain read.
+            wanted: List[float] = []
+            if need_call:
+                wanted += [float(entry.short_call_strike),
+                           float(entry.long_call_strike)]
+            if need_put:
+                wanted += [float(entry.short_put_strike),
+                           float(entry.long_put_strike)]
+            call_map, put_map = self._read_option_chain(expiry, wanted)
+
+            sc = call_map.get(float(entry.short_call_strike)) if need_call else None
+            lc = call_map.get(float(entry.long_call_strike)) if need_call else None
+            sp = put_map.get(float(entry.short_put_strike)) if need_put else None
+            lp = put_map.get(float(entry.long_put_strike)) if need_put else None
+
+            ids = [x for x in (sc, lc, sp, lp) if x]
+            quotes = self._read_option_quotes_batch(ids) if ids else {}
+
+            def _mid(cid) -> float:
+                return self._quote_mid(quotes.get(cid)) if cid else 0.0
+
+            estimated_call_credit = 0.0
+            if need_call:
+                if not sc or not lc:
+                    if need_put:
+                        logger.warning(
+                            "Could not resolve call conids — "
+                            "estimating put side only"
+                        )
+                    else:
+                        logger.warning("Could not resolve call conids")
+                        return (0.0, 0.0)
+                else:
+                    estimated_call_credit = (_mid(sc) - _mid(lc)) * 100
+
+            estimated_put_credit = 0.0
+            if need_put:
+                if not sp or not lp:
+                    if need_call and estimated_call_credit > 0:
+                        logger.warning(
+                            f"Could not resolve put conids — returning call "
+                            f"estimate only (${estimated_call_credit/100:.2f})"
+                        )
+                        return (estimated_call_credit, 0.0)
+                    logger.warning("Could not resolve put conids")
+                    return (0.0, 0.0)
+                estimated_put_credit = (_mid(sp) - _mid(lp)) * 100
+
+            logger.debug(
+                f"Credit estimation (IB) for Entry #{entry.entry_number}: "
+                f"Call ${estimated_call_credit:.2f}, Put ${estimated_put_credit:.2f}"
+            )
+            return (estimated_call_credit, estimated_put_credit)
+
+        except Exception as e:
+            logger.warning(f"Credit estimation (IB) failed: {e}")
             return (0.0, 0.0)
 
     def _check_minimum_credit_gate(self, entry: IronCondorEntry) -> Tuple[bool, str]:
@@ -8360,7 +8445,10 @@ class MEICStrategy:
             return True, "Margin check disabled"
 
         try:
-            balance = self.client.get_balance()
+            # GAP-F (F7.4): broker-agnostic — _read_account_balance keys
+            # the IB balance with the same "MarginAvailableForTrading"
+            # field name the Fix #85 lookup below reads.
+            balance = self._read_account_balance()
             if not balance:
                 logger.warning("ORDER-004: Could not fetch account balance")
                 return True, "Balance check skipped (API unavailable)"
