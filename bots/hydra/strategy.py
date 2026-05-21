@@ -369,10 +369,14 @@ class HydraStrategy(MEICStrategy):
         long_salvage = config.get("long_salvage", {})
         self.short_only_stop = long_salvage.get("short_only_stop", False)
 
-        # MKT-035: downday_theoretical_put_credit must be set BEFORE super().__init__()
-        # because recovery (_reconstruct_entry_from_positions) uses it to compute call-only
-        # stop levels. Without this, the getattr fallback in recovery uses $2.60 instead
-        # of the configured value.
+        # MKT-035: downday_theoretical_put_credit must be set BEFORE
+        # super().__init__() because the MEIC base __init__ runs position
+        # recovery, which (re)computes call-only stop levels and reads
+        # this value. Without it the getattr fallback uses $2.60 instead
+        # of the configured value. (Post-F4.8 HYDRA recovery is
+        # state-file-authoritative and no longer calls
+        # _reconstruct_entry_from_positions, but the set-before-super
+        # ordering is still required for the base __init__'s use.)
         self.downday_theoretical_put_credit = float(strategy_cfg.get("downday_theoretical_put_credit", 2.60)) * 100
 
         # API pacing multiplier — multiplies the monitoring loop's recommended
