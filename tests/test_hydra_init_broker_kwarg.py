@@ -2408,3 +2408,83 @@ class TestBatchUpdateEntryPrices:
         s._read_option_quotes_batch = MagicMock(return_value={})
         s._batch_update_entry_prices()
         s._simulate_hydra_entry_prices.assert_called_once_with(entry)
+
+
+class TestReadFxRate:
+    """F5.3 — _read_fx_rate dispatches the FX-rate lookup to the active
+    broker and degrades to None on failure."""
+
+    def _make(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        return s
+
+    def test_ib_path(self):
+        fake_broker = MagicMock()
+        fake_broker.get_fx_rate.return_value = 1.08
+        s = self._make(broker=fake_broker)
+        assert s._read_fx_rate("USD", "EUR") == 1.08
+        fake_broker.get_fx_rate.assert_called_once_with("USD", "EUR")
+
+    def test_saxo_path(self):
+        fake_client = MagicMock()
+        fake_client.get_fx_rate.return_value = 0.92
+        s = self._make(broker=None, client=fake_client)
+        assert s._read_fx_rate("USD", "EUR") == 0.92
+        fake_client.get_fx_rate.assert_called_once_with("USD", "EUR")
+
+    def test_exception_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_fx_rate.side_effect = RuntimeError("fx outage")
+        s = self._make(broker=fake_broker)
+        assert s._read_fx_rate("USD", "EUR") is None
+
+
+class TestReadClosedPositionPrice:
+    """F5.3 — _read_closed_position_price dispatches the close-price
+    lookup to the active broker."""
+
+    def _make(self, broker=None, client=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = broker
+        s.client = client
+        return s
+
+    def test_ib_path_casts_conid_to_int(self):
+        fake_broker = MagicMock()
+        fake_broker.get_closed_position_price.return_value = {"closing_price": 2.55}
+        s = self._make(broker=fake_broker)
+        out = s._read_closed_position_price("12345", buy_or_sell="Sell")
+        assert out == {"closing_price": 2.55}
+        fake_broker.get_closed_position_price.assert_called_once_with(
+            12345, buy_or_sell="Sell"
+        )
+
+    def test_saxo_path(self):
+        fake_client = MagicMock()
+        fake_client.get_closed_position_price.return_value = {"closing_price": 1.10}
+        s = self._make(broker=None, client=fake_client)
+        out = s._read_closed_position_price(999, buy_or_sell="Buy")
+        assert out == {"closing_price": 1.10}
+        fake_client.get_closed_position_price.assert_called_once_with(
+            999, buy_or_sell="Buy"
+        )
+
+    def test_none_instrument_id_returns_none(self):
+        fake_broker = MagicMock()
+        s = self._make(broker=fake_broker)
+        assert s._read_closed_position_price(None, buy_or_sell="Sell") is None
+        fake_broker.get_closed_position_price.assert_not_called()
+
+    def test_exception_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_closed_position_price.side_effect = RuntimeError("boom")
+        s = self._make(broker=fake_broker)
+        assert s._read_closed_position_price(12345, buy_or_sell="Sell") is None
+
+    def test_broker_returns_none_passed_through(self):
+        fake_broker = MagicMock()
+        fake_broker.get_closed_position_price.return_value = None
+        s = self._make(broker=fake_broker)
+        assert s._read_closed_position_price(12345, buy_or_sell="Sell") is None

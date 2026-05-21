@@ -1986,6 +1986,62 @@ class HydraStrategy(MEICStrategy):
                 return True
         return False
 
+    def _read_fx_rate(
+        self, base_currency: str, account_currency: str
+    ) -> Optional[float]:
+        """FX rate (``base_currency`` → ``account_currency``) from the
+        active broker (F5.3). Returns None on failure — callers treat a
+        missing rate as "skip the currency conversion".
+
+        Both ``IBClient.get_fx_rate`` and ``SaxoClient.get_fx_rate`` take
+        ``(source, target)`` and return a float, so this is a thin
+        dispatch + failure guard.
+        """
+        try:
+            if self.broker is not None:
+                return self.broker.get_fx_rate(base_currency, account_currency)
+            return self.client.get_fx_rate(base_currency, account_currency)
+        except Exception as e:
+            logger.warning(
+                f"_read_fx_rate({base_currency}->{account_currency}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
+    def _read_closed_position_price(
+        self, instrument_id, *, buy_or_sell: str
+    ) -> Optional[Dict[str, Any]]:
+        """Closing execution price of a recently-closed leg, from the
+        active broker (F5.3).
+
+        Returns the broker's dict — both `IBClient` and `SaxoClient`
+        `get_closed_position_price` return a mapping with a
+        ``"closing_price"`` key — or None when there is no match / on a
+        fetch failure.
+
+        Broker dispatch:
+        - ``self.broker`` set: ``IBClient.get_closed_position_price``
+          (conid; scans `/iserver/account/trades`).
+        - ``self.broker`` None: ``SaxoClient.get_closed_position_price``
+          (UIC; `/port/v1/closedpositions`).
+        """
+        if instrument_id is None:
+            return None
+        try:
+            if self.broker is not None:
+                return self.broker.get_closed_position_price(
+                    int(instrument_id), buy_or_sell=buy_or_sell,
+                )
+            return self.client.get_closed_position_price(
+                instrument_id, buy_or_sell=buy_or_sell,
+            )
+        except Exception as e:
+            logger.warning(
+                f"_read_closed_position_price({instrument_id}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
     def _refresh_chart_data_for_scouting(self):
         """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
 
