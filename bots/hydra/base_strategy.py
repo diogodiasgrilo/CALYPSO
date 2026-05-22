@@ -1829,16 +1829,16 @@ class MEICStrategy:
             )
             return
 
-        quote = self.client.get_quote(uic, asset_type="StockIndexOption")
-        if not quote or "Quote" not in quote:
+        quote = self._read_option_quote(uic)
+        if not quote:
             logger.warning(
                 f"MKT-014: Entry #{entry_number} {put_call} {strike} - "
                 f"no quote available after {reason}"
             )
             return
 
-        bid = quote["Quote"].get("Bid") or 0
-        ask = quote["Quote"].get("Ask") or 0
+        bid = quote.get("bid") or 0
+        ask = quote.get("ask") or 0
 
         if bid <= 0 or ask <= 0:
             logger.warning(
@@ -2470,8 +2470,11 @@ class MEICStrategy:
 
         # Get current open orders
         try:
-            open_orders = self.client.get_open_orders()
-            open_order_ids = {str(o.get("OrderId")) for o in (open_orders or [])}
+            open_orders = self._get_open_orders()
+            open_order_ids = {
+                str(o.get("orderId") or o.get("order_id") or o.get("OrderId"))
+                for o in (open_orders or [])
+            }
         except Exception as e:
             logger.error(f"Failed to fetch open orders for orphan cleanup: {e}")
             return
@@ -2487,7 +2490,7 @@ class MEICStrategy:
                 # Still open - try to cancel again
                 logger.warning(f"ORDER-008: Orphaned order {order_id} still open - attempting cancel")
                 try:
-                    cancel_result = self.client.cancel_order(order_id)
+                    cancel_result = self._cancel_order(order_id)
                     if cancel_result:
                         orders_to_clear.append(order_id)
                         logger.info(f"ORDER-008: Successfully cancelled orphaned order {order_id}")
@@ -3024,10 +3027,10 @@ class MEICStrategy:
                     # These expire worthless at 4 PM, so closing wastes API calls for ~$0.
                     if leg_name.startswith("long") and uic:
                         try:
-                            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+                            quote = self._read_option_quote(uic)
                             bid = 0
                             if quote:
-                                bid = quote.get("Quote", {}).get("Bid", 0) or quote.get("Bid", 0) or 0
+                                bid = quote.get("bid", 0) or 0
                             if bid <= 0:
                                 logger.info(
                                     f"  Fix #83a: Skipping {leg_name} close for Entry #{entry.entry_number} "
@@ -3383,13 +3386,13 @@ class MEICStrategy:
             Tuple of (is_acceptable, spread_percent)
         """
         try:
-            quote = self.client.get_quote(uic, asset_type="StockIndexOption")
+            quote = self._read_option_quote(uic)
             if not quote:
                 logger.warning(f"EMERGENCY-001: No quote for UIC {uic}, proceeding anyway")
                 return (True, 0.0)  # Proceed if no quote available
 
-            bid = quote.get("Quote", {}).get("Bid", 0)
-            ask = quote.get("Quote", {}).get("Ask", 0)
+            bid = quote.get("bid") or 0
+            ask = quote.get("ask") or 0
 
             if bid <= 0 or ask <= 0:
                 logger.warning(f"EMERGENCY-001: Invalid bid/ask for UIC {uic}, proceeding anyway")
@@ -3558,92 +3561,6 @@ class MEICStrategy:
         )
         return False
 
-    def _deferred_stop_fill_lookup(
-        self,
-        deferred_legs: list,
-        current_close_cost: float,
-        entry: IronCondorEntry
-    ) -> Tuple[float, bool]:
-        """
-        FIX #70 Part B / FIX #76: Deferred price lookup for stop loss legs.
-
-        FIX #76 (2026-02-17): With the AveragePrice field name fix, activities should
-        now return prices immediately. This deferred lookup is kept as a safety net
-        with closed positions endpoint as the authoritative fallback.
-
-        Args:
-            deferred_legs: List of (order_id, uic, leg_name) tuples needing price lookup
-            current_close_cost: Running close cost total (may already include some legs)
-            entry: The entry being stopped (for contracts count)
-
-        Returns:
-            Tuple of (updated_close_cost, all_prices_found)
-        """
-        logger.info(
-            f"FIX-76: Deferred price lookup for {len(deferred_legs)} legs, "
-            f"waiting 3s for Saxo sync..."
-        )
-        time.sleep(3)
-
-        all_found = True
-        updated_cost = current_close_cost
-
-        for order_id, uic, leg_name in deferred_legs:
-            fill_price = None
-            source = None
-
-            try:
-                # Tier 1: Activities endpoint (AveragePrice - should work now with Fix #76)
-                filled, fill_details = self.client.check_order_filled_by_activity(
-                    order_id=order_id,
-                    uic=uic,
-                    max_retries=3,
-                    retry_delay=1.5
-                )
-                if filled and fill_details:
-                    fp = fill_details.get("fill_price", 0)
-                    if fp and fp > 0:
-                        fill_price = fp
-                        source = "activities"
-
-                # Tier 2: Closed positions endpoint (authoritative fallback)
-                if fill_price is None:
-                    buy_or_sell = "Sell" if leg_name.startswith("short") else "Buy"
-                    closed_info = self.client.get_closed_position_price(uic, buy_or_sell=buy_or_sell)
-                    if closed_info:
-                        cp = closed_info.get("closing_price")
-                        if cp and cp > 0:
-                            fill_price = cp
-                            source = "closedpositions"
-
-                if fill_price is not None:
-                    if leg_name.startswith("short"):
-                        updated_cost += fill_price * 100 * entry.contracts
-                        logger.info(
-                            f"FIX-76: Deferred fill price for {leg_name} via {source}: "
-                            f"${fill_price:.2f} (close cost +${fill_price * 100 * entry.contracts:.2f})"
-                        )
-                    else:
-                        updated_cost -= fill_price * 100 * entry.contracts
-                        logger.info(
-                            f"FIX-76: Deferred fill price for {leg_name} via {source}: "
-                            f"${fill_price:.2f} (close proceeds -${fill_price * 100 * entry.contracts:.2f})"
-                        )
-                    continue
-
-                # Still no price after both lookups
-                logger.warning(
-                    f"FIX-76: Deferred lookup still has no fill price for {leg_name} "
-                    f"(order {order_id}). P&L may be inaccurate."
-                )
-                all_found = False
-
-            except Exception as e:
-                logger.warning(f"FIX-76: Deferred lookup error for {leg_name}: {e}")
-                all_found = False
-
-        return updated_cost, all_found
-
     def _spawn_async_fill_correction(
         self,
         deferred_legs: list,
@@ -3654,70 +3571,19 @@ class MEICStrategy:
         theoretical_net_loss: float
     ):
         """
-        FIX #75: Run deferred fill lookup in background thread.
+        FIX #75: deferred stop-fill P&L correction — no-op on IBKR.
 
-        After a stop loss closes positions, actual fill prices may not be available
-        immediately (Saxo sync delay). Instead of blocking the main loop for ~10s,
-        this spawns a daemon thread that:
-        1. Waits 3s for Saxo to sync
-        2. Retries up to 3 times to get actual fill prices
-        3. Applies P&L correction to daily_state if prices differ from theoretical
-        4. Re-saves state to disk
-
-        Args:
-            deferred_legs: List of (order_id, uic, leg_name) tuples needing price lookup
-            partial_close_cost: Close cost already captured from legs with immediate fills
-            entry: The entry being stopped
-            side: "call" or "put"
-            credit_received: Credit collected for this side
-            theoretical_net_loss: Initial P&L estimate (stop_level - credit)
-
-        Thread safety: CPython GIL ensures atomic float assignment and list append.
-        Entry objects are already marked as stopped before this runs.
+        On IBKR this is intentionally a no-op. Stop closes route through
+        ``_close_position_with_retry`` → ``_close_leg_order`` →
+        ``place_and_wait_for_fill``, which polls to a terminal state and
+        returns the actual ``avg_fill_price`` synchronously. The stop
+        path therefore already records the real close cost into
+        ``actual_call_stop_debit`` / ``actual_put_stop_debit`` and
+        ``total_realized_pnl`` — there is no Saxo-style activity-stream
+        sync lag to correct for. The method is kept so the stop-loss
+        call site stays intact.
         """
-        def worker():
-            try:
-                updated_cost, all_found = self._deferred_stop_fill_lookup(
-                    deferred_legs, partial_close_cost, entry
-                )
-                if all_found:
-                    # Record actual debit for dashboard per-entry P&L
-                    if side == "call":
-                        entry.actual_call_stop_debit = updated_cost
-                    else:
-                        entry.actual_put_stop_debit = updated_cost
-                    actual_net_loss = updated_cost - credit_received
-                    correction = actual_net_loss - theoretical_net_loss
-                    if abs(correction) > 0.01:
-                        self.daily_state.total_realized_pnl -= correction
-                        self._save_state_to_disk()
-                        logger.info(
-                            f"FIX-75: Async P&L correction for Entry #{entry.entry_number} {side}: "
-                            f"theoretical=${theoretical_net_loss:.2f} → actual=${actual_net_loss:.2f} "
-                            f"(correction: ${correction:+.2f})"
-                        )
-                    else:
-                        logger.info(
-                            f"FIX-75: Async lookup confirmed theoretical P&L for "
-                            f"Entry #{entry.entry_number} {side} (no correction needed)"
-                        )
-                else:
-                    logger.warning(
-                        f"FIX-75: Async lookup incomplete for Entry #{entry.entry_number} {side}, "
-                        f"keeping theoretical P&L (${theoretical_net_loss:.2f})"
-                    )
-            except Exception as e:
-                logger.warning(f"FIX-75: Async fill correction failed for Entry #{entry.entry_number}: {e}")
-
-        thread = threading.Thread(
-            target=worker, daemon=True,
-            name=f"fill_correction_e{entry.entry_number}_{side}"
-        )
-        thread.start()
-        self._pending_fill_corrections.append(thread)
-        logger.info(
-            f"FIX-75: Spawned async fill correction thread for Entry #{entry.entry_number} {side}"
-        )
+        return
 
     def _wait_for_pending_fill_corrections(self, timeout: float = 15.0):
         """
@@ -4208,14 +4074,11 @@ class MEICStrategy:
             return lines
 
         # Fetch positions once for all entries (avoid N API calls)
-        try:
-            positions = self.client.get_positions()
-        except Exception:
-            positions = []
+        positions = self._read_open_positions()
 
         for entry in self.daily_state.active_entries:
-            # FIX (2026-02-03): Use Saxo's authoritative P&L for display
-            total_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions)
+            # Use the broker's authoritative per-entry P&L for display
+            total_pnl = self._get_broker_pnl_for_entry(entry, positions=positions)
 
             # FIX (2026-02-04): Use spread_value (cost to close) for cushion calculation
             # This matches the stop logic which triggers when spread_value >= stop_level
@@ -4292,53 +4155,6 @@ class MEICStrategy:
             lines.append(line)
 
         return lines
-
-    def _get_saxo_pnl_for_entry(self, entry: IronCondorEntry, positions: Optional[List] = None) -> float:
-        """
-        Get the actual P&L for an entry directly from Saxo positions.
-
-        This uses Saxo's ProfitLossOnTrade field which is the authoritative
-        P&L calculation (accounts for actual fill prices and current market).
-
-        FIX (2026-02-03): Previously used mid-price calculations which were
-        systematically optimistic. Saxo uses bid for sells and ask for buys.
-
-        Args:
-            entry: The IronCondorEntry to get P&L for
-            positions: Optional pre-fetched positions list (to avoid multiple API calls)
-
-        Returns:
-            Total P&L in dollars (positive = profit, negative = loss)
-        """
-        try:
-            # Get positions from Saxo (or use provided list)
-            if positions is None:
-                positions = self.client.get_positions()
-
-            total_pnl = 0.0
-
-            # Map position IDs to their P&L
-            position_ids = [
-                entry.short_call_position_id,
-                entry.long_call_position_id,
-                entry.short_put_position_id,
-                entry.long_put_position_id,
-            ]
-
-            for pos in positions:
-                pos_id = str(pos.get("PositionId", ""))
-                if pos_id in position_ids:
-                    # Get Saxo's P&L calculation
-                    pos_view = pos.get("PositionView", {})
-                    pnl = pos_view.get("ProfitLossOnTrade", 0) or 0
-                    total_pnl += pnl
-
-            return total_pnl
-
-        except Exception as e:
-            logger.debug(f"Error getting Saxo P&L for Entry #{entry.entry_number}: {e}")
-            # Fall back to mid-price calculation
-            return entry.unrealized_pnl
 
     def _get_total_saxo_pnl(self) -> float:
         """
@@ -4973,23 +4789,21 @@ class MEICStrategy:
             dict: Complete strategy metrics for dashboard logging
         """
         # Fetch positions once and reuse (avoid multiple API calls)
-        try:
-            positions = self.client.get_positions()
-        except Exception:
-            positions = []
+        positions = self._read_open_positions()
 
         # Basic status
         active_entries = len(self.daily_state.active_entries)
-        # FIX (2026-02-03): Use Saxo's authoritative P&L (pass positions to avoid re-fetch)
+        # Use the broker's authoritative per-entry P&L (pass positions to avoid re-fetch)
         unrealized = 0.0
         for entry in self.daily_state.active_entries:
-            unrealized += self._get_saxo_pnl_for_entry(entry, positions=positions)
+            unrealized += self._get_broker_pnl_for_entry(entry, positions=positions)
         total_pnl = self.daily_state.total_realized_pnl + unrealized
 
         # Position counts
+        # IBKR has no per-leg position id — count open legs by conid (*_uic).
         total_legs = sum(
             len([1 for leg in ['short_call', 'long_call', 'short_put', 'long_put']
-                 if getattr(e, f'{leg}_position_id')])
+                 if getattr(e, f'{leg}_uic')])
             for e in self.daily_state.active_entries
         )
 
@@ -5004,18 +4818,18 @@ class MEICStrategy:
             avg_short_put = sum(e.short_put_strike for e in active if e.short_put_strike) / active_entries
             avg_spread_width = sum(e.spread_width for e in active if e.spread_width) / active_entries
 
-        # Per-entry details (use Saxo P&L for each entry, reuse positions)
+        # Per-entry details (use broker P&L for each entry, reuse positions)
         entry_details = []
         for entry in self.daily_state.entries:
-            # Get Saxo P&L if entry has any positions (pass positions to avoid re-fetch)
-            # FIX (2026-02-03): Calculate P&L for partial entries too, not just complete ones
+            # Get broker P&L if entry has any open legs (pass positions to avoid re-fetch).
+            # IBKR has no per-leg position id — key on the leg conids (*_uic).
             has_any_positions = any([
-                entry.short_call_position_id,
-                entry.long_call_position_id,
-                entry.short_put_position_id,
-                entry.long_put_position_id
+                entry.short_call_uic,
+                entry.long_call_uic,
+                entry.short_put_uic,
+                entry.long_put_uic
             ])
-            entry_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions) if has_any_positions else 0
+            entry_pnl = self._get_broker_pnl_for_entry(entry, positions=positions) if has_any_positions else 0
             entry_details.append({
                 "entry_number": entry.entry_number,
                 "entry_time": entry.entry_time.strftime("%H:%M") if hasattr(entry.entry_time, 'strftime') else (entry.entry_time or ""),
