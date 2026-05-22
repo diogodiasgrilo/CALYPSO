@@ -118,6 +118,22 @@ def main() -> int:
         client.connect()
         print("Connected to IBKR paper account.")
 
+        # HYPOTHESIS TEST: the marketdata/snapshot endpoint requires an
+        # /iserver/accounts preflight. IBClient.connect() calls
+        # portfolio_accounts() (/portfolio/accounts — a DIFFERENT
+        # endpoint). receive_brokerage_accounts() is the /iserver/accounts
+        # call. If snapshots populate AFTER this, _snapshot_with_preflight
+        # is missing it.
+        print("\n--- /iserver/accounts preflight (receive_brokerage_accounts) ---")
+        try:
+            acct = client._client.receive_brokerage_accounts()
+            print(f"  → {json.dumps(getattr(acct, 'data', acct), default=str)[:300]}")
+            err = getattr(acct, "error", None)
+            if err:
+                print(f"  error: {err}")
+        except Exception as exc:
+            print(f"  raised: {type(exc).__name__}: {exc}")
+
         # CONTROL — a plain US ETF; the account has free real-time US
         # equity data. If this fails, the problem is not index-specific.
         try:
