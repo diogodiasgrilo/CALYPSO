@@ -165,6 +165,31 @@ def _keys_dir(environment: str) -> Path:
     return DEFAULT_KEYS_BASE / environment
 
 
+# systemd credential IDs (see deploy/hydra.service LoadCredentialEncrypted=).
+# At runtime systemd decrypts each into a file named exactly the ID inside
+# $CREDENTIALS_DIRECTORY.
+_SYSTEMD_CRED_NAMES = {
+    "consumer_key": "ibkr_consumer_key",
+    "access_token": "ibkr_access_token",
+    "access_token_secret": "ibkr_access_token_secret",
+    "signature": "ibkr_signature_pem",
+    "encryption": "ibkr_encryption_pem",
+    "dhparam": "ibkr_dhparam_pem",
+}
+
+
+def _read_credential_file(path: Path) -> str:
+    """Read a systemd-delivered string credential file.
+
+    Returns "" if absent — load_credentials' downstream validate_secrets()
+    then surfaces a clear "missing credential" error.
+    """
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
 def load_credentials(
     environment: str,
     consumer_key: Optional[str] = None,
@@ -180,19 +205,49 @@ def load_credentials(
       IBIND_OAUTH1A_ACCESS_TOKEN
       IBIND_OAUTH1A_ACCESS_TOKEN_SECRET
 
-    The crypto files are read from disk at `$CALYPSO_IBKR_KEYS_DIR/{env}/`
-    (default `~/ibkr-oauth/{env}/`).
+    Production (systemd): when $CREDENTIALS_DIRECTORY is set, all six
+    credentials — the three strings AND the three crypto files — are read
+    from there instead. systemd's LoadCredentialEncrypted= delivers each
+    one as a file named by its credential ID (see deploy/hydra.service).
+    This keeps the secrets off the process environment and away from
+    child processes. Explicit args still win, so tests and the
+    activation poller are unaffected.
+
+    The crypto files are otherwise read from disk at
+    `$CALYPSO_IBKR_KEYS_DIR/{env}/` (default `~/ibkr-oauth/{env}/`).
 
     Args:
         environment: 'paper' or 'live'
-        consumer_key: if None, reads IBIND_OAUTH1A_CONSUMER_KEY env var
-        access_token: if None, reads IBIND_OAUTH1A_ACCESS_TOKEN env var
-        access_token_secret: if None, reads IBIND_OAUTH1A_ACCESS_TOKEN_SECRET
+        consumer_key: if None, reads the systemd credential / env var
+        access_token: if None, reads the systemd credential / env var
+        access_token_secret: if None, reads the systemd credential / env var
 
     Returns:
         IBKRCredentials with paths NOT yet validated. Caller should call
         .validate_paths() + .validate_secrets() if needed.
     """
+    if environment not in ("paper", "live"):
+        raise ValueError(f"environment must be 'paper' or 'live', got {environment!r}")
+
+    # Production VM path: systemd LoadCredentialEncrypted= delivered the
+    # six credentials into $CREDENTIALS_DIRECTORY.
+    creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if creds_dir:
+        cd = Path(creds_dir)
+        n = _SYSTEMD_CRED_NAMES
+        return IBKRCredentials(
+            environment=environment,
+            consumer_key=(consumer_key
+                          or _read_credential_file(cd / n["consumer_key"])).strip(),
+            access_token=(access_token
+                          or _read_credential_file(cd / n["access_token"])).strip(),
+            access_token_secret=(access_token_secret
+                                 or _read_credential_file(cd / n["access_token_secret"])).strip(),
+            private_signature_path=cd / n["signature"],
+            private_encryption_path=cd / n["encryption"],
+            dh_param_path=cd / n["dhparam"],
+        )
+
     keys_dir = _keys_dir(environment)
     # .strip() the secrets: env vars set by copy-paste routinely carry a
     # trailing newline/space, which silently corrupts the OAuth signature

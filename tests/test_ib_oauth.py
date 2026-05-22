@@ -135,6 +135,39 @@ class TestLoadCredentials:
         creds = ib_oauth.load_credentials("paper", "K", "t", "s")
         assert str(creds.private_signature_path).startswith(str(custom_dir))
 
+    # P7 Step 4 (option B) — systemd LoadCredentialEncrypted= path:
+    # when $CREDENTIALS_DIRECTORY is set, all six credentials are read
+    # from files there instead of env vars + $CALYPSO_IBKR_KEYS_DIR.
+
+    def test_systemd_credentials_directory_reads_all_six(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+        (tmp_path / "ibkr_consumer_key").write_text("CALYPSOPP\n")
+        (tmp_path / "ibkr_access_token").write_text("tok\n")
+        (tmp_path / "ibkr_access_token_secret").write_text("sec\n")
+        (tmp_path / "ibkr_signature_pem").write_text("sig")
+        (tmp_path / "ibkr_encryption_pem").write_text("enc")
+        (tmp_path / "ibkr_dhparam_pem").write_text("dh")
+        creds = load_credentials("paper")
+        assert creds.consumer_key == "CALYPSOPP"  # .strip() drops the \n
+        assert creds.access_token == "tok"
+        assert creds.access_token_secret == "sec"
+        assert creds.private_signature_path == tmp_path / "ibkr_signature_pem"
+        assert creds.private_encryption_path == tmp_path / "ibkr_encryption_pem"
+        assert creds.dh_param_path == tmp_path / "ibkr_dhparam_pem"
+
+    def test_systemd_credentials_explicit_args_win(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+        (tmp_path / "ibkr_consumer_key").write_text("FROMFILE")
+        creds = load_credentials("paper", consumer_key="FROMARG",
+                                 access_token="t", access_token_secret="s")
+        assert creds.consumer_key == "FROMARG"
+
+    def test_systemd_missing_string_credential_is_empty(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+        creds = load_credentials("paper")  # no files created
+        assert creds.consumer_key == ""
+        assert creds.access_token == ""
+
 
 @pytest.fixture
 def reload_ib_oauth():

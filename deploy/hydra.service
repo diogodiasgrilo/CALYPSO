@@ -1,0 +1,54 @@
+[Unit]
+Description=HYDRA 0DTE iron-condor bot (Interactive Brokers / ibind OAuth 1.0a)
+# OAuth 1.0a is gateway-free and headless — no IB Gateway, no token-keeper
+# service. network-online.target so the OAuth handshake to api.ibkr.com
+# has DNS+TLS available at startup.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="PYTHONUNBUFFERED=1"
+
+# ─── IBKR OAuth 1.0a credentials (P7 Step 4, option B) ──────────────────
+# systemd decrypts each credential into a file under $CREDENTIALS_DIRECTORY
+# named exactly by its ID; shared/ib_oauth.load_credentials() reads them
+# there. Credentials are NOT process env vars — not in /proc/<pid>/environ,
+# not inherited by child processes, tmpfs-backed, encrypted at rest.
+# One-time setup (encrypt the source values): see deploy/IBKR_CREDENTIALS_SETUP.md
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/dhparam.pem.cred
+
+# Optional: Polygon API key for Brandon GEX features (only used if the
+# config enables the Brandon stack). Leading dash → file is optional.
+EnvironmentFile=-/etc/calypso/polygon.env
+
+ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main
+
+# Restart policy — matches the CALYPSO convention. A full restart cleanly
+# re-runs IBClient.connect() (fresh live session token + Tickler), which
+# is also the morning-reconnect fallback (see P7 Step 3 / main.py gate).
+Restart=always
+RestartSec=30
+StartLimitInterval=600
+StartLimitBurst=5
+
+# Graceful stop: ibind registers a SIGTERM handler that runs oauth_shutdown
+# (stop Tickler + logout). Give it time so the IBKR session is released
+# cleanly rather than left as a competing session.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hydra
+
+[Install]
+WantedBy=multi-user.target
