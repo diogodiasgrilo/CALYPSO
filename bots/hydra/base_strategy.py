@@ -46,7 +46,8 @@ from typing import Optional, Dict, List, Any, Tuple, Deque, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
-from shared.saxo_client import SaxoClient, BuySell, OrderType
+from shared.saxo_client import SaxoClient
+from bots.hydra.order_types import BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day
 from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day

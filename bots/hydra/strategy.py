@@ -43,7 +43,8 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
-from shared.saxo_client import SaxoClient, BuySell
+from shared.saxo_client import SaxoClient
+from bots.hydra.order_types import BuySell
 # IBClient is the broker for the IB-only rewrite. Imported during the
 # transition phase so HydraStrategy can accept an optional `broker`
 # kwarg without forcing a separate construction path. Once MEIC

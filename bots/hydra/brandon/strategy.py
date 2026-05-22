@@ -756,13 +756,8 @@ class BrandonHydraStrategy(HydraStrategy):
         if self.dry_run:
             return
 
-        # Live wiring — mirrors _execute_entry's per-leg pattern. Imported
-        # lazily so dry-run tests don't pull BuySell.
-        try:
-            from shared.saxo_client import BuySell
-        except Exception as exc:
-            logger.error("BRANDON-OVERLAY E#%s: BuySell import failed (%s)", entry.entry_number, exc)
-            return
+        # Live wiring — mirrors _execute_entry's per-leg pattern.
+        from bots.hydra.order_types import BuySell
         expiry = self._get_todays_expiry() if hasattr(self, "_get_todays_expiry") else None
         if not expiry:
             logger.error(
