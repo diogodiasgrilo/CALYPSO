@@ -2256,12 +2256,32 @@ class IBClient:
             )
 
         # Sometimes the place response itself carries a terminal status
-        # (instant fills on MKT orders; reject responses for invalid orders).
-        # Short-circuit before polling to save an extra HTTP round-trip.
-        initial_status = (place_resp.get("status") or "").lower()
+        # (instant fills on MKT orders; reject responses for invalid
+        # orders). P7-audit C3: IBKR's place response reports the state
+        # under `order_status` (camelCase `status` is the *live-order*
+        # field) — check both, order_status first.
+        initial_status = (
+            place_resp.get("order_status")
+            or place_resp.get("status")
+            or ""
+        ).lower()
         if initial_status in _TERMINAL_ORDER_STATUSES:
+            # P7-audit C4: the place response carries the status but NOT
+            # the fill detail (filledQuantity / avgPrice). For an instant
+            # fill, fetch the authoritative numbers from the order-status
+            # endpoint first — otherwise a genuinely-filled order is
+            # reported filled_quantity=0, the caller treats the entry as
+            # failed and retries → a double position.
+            fill_raw = place_resp
+            if initial_status == "filled":
+                try:
+                    status_resp = self.get_order_status(str(order_id))
+                    if status_resp:
+                        fill_raw = status_resp
+                except IBClientError:
+                    pass  # order purged post-fill — fall back to place_resp
             return _build_fill_result_dict(
-                order_id=str(order_id), raw=place_resp, status=initial_status,
+                order_id=str(order_id), raw=fill_raw, status=initial_status,
             )
 
         # Poll for terminal state. Each poll is its own _ib_call with

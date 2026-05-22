@@ -24,8 +24,8 @@ in live mode. **High** = breaks the bot or a safety gate. **Medium/Low**
 |----|-----------|-------|--------|
 | C1 | `base_strategy.py:_execute_stop_loss` + `strategy.py` override | Close loop gated `if pos_id:`; `pos_id` always None on IBKR → stop never closed + P&L inverted (booked as profit). | ✅ **FIXED** — both close loops gate on `if uic:` (conid); M9 fixed alongside (`*_uic` cleared to None); +3 regression tests (close fires, both-legs, loss-not-profit) |
 | C2 | `ib_client.py:_snapshot_with_preflight` | Preflight called `portfolio_accounts()` (`/portfolio/accounts`) — IBKR's snapshot endpoint requires `/iserver/accounts`. Every quote/greek/VIX read returned metadata-only — the live probe failure. | ✅ **FIXED** — new `_ensure_iserver_primed()` calls `receive_brokerage_accounts()` once/session; +3 tests |
-| C3 | `ib_client.py:place_and_wait_for_fill` ~2236 | Instant-fill short-circuit reads `place_resp.get("status")`; IBKR place responses use `order_status`. An instantly-filled MKT order is missed → wasteful poll, possible mis-handling. | OPEN |
-| C4 | `ib_client.py:place_and_wait_for_fill` ~2237 / `_build_fill_result_dict` | When the place response is terminal, `raw=place_resp` is passed to `_build_fill_result_dict` but the place response has no `filledQuantity`/`avgPrice` → a filled order is reported `filled_quantity=0` → strategy thinks the entry failed → retries → double position. Refetch order status before building the result. | OPEN |
+| C3 | `ib_client.py:place_and_wait_for_fill` | Instant-fill short-circuit read `place_resp.get("status")`; IBKR place responses use `order_status`. | ✅ **FIXED** — reads `order_status` then `status` |
+| C4 | `ib_client.py:place_and_wait_for_fill` | Terminal place response has no `filledQuantity`/`avgPrice` → filled order reported `filled_quantity=0` → double-position retry risk. | ✅ **FIXED** — on instant fill, one `get_order_status()` refetch for authoritative fill detail; graceful fallback to place_resp if purged; +2 tests |
 
 ## HIGH
 

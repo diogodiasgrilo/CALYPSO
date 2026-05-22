@@ -910,28 +910,51 @@ class TestPlaceAndWaitForFill:
         assert result["filled_quantity"] == 1
         assert result["avg_fill_price"] == pytest.approx(2.50)
 
-    def test_mkt_fills_immediately_in_place_response_no_polling(
-        self, connected_client,
-    ):
-        """If place_order's response already carries status=Filled, we
-        return immediately without making any status-poll HTTP calls."""
+    def test_mkt_fills_immediately_in_place_response(self, connected_client):
+        """P7-audit C3+C4. IBKR's place response reports the state under
+        `order_status` (not `status`) and carries NO fill detail. When it
+        is terminal=Filled we short-circuit the poll loop, but must do ONE
+        order_status fetch to get the real filledQuantity/avgPrice —
+        otherwise a filled order is reported filled_quantity=0 and the
+        caller retries into a double position."""
         client, mock_ibkr = connected_client
+        # IBKR place response: state under `order_status`, NO fill detail.
         mock_ibkr.place_order.return_value = _mk_result([{
             "order_id": "order-mkt-1",
-            "status": "Filled",
-            "filledQuantity": 5,
-            "avgPrice": 1.10,
+            "order_status": "Filled",
         }])
+        # Authoritative fill detail comes from the order-status fetch.
+        mock_ibkr.order_status.return_value = _mk_result({
+            "status": "Filled", "filledQuantity": 5, "avgPrice": 1.10,
+        })
         with patch("shared.ib_client.time.sleep") as mock_sleep:
             result = client.place_and_wait_for_fill(
                 conid=12345, side="BUY", quantity=5, order_type="MKT",
             )
         assert result["status"] == "filled"
-        assert result["filled_quantity"] == 5
-        # Critical: no polling occurred → order_status mock never called
-        mock_ibkr.order_status.assert_not_called()
-        # And no sleep either
+        assert result["filled_quantity"] == 5            # C4: real qty, not 0
+        assert result["avg_fill_price"] == pytest.approx(1.10)
+        # C4: exactly ONE order_status fetch for the fill detail —
+        # the short-circuit means NO poll loop (and no sleep).
+        assert mock_ibkr.order_status.call_count == 1
         mock_sleep.assert_not_called()
+
+    def test_instant_fill_falls_back_to_place_resp_if_status_fetch_fails(
+        self, connected_client,
+    ):
+        """C4 graceful path: if the post-fill order_status fetch raises
+        (order purged), fall back to the place response rather than
+        crashing — the order is still correctly reported `filled`."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{
+            "order_id": "order-mkt-2", "order_status": "Filled",
+        }])
+        mock_ibkr.order_status.side_effect = IBClientError("is not found")
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=12345, side="BUY", quantity=3, order_type="MKT",
+            )
+        assert result["status"] == "filled"  # still terminal, no crash
 
     def test_pendingcancel_is_NOT_terminal_keeps_polling(
         self, connected_client,
