@@ -151,3 +151,4 @@ backtest/results/sweep_logs/
 # Migration probe logs (local diagnostic evidence, not repo artifacts)
 scripts/probe_chain_*.log
 scripts/probe_trades_*.log
+.claude/
