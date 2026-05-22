@@ -46,7 +46,7 @@ from typing import Optional, Dict, List, Any, Tuple, Deque, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
-from shared.saxo_client import SaxoClient
+from shared.ib_client import IBClient
 from bots.hydra.order_types import BuySell, OrderType
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day
@@ -837,23 +837,23 @@ class MEICStrategy:
 
     def __init__(
         self,
-        saxo_client: SaxoClient,
+        broker: IBClient,
         config: Dict[str, Any],
         logger_service: Any,
         dry_run: bool = False,
         alert_service: Optional[AlertService] = None
     ):
         """
-        Initialize the MEIC strategy.
+        Initialize the strategy.
 
         Args:
-            saxo_client: Authenticated Saxo API client
+            broker: Connected IBClient (Interactive Brokers adapter).
             config: Strategy configuration dictionary
             logger_service: Trade logging service
             dry_run: If True, simulate trades without placing real orders
             alert_service: Optional AlertService for Telegram/Email notifications
         """
-        self.client = saxo_client
+        self.broker = broker
         self.config = config
         self.trade_logger = logger_service
         self.dry_run = dry_run
@@ -3958,7 +3958,7 @@ class MEICStrategy:
                 price=stop_level,
                 delta=0.0,
                 pnl=-realized_loss,  # Negative because it's a loss
-                saxo_client=self.client,  # Fix #63: Enable EUR conversion
+                saxo_client=self.broker,  # Fix #63: Enable EUR conversion
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type=f"IC {side.title()} Spread",

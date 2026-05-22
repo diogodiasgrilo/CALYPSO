@@ -49,7 +49,8 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 # Import shared modules
-from shared.saxo_client import SaxoClient
+from shared.ib_client import IBClient, IBConfig
+from shared.ib_oauth import load_credentials
 from shared.logger_service import setup_logging
 from shared.market_hours import (
     is_market_open, get_market_status_message, calculate_sleep_duration,
@@ -212,17 +213,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     trade_logger.log_event(f"Check Interval: {check_interval} seconds")
     trade_logger.log_event("=" * 60)
 
-    # Initialize Saxo client
-    client = SaxoClient(config)
-
-    # Authenticate with Saxo API
-    trade_logger.log_event("Authenticating with Saxo Bank API...")
-    if not client.authenticate():
-        trade_logger.log_error("Failed to authenticate. Please check your credentials.")
+    # Initialize the IBKR broker client (paper account — never live).
+    trade_logger.log_event("Connecting to Interactive Brokers (paper)...")
+    broker = IBClient(IBConfig(credentials=load_credentials("paper")))
+    if not broker.connect():
+        trade_logger.log_error("Failed to connect to IBKR. Please check credentials.")
         trade_logger.shutdown()
         return
 
-    trade_logger.log_event("Authentication successful!")
+    trade_logger.log_event("IBKR connection successful!")
 
     strategy = None
     try:
@@ -231,9 +230,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
         if brandon_cfg.get("enabled", False):
             from bots.hydra.brandon.strategy import BrandonHydraStrategy
             trade_logger.log_event("Loading BrandonHydraStrategy (TP / GEX / overlay / narrow-spread)")
-            strategy = BrandonHydraStrategy(client, config, trade_logger, dry_run=dry_run)
+            strategy = BrandonHydraStrategy(broker, config, trade_logger, dry_run=dry_run)
         else:
-            strategy = HydraStrategy(client, config, trade_logger, dry_run=dry_run)
+            strategy = HydraStrategy(broker, config, trade_logger, dry_run=dry_run)
     except Exception as e:
         trade_logger.log_error(f"Failed to initialize strategy: {e}")
         logger.exception("Strategy initialization failed")
@@ -422,7 +421,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
 
                     if sleep_time > 0:
                         minutes = sleep_time // 60
-                        client.authenticate(force_refresh=True)
+                        # IBKR session keepalive is handled by IBClient's
+                        # Tickler thread; no manual token refresh needed.
                         trade_logger.log_event(f"HEARTBEAT | Market closed {close_reason} - sleeping for {minutes}m")
 
                         if not interruptible_sleep(sleep_time):
@@ -724,15 +724,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
 def show_status(config: dict):
     """Show current status without entering trading loop."""
     trade_logger = setup_logging(config, bot_name="HYDRA")
-    client = SaxoClient(config)
+    broker = IBClient(IBConfig(credentials=load_credentials("paper")))
 
-    if not client.authenticate():
-        print("Failed to authenticate. Please check your credentials.")
+    if not broker.connect():
+        print("Failed to connect to IBKR. Please check credentials.")
         trade_logger.shutdown()
         return
 
     try:
-        strategy = HydraStrategy(client, config, trade_logger)
+        strategy = HydraStrategy(broker, config, trade_logger)
         strategy.update_market_data()
         status = strategy.get_status_summary()
 
@@ -844,21 +844,16 @@ Examples:
             print("  Credentials: Loaded from Secret Manager")
             print("=" * 60 + "\n")
         else:
+            # HYDRA trades the IBKR paper account only — there is no
+            # live-money path. `--live` is retained for CLI back-compat
+            # but has no effect.
             if args.live:
-                config["saxo_api"]["environment"] = "live"
-                if args.dry_run:
-                    print("\n" + "=" * 60)
-                    print("  DRY RUN MODE - LIVE DATA, NO REAL ORDERS")
-                    print("  Using LIVE market data for realistic simulation")
-                    print("=" * 60 + "\n")
-                else:
-                    print("\n  WARNING: LIVE ENVIRONMENT ENABLED - REAL MONEY TRADING\n")
+                print("\n  NOTE: --live has no effect — HYDRA trades the "
+                      "IBKR paper account only.\n")
+            if args.dry_run:
+                print("\n  Environment: IBKR PAPER (DRY RUN - No real orders)\n")
             else:
-                env_name = config.get('saxo_api', {}).get('environment', 'sim').upper()
-                if args.dry_run:
-                    print(f"\n  Environment: {env_name} (DRY RUN - No real orders)\n")
-                else:
-                    print(f"\n  Environment: {env_name}\n")
+                print("\n  Environment: IBKR PAPER\n")
 
         if args.verbose:
             config["logging"]["log_level"] = "DEBUG"

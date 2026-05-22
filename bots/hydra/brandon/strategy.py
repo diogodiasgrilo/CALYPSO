@@ -64,14 +64,14 @@ class BrandonHydraStrategy(HydraStrategy):
 
     def __init__(
         self,
-        saxo_client,
+        broker,
         config,
         logger_service=None,
         dry_run: bool = False,
         alert_service=None,
     ):
         super().__init__(
-            saxo_client,
+            broker,
             config,
             logger_service,
             dry_run=dry_run,
