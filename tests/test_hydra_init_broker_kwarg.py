@@ -2879,3 +2879,93 @@ class TestSpawnAsyncEarlyCloseFillCorrectionIb:
             [("entry", "call", "short_call", "oid", 11)])
         # no thread spawned, nothing queued
         assert s._pending_fill_corrections == []
+
+
+# =============================================================================
+# P7-audit C1 — _execute_stop_loss must close via the conid (*_uic), not the
+# Saxo-only *_position_id (always None on IBKR).
+# =============================================================================
+
+from bots.hydra.strategy import HydraIronCondorEntry  # noqa: E402
+
+
+class TestExecuteStopLossClosesOnIBKR:
+    """P7-audit C1 regression. IBKR has no per-leg position id, so
+    `entry.*_position_id` is always None. The stop-loss close loop gated
+    on `if pos_id:` → it skipped every close, leaving the breached short
+    open AND booking the stop as a profit (close_cost stayed 0 →
+    net_loss = 0 − credit < 0 → credit ADDED to realized P&L). The fix
+    gates on `if uic:` (the conid)."""
+
+    def _entry(self):
+        e = HydraIronCondorEntry.__new__(HydraIronCondorEntry)
+        e.entry_number = 1
+        e.contracts = 1
+        e.call_side_stopped = False
+        e.put_side_stopped = False
+        e.call_stop_time = None
+        e.put_stop_time = None
+        # IBKR shape: conid lives in *_uic; *_position_id is always None.
+        e.short_call_uic = 12345
+        e.long_call_uic = 12346
+        e.short_call_position_id = None
+        e.long_call_position_id = None
+        e.call_spread_credit = 200.0
+        e.put_spread_credit = 0.0
+        e.call_side_stop = 350.0
+        e.put_side_stop = 0.0
+        e.actual_call_stop_debit = 0.0
+        e.actual_put_stop_debit = 0.0
+        e.close_commission = 0.0
+        e.call_breach_time = None
+        e.call_breach_count = 0
+        return e
+
+    def _strategy(self, *, short_only):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = MagicMock()
+        s.dry_run = False
+        s.short_only_stop = short_only
+        s.stop_confirmation_enabled = False
+        s.long_salvage_enabled = False
+        s.commission_per_leg = 2.5
+        s.contracts_per_entry = 1
+        s.state = MEICState.MONITORING
+        ds = MagicMock()
+        ds.total_realized_pnl = 0.0
+        ds.total_commission = 0.0
+        ds.call_stops_triggered = 0
+        ds.put_stops_triggered = 0
+        ds.double_stops = 0
+        s.daily_state = ds
+        # close returns (success, fill_price, order_id) — a real fill
+        s._close_position_with_retry = MagicMock(return_value=(True, 3.50, "oid-1"))
+        s._read_option_quote = MagicMock(return_value={"bid": 1.50, "ask": 1.60})
+        s._log_stop_loss = MagicMock()
+        s._queue_stop_alert = MagicMock()
+        s._save_state_to_disk = MagicMock()
+        s._spawn_async_fill_correction = MagicMock()
+        s._flush_batched_alerts = MagicMock()
+        s._record_stop_to_db = MagicMock()
+        return s
+
+    def test_mkt025_short_only_close_fires_with_uic(self):
+        s = self._strategy(short_only=True)
+        s._execute_stop_loss(self._entry(), "call")
+        s._close_position_with_retry.assert_called_once()
+        assert s._close_position_with_retry.call_args.kwargs["uic"] == 12345
+
+    def test_base_close_both_legs_fire_with_uic(self):
+        s = self._strategy(short_only=False)
+        s._execute_stop_loss(self._entry(), "call")
+        # base path closes BOTH legs — short + long
+        assert s._close_position_with_retry.call_count == 2
+        uics = {c.kwargs["uic"] for c in s._close_position_with_retry.call_args_list}
+        assert uics == {12345, 12346}
+
+    def test_stop_booked_as_loss_not_profit(self):
+        # credit $200; short buys back at 3.50×100 = $350 → net_loss $150.
+        # With the C1 bug the close was skipped → net_loss −$200 → +$200 "profit".
+        s = self._strategy(short_only=True)
+        s._execute_stop_loss(self._entry(), "call")
+        assert s.daily_state.total_realized_pnl == pytest.approx(-150.0)

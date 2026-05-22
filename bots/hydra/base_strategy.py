@@ -3008,7 +3008,12 @@ class MEICStrategy:
             legs_actually_closed = 0  # Fix #83a: Track for accurate commission
 
             for pos_id, leg_name, uic in positions_to_close:
-                if pos_id:
+                # P7-audit C1: gate on the conid (`uic`), NOT `pos_id`.
+                # IBKR has no per-leg position id — `pos_id` is always
+                # None — so an `if pos_id:` gate skipped every close,
+                # leaving the breached short open AND booking the stop
+                # as a profit. `_close_position_with_retry` keys on `uic`.
+                if uic:
                     # Fix #83a: Skip closing worthless long legs (bid=$0) on 0DTE
                     # Deep OTM longs often have no market — Saxo rejects market orders
                     # with "only limit orders allowed" and limit orders at $0.05 fail too.
@@ -3072,13 +3077,13 @@ class MEICStrategy:
         if side == "call":
             entry.short_call_position_id = None
             entry.long_call_position_id = None
-            entry.short_call_uic = 0
-            entry.long_call_uic = 0
+            entry.short_call_uic = None
+            entry.long_call_uic = None
         else:
             entry.short_put_position_id = None
             entry.long_put_position_id = None
-            entry.short_put_uic = 0
-            entry.long_put_uic = 0
+            entry.short_put_uic = None
+            entry.long_put_uic = None
 
         # Calculate actual net loss
         # FIX #42 (2026-02-05): Use actual close cost when available

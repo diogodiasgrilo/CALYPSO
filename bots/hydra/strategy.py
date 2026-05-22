@@ -6007,7 +6007,12 @@ class HydraStrategy(MEICStrategy):
         else:
             # Close only the short leg via market order
             for pos_id, leg_name, uic in positions_to_close:
-                if pos_id:
+                # P7-audit C1: gate on the conid (`uic`), NOT `pos_id`.
+                # IBKR has no per-leg position id — `pos_id` is always
+                # None — so an `if pos_id:` gate skipped the close
+                # entirely, leaving the breached short open and booking
+                # the stop as a profit.
+                if uic:
                     # v8: pass entry.contracts (MKT-025 short-only stop of legacy entry)
                     _, fill_price, order_id = self._close_position_with_retry(
                         pos_id, leg_name, uic=uic, entry_number=entry.entry_number,
@@ -6029,10 +6034,10 @@ class HydraStrategy(MEICStrategy):
         # Long position ID/UIC stay intact for MKT-033 salvage and settlement.
         if side == "call":
             entry.short_call_position_id = None
-            entry.short_call_uic = 0
+            entry.short_call_uic = None
         else:
             entry.short_put_position_id = None
-            entry.short_put_uic = 0
+            entry.short_put_uic = None
 
         # Calculate net loss
         # MKT-025: close_cost is SHORT only. credit_received is NET of long cost.
