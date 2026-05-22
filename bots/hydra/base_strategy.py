@@ -4777,7 +4777,7 @@ class MEICStrategy:
 
         # Convert P&L to EUR if exchange rate available
         try:
-            rate = self.client.get_fx_rate("USD", "EUR")
+            rate = self._read_fx_rate("USD", "EUR")
             if rate:
                 sheets_summary["daily_pnl_eur"] = net_pnl * rate
                 sheets_summary["cumulative_pnl_eur"] = cumulative_pnl * rate
