@@ -1439,8 +1439,8 @@ class HydraStrategy(MEICStrategy):
             self._cached_chart_bars = None
 
     @staticmethod
-    def _normalize_chart_bar(raw_bar: Dict[str, Any], source: str) -> Dict[str, Any]:
-        """Translate a broker-raw chart bar into HYDRA's normalized shape.
+    def _normalize_chart_bar(raw_bar: Dict[str, Any]) -> Dict[str, Any]:
+        """Translate an IBKR-raw chart bar into HYDRA's normalized shape.
 
         Returns a dict with keys:
           open, high, low, close: float (0.0 if missing/bad)
@@ -1448,13 +1448,8 @@ class HydraStrategy(MEICStrategy):
           timestamp_ms: int (epoch ms, 0 if missing or unparseable)
 
         Args:
-            raw_bar: the bar dict from the broker's chart endpoint
-            source: "ib" or "saxo" — selects which field-name map applies
-                "ib"   → IBClient.get_chart_data returns flat list with
-                         lowercase compact keys (o/h/l/c/v/t per entry)
-                "saxo" → SaxoClient's CFD chart returns Bid-suffixed keys
-                         (OpenBid/HighBid/LowBid/CloseBid/Volume) with
-                         non-Bid fallback for non-CFD instruments.
+            raw_bar: a bar dict from IBClient.get_chart_data — a flat
+                list of entries with lowercase compact keys (o/h/l/c/v/t).
 
         Defensive: missing/null/empty/malformed values gracefully degrade
         to 0 rather than raising. Caller filters out zero-priced bars
@@ -1478,31 +1473,14 @@ class HydraStrategy(MEICStrategy):
             except (TypeError, ValueError):
                 return 0
 
-        if source == "ib":
-            return {
-                "open": _f(raw_bar.get("o")),
-                "high": _f(raw_bar.get("h")),
-                "low": _f(raw_bar.get("l")),
-                "close": _f(raw_bar.get("c")),
-                "volume": _i(raw_bar.get("v")),
-                "timestamp_ms": _i(raw_bar.get("t")),
-            }
-        if source == "saxo":
-            # CFD bars use Bid-suffixed keys; non-CFD bars use the plain
-            # OHLC names. Try Bid first per the existing Saxo trend code.
-            return {
-                "open": _f(raw_bar.get("OpenBid") or raw_bar.get("Open")),
-                "high": _f(raw_bar.get("HighBid") or raw_bar.get("High")),
-                "low": _f(raw_bar.get("LowBid") or raw_bar.get("Low")),
-                "close": _f(raw_bar.get("CloseBid") or raw_bar.get("Close")),
-                "volume": _i(raw_bar.get("Volume")),
-                # Saxo's "Time" field is an ISO string; skip parsing —
-                # HYDRA's downstream code (ATR/EMA) doesn't use the
-                # timestamp anyway. If a future caller needs it, parse
-                # here.
-                "timestamp_ms": 0,
-            }
-        raise ValueError(f"_normalize_chart_bar: unknown source {source!r}")
+        return {
+            "open": _f(raw_bar.get("o")),
+            "high": _f(raw_bar.get("h")),
+            "low": _f(raw_bar.get("l")),
+            "close": _f(raw_bar.get("c")),
+            "volume": _i(raw_bar.get("v")),
+            "timestamp_ms": _i(raw_bar.get("t")),
+        }
 
     def _read_recent_bars(
         self,
@@ -1517,65 +1495,45 @@ class HydraStrategy(MEICStrategy):
         empty broker response — caller falls back to NEUTRAL trend / 0
         ATR score.
 
-        Broker dispatch (2026-05-19 transition):
-        - If self.broker is set (IBClient): translates IBKR's flat list +
-          compact key format to the normalized shape. The IBKR `period`
-          parameter is a lookback window; we request a buffer beyond
-          `count` minutes then slice the last N bars.
-        - Else: falls back to self.client (Saxo) — the legacy CFD chart
-          API call. Both paths return identical shape after normalization.
+        Translates IBKR's flat list + compact key format to the
+        normalized shape. The IBKR `period` parameter is a lookback
+        window; we request a buffer beyond `count` minutes then slice
+        the last N bars.
 
         Errors are logged and converted to None — chart fetch is best-
         effort, not a trading-blocking dependency.
         """
         try:
-            if self.broker is not None:
-                # IB path: 1-min bars over a window large enough to
-                # cover `count` entries. IBKR's `period` accepts
-                # "Nmin" / "Nh" / etc. — we use a generous window
-                # then slice.
-                bar_arg = (
-                    f"{horizon_min}min" if horizon_min < 60
-                    else f"{max(horizon_min // 60, 1)}h"
-                )
-                # Request count + buffer for resilience (closed-market
-                # gaps, partial bars). 60-min floor handles short
-                # lookbacks.
-                period_minutes = max(count * horizon_min + 10, 60)
-                # IBKR's CP API caps the "min" period unit at 30; a
-                # larger lookback MUST be expressed in hours (1-8h) or
-                # it is rejected and the IB-path chart fetch silently
-                # fails (→ NEUTRAL trend / 0 ATR for the whole session).
-                if period_minutes <= 30:
-                    period_arg = f"{period_minutes}min"
-                else:
-                    period_hours = min((period_minutes + 59) // 60, 8)
-                    period_arg = f"{period_hours}h"
-                raw_bars = self.broker.get_chart_data(
-                    symbol="SPX", bar=bar_arg, period=period_arg,
-                    outside_rth=False,
-                )
-                if not raw_bars:
-                    return None
-                tail = raw_bars[-count:] if len(raw_bars) > count else raw_bars
-                return [
-                    self._normalize_chart_bar(b, source="ib")
-                    for b in tail
-                    if isinstance(b, dict)
-                ]
-            # Saxo legacy path — still uses self.client (set by MEIC
-            # parent class from saxo_client constructor arg)
-            chart_data = self.client.get_chart_data(
-                uic=self.underlying_uic,
-                asset_type="CfdOnIndex",
-                horizon=horizon_min,
-                count=count,
+            # 1-min bars over a window large enough to cover `count`
+            # entries. IBKR's `period` accepts "Nmin" / "Nh" / etc. —
+            # we use a generous window then slice.
+            bar_arg = (
+                f"{horizon_min}min" if horizon_min < 60
+                else f"{max(horizon_min // 60, 1)}h"
             )
-            if not chart_data or "Data" not in chart_data:
+            # Request count + buffer for resilience (closed-market
+            # gaps, partial bars). 60-min floor handles short
+            # lookbacks.
+            period_minutes = max(count * horizon_min + 10, 60)
+            # IBKR's CP API caps the "min" period unit at 30; a
+            # larger lookback MUST be expressed in hours (1-8h) or
+            # it is rejected and the IB-path chart fetch silently
+            # fails (→ NEUTRAL trend / 0 ATR for the whole session).
+            if period_minutes <= 30:
+                period_arg = f"{period_minutes}min"
+            else:
+                period_hours = min((period_minutes + 59) // 60, 8)
+                period_arg = f"{period_hours}h"
+            raw_bars = self.broker.get_chart_data(
+                symbol="SPX", bar=bar_arg, period=period_arg,
+                outside_rth=False,
+            )
+            if not raw_bars:
                 return None
+            tail = raw_bars[-count:] if len(raw_bars) > count else raw_bars
             return [
-                self._normalize_chart_bar(b, source="saxo")
-                for b in chart_data["Data"]
+                self._normalize_chart_bar(b)
+                for b in tail
                 if isinstance(b, dict)
             ]
         except Exception as e:
@@ -1595,15 +1553,11 @@ class HydraStrategy(MEICStrategy):
               "ask": Optional[float],   # best ask; None if not quoted
               "last": Optional[float],  # last traded; None if no trades
               "mid": Optional[float],   # (bid+ask)/2; None if either side missing
-              "mark": Optional[float],  # broker's mark; None on Saxo (only IBKR provides)
+              "mark": Optional[float],  # broker's mark price
             }
 
-        Broker dispatch (2026-05-19 transition):
-        - self.broker set: IBClient.get_quote returns a flat dict already
-          in normalized shape — we just slice the price fields we use.
-        - self.broker None: SaxoClient returns nested {"Quote": {"Bid":
-          ...}} with occasional top-level fallback; we extract via the
-          defensive lookup pattern HYDRA's existing code uses.
+        ``IBClient.get_quote`` returns a flat dict already in normalized
+        shape — we just slice the price fields we use.
 
         Why None instead of 0.0 for missing fields: a 0 bid is
         semantically different from "no bid available". Callers must
@@ -1618,35 +1572,15 @@ class HydraStrategy(MEICStrategy):
                 return None
 
         try:
-            if self.broker is not None:
-                raw = self.broker.get_quote(int(instrument_id))
-                if not raw:
-                    return None
-                return {
-                    "bid": _f(raw.get("bid")),
-                    "ask": _f(raw.get("ask")),
-                    "last": _f(raw.get("last")),
-                    "mid": _f(raw.get("mid")),
-                    "mark": _f(raw.get("mark")),
-                }
-            # Saxo path — nested {"Quote": {...}} with top-level fallback
-            raw = self.client.get_quote(
-                instrument_id, asset_type="StockIndexOption",
-            )
+            raw = self.broker.get_quote(int(instrument_id))
             if not raw:
                 return None
-            nested = raw.get("Quote") or {}
             return {
-                "bid": _f(nested.get("Bid") or raw.get("Bid")),
-                "ask": _f(nested.get("Ask") or raw.get("Ask")),
-                "last": _f(
-                    nested.get("LastTraded")
-                    or raw.get("LastTraded")
-                ),
-                # Saxo doesn't deliver mid or mark; downstream computes
-                # mid from bid+ask if it needs one
-                "mid": None,
-                "mark": None,
+                "bid": _f(raw.get("bid")),
+                "ask": _f(raw.get("ask")),
+                "last": _f(raw.get("last")),
+                "mid": _f(raw.get("mid")),
+                "mark": _f(raw.get("mark")),
             }
         except Exception as e:
             logger.warning(
@@ -1667,22 +1601,17 @@ class HydraStrategy(MEICStrategy):
         simply absent from the result. Returns ``{}`` on a batch-level
         failure (the MKT-020/022 call sites already handle empty maps).
 
-        Broker dispatch (F3 of the IB-only rewrite):
-        - ``self.broker`` set: ``IBClient.get_quotes_batch`` returns a
-          list of flat normalized dicts. The CP API caps a batch at 100
-          conids, so this chunks at 100/call and re-keys by conid.
-        - ``self.broker`` None: ``SaxoClient.get_quotes_batch`` returns
-          ``{uic: {"Quote": {...}}}``; this flattens it to the
-          normalized shape with the same defensive Bid/Ask lookup the
-          legacy MKT-020/022 code used.
+        ``IBClient.get_quotes_batch`` returns a list of flat normalized
+        dicts. The CP API caps a batch at 100 conids, so this chunks at
+        100/call and re-keys by conid.
 
         Why None (not 0.0) for missing fields: a 0 bid means something
         different from "not quoted". Callers null-check before computing
         spreads — see :meth:`_read_option_quote`.
 
         Args:
-            instrument_ids: IBKR conids (broker path) or Saxo UICs
-                (legacy path), typically from :meth:`_read_option_chain`.
+            instrument_ids: IBKR conids, typically from
+                :meth:`_read_option_chain`.
 
         Returns:
             ``{instrument_id: {bid, ask, last, mid, mark}}``.
@@ -1700,43 +1629,22 @@ class HydraStrategy(MEICStrategy):
 
         out: Dict[Any, Dict[str, Any]] = {}
         try:
-            if self.broker is not None:
-                # IB path — chunk at 100 conids (CP API batch cap).
-                conids = [int(i) for i in instrument_ids]
-                for start in range(0, len(conids), 100):
-                    chunk = conids[start:start + 100]
-                    rows = self.broker.get_quotes_batch(chunk) or []
-                    for row in rows:
-                        cid = row.get("conid")
-                        if cid is None:
-                            continue
-                        out[int(cid)] = {
-                            "bid": _f(row.get("bid")),
-                            "ask": _f(row.get("ask")),
-                            "last": _f(row.get("last")),
-                            "mid": _f(row.get("mid")),
-                            "mark": _f(row.get("mark")),
-                        }
-                return out
-
-            # Saxo legacy path — {uic: {"Quote": {...}}}
-            raw = self.client.get_quotes_batch(
-                list(instrument_ids), asset_type="StockIndexOption",
-            ) or {}
-            for uic, entry in raw.items():
-                entry = entry or {}
-                nested = entry.get("Quote") or {}
-                out[uic] = {
-                    "bid": _f(nested.get("Bid") or entry.get("Bid")),
-                    "ask": _f(nested.get("Ask") or entry.get("Ask")),
-                    "last": _f(
-                        nested.get("LastTraded") or entry.get("LastTraded")
-                    ),
-                    # Saxo delivers neither mid nor mark — see
-                    # _read_option_quote for the same note.
-                    "mid": None,
-                    "mark": None,
-                }
+            # Chunk at 100 conids (CP API batch cap).
+            conids = [int(i) for i in instrument_ids]
+            for start in range(0, len(conids), 100):
+                chunk = conids[start:start + 100]
+                rows = self.broker.get_quotes_batch(chunk) or []
+                for row in rows:
+                    cid = row.get("conid")
+                    if cid is None:
+                        continue
+                    out[int(cid)] = {
+                        "bid": _f(row.get("bid")),
+                        "ask": _f(row.get("ask")),
+                        "last": _f(row.get("last")),
+                        "mid": _f(row.get("mid")),
+                        "mark": _f(row.get("mark")),
+                    }
             return out
         except Exception as e:
             logger.warning(
@@ -1753,15 +1661,11 @@ class HydraStrategy(MEICStrategy):
         analytics DB only (``trade_entries`` greek columns) — never used
         for trading decisions, so a None here is harmless.
 
-        Broker dispatch (F3.7 of the IB-only rewrite):
-        - ``self.broker`` set: ``IBClient.get_option_greeks`` already
-          returns lowercase greek fields — sliced directly.
-        - ``self.broker`` None: ``SaxoClient.get_option_greeks`` returns
-          capitalized ``Delta``/``Gamma``/``Theta``/``Vega`` — re-keyed
-          to the normalized lowercase shape.
+        ``IBClient.get_option_greeks`` already returns lowercase greek
+        fields — sliced directly.
 
         Args:
-            instrument_id: IBKR conid (broker path) or Saxo UIC (legacy).
+            instrument_id: IBKR conid.
 
         Returns:
             ``{delta, gamma, theta, vega, iv, open_interest}`` or None.
@@ -1775,31 +1679,16 @@ class HydraStrategy(MEICStrategy):
                 return None
 
         try:
-            if self.broker is not None:
-                raw = self.broker.get_option_greeks(int(instrument_id))
-                if not raw:
-                    return None
-                return {
-                    "delta": _f(raw.get("delta")),
-                    "gamma": _f(raw.get("gamma")),
-                    "theta": _f(raw.get("theta")),
-                    "vega": _f(raw.get("vega")),
-                    "iv": _f(raw.get("iv")),
-                    "open_interest": _f(raw.get("open_interest")),
-                }
-            # Saxo legacy path — capitalized greek keys
-            raw = self.client.get_option_greeks(
-                instrument_id, asset_type="StockIndexOption",
-            )
+            raw = self.broker.get_option_greeks(int(instrument_id))
             if not raw:
                 return None
             return {
-                "delta": _f(raw.get("Delta")),
-                "gamma": _f(raw.get("Gamma")),
-                "theta": _f(raw.get("Theta")),
-                "vega": _f(raw.get("Vega")),
-                "iv": _f(raw.get("MidVol")),
-                "open_interest": _f(raw.get("OpenInterest")),
+                "delta": _f(raw.get("delta")),
+                "gamma": _f(raw.get("gamma")),
+                "theta": _f(raw.get("theta")),
+                "vega": _f(raw.get("vega")),
+                "iv": _f(raw.get("iv")),
+                "open_interest": _f(raw.get("open_interest")),
             }
         except Exception as e:
             logger.warning(
@@ -1813,9 +1702,9 @@ class HydraStrategy(MEICStrategy):
         """Mid price from a normalized quote dict.
 
         Consumes the :meth:`_read_option_quote` / :meth:`_read_option_quotes_batch`
-        shape. Prefers the broker's ``mid`` (IBKR computes it); falls
-        back to ``(bid + ask) / 2`` (Saxo delivers no ``mid``), then to
-        ``last`` / ``mark``. Returns ``0.0`` when nothing is quotable.
+        shape. Prefers the broker's ``mid``; falls back to
+        ``(bid + ask) / 2``, then to ``last`` / ``mark``. Returns
+        ``0.0`` when nothing is quotable.
         """
         if not quote:
             return 0.0
@@ -1838,22 +1727,17 @@ class HydraStrategy(MEICStrategy):
             right          : Optional[str]  # "C" | "P"
             expiry         : Optional[date] | Optional[str]
             unrealized_pnl : Optional[float]
-            position_id    : Optional[str]  # Saxo PositionId; None on IBKR
+            position_id    : Optional[str]  # always None on IBKR
             raw            : dict           # untouched broker row
 
         Returns ``[]`` on a fetch failure — every F4 call site treats an
         empty list as "the broker shows no positions".
 
-        Broker dispatch (F4 of the IB-only rewrite):
-        - ``self.broker`` set: ``IBClient.get_positions()`` returns raw
-          IBKR rows; each is run through ``_normalize_position_dict`` and
-          the option rows kept. IBKR has no per-leg position id, so
-          ``position_id`` is None — F4 reconciliation keys on
-          ``(instrument_id, right, quantity)`` instead (see
-          ``docs/migration/F4_POSITION_FLOW_DESIGN.md``).
-        - ``self.broker`` None: ``SaxoClient.get_positions()`` returns the
-          nested ``PositionBase``/``PositionView`` shape; flattened here.
-          Kept until MEIC inheritance is removed.
+        ``IBClient.get_positions()`` returns raw IBKR rows; each is run
+        through ``_normalize_position_dict`` and the option rows kept.
+        IBKR has no per-leg position id, so ``position_id`` is None — F4
+        reconciliation keys on ``(instrument_id, right, quantity)``
+        instead (see ``docs/migration/F4_POSITION_FLOW_DESIGN.md``).
 
         Args:
             strict: when False (default) a fetch failure is swallowed and
@@ -1869,64 +1753,29 @@ class HydraStrategy(MEICStrategy):
         """
         out: List[Dict[str, Any]] = []
         try:
-            if self.broker is not None:
-                raw_list = self.broker.get_positions() or []
-                for raw in raw_list:
-                    try:
-                        norm = _normalize_position_dict(raw)
-                    except ValueError as e:
-                        logger.debug(
-                            f"_read_open_positions: skipping unparseable "
-                            f"IB position ({e})"
-                        )
-                        continue
-                    if norm.get("asset_type") != "OPT":
-                        continue  # HYDRA only reconciles option legs
-                    out.append({
-                        "instrument_id": norm["instrument_id"],
-                        "quantity": norm["quantity"],
-                        "side": norm["side"],
-                        "strike": norm.get("strike"),
-                        "right": norm.get("right"),
-                        "expiry": norm.get("expiry"),
-                        "unrealized_pnl": norm.get("unrealized_pnl"),
-                        # IBKR has no per-leg position id — see docstring.
-                        "position_id": None,
-                        "raw": norm.get("raw", raw),
-                    })
-                return out
-
-            # Saxo legacy path — nested PositionBase / PositionView shape
-            raw_list = self.client.get_positions() or []
-            for p in raw_list:
-                pb = p.get("PositionBase", {}) or {}
-                pv = p.get("PositionView", {}) or {}
-                od = pb.get("OptionsData", {}) or {}
-                asset_type = pb.get("AssetType", "")
-                if asset_type not in ("StockIndexOption", "StockOption") and not od:
-                    continue  # not an option leg
-                pc = od.get("PutCall", "")
-                right = "C" if pc == "Call" else ("P" if pc == "Put" else None)
-                amount = pb.get("Amount", 0) or 0
+            raw_list = self.broker.get_positions() or []
+            for raw in raw_list:
                 try:
-                    quantity = int(amount)
-                except (TypeError, ValueError):
-                    quantity = 0
-                side = (
-                    "SHORT" if quantity < 0
-                    else ("LONG" if quantity > 0 else "FLAT")
-                )
-                pos_id = p.get("PositionId")
+                    norm = _normalize_position_dict(raw)
+                except ValueError as e:
+                    logger.debug(
+                        f"_read_open_positions: skipping unparseable "
+                        f"IB position ({e})"
+                    )
+                    continue
+                if norm.get("asset_type") != "OPT":
+                    continue  # HYDRA only reconciles option legs
                 out.append({
-                    "instrument_id": pb.get("Uic"),
-                    "quantity": quantity,
-                    "side": side,
-                    "strike": od.get("Strike"),
-                    "right": right,
-                    "expiry": od.get("ExpiryDate"),
-                    "unrealized_pnl": pv.get("ProfitLossOnTrade"),
-                    "position_id": str(pos_id) if pos_id is not None else None,
-                    "raw": p,
+                    "instrument_id": norm["instrument_id"],
+                    "quantity": norm["quantity"],
+                    "side": norm["side"],
+                    "strike": norm.get("strike"),
+                    "right": norm.get("right"),
+                    "expiry": norm.get("expiry"),
+                    "unrealized_pnl": norm.get("unrealized_pnl"),
+                    # IBKR has no per-leg position id — see docstring.
+                    "position_id": None,
+                    "raw": norm.get("raw", raw),
                 })
             return out
         except Exception as e:
@@ -1995,14 +1844,11 @@ class HydraStrategy(MEICStrategy):
         active broker (F5.3). Returns None on failure — callers treat a
         missing rate as "skip the currency conversion".
 
-        Both ``IBClient.get_fx_rate`` and ``SaxoClient.get_fx_rate`` take
-        ``(source, target)`` and return a float, so this is a thin
-        dispatch + failure guard.
+        ``IBClient.get_fx_rate`` takes ``(source, target)`` and returns
+        a float, so this is a thin wrapper + failure guard.
         """
         try:
-            if self.broker is not None:
-                return self.broker.get_fx_rate(base_currency, account_currency)
-            return self.client.get_fx_rate(base_currency, account_currency)
+            return self.broker.get_fx_rate(base_currency, account_currency)
         except Exception as e:
             logger.warning(
                 f"_read_fx_rate({base_currency}->{account_currency}) failed "
@@ -2016,26 +1862,18 @@ class HydraStrategy(MEICStrategy):
         """Closing execution price of a recently-closed leg, from the
         active broker (F5.3).
 
-        Returns the broker's dict — both `IBClient` and `SaxoClient`
-        `get_closed_position_price` return a mapping with a
-        ``"closing_price"`` key — or None when there is no match / on a
-        fetch failure.
+        Returns the broker's dict — ``IBClient.get_closed_position_price``
+        returns a mapping with a ``"closing_price"`` key — or None when
+        there is no match / on a fetch failure.
 
-        Broker dispatch:
-        - ``self.broker`` set: ``IBClient.get_closed_position_price``
-          (conid; scans `/iserver/account/trades`).
-        - ``self.broker`` None: ``SaxoClient.get_closed_position_price``
-          (UIC; `/port/v1/closedpositions`).
+        ``IBClient.get_closed_position_price`` takes a conid and scans
+        `/iserver/account/trades`.
         """
         if instrument_id is None:
             return None
         try:
-            if self.broker is not None:
-                return self.broker.get_closed_position_price(
-                    int(instrument_id), buy_or_sell=buy_or_sell,
-                )
-            return self.client.get_closed_position_price(
-                instrument_id, buy_or_sell=buy_or_sell,
+            return self.broker.get_closed_position_price(
+                int(instrument_id), buy_or_sell=buy_or_sell,
             )
         except Exception as e:
             logger.warning(
@@ -2048,34 +1886,21 @@ class HydraStrategy(MEICStrategy):
         """Spot price of an index (``"SPX"`` / ``"VIX"``) from the
         active broker (F7.1). None on failure.
 
-        Broker dispatch:
-        - ``self.broker`` set: VIX → ``IBClient.get_vix_price`` (it has
-          the mark-fallback); other indexes → resolve the index conid
-          (``qualify_contract`` sec_type="IND") then ``get_quote`` and
-          take mid → last → mark.
-        - ``self.broker`` None: ``SaxoClient.get_quote`` on the CFD UIC
-          (SPX = ``underlying_uic``) / ``get_vix_price`` on
-          ``vix_uic``; the legacy Saxo path.
+        VIX → ``IBClient.get_vix_price`` (it has the mark-fallback);
+        other indexes → resolve the index conid (``qualify_contract``
+        sec_type="IND") then ``get_quote`` and take mid → last → mark.
 
         Used by GAP-C ``_update_market_data`` (sets ``current_price`` /
         VIX) and GAP-E ``_check_market_halt``.
         """
         try:
-            if self.broker is not None:
-                if symbol.upper() == "VIX":
-                    return self.broker.get_vix_price()
-                conid = self.broker.qualify_contract(symbol, sec_type="IND")
-                q = self.broker.get_quote(conid)
-                if not q:
-                    return None
-                return q.get("mid") or q.get("last") or q.get("mark")
-            # Saxo legacy path
             if symbol.upper() == "VIX":
-                return self.client.get_vix_price(self.vix_uic)
-            quote = self.client.get_quote(
-                self.underlying_uic, asset_type="CfdOnIndex",
-            )
-            return self._extract_price(quote, context=symbol) if quote else None
+                return self.broker.get_vix_price()
+            conid = self.broker.qualify_contract(symbol, sec_type="IND")
+            q = self.broker.get_quote(conid)
+            if not q:
+                return None
+            return q.get("mid") or q.get("last") or q.get("mark")
         except Exception as e:
             logger.warning(
                 f"_read_index_price({symbol}) failed "
@@ -2088,21 +1913,18 @@ class HydraStrategy(MEICStrategy):
         field names :meth:`_check_buying_power` (ORDER-004) reads.
         ``{}`` on failure.
 
-        IB path maps ``IBClient.get_balance()['tradable']`` to
+        Maps ``IBClient.get_balance()['tradable']`` to
         ``MarginAvailableForTrading``. IBKR's balance does not surface
         per-position margin-used / utilization — ``_check_buying_power``
         ``.get()``s those with a 0 default, so omitting them merely
-        zeroes a diagnostic log line. Saxo path passes the raw balance
-        dict through unchanged.
+        zeroes a diagnostic log line.
         """
         try:
-            if self.broker is not None:
-                bal = self.broker.get_balance() or {}
-                return {
-                    "MarginAvailableForTrading": bal.get("tradable"),
-                    "_raw": bal,
-                }
-            return self.client.get_balance() or {}
+            bal = self.broker.get_balance() or {}
+            return {
+                "MarginAvailableForTrading": bal.get("tradable"),
+                "_raw": bal,
+            }
         except Exception as e:
             logger.warning(
                 f"_read_account_balance failed ({type(e).__name__}: {e})"
@@ -2202,13 +2024,10 @@ class HydraStrategy(MEICStrategy):
         )
 
     def _cancel_order(self, order_id) -> bool:
-        """Cancel a working order on the active broker. False on failure
-        (broker-agnostic — the cancel/status/open-orders dispatch is
-        cheap and symmetric, unlike the placement path)."""
+        """Cancel a working order on the active broker. False on
+        failure."""
         try:
-            if self.broker is not None:
-                return bool(self.broker.cancel_order(str(order_id)))
-            return bool(self.client.cancel_order(order_id))
+            return bool(self.broker.cancel_order(str(order_id)))
         except Exception as e:
             logger.warning(
                 f"_cancel_order({order_id}) failed ({type(e).__name__}: {e})"
@@ -2219,9 +2038,7 @@ class HydraStrategy(MEICStrategy):
         """Current status of an order from the active broker. ``{}`` on
         failure."""
         try:
-            if self.broker is not None:
-                return self.broker.get_order_status(str(order_id)) or {}
-            return self.client.get_order_status(order_id) or {}
+            return self.broker.get_order_status(str(order_id)) or {}
         except Exception as e:
             logger.warning(
                 f"_get_order_status({order_id}) failed "
@@ -2232,9 +2049,7 @@ class HydraStrategy(MEICStrategy):
     def _get_open_orders(self) -> List[Dict[str, Any]]:
         """All live orders on the active broker. ``[]`` on failure."""
         try:
-            if self.broker is not None:
-                return self.broker.get_open_orders() or []
-            return self.client.get_open_orders() or []
+            return self.broker.get_open_orders() or []
         except Exception as e:
             logger.warning(
                 f"_get_open_orders failed ({type(e).__name__}: {e})"
@@ -2896,98 +2711,19 @@ class HydraStrategy(MEICStrategy):
 
     def _spawn_async_early_close_fill_correction(self, deferred_legs: list):
         """
-        MKT-018: Spawn background thread to look up actual fill prices for early close legs.
+        MKT-018: Deferred fill-price correction for early-close legs — no-op.
 
-        Same pattern as FIX #75's _spawn_async_fill_correction but handles multiple
-        entries/sides at once. Non-blocking — main loop continues immediately.
+        On IBKR this is intentionally a no-op. IBKR closes route through
+        ``place_and_wait_for_fill``, which polls to a terminal state and
+        returns the actual ``avg_fill_price`` synchronously — there is no
+        activity-stream sync lag, so no deferred correction is ever
+        needed. (MKT-018 early close is also disabled.)
 
-        GAP-A (F7.7): on the IBKR path this is a no-op. IBKR closes route
-        through ``place_and_wait_for_fill``, which polls to a terminal
-        state and returns the actual ``avg_fill_price`` synchronously —
-        there is no Saxo-style activity-stream sync lag, so no deferred
-        correction is ever needed. (MKT-018 early close is also disabled.)
-        The Saxo body below stays inline (dormant, deleted in P4).
+        The method is kept (rather than removed) so the MKT-018
+        ``_execute_early_close`` call site stays intact in case early
+        close is ever re-enabled.
         """
-        if self.broker is not None:
-            return
-
-        def worker():
-            try:
-                logger.info(
-                    f"MKT-018: Deferred fill lookup for {len(deferred_legs)} legs, "
-                    f"waiting 3s for Saxo sync..."
-                )
-                time.sleep(3)
-
-                total_correction = 0.0
-                for entry, side_name, leg_name, order_id, uic in deferred_legs:
-                    fill_price = None
-                    source = None
-
-                    try:
-                        # Tier 1: Activities endpoint
-                        # Note: uic is captured at close time (5th tuple element) because
-                        # Phase 3 of _execute_early_close clears entry UICs to 0
-                        if order_id:
-                            filled, fill_details = self.client.check_order_filled_by_activity(
-                                order_id=order_id,
-                                uic=uic,
-                                max_retries=3,
-                                retry_delay=1.5
-                            )
-                            if filled and fill_details:
-                                fp = fill_details.get("fill_price", 0)
-                                if fp and fp > 0:
-                                    fill_price = fp
-                                    source = "activities"
-
-                        # Tier 2: Closed positions endpoint (F5.4 — broker-agnostic)
-                        if fill_price is None and uic:
-                            buy_or_sell = "Sell" if leg_name.startswith("short") else "Buy"
-                            closed_info = self._read_closed_position_price(uic, buy_or_sell=buy_or_sell)
-                            if closed_info:
-                                cp = closed_info.get("closing_price")
-                                if cp and cp > 0:
-                                    fill_price = cp
-                                    source = "closedpositions"
-
-                        if fill_price is not None:
-                            actual_cost = fill_price * 100 * entry.contracts
-                            if leg_name.startswith("short"):
-                                # We paid to buy back — this is a cost
-                                self.daily_state.total_realized_pnl -= actual_cost
-                                total_correction -= actual_cost
-                            else:
-                                # We received from selling — this reduces cost
-                                self.daily_state.total_realized_pnl += actual_cost
-                                total_correction += actual_cost
-                            logger.info(
-                                f"MKT-018: Deferred fill for Entry #{entry.entry_number} {leg_name} "
-                                f"via {source}: ${fill_price:.2f}"
-                            )
-                        else:
-                            logger.warning(
-                                f"MKT-018: No fill price found for Entry #{entry.entry_number} {leg_name}"
-                            )
-                    except Exception as e:
-                        logger.warning(f"MKT-018: Deferred lookup error for {leg_name}: {e}")
-
-                if abs(total_correction) > 0.01:
-                    self._save_state_to_disk()
-                    logger.info(f"MKT-018: Async fill correction applied: ${total_correction:+.2f}")
-                else:
-                    logger.info("MKT-018: Async fill lookup complete (no correction needed)")
-
-            except Exception as e:
-                logger.warning(f"MKT-018: Async fill correction thread failed: {e}")
-
-        thread = threading.Thread(
-            target=worker, daemon=True,
-            name="mkt018_fill_correction"
-        )
-        thread.start()
-        self._pending_fill_corrections.append(thread)
-        logger.info(f"MKT-018: Spawned async fill correction thread for {len(deferred_legs)} legs")
+        return
 
     # =========================================================================
     # ANTI-WHIPSAW FILTER
@@ -3806,14 +3542,13 @@ class HydraStrategy(MEICStrategy):
         candidate_strikes: List[float],
     ) -> Tuple[Dict[float, Any], Dict[float, Any]]:
         """
-        Broker-agnostic option-chain reader for the credit-estimation flow.
+        Option-chain reader for the credit-estimation flow.
 
-        Returns ``(call_map, put_map)`` — each a ``{strike: instrument_id}``
-        dict, where ``instrument_id`` is an IBKR conid (broker path) or a
-        Saxo UIC (legacy path). Returns ``({}, {})`` on any failure; every
-        caller already handles empty maps gracefully.
+        Returns ``(call_map, put_map)`` — each a ``{strike: conid}``
+        dict. Returns ``({}, {})`` on any failure; every caller already
+        handles empty maps gracefully.
 
-        IB path (``self.broker`` set — F3 of the IB-only rewrite):
+        Flow (F3 of the IB-only rewrite):
           1. ``broker.get_option_chain("SPX", expiry)`` → full strike list
              (one cheap ``search_strikes_by_conid`` call).
           2. Each requested candidate is snapped to the nearest real chain
@@ -3826,105 +3561,68 @@ class HydraStrategy(MEICStrategy):
              the snapped set in parallel (F3.1).
           4. The maps are keyed by the real (snapped) strikes.
 
-        Saxo path (legacy — kept until MEIC inheritance is removed):
-          one ``client.get_option_chain(option_root_id=, expiry_dates=)``
-          call; ``OptionSpace[0].SpecificOptions`` is parsed into the two
-          maps. The whole chain is returned — ``candidate_strikes`` is
-          ignored on this path because a superset is harmless.
-
         Args:
             expiry: 0DTE expiry as ``"YYYY-MM-DD"`` (from
                 :meth:`_get_todays_expiry`).
             candidate_strikes: Strikes the caller intends to evaluate.
-                Used only by the IB path to bound the conid-resolution
-                batch; the Saxo path returns the full chain regardless.
+                Used to bound the conid-resolution batch.
 
         Returns:
-            ``(call_map, put_map)`` — ``{strike: instrument_id}`` per right.
+            ``(call_map, put_map)`` — ``{strike: conid}`` per right.
         """
-        if self.broker is not None:
-            # ── IB path ──────────────────────────────────────────────
-            try:
-                expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
-            except (ValueError, TypeError) as e:
-                logger.warning(f"_read_option_chain: bad expiry {expiry!r}: {e}")
-                return {}, {}
-
-            try:
-                strike_list = self.broker.get_option_chain("SPX", expiry_date)
-            except Exception as e:
-                logger.warning(
-                    f"_read_option_chain: IB strike-list fetch failed: {e}"
-                )
-                return {}, {}
-            if not strike_list:
-                logger.warning("_read_option_chain: IB returned an empty chain")
-                return {}, {}
-
-            # Snap each requested candidate to the nearest real chain
-            # strike (within 25pt — half the widest far-OTM spacing).
-            snapped: set = set()
-            for cand in candidate_strikes:
-                nearest = min(strike_list, key=lambda s: abs(s - cand))
-                if abs(nearest - cand) <= 25:
-                    snapped.add(nearest)
-            if not snapped:
-                logger.warning(
-                    "_read_option_chain: no candidate strikes snapped to "
-                    "the chain"
-                )
-                return {}, {}
-
-            try:
-                conid_map = self.broker.qualify_option_strikes(
-                    symbol="SPX",
-                    expiry=expiry_date,
-                    strikes=sorted(snapped),
-                )
-            except Exception as e:
-                logger.warning(
-                    f"_read_option_chain: qualify_option_strikes failed: {e}"
-                )
-                return {}, {}
-
-            call_map = {
-                strike: conid
-                for (strike, right), conid in conid_map.items()
-                if right == "C"
-            }
-            put_map = {
-                strike: conid
-                for (strike, right), conid in conid_map.items()
-                if right == "P"
-            }
-            return call_map, put_map
-
-        # ── Saxo legacy path ─────────────────────────────────────────
         try:
-            chain_resp = self.client.get_option_chain(
-                option_root_id=self.option_root_uic,
-                expiry_dates=[expiry],
+            expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+        except (ValueError, TypeError) as e:
+            logger.warning(f"_read_option_chain: bad expiry {expiry!r}: {e}")
+            return {}, {}
+
+        try:
+            strike_list = self.broker.get_option_chain("SPX", expiry_date)
+        except Exception as e:
+            logger.warning(
+                f"_read_option_chain: IB strike-list fetch failed: {e}"
+            )
+            return {}, {}
+        if not strike_list:
+            logger.warning("_read_option_chain: IB returned an empty chain")
+            return {}, {}
+
+        # Snap each requested candidate to the nearest real chain
+        # strike (within 25pt — half the widest far-OTM spacing).
+        snapped: set = set()
+        for cand in candidate_strikes:
+            nearest = min(strike_list, key=lambda s: abs(s - cand))
+            if abs(nearest - cand) <= 25:
+                snapped.add(nearest)
+        if not snapped:
+            logger.warning(
+                "_read_option_chain: no candidate strikes snapped to "
+                "the chain"
+            )
+            return {}, {}
+
+        try:
+            conid_map = self.broker.qualify_option_strikes(
+                symbol="SPX",
+                expiry=expiry_date,
+                strikes=sorted(snapped),
             )
         except Exception as e:
-            logger.warning(f"_read_option_chain: Saxo chain fetch failed: {e}")
-            return {}, {}
-        if not chain_resp:
+            logger.warning(
+                f"_read_option_chain: qualify_option_strikes failed: {e}"
+            )
             return {}, {}
 
-        option_space = chain_resp.get("OptionSpace", [])
-        if not option_space:
-            return {}, {}
-        specific_options = option_space[0].get("SpecificOptions", [])
-
-        call_map: Dict[float, Any] = {}
-        put_map: Dict[float, Any] = {}
-        for opt in specific_options:
-            strike = opt.get("StrikePrice", 0)
-            pc = opt.get("PutCall", "")
-            if pc == "Call":
-                call_map[strike] = opt.get("Uic")
-            elif pc == "Put":
-                put_map[strike] = opt.get("Uic")
+        call_map = {
+            strike: conid
+            for (strike, right), conid in conid_map.items()
+            if right == "C"
+        }
+        put_map = {
+            strike: conid
+            for (strike, right), conid in conid_map.items()
+            if right == "P"
+        }
         return call_map, put_map
 
     @staticmethod
@@ -10475,12 +10173,11 @@ class HydraStrategy(MEICStrategy):
         gone from the broker (DEF-5).
 
         - Dry-run: True — Path-B synthetic positions settle at EOD.
-        - IBKR (``self.broker`` set): a leg is gone when its ``*_uic`` is
-          already cleared OR the broker shows no open position at that
-          conid (``_position_is_open``, F4.2). This is robust whether or
-          not POS-004 has cleared ``*_uic`` yet, and IBKR has no per-leg
-          position id to key on.
-        - Saxo (legacy): both ``*_position_id`` missing / settled.
+        - Live: a leg is gone when its ``*_uic`` is already cleared OR
+          the broker shows no open position at that conid
+          (``_position_is_open``, F4.2). Robust whether or not POS-004
+          has cleared ``*_uic`` yet, and IBKR has no per-leg position
+          id to key on.
 
         Replaces the old ``_position_is_settled(*_position_id)`` pair,
         which on IBKR was always True (``*_position_id`` is never set) —
@@ -10495,14 +10192,9 @@ class HydraStrategy(MEICStrategy):
                 return True  # already cleared on settlement
             return not self._position_is_open(uic, positions=open_positions)
 
-        if self.broker is not None:
-            return (
-                _leg_gone(getattr(entry, f"short_{side}_uic", None))
-                and _leg_gone(getattr(entry, f"long_{side}_uic", None))
-            )
         return (
-            self._position_is_settled(getattr(entry, f"short_{side}_position_id", None))
-            and self._position_is_settled(getattr(entry, f"long_{side}_position_id", None))
+            _leg_gone(getattr(entry, f"short_{side}_uic", None))
+            and _leg_gone(getattr(entry, f"long_{side}_uic", None))
         )
 
     def _process_expired_credits(self) -> float:
@@ -10620,97 +10312,25 @@ class HydraStrategy(MEICStrategy):
 
     def _verify_settlement_pnl_from_saxo(self):
         """
-        Fix #87: Verify total P&L against the broker's closed-positions
-        report at settlement.
+        Fix #87 / DEF-6: Settlement-P&L value cross-check — no-op on IBKR.
 
         The bot calculates P&L from stop close costs + assumed expired
-        credits. But an expired option can settle at non-zero (ITM /
-        near-ATM at settlement). On Saxo, `/cs/v1/reports/closedPositions`
-        gives actual `PnLAccountCurrency` per closed position, so a
-        mismatch can be detected and corrected.
+        credits. An expired option can settle at non-zero (ITM / near-ATM
+        at settlement). The original Fix #87 cross-checked total P&L
+        against Saxo's `/cs/v1/reports/closedPositions` report.
 
-        F5.5 — IBKR path: skipped. IBKR's Client Portal Web API has no
-        real-time per-day closed-positions P&L report; per-position
-        realized P&L lives only in Portfolio Analyst / Flex queries,
-        which are not real-time. The position-LEVEL settlement check
+        IBKR's Client Portal Web API has no real-time per-day
+        closed-positions P&L report — per-position realized P&L lives
+        only in Portfolio Analyst / Flex queries, which are not
+        real-time. So this value-level cross-check is unavailable and
+        the method is a no-op. The position-LEVEL settlement check
         (POS-004 / `check_after_hours_settlement`) still verifies every
-        tracked leg actually settled; only the settled-P&L-VALUE
-        cross-check is unavailable. Tracked as DEF-6.
+        tracked leg actually settled. Tracked as DEF-6.
 
-        The ``_from_saxo`` suffix in the name is legacy — kept to avoid
-        churning the single caller / any inherited dispatch.
+        Kept (rather than removed) so the single caller in
+        `_process_expired_credits` stays intact.
         """
-        # Path-B dry-run skip (2026-04-27): no real broker closures exist
-        # for DRY_* positions, so the report has nothing matching our
-        # entry instrument ids. The "verification" would always conclude
-        # our P&L is off by the entire dry P&L and try to correct to zero.
-        if self.dry_run:
-            return
-
-        # F5.5 — IB path: no CP-Web-API equivalent of Saxo's
-        # closedPositions report (see docstring + DEF-6).
-        if self.broker is not None:
-            logger.info(
-                "Fix #87: settlement P&L value-verification skipped on the "
-                "IBKR path — the CP Web API has no real-time closed-"
-                "positions P&L report (DEF-6). Leg-level settlement is "
-                "still verified by POS-004."
-            )
-            return
-
-        try:
-            from shared.market_hours import get_us_market_time
-            today = get_us_market_time().strftime("%Y-%m-%d")
-
-            response = self.client._make_request(
-                "GET",
-                f"/cs/v1/reports/closedPositions/{self.client.client_key}/{today}/{today}"
-            )
-
-            if not response or "Data" not in response:
-                logger.warning("Fix #87: Could not fetch closedpositions report — using assumed P&L")
-                return
-
-            # PnLAccountCurrency = NET P&L per position (includes commission)
-            # Sum = total net P&L for the day from Saxo's perspective
-            saxo_net_pnl = 0.0
-            positions_found = 0
-            for cp in response["Data"]:
-                pnl = cp.get("PnLAccountCurrency", 0) or 0
-                saxo_net_pnl += pnl
-                positions_found += 1
-
-            if positions_found == 0:
-                logger.info("Fix #87: No closed positions in Saxo report — skipping verification")
-                return
-
-            # Our net P&L = total_realized_pnl (gross) - total_commission
-            our_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
-
-            diff = saxo_net_pnl - our_net_pnl
-            if abs(diff) < 1.0:
-                logger.info(
-                    f"Fix #87: P&L verified — Saxo ${saxo_net_pnl:.2f} net matches "
-                    f"bot ${our_net_pnl:.2f} net ({positions_found} positions)"
-                )
-                return
-
-            # Apply correction to total_realized_pnl (gross).
-            # Since diff = saxo_net - our_net, and our_net = gross - commission,
-            # corrected_gross = gross + diff, so corrected_net = gross + diff - commission = saxo_net.
-            logger.warning(
-                f"Fix #87: P&L CORRECTION — Saxo reports ${saxo_net_pnl:.2f} net, "
-                f"bot calculated ${our_net_pnl:.2f} net (diff: ${diff:+.2f}). "
-                f"Adjusting total_realized_pnl by ${diff:+.2f}"
-            )
-            self.daily_state.total_realized_pnl += diff
-            logger.info(
-                f"Fix #87: Corrected total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f} "
-                f"(net after commission: ${self.daily_state.total_realized_pnl - self.daily_state.total_commission:.2f})"
-            )
-
-        except Exception as e:
-            logger.warning(f"Fix #87: Settlement P&L verification failed: {e} — using assumed P&L")
+        return
 
     def _reconcile_positions(self):
         """Override: After base reconciliation, detect manually closed longs.

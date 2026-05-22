@@ -106,7 +106,6 @@ class TestNormalizeChartBar:
     def test_ib_standard_bar(self):
         out = HydraStrategy._normalize_chart_bar(
             {"o": 5500.0, "h": 5510.0, "l": 5495.0, "c": 5505.5, "v": 12000, "t": 1779129743000},
-            source="ib",
         )
         assert out == {
             "open": 5500.0, "high": 5510.0, "low": 5495.0,
@@ -114,7 +113,7 @@ class TestNormalizeChartBar:
         }
 
     def test_ib_missing_fields_become_zero(self):
-        out = HydraStrategy._normalize_chart_bar({}, source="ib")
+        out = HydraStrategy._normalize_chart_bar({})
         assert out["open"] == 0.0
         assert out["close"] == 0.0
         assert out["volume"] == 0
@@ -124,7 +123,6 @@ class TestNormalizeChartBar:
         """IBKR sometimes sends numeric strings — coerce defensively."""
         out = HydraStrategy._normalize_chart_bar(
             {"o": "5500.0", "c": "5505", "v": "100"},
-            source="ib",
         )
         assert out["open"] == 5500.0
         assert out["close"] == 5505.0
@@ -133,7 +131,6 @@ class TestNormalizeChartBar:
     def test_ib_bad_values_become_safe_defaults(self):
         out = HydraStrategy._normalize_chart_bar(
             {"o": "not-a-number", "c": None, "v": ""},
-            source="ib",
         )
         assert out["open"] == 0.0
         assert out["close"] == 0.0
@@ -141,93 +138,25 @@ class TestNormalizeChartBar:
 
     # ─── Saxo bar normalization ────────────────────────────────────────
 
-    def test_saxo_cfd_bid_keys(self):
-        """SPX CFD chart bars use the Bid-suffixed key set."""
-        out = HydraStrategy._normalize_chart_bar(
-            {
-                "OpenBid": 5500.0, "HighBid": 5510.0,
-                "LowBid": 5495.0, "CloseBid": 5505.5,
-                "Volume": 12000,
-            },
-            source="saxo",
-        )
-        assert out["open"] == 5500.0
-        assert out["high"] == 5510.0
-        assert out["low"] == 5495.0
-        assert out["close"] == 5505.5
-        assert out["volume"] == 12000
-
-    def test_saxo_non_cfd_falls_back_to_plain_keys(self):
-        """Non-CFD instruments may use Open/High/Low/Close without Bid suffix."""
-        out = HydraStrategy._normalize_chart_bar(
-            {"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5},
-            source="saxo",
-        )
-        assert out["open"] == 100.0
-        assert out["close"] == 100.5
-
-    def test_saxo_prefers_bid_over_plain_when_both_present(self):
-        """If both OpenBid and Open are present, prefer OpenBid (CFD source)."""
-        out = HydraStrategy._normalize_chart_bar(
-            {"OpenBid": 5500.0, "Open": 9999.0},  # plain is garbage
-            source="saxo",
-        )
-        assert out["open"] == 5500.0
-
-    def test_saxo_missing_fields_become_zero(self):
-        out = HydraStrategy._normalize_chart_bar({}, source="saxo")
-        assert out["open"] == 0.0
-        assert out["close"] == 0.0
-        assert out["volume"] == 0
-
-    def test_saxo_timestamp_ms_is_always_zero(self):
-        """Saxo's "Time" field is an ISO string; we don't parse it
-        because downstream code doesn't need the timestamp. Pinning
-        this so future-me notices if a caller starts depending on it."""
-        out = HydraStrategy._normalize_chart_bar(
-            {"Time": "2026-05-19T14:30:00Z", "CloseBid": 5500.0},
-            source="saxo",
-        )
-        assert out["timestamp_ms"] == 0
-
     # ─── Source validation ─────────────────────────────────────────────
 
-    def test_unknown_source_raises(self):
-        with pytest.raises(ValueError, match="unknown source"):
-            HydraStrategy._normalize_chart_bar({"c": 1.0}, source="bloomberg")
-
     # ─── Convergence: IB and Saxo bars should produce identical output ───
-
-    def test_ib_and_saxo_converge_on_same_shape(self):
-        """A bar with same OHLC values from both brokers must normalize
-        to identical output (except timestamp, intentionally)."""
-        ib_in = {"o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 100}
-        saxo_in = {"OpenBid": 1.0, "HighBid": 2.0, "LowBid": 0.5,
-                   "CloseBid": 1.5, "Volume": 100}
-        ib_out = HydraStrategy._normalize_chart_bar(ib_in, source="ib")
-        saxo_out = HydraStrategy._normalize_chart_bar(saxo_in, source="saxo")
-        # Match on price + volume (timestamp differs intentionally)
-        for k in ("open", "high", "low", "close", "volume"):
-            assert ib_out[k] == saxo_out[k], f"diverge on {k!r}"
 
 
 class TestReadRecentBars:
     """Unit tests for HydraStrategy._read_recent_bars method.
 
-    Tests both broker paths (IB and Saxo) using a __new__-constructed
-    HydraStrategy with manually-set self.broker, self.client, and a few
-    config attrs."""
+    Uses a __new__-constructed HydraStrategy with a manually-set
+    self.broker (IBKR-only after the P4 Saxo purge)."""
 
-    def _make_bare_strategy(self, broker=None, client=None):
+    def _make_bare_strategy(self, broker=None):
         """Construct a HydraStrategy that bypasses __init__. Sets only
         the attributes _read_recent_bars actually reads."""
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = broker
-        s.client = client
-        s.underlying_uic = 4913  # SPX CFD UIC (legacy Saxo)
         return s
 
-    # ─── IB path (broker is set) ───────────────────────────────────────
+    # ─── IB path ───────────────────────────────────────────────────────
 
     def test_ib_path_returns_normalized_bars(self):
         fake_broker = MagicMock()
@@ -281,83 +210,18 @@ class TestReadRecentBars:
         s = self._make_bare_strategy(broker=fake_broker)
         assert s._read_recent_bars(horizon_min=1, count=10) is None
 
-    # ─── Saxo path (broker is None — legacy) ───────────────────────────
-
-    def test_saxo_path_returns_normalized_bars(self):
-        fake_client = MagicMock()
-        fake_client.get_chart_data.return_value = {
-            "Data": [
-                {"OpenBid": 5500.0, "HighBid": 5510.0, "LowBid": 5495.0,
-                 "CloseBid": 5505.0, "Volume": 100},
-            ],
-        }
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        bars = s._read_recent_bars(horizon_min=1, count=10)
-        assert bars is not None
-        assert len(bars) == 1
-        assert bars[0]["close"] == 5505.0
-        # Saxo path used the legacy CFD args
-        call_kwargs = fake_client.get_chart_data.call_args.kwargs
-        assert call_kwargs["uic"] == 4913
-        assert call_kwargs["asset_type"] == "CfdOnIndex"
-
-    def test_saxo_path_no_data_key_returns_none(self):
-        fake_client = MagicMock()
-        fake_client.get_chart_data.return_value = {}  # no "Data" key
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_recent_bars(horizon_min=1, count=10) is None
-
-    def test_saxo_path_null_response_returns_none(self):
-        fake_client = MagicMock()
-        fake_client.get_chart_data.return_value = None
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_recent_bars(horizon_min=1, count=10) is None
-
-    def test_saxo_path_exception_returns_none(self):
-        fake_client = MagicMock()
-        fake_client.get_chart_data.side_effect = RuntimeError("saxo blip")
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_recent_bars(horizon_min=1, count=10) is None
-
-    # ─── Both paths produce same normalized output ─────────────────────
-
-    def test_ib_and_saxo_paths_produce_equivalent_shape(self):
-        """Critical invariant: regardless of broker, downstream ATR/EMA
-        code consumes the same `bar["close"]` access pattern."""
-        ib_broker = MagicMock()
-        ib_broker.get_chart_data.return_value = [
-            {"o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 100, "t": 999},
-        ]
-        saxo_client = MagicMock()
-        saxo_client.get_chart_data.return_value = {
-            "Data": [{"OpenBid": 1.0, "HighBid": 2.0, "LowBid": 0.5,
-                      "CloseBid": 1.5, "Volume": 100}],
-        }
-        s_ib = self._make_bare_strategy(broker=ib_broker)
-        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
-
-        ib_bars = s_ib._read_recent_bars(horizon_min=1, count=10)
-        saxo_bars = s_saxo._read_recent_bars(horizon_min=1, count=10)
-
-        assert ib_bars is not None and saxo_bars is not None
-        for k in ("open", "high", "low", "close", "volume"):
-            assert ib_bars[0][k] == saxo_bars[0][k], f"diverge on {k!r}"
-
 
 class TestReadOptionQuote:
-    """Unit tests for HydraStrategy._read_option_quote method (commit 7b).
+    """Unit tests for HydraStrategy._read_option_quote method.
 
-    Same two-broker dispatch as _read_recent_bars. IBClient.get_quote
-    returns a flat dict already in normalized shape; Saxo returns
-    {"Quote": {"Bid": ..., "Ask": ..., "LastTraded": ...}} nested with
-    occasional top-level fallback. Helper unifies the shape so call
-    sites do `quote.get("bid")` regardless of broker.
+    IBClient.get_quote returns a flat dict already in normalized shape;
+    the helper slices the price fields and coerces them so call sites
+    do `quote.get("bid")` uniformly.
     """
 
-    def _make_bare_strategy(self, broker=None, client=None):
+    def _make_bare_strategy(self, broker=None):
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = broker
-        s.client = client
         return s
 
     # ─── IB path ───────────────────────────────────────────────────────
@@ -409,46 +273,10 @@ class TestReadOptionQuote:
         s = self._make_bare_strategy(broker=fake_broker)
         assert s._read_option_quote(12345) is None
 
-    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
-
-    def test_saxo_path_nested_quote_block(self):
-        """Saxo's typical response: {"Quote": {"Bid": ..., "Ask": ...}}."""
-        fake_client = MagicMock()
-        fake_client.get_quote.return_value = {
-            "Quote": {"Bid": 2.50, "Ask": 2.55, "LastTraded": 2.52},
-        }
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        quote = s._read_option_quote(12345678)
-        assert quote["bid"] == 2.50
-        assert quote["ask"] == 2.55
-        assert quote["last"] == 2.52
-        # Saxo never provides mid/mark
-        assert quote["mid"] is None
-        assert quote["mark"] is None
-        # Confirms Saxo path: asset_type="StockIndexOption" passed through
-        call_kwargs = fake_client.get_quote.call_args.kwargs
-        assert call_kwargs["asset_type"] == "StockIndexOption"
-
-    def test_saxo_path_top_level_fallback(self):
-        """Some Saxo responses put Bid at top level instead of nested.
-        Legacy HYDRA's defensive lookup tried both — preserve that."""
-        fake_client = MagicMock()
-        fake_client.get_quote.return_value = {"Bid": 2.50, "Ask": 2.55}
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        quote = s._read_option_quote(12345)
-        assert quote["bid"] == 2.50
-        assert quote["ask"] == 2.55
-
-    def test_saxo_path_null_response_returns_none(self):
-        fake_client = MagicMock()
-        fake_client.get_quote.return_value = None
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_option_quote(12345) is None
-
-    def test_saxo_path_exception_returns_none(self):
-        fake_client = MagicMock()
-        fake_client.get_quote.side_effect = RuntimeError("saxo failure")
-        s = self._make_bare_strategy(broker=None, client=fake_client)
+    def test_null_response_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_quote.return_value = None
+        s = self._make_bare_strategy(broker=fake_broker)
         assert s._read_option_quote(12345) is None
 
     # ─── Defensive parsing ─────────────────────────────────────────────
@@ -473,44 +301,18 @@ class TestReadOptionQuote:
         assert quote["ask"] is None
         assert quote["last"] is None
 
-    # ─── Cross-broker convergence ──────────────────────────────────────
-
-    def test_ib_and_saxo_paths_produce_equivalent_bid_ask_last(self):
-        """Critical invariant: bid/ask/last fields match across brokers
-        when underlying instrument data is the same."""
-        ib_broker = MagicMock()
-        ib_broker.get_quote.return_value = {
-            "bid": 2.50, "ask": 2.55, "last": 2.52,
-        }
-        saxo_client = MagicMock()
-        saxo_client.get_quote.return_value = {
-            "Quote": {"Bid": 2.50, "Ask": 2.55, "LastTraded": 2.52},
-        }
-        s_ib = self._make_bare_strategy(broker=ib_broker)
-        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
-
-        ib_quote = s_ib._read_option_quote(12345)
-        saxo_quote = s_saxo._read_option_quote(12345)
-
-        for k in ("bid", "ask", "last"):
-            assert ib_quote[k] == saxo_quote[k], f"diverge on {k!r}"
-
 
 class TestReadOptionChain:
     """Unit tests for HydraStrategy._read_option_chain (F3.2).
 
-    Two-broker dispatch: the IB path resolves a strike list then
-    batch-resolves conids via qualify_option_strikes (F3.1); the Saxo
-    path parses OptionSpace into the same {strike: id} map shape. Both
-    return ``(call_map, put_map)`` so the MKT-045/020/022 call sites
-    become broker-agnostic in F3.3-F3.5.
+    Resolves a strike list then batch-resolves conids via
+    qualify_option_strikes (F3.1), returning ``(call_map, put_map)`` so
+    the MKT-045/020/022 call sites consume one map shape.
     """
 
-    def _make_bare_strategy(self, broker=None, client=None):
+    def _make_bare_strategy(self, broker=None):
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = broker
-        s.client = client
-        s.option_root_uic = 12345  # legacy Saxo SPXW root
         return s
 
     # ─── IB path ───────────────────────────────────────────────────────
@@ -620,110 +422,17 @@ class TestReadOptionChain:
         assert call_map == {6735.0: 1, 6740.0: 2}
         assert put_map == {6740.0: 3}
 
-    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
-
-    def test_saxo_path_parses_option_space(self):
-        fake_client = MagicMock()
-        fake_client.get_option_chain.return_value = {
-            "OptionSpace": [{
-                "SpecificOptions": [
-                    {"StrikePrice": 6735.0, "PutCall": "Call", "Uic": 101},
-                    {"StrikePrice": 6735.0, "PutCall": "Put", "Uic": 102},
-                    {"StrikePrice": 6740.0, "PutCall": "Call", "Uic": 103},
-                    {"StrikePrice": 6740.0, "PutCall": "Put", "Uic": 104},
-                ],
-            }],
-        }
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        call_map, put_map = s._read_option_chain("2026-05-21", [6735.0])
-        assert call_map == {6735.0: 101, 6740.0: 103}
-        assert put_map == {6735.0: 102, 6740.0: 104}
-
-    def test_saxo_path_ignores_candidate_strikes(self):
-        """The Saxo path returns the full chain regardless of which
-        candidates the caller asked about — a superset is harmless."""
-        fake_client = MagicMock()
-        fake_client.get_option_chain.return_value = {
-            "OptionSpace": [{
-                "SpecificOptions": [
-                    {"StrikePrice": 6735.0, "PutCall": "Call", "Uic": 1},
-                    {"StrikePrice": 9999.0, "PutCall": "Call", "Uic": 2},
-                ],
-            }],
-        }
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        call_map, _ = s._read_option_chain("2026-05-21", [6735.0])
-        # 9999 wasn't requested but is still present
-        assert call_map == {6735.0: 1, 9999.0: 2}
-
-    def test_saxo_path_passes_root_id_and_expiry(self):
-        fake_client = MagicMock()
-        fake_client.get_option_chain.return_value = {"OptionSpace": []}
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        s._read_option_chain("2026-05-21", [6735.0])
-        call_kwargs = fake_client.get_option_chain.call_args.kwargs
-        assert call_kwargs["option_root_id"] == 12345
-        assert call_kwargs["expiry_dates"] == ["2026-05-21"]
-
-    def test_saxo_path_null_response_returns_empty_maps(self):
-        fake_client = MagicMock()
-        fake_client.get_option_chain.return_value = None
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
-
-    def test_saxo_path_empty_option_space_returns_empty_maps(self):
-        fake_client = MagicMock()
-        fake_client.get_option_chain.return_value = {"OptionSpace": []}
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
-
-    def test_saxo_path_exception_returns_empty_maps(self):
-        fake_client = MagicMock()
-        fake_client.get_option_chain.side_effect = RuntimeError("saxo down")
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_option_chain("2026-05-21", [6735.0]) == ({}, {})
-
-    # ─── Cross-broker convergence ──────────────────────────────────────
-
-    def test_ib_and_saxo_paths_produce_same_map_shape(self):
-        """Both brokers yield {strike: instrument_id} dicts so the
-        MKT-020/022/045 call sites read them identically."""
-        ib_broker = MagicMock()
-        ib_broker.get_option_chain.return_value = [6735.0]
-        ib_broker.qualify_option_strikes.return_value = {
-            (6735.0, "C"): 111, (6735.0, "P"): 222,
-        }
-        saxo_client = MagicMock()
-        saxo_client.get_option_chain.return_value = {
-            "OptionSpace": [{
-                "SpecificOptions": [
-                    {"StrikePrice": 6735.0, "PutCall": "Call", "Uic": 111},
-                    {"StrikePrice": 6735.0, "PutCall": "Put", "Uic": 222},
-                ],
-            }],
-        }
-        s_ib = self._make_bare_strategy(broker=ib_broker)
-        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
-
-        ib_call, ib_put = s_ib._read_option_chain("2026-05-21", [6735.0])
-        saxo_call, saxo_put = s_saxo._read_option_chain("2026-05-21", [6735.0])
-        assert ib_call == saxo_call == {6735.0: 111}
-        assert ib_put == saxo_put == {6735.0: 222}
-
-
 class TestReadOptionQuotesBatch:
     """Unit tests for HydraStrategy._read_option_quotes_batch (F3.4).
 
-    Batch sibling of _read_option_quote. IB path: IBClient.get_quotes_
-    batch returns a list of flat normalized dicts, chunked at 100 conids
-    and re-keyed by conid. Saxo path: nested {uic: {"Quote": {...}}}
-    flattened to the same per-quote shape.
+    Batch sibling of _read_option_quote. IBClient.get_quotes_batch
+    returns a list of flat normalized dicts, chunked at 100 conids and
+    re-keyed by conid.
     """
 
-    def _make_bare_strategy(self, broker=None, client=None):
+    def _make_bare_strategy(self, broker=None):
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = broker
-        s.client = client
         return s
 
     # ─── IB path ───────────────────────────────────────────────────────
@@ -801,68 +510,11 @@ class TestReadOptionQuotesBatch:
         s = self._make_bare_strategy(broker=fake_broker)
         assert s._read_option_quotes_batch([111]) == {}
 
-    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
-
-    def test_saxo_path_nested_quote_blocks(self):
-        fake_client = MagicMock()
-        fake_client.get_quotes_batch.return_value = {
-            101: {"Quote": {"Bid": 2.50, "Ask": 2.55, "LastTraded": 2.52}},
-            102: {"Quote": {"Bid": 1.10, "Ask": 1.15, "LastTraded": 1.12}},
-        }
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        out = s._read_option_quotes_batch([101, 102])
-        assert out[101]["bid"] == 2.50
-        assert out[101]["ask"] == 2.55
-        assert out[101]["last"] == 2.52
-        assert out[101]["mid"] is None
-        assert out[101]["mark"] is None
-        call_kwargs = fake_client.get_quotes_batch.call_args.kwargs
-        assert call_kwargs["asset_type"] == "StockIndexOption"
-
-    def test_saxo_path_top_level_fallback(self):
-        """Some Saxo rows put Bid at top level instead of nested."""
-        fake_client = MagicMock()
-        fake_client.get_quotes_batch.return_value = {
-            101: {"Bid": 2.50, "Ask": 2.55},
-        }
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        out = s._read_option_quotes_batch([101])
-        assert out[101]["bid"] == 2.50
-        assert out[101]["ask"] == 2.55
-
-    def test_saxo_path_null_response_returns_empty(self):
-        fake_client = MagicMock()
-        fake_client.get_quotes_batch.return_value = None
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_option_quotes_batch([101]) == {}
-
-    def test_saxo_path_exception_returns_empty(self):
-        fake_client = MagicMock()
-        fake_client.get_quotes_batch.side_effect = RuntimeError("saxo down")
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_option_quotes_batch([101]) == {}
-
     # ─── Shared behavior ───────────────────────────────────────────────
 
     def test_empty_input_returns_empty(self):
         s = self._make_bare_strategy(broker=MagicMock())
         assert s._read_option_quotes_batch([]) == {}
-
-    def test_ib_and_saxo_paths_produce_equivalent_bid_ask_last(self):
-        ib_broker = MagicMock()
-        ib_broker.get_quotes_batch.return_value = [
-            {"conid": 101, "bid": 2.50, "ask": 2.55, "last": 2.52},
-        ]
-        saxo_client = MagicMock()
-        saxo_client.get_quotes_batch.return_value = {
-            101: {"Quote": {"Bid": 2.50, "Ask": 2.55, "LastTraded": 2.52}},
-        }
-        s_ib = self._make_bare_strategy(broker=ib_broker)
-        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
-        ib_out = s_ib._read_option_quotes_batch([101])
-        saxo_out = s_saxo._read_option_quotes_batch([101])
-        for k in ("bid", "ask", "last"):
-            assert ib_out[101][k] == saxo_out[101][k], f"diverge on {k!r}"
 
 
 class _FakeMKT045Entry:
@@ -1211,15 +863,12 @@ class TestProgressivePutTightening:
 class TestReadOptionGreeks:
     """Unit tests for HydraStrategy._read_option_greeks (F3.7).
 
-    IB path: IBClient.get_option_greeks already returns lowercase greek
-    fields. Saxo path: capitalized Delta/Gamma/Theta/Vega re-keyed to
-    the normalized lowercase shape. Greeks are analytics-only — None on
-    failure is harmless."""
+    IBClient.get_option_greeks already returns lowercase greek fields.
+    Greeks are analytics-only — None on failure is harmless."""
 
-    def _make_bare_strategy(self, broker=None, client=None):
+    def _make_bare_strategy(self, broker=None):
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = broker
-        s.client = client
         return s
 
     # ─── IB path ───────────────────────────────────────────────────────
@@ -1276,68 +925,23 @@ class TestReadOptionGreeks:
         s = self._make_bare_strategy(broker=fake_broker)
         assert s._read_option_greeks(123) is None
 
-    # ─── Saxo path (broker=None — legacy) ──────────────────────────────
-
-    def test_saxo_path_capitalized_keys_mapped(self):
-        fake_client = MagicMock()
-        fake_client.get_option_greeks.return_value = {
-            "Delta": -0.08, "Gamma": 0.002, "Theta": -1.5,
-            "Vega": 0.9, "MidVol": 0.18, "OpenInterest": 1200,
-        }
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        g = s._read_option_greeks(12345678)
-        assert g["delta"] == -0.08
-        assert g["gamma"] == 0.002
-        assert g["theta"] == -1.5
-        assert g["vega"] == 0.9
-        assert g["iv"] == 0.18
-        assert g["open_interest"] == 1200.0
-        call_kwargs = fake_client.get_option_greeks.call_args.kwargs
-        assert call_kwargs["asset_type"] == "StockIndexOption"
-
-    def test_saxo_path_null_returns_none(self):
-        fake_client = MagicMock()
-        fake_client.get_option_greeks.return_value = None
-        s = self._make_bare_strategy(broker=None, client=fake_client)
+    def test_null_returns_none(self):
+        fake_broker = MagicMock()
+        fake_broker.get_option_greeks.return_value = None
+        s = self._make_bare_strategy(broker=fake_broker)
         assert s._read_option_greeks(123) is None
-
-    def test_saxo_path_exception_returns_none(self):
-        fake_client = MagicMock()
-        fake_client.get_option_greeks.side_effect = RuntimeError("saxo down")
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_option_greeks(123) is None
-
-    # ─── Cross-broker convergence ──────────────────────────────────────
-
-    def test_ib_and_saxo_paths_converge(self):
-        ib_broker = MagicMock()
-        ib_broker.get_option_greeks.return_value = {
-            "delta": -0.08, "gamma": 0.002, "theta": -1.5, "vega": 0.9,
-        }
-        saxo_client = MagicMock()
-        saxo_client.get_option_greeks.return_value = {
-            "Delta": -0.08, "Gamma": 0.002, "Theta": -1.5, "Vega": 0.9,
-        }
-        s_ib = self._make_bare_strategy(broker=ib_broker)
-        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
-        g_ib = s_ib._read_option_greeks(123)
-        g_saxo = s_saxo._read_option_greeks(123)
-        for k in ("delta", "gamma", "theta", "vega"):
-            assert g_ib[k] == g_saxo[k], f"diverge on {k!r}"
 
 
 class TestReadOpenPositions:
     """Unit tests for HydraStrategy._read_open_positions (F4.1).
 
-    IB path runs raw IBKR rows through the real _normalize_position_dict
-    and keeps option rows; Saxo path flattens the nested PositionBase /
-    PositionView shape. Both converge on one broker-agnostic dict shape.
+    Runs raw IBKR rows through the real _normalize_position_dict and
+    keeps option rows, yielding one broker-agnostic dict shape.
     """
 
-    def _make_bare_strategy(self, broker=None, client=None):
+    def _make_bare_strategy(self, broker=None):
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = broker
-        s.client = client
         return s
 
     # ─── IB path ───────────────────────────────────────────────────────
@@ -1421,84 +1025,7 @@ class TestReadOpenPositions:
 
     # ─── Saxo path (broker=None — legacy) ──────────────────────────────
 
-    def test_saxo_path_parses_nested_shape(self):
-        fake_client = MagicMock()
-        fake_client.get_positions.return_value = [
-            {"PositionId": "saxo-uuid-1",
-             "PositionBase": {"Uic": 12345678, "Amount": -1,
-                              "AssetType": "StockIndexOption",
-                              "OptionsData": {"Strike": 6800,
-                                              "PutCall": "Call",
-                                              "ExpiryDate": "2026-05-21"}},
-             "PositionView": {"ProfitLossOnTrade": 12.5}},
-        ]
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        positions = s._read_open_positions()
-        assert len(positions) == 1
-        p = positions[0]
-        assert p["instrument_id"] == 12345678
-        assert p["quantity"] == -1
-        assert p["side"] == "SHORT"
-        assert p["right"] == "C"
-        assert p["strike"] == 6800
-        assert p["expiry"] == "2026-05-21"
-        assert p["unrealized_pnl"] == 12.5
-        assert p["position_id"] == "saxo-uuid-1"
-
-    def test_saxo_path_putcall_mapped(self):
-        fake_client = MagicMock()
-        fake_client.get_positions.return_value = [
-            {"PositionId": "p1",
-             "PositionBase": {"Uic": 1, "Amount": -1,
-                              "AssetType": "StockIndexOption",
-                              "OptionsData": {"PutCall": "Put"}}},
-        ]
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_open_positions()[0]["right"] == "P"
-
-    def test_saxo_path_filters_non_options(self):
-        fake_client = MagicMock()
-        fake_client.get_positions.return_value = [
-            {"PositionId": "stk", "PositionBase": {"Uic": 9, "Amount": 100,
-                                                   "AssetType": "Stock"}},
-            {"PositionId": "opt", "PositionBase": {"Uic": 1, "Amount": -1,
-                                                   "AssetType": "StockIndexOption",
-                                                   "OptionsData": {"PutCall": "Call"}}},
-        ]
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        positions = s._read_open_positions()
-        assert [p["position_id"] for p in positions] == ["opt"]
-
-    def test_saxo_path_exception_returns_empty(self):
-        fake_client = MagicMock()
-        fake_client.get_positions.side_effect = RuntimeError("saxo down")
-        s = self._make_bare_strategy(broker=None, client=fake_client)
-        assert s._read_open_positions() == []
-
     # ─── Cross-broker convergence ──────────────────────────────────────
-
-    def test_both_paths_converge_on_shape(self):
-        """Both brokers yield dicts with the same keys so the F4 call
-        sites read them identically."""
-        ib_broker = MagicMock()
-        ib_broker.get_positions.return_value = [
-            {"conid": 1, "position": -1, "assetClass": "OPT",
-             "putOrCall": "C"},
-        ]
-        saxo_client = MagicMock()
-        saxo_client.get_positions.return_value = [
-            {"PositionId": "p1",
-             "PositionBase": {"Uic": 1, "Amount": -1,
-                              "AssetType": "StockIndexOption",
-                              "OptionsData": {"PutCall": "Call"}}},
-        ]
-        s_ib = self._make_bare_strategy(broker=ib_broker)
-        s_saxo = self._make_bare_strategy(broker=None, client=saxo_client)
-        ib_p = s_ib._read_open_positions()[0]
-        saxo_p = s_saxo._read_open_positions()[0]
-        assert set(ib_p.keys()) == set(saxo_p.keys())
-        for k in ("instrument_id", "quantity", "side", "right"):
-            assert ib_p[k] == saxo_p[k], f"diverge on {k!r}"
 
 
 class TestPositionIsOpen:
@@ -2435,13 +1962,6 @@ class TestReadFxRate:
         assert s._read_fx_rate("USD", "EUR") == 1.08
         fake_broker.get_fx_rate.assert_called_once_with("USD", "EUR")
 
-    def test_saxo_path(self):
-        fake_client = MagicMock()
-        fake_client.get_fx_rate.return_value = 0.92
-        s = self._make(broker=None, client=fake_client)
-        assert s._read_fx_rate("USD", "EUR") == 0.92
-        fake_client.get_fx_rate.assert_called_once_with("USD", "EUR")
-
     def test_exception_returns_none(self):
         fake_broker = MagicMock()
         fake_broker.get_fx_rate.side_effect = RuntimeError("fx outage")
@@ -2467,16 +1987,6 @@ class TestReadClosedPositionPrice:
         assert out == {"closing_price": 2.55}
         fake_broker.get_closed_position_price.assert_called_once_with(
             12345, buy_or_sell="Sell"
-        )
-
-    def test_saxo_path(self):
-        fake_client = MagicMock()
-        fake_client.get_closed_position_price.return_value = {"closing_price": 1.10}
-        s = self._make(broker=None, client=fake_client)
-        out = s._read_closed_position_price(999, buy_or_sell="Buy")
-        assert out == {"closing_price": 1.10}
-        fake_client.get_closed_position_price.assert_called_once_with(
-            999, buy_or_sell="Buy"
         )
 
     def test_none_instrument_id_returns_none(self):
@@ -2525,14 +2035,6 @@ class TestVerifySettlementPnl:
         s._verify_settlement_pnl_from_saxo()
         s.client._make_request.assert_not_called()
         assert s.daily_state.total_realized_pnl == 500.0
-
-    def test_saxo_path_still_queries_report(self):
-        """broker=None + live → the legacy Saxo verification runs."""
-        s = self._make(broker=None, dry_run=False)
-        s.client.client_key = "ck"
-        s.client._make_request.return_value = None  # no report → early return
-        s._verify_settlement_pnl_from_saxo()
-        s.client._make_request.assert_called_once()
 
 
 class TestPlaceLegOrder:
@@ -2643,12 +2145,6 @@ class TestWriteDispatchHelpers:
         assert s._cancel_order("o-1") is True
         b.cancel_order.assert_called_once_with("o-1")
 
-    def test_cancel_order_saxo(self):
-        c = MagicMock()
-        c.cancel_order.return_value = {"ok": 1}
-        s = self._make(broker=None, client=c)
-        assert s._cancel_order("o-1") is True
-
     def test_cancel_order_exception_false(self):
         b = MagicMock()
         b.cancel_order.side_effect = RuntimeError("x")
@@ -2672,12 +2168,6 @@ class TestWriteDispatchHelpers:
         b.get_open_orders.return_value = [{"orderId": 1}]
         s = self._make(broker=b)
         assert s._get_open_orders() == [{"orderId": 1}]
-
-    def test_get_open_orders_saxo(self):
-        c = MagicMock()
-        c.get_open_orders.return_value = [{"OrderId": "s1"}]
-        s = self._make(broker=None, client=c)
-        assert s._get_open_orders() == [{"OrderId": "s1"}]
 
     def test_get_open_orders_exception_empty(self):
         b = MagicMock()
@@ -3063,19 +2553,6 @@ class TestSidePositionsGone:
         s._position_is_open = MagicMock(return_value=False)  # broker shows nothing
         assert s._side_positions_gone(entry, "call", []) is True
 
-    def test_saxo_open_position_ids_not_gone(self):
-        s = self._make(broker=None)
-        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
-        entry.short_call_position_id = "saxo-1"  # real id → not settled
-        entry.long_call_position_id = "saxo-2"
-        assert s._side_positions_gone(entry, "call") is False
-
-    def test_saxo_cleared_position_ids_gone(self):
-        s = self._make(broker=None)
-        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
-        # *_position_id default None → _position_is_settled → True
-        assert s._side_positions_gone(entry, "call") is True
-
 
 class TestMkt033GateDef3:
     """F6.6 / DEF-3 — MKT-033 salvage gates on the long leg's *_uic,
@@ -3145,13 +2622,6 @@ class TestReadIndexPrice:
         b.get_vix_price.assert_called_once()
         b.qualify_contract.assert_not_called()
 
-    def test_saxo_vix(self):
-        c = MagicMock()
-        c.get_vix_price.return_value = 17.0
-        s = self._make(broker=None, client=c)
-        assert s._read_index_price("VIX") == 17.0
-        c.get_vix_price.assert_called_once_with(10606)
-
     def test_exception_returns_none(self):
         b = MagicMock()
         b.get_vix_price.side_effect = RuntimeError("blip")
@@ -3176,12 +2646,6 @@ class TestReadAccountBalance:
         out = s._read_account_balance()
         assert out["MarginAvailableForTrading"] == 22354.67
         assert out["_raw"]["currency"] == "USD"
-
-    def test_saxo_passthrough(self):
-        c = MagicMock()
-        c.get_balance.return_value = {"MarginAvailableForTrading": 5000.0}
-        s = self._make(broker=None, client=c)
-        assert s._read_account_balance() == {"MarginAvailableForTrading": 5000.0}
 
     def test_exception_returns_empty(self):
         b = MagicMock()
