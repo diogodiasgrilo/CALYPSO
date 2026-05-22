@@ -1,21 +1,23 @@
-"""P7 Step 2 — verify the IBKR paper account delivers real-time market data.
+"""P7 Step 2 — IBKR paper market-data diagnostic.
 
-Checks the four data feeds HYDRA depends on, via the exact IBClient
-methods the bot uses, and reports for each whether the quote came back
-REAL-TIME, DELAYED, or STALE/frozen:
+The first Step-2 run returned all-None for SPX + VIX during market
+hours. This rewrite is a *diagnostic*: it figures out WHY by
 
-  1. SPX index spot   (qualify_contract IND + get_quote)
-  2. VIX index level  (qualify_contract IND + get_quote, + get_vix_price)
-  3. SPX 0DTE option quotes  (qualify_option_strikes + get_quote)
-  4. SPX 0DTE option greeks  (get_option_greeks — delta/gamma/theta/vega?)
+  1. testing a CONTROL instrument first — SPY, a plain US-listed ETF
+     the account has free real-time data for ("US Real-Time Non
+     Consolidated Streaming Quotes"). If the control works but the
+     indices don't, the problem is index entitlement / paper
+     data-sharing. If even the control fails, it is broader (the
+     data-sharing toggle hasn't propagated, or a snapshot mechanism
+     issue);
+  2. dumping the RAW IBKR snapshot rows (all field codes) so nothing
+     is hidden — metadata-only vs an error vs a delayed marker;
+  3. polling each conid for up to ~30s (far longer than IBClient's
+     2s warmup) so "the warmup is just too short" can be ruled in
+     or out.
 
-IBClient.get_quote() returns an `availability` field: 'R'=real-time,
-'D'=delayed, 'Z'=stale/frozen. That flag is the verdict.
-
-NOTE: the real-time-vs-delayed verdict is only meaningful during
-regular market hours (09:30-16:00 ET). Outside them even a fully
-entitled quote can read 'Z' (frozen) — re-run intraday for the
-definitive check.
+Field 6509 is IBKR's market-data-availability flag (first char:
+R=real-time, D=delayed, Z=frozen).
 
 SAFE: read-only. No orders, no writes. Asserts paper environment.
 
@@ -27,8 +29,9 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 import sys
-from datetime import date, timedelta
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,27 +40,59 @@ from shared.ib_client import IBClient, IBConfig
 from shared.ib_oauth import load_credentials
 from shared.market_hours import is_market_open, get_us_market_time
 
-_AVAIL = {"R": "REAL-TIME ✅", "D": "DELAYED ⚠️", "Z": "STALE/FROZEN"}
+# last, bid, ask, ask-size, bid-size, volume, open, high, low, change,
+# change%, market-data-availability, last-size
+_FIELDS = ["31", "84", "86", "85", "88", "87", "7295", "70", "71",
+           "82", "83", "6509", "7059"]
+_METADATA = {"conid", "conidEx", "_updated", "6119", "server_id", "6509"}
+_MAX_POLLS = 30
+_POLL_INTERVAL_S = 1.0
 
 
-def _verdict(avail) -> str:
-    return _AVAIL.get((avail or "").upper()[:1], f"UNKNOWN ({avail!r})")
+def _has_price(row: dict) -> bool:
+    """True if the row carries any price field beyond metadata."""
+    return isinstance(row, dict) and any(k not in _METADATA for k in row)
 
 
-def _show_quote(label: str, q: dict) -> None:
-    print(f"\n━━━ {label} ━━━")
-    if not q:
-        print("  no quote returned")
-        return
-    print(f"  bid={q.get('bid')}  ask={q.get('ask')}  last={q.get('last')}  "
-          f"mid={q.get('mid')}  mark={q.get('mark')}")
-    print(f"  availability: {q.get('availability')!r} → {_verdict(q.get('availability'))}")
+def _probe(client: IBClient, label: str, conid: int) -> str:
+    """Preflight + long warmup poll on one conid. Returns a verdict."""
+    print(f"\n{'━' * 58}\n{label}  (conid {conid})\n{'━' * 58}")
+    raw = client._client  # underlying ibind IbkrClient
+    cs = str(conid)
 
+    # Preflight — ibind documents the first call as priming-only.
+    try:
+        raw.live_marketdata_snapshot(conids=cs, fields=_FIELDS)
+    except Exception as exc:
+        print(f"  preflight raised: {type(exc).__name__}: {exc}")
 
-def _next_trading_day(d: date) -> date:
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    return d
+    first_row = None
+    for attempt in range(1, _MAX_POLLS + 1):
+        try:
+            res = raw.live_marketdata_snapshot(conids=cs, fields=_FIELDS)
+            data = getattr(res, "data", res)
+        except Exception as exc:
+            print(f"  poll {attempt}: raised {type(exc).__name__}: {exc}")
+            time.sleep(_POLL_INTERVAL_S)
+            continue
+        row = data[0] if isinstance(data, list) and data else (
+            data if isinstance(data, dict) else {})
+        if first_row is None:
+            first_row = row
+            print(f"  poll 1 raw row: {json.dumps(row, default=str)[:400]}")
+        if _has_price(row):
+            print(f"  ✅ price data appeared on poll {attempt} "
+                  f"(~{attempt * _POLL_INTERVAL_S:.0f}s):")
+            print(f"     {json.dumps(row, default=str)[:500]}")
+            avail = str(row.get("6509", "") or "")
+            print(f"     field 6509 (availability): {avail!r}")
+            return f"DATA OK (poll {attempt}, 6509={avail!r})"
+        time.sleep(_POLL_INTERVAL_S)
+
+    print(f"  ❌ no price fields after {_MAX_POLLS} polls "
+          f"(~{_MAX_POLLS * _POLL_INTERVAL_S:.0f}s)")
+    print(f"  final raw row: {json.dumps(first_row, default=str)[:400]}")
+    return "NO DATA (metadata-only after 30s)"
 
 
 def main() -> int:
@@ -67,78 +102,49 @@ def main() -> int:
     )
 
     now_et = get_us_market_time()
-    mkt_open = is_market_open()
     print(f"Current time: {now_et:%Y-%m-%d %H:%M:%S %Z}")
-    print(f"Regular market hours right now: {'YES' if mkt_open else 'NO'}")
-    if not mkt_open:
-        print("  ⚠️  Market closed — quotes may read STALE even when entitled.")
-        print("      Re-run during 09:30-16:00 ET for the definitive verdict.")
+    print(f"Regular market hours right now: {'YES' if is_market_open() else 'NO'}")
 
     client = IBClient(IBConfig(credentials=creds))
     results: dict[str, str] = {}
     try:
         client.connect()
-        print("\nConnected to IBKR paper account.")
+        print("Connected to IBKR paper account.")
 
-        # 1. SPX index spot
-        spx_conid = client.qualify_contract("SPX", sec_type="IND")
-        spx_q = client.get_quote(spx_conid)
-        _show_quote(f"1. SPX index  (conid {spx_conid})", spx_q)
-        results["SPX index"] = _verdict(spx_q.get("availability"))
-        spx_spot = spx_q.get("last") or spx_q.get("mid") or spx_q.get("mark")
+        # CONTROL — a plain US ETF; the account has free real-time US
+        # equity data. If this fails, the problem is not index-specific.
+        try:
+            spy = client.qualify_contract("SPY", sec_type="STK")
+            results["SPY (control ETF)"] = _probe(client, "CONTROL: SPY ETF", spy)
+        except Exception as exc:
+            results["SPY (control ETF)"] = f"conid resolve failed: {exc}"
+            print(f"\nCONTROL SPY: conid resolution failed — {exc}")
 
-        # 2. VIX index
-        vix_conid = client.qualify_contract("VIX", sec_type="IND")
-        vix_q = client.get_quote(vix_conid)
-        _show_quote(f"2. VIX index  (conid {vix_conid})", vix_q)
-        results["VIX index"] = _verdict(vix_q.get("availability"))
-        print(f"  get_vix_price() convenience method → {client.get_vix_price()}")
+        # SPX index
+        try:
+            spx = client.qualify_contract("SPX", sec_type="IND")
+            results["SPX index"] = _probe(client, "SPX index", spx)
+        except Exception as exc:
+            results["SPX index"] = f"conid resolve failed: {exc}"
 
-        # 3 + 4. SPX 0DTE option quotes + greeks
-        if not spx_spot:
-            print("\n⚠️  No SPX spot — skipping option probes.")
-            results["SPX options"] = "SKIPPED (no SPX spot)"
-            results["SPX greeks"] = "SKIPPED"
-        else:
-            expiry = _next_trading_day(now_et.date())
-            atm = round(spx_spot / 25) * 25
-            print(f"\nResolving SPX {expiry.isoformat()} options near "
-                  f"ATM {atm} (SPX spot ≈ {spx_spot})...")
-            conids = client.qualify_option_strikes(
-                symbol="SPX", expiry=expiry, strikes=[float(atm)],
-                trading_class="SPXW",
-            )
-            opt_verdicts, greek_ok = [], []
-            for right, label in (("C", "call"), ("P", "put")):
-                conid = conids.get((float(atm), right))
-                if not conid:
-                    print(f"  {label} {atm}: conid did not resolve")
-                    continue
-                q = client.get_quote(conid)
-                _show_quote(f"3. SPX {atm}{right} 0DTE {label}  (conid {conid})", q)
-                opt_verdicts.append(_verdict(q.get("availability")))
-                g = client.get_option_greeks(conid)
-                greeks = {k: g.get(k) for k in
-                          ("delta", "gamma", "theta", "vega", "iv", "open_interest")}
-                print(f"  greeks: {greeks}")
-                have = [k for k in ("delta", "gamma", "theta", "vega")
-                        if greeks.get(k) is not None]
-                greek_ok.append(bool(have))
-                print(f"  → greeks present: {have or 'NONE (only IV?)'}")
-            results["SPX options"] = (
-                opt_verdicts[0] if opt_verdicts else "SKIPPED")
-            results["SPX greeks"] = (
-                "delta/gamma/theta/vega present ✅" if greek_ok and all(greek_ok)
-                else "IV only — needs local Black-Scholes" if greek_ok
-                else "SKIPPED")
+        # VIX index
+        try:
+            vix = client.qualify_contract("VIX", sec_type="IND")
+            results["VIX index"] = _probe(client, "VIX index", vix)
+        except Exception as exc:
+            results["VIX index"] = f"conid resolve failed: {exc}"
 
         print("\n" + "=" * 60)
-        print("STEP 2 SUMMARY")
+        print("STEP 2 DIAGNOSTIC SUMMARY")
         print("=" * 60)
         for k, v in results.items():
-            print(f"  {k:14s}: {v}")
-        if not mkt_open:
-            print("\n  (Market closed — re-run intraday to confirm real-time.)")
+            print(f"  {k:20s}: {v}")
+        print("\nInterpretation:")
+        print("  - control OK, indices NO DATA  → index entitlement /")
+        print("    paper data-sharing not propagated (wait, or subscribe).")
+        print("  - everything NO DATA           → data-sharing toggle not")
+        print("    propagated yet, or a broader market-data issue.")
+        print("  - all DATA OK                  → Step 2 passes; check 6509.")
     finally:
         client.disconnect()
     return 0
