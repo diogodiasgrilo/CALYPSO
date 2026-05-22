@@ -194,7 +194,7 @@ def print_banner():
     ║         #3: 14:00 ET (conditional Up/Down-day)                ║
     ║                                                               ║
     ║         Version: 1.24.0                                       ║
-    ║         API: Saxo Bank OpenAPI                                ║
+    ║         Broker: Interactive Brokers (paper)                   ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
     """
@@ -323,8 +323,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     # Heartbeat cadence — drives spread_snapshots, account summary, state file
     # write, and cushion bar updates. Variants pace this looser via
     # api_pacing_multiplier (variant A = 1.0 → 10s; B at 1.5 → 15s; C at 2.0 → 20s).
-    # Account summary calls Saxo /port/v1/balances every cycle so this is one of
-    # the API-load levers when running 3+ variants.
+    # Account summary calls the IBKR balance endpoint every cycle so this is
+    # one of the API-load levers when running 3+ variants.
     pacing = float(getattr(strategy, "api_pacing_multiplier", 1.0) or 1.0)
     status_interval = max(10, int(round(10 * pacing)))
     last_bot_log_time = datetime.now()
@@ -362,9 +362,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                         close_reason = ""
 
                     # After-hours settlement reconciliation
-                    # FIX #39: Check settlement until complete, not just during 4-5 PM window
-                    # Saxo settles 0DTE options anytime between 5 PM - 2 AM ET, so we need to
-                    # keep checking until settlement_complete returns True (all positions cleared)
+                    # FIX #39: Check settlement until complete, not just during 4-5 PM window.
+                    # 0DTE options settle after the close, so we keep checking until
+                    # settlement_complete returns True (all positions cleared).
                     today_date = now_et.date()
                     if not is_weekend() and daily_summary_sent_date != today_date:
                         try:
@@ -374,7 +374,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             settlement_complete = False
 
                         if not settlement_complete:
-                            trade_logger.log_event("Settlement pending - positions still open on Saxo")
+                            trade_logger.log_event("Settlement pending - positions still open")
                         else:
                             # FIX #48: Don't send empty daily summary on pre-market startup
                             # If settlement is "complete" because there's nothing to settle AND

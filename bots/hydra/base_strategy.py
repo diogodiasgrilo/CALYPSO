@@ -1050,9 +1050,9 @@ class MEICStrategy:
         # Initialize metrics
         self.cumulative_metrics = self._load_cumulative_metrics()
 
-        # CRITICAL FIX: Recover positions from Saxo API (not local state file)
-        # Local state files can be wrong if positions are closed manually on Saxo platform
-        # This matches Delta Neutral's foolproof approach of always querying Saxo for truth
+        # CRITICAL: Recover positions from the broker (not the local state
+        # file) — the state file can be stale if positions were closed
+        # manually; the broker is the source of truth.
         self._recover_positions_from_saxo()
 
         # TIME-001: Validate system clock on startup
