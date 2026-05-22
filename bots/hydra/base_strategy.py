@@ -2574,15 +2574,18 @@ class MEICStrategy:
         total = 0
 
         for entry in self.daily_state.entries:
-            # Count each open leg that has a position ID
-            # Works for both complete and partial entries
-            if entry.short_call_position_id:
+            # Count each open leg by its conid (`*_uic`). P7-audit H9:
+            # IBKR has no per-leg position id — `*_position_id` is always
+            # None — so gating on it counted 0 and silently disabled the
+            # ORDER-006 max_contracts_per_underlying cap. Works for both
+            # complete and partial entries.
+            if entry.short_call_uic:
                 total += self.contracts_per_entry
-            if entry.long_call_position_id:
+            if entry.long_call_uic:
                 total += self.contracts_per_entry
-            if entry.short_put_position_id:
+            if entry.short_put_uic:
                 total += self.contracts_per_entry
-            if entry.long_put_position_id:
+            if entry.long_put_uic:
                 total += self.contracts_per_entry
 
         return total
@@ -2894,25 +2897,26 @@ class MEICStrategy:
         logger.warning(f"Unwinding {len(filled_legs)} partially filled legs")
 
         for leg_name, pos_id, uic in filled_legs:
-            if pos_id and uic:
+            # P7-audit H1: gate on the conid (`uic`), NOT `pos_id` — IBKR
+            # has no per-leg position id so `pos_id` is always None, which
+            # made this rollback a silent no-op (a partially-filled IC
+            # left open and untracked).
+            if uic:
                 try:
-                    # Market-order close. Determine direction: short
-                    # positions need BUY to close, long positions SELL.
-                    # v8: unwinding a leg from the CURRENT entry — use
-                    # entry.contracts (explicit, == config at placement).
+                    # Market-order close. short → BUY to close, long → SELL.
+                    # v8: use entry.contracts (== config at placement).
                     # F6.4 — closes the leg via _close_leg_order (IBClient);
                     # `result` normalized to a {"OrderId": …}/None shape.
-                    if self.broker is not None:
-                        _res = self._close_leg_order(
-                            instrument_id=uic,
-                            side=("BUY" if leg_name.startswith("short")
-                                  else "SELL"),
-                            quantity=entry.contracts,
-                        )
-                        result = (
-                            {"OrderId": _res.get("order_id")}
-                            if _res.get("filled") else None
-                        )
+                    _res = self._close_leg_order(
+                        instrument_id=uic,
+                        side=("BUY" if leg_name.startswith("short")
+                              else "SELL"),
+                        quantity=entry.contracts,
+                    )
+                    result = (
+                        {"OrderId": _res.get("order_id")}
+                        if _res.get("filled") else None
+                    )
                     if result:
                         try:
                             self.registry.unregister(pos_id)

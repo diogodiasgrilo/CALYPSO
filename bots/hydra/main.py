@@ -49,7 +49,9 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 # Import shared modules
-from shared.ib_client import IBClient, IBConfig
+from shared.ib_client import (
+    IBClient, IBConfig, IBClientError, IBAuthError, IBConnectionError,
+)
 from shared.ib_oauth import load_credentials
 from shared.logger_service import setup_logging
 from shared.market_hours import (
@@ -214,10 +216,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     trade_logger.log_event("=" * 60)
 
     # Initialize the IBKR broker client (paper account — never live).
+    # P7-audit H4: IBClient.connect() returns True or RAISES — it never
+    # returns False — so a bare `if not broker.connect()` is dead code.
+    # Catch the real exception, shut the logger down cleanly, exit.
     trade_logger.log_event("Connecting to Interactive Brokers (paper)...")
-    broker = IBClient(IBConfig(credentials=load_credentials("paper")))
-    if not broker.connect():
-        trade_logger.log_error("Failed to connect to IBKR. Please check credentials.")
+    try:
+        broker = IBClient(IBConfig(credentials=load_credentials("paper")))
+        broker.connect()
+    except (IBAuthError, IBConnectionError, IBClientError) as e:
+        trade_logger.log_error(f"Failed to connect to IBKR: {e}")
         trade_logger.shutdown()
         return
 
@@ -662,6 +669,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     })
                     logger.critical(f"CRITICAL: {consecutive_errors} consecutive errors in main loop!")
 
+                # P7-audit M1: a persistent fault (dead IBKR session, a
+                # strategy bug) must not spin forever — break so systemd
+                # restarts with a fresh connect(). StartLimitBurst caps
+                # the restart loop. 15 ≈ 15s of failures at check_interval=1.
+                if consecutive_errors >= 15:
+                    trade_logger.log_error(
+                        f"{consecutive_errors} consecutive main-loop errors — "
+                        f"exiting for a clean systemd restart."
+                    )
+                    break
+
                 if not interruptible_sleep(check_interval):
                     break
 
@@ -742,10 +760,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
 def show_status(config: dict):
     """Show current status without entering trading loop."""
     trade_logger = setup_logging(config, bot_name="HYDRA")
-    broker = IBClient(IBConfig(credentials=load_credentials("paper")))
-
-    if not broker.connect():
-        print("Failed to connect to IBKR. Please check credentials.")
+    # P7-audit H4: connect() raises on failure — it never returns False.
+    try:
+        broker = IBClient(IBConfig(credentials=load_credentials("paper")))
+        broker.connect()
+    except (IBAuthError, IBConnectionError, IBClientError) as e:
+        print(f"Failed to connect to IBKR: {e}")
         trade_logger.shutdown()
         return
 

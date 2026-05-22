@@ -5,6 +5,12 @@ Description=HYDRA 0DTE iron-condor bot (Interactive Brokers / ibind OAuth 1.0a)
 # has DNS+TLS available at startup.
 After=network-online.target
 Wants=network-online.target
+# Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst are [Unit]
+# directives — in [Service] systemd silently ignores them. If the bot
+# crash-loops (e.g. expired IBKR credentials), systemd gives up after
+# 5 starts in 600s instead of hammering api.ibkr.com forever.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -37,8 +43,6 @@ ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main
 # is also the morning-reconnect fallback (see P7 Step 3 / main.py gate).
 Restart=always
 RestartSec=30
-StartLimitInterval=600
-StartLimitBurst=5
 
 # Graceful stop: ibind registers a SIGTERM handler that runs oauth_shutdown
 # (stop Tickler + logout). Give it time so the IBKR session is released
@@ -49,6 +53,18 @@ TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=hydra
+
+# ─── Sandboxing (defense-in-depth for a brokerage-credential service) ───
+# The service holds decrypted OAuth private keys; a code-execution bug in
+# the ibind/strategy surface should not be able to escalate or write
+# outside the bot's own tree. Verify with `systemd-analyze security hydra`.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+# The bot writes only inside its own tree (data/, logs/, state files).
+ReadWritePaths=/opt/calypso
 
 [Install]
 WantedBy=multi-user.target
