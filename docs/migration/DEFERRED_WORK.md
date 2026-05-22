@@ -177,6 +177,25 @@ implement option B (snapshot at first entry, compare at settlement);
 if not, accept POS-004's leg-level check as sufficient and retire
 Fix #87 on IBKR explicitly.
 
+## DEF-7 — POS-003 mid-session reconciliation not ported to conids
+
+`_reconcile_positions` (base) detects legs closed manually during the
+session. Its per-leg loop keys on Saxo `*_position_id`, which is
+always None on IBKR — so on the IBKR path the loop is dormant and
+mid-session POS-003 reconciliation does nothing. HYDRA's settlement
+path (`_side_positions_gone`, conid-based) and the stop monitor still
+function; only the *hourly* manual-close detection is inert.
+
+P4.3b wired the method's `get_positions` call to `_read_open_positions`
+(so it no longer references `self.client`) but did not redesign the
+detection logic — that is a behavioural change, out of P4's
+"remove Saxo code" scope.
+
+**Trigger**: if mid-session manual position closes need detecting on
+IBKR, rewrite the `_reconcile_positions` per-leg loop to test each
+leg's `*_uic` against `_position_is_open` (the same conid predicate
+`_side_positions_gone` uses).
+
 ## How to maintain this doc
 
 - When deferring something, add an entry here with the trigger.
@@ -193,5 +212,5 @@ Fix #87 on IBKR explicitly.
   conid-model `_side_positions_gone`. Resolved in F6.6.
 
 DEF-1 / DEF-2 are superseded by the F5 design (F5.2 / F5.5). DEF-4
-(STATE-002) and DEF-6 (settlement P&L value-verification) remain open
-— see their entries above.
+(STATE-002), DEF-6 (settlement P&L value-verification) and DEF-7
+(POS-003 conid reconciliation) remain open — see their entries above.
