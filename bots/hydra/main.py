@@ -334,6 +334,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     last_day = get_us_market_time().date()
     consecutive_errors = 0
     daily_summary_sent_date = None
+    last_session_check_date = None  # P7: once-per-day IBKR re-auth gate
 
     try:
         while not shutdown_requested:
@@ -432,6 +433,23 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                         if not interruptible_sleep(60):
                             break
                     continue
+
+                # P7: morning IBKR re-auth gate. The brokerage session does
+                # NOT survive IBKR's ~01:00 ET daily server reset or the 24h
+                # live-session-token TTL — ibind's Tickler only holds off the
+                # idle timeout. Verify (and, if stale, re-establish) the
+                # session once per trading day before any entry. On failure,
+                # break the loop so systemd restarts with a fresh connect().
+                if last_session_check_date != today:
+                    trade_logger.log_event("Verifying IBKR session for the trading day...")
+                    if not broker.ensure_connected():
+                        trade_logger.log_error(
+                            "IBKR session could not be re-established — "
+                            "exiting for systemd restart (fresh connect)."
+                        )
+                        break
+                    last_session_check_date = today
+                    trade_logger.log_event("IBKR session verified.")
 
                 # Directional-pivot continuous monitor (introduced 2026-05-01 in v1.26.0).
                 # Fires BEFORE the strategy state machine on each heartbeat, so a

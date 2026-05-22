@@ -1121,3 +1121,68 @@ class TestGetClosedPositionPrice:
         mock_ibkr.trades.return_value = _mk_result([rec])
         out = client.get_closed_position_price(12345, buy_or_sell="Sell")
         assert out["closing_price"] == 2.55
+
+
+# ─── ensure_connected (P7 morning re-auth gate) ────────────────────────────
+
+
+class TestEnsureConnected:
+    """P7 — IBClient.ensure_connected(): the once-per-trading-day re-auth
+    gate. A healthy session is a no-op; a stale one (IBKR's ~01:00 ET
+    daily reset / 24h token TTL) triggers a clean disconnect()+connect()."""
+
+    def test_healthy_session_returns_true_no_reconnect(self, connected_client):
+        client, mock_ibkr = connected_client
+        # fixture's authentication_status is authenticated + connected
+        client.disconnect = MagicMock()
+        client.connect = MagicMock()
+        assert client.ensure_connected() is True
+        client.disconnect.assert_not_called()
+        client.connect.assert_not_called()
+
+    def test_stale_session_reconnects(self, connected_client):
+        client, mock_ibkr = connected_client
+        stale = MagicMock()
+        stale.data = {"authenticated": False, "connected": True, "competing": False}
+        mock_ibkr.authentication_status.return_value = stale
+        client.disconnect = MagicMock()
+        client.connect = MagicMock(return_value=True)
+        assert client.ensure_connected() is True
+        client.disconnect.assert_called_once()
+        client.connect.assert_called_once()
+
+    def test_competing_session_reconnects(self, connected_client):
+        client, mock_ibkr = connected_client
+        comp = MagicMock()
+        comp.data = {"authenticated": True, "connected": True, "competing": True}
+        mock_ibkr.authentication_status.return_value = comp
+        client.disconnect = MagicMock()
+        client.connect = MagicMock(return_value=True)
+        assert client.ensure_connected() is True
+        client.connect.assert_called_once()
+
+    def test_reconnect_failure_returns_false(self, connected_client):
+        client, mock_ibkr = connected_client
+        stale = MagicMock()
+        stale.data = {"authenticated": False, "connected": False, "competing": False}
+        mock_ibkr.authentication_status.return_value = stale
+        client.disconnect = MagicMock()
+        client.connect = MagicMock(side_effect=RuntimeError("IBKR down"))
+        assert client.ensure_connected() is False
+
+    def test_status_read_exception_triggers_reconnect(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.authentication_status.side_effect = RuntimeError("boom")
+        client.disconnect = MagicMock()
+        client.connect = MagicMock(return_value=True)
+        assert client.ensure_connected() is True
+        client.connect.assert_called_once()
+
+    def test_not_connected_skips_status_read_and_reconnects(self, connected_client):
+        client, mock_ibkr = connected_client
+        client._connected = False
+        client.disconnect = MagicMock()
+        client.connect = MagicMock(return_value=True)
+        assert client.ensure_connected() is True
+        # _connected False → no auth status round-trip, straight to reconnect
+        client.connect.assert_called_once()

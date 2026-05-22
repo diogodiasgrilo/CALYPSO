@@ -615,6 +615,57 @@ class IBClient:
         self._require_connected()
         return self._read_auth_status()
 
+    def ensure_connected(self) -> bool:
+        """Verify the brokerage session is live; re-establish it if not.
+
+        The IBKR brokerage session does NOT survive IBKR's ~01:00 ET
+        daily server reset or the 24h live-session-token TTL. ibind's
+        Tickler holds off the 6-minute *idle* timeout but cannot survive
+        a server-side reset — so a process that has been up overnight
+        will usually find its session dead the next morning.
+
+        Call this as a once-per-trading-day gate before the first entry
+        (and after any 401/410). It round-trips to auth/status:
+
+        - healthy (``authenticated`` + ``connected``, not ``competing``)
+          → returns True, touches nothing;
+        - stale → runs a clean ``disconnect()`` + ``connect()`` to obtain
+          a fresh live session token (which also restarts the Tickler
+          and re-runs ssodh/init), and returns whether that succeeded.
+
+        Returns False if the session is down and could not be
+        re-established — the caller should then exit so systemd restarts
+        the process with a fresh ``connect()`` (the most reliable reset).
+        """
+        try:
+            status = self._read_auth_status() if self._connected else {}
+            if (status.get("authenticated")
+                    and status.get("connected")
+                    and not status.get("competing")):
+                return True
+            logger.info(
+                "ensure_connected: session stale (status=%r) — reconnecting",
+                status,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ensure_connected: auth status read failed (%s) — reconnecting",
+                exc,
+            )
+
+        try:
+            self.disconnect()
+        except Exception as exc:
+            logger.warning(
+                "ensure_connected: disconnect during reconnect failed (%s)",
+                exc,
+            )
+        try:
+            return self.connect()
+        except Exception as exc:
+            logger.error("ensure_connected: reconnect failed (%s)", exc)
+            return False
+
     def _discover_account_id(self) -> str:
         """Look up the IBKR account ID via portfolio_accounts.
 
