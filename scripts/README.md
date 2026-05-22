@@ -1,232 +1,76 @@
-# CALYPSO Scripts
+# HYDRA Scripts
 
-Utility scripts for analysis, testing, and diagnostics. All scripts are run from the repository root.
+Analysis, backtest, research and migration scripts for the HYDRA bot.
+Run from the repository root. Most are one-off research artifacts —
+the formal test suite is in `/tests/` (`pytest tests/`).
 
-## Quick Reference: Which Script to Use?
+Backtest / analysis scripts read the local `data/backtesting.db`
+(populated by HOMER) and need no broker connection.
 
-| If you want to... | Run this |
-|-------------------|----------|
-| See what Delta Neutral bot would do NOW | `python scripts/preview_live_entry.py` |
-| See what Iron Fly bot would do NOW | `python scripts/preview_iron_fly_entry.py` |
-| Deep analysis with historical research | `python scripts/optimal_strike_analysis.py` |
-| Check if API is working before trading | `python scripts/test_rest_api.py` |
-| Quick NET return calculation | `python scripts/calculate_net_return.py` |
-
----
-
-## Iron Fly Strategy Scripts
-
-| Script | Purpose | When to Use |
-|--------|---------|-------------|
-| `preview_iron_fly_entry.py` | Shows what Iron Fly bot would do now: VIX check, 0 DTE expiry, expected move, wing width, pricing | **PRIMARY** - Run daily to verify Iron Fly logic |
-
-**Key checks in preview_iron_fly_entry.py:**
-1. VIX filter (must be < 20)
-2. 0 DTE vs 1 DTE expiration verification
-3. Expected move from ATM straddle
-4. Wing width (Jim Olson 40pt minimum rule)
-5. Complete Iron Fly structure and pricing
-6. P&L projections with commission
-
----
-
-## Delta Neutral Strategy Scripts
-
-### Daily Use
-
-| Script | Purpose | When to Use |
-|--------|---------|-------------|
-| `preview_live_entry.py` | Shows exactly what the bot would do if it entered now | **PRIMARY** - Run daily to verify bot logic |
-| `check_short_strikes.py` | Shows strike prices for short strangle | Quick strike check |
-
-### Analysis & Research
-
-| Script | Purpose | When to Use |
-|--------|---------|-------------|
-| `optimal_strike_analysis.py` | Comprehensive 740-line analysis using historical research + live prices | Deep strategy analysis, understanding risk/reward |
-| `weekly_projection.py` | Compare multiple multipliers side-by-side | Comparing strike options |
-| `find_optimal_strikes.py` | Analyze asymmetric adjustment (put skew) | Understanding put/call distance asymmetry |
-| `find_optimal_mult.py` | Scan all multipliers 0.5x to 2.0x | Finding optimal symmetric strikes |
-| `calculate_1pct_target.py` | Calculate strikes for exact 1% NET return | Matches actual bot logic |
-| `calculate_net_return.py` | Quick NET return for a given premium | Simple sanity checks |
-
----
-
-## HYDRA Backtesting Scripts (SQLite DB)
-
-These scripts run against `data/backtesting.db` (populated daily by HOMER). Must be run from repo root — no Saxo API needed.
+## Backtesting (SQLite DB)
 
 | Script | Purpose |
 |--------|---------|
-| `backtest_mkt035_ref.py` | Sweep MKT-035 thresholds 0.1%-2.0% using SPX open as reference for E6/E7 |
-| `backtest_stop_buffers.py` | Full IC put buffer + conditional call buffer optimal value analysis |
-| `backtest_call_buffer_sweep.py` | Sweep call buffer $0.00-$5.00, shows P&L impact at each level |
-| `backtest_call_buffer_detail.py` | Detail view: exactly which call stops avoided at $0.30 vs $0.10 buffer |
-| `backtest_call_buffer_deep.py` | Deep analysis: max adverse excursion after each call stop |
+| `backtest_full_history.py` | Full-history HYDRA replay |
+| `backtest_stop_buffers.py` | Put / call stop-buffer optimisation |
+| `backtest_call_buffer_sweep.py` / `_detail.py` / `_deep.py` | Call-buffer sweep + drill-down |
+| `backtest_mkt035_ref.py` / `mkt035_corrected_analysis.py` | MKT-035 down-day threshold |
+| `backtest_mkt038.py` | FOMC T+1 call-only backtest |
+| `backtest_downday035.py` / `downday_threshold_sweep.py` | Down-day conditional-entry sweeps |
+| `backtest_base_downday.py` / `sweep_base_downday.py` | Base-entry down-day call-only EV |
+| `backtest_fomc_all_days.py` | FOMC-day behaviour |
+| `backtest_pot_vs_hydra.py` | Probability-of-touching vs production |
+| `early_close_backtest.py` / `early_close_roc_backtest.py` | MKT-018 early-close ROC |
+| `ema_trend_backtest.py` | EMA trend-signal backtest |
+| `spread_width_*.py` | VIX-scaled spread-width experiments |
+| `buffer_*.py` / `call_buffer_*.py` / `call_stop_buffer_analysis.py` | Stop-buffer studies |
+| `mkt036_*.py` / `mkt037_dynamic_entry_backtest.py` | MKT-036 / MKT-037 experiments |
 
-```bash
-# Run locally (no VM needed — reads local DB copy)
-python scripts/backtest_stop_buffers.py
-python scripts/backtest_mkt035_ref.py
-```
-
----
-
-## API & WebSocket Testing
-
-| Script | Purpose | When to Use |
-|--------|---------|-------------|
-| `test_rest_api.py` | Test all REST API calls (SPY, VIX, options, Greeks, positions) | **Pre-flight check before trading** |
-| `test_websocket_fixes.py` | Unit tests for WebSocket/quote fixes (2026-01-28) | After code changes to WebSocket |
-| `test_websocket_live.py` | Integration tests against live Saxo API | Verify WebSocket in live environment |
-
----
-
-## Instrument Search (`scripts/search/`)
+## Analysis & investigation
 
 | Script | Purpose |
 |--------|---------|
-| `find_vix.py` | Search for VIX instruments across multiple asset types |
-| `find_spy_uic.py` | Find correct SPY UIC for your account |
+| `credit_breakeven_analysis.py` | Breakeven credit per VIX regime |
+| `probability_of_touching.py` / `pot_strike_recommender.py` | POT strike-selection framework |
+| `expected_value_strike.py` | EV by strike distance |
+| `analyze_*.py` / `e6_*.py` / `e1_*.py` / `e23_doubling_risk.py` | Per-entry / E6 / E1 studies |
+| `ask_spike_evidence.py` / `stop_trigger_investigation.py` | False-stop / ask-spike forensics |
+| `apr15_*.py` / `apr17_post_stop_check.py` | Dated incident investigations |
+| `compare_live_vs_backtest.py` | ThetaData-vs-live calibration |
+| `audit_all_configs.py` + `config_audit_lib.py` | Config drift audit (VM vs template) |
 
----
-
-## VM Status Script
-
-### `bot_status.sh`
-Quick status overview of all bots on the VM.
-
-```bash
-# On VM:
-/opt/calypso/scripts/bot_status.sh
-```
-
-Shows:
-- Service status (running/stopped) for each bot
-- Memory usage
-- Last log entry from each bot
-
----
-
-## HYDRA Analysis & Investigation Scripts
-
-Investigation and analysis scripts created during live trading. Run on VM against `data/backtesting.db`.
+## Migration (Saxo → IBKR rewrite)
 
 | Script | Purpose |
 |--------|---------|
-| `credit_breakeven_analysis.py` | Per-side P&L by credit bucket — calculates breakeven credit at each VIX regime |
-| `call_stop_buffer_analysis.py` | Simulates P&L at different call/put buffer levels (what-if analysis) |
-| `call_buffer_snapshot_analysis.py` | Uses spread_snapshots to verify if stopped calls would have recovered at wider buffer |
-| `ask_spike_evidence.py` | Compares last snapshot bid/ask to actual stop fill price — detects ask spikes |
-| `stop_trigger_investigation.py` | For each call stop, checks if SPX later reached the strike (wider buffer impact) |
-| `apr15_spx_check.py` | April 15 investigation: SPX price trajectory around E#1 stop |
-| `apr15_bidask_analysis.py` | April 15 investigation: bid/ask spread data around stop trigger |
-| `expected_value_strike.py` | Expected value analysis at different strike distances |
+| `p2_method_ranges.py` | Verify unreachable-method deletion set (AST) |
+| `p2_delete_methods.py` | Delete named methods from `base_strategy.py` |
+| `p4_collapse.py` | Collapse broker-branched methods to IBKR-only |
+| `probe_ibkr_chain.py` / `probe_ibkr_trades.py` | Read-only IBKR paper-account probes |
 
-## HYDRA Strategy Research Scripts
-
-Research scripts for MKT rule development and strategy parameter optimization.
+## Maintenance
 
 | Script | Purpose |
 |--------|---------|
-| `probability_of_touching.py` | Empirical Probability-of-Touching (POT) framework for strike selection |
-| `pot_strike_recommender.py` | POT-based strike recommendations vs credit-based |
-| `backtest_pot_vs_hydra.py` | Compare POT strategy vs actual HYDRA production |
-| `analyze_base_downday.py` | Analysis of base-entry down-day call-only performance |
-| `analyze_e6_alternatives.py` | E6 conditional entry alternative threshold analysis |
-| `early_close_backtest.py` | MKT-018 early close ROC threshold backtest |
-| `early_close_roc_backtest.py` | Detailed ROC-based early close analysis |
-| `mkt035_corrected_analysis.py` | MKT-035 down-day threshold analysis |
-| `mkt036_timer_analysis.py` | MKT-036 stop confirmation timer analysis |
-| `mkt036_solutions_backtest.py` | Compare MKT-036 solutions (timer vs buffer) |
-| `mkt036_buffer_plus_timer_backtest.py` | Combined buffer + timer backtest |
-| `mkt037_dynamic_entry_backtest.py` | MKT-037 dynamic entry analysis |
-| `config_audit_lib.py` | Library for auditing config values across VM and template |
-| `audit_all_configs.py` | Sweep all config keys and compare VM vs template |
+| `backfill_journal_credits.py` | Backfill missing credits in the trading journal |
+| `fix_state_entry2.py` | One-off state-file repair |
 
-## Utility & Maintenance Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `fix_state_entry2.py` | One-time state file fix utility |
-| `backfill_journal_credits.py` | Backfill missing credit data in HYDRA trading journal |
-| `temp_mae_analysis.py` | Temporary MAE/MFE analysis |
-| `test_batch_quotes.py` | Test batch quote API call |
-| `test_config_audit_lib.py` | Test config audit library |
-| `test_premarket_prices.py` | Test pre-market price availability |
-| `test_trend_detection.py` | Test EMA trend detection logic |
-
----
-
-## Running Scripts
-
-All scripts should be run from the repository root:
+## Running
 
 ```bash
 # From repo root
-cd /Users/ddias/Desktop/CALYPSO/Git\ Repo
+python scripts/backtest_stop_buffers.py
 
-# Run a script
-python scripts/preview_live_entry.py
-python scripts/test_rest_api.py
+# On the VM
+gcloud compute ssh calypso-bot --zone=us-east1-b \
+  --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/<name>.py'"
 ```
 
-### On the VM
+## Formal test suite
 
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/preview_live_entry.py'"
+pytest tests/            # all tests
+pytest tests/ -q         # quiet
 ```
 
----
-
-## Script Details
-
-### `preview_live_entry.py`
-The most useful daily script. Shows:
-- Current SPY price and VIX
-- What strikes the bot would select
-- Expected premium and NET return
-- Whether entry conditions are met
-
-### `optimal_strike_analysis.py`
-Comprehensive analysis including:
-- Historical research on IV vs RV
-- Win rates from Tastytrade/Spintwig backtests
-- Expected value calculations at different multipliers
-- Comparison of bot's approach vs theoretical optimal
-
-### `test_rest_api.py`
-Tests 10 API endpoints:
-1. SPY quote
-2. VIX quote
-3. Option expirations
-4. Option chain
-5. Option Greeks
-6. Expected move calculation
-7. Find strangle options
-8. Account info
-9. Positions
-10. Orders
-
-Run before each trading day to verify connectivity.
-
----
-
-## Formal Test Suite
-
-The proper pytest test suite is in `/tests/`:
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run with verbose output
-pytest tests/ -v
-
-# Run specific test file
-pytest tests/test_position_registry.py -v
-```
-
----
-
-**Last Updated:** 2026-03-03
+**Last Updated:** 2026-05-22
