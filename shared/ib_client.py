@@ -470,6 +470,10 @@ class IBClient:
         # conid cache for qualify_contract — cleared on disconnect.
         # Key: (symbol, expiry_iso, strike, right, trading_class, sec_type)
         self._conid_cache: dict[tuple, int] = {}
+        # Whether /iserver/accounts has been primed this session — IBKR
+        # requires it before /iserver/marketdata/snapshot and
+        # /iserver/account/trades. Reset on disconnect.
+        self._iserver_primed = False
         # Phase A.8 — retry + per-family circuit breakers. RetryPolicy
         # defaults: 6 attempts (initial + 5 retries), 1s base, 30s cap,
         # 0.5 jitter, retryable on HTTP 429/5xx + transient network errors.
@@ -734,6 +738,7 @@ class IBClient:
 
         self._connected = False
         self._conid_cache.clear()
+        self._iserver_primed = False
         if unclean:
             logger.error(
                 "IBClient disconnect completed with %d unclean step(s); "
@@ -1268,19 +1273,35 @@ class IBClient:
 
     # ─── Quotes (read methods) ────────────────────────────────────────────
 
+    def _ensure_iserver_primed(self) -> None:
+        """Prime the /iserver brokerage session, once per session.
+
+        IBKR requires `/iserver/accounts` to be called before
+        `/iserver/marketdata/snapshot` (and `/iserver/account/trades`);
+        without it the snapshot endpoint returns metadata-only rows
+        (`{conid, conidEx, _updated}`) with no price fields, indefinitely.
+
+        `portfolio_accounts()` (which `connect()` calls for account-id
+        discovery) hits `/portfolio/accounts` — a DIFFERENT endpoint
+        namespace — and does NOT satisfy this. `receive_brokerage_accounts()`
+        is the `/iserver/accounts` call. Idempotent: primed once per
+        session, reset on `disconnect()`.
+        """
+        if self._iserver_primed:
+            return
+        self._ib_call("session", self._client.receive_brokerage_accounts)
+        self._iserver_primed = True
+
     def _snapshot_with_preflight(self, conids: str, fields: list[str]):
-        """Call live_marketdata_snapshot with the required pre-flight.
+        """Call live_marketdata_snapshot with the required pre-flights.
 
-        ibind's own docstring (MarketdataMixin.live_marketdata_snapshot):
-        *"A pre-flight request must be made prior to ever receiving data."*
-        ibind's `live_marketdata_snapshot_by_symbol` handles this by calling
-        the endpoint twice. We do the same at the conid-by-id level — first
-        call primes IBKR's snapshot cache, second call returns real data.
-
-        `self._client.portfolio_accounts()` (the other ibind-documented
-        pre-flight, "/iserver/accounts must be called prior to .../snapshot")
-        is satisfied once per session by IBClient.connect()'s account-id
-        discovery.
+        Two pre-flights are required:
+        1. `/iserver/accounts` (via `_ensure_iserver_primed`) — without it
+           the snapshot endpoint returns metadata-only forever.
+        2. ibind's documented snapshot priming — the first
+           `live_marketdata_snapshot` call for a conid primes IBKR's
+           snapshot cache; the next call returns real data. ibind's
+           `live_marketdata_snapshot_by_symbol` does the same.
 
         **Warmup polling (fix for 2026-05-18 Monday smoke failure):**
         IBKR's snapshot endpoint for a freshly-queried conid (first time
@@ -1298,7 +1319,11 @@ class IBClient:
         production because HYDRA reads quotes on demand and a silent
         all-None response would break credit estimation + stop monitoring.
         """
-        # Pre-flight
+        # Pre-flight 1: /iserver/accounts (required, once per session).
+        self._ensure_iserver_primed()
+
+        # Pre-flight 2: ibind's snapshot priming — first call arms the
+        # conid's snapshot cache, it returns no data itself.
         self._ib_call(
             "market", self._client.live_marketdata_snapshot,
             conids=conids, fields=fields,

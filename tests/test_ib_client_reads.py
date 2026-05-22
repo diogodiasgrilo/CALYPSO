@@ -77,6 +77,12 @@ def connected_client(paper_creds):
     portfolio_result.data = [{"accountId": "DU1234567"}]
     portfolio_result.error = None
     mock_ibkr.portfolio_accounts.return_value = portfolio_result
+    # /iserver/accounts preflight (_ensure_iserver_primed) — required
+    # before the marketdata snapshot + trades endpoints.
+    iserver_result = MagicMock()
+    iserver_result.data = {}
+    iserver_result.error = None
+    mock_ibkr.receive_brokerage_accounts.return_value = iserver_result
 
     cfg = IBConfig(credentials=paper_creds)
     with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr):
@@ -587,6 +593,36 @@ class TestGetQuote:
         client.get_quote(12345)
         # 1 preflight + 1 data call (data populated immediately → no warmup)
         assert mock_ibkr.live_marketdata_snapshot.call_count == 2
+
+    def test_iserver_primed_before_snapshot(self, connected_client):
+        """C2 regression: the snapshot endpoint returns metadata-only
+        forever unless /iserver/accounts (receive_brokerage_accounts)
+        is primed first. Verify get_quote primes it."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([
+            {"conid": 12345, FIELD_LAST: "5.30"},
+        ])
+        client.get_quote(12345)
+        mock_ibkr.receive_brokerage_accounts.assert_called()
+
+    def test_iserver_primed_only_once_per_session(self, connected_client):
+        """The /iserver/accounts preflight is once-per-session — a second
+        get_quote must NOT re-prime."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([
+            {"conid": 12345, FIELD_LAST: "5.30"},
+        ])
+        client.get_quote(12345)
+        client.get_quote(12345)
+        assert mock_ibkr.receive_brokerage_accounts.call_count == 1
+        assert client._iserver_primed is True
+
+    def test_iserver_prime_resets_on_disconnect(self, connected_client):
+        """disconnect() must clear the primed flag so a reconnect re-primes."""
+        client, mock_ibkr = connected_client
+        client._iserver_primed = True
+        client.disconnect()
+        assert client._iserver_primed is False
 
     def test_warmup_polls_until_fields_populate(self, connected_client):
         """Fix 2026-05-18: IBKR's snapshot endpoint sometimes returns
