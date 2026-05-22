@@ -36,6 +36,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Stream output line-by-line even when piped through `tee` (otherwise
+# Python block-buffers stdout on a pipe and nothing shows until exit).
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 from shared.ib_client import IBClient, IBConfig
 from shared.ib_oauth import load_credentials
 from shared.market_hours import is_market_open, get_us_market_time
