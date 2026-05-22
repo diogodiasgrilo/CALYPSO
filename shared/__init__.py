@@ -242,7 +242,6 @@ Full documentation: docs/SAXO_API_PATTERNS.md
 ================================================================================
 """
 
-from shared.saxo_client import SaxoClient, BuySell, OrderType, AssetType
 from shared.logger_service import TradeLoggerService, setup_logging, TradeRecord
 from shared.config_loader import ConfigLoader, get_config_loader
 from shared.market_hours import (
@@ -285,8 +284,6 @@ from shared.sheets_reader import SheetsReader
 from shared.claude_client import get_anthropic_client, ask_claude
 
 __all__ = [
-    # Saxo Client
-    'SaxoClient', 'BuySell', 'OrderType', 'AssetType',
     # Logging
     'TradeLoggerService', 'setup_logging', 'TradeRecord',
     # Config
