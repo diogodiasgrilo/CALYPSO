@@ -1887,10 +1887,8 @@ class MEICStrategy:
             Tuple of (estimated_call_credit, estimated_put_credit) in total dollars
             Returns (0.0, 0.0) if quotes unavailable
         """
-        # GAP-B (F7.5): IBKR path. The Saxo body below is dormant on the
-        # standalone branch and is deleted in P4.
-        if self.broker is not None:
-            return self._estimate_entry_credit_ib(entry)
+        # GAP-B (F7.5): delegates to the IBClient credit estimator.
+        return self._estimate_entry_credit_ib(entry)
 
     def _estimate_entry_credit_ib(self, entry: IronCondorEntry) -> Tuple[float, float]:
         """IBKR path of :meth:`_estimate_entry_credit` (GAP-B / F7.5).
@@ -2229,14 +2227,11 @@ class MEICStrategy:
             )
             return None
 
-        # F6.2 — IBKR path. The Saxo body below is dormant on the
-        # standalone branch (the migration only ever goes live on IBKR)
-        # and is deleted in completion-plan phase P4.
-        if self.broker is not None:
-            return self._place_option_order_ib(
-                strike, put_call, buy_sell, expiry, external_ref,
-                emergency_mode,
-            )
+        # F6.2 — places the leg via the IBClient write path.
+        return self._place_option_order_ib(
+            strike, put_call, buy_sell, expiry, external_ref,
+            emergency_mode,
+        )
 
     def _place_option_order_ib(
         self,
@@ -2698,15 +2693,12 @@ class MEICStrategy:
             expiry: Expiry date (YYYY-MM-DD)
 
         Returns:
-            Option instrument id (IBKR conid / Saxo UIC) or None.
+            Option instrument id (IBKR conid) or None.
         """
-        # F7.6 — broker-agnostic. The IB path resolves the conid through
-        # _read_option_chain (F3.2); the Saxo body below is dormant on
-        # the standalone branch and is deleted in P4.
-        if self.broker is not None:
-            call_map, put_map = self._read_option_chain(expiry, [float(strike)])
-            id_map = call_map if put_call == "Call" else put_map
-            return id_map.get(float(strike)) or id_map.get(strike)
+        # F7.6 — resolves the conid through _read_option_chain (F3.2).
+        call_map, put_map = self._read_option_chain(expiry, [float(strike)])
+        id_map = call_map if put_call == "Call" else put_map
+        return id_map.get(float(strike)) or id_map.get(strike)
 
     def _verify_entry_fill_prices(self, entry: IronCondorEntry) -> None:
         """
@@ -2726,11 +2718,9 @@ class MEICStrategy:
             entry: IronCondorEntry with all legs filled and position IDs set
         """
         try:
-            # GAP-G (F7.7): broker-agnostic. IB keys the price lookup by
-            # conid (str) and the legs by *_uic — IBKR has no per-leg
-            # position id, and `avg_cost` is its actual execution price
-            # (the equivalent of Saxo's PositionBase.OpenPrice). The Saxo
-            # body stays inline (dormant, deleted in P4).
+            # GAP-G (F7.7): IBKR keys the price lookup by conid (str) and
+            # the legs by *_uic — IBKR has no per-leg position id, and
+            # `avg_cost` is the actual execution price.
             if self.broker is not None:
                 positions = self._read_open_positions()
                 if not positions:
@@ -2851,10 +2841,9 @@ class MEICStrategy:
         # Attempt to close the naked short using a market order.
         # Naked shorts need BUY to close.
         try:
-            # F6.4 — IBKR path via _close_leg_order; Saxo path inline
-            # (dormant, deleted in P4). `result` is normalized to the
-            # Saxo {"OrderId": …}/None shape so the downstream registry
-            # + logging logic stays broker-agnostic.
+            # F6.4 — closes the leg via _close_leg_order (IBClient).
+            # `result` is normalized to a {"OrderId": …}/None shape so
+            # the downstream registry + logging logic is unchanged.
             if self.broker is not None:
                 _res = self._close_leg_order(
                     instrument_id=uic, side="BUY",
@@ -2911,9 +2900,8 @@ class MEICStrategy:
                     # positions need BUY to close, long positions SELL.
                     # v8: unwinding a leg from the CURRENT entry — use
                     # entry.contracts (explicit, == config at placement).
-                    # F6.4 — IBKR path via _close_leg_order; Saxo inline
-                    # (dormant, deleted in P4). `result` normalized to the
-                    # Saxo {"OrderId": …}/None shape.
+                    # F6.4 — closes the leg via _close_leg_order (IBClient);
+                    # `result` normalized to a {"OrderId": …}/None shape.
                     if self.broker is not None:
                         _res = self._close_leg_order(
                             instrument_id=uic,
@@ -3232,13 +3220,11 @@ class MEICStrategy:
             )
             return True, None, None
 
-        # F6.3 — IBKR path. The Saxo body below is dormant on the
-        # standalone branch and is deleted in completion-plan phase P4.
-        if self.broker is not None:
-            return self._close_position_with_retry_ib(
-                position_id, leg_name, uic=uic, entry_number=entry_number,
-                contracts=contracts,
-            )
+        # F6.3 — closes the leg via the IBClient write path.
+        return self._close_position_with_retry_ib(
+            position_id, leg_name, uic=uic, entry_number=entry_number,
+            contracts=contracts,
+        )
 
     def _close_position_with_retry_ib(
         self, position_id: str, leg_name: str, uic: int = None,
@@ -4168,12 +4154,10 @@ class MEICStrategy:
         FIX (2026-02-03): Use the broker's authoritative P&L instead of a
         mid-price calc.
 
-        GAP-A (F7.7): broker-agnostic. The IB path sums
-        :meth:`_get_broker_pnl_for_entry` (conid-keyed, MKT-025 aware) per
-        entry off a single :meth:`_read_open_positions` fetch. The Saxo
-        body stays inline (dormant, deleted in P4). Both callers in HYDRA
-        (early-close P&L) are inside MKT-018, which is disabled — this is
-        a correctness-preservation rewire, not a hot path.
+        GAP-A (F7.7): sums :meth:`_get_broker_pnl_for_entry` (conid-keyed,
+        MKT-025 aware) per entry off a single :meth:`_read_open_positions`
+        fetch. Both callers in HYDRA (early-close P&L) are inside
+        MKT-018, which is disabled — not a hot path.
 
         Returns:
             Total unrealized P&L in dollars

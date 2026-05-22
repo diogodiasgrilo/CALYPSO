@@ -1912,13 +1912,9 @@ class HydraStrategy(MEICStrategy):
     # ──────────────────────────────────────────────────────────────────
     # F6 — order WRITE-path helpers (IBKR)
     #
-    # These wrap IBClient's write primitives. The Saxo write path is NOT
-    # dispatched here — it stays inline in the orchestration methods
-    # (`_place_option_order`, `_close_position_with_retry`, …), which
-    # branch `if self.broker is not None:` to the IB path below. The
-    # Saxo write path is dormant on this branch (dry-run blocks every
-    # write; the migration only ever goes live on IBKR) and is deleted
-    # wholesale in completion-plan phase P4. See
+    # These wrap IBClient's write primitives. The orchestration methods
+    # (`_place_option_order`, `_close_position_with_retry`, …) delegate
+    # leg placement / close to these helpers. See
     # docs/migration/F6_ORDER_WRITE_PATH_DESIGN.md.
     # ──────────────────────────────────────────────────────────────────
 
