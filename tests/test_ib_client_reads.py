@@ -663,8 +663,10 @@ class TestGetQuote:
         # All fields end up None — quote parser couldn't find any
         assert q["bid"] is None
         assert q["last"] is None
-        # 1 preflight + 8 warmup polls = 9 total (matches _SNAPSHOT_MAX_WARMUP_POLLS)
-        assert mock_ibkr.live_marketdata_snapshot.call_count == 9
+        # 1 priming call + _SNAPSHOT_MAX_WARMUP_POLLS data polls.
+        from shared.ib_client import _SNAPSHOT_MAX_WARMUP_POLLS
+        assert (mock_ibkr.live_marketdata_snapshot.call_count
+                == 1 + _SNAPSHOT_MAX_WARMUP_POLLS)
 
     def test_warmup_detects_data_in_any_row(self, connected_client):
         """Batch snapshot: if ANY of the rows has a populated field,
@@ -838,10 +840,10 @@ class TestGetBalance:
         assert bal["tradable"] == 50000.0
         assert bal["exchange_rate"] == 1.0
 
-    def test_exchange_rate_zero_raises(self, connected_client):
-        """exchangerate=0 means the ledger row is unusable — bail loudly
-        rather than silently miscalculate the USD-tradable amount."""
-        from shared.ib_client import IBClientError
+    def test_exchange_rate_zero_degrades_gracefully(self, connected_client):
+        """P7-audit H8: a bad exchangerate must NOT hard-fail (that would
+        block all trading). get_balance degrades to base-currency
+        available funds as a conservative tradable estimate."""
         client, mock_ibkr = connected_client
         mock_ibkr.portfolio_summary.return_value = _mk_result({
             "availablefunds": {"amount": "50000.0", "currency": "EUR"},
@@ -850,12 +852,13 @@ class TestGetBalance:
             "EUR": {"cashbalance": 50000.0, "isbase": True, "exchangerate": 1.0},
             "USD": {"cashbalance": 0.0, "isbase": False, "exchangerate": 0.0},
         })
-        with pytest.raises(IBClientError, match="exchangerate"):
-            client.get_balance("USD")
+        bal = client.get_balance("USD")            # must NOT raise
+        assert bal["tradable"] == 50000.0          # base-currency fallback
+        assert bal["exchange_rate"] is None
+        assert bal["fx_rate_unavailable"] is True
 
-    def test_exchange_rate_nan_raises(self, connected_client):
-        """NaN exchange_rate is also unusable — same loud-bail policy."""
-        from shared.ib_client import IBClientError
+    def test_exchange_rate_nan_degrades_gracefully(self, connected_client):
+        """NaN exchangerate — same graceful degradation as zero."""
         client, mock_ibkr = connected_client
         mock_ibkr.portfolio_summary.return_value = _mk_result({
             "availablefunds": {"amount": "50000.0", "currency": "EUR"},
@@ -864,8 +867,9 @@ class TestGetBalance:
             "EUR": {"cashbalance": 50000.0, "isbase": True, "exchangerate": 1.0},
             "USD": {"cashbalance": 0.0, "isbase": False, "exchangerate": float("nan")},
         })
-        with pytest.raises(IBClientError, match="exchangerate"):
-            client.get_balance("USD")
+        bal = client.get_balance("USD")            # must NOT raise
+        assert bal["tradable"] == 50000.0
+        assert bal["fx_rate_unavailable"] is True
 
     def test_base_currency_falls_back_to_ledger_when_summary_missing(
         self, connected_client,

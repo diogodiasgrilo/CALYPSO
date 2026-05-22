@@ -101,8 +101,12 @@ from shared.ib_retry import (  # noqa: E402
 # call after preflight returned metadata-only; LATER session calls returned
 # populated data immediately. We poll up to 8 × 250ms = 2s after the
 # preflight before giving up. Tunable if HYDRA's tick budget needs adjusting.
-_SNAPSHOT_MAX_WARMUP_POLLS = 8
-_SNAPSHOT_POLL_INTERVAL_S = 0.25
+# P7-audit H10: 12×0.5s = 6s warmup. A cold conid (and especially
+# calculated greek fields) can take "a few moments" to populate after
+# priming — 2s was too thin. 0.5s spacing also keeps the snapshot call
+# rate (~2/s, even batched) well under IBKR's 10 req/s global limit.
+_SNAPSHOT_MAX_WARMUP_POLLS = 12
+_SNAPSHOT_POLL_INTERVAL_S = 0.5
 # Keys IBKR returns in the snapshot row that are pure metadata (not market
 # data). If a snapshot row contains ONLY these keys, the cache isn't warm.
 _SNAPSHOT_METADATA_KEYS = frozenset({"conid", "conidEx", "_updated"})
@@ -1555,15 +1559,31 @@ class IBClient:
                 exchange_rate = float(raw_rate)
             except (TypeError, ValueError):
                 exchange_rate = 0.0
-            # NaN check: NaN != NaN, so this catches it cleanly
+            # NaN check: NaN != NaN, so this catches it cleanly.
+            # P7-audit H8: do NOT hard-fail on a bad/missing rate — a
+            # transient missing ledger field would block ALL trading.
+            # Degrade: report base-currency available funds as `tradable`.
+            # For CALYPSO (EUR base, USD trade) EUR-avail < USD-equivalent,
+            # so the buying-power gate stays CONSERVATIVE — never falsely
+            # permissive — and trading continues.
             if exchange_rate != exchange_rate or exchange_rate <= 0:
-                raise IBClientError(
-                    f"get_balance({currency!r}): ledger row missing or has "
-                    f"invalid exchangerate (got {raw_rate!r}). Cannot compose "
-                    f"{base_currency}-base to {currency}-tradable. Re-check "
-                    "ledger response shape against IBKR docs (Phase A.10 "
-                    "verifies direction on live paper account)."
+                logger.warning(
+                    "get_balance(%s): ledger exchangerate missing/invalid "
+                    "(%r) — falling back to base-currency available funds "
+                    "(%.2f %s) as a conservative tradable estimate.",
+                    currency, raw_rate, base_avail, base_currency,
                 )
+                return {
+                    "tradable": base_avail,
+                    "currency": currency,
+                    "base_currency": base_currency,
+                    "base_available": base_avail,
+                    "exchange_rate": None,
+                    "cash_in_target": 0.0,
+                    "fx_rate_unavailable": True,
+                    "raw_summary": summary,
+                    "raw_ledger": ledger,
+                }
             cash_in_target = float(row.get("cashbalance", 0) or 0)
             # Empirical default: assume `exchangerate` is base-per-target
             # (i.e., 1 USD = ER EUR). USD_tradable = EUR_avail / ER + USD_cash.
