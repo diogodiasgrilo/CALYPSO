@@ -3836,11 +3836,16 @@ class MEICStrategy:
             logger.debug("Path-B: skipping _reconcile_positions in dry-run mode (DRY_* IDs not in Saxo by design)")
             return
 
-        logger.info("Reconciling positions with Saxo API...")
+        logger.info("Reconciling positions with the broker...")
 
-        # Get all positions from Saxo
-        all_positions = self.client.get_positions()
-        valid_ids = {str(p.get("PositionId")) for p in all_positions}
+        # Get all open positions from the broker. IBKR has no per-leg
+        # position id — positions are conid-keyed — so reconciliation
+        # keys on the leg conid. NOTE: the per-leg `*_position_id` loop
+        # below is Saxo-era and dormant on IBKR (`*_position_id` is
+        # always None); conid-based mid-session POS-003 reconciliation
+        # is tracked as DEF-7. _save_state_to_disk still runs.
+        all_positions = self._read_open_positions()
+        valid_ids = {str(p.get("instrument_id")) for p in all_positions}
 
         # FIX (2026-02-04): Skip orphan cleanup in dry-run mode
         # Dry-run positions use synthetic IDs (DRY_xxx) that won't exist in Saxo,
@@ -5248,16 +5253,17 @@ class MEICStrategy:
 
     def _validate_system_clock(self):
         """
-        TIME-001: Validate system clock against Saxo server time.
+        TIME-001: Verify broker API connectivity at startup.
 
-        Checks for significant clock skew that could affect entry timing.
+        A broker balance read is used as a lightweight connectivity
+        probe. The Client Portal Web API does not expose a server
+        clock, so actual skew is not measured — consider an NTP check
+        if precise skew detection is ever needed.
         """
         try:
-            # Get server time from Saxo API
-            # Use a simple API call that returns timestamp
-            # Use account info endpoint as a proxy to verify API connectivity
-            account_info = self.client.get_account_info()
-            if account_info:
+            # Use a broker balance read as a connectivity probe.
+            balance = self._read_account_balance()
+            if balance:
                 # If successful, we can at least verify our connection works
                 self._clock_validated = True
 
@@ -5266,7 +5272,6 @@ class MEICStrategy:
                 logger.info(f"TIME-001: Clock validation - Local time: {local_time.strftime('%H:%M:%S')}")
 
                 # Without actual server time, we can only log local time
-                # In production, consider using NTP check or Saxo response headers
                 self._clock_skew_seconds = 0.0
                 logger.info("TIME-001: Clock validation passed (server time comparison not available)")
                 return
