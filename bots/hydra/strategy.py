@@ -10431,45 +10431,54 @@ class HydraStrategy(MEICStrategy):
             True if all positions are settled (or were already confirmed settled)
             False if positions still exist on Saxo (settlement pending)
         """
-        # Already confirmed settled for today - but check if new positions appeared
-        # FIX #82: The flag gets set at midnight when registry is empty (pre-market).
-        # If trading happens during the day, registry gets new positions. We must
-        # reset the flag so post-market settlement actually processes them.
+        # P7-audit H2: gate on the conid→quantity model, NOT the Position
+        # Registry. On IBKR the registry is never populated (no per-leg
+        # position id, so _register_position early-returns), so the
+        # registry path was dead code — settlement always took the
+        # empty-registry branch and unconditionally set
+        # `_settlement_reconciliation_complete=True`, dropping the
+        # expired credit of any side still actually open.
+        expected = self._expected_position_quantities()
+
+        # Already confirmed settled today — but if tracked conids
+        # reappeared (next-day reset, new entry mid-day after a
+        # completion), reset and re-reconcile (former FIX #82 path).
         if self._settlement_reconciliation_complete:
-            my_position_ids = self.registry.get_positions(self.BOT_NAME)
-            if my_position_ids:
+            if expected:
                 logger.info(
-                    f"FIX #82: Settlement was marked complete but registry has "
-                    f"{len(my_position_ids)} positions - resetting flag for proper settlement"
+                    f"Settlement was marked complete but {len(expected)} "
+                    f"tracked conid(s) reappeared — resetting flag."
                 )
                 self._settlement_reconciliation_complete = False
-                # Fall through to normal settlement logic below
             else:
                 return True
 
-        # Check how many positions we think we have in registry
-        my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
-
-        if not my_position_ids:
-            # FIX #77: Registry empty — but entries may have un-finalized surviving sides
-            # that need expired credit processing (e.g., post-restart with partial ICs).
-            # Previously returned True immediately, skipping expired credit processing.
+        if not expected:
+            # No tracked conids — but a state-file restore can leave
+            # entries with un-finalized surviving sides (FIX #77). Run
+            # the expired-credit processor so those get booked, then
+            # mark complete.
             expired_credit = self._process_expired_credits()
             if expired_credit > 0:
-                logger.info(f"FIX #77: Processed ${expired_credit:.2f} expired credits from surviving sides (registry was empty)")
-                # Fix #84: Add final P&L history point after settlement
+                logger.info(
+                    f"FIX #77: Processed ${expired_credit:.2f} expired credits "
+                    f"from surviving sides (no tracked conids)."
+                )
+                # Fix #84: final P&L history point after settlement
                 final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
                 now = get_us_market_time()
                 time_key = now.strftime("%H:%M")
                 self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
                 logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
                 self._save_state_to_disk()
-            logger.info(f"POS-004: No {self.BOT_NAME} positions in registry - settlement reconciliation complete")
+            logger.info(
+                f"POS-004: No tracked conids — settlement reconciliation complete."
+            )
             self._settlement_reconciliation_complete = True
             return True
 
-        # We have positions in registry - check if they still exist on Saxo
-        logger.info(f"POS-004: Checking settlement status for {len(my_position_ids)} {self.BOT_NAME} positions...")
+        # Tracked conids exist — check whether they're still open on the broker.
+        logger.info(f"POS-004: Checking settlement for {len(expected)} tracked conid(s)…")
 
         try:
             # POS-004 in the IBKR-native conid→quantity model (F4.6):
