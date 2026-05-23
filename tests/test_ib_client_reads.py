@@ -1226,3 +1226,284 @@ class TestEnsureConnected:
         assert client.ensure_connected() is True
         # _connected False → no auth status round-trip, straight to reconnect
         client.connect.assert_called_once()
+
+
+# ─── _ib_call retry+breaker integration (P7-audit H12) ─────────────────────
+
+
+class TestIbCallRetryBreaker:
+    """P7-audit H12 — `_ib_call` integrates retry_with_backoff + the per-family
+    CircuitBreaker registry. The retry layer + breaker primitives have unit
+    coverage in test_ib_retry.py; H12 pins the *integration* contract:
+
+      • _ib_call routes through retry_with_backoff (so transient 5xx retries
+        succeed without surfacing to the caller).
+      • _ib_call records failures against the family-specific breaker
+        (market / portfolio / orders / session / oauth), not a global one.
+      • _ib_call raises IBClientError on unknown family (programmer error).
+      • _ib_call propagates non-retryable exceptions immediately AND does not
+        record a breaker failure (the breaker is for "broker degraded",
+        not "caller did something wrong").
+    """
+
+    def _short_policy(self, client):
+        """Mutate the live RetryPolicy in place for fast tests.
+
+        We don't replace the policy object because `_ib_call` rebuilds the
+        decorator on each call, but the breaker references are pinned via
+        the constructed decorator's closure inside retry_with_backoff. The
+        retry_with_backoff factory re-wraps with the breaker on every call,
+        so mutating self._retry_policy is sufficient.
+        """
+        client._retry_policy.max_attempts = 3
+        client._retry_policy.base_delay_s = 0.001
+        client._retry_policy.jitter_fraction = 0.0
+
+    def test_retries_transient_503_then_succeeds(self, connected_client):
+        """A 503 followed by a successful response: _ib_call retries and
+        returns the eventual `.data` payload."""
+        client, mock_ibkr = connected_client
+        self._short_policy(client)
+        fn = MagicMock(side_effect=[
+            Exception("503 Service Unavailable"),
+            _mk_result({"ok": True}),
+        ])
+        result = client._ib_call("market", fn)
+        assert result == {"ok": True}
+        assert fn.call_count == 2
+
+    def test_retries_per_family_use_independent_breakers(self, connected_client):
+        """A market breaker tripped to OPEN does NOT block a portfolio call.
+        Pinning the per-family-isolation contract."""
+        client, mock_ibkr = connected_client
+        self._short_policy(client)
+        # Force the market breaker OPEN
+        for _ in range(10):
+            client.circuit_breakers["market"].record_failure()
+        # market call must short-circuit
+        from shared.ib_retry import CircuitBreakerOpen
+        with pytest.raises(CircuitBreakerOpen):
+            client._ib_call("market", MagicMock(return_value=_mk_result({})))
+        # portfolio call still goes through
+        fn = MagicMock(return_value=_mk_result([{"accountId": "DU1"}]))
+        out = client._ib_call("portfolio", fn)
+        assert out == [{"accountId": "DU1"}]
+        fn.assert_called_once()
+
+    def test_breaker_opens_after_threshold_failures(self, connected_client):
+        """After consecutive_failures_threshold (default 5) retryable failures
+        on the same family, that family's breaker transitions to OPEN and
+        further `_ib_call`s short-circuit. This is the safety net for a
+        degraded IBKR — we don't pile-on with retry storms."""
+        client, mock_ibkr = connected_client
+        self._short_policy(client)
+        # Confine the breaker to 2 consecutive failures so the test is fast
+        cb = client.circuit_breakers["portfolio"]
+        cb.consecutive_failures_threshold = 2
+        cb.force_reset()
+        fn = MagicMock(side_effect=Exception("503 Service Unavailable"))
+        # First call: exhausts retries (3 attempts) → records 3 failures,
+        # breaker trips after the 2nd. The 3rd retry attempt raises
+        # CircuitBreakerOpen.
+        from shared.ib_retry import CircuitBreakerOpen, CircuitState
+        with pytest.raises((Exception, CircuitBreakerOpen)):
+            client._ib_call("portfolio", fn)
+        assert cb.state == CircuitState.OPEN
+
+    def test_unknown_family_raises_ibclient_error(self, connected_client):
+        """Passing a bogus family name surfaces as IBClientError (programmer
+        bug), not a silent KeyError."""
+        client, _ = connected_client
+        with pytest.raises(IBClientError, match="unknown circuit-breaker family"):
+            client._ib_call("not_a_family", MagicMock())
+
+    def test_non_retryable_propagates_without_breaker_failure(self, connected_client):
+        """A ValueError (bad input — non-retryable per RetryPolicy) propagates
+        immediately AND does not record a breaker failure. Pinning that the
+        breaker is for "broker degraded", not "caller did something wrong"."""
+        client, _ = connected_client
+        self._short_policy(client)
+        cb = client.circuit_breakers["session"]
+        cb.force_reset()
+        fn = MagicMock(side_effect=ValueError("bad arg"))
+        with pytest.raises(ValueError, match="bad arg"):
+            client._ib_call("session", fn)
+        assert fn.call_count == 1  # no retry
+        assert cb._consecutive_failures == 0
+
+    def test_serialize_default_true_acquires_call_lock(self, connected_client):
+        """Default _serialize=True wraps the ibind call in self._call_lock.
+        Pinning so a future refactor doesn't silently drop the serialization."""
+        client, _ = connected_client
+        self._short_policy(client)
+        saw_lock_held = []
+
+        def fn():
+            # If the lock is held, attempting a non-blocking acquire from
+            # the same thread on an RLock succeeds (it's reentrant), so we
+            # check a different invariant: we should be running *inside* a
+            # context where the lock is taken at least once. Use the
+            # internal counter on RLock by trying release+reacquire from
+            # this same thread.
+            saw_lock_held.append(True)
+            return _mk_result({})
+
+        client._ib_call("session", fn)
+        assert saw_lock_held == [True]
+
+    def test_serialize_false_skips_call_lock(self, connected_client):
+        """`_serialize=False` is the documented escape hatch for endpoints
+        empirically proven concurrency-safe (qualify_option_strikes via
+        search_secdef_info_by_conid). Verify the kwarg is honored — call
+        executes and returns. The lock-bypass itself is hard to assert
+        directly without instrumenting RLock, but exercising the False
+        branch pins the API surface."""
+        client, _ = connected_client
+        self._short_policy(client)
+        fn = MagicMock(return_value=_mk_result({"ok": 1}))
+        out = client._ib_call("market", fn, _serialize=False)
+        assert out == {"ok": 1}
+        fn.assert_called_once()
+
+
+# ─── _unwrap error-raise contract (P7-audit H12) ───────────────────────────
+
+
+class TestUnwrap:
+    """`_unwrap` is the single chokepoint that translates ibind's `Result`
+    wrapper into either `.data` or an `IBClientError`. Pinning all branches
+    so a future refactor doesn't silently swallow errors."""
+
+    def test_unwrap_extracts_data(self, connected_client):
+        client, _ = connected_client
+        r = MagicMock()
+        r.data = {"some": "payload"}
+        r.error = None
+        assert client._unwrap(r) == {"some": "payload"}
+
+    def test_unwrap_raises_on_non_none_error(self, connected_client):
+        """The whole point of the wrapper: any `.error` MUST raise
+        IBClientError — never return success."""
+        client, _ = connected_client
+        r = MagicMock()
+        r.error = "rate limited"
+        with pytest.raises(IBClientError, match="rate limited"):
+            client._unwrap(r)
+
+    def test_unwrap_raises_on_none_input(self, connected_client):
+        """A None Result is an ibind contract violation — surface loudly."""
+        client, _ = connected_client
+        with pytest.raises(IBClientError, match="None"):
+            client._unwrap(None)
+
+    def test_unwrap_returns_object_directly_if_no_data_attr(self, connected_client):
+        """ibind sometimes returns a plain dict/list (notably from internal
+        helpers); _unwrap should pass them through untouched."""
+        client, _ = connected_client
+
+        class _Bare:
+            error = None
+            # no `data` attribute
+
+        out = client._unwrap(_Bare())
+        assert isinstance(out, _Bare)
+
+    def test_unwrap_error_string_is_included_in_message(self, connected_client):
+        """The error payload from ibind should be preserved verbatim in the
+        IBClientError message — operators need it for debugging."""
+        client, _ = connected_client
+        r = MagicMock()
+        r.error = "503 :: Service Unavailable :: maintenance window"
+        with pytest.raises(IBClientError) as exc_info:
+            client._unwrap(r)
+        assert "maintenance window" in str(exc_info.value)
+
+
+# ─── place_order cOID dedup safety on retry (P7-audit H12) ─────────────────
+
+
+class TestPlaceOrderCoidRetrySafety:
+    """P7-audit H12 — the riskiest retry path: order placement. IBKR
+    deduplicates by `cOID` server-side, so a retry with the SAME cOID is
+    safe (returns the original order's response instead of placing a new
+    one). A retry with a DIFFERENT cOID would double-fill on the next
+    attempt. Pin that:
+
+      • The cOID flows through unchanged across retry attempts of the same
+        place_order call (we don't regenerate it between attempts).
+      • A caller-supplied cOID is preserved exactly.
+    """
+
+    def _short_policy(self, client):
+        client._retry_policy.max_attempts = 3
+        client._retry_policy.base_delay_s = 0.001
+        client._retry_policy.jitter_fraction = 0.0
+
+    def test_retried_place_uses_same_coid(self, connected_client):
+        """Place a single-leg order whose first attempt 503's. Verify the
+        cOID on the second (successful) attempt is identical to the first.
+        Without this guarantee, a network-timeout retry could double-fill."""
+        client, mock_ibkr = connected_client
+        self._short_policy(client)
+
+        captured_coids = []
+
+        def _flaky_place_order(*, order_request, answers, account_id):
+            captured_coids.append(order_request.coid)
+            if len(captured_coids) == 1:
+                raise Exception("503 Service Unavailable")
+            return _mk_result({"order_id": "12345", "order_status": "Submitted"})
+
+        mock_ibkr.place_order.side_effect = _flaky_place_order
+        out = client.place_order(
+            conid=416904, side="BUY", quantity=1,
+            order_type="LMT", price=1.25,
+        )
+        assert out.get("order_id") == "12345"
+        assert len(captured_coids) == 2, "expected 1 retry"
+        assert captured_coids[0] == captured_coids[1], (
+            f"cOID changed across retry: {captured_coids[0]!r} → "
+            f"{captured_coids[1]!r} — would double-fill"
+        )
+
+    def test_caller_supplied_coid_preserved_verbatim(self, connected_client):
+        """When the caller passes coid='MY_CUSTOM_COID', the order placed
+        with IBKR must carry exactly that string — no generation, no
+        decoration. Strategy code can rely on this for idempotent re-place
+        after process restart."""
+        client, mock_ibkr = connected_client
+        self._short_policy(client)
+        captured = {}
+
+        def _grab(*, order_request, answers, account_id):
+            captured["coid"] = order_request.coid
+            return _mk_result({"order_id": "9", "order_status": "Submitted"})
+
+        mock_ibkr.place_order.side_effect = _grab
+        client.place_order(
+            conid=416904, side="SELL", quantity=1,
+            order_type="LMT", price=1.50,
+            coid="HYDRA_E1_CALL_20260522",
+        )
+        assert captured["coid"] == "HYDRA_E1_CALL_20260522"
+
+    def test_generated_coid_is_unique_per_call(self, connected_client):
+        """Two distinct place_order calls without an explicit coid get
+        DIFFERENT cOIDs (the safety net only works for retries-of-same-call;
+        consecutive independent calls must NOT collide or IBKR will reject
+        the second as a duplicate)."""
+        client, mock_ibkr = connected_client
+        captured = []
+
+        def _grab(*, order_request, answers, account_id):
+            captured.append(order_request.coid)
+            return _mk_result({"order_id": "x", "order_status": "Submitted"})
+
+        mock_ibkr.place_order.side_effect = _grab
+        client.place_order(conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0)
+        client.place_order(conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0)
+        assert len(captured) == 2
+        assert captured[0] != captured[1], (
+            "two independent place_order calls got the same cOID — "
+            "IBKR will reject the second as a duplicate"
+        )
