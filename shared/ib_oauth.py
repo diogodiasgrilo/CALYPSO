@@ -22,6 +22,7 @@ Security context:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -30,6 +31,9 @@ from pathlib import Path
 from typing import Optional
 
 from ibind.oauth.oauth1a import OAuth1aConfig  # module-level so tests can patch cleanly
+
+
+logger = logging.getLogger(__name__)
 
 
 # Path where the OAuth crypto files live. Override via env var if needed.
@@ -181,12 +185,32 @@ _SYSTEMD_CRED_NAMES = {
 def _read_credential_file(path: Path) -> str:
     """Read a systemd-delivered string credential file.
 
-    Returns "" if absent — load_credentials' downstream validate_secrets()
-    then surfaces a clear "missing credential" error.
+    Returns "" if the credential is absent so load_credentials' downstream
+    ``validate_secrets()`` surfaces a clear "missing credential" error.
+
+    P7-audit M2: distinguish absent (``FileNotFoundError``) from
+    unreadable (permission denied, IO error). Silently returning "" on
+    an unreadable file was indistinguishable from "absent" downstream
+    and could mask a credential-delivery deployment bug. Now:
+      • Missing file → "" (caller treats as "credential not provided"
+        and either uses the args/env-var path or surfaces a missing-
+        credential error).
+      • Unreadable file (permission, IO error) → WARNING log so the
+        operator notices the misconfiguration; still returns "" so
+        downstream validation can produce a single consistent error
+        rather than a Python traceback.
     """
     try:
         return path.read_text()
-    except OSError:
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        logger.warning(
+            "ib_oauth: credential file %s exists but could not be read "
+            "(%s: %s). Check systemd-creds permissions and the service "
+            "unit's LoadCredentialEncrypted= entry.",
+            path, type(exc).__name__, exc,
+        )
         return ""
 
 
@@ -231,7 +255,22 @@ def load_credentials(
 
     # Production VM path: systemd LoadCredentialEncrypted= delivered the
     # six credentials into $CREDENTIALS_DIRECTORY.
+    #
+    # P7-audit M3: explicitly check for None and an empty string. The
+    # prior `if creds_dir:` matched a non-empty string but also fell
+    # through when the env var was set-but-empty (e.g. a malformed
+    # service unit) → silent dev-path fallback. Now: if the env var is
+    # set, even to "", we treat it as a production-path declaration —
+    # an empty value raises so the deployment bug surfaces immediately
+    # rather than silently picking up dev credentials.
     creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if creds_dir is not None and creds_dir.strip() == "":
+        raise RuntimeError(
+            "CREDENTIALS_DIRECTORY env var is set but empty — this "
+            "usually means systemd's LoadCredentialEncrypted= entries "
+            "failed and the service started without credentials. Check "
+            "`systemctl status hydra` for credential-load errors."
+        )
     if creds_dir:
         cd = Path(creds_dir)
         n = _SYSTEMD_CRED_NAMES

@@ -48,12 +48,53 @@ sudo systemd-creds encrypt --name=ibkr_dhparam_pem    dhparam.pem            /et
 # 3. Shred the plaintext PEM files once encrypted.
 shred -u private_signature.pem private_encryption.pem dhparam.pem
 
-# 4. Install the service and start.
+# 4. Install the service. DO NOT enable yet — verify first (next section).
 sudo cp /opt/calypso/deploy/hydra.service /etc/systemd/system/
 sudo systemctl daemon-reload
+```
+
+## Pre-start verification (DO THIS BEFORE `systemctl enable`)
+
+P7-audit M4: verify the encrypt → decrypt → unit-load round-trip
+BEFORE relying on the service to do it for you. A bad encrypt step
+or a typo in `LoadCredentialEncrypted=` will otherwise surface only
+at start time, possibly during market hours.
+
+```bash
+# 1. Validate the service unit syntactically. `systemd-analyze verify`
+#    catches typos in LoadCredentialEncrypted= names BEFORE the unit
+#    ever tries to start. Exit code 0 = clean.
+sudo systemd-analyze verify /etc/systemd/system/hydra.service
+
+# 2. Decrypt each .cred file back to plaintext and check byte length.
+#    Sanity: did we lose bytes during the encrypt step?
+#    Plaintext is only printed to stdout / piped to wc; nothing lands
+#    on disk.
+for f in /etc/calypso/ibkr/*.cred; do
+    n=$(sudo systemd-creds decrypt "$f" - | wc -c)
+    printf '%-60s %s bytes\n' "$f" "$n"
+done
+# Expected (paper):
+#   consumer_key.cred  9 bytes  (IBKR 9-char A-Z key)
+#   access_token.cred  ~32 bytes
+#   access_token_secret.cred  ~32 bytes
+#   signature.pem.cred  ~1700 bytes (RSA 2048)
+#   encryption.pem.cred ~1700 bytes
+#   dhparam.pem.cred   ~400-500 bytes
+# A `0 bytes` line means the encrypt step ingested nothing — re-run it.
+
+# 3. Spot-check the consumer key matches what 1Password has.
+sudo systemd-creds decrypt /etc/calypso/ibkr/consumer_key.cred -
+# Expected: prints exactly your consumer key, no trailing newline.
+
+# 4. Once steps 1-3 are clean, enable + start:
 sudo systemctl enable --now hydra
 sudo journalctl -u hydra -f
 ```
+
+If any of steps 1-3 fail, **do not** enable the service. Re-run the
+failing encrypt step (verifying the source value first) or fix the
+typo in `hydra.service`.
 
 ## How the bot reads them
 

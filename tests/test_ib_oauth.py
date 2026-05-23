@@ -168,6 +168,68 @@ class TestLoadCredentials:
         assert creds.consumer_key == ""
         assert creds.access_token == ""
 
+    # ─── P7-audit M2: distinguish absent from unreadable ─────────────────
+
+    def test_unreadable_credential_logs_warning_and_returns_empty(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """M2: when a credential file exists but can't be read (permission
+        denied), the loader returns "" (so downstream validation produces
+        a single consistent error) AND logs a WARNING so the operator
+        can see the deployment misconfig — distinct from "file absent".
+        """
+        import logging
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+        # Create the file but make it unreadable. chmod 000 is enough on
+        # POSIX to surface PermissionError from read_text() when running
+        # as a non-root user.
+        ck = tmp_path / "ibkr_consumer_key"
+        ck.write_text("CALYPSOPP")
+        ck.chmod(0o000)
+        try:
+            with caplog.at_level(logging.WARNING, logger="shared.ib_oauth"):
+                creds = load_credentials("paper")
+            assert creds.consumer_key == ""
+            # WARNING message names the path and surfaces the OSError type
+            warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+            assert any("ibkr_consumer_key" in m for m in warning_msgs), (
+                f"expected WARNING mentioning the credential file path, "
+                f"got: {warning_msgs}"
+            )
+        finally:
+            # Restore so pytest can clean up tmp_path
+            ck.chmod(0o600)
+
+    # ─── P7-audit M3: empty CREDENTIALS_DIRECTORY raises ────────────────
+
+    def test_empty_credentials_directory_raises(self, monkeypatch):
+        """M3: a set-but-empty CREDENTIALS_DIRECTORY env var is a systemd
+        misconfig (LoadCredentialEncrypted= failed). Don't silently fall
+        through to the dev path — raise so the deployment bug surfaces.
+        """
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", "")
+        with pytest.raises(RuntimeError, match="CREDENTIALS_DIRECTORY"):
+            load_credentials("paper")
+
+    def test_whitespace_only_credentials_directory_raises(self, monkeypatch):
+        """M3 variant: whitespace-only env var is also a misconfig."""
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", "   ")
+        with pytest.raises(RuntimeError, match="CREDENTIALS_DIRECTORY"):
+            load_credentials("paper")
+
+    def test_unset_credentials_directory_falls_through_to_dev_path(
+        self, monkeypatch
+    ):
+        """M3: unsetting CREDENTIALS_DIRECTORY (vs setting to "") falls
+        through to the dev env-var path unchanged. Pinning the
+        distinction so the M3 guard doesn't accidentally break dev."""
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        # Provide explicit args so we don't depend on the dev env vars
+        # being unset / set in CI.
+        creds = load_credentials("paper", consumer_key="ck", access_token="t",
+                                 access_token_secret="s")
+        assert creds.consumer_key == "ck"
+
 
 @pytest.fixture
 def reload_ib_oauth():
