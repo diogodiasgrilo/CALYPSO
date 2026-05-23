@@ -1933,6 +1933,16 @@ class MEICStrategy:
             def _mid(cid) -> float:
                 return self._quote_mid(quotes.get(cid)) if cid else 0.0
 
+            def _quoted(cid) -> bool:
+                """True iff the batch actually returned a quote row for
+                this conid. P7-audit H7: a conid that resolved but got
+                NO quote makes _quote_mid return 0.0 — if that's the
+                LONG leg, the spread credit becomes the full short
+                premium (overstated), which could pass the MKT-011 gate
+                on a trade that is actually sub-viable. A side is only
+                priceable when BOTH its legs are genuinely quoted."""
+                return cid is not None and quotes.get(cid) is not None
+
             estimated_call_credit = 0.0
             if need_call:
                 if not sc or not lc:
@@ -1944,6 +1954,11 @@ class MEICStrategy:
                     else:
                         logger.warning("Could not resolve call conids")
                         return (0.0, 0.0)
+                elif not (_quoted(sc) and _quoted(lc)):
+                    logger.warning(
+                        "Call side has an unquoted leg — credit estimate "
+                        "unreliable, treating call side as non-viable"
+                    )
                 else:
                     estimated_call_credit = (_mid(sc) - _mid(lc)) * 100
 
@@ -1958,7 +1973,13 @@ class MEICStrategy:
                         return (estimated_call_credit, 0.0)
                     logger.warning("Could not resolve put conids")
                     return (0.0, 0.0)
-                estimated_put_credit = (_mid(sp) - _mid(lp)) * 100
+                elif not (_quoted(sp) and _quoted(lp)):
+                    logger.warning(
+                        "Put side has an unquoted leg — credit estimate "
+                        "unreliable, treating put side as non-viable"
+                    )
+                else:
+                    estimated_put_credit = (_mid(sp) - _mid(lp)) * 100
 
             logger.debug(
                 f"Credit estimation (IB) for Entry #{entry.entry_number}: "
@@ -5293,26 +5314,20 @@ class MEICStrategy:
         errors = []
         warnings = []
 
-        # Required top-level sections
-        required_sections = ["saxo_api", "strategy"]
-        for section in required_sections:
-            if section not in self.config:
-                errors.append(f"Missing required config section: {section}")
+        # P7-audit H3: post-Saxo-purge config validation. Only the
+        # `strategy` section is required — IBKR credentials are loaded
+        # by shared/ib_oauth.load_credentials() (env vars or systemd
+        # credentials), NOT from this JSON config. A stale `saxo_api`
+        # block in the config (legacy) is now harmless and ignored.
+        if "strategy" not in self.config:
+            errors.append("Missing required config section: strategy")
 
-        # Saxo API config validation
-        # Config structure: saxo_api.{environment}.app_key where environment is "live" or "sim"
-        saxo_config = self.config.get("saxo_api", {})
-        environment = saxo_config.get("environment", "sim")  # Default to sim for safety
-        env_config = saxo_config.get(environment, {})
-        if not env_config.get("app_key"):
-            errors.append(f"Missing saxo_api.{environment}.app_key")
-        if not env_config.get("app_secret"):
-            errors.append(f"Missing saxo_api.{environment}.app_secret")
-
-        # Strategy config validation
         strategy = self.config.get("strategy", {})
 
-        # UIC validation (must be positive integers)
+        # Legacy UIC fields (e.g. underlying_uic) are vestigial — on
+        # IBKR instruments are resolved by conid via _read_option_chain
+        # / qualify_contract. If still present, they must at least be
+        # well-typed; absence is fine.
         uic_fields = ["underlying_uic", "option_root_uic", "vix_spot_uic"]
         for field in uic_fields:
             uic = strategy.get(field)

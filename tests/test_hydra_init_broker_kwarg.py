@@ -2722,6 +2722,25 @@ class TestEstimateEntryCreditIb:
         entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650)
         assert s._estimate_entry_credit_ib(entry) == (0.0, 0.0)
 
+    def test_unquoted_long_leg_makes_side_non_viable(self):
+        """P7-audit H7: if the long-leg's conid resolves but the batch
+        returns no quote for it, _quote_mid returns 0.0 and the credit
+        becomes the full short premium (overstated) — MKT-011 could then
+        admit a sub-viable trade. The fix treats the side as non-viable
+        whenever EITHER leg's quote is missing from the batch."""
+        s = self._make()
+        s._read_option_chain = MagicMock(return_value=(
+            {6900.0: 11, 6950.0: 12},          # call conids resolve
+            {6700.0: 13, 6650.0: 14},          # put conids resolve
+        ))
+        # batch quote MISSING the long call (conid 12).
+        partial_Q = {11: self._Q[11], 13: self._Q[13], 14: self._Q[14]}
+        s._read_option_quotes_batch = MagicMock(return_value=partial_Q)
+        entry = _FakeTighteningEntry(sc=6900, lc=6950, sp=6700, lp=6650)
+        call_c, put_c = s._estimate_entry_credit_ib(entry)
+        assert call_c == 0.0                    # call side non-viable
+        assert put_c == 160                     # put side priced normally
+
 
 # =============================================================================
 # F7.7 — GAP-G / GAP-A: _verify_entry_fill_prices, _get_total_saxo_pnl,

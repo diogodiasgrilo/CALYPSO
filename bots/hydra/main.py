@@ -342,6 +342,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     consecutive_errors = 0
     daily_summary_sent_date = None
     last_session_check_date = None  # P7: once-per-day IBKR re-auth gate
+    last_intraday_session_check = datetime.min  # P7-audit H6: periodic re-check
+    INTRADAY_SESSION_CHECK_INTERVAL_S = 15 * 60  # 15 min
 
     try:
         while not shutdown_requested:
@@ -456,7 +458,25 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                         )
                         break
                     last_session_check_date = today
+                    last_intraday_session_check = datetime.now()
                     trade_logger.log_event("IBKR session verified.")
+
+                # P7-audit H6: intraday session re-check. The daily gate
+                # above only fires once/day, so a mid-session 401/410
+                # (the 24h LST TTL elapsing mid-day, IBKR-side restart,
+                # a competing login) would silently leave the bot
+                # trading on a dead session. Re-verify every 15 minutes —
+                # ensure_connected() round-trips auth/status (one cheap
+                # call if healthy) and re-establishes if not.
+                now_ = datetime.now()
+                if (now_ - last_intraday_session_check).total_seconds() >= INTRADAY_SESSION_CHECK_INTERVAL_S:
+                    if not broker.ensure_connected():
+                        trade_logger.log_error(
+                            "Intraday IBKR session check failed — "
+                            "exiting for systemd restart."
+                        )
+                        break
+                    last_intraday_session_check = now_
 
                 # Directional-pivot continuous monitor (introduced 2026-05-01 in v1.26.0).
                 # Fires BEFORE the strategy state machine on each heartbeat, so a
