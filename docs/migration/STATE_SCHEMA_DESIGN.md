@@ -1,5 +1,19 @@
 # State File Schema Design — IB-Only HYDRA
 
+> **⚠️ SUPERSEDED — design not adopted.** P7-audit H13 (2026-05-22)
+> found this document materially inaccurate: the `*_uic` → `*_instrument_id`
+> and `*_position_id` → `*_order_id` renames described below were
+> **never implemented**. The actual implementation keeps the legacy
+> field names (`*_uic`, `*_position_id`) and stores the IBKR conid in
+> the `*_uic` field; `*_position_id` is always `None` on the IBKR
+> path. `data_recorder.py`'s SQLite schema (currently v8) was NOT
+> renamed either. Save/load are internally symmetric so it is not a
+> runtime bug — but the document below describes a design abandoned in
+> favour of keeping field names stable. Kept as a record of the
+> rejected proposal; **do not rely on it**.
+
+---
+
 **Decision**: No standalone migration script. New HYDRA writes the new
 schema natively; old Saxo state files get archived (not converted) at
 cutover. Cumulative metrics are preserved via a one-shot copy.

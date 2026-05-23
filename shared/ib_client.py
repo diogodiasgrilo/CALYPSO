@@ -2426,6 +2426,7 @@ class IBClient:
         order_type: str = "LMT",
         conid: Optional[int] = None,
         answers: Optional[dict] = None,
+        price_increment: float = 0.05,
     ) -> dict:
         """Modify a working order's price (and/or quantity).
 
@@ -2436,8 +2437,18 @@ class IBClient:
         original side + quantity (and optionally the conid for single-leg
         orders) — we do not invent placeholders.
 
-        For combo modifications (BAG/conidex orders), pass the original
-        `conid=None` and the IBKR `order_id` already identifies the combo.
+        ``price_increment`` mirrors ``place_order`` (P7-audit H11):
+        default 0.05 (SPX/SPXW combo tick); pass 0.01 for equities or
+        single-leg sub-$3 options, 0 to skip rounding.
+
+        **Single-leg only.** Combo (BAG/conidex) modify requires
+        ``sec_type="BAG"`` + the original ``conidex`` to be carried
+        through (per IBKR's "content should mirror the original"
+        requirement); the current implementation does not do that yet
+        and would likely be rejected on a combo. HYDRA's progressive-
+        chase entry placement uses cancel+place, not modify, so this
+        is not blocking. P7-audit H11 follow-up: implement combo modify
+        before any caller uses it on a combo.
         """
         self._require_connected()
         if not side:
@@ -2446,7 +2457,8 @@ class IBClient:
             raise IBClientError("modify_order requires a positive quantity")
 
         rounded_price = (
-            self._round_to_increment(price, 0.05) if price is not None else None
+            self._round_to_increment(price, price_increment)
+            if price is not None and price_increment > 0 else price
         )
 
         order = OrderRequest(

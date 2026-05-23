@@ -47,9 +47,13 @@ signed net `position` quantity. Two entries both short the 6800 call
 aggregate into ONE conid row with `position = -2`. There is no id to
 intersect.
 
-`STATE_SCHEMA_DESIGN.md` already recorded the field-level consequence:
-`*_position_id` → `*_order_id` (IBKR positions derive from order IDs).
-F4 is where that decision becomes executable code.
+**Correction (P7-audit H13, 2026-05-22):** the F4 implementation
+keeps the legacy field names (`*_uic` / `*_position_id`); the conid
+is stored in `*_uic` and `*_position_id` is always `None` on the
+IBKR path. The `*_position_id → *_order_id` rename described in
+`STATE_SCHEMA_DESIGN.md` was abandoned and that doc is now marked
+SUPERSEDED. F4 is the executable conid→quantity reconciliation
+model, not a field rename.
 
 ### Identity model for the IB era
 

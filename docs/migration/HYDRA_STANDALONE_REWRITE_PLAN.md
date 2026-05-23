@@ -1,6 +1,9 @@
 # HYDRA Standalone Rewrite — Implementation Plan
 
-**Status**: ✅ APPROVED & IN PROGRESS — F1–F4 complete, F5 in progress (see §11.9)
+**Status**: ✅ **F1–F7 + P1–P7 code-complete (2026-05-22).** See
+`P7_GO_LIVE_PLAN.md` for the go-live sequence and
+`P7_AUDIT_FINDINGS.md` for the multi-agent audit register. (Earlier
+"F5 in progress" status was stale — corrected 2026-05-22.)
 **Created**: 2026-05-19
 **Owner**: Diogo Dias
 
@@ -641,4 +644,4 @@ Approve this updated plan (with §11 corrections applied)?
 
 ---
 
-**Last updated**: 2026-05-21 (F1–F4 complete, F5 in progress, 5-agent audit + remediation done)
+**Last updated**: 2026-05-22 (F1–F7 + P1–P7 code-complete; 6-agent P7 audit found 4 Critical + 13 High + Medium/Low — Criticals + most Highs fixed; see `P7_AUDIT_FINDINGS.md`)
