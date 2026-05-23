@@ -1878,7 +1878,14 @@ class HydraStrategy(MEICStrategy):
             q = self.broker.get_quote(conid)
             if not q:
                 return None
-            return q.get("mid") or q.get("last") or q.get("mark")
+            # P7-audit M10: explicit `is not None` ladder, not an
+            # `or`-chain — a legitimate 0.0 quote (rare for an index but
+            # possible during a halt) is a price, not a fallback trigger.
+            for key in ("mid", "last", "mark"):
+                v = q.get(key)
+                if v is not None:
+                    return v
+            return None
         except Exception as e:
             logger.warning(
                 f"_read_index_price({symbol}) failed "
@@ -9900,78 +9907,96 @@ class HydraStrategy(MEICStrategy):
 
         logger.info("Resetting for new trading day")
 
-        # STATE-004: Check for overnight 0DTE positions (should NEVER happen)
+        # STATE-004: Check for overnight 0DTE positions (should NEVER happen).
+        #
+        # P7-audit M7: the prior Saxo design gated this on
+        # `self.registry.get_positions(self.BOT_NAME)` as a fast cache hit
+        # before round-tripping to the broker. On IBKR the Position
+        # Registry is vestigial — IBKR has no per-leg position IDs, so
+        # F4 reconciliation keys on `(conid, quantity)` and the registry
+        # is always empty. That meant the entire STATE-004 trigger never
+        # fired on IBKR.
+        #
+        # Fix: ask the broker directly. ``_read_open_positions(strict=True)``
+        # raises on a fetch failure so a broker outage halts the reset
+        # conservatively instead of being mistaken for "all settled".
+        #
+        # Any stale registry entries (left over from a prior write that
+        # didn't unregister cleanly) get cleaned up too — harmless on
+        # IBKR but keeps the registry tidy if a multi-bot future
+        # resurrects it.
         try:
-            my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
+            open_positions = self._read_open_positions(strict=True)
         except Exception as e:
-            logger.error(f"Registry error checking for overnight positions: {e}")
-            my_position_ids = set()
-        if my_position_ids:
-            # FIX #82: the (vestigial) Position Registry still lists ids,
-            # but they may be stale (already settled). F4.5: verify
-            # against the broker directly via _read_open_positions —
-            # 0DTE options always settle same day, so anything still open
-            # at the new-day reset is a genuine overnight position. Uses
-            # strict=True so a fetch failure halts conservatively rather
-            # than being mistaken for "0 open".
-            try:
-                open_positions = self._read_open_positions(strict=True)
+            error_msg = (
+                f"CRITICAL: broker overnight-position check failed at "
+                f"new-day reset ({e}) — halting for safety"
+            )
+            logger.critical(error_msg)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title=f"{self.BOT_NAME} Overnight Position Check Failed!",
+                message=error_msg,
+                priority=AlertPriority.CRITICAL,
+                details={"error": str(e)},
+                contracts=self.contracts_per_entry,
+            )
+            self._critical_intervention_required = True
+            self._critical_intervention_reason = (
+                f"Overnight position verification failed: {e}"
+            )
+            return
 
-                if not open_positions:
-                    # Nothing open on the broker — registry is stale, clean it up
-                    logger.info(
-                        f"FIX #82: Registry had {len(my_position_ids)} stale "
-                        f"position id(s) but the broker confirms 0 still open "
-                        f"— cleaning up the registry"
+        if open_positions:
+            # Genuine overnight 0DTE — 0DTE options always settle same day,
+            # so anything still open at the new-day reset is a real
+            # problem requiring manual intervention.
+            open_conids = sorted(
+                {p.get("instrument_id") for p in open_positions},
+                key=lambda c: (c is None, c),
+            )
+            error_msg = (
+                f"CRITICAL: {len(open_positions)} {self.BOT_NAME} option "
+                f"position(s) still open on the broker overnight! "
+                f"0DTE should expire same day. Conids: {open_conids}"
+            )
+            logger.critical(error_msg)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title=f"{self.BOT_NAME} Overnight Position Detected!",
+                message=error_msg,
+                priority=AlertPriority.CRITICAL,
+                details={"conids": open_conids},
+                contracts=self.contracts_per_entry,
+            )
+            self._critical_intervention_required = True
+            self._critical_intervention_reason = (
+                "Overnight 0DTE positions detected - investigate immediately"
+            )
+            return  # Don't reset state, need to handle existing positions
+
+        # Broker shows nothing open — clean up any stale registry entries
+        # (vestigial on IBKR; defensive for the multi-bot legacy code path)
+        # and fall through to the normal reset.
+        try:
+            stale_position_ids = self.registry.get_positions(self.BOT_NAME)
+        except Exception as e:
+            logger.error(
+                f"Registry error reading positions at new-day reset: {e}"
+            )
+            stale_position_ids = set()
+        if stale_position_ids:
+            logger.info(
+                f"Cleaning {len(stale_position_ids)} stale registry "
+                f"id(s) at new-day reset (broker confirms 0 open)"
+            )
+            for pos_id in stale_position_ids:
+                try:
+                    self.registry.unregister(pos_id)
+                except Exception as e:
+                    logger.error(
+                        f"Registry error unregistering stale {pos_id}: {e}"
                     )
-                    for pos_id in my_position_ids:
-                        try:
-                            self.registry.unregister(pos_id)
-                        except Exception as e:
-                            logger.error(f"Registry error unregistering stale {pos_id}: {e}")
-                    # Fall through to normal reset below
-                else:
-                    # Positions genuinely still open — this is a real problem
-                    open_conids = sorted(
-                        {p.get("instrument_id") for p in open_positions},
-                        key=lambda c: (c is None, c),
-                    )
-                    error_msg = (
-                        f"CRITICAL: {len(open_positions)} {self.BOT_NAME} option "
-                        f"position(s) still open on the broker overnight! "
-                        f"0DTE should expire same day. Conids: {open_conids}"
-                    )
-                    logger.critical(error_msg)
-                    self.alert_service.send_alert(
-                        alert_type=AlertType.CRITICAL_INTERVENTION,
-                        title=f"{self.BOT_NAME} Overnight Position Detected!",
-                        message=error_msg,
-                        priority=AlertPriority.CRITICAL,
-                        details={"conids": open_conids},
-                        contracts=self.contracts_per_entry,
-                    )
-                    # Halt trading - manual intervention required
-                    self._critical_intervention_required = True
-                    self._critical_intervention_reason = "Overnight 0DTE positions detected - investigate immediately"
-                    return  # Don't reset state, need to handle existing positions
-            except Exception as e:
-                # Can't verify — be conservative and halt
-                error_msg = (
-                    f"CRITICAL: {len(my_position_ids)} {self.BOT_NAME} positions in registry and "
-                    f"Saxo verification failed ({e}) — halting for safety"
-                )
-                logger.critical(error_msg)
-                self.alert_service.send_alert(
-                    alert_type=AlertType.CRITICAL_INTERVENTION,
-                    title=f"{self.BOT_NAME} Overnight Position Check Failed!",
-                    message=error_msg,
-                    priority=AlertPriority.CRITICAL,
-                    details={"position_ids": list(my_position_ids), "error": str(e)},
-                    contracts=self.contracts_per_entry,
-                )
-                self._critical_intervention_required = True
-                self._critical_intervention_reason = f"Overnight position verification failed: {e}"
-                return
 
         self.daily_state = MEICDailyState()
         self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
@@ -10314,20 +10339,28 @@ class HydraStrategy(MEICStrategy):
     def _reconcile_positions(self):
         """Override: After base reconciliation, detect manually closed longs.
 
-        When a long leg disappears from Saxo (manually sold by the user),
-        the base class clears position_id and UIC. This override checks
-        Saxo's closedpositions API to capture the actual sale revenue,
-        replicating what MKT-033 would have recorded.
+        When a long leg disappears from the broker (manually sold by the
+        user), the base class clears position_id and UIC. This override
+        checks the broker's closedpositions endpoint to capture the
+        actual sale revenue, replicating what MKT-033 would have recorded.
+
+        P7-audit M8: trigger keys on ``*_uic`` (conid) alone — not
+        ``and pos_id`` — because IBKR has no per-leg position id
+        (``*_position_id`` is always None on the IBKR path). Gating on
+        ``pos_id`` would dead-code the external-sale capture on IBKR
+        even though the closedpositions lookup keys on conid only.
         """
         # Path-B dry-run skip (2026-04-27): the base class skip (MEIC) already
         # returns early in dry mode so this override never sees cleared longs
         # to investigate. But to be defensive (and avoid the MKT-033 AUTO call
         # to client.get_closed_position_price for DRY_* UICs that fired today
-        # at 10:45:23), exit explicitly before any Saxo API call.
+        # at 10:45:23), exit explicitly before any broker API call.
         if self.dry_run:
             return
 
-        # Snapshot which long legs have UICs BEFORE base reconciliation clears them
+        # Snapshot which long legs have UICs (conids) BEFORE base reconciliation
+        # clears them. P7-audit M8: gating on `uic` only, not also `pos_id`,
+        # because on IBKR `pos_id` is always None.
         pre_longs = {}
         for entry in self.daily_state.entries:
             if not entry.entry_time:
@@ -10335,11 +10368,9 @@ class HydraStrategy(MEICStrategy):
             for side in ("call", "put"):
                 sold = getattr(entry, f"{side}_long_sold", False)
                 uic = getattr(entry, f"long_{side}_uic", None)
-                pos_id = getattr(entry, f"long_{side}_position_id", None)
-                if uic and pos_id and not sold:
+                if uic and not sold:
                     pre_longs[(entry.entry_number, side)] = {
                         "uic": uic,
-                        "pos_id": pos_id,
                     }
 
         # Run base reconciliation (clears position_id + UIC for missing legs)

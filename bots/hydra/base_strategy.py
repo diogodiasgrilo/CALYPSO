@@ -2745,23 +2745,28 @@ class MEICStrategy:
             # GAP-G (F7.7): IBKR keys the price lookup by conid (str) and
             # the legs by *_uic — IBKR has no per-leg position id, and
             # `avg_cost` is the actual execution price.
-            if self.broker is not None:
-                positions = self._read_open_positions()
-                if not positions:
-                    logger.warning("FIX-70: Could not fetch positions for entry price verification")
-                    return
-                price_lookup = {
-                    str(p["instrument_id"]): p["avg_cost"]
-                    for p in positions
-                    if p.get("instrument_id") is not None
-                    and (p.get("avg_cost") or 0) > 0
-                }
-                legs = [
-                    ("short_call_uic", "short_call"),
-                    ("long_call_uic", "long_call"),
-                    ("short_put_uic", "short_put"),
-                    ("long_put_uic", "long_put"),
-                ]
+            #
+            # P7-audit M6: the prior `if self.broker is not None:` guard
+            # was vacuous (HYDRA always has a broker on the IBKR path) AND
+            # buggy — `legs` / `price_lookup` were scoped inside the guard
+            # but referenced outside, so a False guard would NameError. The
+            # guard is now flattened.
+            positions = self._read_open_positions()
+            if not positions:
+                logger.warning("FIX-70: Could not fetch positions for entry price verification")
+                return
+            price_lookup = {
+                str(p["instrument_id"]): p["avg_cost"]
+                for p in positions
+                if p.get("instrument_id") is not None
+                and (p.get("avg_cost") or 0) > 0
+            }
+            legs = [
+                ("short_call_uic", "short_call"),
+                ("long_call_uic", "long_call"),
+                ("short_put_uic", "short_put"),
+                ("long_put_uic", "long_put"),
+            ]
             corrections = {}  # leg_name -> actual_price from PositionBase.OpenPrice
 
             for pos_attr, leg_name in legs:
@@ -2868,15 +2873,20 @@ class MEICStrategy:
             # F6.4 — closes the leg via _close_leg_order (IBClient).
             # `result` is normalized to a {"OrderId": …}/None shape so
             # the downstream registry + logging logic is unchanged.
-            if self.broker is not None:
-                _res = self._close_leg_order(
-                    instrument_id=uic, side="BUY",
-                    quantity=self.contracts_per_entry,
-                )
-                result = (
-                    {"OrderId": _res.get("order_id")}
-                    if _res.get("filled") else None
-                )
+            #
+            # P7-audit M6: the prior `if self.broker is not None:` guard
+            # was vacuous (HYDRA always has a broker on the IBKR path)
+            # AND latently buggy — `result` was only defined when the
+            # guard was True, so a False guard would have raised
+            # NameError at the `if result:` check below. Flattened.
+            _res = self._close_leg_order(
+                instrument_id=uic, side="BUY",
+                quantity=self.contracts_per_entry,
+            )
+            result = (
+                {"OrderId": _res.get("order_id")}
+                if _res.get("filled") else None
+            )
             if result:
                 logger.info(f"Closed naked short {pos_id} via order {result.get('OrderId')}")
                 try:
@@ -4193,12 +4203,16 @@ class MEICStrategy:
             Total unrealized P&L in dollars
         """
         try:
-            if self.broker is not None:
-                positions = self._read_open_positions()
-                return sum(
-                    self._get_broker_pnl_for_entry(entry, positions=positions)
-                    for entry in self.daily_state.active_entries
-                )
+            # P7-audit M6: the prior `if self.broker is not None:` guard
+            # was vacuous (HYDRA always has a broker on the IBKR path) AND
+            # would silently return None from a `-> float` method if the
+            # guard were ever False. Flattened — broker fetch failure
+            # now hits the except branch with the mid-price fallback.
+            positions = self._read_open_positions()
+            return sum(
+                self._get_broker_pnl_for_entry(entry, positions=positions)
+                for entry in self.daily_state.active_entries
+            )
         except Exception as e:
             logger.debug(f"Error getting total broker P&L: {e}")
             # Fall back to mid-price calculation
