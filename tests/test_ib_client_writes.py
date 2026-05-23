@@ -67,6 +67,13 @@ def connected_client(paper_creds):
     portfolio_result.data = [{"accountId": "DU1234567"}]
     portfolio_result.error = None
     mock_ibkr.portfolio_accounts.return_value = portfolio_result
+    # P7-audit M11: what_if_order now primes /iserver/accounts via
+    # _ensure_iserver_primed (same preflight as snapshot). Configure the
+    # mock so the priming call returns a clean Result.
+    iserver_result = MagicMock()
+    iserver_result.data = {}
+    iserver_result.error = None
+    mock_ibkr.receive_brokerage_accounts.return_value = iserver_result
 
     with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr):
         client = IBClient(IBConfig(credentials=paper_creds))
@@ -502,6 +509,26 @@ class TestSubmitOrderResponseShapes:
             conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0,
         )
         assert out == {}
+
+    def test_prefers_order_id_entry_over_reply_prompt(self, connected_client):
+        """P7-audit M15: if a list response interleaves a reply-prompt
+        entry (no `order_id`/`id`) with a real order entry, promote the
+        order entry. Otherwise the caller reads `order_id=None` and
+        treats the fill as a failure even though IBKR accepted it."""
+        client, mock_ibkr = connected_client
+        # Reply-prompt-shaped entry FIRST, real order SECOND.
+        mock_ibkr.place_order.return_value = _mk_result([
+            {"message": ["Confirm price improvement"], "isSuppressed": False},
+            {"order_id": "real_id", "order_status": "Submitted"},
+        ])
+        out = client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0,
+        )
+        assert out["order_id"] == "real_id"
+        # The reply-prompt entry is preserved under `_legs` (nothing
+        # silently dropped — caller can inspect for unhandled prompts).
+        assert "_legs" in out
+        assert any("message" in d for d in out["_legs"])
 
 
 class TestPlaceMarketOrder:

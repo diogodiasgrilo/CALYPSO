@@ -697,7 +697,19 @@ class IBClient:
                 len(data),
                 [a.get("accountId") for a in data],
             )
-        return data[0]["accountId"]
+        # P7-audit M13: surface a missing accountId as a typed
+        # IBAuthError, not a raw KeyError — operators reading the log
+        # need a clear "broker returned a malformed account row" signal,
+        # not a generic Python traceback. (Should never happen in
+        # practice: IBKR's portfolio_accounts always returns rows shaped
+        # `{accountId, accountVan, accountTitle, ...}`. Defense in depth.)
+        try:
+            return data[0]["accountId"]
+        except KeyError as exc:
+            raise IBAuthError(
+                f"IBKR portfolio_accounts returned a row without 'accountId': "
+                f"{data[0]!r}"
+            ) from exc
 
     def disconnect(self) -> None:
         """Tear down the brokerage session cleanly.
@@ -1344,7 +1356,30 @@ class IBClient:
                 return data
             if attempt < _SNAPSHOT_MAX_WARMUP_POLLS - 1:
                 time.sleep(_SNAPSHOT_POLL_INTERVAL_S)
-        return data or []
+        # P7-audit M17: warmup budget exhausted. A non-empty `data` here
+        # is metadata-only (`{conid, _updated}` with no price fields) —
+        # truthy but useless to the caller; an empty `data` is "broker
+        # returned nothing". Log diagnostically so the operator can tell
+        # "no entitlement" from "preflight bug" from "no quote", and
+        # always return a list (never None) so callers can iterate
+        # without a type check.
+        if data:
+            logger.warning(
+                "snapshot warmup exhausted for conids=%s — returning "
+                "metadata-only rows (no price fields). "
+                "Likely causes: no real-time entitlement for this conid, "
+                "stale/invalid conid, or IBKR snapshot service degraded. "
+                "Last response: %r",
+                conids, data,
+            )
+        else:
+            logger.warning(
+                "snapshot warmup exhausted for conids=%s — broker "
+                "returned empty list. Likely IBKR snapshot service "
+                "outage or preflight degradation.",
+                conids,
+            )
+        return data if isinstance(data, list) else []
 
     def get_quote(
         self,
@@ -1647,6 +1682,15 @@ class IBClient:
         Uses CP API's currency_exchange_rate endpoint. Note: only one direction
         may be exposed — call site should handle inverse if needed.
 
+        P7-audit M14: the IBKR ``currency_exchange_rate`` response shape
+        is ``{"USD.EUR": 0.92}`` (or ``{"rate": 0.92}`` on some variants).
+        The lookup now explicitly tries known shapes — ``"rate"``,
+        ``"{source}.{target}"``, ``"{source}_{target}"``,
+        ``"{target}.{source}"`` (inverse) — and logs a warning when none
+        match so a real broker shape change surfaces in logs instead of
+        silently returning None. (Inverse is logged but not auto-flipped
+        — callers know the directional convention they asked for.)
+
         SaxoClient.get_fx_rate() equivalent.
         """
         self._require_connected()
@@ -1658,8 +1702,42 @@ class IBClient:
             source=source, target=target,
         )
         if isinstance(data, dict):
-            rate = data.get("rate") or data.get(f"{source}_{target}")
-            return float(rate) if rate else None
+            # Try known IBKR response shapes in order of likelihood.
+            for key in (
+                "rate",
+                f"{source}.{target}",
+                f"{source}_{target}",
+            ):
+                v = data.get(key)
+                if v is not None:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        continue
+            # Inverse shape — log it so a future maintainer notices the
+            # convention mismatch instead of silently mis-converting.
+            inverse_key = f"{target}.{source}"
+            inv = data.get(inverse_key)
+            if inv is not None:
+                try:
+                    rate = float(inv)
+                    if rate:
+                        logger.warning(
+                            "get_fx_rate: broker returned inverse key %r "
+                            "(=%.6f) for requested %s/%s; returning the "
+                            "inverse-flipped value (1/rate). Verify "
+                            "direction matches caller expectation.",
+                            inverse_key, rate, source, target,
+                        )
+                        return 1.0 / rate
+                except (TypeError, ValueError):
+                    pass
+            logger.warning(
+                "get_fx_rate: no known rate key in response for %s/%s; "
+                "keys=%s",
+                source, target, list(data.keys()),
+            )
+            return None
         if isinstance(data, (int, float, str)):
             try:
                 return float(data)
@@ -2326,6 +2404,26 @@ class IBClient:
                         status="cancelled",
                     )
                 raise
+            except CircuitBreakerOpen as exc:
+                # P7-audit M12: the orders breaker opened DURING polling
+                # (e.g. five consecutive retryable 5xx from get_order_status).
+                # The order is unknown — it may still be working, may have
+                # filled, may have been purged. We must NOT propagate
+                # CircuitBreakerOpen — the documented `Raises:` clause says
+                # only ValueError / IBClientError. Surface as `timed_out`
+                # (the existing "may still be working — caller escalates"
+                # path: cancel the order id + retry at the next chase level).
+                logger.error(
+                    "place_and_wait_for_fill: orders breaker OPEN during "
+                    "status poll for %s (%s) — surfacing as timed_out; "
+                    "caller should cancel + escalate",
+                    order_id, exc,
+                )
+                return _build_fill_result_dict(
+                    order_id=str(order_id),
+                    raw=last_status_resp,
+                    status="timed_out",
+                )
 
             last_status_resp = status_resp or {}
             status = (
@@ -2499,8 +2597,17 @@ class IBClient:
 
         Per research_scratch/11_cpapi_margin_account.md: whatif does NOT
         fire reply prompts (no `answers` param needed).
+
+        P7-audit M11: ``/iserver/account/{accountId}/order/whatif`` is on
+        the same ``/iserver`` namespace as the snapshot endpoint and
+        requires the brokerage session to be primed via
+        ``/iserver/accounts``. Without the preflight, whatif silently
+        returns an empty / metadata-only block, defeating the BP gate.
+        ``_ensure_iserver_primed`` is idempotent so the extra call is
+        free on subsequent invocations.
         """
         self._require_connected()
+        self._ensure_iserver_primed()
         return self._ib_call(
             "orders", self._client.whatif_order,
             order_request=order,
@@ -2535,13 +2642,38 @@ class IBClient:
         # convenience and stash the remaining entries under "_legs" so
         # nothing is silently dropped — callers that need per-leg fill
         # tracking can read order["_legs"].
+        #
+        # P7-audit M15: prefer entries that look like real order responses
+        # (carry `order_id` or `id`) over reply-prompt entries (which
+        # carry `message` / `messageIds` but not `order_id`). Reply
+        # prompts SHOULD be fully consumed by ibind's reply loop against
+        # the `answers` dict, but if an unknown prompt slips through, we
+        # don't want to promote it to "the order" and have the caller
+        # then read `order_id=None` as a fill failure. If no entry
+        # carries an id, fall back to the legacy "first dict" behavior
+        # and log a warning so the operator notices.
         if isinstance(data, list):
             if not data:
                 data = {}
             elif len(data) == 1:
                 data = data[0]
             else:
-                head, *rest = data
+                def _looks_like_order(d):
+                    return isinstance(d, dict) and (
+                        d.get("order_id") or d.get("id")
+                    )
+                ordered = [d for d in data if _looks_like_order(d)]
+                if ordered:
+                    head = ordered[0]
+                    rest = [d for d in data if d is not head]
+                else:
+                    logger.warning(
+                        "place_order: list response had no entry with "
+                        "order_id/id (possible unresolved reply prompt); "
+                        "promoting first entry. raw=%r", data,
+                    )
+                    head = data[0]
+                    rest = list(data[1:])
                 data = dict(head) if isinstance(head, dict) else {"_first": head}
                 data["_legs"] = rest
         return data
@@ -2574,14 +2706,39 @@ class IBClient:
         # field codes ("31", "84", "7308", …) instead of ibind's remapped
         # human names — StreamingManager._handle_tick filters on numeric
         # keys, and the rest of IBClient reads field codes directly.
+        #
+        # P7-audit M16: the prior code passed `start=True` (which kicks
+        # ibind's connect/listen threads asynchronously) and then
+        # immediately called `StreamingManager.start()` — our consume
+        # thread could race the WS handshake and try to read from a
+        # not-yet-ready queue accessor. Sequence is now explicit:
+        # construct with `start=False`, start the WS, briefly wait for
+        # `ws.ready`, THEN start our StreamingManager. Best-effort wait
+        # (up to 5s) — if the WS isn't ready, StreamingManager.start()
+        # still proceeds and ibind's reconnect-on-close handles a later
+        # connection drop.
         ws = IbkrWsClient(
             ibkr_client=self._client,
             account_id=self.account_id,
             use_oauth=True,
             access_token=self.cfg.credentials.access_token,
             unwrap_market_data=False,
-            start=True,
+            start=False,
         )
+        ws.start()
+        # Wait briefly for `ready` so StreamingManager doesn't race the
+        # handshake. We don't gate on it — log + continue if it's slow.
+        ws_ready_deadline = time.monotonic() + 5.0
+        while time.monotonic() < ws_ready_deadline:
+            if getattr(ws, "ready", False):
+                break
+            time.sleep(0.1)
+        else:
+            logger.warning(
+                "IBClient: IbkrWsClient did not report ready within 5s "
+                "— starting StreamingManager anyway; ibind reconnect "
+                "will recover if the WS is slow."
+            )
         self._ws_client = ws
         self._streaming = StreamingManager(ws)
         self._streaming.start()
