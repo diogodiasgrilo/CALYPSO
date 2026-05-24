@@ -100,3 +100,33 @@ Round 1 (this register) → fix Critical, then High, then Medium, then
 Low, each with a regression test → Round 2 re-audit of the fixes →
 Round 3 senior-overseer full-branch verification. No finding closes
 without a test or an explicit, documented "accepted" rationale.
+
+## Round 2 re-audit — 2026-05-22, branch tip `7d6f04f`
+
+Four parallel domain agents re-verified the fixes against the live
+code, asking three questions per finding: (a) does the code actually
+do what the register claims? (b) does the fix miss any edge case?
+(c) did the fix break anything in surrounding code? Plus a fresh
+sweep for new issues. Read-only audit; no files modified.
+
+| Agent | Domain | Verdict | New findings | Concerns |
+|---|---|---|---|---|
+| 1 | IBKR Client + writes (`ib_client.py`, `ib_oauth.py`, `ib_retry.py`, `ib_streaming.py`, related tests) | ✅ PASS | 0 | 0 |
+| 2 | HYDRA strategy + position flow (`strategy.py`, `base_strategy.py`, `main.py`, `__init__.py`, init tests) | ✅ PASS | 0 | 0 |
+| 3 | Ops / Auth / Deploy (`ib_oauth.py`, `hydra.service`, `IBKR_CREDENTIALS_SETUP.md`, migration docs) | ✅ PASS | 0 | 3 minor (doc clarity — addressed) |
+| 4 | Tests + integration (all `tests/test_ib_*`, `test_hydra_init_broker_kwarg`) | ✅ PASS | 0 | 3 low-risk observations (test isolation, OS assumption, retry-policy mutation — all acceptable) |
+
+**Round 2 result: PASS across all 4 domains, 0 new bugs introduced
+by the Round 1 fixes, 0 incomplete fixes.** The three minor doc-
+clarity concerns from Agent 3 were addressed post-audit:
+
+- `hydra.service` sandboxing comments now explicitly state that
+  `LoadCredentialEncrypted=` runs BEFORE the sandboxing directives
+  take effect (so `ProtectSystem=strict` does not block credential
+  reading — the bot reads from the tmpfs at runtime, never from
+  `/etc/calypso/ibkr/`).
+- `IBKR_CREDENTIALS_SETUP.md` step 1 now spells out the expected
+  ownership/mode invariant (`stat -c '%a %U:%G'` returns `700 root:root`)
+  and notes that `install -d -m 0700` sets both in one step.
+
+Round 3 (senior-overseer full-branch verification) is the next gate.

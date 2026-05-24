@@ -30,6 +30,10 @@ Run as root on `calypso-bot`.
 
 ```bash
 # 1. Create the credentials directory (root-only).
+#    `install -d -m 0700` creates with mode 700 AND root ownership in one
+#    step; verify with `stat -c '%a %U:%G' /etc/calypso/ibkr` (expect 700
+#    root:root). The .cred files inherit root ownership and 0600 mode
+#    from systemd-creds encrypt.
 sudo install -d -m 0700 /etc/calypso/ibkr
 
 # 2. Encrypt each credential. The --name MUST match the credential ID in

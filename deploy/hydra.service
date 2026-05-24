@@ -58,6 +58,13 @@ SyslogIdentifier=hydra
 # The service holds decrypted OAuth private keys; a code-execution bug in
 # the ibind/strategy surface should not be able to escalate or write
 # outside the bot's own tree. Verify with `systemd-analyze security hydra`.
+#
+# LoadCredentialEncrypted= above runs BEFORE these sandboxing directives
+# take effect: systemd decrypts each .cred file with the host key, lands
+# the plaintext in a private tmpfs at $CREDENTIALS_DIRECTORY, then drops
+# the service into the sandbox. ProtectSystem=strict therefore does NOT
+# block credential reading — the bot reads from the tmpfs, never from
+# /etc/calypso/ibkr/ at runtime.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
