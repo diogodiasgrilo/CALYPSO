@@ -299,6 +299,111 @@ class TestValidateSecrets:
         with pytest.raises(ValueError, match="uppercase"):
             self._base_creds(consumer_key="CALYPSOa").validate_secrets()
 
+    # ─── Polish Item 10: secret-leak regression tests ─────────────────────
+
+    def test_invalid_consumer_key_error_message_does_NOT_echo_value(self):
+        """Polish Item 10: validate_secrets must not echo the bad
+        consumer_key value in its error message. A bad key that hits the
+        regex check would otherwise leak into tracebacks and log lines.
+
+        Test value `'BADcal999'` is 9 chars (passes the length check) and
+        has lowercase letters (fails the [A-Z0-9]+ regex check) — that's
+        the branch the redaction-marker lives in.
+        """
+        SECRET_LEAKED_IF_PRESENT = "BADcal999"  # 9 chars, has lowercase
+        assert len(SECRET_LEAKED_IF_PRESENT) <= 9  # sanity: hits regex branch
+        try:
+            self._base_creds(consumer_key=SECRET_LEAKED_IF_PRESENT).validate_secrets()
+        except ValueError as e:
+            assert SECRET_LEAKED_IF_PRESENT not in str(e), (
+                f"validate_secrets error message echoed the consumer_key "
+                f"value: {e!r}"
+            )
+            assert "redacted" in str(e), (
+                f"expected the redaction-marker in the message: {e!r}"
+            )
+
+    def test_too_long_consumer_key_error_message_includes_length_only(self):
+        """The too-long branch already uses len() rather than the value;
+        pin that contract."""
+        SECRET_LEAKED_IF_PRESENT = "VERYLONGSECRETKEY12345"
+        try:
+            self._base_creds(consumer_key=SECRET_LEAKED_IF_PRESENT).validate_secrets()
+        except ValueError as e:
+            assert SECRET_LEAKED_IF_PRESENT not in str(e), (
+                f"too-long branch echoed the consumer_key value: {e!r}"
+            )
+            assert str(len(SECRET_LEAKED_IF_PRESENT)) in str(e), (
+                f"expected the length in the message: {e!r}"
+            )
+
+
+class TestCredentialReprDoesNotLeak:
+    """Polish Item 10: the IBKRCredentials default dataclass __repr__ must
+    not include the three string secrets (consumer_key, access_token,
+    access_token_secret). The path fields are not secret and may remain.
+
+    A failure here means a future refactor accidentally removed the
+    field(repr=False) markers — and any traceback / logger.exception()
+    that touches a credentials object would start leaking the secrets
+    into logs.
+    """
+
+    def _make_creds(self):
+        return IBKRCredentials(
+            environment="paper",
+            consumer_key="CK_LEAK_CANARY_9",
+            access_token="AT_LEAK_CANARY_ABCDEFGH",
+            access_token_secret="ATS_LEAK_CANARY_IJKLMNOP",
+            private_signature_path=Path("/tmp/sig.pem"),
+            private_encryption_path=Path("/tmp/enc.pem"),
+            dh_param_path=Path("/tmp/dh.pem"),
+        )
+
+    def test_repr_excludes_consumer_key(self):
+        r = repr(self._make_creds())
+        assert "CK_LEAK_CANARY" not in r, (
+            f"repr() leaked consumer_key: {r!r}"
+        )
+
+    def test_repr_excludes_access_token(self):
+        r = repr(self._make_creds())
+        assert "AT_LEAK_CANARY" not in r, (
+            f"repr() leaked access_token: {r!r}"
+        )
+
+    def test_repr_excludes_access_token_secret(self):
+        r = repr(self._make_creds())
+        assert "ATS_LEAK_CANARY" not in r, (
+            f"repr() leaked access_token_secret: {r!r}"
+        )
+
+    def test_str_excludes_all_secrets(self):
+        """str(creds) defaults to __repr__ for a frozen dataclass; pin
+        that no secret leaks via the str() path either."""
+        s = str(self._make_creds())
+        for secret in ("CK_LEAK_CANARY", "AT_LEAK_CANARY", "ATS_LEAK_CANARY"):
+            assert secret not in s, f"str() leaked {secret}: {s!r}"
+
+    def test_repr_keeps_environment_for_debugging(self):
+        """The non-secret fields (environment, paths) should still appear
+        in repr — operators need to identify which credentials object
+        they're looking at."""
+        r = repr(self._make_creds())
+        assert "paper" in r, (
+            f"environment should remain in repr for debugging: {r!r}"
+        )
+
+    def test_f_string_format_does_not_leak(self):
+        """f-strings call __format__ which defaults to __str__ which
+        defaults to __repr__ — pin that the chain doesn't leak."""
+        c = self._make_creds()
+        formatted = f"creds={c}"
+        for secret in ("CK_LEAK_CANARY", "AT_LEAK_CANARY", "ATS_LEAK_CANARY"):
+            assert secret not in formatted, (
+                f"f-string leaked {secret}: {formatted!r}"
+            )
+
 
 class TestValidatePaths:
     def test_existing_paths_pass(self, tmp_path):

@@ -26,7 +26,7 @@ import logging
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -56,11 +56,19 @@ class IBKRCredentials:
       access_token, access_token_secret: returned by IBKR at "Generate Token"
       private_signature_path, private_encryption_path: PEM files on disk
       dh_param_path: PEM file on disk; we extract the hex prime via openssl
+
+    Secret-leak hardening (Polish Item 10, 2026-05-24): the three string
+    secrets (`consumer_key`, `access_token`, `access_token_secret`) are
+    marked `repr=False` so the default dataclass `__repr__` cannot leak
+    them into a traceback or log line. The path fields are not secret
+    (just filesystem locations) so they remain in repr for debugging.
+    A custom `__repr__` would have worked too but the field flag is
+    less code and equally tested by the test suite.
     """
     environment: str
-    consumer_key: str
-    access_token: str
-    access_token_secret: str
+    consumer_key: str = field(repr=False)
+    access_token: str = field(repr=False)
+    access_token_secret: str = field(repr=False)
     private_signature_path: Path
     private_encryption_path: Path
     dh_param_path: Path
@@ -93,9 +101,14 @@ class IBKRCredentials:
                 f"consumer_key must be at most 9 chars; got {len(self.consumer_key)}"
             )
         if not re.fullmatch(r"[A-Z0-9]+", self.consumer_key):
+            # P7-audit / Polish Item 10: don't echo the bad consumer_key
+            # value in the error message — that value WILL land in
+            # tracebacks / logs, and a misregistered key still has secret
+            # value (the IBKR account-recovery story is non-trivial).
+            # Give the operator enough to debug without including the value.
             raise ValueError(
-                f"consumer_key must be uppercase A-Z / 0-9 only; got "
-                f"{self.consumer_key!r}"
+                f"consumer_key must be uppercase A-Z / 0-9 only "
+                f"(length {len(self.consumer_key)}, redacted)"
             )
         if not self.access_token or not self.access_token_secret:
             raise ValueError(
