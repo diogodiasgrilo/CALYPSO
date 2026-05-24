@@ -64,6 +64,12 @@ logs/
 *.txt
 bot_log*.txt
 *_trades.json
+# Explicit allow-list: pip requirements files MUST be version-controlled.
+# The blanket *.txt ignore (line 64) was Saxo-era hygiene for bot_log_*.txt
+# files; we preserve it but escape the pip-installable manifests.
+!requirements.txt
+!requirements-lock.txt
+!requirements-dev.txt
 
 # Data files (persistent state - machine specific)
 data/

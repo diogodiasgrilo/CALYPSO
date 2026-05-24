@@ -1,0 +1,5 @@
+# Cloud Function dependencies for alert processing
+functions-framework==3.*
+google-cloud-secret-manager==2.*
+requests>=2.28.0
+pytz>=2024.1  # Timezone handling for EST/ET timestamps
