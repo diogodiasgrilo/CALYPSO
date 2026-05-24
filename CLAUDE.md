@@ -1,4 +1,9 @@
-# CALYPSO Trading Bot Infrastructure
+# CALYPSO — HYDRA on Interactive Brokers
+
+> **Branch state (this branch only — `hydra-ibkr-standalone`).**
+> Bot: **HYDRA** v`2.0.0-rc.1` (IBKR-standalone). Broker: **Interactive Brokers Web API** (ibind OAuth 1.0a, no gateway). Account: **paper only** on this branch — there is no live-money path. The legacy Saxo Bank integration plus the 4 sibling bots (Iron Fly, Delta Neutral, Rolling Put Diagonal, MEIC) are removed or kill-switched (`DISABLED_FOR_SAFETY=True`) here. Migration history lives in [`docs/migration/`](docs/migration/). Pre-migration code is preserved on `main`.
+
+---
 
 ## CRITICAL: Bot Control Warning
 
@@ -6,663 +11,466 @@
 
 ---
 
+## CRITICAL: Paper-Only Branch
+
+This branch trades the IBKR **paper account** only. The systemd unit's `LoadCredentialEncrypted=` directives reference paper credentials. The legacy `--live` CLI flag is a no-op (logs a NOTE on startup). The `IBClient.is_paper` property is `True` for the loaded credentials. Do not flip any of these to live without:
+
+1. Issuing a separate IBKR live-OAuth keypair
+2. Re-encrypting credentials with `systemd-creds encrypt` for live
+3. Updating the env name in `load_credentials("live")` call sites
+4. Approval — this is not a config flip
+
+---
+
 ## CRITICAL: Shared Code Change Policy
 
 **Before modifying any code in `shared/`, STOP and consider:**
 
-1. **Which bots use this code?** Check with `grep -r "function_name" bots/`
-2. **Are those bots working correctly?** If Delta Neutral is working great, don't touch code it depends on unless absolutely necessary.
-3. **Is this change surgical or broad?** Fix the specific bug, don't "improve" surrounding code.
-4. **Get explicit approval** before changing shared code that affects working bots.
+1. **What does HYDRA actually use?** Check with `grep -rn "function_name" bots/hydra/ shared/`.
+2. **Is this change surgical or broad?** Fix the specific bug, don't "improve" surrounding code.
+3. **Will it survive the ibind upgrade path?** Anything that depends on internal ibind shapes should have a regression test.
 
-**The principle: Working code earns trust. Don't touch it without a clear reason.**
-
-### When Fixing a Bug in One Bot:
-- ✅ **DO**: Make the minimal change needed to fix that bot's issue
-- ✅ **DO**: Keep changes isolated to that bot's code when possible
-- ❌ **DON'T**: "Improve" shared code that other working bots depend on
-- ❌ **DON'T**: Refactor or add defensive code to paths used by working bots
-
-### If Shared Code Change Is Truly Necessary:
-1. Explicitly state: "This change affects Delta Neutral / MEIC / etc."
-2. Explain why the change is safe for those bots
-3. Get user approval before proceeding
-4. Test that all affected bots still work after deployment
-
-**Example (2026-02-02):** When fixing Iron Fly's P&L calculation, changes were made to `saxo_client.py` that also affected Delta Neutral. While the changes were backwards-compatible, they should have been flagged for approval since Delta Neutral was working correctly.
+The 4 sibling bots' `main.py` files are kill-switched at module top with `DISABLED_FOR_SAFETY = True` + `_check_disabled_kill_switch()` (added in v1.24.0). They cannot be `systemctl start`ed accidentally. Their code is preserved for back-compat / future restoration on `main`.
 
 ---
 
 ## Project Overview
 
-CALYPSO is a monorepo containing multiple automated options trading bots that trade SPX 0DTE options via Saxo Bank's OpenAPI. All bots run on a Google Cloud VM and use:
-- **Saxo Bank OpenAPI** for order execution and market data
-- **Google Secret Manager** for credentials (never in config files)
-- **Google Sheets** for trade logging and dashboards
-- **WebSocket streaming** for real-time price data
+CALYPSO on this branch is a single 0DTE SPX iron-condor trading bot (**HYDRA**) running on a Google Cloud VM, talking to IBKR via the Web API. Stack:
+
+- **Broker:** Interactive Brokers Client Portal Web API via [`ibind`](https://github.com/Voyz/ibind) 0.1.23 (OAuth 1.0a, no gateway/container)
+- **Credentials:** systemd `LoadCredentialEncrypted=` (TPM- or host-key-bound .cred files in `/etc/calypso/ibkr/`). No `token_keeper`-style refresh service is needed — OAuth 1.0a is unattended; the live session token rotates cryptographically and the morning re-auth gate handles the 01:00 ET daily reset.
+- **Google Sheets** for trade logging and post-settlement dashboards
 - **Pub/Sub + Cloud Functions** for Telegram/Email alerts (Telegram Bot API + Gmail)
+- **Polygon Options Starter** for the GEX-based Brandon variants (B/C)
 
 ### Codebase Structure
+
 ```
 bots/
-  iron_fly_0dte/      # Doc Severson's Iron Fly strategy (PAUSED)
-  delta_neutral/      # Brian's Delta Neutral strategy
-  rolling_put_diagonal/  # Bill Belt's Rolling Put Diagonal strategy
-  meic/               # Tammy Chambless's MEIC strategy (Multiple Entry Iron Condors)
-  hydra/              # HYDRA: MEIC + Trend Following hybrid (EMA 20/40 direction filter)
+  hydra/                      # the only active bot on this branch
+    main.py                   # entry point, monitoring loop, signal handlers
+    strategy.py               # HYDRA subclass (IBKR-aware overrides)
+    base_strategy.py          # MEICStrategy (IBKR-native; F1–F7 ports applied)
+    brandon/                  # Brandon Trojan Horse variants (B/C only)
+    config/                   # config.json + config_variant_{b,c}.json
+  iron_fly_0dte/              # KILL-SWITCHED — DISABLED_FOR_SAFETY = True
+  delta_neutral/              # KILL-SWITCHED
+  rolling_put_diagonal/       # KILL-SWITCHED
+  meic/                       # KILL-SWITCHED (importable as HYDRA's parent class)
 
-shared/               # Shared modules used by all bots
-  saxo_client.py      # Saxo Bank API client (orders, positions, streaming)
-  logger_service.py   # Trade logging (Google Sheets, local files)
-  config_loader.py    # Config loading with Secret Manager integration
-  market_hours.py     # Market hours, holidays, early close detection
-  event_calendar.py   # FOMC/economic calendar (SINGLE SOURCE OF TRUTH for all bots)
-  secret_manager.py   # Google Secret Manager integration
-  token_coordinator.py # OAuth token refresh coordination
-  external_price_feed.py # Yahoo Finance fallback for VIX
-  technical_indicators.py # TA calculations
-  alert_service.py    # Telegram/Email alerting via Pub/Sub
+shared/
+  ib_client.py                # IBClient — OAuth + REST + write path + reconcile (Saxo replacement)
+  ib_oauth.py                 # credentials loader; reads $CREDENTIALS_DIRECTORY OR env vars
+  ib_retry.py                 # RetryPolicy + per-family CircuitBreaker (oauth/session/portfolio/market/orders)
+  ib_streaming.py             # StreamingManager (lazy IbkrWsClient wrapper — REST-only by default)
+  ib_reconcile.py             # conid→quantity reconciliation primitives
+  logger_service.py           # Google Sheets / trade-logging (timeout-protected)
+  config_loader.py            # JSON config + Secret Manager
+  market_hours.py             # is_market_open / is_early_close_day / get_us_market_time
+  event_calendar.py           # FOMC + economic calendar (single source of truth)
+  secret_manager.py           # GCP Secret Manager
+  external_price_feed.py      # Yahoo Finance fallback for VIX (still used as last-resort)
+  technical_indicators.py     # EMA / ROC / ATR
+  alert_service.py            # Telegram/Email via Pub/Sub
+  position_registry.py        # vestigial on IBKR (always empty); kept for multi-bot legacy
 
-services/             # Standalone services (independent of trading bots)
-  token_keeper/       # Keeps Saxo OAuth tokens fresh 24/7
+# Dead-on-this-branch (kept for back-compat with main, never loaded by HYDRA):
+  token_coordinator.py        # used to coordinate Saxo OAuth refresh; HYDRA doesn't use Saxo
+services/token_keeper/        # Saxo-only service; do NOT start on this branch
 
-dashboard/            # HYDRA Dashboard (read-only monitoring, v2.0.0)
-  backend/            # FastAPI + WebSocket (port 8001)
-  frontend/           # React 19 + TypeScript + Vite (built → dist/)
-  deploy/             # systemd service + nginx config
-  scriptable/         # iOS Scriptable widget
+services/                     # standalone services
+  homer/                      # HYDRA Trading Journal writer (active)
+  hermes/                     # daily execution analyst (active)
+  apollo/                     # pre-market scout (active)
+  clio/                       # weekly strategy analyst (active)
+  argus/                      # health monitor (active)
+  token_keeper/               # Saxo-only — DEAD on this branch
 
-cloud_functions/      # Google Cloud Functions
-  alert_processor/    # Processes alerts from Pub/Sub, sends Telegram/Email
+dashboard/                    # HYDRA dashboard (read-only monitoring, v2.0.0)
+  backend/                    # FastAPI + WebSocket (port 8001)
+  frontend/                   # React 19 + TypeScript + Vite
+  scriptable/                 # iOS Scriptable widget
 
-scripts/              # Utility scripts (see scripts/README.md for full list)
-  preview_live_entry.py    # PRIMARY: Shows what bot would do right now
-  weekly_projection.py     # Compare multipliers side-by-side with P&L
-  optimal_strike_analysis.py # Deep analysis with historical research
-  check_short_strikes.py   # Quick strike check
-  test_rest_api.py         # API connectivity test (pre-flight check)
-  calculate_net_return.py  # Quick NET return calculation
-```
+deploy/
+  hydra.service               # main bot (LoadCredentialEncrypted= for 6 IBKR creds, sandboxed)
+  hydra_variant_b.service     # parallel dry-run instance (Brandon variant B)
+  hydra_variant_c.service     # parallel dry-run instance (Brandon variant C)
+  IBKR_CREDENTIALS_SETUP.md   # one-time-setup + pre-start verification runbook
+  hermes/apollo/clio/homer/argus .service + .timer  # agent timers
+  token_keeper.service        # Saxo-only — DEAD on this branch
 
----
-
-## CRITICAL: Check Existing Scripts First
-
-**BEFORE creating ANY new script (temporary or permanent) for any bot, you MUST:**
-
-1. **Check `scripts/README.md`** - Contains a quick reference table of which script to use for common tasks
-2. **List existing scripts**: `ls scripts/*.py scripts/**/*.py`
-3. **Search for similar functionality**: Many analysis tasks already have dedicated scripts
-
-### Script Quick Reference
-
-| If you want to... | Use this (don't create new!) |
-|-------------------|------------------------------|
-| See what bot would do NOW | `preview_live_entry.py` |
-| Compare premium at different multipliers | `weekly_projection.py` |
-| Deep strategy analysis | `optimal_strike_analysis.py` |
-| Quick strike check | `check_short_strikes.py` |
-| Test API connectivity | `test_rest_api.py` |
-| Calculate NET return | `calculate_net_return.py` |
-| Find optimal symmetric strikes | `find_optimal_mult.py` |
-| Calculate 1% target strikes | `calculate_1pct_target.py` |
-
-### If Existing Script Needs Modification
-
-If an existing script is close but needs small changes:
-1. **Modify the existing script** rather than creating a new one
-2. Document the change in git commit message
-3. Update `scripts/README.md` if the script's purpose changed
-
-### Running Scripts on VM
-
-Scripts must run on VM to access Saxo API (local tokens are often expired):
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/SCRIPT_NAME.py'"
+scripts/
+  probe_ibkr_market_data.py   # P7 Step 2 — verify real-time data flow (run after credentials toggle)
+  probe_ibkr_chain.py         # option chain + qualify_option_strikes probe
+  preview_live_entry.py       # see what HYDRA would do right now
+  ...                         # see scripts/README.md
 ```
 
 ---
 
 ## VM Details
 
-- **VM Name:** `calypso-bot`
-- **Zone:** `us-east1-b`
-- **Project:** `calypso-trading-bot`
-- **Calypso Path:** `/opt/calypso`
-- **Calypso User:** `calypso`
+| | |
+|---|---|
+| **VM name** | `calypso-bot` |
+| **Zone** | `us-east1-b` |
+| **Project** | `calypso-trading-bot` |
+| **Path** | `/opt/calypso` |
+| **User** | `calypso` |
 
 ---
 
-## Trading Bots (5 Total)
+## HYDRA Bot Details (v2.0.0-rc.1 — IBKR-standalone)
 
-| Bot | Service Name | Strategy | Config Path | Status |
-|-----|--------------|----------|-------------|--------|
-| Iron Fly | `iron_fly_0dte.service` | Doc Severson's 0DTE Iron Butterfly | `bots/iron_fly_0dte/config/config.json` | PAUSED |
-| Delta Neutral | `delta_neutral.service` | Brian's Delta Neutral | `bots/delta_neutral/config/config.json` | STOPPED |
-| Rolling Put Diagonal | `rolling_put_diagonal.service` | Bill Belt's Rolling Put Diagonal | `bots/rolling_put_diagonal/config/config.json` | STOPPED |
-| MEIC | `meic.service` | Tammy Chambless's MEIC (Multiple Entry Iron Condors) | `bots/meic/config/config.json` | STOPPED |
-| HYDRA | `hydra.service` | MEIC + Trend Following hybrid (EMA 20/40 filter) | `bots/hydra/config/config.json` | **LIVE** |
+The strategy itself is unchanged across the Saxo→IBKR migration; only the broker integration was rewritten.
 
-All bots have: `Restart=always`, `RestartSec=30`, `StartLimitInterval=600`, `StartLimitBurst=5`
+### Schedule
 
-### Dry-Run vs Live Mode (Standardized)
+**2 base entries per day** at **10:45 ET** and **11:15 ET** (E#1 at 10:15 dropped at ALL VIX levels). Full iron condors or one-sided via MKT-011 credit gate. VIX entry cutoff disabled (`max_vix_entry=999` — neither Tammy nor Sandvand use VIX cutoffs).
 
-**All bots use the same pattern for mode control:**
+Conditional entries: **E7 disabled.** **E6 (14:00)** fires put-only on up-days (≥ 0.25% above session open — Upday-035) or call-only on down-days (≥ 0.25% below open — Downday-035). Down-day check runs first, then up-day; flat days skip E6.
 
-1. **Config file is the source of truth** - Add `"dry_run": true` or `"dry_run": false` at the root level of `config.json`
-2. **CLI flag takes priority** - Running with `--dry-run` flag overrides the config setting
-3. **Default is false (LIVE)** - If neither config nor CLI flag is set, bot runs in LIVE mode
+Walk-forward backtest Sharpe 3.282; realistic live Sharpe estimate 2.684 (ThetaData→Saxo calibration applied).
 
-**To switch a bot between modes:**
-```bash
-# Edit config on VM (no service file changes needed)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
-import json
-with open(\"bots/BOT_NAME/config/config.json\", \"r\") as f:
-    config = json.load(f)
-config[\"dry_run\"] = True  # or False for LIVE
-with open(\"bots/BOT_NAME/config/config.json\", \"w\") as f:
-    json.dump(config, f, indent=2)
-print(\"Updated dry_run to:\", config[\"dry_run\"])
-SCRIPT
-'"
+### Anti-Whipsaw Filter
+`whipsaw_range_skip_mult = 1.75` — skips entries when intraday range exceeds 1.75× expected move.
 
-# Then restart the bot
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart BOT_SERVICE_NAME"
-```
+### VIX Regime Adaptive (updated 2026-04-17)
 
-**Current Mode Status (Updated 2026-02-05):**
-| Bot | Config `dry_run` | Mode | Service Status |
-|-----|------------------|------|----------------|
-| Iron Fly | `false` | LIVE | **STOPPED** |
-| Delta Neutral | `false` | LIVE | **STOPPED** |
-| MEIC | `false` | LIVE | **STOPPED** |
-| HYDRA | `false` | LIVE | **RUNNING** |
-| Rolling Put Diagonal | `true` | DRY-RUN | **STOPPED** |
+Breakpoints `[18.0, 22.0, 28.0]` define 4 zones. The regime ALWAYS overrides the base `min_viable_credit_per_side` ($2.00) and `min_viable_credit_put_side` ($2.75) — those base values are effectively dead.
 
-**Active Services:** `token_keeper`, `hydra`
+| Zone | VIX | Max entries | Entries kept | Min call credit | Min put credit |
+|------|------|-------------|--------------|-----------------|----------------|
+| 0 | < 18 | 2 (drops E#1) | E#2, E#3 | $1.00 | $1.25 |
+| 1 | 18 – 22 | 2 (drops E#1) | E#2, E#3 | $0.50 | $0.75 |
+| 2 | 22 – 28 | 2 (drops E#1) | E#2, E#3 | $0.30 | $0.50 |
+| 3 | ≥ 28 | 1 (E#3 only) | E#3 | $0.30 | $0.40 |
 
-### Iron Fly Bot Details
-- **Entry:** 10:00 AM EST (after 30-min opening range)
-- **Exit:** Wing touch (stop loss) or 30% of credit profit target
-- **Max hold:** 60 minutes (11:00 AM rule)
-- **Wing width:** Minimum 40 points (Jim Olson rule), or expected move if higher
-- **Filters:** VIX < 20, no FOMC days, price in opening range
-- **Strategy spec:** Full strategy specification (see `docs/IRON_FLY_STRATEGY_SPECIFICATION.md`)
-- **Edge cases:** 64 analyzed, all resolved (see `docs/IRON_FLY_EDGE_CASES.md`)
-- **Code audit:** Comprehensive review completed (see `docs/IRON_FLY_CODE_AUDIT.md`)
+When the regime applies, `call_credit_floor` / `put_credit_floor` are overwritten to `min_credit − $0.10`. `strategy.py:_apply_vix_regime_overrides()` drops EARLIEST entries when capped (keeps best-performing E#3 at 11:15).
 
-#### Iron Fly Safety Features
-- **Position Registry:** Uses shared Position Registry for multi-bot SPX trading isolation (2026-02-04)
-- **Entry order:** Longs first (Long Call → Long Put → Short Call → Short Put) - safer on partial fills
-- **Entry retries:** 3 attempts with 15-second delays; auto-unwind filled legs on failure
-- **Stop losses:** Software-based via 2-second polling (NOT broker-side stops)
-- **Wing breach tolerance:** $0.10 buffer to avoid floating-point issues
-- **Circuit breaker:** 5 consecutive failures or 5-of-10 sliding window triggers halt
+### Strike Selection
 
-#### Iron Fly Typical P&L (1 contract, 40pt wings)
-| Scenario | P&L | Notes |
-|----------|-----|-------|
-| Max profit (expires at ATM) | ~$1,500 | Rare - would hold to 4:00 PM |
-| Profit target hit (30% of credit) | +$5 to +$15 net | Target exit |
-| Time exit (11:00 AM rule) | +$0 to +$10 net | Small profit or breakeven |
-| Stop loss (wing touch) | -$300 to -$350 | Typical stop-out |
-| Max loss (circuit breaker) | -$400 | Safety cap |
+- **Wider Starting OTM (MKT-024) — tuned 2026-04-30:** Calls **2.5×**, puts **2.75×** the VIX-adjusted OTM distance, hard-clamped to **180pt**. MKT-020/022 scan inward from there.
+- **VIX-Scaled Spread Width (MKT-027):** `round(VIX × 6.0 / 5) × 5`, floor 25pt, cap 110pt.
+- **Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts):** scans from MKT-024 starting distance inward in 5pt steps until credit ≥ active minimum (VIX-regime-dependent) with MKT-029 graduated fallback to `min_credit − $0.10`, or 25pt OTM floor. Each uses batch API (1 chain + 1 batch quote = 2 IBKR calls).
+- **Chain Strike Snapping (MKT-045):** After tightening + overlap checks, snaps all 4 strikes to the nearest actual IBKR chain strike (max 25pt tolerance).
 
-### MEIC Bot Details (v1.3.0 - Updated 2026-02-19)
-- **Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors) - "Queen of 0DTE"
-- **Structure:** 6 scheduled iron condor entries per day
-- **Entry times:** 10:05, 10:35, 11:05, 11:35, 12:05, 12:35 AM ET
-- **Strikes:** VIX-adjusted for ~8 delta, 50-point spreads (25-120pt range based on VIX)
-- **Stop loss:** Per-side stop = total credit received (breakeven design)
-- **MEIC+ modification:** Stop = credit - $0.15 to cover commission on one-side-stop (true breakeven)
-- **Credit validation:** Warns if credit < $1.00 or > $1.75 per side
-- **Expected results:** 20.7% CAGR, 4.31% max drawdown, 4.8 Calmar ratio, ~70% win rate
-- **Edge cases:** 79 analyzed, all resolved (see `docs/MEIC_EDGE_CASES.md`)
-- **Specification:** Full strategy spec (see `docs/MEIC_STRATEGY_SPECIFICATION.md`)
+### Credit Gate (MKT-011)
 
-#### MEIC Key Features
-- **Position Registry:** Uses shared Position Registry for multi-bot SPX trading isolation
-- **Safe entry order:** Longs first (hedges) then shorts - never leave naked position
-- **Per-entry stops:** Each IC has independent stop monitoring
-- **FOMC blackout:** Skips all entries on FOMC announcement days (configurable via `fomc_announcement_skip`, default true for MEIC; HYDRA overrides to false)
-- **VIX filter:** Skips remaining entries if VIX >= max_vix_entry (default 25, CALYPSO addition — Tammy does not use a VIX cutoff)
-- **Circuit breaker:** 5 consecutive failures or 5-of-10 sliding window triggers halt
+Estimates credit from quotes BEFORE placing orders. Thresholds VIX-regime-dependent (table above). MKT-029 fallback steps -$0.05, -$0.10 down to the floor. Decision tree:
 
-#### MEIC Typical P&L (per IC, 50pt spreads, $2.50 credit)
-| Scenario | Probability | P&L |
-|----------|-------------|-----|
-| Both sides expire worthless | ~60% | +$250 |
-| One side stopped, other expires | ~34% | ~$0 (breakeven) |
-| Both sides stopped | ~6% | -$250 to -$750 |
+- **Call non-viable + put viable + VIX < 15.0** → put-only entry (MKT-032/MKT-039)
+- **Call non-viable + put viable + VIX ≥ 15.0** → skip (no put-only in volatile conditions)
+- **Put non-viable + call viable** → retry with tighter put strikes (5pt closer, max 2 retries), then call-only entry (MKT-040)
+- **Both non-viable** → skip
 
-**Note:** MEIC and Iron Fly both trade SPX 0DTE options. The Position Registry prevents conflicts when running simultaneously.
+Per P7-audit H7: the IBKR `_estimate_entry_credit_ib` requires BOTH legs of a side to be quoted in the batch — any None makes that side return 0.0 so MKT-011 stays conservative.
 
-### HYDRA Bot Details (v1.23.0 - Updated 2026-04-17)
-- **Strategy:** MEIC + Trend Following Hybrid (EMA 20/40 direction filter)
-- **Structure:** **2 base entries** per day at **10:45, 11:15 AM ET** (E#1 at 10:15 dropped at ALL VIX levels as of 2026-04-17 — canonical slots are still E#1/E#2/E#3 but E#1 is always skipped). Full iron condors or put-only (MKT-011) + credit gate. VIX entry cutoff disabled (max_vix_entry=999, neither Tammy nor Sandvand use VIX cutoffs). Conditional entries: **E7 DISABLED** (`conditional_e7_enabled: false`). **E6 (14:00) ENABLED** as up-day put-only (`conditional_upday_e6_enabled: true`, threshold 0.25% rise from open — Upday-035). Walk-forward backtest Sharpe 3.282, realistic live Sharpe 2.684. Base entries (E#2, E#3) always attempt full ICs regardless of market direction.
-- **Anti-Whipsaw Filter:** `whipsaw_range_skip_mult = 1.75` — skips entries when intraday range exceeds 1.75× expected move (choppy/whipsaw conditions).
-- **VIX Regime Adaptive (updated 2026-04-17):** Adjusts entries and credit thresholds based on VIX at open. Breakpoints `[18.0, 22.0, 28.0]` define 4 zones. All regime slots now filled — base `min_viable_credit_per_side` ($2.00) and `min_viable_credit_put_side` ($2.75) are effectively dead because the regime always overrides. **E#1 (10:15) is now dropped at ALL VIX levels** (max_entries `[2, 2, 2, 1]`, changed 2026-04-17 after analysis showed E#1 is the worst-performing slot: 24% WR, -$79/entry avg across all regimes). Live VM values:
+### Stop Formula
 
-  | Zone | VIX | Max entries | Entries kept | Min call credit | Min put credit |
-  |------|------|-------------|--------------|-----------------|----------------|
-  | 0 | < 18 | 2 (drops E#1) | E#2, E#3 | $1.00 | $1.25 |
-  | 1 | 18 – 22 | 2 (drops E#1) | E#2, E#3 | $0.50 | $0.75 |
-  | 2 | 22 – 28 | 2 (drops E#1) | E#2, E#3 | $0.30 | $0.50 |
-  | 3 | ≥ 28 | 1 (E#3 only) | E#3 | $0.30 | $0.40 |
+Full IC: `total_credit + buffer` (asymmetric — call uses `call_stop_buffer`, put uses `put_stop_buffer`).
 
-  When the regime applies, `call_credit_floor` / `put_credit_floor` are also overwritten to `min_credit − $0.10` (so effective floors vary per zone; the top-level $0.20 / $0.30 floors only apply if the regime is disabled). Code: `strategy.py:_apply_vix_regime_overrides()` drops EARLIEST entries when capped (keeps best-performing E#3 at 11:15).
-- **Schedule Config:** `skip_weekdays` (list of weekday names to skip entirely, default empty/disabled) and `dow_max_entries` (max entries on specific weekdays, default disabled) available as config keys for day-of-week filtering.
-- **VIX-Scaled Entry Time Shifting (MKT-034):** DISABLED (v1.10.3). Code preserved and configurable via `vix_time_shift.enabled`. When enabled: shifts entry schedule later on high-VIX days. Neither Tammy nor Sandvand use VIX-based time shifting.
-- **Smart Entry Windows (MKT-031):** DISABLED (v1.10.4). Code preserved and configurable via `smart_entry.enabled`. When enabled: 10-minute scouting window before each scheduled entry, 2-parameter scoring (post-spike ATR calm + momentum pause), score >= 65 triggers early entry. Disabled because early entries add complexity without proven edge — enter at scheduled times only.
-- **EMA Trend Signal:** Before each entry, checks 20 EMA vs 40 EMA on SPX 1-min bars. Signal (BULLISH/BEARISH/NEUTRAL) is informational only — logged and stored but does NOT drive entry type.
-- **Wider Starting OTM (MKT-024) — multipliers tuned 2026-04-30:** Calls start at **2.5×** and puts at **2.75×** the VIX-adjusted OTM distance, hard-clamped to **180pt** (was 3.5×/4.0× at 240pt cap). MKT-020/022 scan inward from there to find the widest viable strike. The 180pt clamp covers the empirical max settled OTM (Mar 3 VIX 26.5: 116pt call) plus margin and the theoretical 8-delta strike at VIX 50 (~133pt). Old 240pt clamp + 3.5×/4.0× wasted ~125pt of MKT-020/022 inward scanning per entry; new values cut average scan distance ~40-50%. Batch API = zero extra cost for the scan that remains.
-- **VIX-Scaled Spread Width (MKT-027):** Continuous formula `round(VIX × 6.0 / 5) × 5`, floor 25pt, cap 110pt. Pushes long legs further OTM on high-VIX days → cheaper longs → higher net credit → more stop cushion. Config: `call_min_spread_width=25`, `put_min_spread_width=25`, `max_spread_width=110`, `spread_vix_multiplier=6.0`.
-- **Credit Gate (MKT-011):** Estimates credit from quotes BEFORE placing orders. Effective thresholds are VIX-regime-dependent (see VIX Regime Adaptive table above — currently $1.00 / $1.25 at VIX<18, scaling down to $0.30 / $0.40 at VIX≥28). MKT-029 graduated fallback for BOTH sides steps -$0.05, -$0.10 down to the floor; when VIX regime is active the floor is `min_credit − $0.10` (e.g. VIX<18: call floor $0.90, put floor $1.15). MKT-038 call-only entries use the same call floor. Call non-viable + put viable → put-only entry, but only when VIX < 15.0 per MKT-032/MKT-039. Put non-viable + call viable → retry with tighter put strikes (5pt closer, max 2 retries), then call-only entry (MKT-040, 89% WR, stop = call + theo $2.60 put + buffer). Both non-viable → skip.
-- **Conditional Entry Triggers (Upday-035 + Downday-035):** E6 at 14:00 fires based on intraday SPX direction from session open:
-  - **Upday-035 (up-day put-only):** When SPX rises ≥ 0.25% above open, E6 fires put-only spread. Stop = put_credit + put_stop_buffer. Config: `conditional_upday_e6_enabled: true`, `upday_threshold_pct: 0.0025`.
-  - **Downday-035 (down-day call-only) — NEW 2026-04-19:** When SPX drops ≥ 0.25% below open, E6 fires call-only spread. Stop = call_credit + $2.60 theo put + call_stop_buffer. Config: `conditional_downday_e6_enabled: true`, `conditional_downday_threshold_pct: 0.0025`. Historical sim: 11/11 wins on Feb-Apr 2026 down days. Legacy `conditional_e6_enabled` (MKT-035 with `downday_threshold_pct: 0.003`) superseded by the new flag — OR'd for back-compat.
-  - **Precedence:** Downday check runs first, then Upday only if Downday didn't trigger. On flat days (no trigger in either direction), entry is skipped.
-  - **E7 DISABLED** (`conditional_e7_enabled: false`, `conditional_downday_e7_enabled: false`).
-  - Base entries E1-E3 are NOT affected by the conditional — they always attempt full ICs. (Base-downday call-only conversion was DISABLED 2026-04-19 after A/B sweep showed negative EV at every threshold 0.57%-1.20%.)
-- **Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts):** For all entries, scans from MKT-024 starting distance inward in 5pt steps until credit >= the active minimum (VIX-regime-dependent, see Credit Gate) — with MKT-029 graduated fallback down to `min_credit − $0.10` — or 25pt OTM floor is reached. Each uses batch API (1 chain + 1 batch quote = 2 calls). If can't reach floor, MKT-011 skips or converts entry.
-- **Early Close (MKT-018):** INTENTIONALLY DISABLED. Backtest showed no ROC-based early close configuration beats hold-to-expiry. Code preserved but dormant — set `early_close_enabled: true` in config to re-enable. See `docs/HYDRA_EARLY_CLOSE_ANALYSIS.md`. When enabled: monitors ROC after all entries placed, closes all positions when ROC >= 3% (with MKT-023 hold check).
-- **Smart Hold Check (MKT-023):** Only active when MKT-018 is enabled (currently disabled). Compares close-now P&L vs worst-case-hold P&L before early close fires.
-- **Pre-Entry ROC Gate (MKT-021):** Only active when MKT-018 is enabled (currently disabled). Skips entries #4/#5 if ROC already exceeds threshold to prevent ROC dilution.
-- **Stop Formula:** Full IC stop = total_credit + buffer (asymmetric: call uses `call_stop_buffer`, put uses `put_stop_buffer`). **Option B per-VIX-regime overrides deployed 2026-04-27** (see `docs/HYDRA_BUFFER_OPTIMIZATION.md`): Zone 0 (VIX<18) and Zone 3 (VIX≥28) fall back to global `$0.75 / $1.75`; **Zone 1 (VIX 18-22) overrides to `$1.50 / $2.50`** (wider both — calm regime, most stops are noise); **Zone 2 (VIX 22-28) overrides to `$1.00 / $1.50`** (wider call, TIGHTER put — stress regime, fast exit beats cushion). Override applied once per day at first entry via `_apply_vix_regime_overrides()`. MKT-040 call-only (put non-viable): call_credit + theoretical $2.60 put + call buffer (unified with MKT-038). Put-only (MKT-039): credit + put_stop_buffer. MKT-038 call-only (FOMC T+1): call_credit + theoretical $2.60 put + call buffer. Configurable via `call_stop_buffer` / `put_stop_buffer` (global fallback) and `vix_regime.call_stop_buffer` / `vix_regime.put_stop_buffer` arrays (per-zone overrides). MKT-019 (2× max credit) removed in v1.4.0.
-- **Stop Confirmation Timer (MKT-036):** DISABLED (`stop_confirmation_enabled: false`). When enabled: 75-second confirmation window. When disabled, MKT-046 provides a shorter 10-second confirmation instead (see below).
-- **Stop Anti-Spike Filter (MKT-046):** When MKT-036 is disabled, MKT-046 requires the stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes where market makers briefly widen the ask, inflating the mid-price-based spread value without a real underlying move. Confirmed as the cause of 80% of false call stops (April 2026 analysis). On first breach, logs full bid/ask detail (STOP-DETAIL) for diagnostics. If spread recovers within 10s, stop is avoided and logged as `MKT-046_FALSE_STOP_AVOIDED`.
-- **Chain Strike Snapping (MKT-045):** After MKT-020/MKT-022 tightening and overlap adjustments (MKT-013/015, Fix #44/#66), snaps all 4 strikes to the nearest actual Saxo chain strike (max 25pt tolerance). Far-OTM 0DTE strikes use 10-25pt intervals, not 5pt — overlap adjustments that blindly add 5pt can land on non-existent strikes. Re-runs overlap checks once after snapping. Prevents entries from being skipped due to missing strikes (confirmed cause of April 15 E#2/E#3 skip).
-- **Cushion Recovery Exit (MKT-041):** DISABLED (buffer+cushion interfere). Closes individual IC sides when they nearly hit their stop (>= `cushion_nearstop_pct` of stop level, default 96%) then recover (<= `cushion_recovery_pct` of stop level, default 67%). Config keys null on VM. Backtest: Sharpe 2.182 vs 2.094 baseline over 938 days, fires ~10.8% of days. Config: `cushion_nearstop_pct`, `cushion_recovery_pct` in strategy section.
-- **Buffer Decay (MKT-042):** Time-decaying stop buffer. Starts at `buffer_decay_start_mult` (default 2.50) times the normal buffer, linearly decays to 1x over `buffer_decay_hours` (default 4.0 hours). Wider stops early when premium is rich and moves are noisy, normal stops later as theta decays. Applied to both call and put buffers. Set `buffer_decay_start_mult` to 1.0 or null to disable. Config: `buffer_decay_start_mult`, `buffer_decay_hours` in strategy section.
-- **Calm Entry Filter (MKT-043):** Delays entry up to `calm_entry_max_delay_min` (default 5 min) when SPX moved more than `calm_entry_threshold_pts` (default 15.0 pts) in the last `calm_entry_lookback_min` (default 3 min). Prevents entering during sharp spikes that inflate premium but reverse quickly. Set `calm_entry_threshold_pts` to null to disable. Config: `calm_entry_lookback_min`, `calm_entry_threshold_pts`, `calm_entry_max_delay_min` in strategy section.
-- **FOMC Announcement Skip:** DISABLED (`fomc_announcement_skip: false`). FOMC announcement days are no longer skipped — bot trades normally on FOMC days.
-- **FOMC T+1 Blackout (NEW 2026-04-19):** On the day after FOMC announcement (T+1), skip ALL entries entirely. Supersedes MKT-038 (which forced call-only) after A/B backtest over 2025-01 → 2026-04 (9 T+1 days) showed: trade-normal = −$900, MKT-038 ON = −$1,325, **skip entirely = $0** (+$900 vs normal, +$1,325 vs MKT-038). Mechanism: T+1 is bearish on average but the 33% up days crush call-only, so neither direction-agnostic strategy wins. Configurable via `fomc_t1_skip_enabled` (default true on VM, live since 2026-04-19). Takes precedence over `fomc_t1_callonly_enabled` when both are set. Skip happens in `_initiate_entry()` immediately after the whipsaw filter, before credit gating or tightening. Next T+1: Apr 30 (Thu).
-- **FOMC T+1 Call-Only (MKT-038):** LEGACY — now DISABLED on VM (`fomc_t1_callonly_enabled: false`) after being superseded by T+1 blackout above. Code preserved as fallback: if `fomc_t1_skip_enabled` is disabled AND `fomc_t1_callonly_enabled` is true, forces all entries to call-only on T+1. Stop formula (when active): call_credit + theoretical $2.60 put + call buffer.
-- **Base-Entry Down-Day Call-Only:** DISABLED on VM (`base_entry_downday_callonly_pct: null`) as of 2026-04-19. Code preserved — set to a decimal fraction (e.g. `0.0057` = 0.57%) to re-enable. When enabled: E1-E3 full IC is converted to call-only (put side skipped) if SPX is down ≥ threshold from session open at entry time. Override reason in Sheets/logs: `[BASE-DOWNDAY]`. Stop formula when enabled: `call_credit + theoretical $2.60 put + call buffer` (same as MKT-040/038). **Why disabled:** A/B sweep over Feb 10 - Apr 10 2026 (42 days, 19 days with ≥0.57% intraday drop, worst 3-day −3.78%) showed negative EV at every threshold tested (0.57% / 0.70% / 0.80% / 1.00% / 1.20%) — including during a real 2.25% cumulative drawdown. Mechanism: mean-reverting drops forfeit put-side profit; continuing drops trigger call stops too, so conversion doesn't actually limit risk (stop losses already do). MKT-040 (call-only when put genuinely non-viable) and MKT-011 credit gate handle the "put uninvestable" case more surgically. See `scripts/sweep_base_downday.py`.
-- **Stop Close Mode (configurable via `long_salvage.short_only_stop`):** Default `false` = close BOTH short and long legs on stop (base MEIC behavior). When `true` = MKT-025 short-only stop + MKT-033 long salvage. Analysis of 19+ trading days showed closing both legs has better expected value per stop (~$15-30 better).
-- **Short-Only Stop (MKT-025, when `short_only_stop: true`):** Only the SHORT leg is closed via market order. The long leg stays open and expires at end-of-day settlement (0DTE). Reduces slippage (1 market order vs 2) and saves $2.50 commission per stop.
-- **Long Leg Salvage (MKT-033, when `short_only_stop: true`):** After MKT-025 closes the short, attempts to sell the surviving long if it appreciated >= $10 (covers $5 round-trip commission + $5 max market order slippage). Two trigger points: immediately after stop + periodic heartbeat check during market hours.
-- **Illiquidity Fallback (MKT-010):** When credit estimation fails, checks wing illiquidity flags. Any wing illiquid → skip entry (no one-sided entries).
-- **State file:** `data/hydra_state.json` (separate from MEIC's `meic_state.json`)
-- **Why it exists:** On Feb 4, 2026, pure MEIC had all 6 put sides stopped in a sustained downtrend. HYDRA adds credit validation + progressive tightening to improve fill quality and profit management.
+**Option B per-VIX-regime overrides (deployed 2026-04-27, see `docs/HYDRA_BUFFER_OPTIMIZATION.md`):**
 
-- **Telegram Commands (16 total):** Background daemon thread polls Telegram `getUpdates` every 5s. Credentials from Secret Manager (`calypso-telegram-credentials`). Security: only responds to configured chat_id. Commands: `/status` (bot state, market, filters), `/snapshot` (live positions, market hours only), `/entry N` (entry details), `/lastday` (last complete day), `/week` (current week summary), `/account` (lifetime performance), `/stops` (stop analysis), `/config` (current config, read-only), `/set` (edit config parameter, requires /restart to apply), `/hermes` (latest HERMES report), `/apollo` (latest APOLLO briefing), `/clio` (latest CLIO weekly analysis), `/compare` (variant A vs B head-to-head — only meaningful when comparison mode is on), `/restart` (restart HYDRA service), `/stop` (stop HYDRA, warns if active positions), `/help` (command list). Message splitting for long reports (HERMES/APOLLO/CLIO) — splits at paragraph/line boundaries with `(1/N)` headers instead of truncating at 4096 chars.
+| Zone | VIX | call_stop_buffer | put_stop_buffer |
+|------|------|------------------|-----------------|
+| 0 | < 18 | $0.75 (global) | $1.75 (global) |
+| 1 | 18 – 22 | $1.50 | $2.50 |
+| 2 | 22 – 28 | $1.00 | $1.50 |
+| 3 | ≥ 28 | $0.75 (global) | $1.75 (global) |
 
-**Note:** HYDRA and MEIC can run simultaneously - they use separate state files but share the Position Registry for multi-bot SPX position isolation.
+One-sided stops:
+- **Put-only (MKT-039):** `credit + put_stop_buffer`
+- **Call-only (MKT-040/MKT-038):** `call_credit + theoretical $2.60 put + call_stop_buffer`
 
-### Delta Neutral Bot Details
-- **Version:** 2.0.6 (Updated 2026-02-03 with margin settlement delay and improved retry logic)
-- **Strategy:** Brian Terry's Delta Neutral (from Theta Profits)
-- **Structure:** Long ATM straddle (90-120 DTE) + Weekly short strangles (5-12 DTE)
-- **Long Entry:** 120 DTE target (configurable)
-- **Long Exit:** 60 DTE threshold - close everything when longs reach this point
-- **Shorts Roll:** Weekly (Thursday/Friday) to next week's expiry for continued premium collection
-- **Strike Selection:** Scan 2.0x→1.33x for 1.5% NET return, safety extension to 1.0x if floor gives negative
-- **Opening Range Delay:** Wait until 10:00 AM for fresh entries (0 positions) - first 30 min are volatile
-- **Adaptive Roll Trigger:** Rolls shorts when 75% of original cushion is consumed (scales with market conditions)
-- **Immediate Re-Entry:** After scheduled debit skip, enters next-week shorts immediately (no 19-hour gap)
-- **Recenter:** When SPY moves ±$5 from initial strike, rebalance long straddle strikes
-- **Edge cases:** 61 analyzed, all resolved (see `docs/DELTA_NEUTRAL_EDGE_CASES.md`)
-- **Full specification:** See [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md)
+### Stop Anti-Spike Filter (MKT-046)
+10-second persistence requirement on breach. Filters momentary bid/ask spikes from MM widening. On first breach, logs full bid/ask detail (`STOP-DETAIL`). If spread recovers within 10s → `MKT-046_FALSE_STOP_AVOIDED`. (MKT-036 75-second confirmation timer is `stop_confirmation_enabled: false`.)
 
-#### Delta Neutral Safety Features (Added 2026-02-01)
-| Feature | Description | Config Key |
-|---------|-------------|------------|
-| ORDER-006 | Order size validation (max 10/order, 20/underlying) | `order_limits.*` |
-| ORDER-007 | Fill slippage monitoring (5% warning, 15% critical) | `slippage_monitoring.*` |
-| ORDER-008 | Emergency close retries with spread wait | `emergency_close.*` |
-| Activities Retry | 3 attempts × 1s delay for sync issues | Built-in |
+### Buffer Decay (MKT-042)
+Starts at `buffer_decay_start_mult` (default 2.50) × normal buffer, linearly decays to 1× over `buffer_decay_hours` (default 4.0h). Wider stops early when premium is rich; normal stops later as theta decays.
 
-#### Delta Neutral Key Logic
+### Calm Entry Filter (MKT-043)
+Delays entry up to `calm_entry_max_delay_min` (default 5 min) when SPX moved more than `calm_entry_threshold_pts` (default 15.0 pts) in the last `calm_entry_lookback_min` (default 3 min).
 
-**Opening Range Delay (2026-01-29):**
-When bot has 0 positions and wants to enter from scratch:
-- Wait until 10:00 AM ET (configurable via `fresh_entry_delay_minutes: 30`)
-- First 30 minutes after open are volatile - VIX can spike/drop misleadingly
-- State: `WAITING_OPENING_RANGE` until delay ends
-- Does NOT apply to re-entries when we already have longs (e.g., after ITM close)
+### Other knobs
+- **Stop Close Mode:** `long_salvage.short_only_stop` (default `false` = close both legs). When `true` → MKT-025 short-only stop + MKT-033 long salvage.
+- **FOMC Announcement Skip:** DISABLED. Bot trades normally on FOMC days.
+- **FOMC T+1 Blackout:** ENABLED (`fomc_t1_skip_enabled: true`) — skip all entries the day after a FOMC announcement.
+- **FOMC T+1 Call-Only (MKT-038):** legacy, DISABLED. Code preserved as fallback when `fomc_t1_skip_enabled` is false.
+- **Base-Entry Down-Day Call-Only:** DISABLED (`base_entry_downday_callonly_pct: null`) — negative EV in A/B sweep (Feb–Apr 2026).
+- **Early Close (MKT-018):** DISABLED. Hold-to-expiry. Code preserved (set `early_close_enabled: true` to re-enable).
+- **VIX-Scaled Entry Time Shifting (MKT-034):** DISABLED.
+- **Smart Entry Windows (MKT-031):** DISABLED.
+- **Cushion Recovery Exit (MKT-041):** DISABLED (interferes with buffer logic).
+- **EMA Trend Signal:** Informational only (logged + stored, does NOT drive entry type).
 
-**Strike Selection Priority (2026-01-29):**
-Bot uses 3-tier fallback to balance profit target vs safety:
-1. **Optimal:** Find highest multiplier (2.0x→1.33x) achieving 1.5% NET return (widest = safest)
-2. **Fallback:** Use 1.33x floor with whatever positive return (safe roll trigger at 1.0x EM)
-3. **Safety Extension:** If floor gives zero/negative, scan 1.33x→1.0x for first positive
-4. **Abort:** Skip entry if no positive return found even at 1.0x
+### State + Recovery
+- **State file:** `data/hydra_state.json` (entries, fill prices, stop levels, P&L history, OHLC, FOMC flags).
+- **Position Registry:** `data/position_registry.json` (vestigial on IBKR — IBKR has no per-leg position ID; F4 keys reconciliation on `(conid, quantity)` instead).
+- **Cumulative metrics:** `data/hydra_metrics.json` (lifetime P&L, win rate, total entries, broker-agnostic — unchanged across Saxo→IBKR cutover).
 
-**Why 1.33x Floor?** Formula: `1.0 / 0.75 = 1.33` ensures roll trigger (at 75% cushion consumed) lands exactly at 1.0x expected move boundary.
+Mid-day restart recovery is broker-driven: `_recover_positions_from_saxo()` (despite the legacy name) reads state file authoritatively, then reconciles with the broker via `_read_open_positions()`.
 
-**Proactive Restart Check:**
-Instead of waiting for longs to hit 60 DTE and then closing (which wastes recently opened shorts), the bot checks BEFORE opening/rolling shorts:
-- Calculate: `days_until_longs_hit_60_DTE = long_dte - 60`
-- Get: expected DTE for new shorts (5-12 days typically)
-- If `new_shorts_dte > days_until_longs_hit_60_DTE`:
-  - Close everything NOW (don't wait for 60 DTE trigger)
-  - Start fresh with new 120 DTE longs + new shorts
-  - This avoids scenarios where shorts are opened with 7+ DTE but longs only have 5 days until hitting exit threshold
+### Telegram Commands (16 total)
+Background daemon thread polls Telegram `getUpdates` every 5s. Credentials from Secret Manager (`calypso-telegram-credentials`). Responds only to the configured chat_id.
 
-**Why this matters:**
-- Without this: Bot opens shorts on Thursday, longs hit 60 DTE on Monday → exit everything → wasted 4 days of theta on shorts
-- With this: Bot detects the conflict BEFORE opening shorts → closes everything → starts fresh → maximizes theta collection
+`/status`, `/snapshot`, `/entry N`, `/lastday`, `/week`, `/account`, `/stops`, `/config`, `/set <key> <value>`, `/hermes`, `/apollo`, `/clio`, `/compare`, `/restart`, `/stop`, `/help`.
 
-**Abort Callbacks for Recenter/Roll (2026-02-03):**
-When executing recenter or roll operations, the bot re-checks conditions before each retry attempt on the first leg:
-- **Recenter:** If SPY price bounces back and distance to strike drops below threshold, abort the recenter
-- **Roll:** If price moves away from the challenged strike (cushion consumption drops below 75%), abort the roll
-- This prevents unnecessary operations when price briefly touches a threshold then bounces back
-- Only checked during close phase (leg 1) - once leg 1 fills, we're committed to completing the operation
-
-**SHORT_STRANGLE_ONLY Recovery State (2026-02-03):**
-A recovery state for when the bot has only short strangle positions (no longs):
-- **Trigger:** Recenter fails mid-way - closes longs successfully but fails to re-enter new longs
-- **Behavior:** Bot sets state to `SHORT_STRANGLE_ONLY` and enters longs normally on next cycle
-- **Recovery:** Automatically transitions to `FULL_POSITION` once longs are entered
-- **Duration:** Typically resolved within 10-60 seconds (next strategy check)
-- **Note:** Previously, shorts-only incorrectly set `FULL_POSITION` which caused the bot to skip entering longs
-
-**Margin Settlement Delay (Fix #24, 2026-02-03):**
-After closing positions (longs or shorts), wait 3 seconds before entering new positions:
-- **Why:** Saxo rejects orders with `WouldExceedMargin` if cash from close isn't immediately available
-- **Where:** Recenter (after close longs), Roll (after close shorts), all partial straddle recovery paths
-- **Duration:** 3 seconds hardcoded delay
-- **Logs:** `"⏳ Waiting 3.0s for margin to settle after close..."`
-
-**Retry Delay Between Attempts (Fix #25, 2026-02-03):**
-Add 1.5 second delay between retry attempts in `_place_protected_multi_leg_order`:
-- **Why:** Rapid-fire retries caused 409 Conflict errors when Saxo hadn't fully processed previous cancellation
-- **When:** After each failed limit order attempt, before the next retry
-- **Duration:** 1.5 seconds between retries
-- **Logs:** `"Waiting 1.5s before retry..."`
-
-**Fresh Quote Retry on Invalid (Fix #26, 2026-02-03):**
-Retry fetching quotes up to 3 times if invalid (Bid=0/Ask=0):
-- **Why:** After closing positions, quotes may briefly be unavailable; using stale leg_price caused `PriceExceedsAggressiveTolerance`
-- **How:** Up to 3 attempts with 1.5s wait between each
-- **Fallback:** Only use original leg_price as last resort (with warning about staleness)
-- **Logs:** `"⚠️ Quote pending for UIC ... (attempt X/3)"`
-
-### Bot Isolation
-Iron Fly (SPX/SPXW) and Delta Neutral (SPY) are mostly independent:
-- Different underlying instruments (UIC 4913/128 vs SPY UICs)
-- Separate systemd processes
-- Separate config files, logs, and state files
-- No shared position data
-
-**Shared Resources:**
-- `token_coordinator.py` manages OAuth token refresh across all bots via file-based locking
-- When one bot refreshes the token, others pick up the fresh token from the shared cache
-- WebSocket connections refresh tokens before connecting to avoid 401 errors (CONN-008 fix)
-- `position_registry.py` tracks which bot owns which position (for SPX multi-bot isolation)
-  - File-based persistence at `/opt/calypso/data/position_registry.json`
-  - fcntl file locking for concurrent access
-  - Required when running MEIC + Iron Fly simultaneously (both trade SPX)
+Long reports (HERMES/APOLLO/CLIO) split at paragraph/line boundaries with `(1/N)` headers instead of truncating at 4096 chars.
 
 ---
 
-## Token Keeper Service (NEW - 2026-01-27)
+## IBKR Integration
 
-A dedicated service that keeps Saxo OAuth tokens fresh 24/7, independent of trading bot status.
+### Authentication
 
-### Why It's Needed
-- Saxo tokens expire every **20 minutes**
-- If all bots are stopped (e.g., for safety or maintenance), no one refreshes the token
-- Expired tokens require **manual OAuth browser flow** to re-authenticate
-- Token Keeper ensures tokens stay fresh even when all trading bots are stopped
+OAuth 1.0a via `ibind`. `IBClient.connect()` is a 3-stage handshake:
 
-### How It Works
-| Property | Value |
-|----------|-------|
-| Service Name | `token_keeper.service` |
-| Check Interval | Every 60 seconds |
-| Refresh Threshold | 5 minutes before expiry |
-| Token Cache | `/opt/calypso/data/saxo_token_cache.json` |
-| Lock File | `/opt/calypso/data/saxo_token.lock` |
-| Restart Policy | `Restart=always`, `RestartSec=10` |
+1. **LST handshake** — `IbkrClient(use_oauth=True, oauth_config=...)` triggers the live-session-token exchange. 401 / "invalid consumer" → `IBAuthError`; other errors → `IBConnectionError`.
+2. **Brokerage session init** — `init_brokerage_session=True` triggers `ssodh/init` on `IbkrClient` construction.
+3. **Auth status check** — `/iserver/auth/status`. If `competing=true` post-init, sleep 5s and retry once (the ssodh handoff race). On `authenticated && connected && !competing` → success; else `IBAuthError`.
 
-### Service Commands
-```bash
-# Start token keeper
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start token_keeper"
+After connect, `account_id` is pinned via `_discover_account_id()` (calls `portfolio_accounts` — different namespace from `/iserver/accounts`).
 
-# Stop token keeper
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop token_keeper"
+### The morning re-auth gate
 
-# Check status
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper"
+`IBClient.ensure_connected()` (called at the start of every monitoring iteration in `main.py:run_bot()`) is the once-per-trading-day stale-session check:
 
-# View logs
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -n 50 --no-pager"
+- Healthy session → no-op (no round-trip to IBKR — checks `_connected` then auth/status, no reconnect).
+- `authenticated=false` OR `connected=false` OR `competing=true` → `disconnect()` + `connect()` fresh.
+- Auth-status read exception → triggers full reconnect.
+- `_connected=False` → skips status read and reconnects directly.
 
-# Follow logs (live)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -f"
-```
+**Intraday re-check (P7-audit H6):** Every 15 minutes (`INTRADAY_SESSION_CHECK_INTERVAL_S = 15 * 60`), the main loop calls `ensure_connected()` again. Failure → `break` so systemd restarts cleanly with `Restart=always` + `RestartSec=30`.
 
-### First-Time Deployment
-```bash
-# 1. Copy service file to systemd
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo cp /opt/calypso/deploy/token_keeper.service /etc/systemd/system/"
+### The /iserver/accounts preflight (P7-audit C2)
 
-# 2. Reload systemd
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl daemon-reload"
+IBKR requires `receive_brokerage_accounts()` (= `GET /iserver/accounts`) BEFORE the snapshot endpoint and `/iserver/account/trades` will return real data. Without it, snapshots silently return metadata-only rows (`{conid, conidEx, _updated}` with no price fields) forever.
 
-# 3. Enable service (auto-start on boot)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl enable token_keeper"
+`portfolio_accounts()` (which `connect()` calls for account-id discovery) hits `/portfolio/accounts` — a DIFFERENT endpoint namespace — and does NOT satisfy this.
 
-# 4. Start service
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start token_keeper"
-```
+`IBClient._ensure_iserver_primed()` is idempotent (sets `self._iserver_primed=True` after first call; reset on `disconnect()`). Called from:
+- `_snapshot_with_preflight` — every quote / option-chain fetch
+- `what_if_order` — margin/cost pre-check (P7-audit M11)
 
-### Integration with Trading Bots
-- Uses the same `TokenCoordinator` as all trading bots
-- File-based locking prevents race conditions during refresh
-- All bots read from the same cache file (`saxo_token_cache.json`)
-- Token Keeper runs with `Before=` directive to start before trading bots
+### Snapshot warmup (P7-audit H10)
 
-**Important:** Token Keeper should be the **only** service actively refreshing tokens. Trading bots will:
-1. Check the shared cache on startup
-2. Use cached tokens (refreshed by Token Keeper)
-3. Only refresh if Token Keeper is down and token is about to expire
+After the preflight, `live_marketdata_snapshot` for a fresh conid often returns only metadata for the first ~1-2 polls even in active hours. `_snapshot_with_preflight` warmup-polls up to **12 × 0.5s = 6s** waiting for a populated row. Logs distinct WARNING for metadata-only vs empty-data exhaustion (P7-audit M17) so operators can tell "no real-time entitlement" from "preflight bug" from "snapshot service outage".
+
+### Retry + per-family circuit breakers
+
+`shared/ib_retry.py` (Phase A.8): every IBClient API call routes through `_ib_call(family, fn, ...)` which applies retry + a family-specific `CircuitBreaker`.
+
+| Family | Endpoints |
+|---|---|
+| `oauth` | token refresh / LST handshake (rare; **lifecycle NOT wrapped** — connect/disconnect manage their own retries) |
+| `session` | `auth/status`, `tickle`, `receive_brokerage_accounts` |
+| `portfolio` | `accounts`, `summary`, `positions`, `ledger`, FX |
+| `market` | snapshot, option chain, contract search, greeks, history |
+| `orders` | place, cancel, modify, status, live_orders, whatif |
+
+**RetryPolicy:** 6 attempts (initial + 5 retries), 1s base, 30s cap, ±50% jitter. Retries: HTTP 429/5xx + transient network errors. **Does NOT retry**: IBKR's misuse-of-503 patterns (`is not found`, `already filled`, `already cancel`, `order is filled or canceled`) — those are 4xx-semantically-permanent.
+
+**CircuitBreaker:** Opens after 5 consecutive retryable failures OR ≥50% failure rate over 20-request / 60-second window. 30s half-open probe. Non-retryable exceptions (auth, validation, bad request) propagate immediately and do NOT record a breaker failure — the breaker is for "broker degraded", not "caller did something wrong" (P7-audit H12 pins this).
+
+### Order placement (`place_and_wait_for_fill`)
+
+The building-block primitive for entry placement, stop-loss escalation, and salvage. Sequence:
+
+1. `place_order(coid=...)` — `_ensure_coid` guarantees every order carries a `client_order_id` for server-side dedup (retry-safe; same cOID across all attempts of the same call per P7-audit H12).
+2. Check `place_resp.get("order_status")` (P7-audit C3 — the place-response field is `order_status`, **NOT** `status`; the latter is the live-order field). Terminal status → instant fill / cancel / reject.
+3. On `order_status == "filled"` → fetch `get_order_status(order_id)` to get the authoritative `filledQuantity` / `avgPrice` (P7-audit C4 — the place-response doesn't carry fill detail; reporting `filled_quantity=0` would cause double-positions on retry).
+4. Otherwise: poll `get_order_status` every `poll_interval_s` (default 0.5s) until terminal status or `timeout_seconds` (default 30s).
+5. On `CircuitBreakerOpen` during polling (P7-audit M12) → surface as `status="timed_out"` (the existing "caller cancels + escalates" path).
+
+### Conid-quantity reconciliation (F4)
+
+IBKR has **no per-leg position ID** — every IBClient method that previously took a `position_id` now keys on `(conid, quantity)`. The Position Registry is vestigial (always empty on IBKR) but kept for back-compat. Every action path (`_execute_stop_loss`, `_unwind_partial_entry`, `_handle_naked_short`, settlement reconciliation, MKT-033 long salvage) gates on `*_uic` (= conid stored under the legacy field name), NOT `*_position_id`. P7-audit C1, H1, H2, H9, M7, M8 closed every remaining `pos_id`-gated action path.
+
+`base_strategy._position_is_settled(pid)` treats `None`, empty, AND `DRY_*` synthetic IDs as settled so dry-run paths book expired credits correctly.
+
+### Fill prices
+
+Three authoritative sources (in priority order):
+1. **`/iserver/account/orders/{order_id}`** → `avgPrice` / `filledQuantity` (post-fill, before purge)
+2. **`/portfolio/accounts/{accountId}/positions`** → `avg_cost` (live position, normalized by `_normalize_position_dict`)
+3. **`/iserver/account/trades`** → most-recent execution at conid + side (closed-position lookup; replaces Saxo's `closedpositions`)
+
+`_get_close_fill_price` returns `None` on `FilledPrice == 0` so `_deferred_stop_fill_lookup` (background thread) can re-check after IBKR's sync delay, then apply a P&L correction to `total_realized_pnl` before settlement.
+
+### What's NOT used
+- **WebSocket streaming** — `StreamingManager` exists but is OFF by default. HYDRA is REST-only on this branch; quotes are snapshot-driven via the warmup-polled `_snapshot_with_preflight`.
+- **`shared/saxo_client.py`** — deleted in P5c. Any import would fail at module load.
+- **`shared/token_coordinator.py`** — present (kept for `main`-branch back-compat) but never imported by HYDRA. The Saxo `token_keeper.service` is dead on this branch; do not start it.
+- **`broker` abstraction layer (`shared/broker/`)** — deleted in P5c. HYDRA's strategy reads IBClient directly via its inherited `self.broker` attribute.
+
+---
+
+## Credentials (systemd LoadCredentialEncrypted=)
+
+Six credentials, all per-environment (paper here):
+
+| # | Name | Form | systemd-creds name |
+|---|---|---|---|
+| 1 | Consumer key | 9-char A–Z string | `ibkr_consumer_key` |
+| 2 | Access token | string | `ibkr_access_token` |
+| 3 | Access-token-secret | string | `ibkr_access_token_secret` |
+| 4 | Signature key | PEM file | `ibkr_signature_pem` |
+| 5 | Encryption key | PEM file | `ibkr_encryption_pem` |
+| 6 | Diffie-Hellman params | PEM file | `ibkr_dhparam_pem` |
+
+**Full one-time setup runbook:** [`deploy/IBKR_CREDENTIALS_SETUP.md`](deploy/IBKR_CREDENTIALS_SETUP.md) — includes mandatory pre-start verification (3 checks: `systemd-analyze verify`, per-file `systemd-creds decrypt | wc -c` against expected byte ranges, spot-check decrypt of consumer key). Do **not** `systemctl enable hydra` until all 3 pass.
+
+**Loading at runtime:** systemd sets `$CREDENTIALS_DIRECTORY=/run/credentials/hydra.service` (private tmpfs) BEFORE the sandboxing directives take effect, then drops the bot into the sandbox. `shared/ib_oauth.load_credentials("paper")` reads from there. `ProtectSystem=strict` does NOT block credential reading — the bot reads from the tmpfs, never from `/etc/calypso/ibkr/`.
+
+**Dev path:** When `$CREDENTIALS_DIRECTORY` is unset, `load_credentials` falls back to env vars (`IBIND_OAUTH1A_CONSUMER_KEY` / `IBIND_OAUTH1A_ACCESS_TOKEN` / `IBIND_OAUTH1A_ACCESS_TOKEN_SECRET`) plus PEM files in `$CALYPSO_IBKR_KEYS_DIR/{env}/` (default `~/ibkr-oauth/{env}/`). An empty/whitespace-only `$CREDENTIALS_DIRECTORY` raises `RuntimeError` (P7-audit M3) — that means systemd's credential load failed and the service should not silently fall through to dev creds.
+
+**Rotation:** Re-encrypt the changed credential, `sudo systemctl restart hydra`. The .cred files are host-key-bound — they don't port to another VM, re-encrypt on each host.
+
+---
+
+## Variant Comparison (Dry-Run Head-to-Head)
+
+A and B/C are 3 parallel HYDRA processes running concurrently. Each variant has its own systemd unit, isolated `data/variant_<id>/*` paths via the `HYDRA_VARIANT_ID` env var, and `alerts.enabled=false` + `google_sheets.enabled=false` so non-A variants don't pollute the canonical record.
+
+**Current scheme (v1.28.x, IBKR-standalone branch):**
+
+| Variant | Service | Strategy | Schedule | Contracts | Widths |
+|---|---|---|---|---|---|
+| A | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic |
+| B | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack LIVE) | 09:45 / 10:45 / 11:15 / 11:45 (+ E6) | 10c | 5pt below VIX 22, 10pt above (narrow) |
+| C | `hydra_variant_c.service` | `BrandonHydraStrategy` (Brandon-faithful baseline) | 10:15 / 10:45 / 11:15 (+ E6) | 10c | Same narrow widths as B |
+
+**Brandon Trojan Horse features (LIVE on B/C):** take-profit at 80% credit captured, GEX-aware strike adjuster (skips sides inside accel zones, shifts toward decel walls), GEX breach exit (closes IC after sustained 90s breach of decel wall), defensive overlay (debit spread / butterfly hedge), delta-target strike selection anchored to 8δ from the live Polygon chain (replaces HYDRA's OTM-multiplier).
+
+Only HYDRA's credit+buffer stop runs in `hydra_stop_shadow` on B/C — parallel for head-to-head journal comparison, never acts on B/C.
+
+**Dashboard:** `/comparison` page (gated by `DASHBOARD_COMPARISON_MODE_ENABLED=true` on the dashboard service) auto-discovers running variants via `/api/variants/health`. End-of-day `VARIANT_COMPARISON_DAILY` Telegram alert from variant A + on-demand `/compare` command.
+
+**Adding a new variant:** (1) add 5 `variant_<id>_*` fields to `dashboard/backend/config.py`; (2) append id to `_VARIANT_IDS` in `dashboard/backend/routers/variants.py`; (3) create `deploy/hydra_variant_<id>.service`; (4) create `bots/hydra/config/config_variant_<id>.json` on the VM. See `docs/HYDRA_VARIANT_TESTING_PLAN.md`.
+
+**API pacing:** Each variant's config can set `strategy.api_pacing_multiplier` (default 1.0 = A; B=1.5, C=2.0 recommended) to scale monitoring + heartbeat intervals — keeps combined IBKR request rate under the rate-limit ceiling. Vigilant-mode stop checks are NOT scaled (safety-critical).
+
+**Polygon:** Variants B/C require `POLYGON_API_KEY` (Options Starter tier — `EnvironmentFile=-/etc/calypso/polygon.env` per `deploy/polygon.env.example`). If absent, GEX features silently disable; TP and narrow widths continue.
 
 ---
 
 ## Alert System (Telegram/Email)
 
-All bots use a shared alerting system via Google Cloud Pub/Sub and Cloud Functions.
-
-### Architecture
 ```
-Bot → AlertService → Pub/Sub (~50ms) → Cloud Function → Telegram/Gmail → User
+HYDRA → AlertService → Pub/Sub (~50ms) → Cloud Function → Telegram/Gmail → User
 ```
 
-**Key Design Principle:** Alerts are sent AFTER actions complete with ACTUAL results (not predictions). The bot publishes to Pub/Sub (~50ms non-blocking) and continues immediately. Cloud Function delivers Telegram/Email asynchronously.
+Alerts are sent AFTER actions complete with actual results. The bot publishes to Pub/Sub non-blocking and continues. All timestamps in US Eastern Time (ET) — exchange timezone, DST handled.
 
-**Timezone:** All alert timestamps use US Eastern Time (ET) - the exchange timezone. Consistent regardless of where you travel. DST transitions (EST ↔ EDT) are handled automatically.
-
-### Alert Priority Levels
 | Priority | Delivery | Examples |
 |----------|----------|----------|
-| CRITICAL | Telegram + Email | Circuit breaker, emergency exit, naked position, ITM risk close |
-| HIGH | Telegram + Email | Stop loss, max loss, wing breach, roll failed, vigilant mode entry |
-| MEDIUM | Telegram + Email | Position opened/closed, profit target, roll complete, recenter |
-| LOW | Telegram + Email | Bot started/stopped, daily summary, vigilant mode exit, entry skipped (Telegram only) |
+| CRITICAL | Telegram + Email | Circuit breaker, emergency exit, naked position, intervention required |
+| HIGH | Telegram + Email | Stop loss, max loss, position mismatch |
+| MEDIUM | Telegram + Email | Position opened/closed, profit target, settlement complete |
+| LOW | Telegram (only) | Bot started/stopped, daily summary, entry skipped, vigilant exit |
 
-**Note:** ALL alerts go to Telegram (rich Markdown formatting) + Email.
+AlertService auto-prefixes `[Nc]` on the title when `contracts > 1` (v1.24.0). 14 HYDRA call sites pass `contracts=entry.contracts` so the prefix appears on multi-contract events.
 
-### Alert Responsibilities by Bot (2026-01-27)
+**Telegram credentials** in Secret Manager (`calypso-telegram-credentials`), not config files. **Email** address optionally in Secret Manager (`calypso-alert-config`).
 
-| Bot | AlertService | MarketStatusMonitor |
-|-----|--------------|---------------------|
-| **Iron Fly** | ✅ IRON_FLY | ❌ |
-| **Delta Neutral** | ✅ DELTA_NEUTRAL | ✅ (sole owner) |
-| **Rolling Put Diagonal** | ✅ ROLLING_PUT_DIAGONAL | ❌ |
-| **MEIC** | ✅ MEIC | ❌ |
-
-**MarketStatusMonitor** (only on Delta Neutral to avoid duplicates):
-- Market opening countdown (1h, 30m, 15m before open) - sends Telegram/Email alerts
-- Market open notification (at 9:30 AM ET)
-- Market close notification (at 4:00 PM ET or early close)
-- Holiday notifications (weekday market closures)
-
-**Delta Neutral ITM Monitoring Alerts** (Updated 2026-01-28):
-- VIGILANT_ENTERED (HIGH): 60-75% of original cushion consumed (adaptive threshold)
-- VIGILANT_EXITED (LOW): Cushion consumption drops below 60% (back to safe zone)
-- ITM_RISK_CLOSE (CRITICAL): Shorts emergency closed at 0.1% from strike (absolute safety floor)
-- ROLL_COMPLETED (MEDIUM): Weekly shorts rolled successfully
-- RECENTER (MEDIUM): Long straddle recentered to new ATM strike
-
-### Enabling Alerts
-Add to each bot's `config.json`:
-```json
-{
-    "alerts": {
-        "enabled": true,
-        "email": "your@email.com"
-    }
-}
-```
-
-**Note:** Telegram delivery uses `bot_token` and `chat_id` from Secret Manager (`calypso-telegram-credentials`), not from config files. Email address can also be stored in Secret Manager (`calypso-alert-config`).
-
-### Key Files
-| File | Purpose |
-|------|---------|
-| `shared/alert_service.py` | AlertService class used by bots |
-| `cloud_functions/alert_processor/main.py` | Cloud Function that sends Telegram/Email |
-| `docs/ALERTING_SETUP.md` | Full deployment guide |
-
-### Testing Alerts Locally (Dry Run)
 ```bash
+# Test alerts in dry-run
 export ALERT_DRY_RUN=true
-python -c "
-from shared.alert_service import AlertService
-svc = AlertService({'alerts': {'enabled': True}}, 'TEST')
-svc.circuit_breaker('Test reason', 3)
-"
-```
+python -c "from shared.alert_service import AlertService; AlertService({'alerts': {'enabled': True}}, 'TEST').circuit_breaker('Test', 3)"
 
-### Monitoring Alert Delivery
-```bash
-# View Cloud Function logs
+# Cloud Function logs
 gcloud functions logs read process-trading-alert --region=us-east1 --project=calypso-trading-bot --limit=50
 
-# Check dead letter queue for failed alerts
+# Dead-letter queue (failed alerts)
 gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-trading-bot --limit=10 --auto-ack
 ```
+
+Full deployment guide: [`docs/ALERTING_SETUP.md`](docs/ALERTING_SETUP.md).
 
 ---
 
 ## Agent Suite (5 Agents)
 
-CALYPSO has 5 autonomous agents that run on schedules via systemd timers. All use `shared/claude_client.py` for Claude API access and `shared/sheets_reader.py` for Google Sheets data.
+5 autonomous agents on systemd timers. All use `shared/claude_client.py` for Claude API + `shared/sheets_reader.py` for Google Sheets.
 
-| Agent | Service Name | Schedule | Purpose |
-|-------|-------------|----------|---------|
+| Agent | Service | Schedule | Purpose |
+|-------|---------|----------|---------|
 | APOLLO | `apollo.service` | 8:30 AM ET weekdays | Pre-market scout (overnight news, VIX, expected move) |
-| HERMES | `hermes.service` | 7:00 PM ET weekdays | Daily execution quality analyst (post-settlement) |
-| HOMER | `homer.service` | 7:30 PM ET weekdays | Automated HYDRA Trading Journal writer |
-| CLIO | `clio.service` | Saturday 9:00 AM ET | Weekly strategy analyst (aggregates + deep analysis) |
-| ARGUS | `argus.service` | Every 15 min | Health monitor (bot process, API, token status) |
+| HERMES | `hermes.service` | 7:00 PM ET weekdays | Daily execution quality analyst |
+| HOMER | `homer.service` | 7:30 PM ET weekdays | Automatic HYDRA Trading Journal updates |
+| CLIO | `clio.service` | Sat 9:00 AM ET | Weekly strategy analyst |
+| ARGUS | `argus.service` | Every 15 min | Health monitor (bot process, API, OAuth) |
 
-### Agent Config
-- Template: `services/agents_config.json.template`
-- Production: `services/agents_config.json` (gitignored, on VM only)
-- Shared: `anthropic` API key, `google_sheets` credentials, `alerts` settings
+**Config:** Template `services/agents_config.json.template`; production `services/agents_config.json` (gitignored, on VM only). Shared: `anthropic` API key, `google_sheets` credentials, `alerts` settings.
 
-### HOMER — Trading Journal Writer (NEW)
+### HOMER (Trading Journal Writer)
 
-Automatically updates `docs/HYDRA_TRADING_JOURNAL.md` after market close each day.
+Updates `docs/HYDRA_TRADING_JOURNAL.md` after market close. Flow:
 
-**What it does:**
-1. Detects missing trading days (compares journal vs Google Sheets)
-2. Collects data from Sheets Daily Summary + Positions + Trades tabs + metrics file
-3. Fills missing stop data from fallback sources (HYDRA log file for stop times/P&L, P&L identity derivation for missing individual stop losses)
-4. Updates Sections 1, 2, 3, 4, 5, 8, 9 of the journal
-5. Uses Claude API for narrative sections (observations, market labels, assessments)
-6. Validates journal structure, commits + pushes to git
-7. Sends Telegram alert to HYDRA chat on completion/failure
+1. Detect missing trading days (compare journal vs Google Sheets)
+2. Collect Sheets Daily Summary + Positions + Trades tabs + metrics file
+3. Fill gaps from fallback sources (HYDRA log file for stop times/P&L; P&L identity derivation)
+4. Update sections 1, 2, 3, 4, 5, 8, 9
+5. Use Claude API for narrative sections (observations, assessments)
+6. Validate journal structure, commit + push to git
+7. Send Telegram alert on completion/failure
 
-**Data fallback chain (for missing Trades tab records):**
-1. Google Sheets Trades tab (primary — per-entry + per-stop rows)
-2. HYDRA log file (`logs/hydra/bot.log`) — parses MKT-025 stop events for times and P&L
+**Fallback chain for missing trade records:**
+1. Google Sheets Trades tab (primary)
+2. HYDRA log file (`logs/hydra/bot.log`) — parses MKT-025 stop events
 3. P&L identity derivation — `missing_debit = total_stop_debits - sum(known_debits)`
 
-**Files:**
-```
-services/homer/
-  main.py               Entry point (orchestration, git, Telegram alerts)
-  data_collector.py     Gathers data from Sheets + files + heartbeat logs
-  db_manager.py         SQLite backtesting database (schema, inserts, queries)
-  journal_parser.py     Parses journal structure (sections, tables)
-  journal_updater.py    Applies updates section-by-section
-  narrative_generator.py Claude API for observations/assessments
-deploy/homer.service    systemd oneshot service
-deploy/homer.timer      systemd timer (7:30 PM ET weekdays)
-intel/homer/            Backups + logs
-data/backtesting.db     SQLite database with market ticks, OHLC, trades
-```
-
-**Backtesting Database** (`data/backtesting.db`):
-SQLite database populated live by HYDRA (`DataRecorder`) and backfilled by HOMER. Stores heartbeat snapshots, 1-minute OHLC bars, trade entries, stop events, daily summaries, per-entry spread snapshots, skipped entries, MAE/MFE, and shadow entries. Current schema version: **v7** (OTM-based shadow logging for strategy counterfactual).
-
-| Table | Content | ~Rows/Day |
-|-------|---------|-----------|
-| `market_ticks` | Heartbeat snapshots (~11s intervals: SPX, VIX, trend, state) | ~1,500 |
-| `market_ohlc_1min` | 1-min OHLC bars computed from ticks | ~390 |
-| `trade_entries` | Iron condor entries (strikes, credits, signals, OTM distances, Greeks, bid-ask width, slippage, margin) | ~3 |
-| `trade_stops` | Stop loss events (debit, P&L, trigger level, quoted mid, slippage, salvage) | 0-3 |
-| `daily_summaries` | End-of-day totals (SPX OHLC, VIX, P&L, entry/stop counts) | 1 |
-| `spread_snapshots` | Per-entry cost-to-close every ~10s during monitoring. v5 adds individual leg mid prices; v6 adds Saxo bid/ask per leg for ThetaData-vs-Saxo calibration | ~3,000 |
-| `skipped_entries` | Counterfactual tracking of entries rejected by MKT-011 (theoretical strikes + credit) | 0-3 |
-| `entry_mae_mfe` | Max Adverse / Max Favorable Excursion per entry side (cushion_min_pct) | 0-6 |
-| `shadow_entries` | v7: Shadow strikes that OTM-based selection WOULD have placed (observation only, used to compare credit-based vs OTM-based selection) | 0-3 |
-| `schema_info` | Schema version tracking for migrations | — |
-
-```sql
--- Example queries
--- SPX price at specific time
-SELECT timestamp, spx_price, vix_level FROM market_ticks
-WHERE timestamp LIKE '2026-03-04 11:15%';
-
--- Daily P&L summary
-SELECT date, net_pnl, entries_placed, entries_stopped FROM daily_summaries ORDER BY date;
-
--- 1-minute OHLC for a date
-SELECT * FROM market_ohlc_1min WHERE timestamp LIKE '2026-03-04%' ORDER BY timestamp;
-
--- Entry details with OTM distances
-SELECT date, entry_number, entry_time, spx_at_entry, short_call_strike, short_put_strike,
-       otm_distance_call, otm_distance_put, total_credit
-FROM trade_entries WHERE date = '2026-03-04' ORDER BY entry_number;
-```
-
-**Commands:**
 ```bash
-# Run manually
+# Manual run
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main'"
 
-# Dry run (parse + collect but don't write)
+# Dry-run (parse + collect, don't write)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main --dry-run'"
 
-# Backfill all historical data into SQLite
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main --backfill 2>&1'"
+# Backfill historical data into SQLite
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main --backfill'"
+```
 
-# Check timer status
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status homer.timer"
+### Backtesting Database (`data/backtesting.db`)
 
-# View logs
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u homer -n 50 --no-pager"
+SQLite populated live by HYDRA's `DataRecorder` + backfilled by HOMER. Current schema: **v8** (added `contracts` per-row + `contracts_per_entry` on daily_summaries, 2026-04-21).
 
-# Verify DB contents
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sqlite3 /opt/calypso/data/backtesting.db \"SELECT 'ticks', COUNT(*) FROM market_ticks UNION ALL SELECT 'ohlc', COUNT(*) FROM market_ohlc_1min UNION ALL SELECT 'entries', COUNT(*) FROM trade_entries UNION ALL SELECT 'stops', COUNT(*) FROM trade_stops UNION ALL SELECT 'summaries', COUNT(*) FROM daily_summaries;\""
+| Table | Content | Rows/day |
+|-------|---------|----------|
+| `market_ticks` | Heartbeat snapshots (~11s: SPX, VIX, trend, state) | ~1,500 |
+| `market_ohlc_1min` | 1-min OHLC from ticks | ~390 |
+| `trade_entries` | Entries (strikes, credits, signals, OTM, Greeks, bid-ask, slippage, margin, contracts) | ~3 |
+| `trade_stops` | Stop events (debit, P&L, trigger, mid, slippage, salvage, contracts) | 0–3 |
+| `daily_summaries` | EOD totals (SPX OHLC, VIX, P&L, entry/stop counts, contracts_per_entry) | 1 |
+| `spread_snapshots` | Per-entry cost-to-close every ~10s; leg-level mid/bid/ask | ~3,000 |
+| `skipped_entries` | Counterfactual (entries rejected by MKT-011) | 0–3 |
+| `entry_mae_mfe` | Max Adverse / Favorable Excursion per side | 0–6 |
+| `shadow_entries` | OTM-based shadow selection (observation only) | 0–3 |
+| `schema_info` | Schema version | — |
+
+```sql
+-- SPX price at a specific time
+SELECT timestamp, spx_price, vix_level FROM market_ticks WHERE timestamp LIKE '2026-05-20 11:15%';
+
+-- Daily P&L roll-up
+SELECT date, net_pnl, entries_placed, entries_stopped FROM daily_summaries ORDER BY date DESC LIMIT 20;
+
+-- Entries with OTM distances
+SELECT date, entry_number, entry_time, spx_at_entry, short_call_strike, short_put_strike,
+       otm_distance_call, otm_distance_put, total_credit, contracts
+FROM trade_entries WHERE date = '2026-05-20' ORDER BY entry_number;
 ```
 
 ---
 
-## HYDRA Dashboard (v2.0.0 — Deployed 2026-03-15)
+## HYDRA Dashboard (v2.0.0)
 
-Real-time read-only monitoring dashboard for the HYDRA trading bot. **100% read-only — zero changes to the bot.** HYDRA has no idea the dashboard exists.
+Real-time read-only monitoring. **100% read-only — zero changes to the bot.**
 
 ### Architecture
+
 ```
 Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
                                                       ↓ reads
@@ -673,240 +481,116 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
                                               intel/*/*.md (agent reports)
 ```
 
-### Services
 | Service | Port | Description |
-|---------|------|-------------|
+|---|---|---|
 | `dashboard.service` | 8001 (localhost) | FastAPI backend (uvicorn, 1 worker) |
 | nginx | 8080 (public) | Reverse proxy + static file server |
 
-### Tech Stack
-- **Backend:** FastAPI + uvicorn, SQLite (query_only=TRUE), WebSocket broadcaster
-- **Frontend:** React 19 + TypeScript + Vite, Tailwind CSS v4, Zustand, Recharts, TradingView Lightweight Charts, Inter font (Google Fonts CDN)
-- **PWA:** vite-plugin-pwa (installable on iOS/Android)
-- **Widget:** iOS Scriptable widget (`scriptable/HYDRA_Widget.js`)
+**Stack:** FastAPI + uvicorn, SQLite `PRAGMA query_only=TRUE`, WebSocket broadcaster. Frontend: React 19 + TypeScript + Vite, Tailwind CSS v4, Zustand, Recharts, TradingView Lightweight Charts. PWA-installable. iOS Scriptable widget at `dashboard/scriptable/HYDRA_Widget.js`.
 
 ### Pages
-| Page | Route | Content |
-|------|-------|---------|
-| Dashboard | `/` | Live entries, SPX chart, cushion bars, P&L with comparison context, position heatmap, performance metrics (Sharpe/Sortino/etc.), agents, log feed, ambient state gradient |
-| History | `/history` | Calendar heat map, week/month summary cards, day drill-down with OHLC charts + session replay, CSV export |
-| Analytics | `/analytics` | 4-tab view: Performance (cumulative P&L, equity curve with drawdown, histogram, rolling win rate, day-of-week), Entries (credit by slot, type breakdown, P&L by entry#, OTM scatter), Stops (rate by slot, call/put ratio, slippage, MKT-036 timer), Market (VIX scatter, day range, direction, trend signal, correlation heatmap) |
 
-### Key API Endpoints
+| Page | Route | Content |
+|---|---|---|
+| Dashboard | `/` | Live entries, SPX chart, cushion bars, P&L w/ comparison context, position heatmap, perf metrics, agents, log feed |
+| History | `/history` | Calendar heat map, week/month summary cards, day drill-down + session replay, CSV export |
+| Analytics | `/analytics` | 4-tab: Performance / Entries / Stops / Market |
+| Comparison | `/comparison` | N-variant panels (gated by env flag) |
+
+### Key API endpoints
+
 | Endpoint | Description |
-|----------|-------------|
+|---|---|
 | `GET /api/health` | Health check |
 | `GET /api/hydra/state` | Current HYDRA state |
-| `GET /api/hydra/bot-config` | Bot config flags (e.g. `conditional_e6_enabled`, `conditional_e7_enabled`) — read directly from `bots/hydra/config/config.json`; dashboard hides E6/E7 UI elements when both false |
-| `GET /api/hydra/entries?date=YYYY-MM-DD` | Entries for a date |
-| `GET /api/hydra/summary` | Daily summary (P&L, entries, stops) |
+| `GET /api/hydra/bot-config` | Config flags (read directly from `bots/hydra/config/config.json`) |
+| `GET /api/hydra/entries?date=...` | Entries for a date |
+| `GET /api/hydra/summary` | Daily summary (P&L, entries, stops, contracts_per_entry) |
 | `GET /api/metrics/cumulative` | Lifetime metrics |
 | `GET /api/metrics/daily?days=30` | Daily summaries for calendar |
-| `GET /api/market/ohlc?date=YYYY-MM-DD` | 1-min OHLC for SPX chart |
+| `GET /api/market/ohlc?date=...` | 1-min OHLC for SPX chart |
 | `GET /api/agents/status` | Agent last-run times |
-| `GET /api/metrics/comparisons` | Historical comparison stats (avg P&L, avg credit, etc.) |
-| `GET /api/metrics/performance` | Daily P&L array for client-side stats (Sharpe, etc.) |
+| `GET /api/metrics/{comparisons,performance}` | Historical context for the panel |
+| `GET /api/variants/{health,list,comparison,aggregate}` | Variant discovery + cross-day analytics |
 | `GET /api/widget` | Flat JSON for iOS Scriptable |
-| `WS /ws/dashboard` | WebSocket for real-time updates (heartbeat timeout, agent status, comparisons) |
+| `WS /ws/dashboard` | Real-time updates |
 
-### Safety Guarantees
-- Dashboard is **100% read-only** — never writes to state files, metrics, DB, or logs
-- SQLite opened with `PRAGMA query_only=TRUE`
-- Does NOT import `saxo_client.py`, `token_coordinator.py`, or any trading code
+### Safety guarantees
+- 100% read-only — never writes to state, metrics, DB, or logs
+- SQLite opened `query_only=TRUE`
+- Does NOT import IBClient or any trading code
 - Separate systemd service — `systemctl stop dashboard` has zero effect on HYDRA
 - Resource capped: 256MB RAM, 25% CPU
 
 ### Commands
+
 ```bash
-# Start/stop/restart dashboard
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start dashboard"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop dashboard"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart dashboard"
+# Start/stop/restart
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl {start,stop,restart} dashboard"
 
-# Check status
+# Status + logs
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status dashboard"
-
-# View logs
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u dashboard -n 50 --no-pager"
 
-# Deploy frontend update (build locally first)
+# Deploy frontend (build locally, scp, swap)
 cd dashboard/frontend && npm run build
 gcloud compute scp --recurse dist/ calypso-bot:/tmp/dashboard-dist --zone=us-east1-b
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo cp -r /tmp/dashboard-dist/* /opt/calypso/dashboard/frontend/dist/ && sudo chown -R calypso:calypso /opt/calypso/dashboard/frontend/dist/ && rm -rf /tmp/dashboard-dist"
 
-# Deploy backend update (pull code, restart service)
+# Deploy backend (pull, clear cache, restart)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find dashboard -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart dashboard"
 ```
-
-### Color System (HYDRA Brand)
-All colors derived from the HYDRA logo (dark teal background), 3-level surface depth:
-- Level 0 (page): `#1a2229` / Level 1 (cards): `#222e35` / Level 2 (elevated): `#2d3b43`
-- Profit: `#7ee8c7` (mint) / Loss: `#f85149` (coral) / Warning: `#d29922` (amber)
-- Defined in `dashboard/frontend/src/lib/tradingColors.ts` and `src/index.css`
 
 ---
 
 ## Quick Reference Commands
 
-### Emergency Stop (All Bots + Token Keeper)
+### Service lifecycle
+
 ```bash
-# Stop all trading bots (token keeper keeps running to preserve auth)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
+# Stop HYDRA + variants (does NOT affect IBKR OAuth — no token keeper to worry about)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c"
 
-# Stop EVERYTHING including token keeper (token will expire in ~20 min!)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra token_keeper"
-```
-
-### Stop Individual Services
-```bash
-# Iron Fly
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop iron_fly_0dte"
-
-# Delta Neutral
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop delta_neutral"
-
-# Rolling Put Diagonal
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop rolling_put_diagonal"
-
-# MEIC
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop meic"
-
-# HYDRA (MEIC + Trend Following)
+# Stop just HYDRA
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
 
-# Token Keeper (WARNING: token will expire in ~20 min without this!)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop token_keeper"
-```
+# Start HYDRA + variants (run pre-start verification first — see deploy/IBKR_CREDENTIALS_SETUP.md)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra hydra_variant_b hydra_variant_c"
 
-### Start Services
-```bash
-# Start token keeper first (ensures fresh token for bots)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start token_keeper"
-
-# Start all trading bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
-
-# Individual bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start iron_fly_0dte"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start delta_neutral"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start rolling_put_diagonal"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start meic"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra"
-```
-
-### Restart Services
-```bash
-# Restart all trading bots (token keeper usually doesn't need restart)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
-
-# Individual bots
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart delta_neutral"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart rolling_put_diagonal"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart meic"
+# Restart HYDRA (config change pickup)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
-
-# Token Keeper (rarely needed)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart token_keeper"
 ```
 
-### Check Status
+### Status / logs
+
 ```bash
-# All services (bots + token keeper)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status token_keeper iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
+# All active HYDRA-related services
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra hydra_variant_b hydra_variant_c dashboard"
 
-# List running Calypso services
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl list-units --type=service | grep -E '(iron|delta|rolling|meic|hydra|token_keeper)'"
-```
-
-### View Logs
-```bash
-# Token Keeper logs (check token refresh status)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -n 50 --no-pager"
-
-# Trading bot logs (50 lines)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte -n 50 --no-pager"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u delta_neutral -n 50 --no-pager"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u rolling_put_diagonal -n 50 --no-pager"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -n 50 --no-pager"
+# HYDRA logs (50 lines)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 50 --no-pager"
 
-# Follow logs (live)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper -f"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte -f"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic -f"
+# Follow live
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -f"
 
-# Today's logs
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u token_keeper --since today --no-pager"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u iron_fly_0dte --since today --no-pager"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u meic --since today --no-pager"
+# Today
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra --since today --no-pager"
+
+# Variant B/C
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra_variant_b -n 50 --no-pager"
+
+# Agents
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u homer -n 50 --no-pager"
 ```
 
----
+### Emergency stop (everything)
 
-## ODYSSEUS — Pre-Push Code Audit Protocol
-
-**Trigger:** Before any `git push` or VM deployment in a Claude Code session.
-
-ODYSSEUS is a 3-pass code audit that catches bugs, dead code, misspellings, and documentation gaps before they reach production. It runs entirely within Claude Code (no external tools needed).
-
-### Pass 1: Discovery
-
-Scan all changed files (`git diff main`) and check each category. Print progress after EACH check:
-
-```
-ODYSSEUS Pass 1/3 [1/8]: Shared code impact... 2 files in shared/ changed, affects HYDRA only
-ODYSSEUS Pass 1/3 [2/8]: Dead code scan... 1 unused import found in strategy.py:45
-ODYSSEUS Pass 1/3 [3/8]: Misspelling check... clean
-ODYSSEUS Pass 1/3 [4/8]: Bug pattern scan... 1 missing timeout found in new requests.get()
-ODYSSEUS Pass 1/3 [5/8]: Hanging risk... clean
-ODYSSEUS Pass 1/3 [6/8]: Attribute verification... entry.call_long_strike → should be entry.long_call_strike
-ODYSSEUS Pass 1/3 [7/8]: Documentation... __init__.py needs version bump
-ODYSSEUS Pass 1/3 [8/8]: VM config/state... no config key changes needed, state file compatible
-Pass 1 complete: 4 issues found
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c"
 ```
 
-**Check categories:**
-
-| # | Category | What to look for |
-|---|----------|------------------|
-| 1 | **Shared code impact** | `grep` callers in `bots/`, flag any working bots affected |
-| 2 | **Dead code** | Unused functions, imports, config keys, variables |
-| 3 | **Misspellings** | Identifiers, dict keys, string literals, log messages |
-| 4 | **Bug patterns** | `if value:` on numerics, missing timeouts, bare `except:`, unsafe threading, `alert.get("key", {})` with possible None |
-| 5 | **Hanging risk** | Blocking calls without timeout: `requests.*`, `thread.join`, `fcntl.flock`, `gspread.*` |
-| 6 | **Attribute verification** | For EVERY `obj.attribute` access on dataclasses, model objects, or API responses in new/changed code: verify the attribute actually exists on the class definition. Use AST parsing or grep the class/dataclass to confirm field names match exactly. Common mistake: `entry.call_long_strike` vs actual `entry.long_call_strike` (adjective-noun vs noun-adjective ordering). Also verify dict key strings match actual Sheets column headers, config keys, and API response fields. |
-| 7 | **Documentation** | `__init__.py` exports, docstrings, CLAUDE.md, strategy specs, README.md |
-| 8 | **VM config/state** | New config keys read by code but missing from VM config? New state fields that break deserialization? State file date stale? Metrics file needs new counters? **SSH to VM and verify**: (1) `cat` each running bot's `config.json` and confirm all config keys referenced in new code exist with correct values or have safe defaults, (2) check state files (`data/*_state.json`) for compatibility with new code, (3) check metrics files for new counters, (4) if config needs updating, update it and flag that a restart is required. |
-
-### Pass 2: Fix & Re-Audit
-
-Fix all issues found in Pass 1, then re-run the full 8-category checklist. Loop until clean:
-
-```
-ODYSSEUS Pass 2/3: Fixing 3 issues...
-  Fixed: removed unused import (strategy.py:45)
-  Fixed: added timeout=30 to requests.get (scout.py:88)
-  Fixed: bumped __init__.py version
-Re-running all checks... 0 issues found
-Pass 2 complete: all fixes verified
-```
-
-### Pass 3: Final Confirmation
-
-One last full pass + `git diff --stat` review:
-
-```
-ODYSSEUS Pass 3/3: Final confirmation...
-  Files changed: 4 (strategy.py, scout.py, __init__.py, CLAUDE.md)
-  All checks: PASS
-  Unintended changes: NONE
-
-ODYSSEUS: ALL CLEAR — safe to push
-```
+There is **no** `token_keeper` to worry about on this branch — IBKR OAuth 1.0a is unattended and survives bot restarts without external help.
 
 ---
 
@@ -914,92 +598,163 @@ ODYSSEUS: ALL CLEAR — safe to push
 
 ### Pre-Commit Checklist
 
-**IMPORTANT:** Before every commit, ensure documentation is updated for any code changes:
+1. Run the affected test files: `python -m pytest tests/ -q`
+2. Update `bots/hydra/__init__.py` version history if behavior changed
+3. Update docstrings for any modified functions
+4. Update relevant `.md` files (this file, `HYDRA_STRATEGY_SPECIFICATION.md`, `docs/migration/*` if migration-related)
+5. **For shared/ib_client.py changes:** re-read [`docs/migration/P7_AUDIT_FINDINGS.md`](docs/migration/P7_AUDIT_FINDINGS.md) to confirm your change doesn't reopen any of the 49 closed findings.
 
-1. **Update `__init__.py` files** - If you added, removed, or changed exports in a module
-2. **Update docstrings/comments** - For any functions or classes you modified
-3. **Update relevant `.md` files:**
-   - `README.md` - If features, safety measures, or project structure changed
-   - `CLAUDE.md` - If VM commands, bot details, or workflows changed
-   - `docs/IRON_FLY_EDGE_CASES.md` - If edge case handling changed
-   - `docs/IRON_FLY_CODE_AUDIT.md` - If significant code changes were made
-   - `bots/*/README.md` - If bot-specific behavior changed
-4. **Update "Last Updated" dates** - In any `.md` files you modified
+### Push local → VM
 
-### Push Local Changes to VM
-
-1. **Commit and push locally:**
 ```bash
-git add -A
-git commit -m "your message"
-git push
+# 1. Commit + push locally
+git add -A && git commit -m "your message" && git push
+
+# 2. Pull on VM and clear Python cache (must run as calypso user)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
+
+# 3. Restart HYDRA (config / strategy change)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
+
+# 4. Verify
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 50 --no-pager"
 ```
 
-2. **Pull on VM and clear Python cache (must use calypso user):**
+### Cold deploy (first VM setup)
+
+1. Encrypt 6 IBKR credentials with `systemd-creds encrypt --name=... > .cred` (see `deploy/IBKR_CREDENTIALS_SETUP.md` step-by-step)
+2. `sudo cp deploy/hydra.service /etc/systemd/system/`
+3. `sudo systemctl daemon-reload`
+4. **Pre-start verification (mandatory):**
+   - `sudo systemd-analyze verify /etc/systemd/system/hydra.service`
+   - For each .cred: `sudo systemd-creds decrypt <file> - | wc -c` and confirm byte count matches expected (consumer_key 9, access_token/secret ~32, signature/encryption PEM ~1700, dhparam ~400-500)
+   - `sudo systemd-creds decrypt /etc/calypso/ibkr/consumer_key.cred -` and confirm it matches 1Password
+5. Only if all 3 pass: `sudo systemctl enable --now hydra`
+6. `sudo journalctl -u hydra -f` to watch the connect handshake
+
+---
+
+## Troubleshooting
+
+### Snapshot returns metadata-only forever
+
+**Symptom:** Quotes are `{conid, conidEx, _updated}` rows with no price fields, even during regular market hours.
+
+**Cause 1:** `_iserver_primed` flag bug. Verify `_ensure_iserver_primed()` is called before `live_marketdata_snapshot`. (P7-audit C2 fixed this in commit c5f43b3; should not recur.)
+
+**Cause 2:** IBKR data-sharing toggle hasn't propagated. Run `scripts/probe_ibkr_market_data.py` — it tests SPY (control US equity, free real-time) before SPX/VIX (indices, gated on toggle). If SPY shows data but SPX/VIX don't, the index entitlement / data-sharing hasn't propagated yet (allow up to 24h after toggling).
+
+**Cause 3:** No real-time entitlement for the conid (or stale conid). The `_snapshot_with_preflight` warmup-exhaustion WARNING logs distinguish: "metadata-only" = entitlement/conid issue, "empty list" = service outage (P7-audit M17).
+
+### Stop loss closed at wrong amount
+
+**Cause:** Probably NOT the C1 bug anymore (action paths gate on `*_uic`, not `*_position_id`). Check: was the entry merged with another at the same strike? IBKR (like Saxo) merges positions at the same (conid, side); the older order_id gets deleted, the newer one keeps its ID with increased Amount. Look for `_get_position_amount` / `_is_position_shared` log lines around the stop time.
+
+### Order rejected with "Order is filled or canceled"
+
+**Cause:** Race — the order completed (filled or cancelled) between when the bot decided to cancel and the DELETE arrived. IBKR returns 4xx/503 with this body. `RetryPolicy.is_retryable` short-circuits these so we don't waste backoff (and don't trip the orders breaker). The `cancel_order()` method specifically returns `True` on this pattern since "no longer working" is the caller's intent.
+
+### "Order X is not found" during stop confirmation
+
+**Cause:** Same family as above — order was purged after reaching a terminal state. `place_and_wait_for_fill`'s poll loop catches this (`"is not found"`/`"no longer found"`) and surfaces as `status="cancelled"`.
+
+### Bot can't connect — `IBAuthError: LST handshake failed`
+
+**Cause:** Wrong consumer key (Saxo creds in a `.cred` file?), or the consumer key is pre-activation. Verify: `sudo systemd-creds decrypt /etc/calypso/ibkr/consumer_key.cred -` matches 1Password's paper consumer key (9 uppercase A–Z chars). If newly issued, IBKR can take up to several hours to activate.
+
+### `ProtectSystem=strict` failing to start service
+
+**Cause:** Almost certainly NOT this — `LoadCredentialEncrypted=` runs BEFORE sandboxing, so credentials are accessible. More likely: the bot is trying to write somewhere outside `/opt/calypso`. Check `journalctl -u hydra` for the actual write path.
+
+### Empty `$CREDENTIALS_DIRECTORY` causes `RuntimeError`
+
+**Cause:** systemd's credential load failed. Run `sudo systemd-analyze verify /etc/systemd/system/hydra.service` and check journalctl for the credential-load error. **Do not** unset `$CREDENTIALS_DIRECTORY` to "fix" this — that would fall through to dev creds.
+
+### Bots running old code after deploy
+
+**Cause:** Python bytecode cache. Always clear after pull:
+
 ```bash
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
 ```
 
-> **Why clear cache?** Python caches compiled bytecode in `__pycache__` directories. Stale cache can cause bots to run old code even after `git pull`. This was discovered when VIX data fetching appeared broken but was actually using cached old code.
+### Bot frozen, stop loss not firing
 
-3. **Restart bots to apply changes:**
+**Cause:** Some blocking call without a timeout. The Fix #64+#68 audit pass added timeout-protected wrappers for Google Sheets (10s), Secret Manager (10s), config token-coordinator file locks (10s polling on `LOCK_NB`), and `ib_oauth` request flows (30s). If the bot freezes again, identify the blocker via `py-spy dump --pid $(pgrep -f hydra.main)` and add a timeout. The IBKR side is already covered by `_ib_call`'s retry+breaker.
+
+---
+
+## Running Diagnostic Scripts on VM
+
+Scripts that hit IBKR need a real (paper-authenticated) `IBClient` — they run on the VM, not locally (local dev path is fine for offline analysis).
+
+### Requirements
+1. Run as `calypso` user (file permissions + Secret Manager + credentials access)
+2. From `/opt/calypso` (import path)
+3. Use the virtualenv Python (`.venv/bin/python` has ibind + ibind-rsa-tools installed)
+4. For IBKR-talking scripts: env vars OR systemd credentials must be visible. systemd's `LoadCredentialEncrypted=` files are only accessible inside `hydra.service` — scripts won't see them. For local-script use, either:
+   - Export `IBIND_OAUTH1A_*` env vars in the shell first, OR
+   - Run via `sudo systemd-run --unit=oneshot-probe --service-type=oneshot ...` borrowing the same `LoadCredentialEncrypted=` lines
+
+### Pattern: heredoc multi-line script
+
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
+import sys
+sys.path.insert(0, \"/opt/calypso\")
+from shared.ib_client import IBClient, IBConfig
+from shared.ib_oauth import load_credentials
+
+client = IBClient(IBConfig(credentials=load_credentials(\"paper\")))
+client.connect()
+try:
+    positions = client.get_positions()
+    print(f\"Found {len(positions)} positions\")
+    for p in positions:
+        print(p)
+finally:
+    client.disconnect()
+SCRIPT
+'"
 ```
 
-4. **Verify status:**
+### The Step 2 probe
+
+`scripts/probe_ibkr_market_data.py` is the canonical IBKR-data-flow diagnostic:
+
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status iron_fly_0dte delta_neutral rolling_put_diagonal meic hydra"
+# Locally (env vars exported from 1Password)
+source .venv/bin/activate
+python scripts/probe_ibkr_market_data.py 2>&1 | tee scripts/probe_mktdata_$(date +%H%M%S).log
 ```
 
-5. **Post-Deployment Documentation Update (MANDATORY):**
-
-After successfully deploying code and verifying it works, you MUST update all relevant documentation:
-
-| What Changed | Files to Update |
-|--------------|-----------------|
-| New exports in shared/ | `shared/__init__.py` - add to imports and `__all__` |
-| New/changed functions | Update docstrings in the source file |
-| Bot behavior changes | `CLAUDE.md`, `bots/*/README.md` |
-| Edge case handling | `docs/*_EDGE_CASES.md` |
-| API patterns | `docs/SAXO_API_PATTERNS.md` |
-| Filter/calendar changes | `shared/event_calendar.py` docstrings |
-| Alert system changes | `docs/ALERTING_SETUP.md` |
-
-**Documentation Checklist:**
-- [ ] `__init__.py` exports updated for any new public functions
-- [ ] Docstrings added/updated for modified functions
-- [ ] Code comments explain non-obvious logic
-- [ ] Relevant `.md` files updated with new behavior
-- [ ] "Last Updated" dates changed in modified `.md` files
-
-**Example:** When adding FOMC calendar functions:
-1. Add functions to `shared/event_calendar.py` with docstrings
-2. Export them in `shared/__init__.py`
-3. Update `CLAUDE.md` if workflow changed
-4. Update `docs/IRON_FLY_EDGE_CASES.md` if edge case handling changed
+It tests SPY (control US equity) before SPX/VIX (indices). Output interpretation:
+- **Control SPY OK, SPX/VIX NO DATA** → index data-sharing toggle not propagated yet
+- **Everything NO DATA** → broader broker-data-sharing issue
+- **All DATA OK** → Step 2 passes; check field 6509 for `R`/`D`/`Z` availability
 
 ---
 
 ## VM System Commands
 
 ```bash
-# SSH connect interactively
+# SSH interactive
 gcloud compute ssh calypso-bot --zone=us-east1-b
 
-# Disk usage
+# Disk
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="df -h"
 
-# Memory usage
+# Memory
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="free -h"
 
-# Running Python processes
+# Python processes
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="ps aux | grep python"
 
-# List log directories
+# Log directories
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="ls -la /opt/calypso/logs/"
 
-# List data directory
+# Data directory
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="ls -la /opt/calypso/data/"
 ```
 
@@ -1007,29 +762,42 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="ls -la /opt/calypso/
 
 ## Config Files
 
-**IMPORTANT:** Config files are in `.gitignore` and must be edited directly on the VM. They are NOT synced via git. Local config files are for development only - production configs live on the VM.
+**IMPORTANT:** Config files (`bots/hydra/config/config*.json`) are `.gitignore`'d and edited directly on the VM. Real credentials come from Secret Manager (Telegram, Google Sheets) or systemd-creds (IBKR OAuth) — never from config files.
 
-To edit VM configs, use `nano` or `vim` via SSH:
 ```bash
-# Edit Iron Fly config on VM
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso nano /opt/calypso/bots/iron_fly_0dte/config/config.json"
+# View HYDRA config
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/hydra/config/config.json"
 
-# After editing, restart the bot to apply changes
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart iron_fly_0dte"
+# View variant configs
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/hydra/config/config_variant_b.json"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/hydra/config/config_variant_c.json"
+
+# Edit (then restart for changes to take effect)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso nano /opt/calypso/bots/hydra/config/config.json"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
+
+# View service files
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/hydra.service"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/hydra_variant_b.service"
 ```
 
-```bash
-# View VM config
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/iron_fly_0dte/config/config.json"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/delta_neutral/config/config.json"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/rolling_put_diagonal/config/config.json"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/bots/meic/config/config.json"
+### Mode (dry-run vs paper-live)
 
-# View systemd service files
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/iron_fly_0dte.service"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/delta_neutral.service"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/rolling_put_diagonal.service"
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/system/meic.service"
+`config.json` is the source of truth. Set `"dry_run": true` (root level) for simulation, `false` for actual paper-money orders. CLI `--dry-run` flag overrides. Default is `false`.
+
+> Reminder: even with `dry_run: false`, this branch trades the IBKR **paper account** only. There is no live-money path.
+
+```bash
+# Flip dry_run via heredoc
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
+import json
+with open(\"bots/hydra/config/config.json\") as f: c = json.load(f)
+c[\"dry_run\"] = True
+with open(\"bots/hydra/config/config.json\", \"w\") as f: json.dump(c, f, indent=2)
+print(\"dry_run =\", c[\"dry_run\"])
+SCRIPT
+'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
 ```
 
 ---
@@ -1044,477 +812,132 @@ gcloud secrets list --project=calypso-trading-bot
 gcloud secrets versions access latest --secret=SECRET_NAME --project=calypso-trading-bot
 ```
 
----
+**Active secrets on this branch:**
+- `calypso-telegram-credentials` — bot token + chat id
+- `calypso-alert-config` — alert email (optional)
+- `calypso-google-sheets-credentials` — service-account JSON
+- `calypso-anthropic-api-key` — agent suite (Claude API)
+- `calypso-polygon-api-key` — Brandon variants B/C (Options Starter tier)
 
-## Key Saxo Bank Symbols
-
-| Symbol | UIC | Description |
-|--------|-----|-------------|
-| US500.I | 4913 | S&P 500 CFD (for SPX price tracking) |
-| SPXW:xcbf | 128 | SPX Weekly options (0DTE) |
-| VIX.I | 10606 | VIX spot price |
-| VIX:xcbf | 117 | VIX options |
+IBKR OAuth is **not** in Secret Manager on this branch — it's in systemd-creds for paper, accessed only from within `hydra.service`'s sandbox.
 
 ---
 
-## Troubleshooting
+## Key IBKR Symbols + Conids
 
-### VIX Data Falling Back to Yahoo Finance
+Conids are not stable across IBKR's environments and can change without notice. Always resolve via `qualify_contract()` — never hard-code. For reference (paper, late 2025 / early 2026):
 
-**Symptom:** Logs show `VIX: Saxo failed (...), using Yahoo fallback` repeatedly.
+| Symbol | sec_type | Approximate conid | Description |
+|--------|----------|-------------------|-------------|
+| SPX | IND | 416904 | S&P 500 index (cash-settled) |
+| SPXW | OPT trading_class | — | SPX Weekly options (0DTE PM-settled) |
+| VIX | IND | 13455 | CBOE VIX index |
+| SPY | STK | 756733 | SPDR S&P 500 ETF (used as control instrument in probes) |
 
-**Root Cause (Fixed 2026-01-23):** VIX is a stock index, not a tradable instrument. Unlike stocks/ETFs that have bid/ask/mid prices, VIX only provides `LastTraded` in the `PriceInfoDetails` block. If the WebSocket subscription doesn't request `PriceInfoDetails` in FieldGroups, the cache will have no extractable price.
-
-**Solution:** Ensure `start_price_streaming()` in `saxo_client.py` includes `"PriceInfoDetails"` in the FieldGroups:
-```python
-"FieldGroups": ["DisplayAndFormat", "Quote", "PriceInfo", "PriceInfoDetails"]
-```
-
-**Debugging Steps:**
-1. Check logs for the specific failure reason: `cache(no valid price)` or `REST(no valid price in response)`
-2. Run the VIX REST API test to see what data Saxo returns
-3. Compare cache snapshot vs REST response - cache may be missing `PriceInfoDetails`
-
-### Bots Running Old Code After Deployment
-
-**Symptom:** Code changes don't take effect even after `git pull` and bot restart.
-
-**Root Cause:** Python bytecode cache (`.pyc` files in `__pycache__`) can persist old compiled code.
-
-**Solution:** Always clear cache after pulling changes (now in standard deployment workflow):
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git pull && find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; echo Cache cleared'"
-```
-
-### Saxo Balance API Field Names (Fix #85, 2026-03-16)
-
-The `/port/v1/balances` endpoint returns these key financial fields (verified via live diagnostic):
-
-| Field | Value (example) | Use For |
-|-------|----------------|---------|
-| `MarginAvailableForTrading` | $22,354.67 | **Available margin for new trades** (USE THIS) |
-| `SpendingPower` | $22,354.67 | Same as MarginAvailableForTrading |
-| `CashAvailableForTrading` | $22,354.67 | Cash portion available |
-| `MarginUsedByCurrentPositions` | -$17,500.00 | Margin locked by open positions |
-| `MarginUtilizationPct` | 43.91 | Percentage of margin used |
-| `NetEquityForMargin` | $39,854.67 | Total equity (NOT available — don't use for margin checks) |
-| `TotalValue` | $50,459.67 | Total account value |
-| `CashBalance` | $38,928.63 | Total cash in account |
-
-**CRITICAL:** `NetEquityForMargin` is total equity (like a credit limit), NOT available margin. Use `MarginAvailableForTrading` for pre-entry margin validation.
-
-**Note:** The `/port/v1/accounts/{key}` endpoint (`get_account_info()`) returns account metadata only (AccountType, Currency, etc.) — NO financial data. Use `get_balance()` for all financial queries.
-
-### Pre-Market Price Fetching Fails (Before 7:00 AM ET)
-
-**Symptom:** Bots log "No quote yet" or fail to get prices during what appears to be pre-market hours.
-
-**Root Cause (Fixed 2026-01-26):** Saxo Bank's extended hours trading only starts at 7:00 AM ET. Before this time, no pre-market data is available. The bots were attempting to fetch prices too early.
-
-**Saxo Extended Hours Schedule:**
-| Session | Time (ET) | Notes |
-|---------|-----------|-------|
-| Pre-Market | 7:00 AM - 9:30 AM | Limit orders only |
-| Regular | 9:30 AM - 4:00 PM | Full trading |
-| After-Hours | 4:00 PM - 5:00 PM | Limit orders only |
-
-**Solution:** Use `is_saxo_price_available()` from `shared/market_hours.py` before fetching prices:
-```python
-from shared.market_hours import is_saxo_price_available
-
-if is_saxo_price_available():  # True only 7:00 AM - 5:00 PM ET on trading days
-    quote = client.get_quote(uic)
-else:
-    logger.info("Saxo prices not available yet")
-```
-
-**See:** [SAXO_API_PATTERNS.md Section 10](docs/SAXO_API_PATTERNS.md#10-extended-hours-trading-pre-market--after-hours)
-
-### WebSocket Streaming Shows Stale Prices
-
-**Symptom:** Cached prices from WebSocket don't update. Logs show the same price for minutes/hours. Bot falls back to REST API for every price check.
-
-**Root Cause (Fixed 2026-01-26):** Saxo Bank sends WebSocket messages as **binary frames**, not plain JSON text. Previous code tried to decode binary as UTF-8 text which silently failed, leaving the cache with only the initial snapshot.
-
-**Binary Frame Format:**
-```
-| 8 bytes | 2 bytes  | 1 byte      | N bytes | 1 byte  | 4 bytes | N bytes |
-| Msg ID  | Reserved | RefID Len   | RefID   | Format  | Size    | Payload |
-| uint64  |          | uint8       | ASCII   | 0=JSON  | int32   | JSON    |
-```
-
-**Solution:** The `_decode_binary_ws_message()` function in `saxo_client.py` now properly parses binary frames using Python's `struct` module:
-```python
-# Proper binary parsing (in saxo_client.py)
-msg_id = struct.unpack_from('<Q', raw, pos)[0]  # 8 bytes, uint64 little-endian
-ref_id_len = struct.unpack_from('B', raw, pos)[0]  # 1 byte
-payload_size = struct.unpack_from('<i', raw, pos)[0]  # 4 bytes, int32 little-endian
-```
-
-**Impact on All Bots:**
-| Bot | Benefit |
-|-----|---------|
-| Delta Neutral | ITM monitoring now works at 1-second intervals (was 3s, now uses cache) |
-| Iron Fly | Option price callbacks in `handle_price_update()` now actually fire |
-| Rolling Put Diagonal | Same benefit as Iron Fly |
-
-**Verification:** After bot restart, check logs for WebSocket update messages:
-```
-WebSocket update #1: UIC 36590 = $693.19
-WebSocket update #2: UIC 36590 = $693.24
-```
-Prices should change over time, not stay static.
+The `IBClient._conid_cache` keys on `(symbol, expiry_iso, strike, right, trading_class, sec_type)` and is cleared on `disconnect()`.
 
 ---
 
-## Running Diagnostic Scripts on VM
+## Migration history
 
-When debugging issues, you often need to run Python scripts directly on the VM to test API calls, inspect data structures, or diagnose problems. This section documents the **exact patterns that work**.
+Saxo → IBKR migration spans 7 functional phases (F1–F7) + 7 cleanup passes (P1–P7). Code-complete on this branch as of 2026-05-22. Phases:
 
-### Critical Requirements
+| Phase | Scope |
+|---|---|
+| F1 | Auth + LST handshake (`IBClient.connect`) |
+| F2 | Contract qualification (`qualify_contract` + conid cache) |
+| F3 | Option chain (`get_option_chain` via probed secdef behavior) |
+| F4 | Position read + reconciliation (conid-quantity model — IBKR has no per-leg position id) |
+| F5 | Closed-position price (`/iserver/account/trades` + `_deferred_stop_fill_lookup`) |
+| F6 | Order write path (`place_order`, `place_and_wait_for_fill`, `cancel_order`, `modify_order`, cOID dedup) |
+| F7 | Strategy-layer broker abstraction (read helpers + balance + ORDER-004 BP gate) |
+| P1–P7 | Imports, dead-Saxo-helper purge, method ranges audit, broker-abstraction flattening, streaming subsystem, retry + per-family circuit breakers, go-live (re-auth gate, systemd creds, multi-agent code audit) |
 
-1. **Run as `calypso` user** - Required for file permissions and Secret Manager access
-2. **Run from `/opt/calypso`** - Required for Python imports to resolve
-3. **Use the virtualenv Python** - `.venv/bin/python` has all dependencies
-4. **Use heredoc for multi-line scripts** - Avoids quoting hell
+P7 multi-agent code audit found and closed 49 issues (4 Critical, 13 High, 17 Medium, 15 Low) across 3 audit rounds. The senior-overseer Round 3 verdict was PASS — branch is cleared for VM deploy + paper smoke test. See [`docs/migration/P7_AUDIT_FINDINGS.md`](docs/migration/P7_AUDIT_FINDINGS.md) for the full register.
 
-### Pattern 1: Simple One-Liner Script
-
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -c \"from shared import SaxoClient; print(SaxoClient)\"'"
-```
-
-### Pattern 2: Multi-Line Script (RECOMMENDED)
-
-Use heredoc (`<<'SCRIPT'`) to write readable multi-line Python scripts:
-
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
-import sys
-sys.path.insert(0, \"/opt/calypso\")
-
-from shared.saxo_client import SaxoClient
-from shared.config_loader import get_config_loader
-
-# Load config
-config_loader = get_config_loader(\"bots/iron_fly_0dte/config\")
-config = config_loader.load_config()
-
-# Create client and authenticate
-client = SaxoClient(config)
-client.authenticate()
-
-# Run your diagnostic code
-positions = client.get_positions()
-print(f\"Found {len(positions)} positions\")
-for p in positions:
-    print(p)
-
-SCRIPT
-'"
-```
-
-### Pattern 3: Test Specific API Calls
-
-**Check current positions:**
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
-import sys
-sys.path.insert(0, \"/opt/calypso\")
-from shared.saxo_client import SaxoClient
-from shared.config_loader import get_config_loader
-
-config = get_config_loader(\"bots/iron_fly_0dte/config\").load_config()
-client = SaxoClient(config)
-client.authenticate()
-
-positions = client.get_positions()
-print(f\"Positions: {len(positions)}\")
-for p in positions:
-    uic = p.get(\"PositionBase\", {}).get(\"Uic\")
-    amount = p.get(\"PositionBase\", {}).get(\"Amount\")
-    strike = p.get(\"PositionBase\", {}).get(\"OptionsData\", {}).get(\"Strike\")
-    print(f\"  UIC={uic}, Amount={amount}, Strike={strike}\")
-SCRIPT
-'"
-```
-
-**Check VIX price:**
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
-import sys
-sys.path.insert(0, \"/opt/calypso\")
-from shared.saxo_client import SaxoClient
-from shared.config_loader import get_config_loader
-
-config = get_config_loader(\"bots/iron_fly_0dte/config\").load_config()
-client = SaxoClient(config)
-client.authenticate()
-
-vix = client.get_vix_level()
-print(f\"VIX: {vix}\")
-SCRIPT
-'"
-```
-
-**Inspect saved position metadata:**
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /opt/calypso/data/iron_fly_position.json"
-```
-
-### Common Mistakes to Avoid
-
-| Mistake | Why It Fails | Solution |
-|---------|--------------|----------|
-| Not using `sudo -u calypso` | Permission errors, can't access Secret Manager | Always use `sudo -u calypso bash -c '...'` |
-| Running from wrong directory | `ModuleNotFoundError: No module named 'shared'` | Always `cd /opt/calypso` first |
-| Using system Python | Missing dependencies | Use `.venv/bin/python` |
-| Single quotes inside single quotes | Shell quoting breaks | Use heredoc or escape carefully |
-| Missing `sys.path.insert` | Imports may fail | Add at top of script |
-
-### Debugging Import Errors
-
-If imports fail, run this to check the environment:
-
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"
-import sys
-print(\"Python:\", sys.executable)
-print(\"Path:\")
-for p in sys.path:
-    print(f\"  {p}\")
-print()
-print(\"Trying imports...\")
-try:
-    from shared import SaxoClient
-    print(\"OK: shared.SaxoClient\")
-except Exception as e:
-    print(f\"FAIL: {e}\")
-SCRIPT
-'"
-```
+Detailed plan: [`docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`](docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md). Per-phase design docs under `docs/migration/F*_*.md` and `docs/migration/P*_*.md`.
 
 ---
 
-## Important Notes
+## Key Lessons Learned
 
-1. **Git on VM:** Must run as `calypso` user: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
-2. **Service names use underscores:** `iron_fly_0dte`, `delta_neutral`, `rolling_put_diagonal`, `meic`, `hydra`
-3. **Log locations:** `/opt/calypso/logs/{iron_fly_0dte,delta_neutral,rolling_put_diagonal,meic,hydra}/bot.log`
-4. **Position data:** `/opt/calypso/data/iron_fly_position.json`
-5. **Config files are gitignored:** Real credentials come from Secret Manager
-6. **All API calls are direct:** No caching for order status or positions (always fresh from Saxo)
-7. **Iron Fly bot:** STOPPED (as of 2026-02-04) - Position Registry integration complete, paused to focus on MEIC
-8. **Delta Neutral bot:** STOPPED (as of 2026-02-04)
-9. **Rolling Put Diagonal bot:** STOPPED (as of 2026-02-04)
-10. **MEIC bot:** STOPPED (as of 2026-02-05) - Replaced by HYDRA for trend filtering
-11. **HYDRA bot:** Running in DRY-RUN mode since 2026-04-27 — ONLY active trading bot. **Current scheme (v1.28.x, 2026-05-08)**: variant A = HYDRA baseline (1c × 75pt MKT-027 dynamic, 3-slot entry grid, no Brandon stack), variants B and C = Brandon Trojan Horse stack with all features LIVE. **Variant A** (control) loads `HydraStrategy` directly. **Variants B and C** load `BrandonHydraStrategy(HydraStrategy)` from `bots/hydra/brandon/strategy.py` via `strategy.brandon.enabled: true`. Brandon features ALL LIVE on B/C (no shadow): take-profit at 80% credit captured, GEX-aware strike adjuster (skips sides inside accel zones, shifts toward decel walls), GEX breach exit (closes IC after sustained 90s breach of decel wall), defensive overlay (debit spread / butterfly hedge), and a delta-target strike-selection override that anchors short strikes to 8δ from the live Polygon chain (replaces HYDRA's OTM-multiplier of expected move per `brandon.delta_target_strike_selection.enabled: true`). HYDRA's progressive credit-chasing tighteners (MKT-020 / MKT-022) are OFF on B/C via `brandon.disable_progressive_tightening: true` so strikes stay where Brandon GEX-zone selection wants them. Only HYDRA's credit+buffer stop runs in `hydra_stop_shadow` on B/C — computes parallel for head-to-head journal comparison without acting. **Variant B (2026-05-13 trim)**: 4-slot entry grid (09:45 / 10:45 / 11:15 / 11:45) at 10c × Brandon narrow widths (5pt below VIX 22, 10pt above). Dropped 09:31 (whipsaw), 10:15 (between-slot), 12:15 (late GEX-already-in-motion) from the original 7-slot design after 5/4-5/12 review showed B at 0-for-4 winning days with commission drag dominating. **Variant C**: 3-slot grid (10:15 / 10:45 / 11:15 + 14:00 conditional) at 10c × narrow widths — Brandon canonical baseline. **Sizing**: B and C run 10c per entry (cut from 15c on 2026-05-13 for the same commission-drag reason); both have config-overridden `min_buying_power_per_ic: 500`, `max_contracts_per_order: 15`, `max_contracts_per_underlying: 60` (B) / 180 (C) so the HYDRA-1c safety constants don't reject Brandon sizing. **GEX peak-locality SKIP (2026-05-13)**: the strike-adjuster's accel-zone SKIP now requires the proposed short to be within `accel_peak_locality_pts: 25.0` (default) of the negative cluster's |GEX| peak strike — fixes the chronic put-only pattern (B 77%, C 89% 5/4-5/12) where the SpotGamma sign convention collapsed the entire call wing into one giant "accel zone" and blanket-SKIP'd every call short regardless of distance from a real wall. **Delta-target BS recompute (2026-05-13)**: `find_strike_at_delta` recomputes each candidate's delta from cached IV + live spot via Black-Scholes when called with `recompute_t_years` (set by `_calculate_strikes`), eliminating 12-min stale-snapshot drift that flipped 8δ picks into 14δ on 0DTE. **Cross-variant shared GEX cache (2026-05-13)**: `bots/hydra/brandon/gex_shared_cache.py` persists the most-recent profile to `/opt/calypso/data/shared/brandon_gex_profile.json` via atomic write + fcntl `LOCK_EX | LOCK_NB` (30s timeout, falls through to unlocked fetch on timeout so the monitor loop never freezes). B and C read each other's just-written snapshots so simultaneous entries at 10:45 / 11:15 share one Polygon round-trip and see identical chains. Background TTL is **3 min** (was 15 min, governs breach-exit + overlay ticks); `_calculate_strikes` calls `_brandon_get_gex_profile(force_refresh=True)` to guarantee the strike-selection moment uses a chain snapshot fetched within the last few seconds. ORDER-004 BP gate is bypassed in dry-run by design (`if self.dry_run` — re-engages live). DATA-003 P&L sanity bounds are now contracts-aware (`max_pnl_per_ic: 100`, `min_pnl_per_ic: -1000` per-contract on B/C). Polygon Options Starter API key required for GEX features; deploy via `EnvironmentFile=-/etc/calypso/polygon.env` per `deploy/polygon.env.example`. If the key is absent, GEX features silently disable — TP and narrow_spread continue. Pre-2026-05-05 designs (75pt × 2c uniform; v1.25-1.26 widths experiment; pivot A/B) are RETIRED — pivot logic preserved as togglable in case GEX-breach exit underperforms. Polygon Options Starter API key required for GEX features; deploy via `EnvironmentFile=-/etc/calypso/polygon.env` per `deploy/polygon.env.example`. If the key is absent, GEX features silently disable — TP and narrow_spread continue. Old variants B (110pt) / C (25pt) and the 2026-05-01 directional-pivot experiments (B=`stressed_only`, C=`both_sides`) are RETIRED in v1.27 — pivot logic is preserved as togglable in case GEX-breach exit underperforms. **(legacy v1.26.0 / pre-v1.27 detail follows for context — variants B and C now run the Brandon stack, not pivot)**: Pivot fires when SPX moves ±0.25% from session open at any time during the day; pre-entry breach gate defers and watches for band re-entry up to 15 min before permanent skip. Conditional E#3 (Upday-035 / Downday-035 at 14:00) is unaffected — fires on SPX-vs-open at 14:00 regardless of pivot history. Idempotent within a day. Stop-loss vs pivot precedence: stops take precedence (Option 1) — if a per-side stop fires before pivot, that side closes via the standard credit+buffer; pivot then skips already-closed sides. **spx_open / vix_open anchor (NEW 2026-05-01)**: `MarketData.update_spx` and `update_vix` now gate intraday-OHLC capture (open/high/low) to >= 9:30 ET via `_is_regular_session_or_later` — pre-market Saxo extended-hours quotes no longer pollute the open reference. HYDRA __init__ also unconditionally restores OHLC from the state file at startup via `_restore_market_ohlc_from_state_file_unconditional` so mid-day restarts in dry-run preserve the actual 9:30 anchor (the standard `_recover_positions_from_saxo` path short-circuits in dry mode and never reaches `_load_state_file_history`'s OHLC restore). All "% from open" calculations (Upday-035, Downday-035, whipsaw filter, ROC gate, directional pivot) use the corrected anchor. Apr 30 evidence: bot stored spx_open=7138.71 vs actual 9:30 open of 7169.97 — 31-point / 0.43% reference error invisible at 0.25%-of-1%-moves but fatal for the pivot strategy's 0.25% primary threshold. **(continued)** 2 base entries at 10:45, 11:15 AM ET (E#1 at 10:15 dropped at ALL VIX levels as of 2026-04-17; E7 downday call-only DISABLED, E6 upday put-only ENABLED at 14:00 with 0.25% threshold, Upday-035) (MKT-034 VIX time shifting DISABLED) + MKT-031 smart entry DISABLED (v1.10.4 — enter at scheduled times only) + Upday-035 conditional entry (E6 at 14:00 fires put-only when SPX rises >= 0.25% above open) + anti-whipsaw filter (`whipsaw_range_skip_mult: 1.75`) + VIX regime adaptive **updated 2026-04-14** (breakpoints [18,22,28], all regime slots now filled — see HYDRA Bot Details table; min_call_credit `[1.00, 0.50, 0.30, 0.30]`, min_put_credit `[1.25, 0.75, 0.50, 0.40]`, max_entries `[2, 2, 2, 1]` (E#1 dropped at ALL VIX levels as of 2026-04-17); regime overwrites credit floors to `min_credit − $0.10`; code drops EARLIEST entries when capped) + base-entry down-day call-only DISABLED 2026-04-19 (`base_entry_downday_callonly_pct: null`, negative EV in sweep — see Base-Entry Down-Day Call-Only section) + EMA 20/40 trend signal (informational only) + **MKT-024 wider starting OTM tuned 2026-04-30 to 2.5x/2.75x with 180pt clamp** (was 3.5x/4.0x at 240pt cap — see MKT-024 section above) + VIX-scaled spread width 25-110pt (MKT-027, floor=25 cap=110 mult=6.0) + credit gate: effective thresholds are regime-dependent (base $2.00/$2.75 now dead) with MKT-029 graduated fallback to `min_credit − $0.10` (MKT-011) + put-only entries when call non-viable AND VIX < 15 (MKT-032/MKT-039) + call-only entries when put non-viable (MKT-040, 89% WR) + VIX entry cutoff disabled (max_vix_entry=999) + early close DISABLED (MKT-018) + stop = total_credit + asymmetric buffer with **Option B per-VIX-regime overrides (2026-04-27)**: Z0/Z3 fall back to global call $0.75 / put $1.75; Z1 (VIX 18-22) overrides to $1.50/$2.50; Z2 (VIX 22-28) overrides to $1.00/$1.50 — wider both in calm, wider call + tighter put in stress (see docs/HYDRA_BUFFER_OPTIMIZATION.md). MKT-042 buffer decay (2.50x early, linear to 1x over 4h), MKT-036 confirmation timer DISABLED, MKT-041 cushion recovery DISABLED (buffer+cushion interfere), MKT-043 calm entry filter (delays entry up to 5min when SPX >15pt move in 3min), MKT-039 put-only stop: credit + $1.75 put buffer, MKT-040 call-only stop: call + $2.60 theo put + call buffer, MKT-038: call + $2.60 theo put + call buffer + FOMC T+1 BLACKOUT ENABLED 2026-04-19 (`fomc_t1_skip_enabled: true`, skip all entries on day after FOMC) + **`dry_run_force_normal_day: true` (NEW 2026-04-30) bypasses FOMC date-based skips in dry mode** for full data collection — live mode untouched + MKT-038 FOMC T+1 call-only DISABLED + FOMC announcement skip DISABLED + configurable stop close mode (default: both legs) + progressive OTM tightening (MKT-020/MKT-022) + **4 SAFETY-DRY defense-in-depth gates (NEW 2026-04-30)** at `_place_option_order`, `_handle_naked_short`, `_unwind_partial_entry`, `_close_position_with_retry` — each self-protects independently of upstream gating + 16 Telegram commands (added `/compare`) + skip alerts: Telegram ENTRY_SKIPPED at all 8 skip paths with detailed reasons (v1.16.0) + state file: `entry_schedule` (base+conditional times), `skip_reason` per entry + `skip_weekdays` and `dow_max_entries` day-of-week config keys (disabled by default) + dashboard: mobile-responsive header, pending cards with scheduled times, skipped cards with reason + backtesting: 1-minute data resolution, Sharpe 3.282 (realistic live 2.684)
-12. **Variant comparison (N-way dry-run head-to-head, expanded 2026-05-01; v1.28 update 2026-05-08):** Variants B, C, ... = parallel HYDRA processes (`hydra_variant_<id>.service`) running in dry mode with different configs. **Current scheme (v1.28, 2026-05-13 retune)**: A = HYDRA baseline (1c × 75pt × 3-slot grid), B = Brandon stack at 10c with narrow 5/10pt widths AND a 4-slot entry grid (09:45/10:45/11:15/11:45 — cut from 7-slot after commission-drag review), C = Brandon stack at 10c with narrow widths AND HYDRA's canonical 3-slot grid (Brandon-faithful baseline). **Historical (v1.25-v1.27)**: width experiment (A=50pt, B=110pt, C=25pt) → directional-pivot A/B → uniform 75pt × 2c with Brandon shadow features → current narrow + entry-time grid scheme. Data isolated under `data/variant_<id>/*` (state, metrics, DB) via `HYDRA_VARIANT_ID=<id>` env var. Non-A variants have `alerts.enabled=false` and `google_sheets.enabled=false` so they don't pollute the canonical record. **API pacing**: each variant config can set `strategy.api_pacing_multiplier` (default 1.0 = variant A behavior; B=1.5, C=2.0 recommended for 3 simultaneous variants) which scales monitoring loop interval + heartbeat status_interval to keep combined Saxo API rate under the ~60 req/min sustained limit. Vigilant-mode stop checks are NOT scaled (safety-critical). Dashboard `/comparison` page (route + nav tab gated by `DASHBOARD_COMPARISON_MODE_ENABLED=true` env on dashboard service) renders N panels dynamically + leaderboard / strikes / buffer bars / live P&L chart / cross-day analytics — auto-discovers variants via `/api/variants/health`. End-of-day `VARIANT_COMPARISON_DAILY` Telegram alert from variant A includes all running non-A variants + on-demand `/compare` command. **Adding a new variant**: (1) add 5 `variant_<id>_*` fields to `dashboard/backend/config.py`, (2) append id to `_VARIANT_IDS` in `dashboard/backend/routers/variants.py`, (3) create `deploy/hydra_variant_<id>.service` mirroring the existing ones, (4) create `bots/hydra/config/config_variant_<id>.json` on the VM. Bot strategy auto-discovers via filesystem glob — no code change needed there. See `docs/HYDRA_VARIANT_TESTING_PLAN.md` for full design.
-13. **FOMC Calendar:** Single source of truth in `shared/event_calendar.py` - ALL bots import from there (updated 2026-01-26)
-14. **Token Keeper:** Always running - keeps OAuth tokens fresh 24/7
-15. **HOMER agent:** Runs at 7:30 PM ET weekdays — auto-updates HYDRA Trading Journal with new trading days, commits + pushes, sends Telegram alert
+### From the IBKR migration (this branch)
+
+1. **IBKR has no per-leg position id.** Every action path that used to gate on `*_position_id` must gate on `*_uic` (= conid). 6 of 13 P7-audit High findings (C1, H1, H2, H9, M7, M8) were this pattern.
+
+2. **The `/iserver/accounts` preflight is mandatory.** Without it, `live_marketdata_snapshot` and `/iserver/account/trades` silently return metadata-only forever. `portfolio_accounts` does NOT satisfy this — it's a different namespace (P7-audit C2).
+
+3. **Place-response status field is `order_status`, not `status`.** Reading the wrong key means instant fills look like "submitted" and the bot retries → double-positions (P7-audit C3).
+
+4. **Place-response doesn't carry fill detail.** On instant fill, fetch `get_order_status(order_id)` for authoritative `filledQuantity` / `avgPrice`; the place-response only has the status (P7-audit C4).
+
+5. **IBKR uses 503 for some 4xx-semantic permanent errors** (`is not found`, `already filled`, `already cancel`, `order is filled or canceled`). The retry policy must short-circuit these or it wastes backoff and trips the breaker (`shared/ib_retry.py:is_retryable`).
+
+6. **`AveragePrice` / `ExecutionPrice` / `Price` — not `FilledPrice`.** Activities endpoint field naming. The closed-position lookup (`/iserver/account/trades`) is the authoritative fallback when activities returns 0.
+
+7. **Crossed quotes happen during fast moves.** `mid = (bid+ask)/2` on a crossed market is nonsense; `_parse_quote_row` returns `mid=None` instead (P7-audit L9).
+
+8. **Snapshot warmup is real.** First poll for a fresh conid returns metadata-only; 12 × 0.5s = 6s warmup is calibrated. Less is brittle (H10).
+
+9. **cOID dedup is the only safe retry strategy for order placement.** `_ensure_coid` guarantees every order carries a `client_order_id`. IBKR dedupes server-side so a timed-out place that secretly succeeded won't double-fill on retry. Tests pin that the same cOID flows through every retry attempt of the same call (P7-audit H12).
+
+10. **systemd `LoadCredentialEncrypted=` is the right answer for the 6 IBKR creds.** Host-key bound, off-process-env, tmpfs at runtime, runs before sandboxing so `ProtectSystem=strict` doesn't block reading. Pre-start verification (3 mandatory checks before `systemctl enable`) catches encrypt-step errors at the operator level.
+
+### Operator gotchas (preserved from Saxo era, still apply)
+
+11. **Always clear Python bytecode cache after `git pull` on VM.** Stale `__pycache__` was the cause of multiple "fix isn't running" incidents.
+
+12. **Daily summary only at market close, not calendar day reset.** Calendar days change at midnight UTC (7 PM ET); trading days end at 4 PM ET. Never send a daily summary from `_reset_for_new_day()` — only from main.py after-hours check.
+
+13. **Google Sheets API can hang indefinitely.** All `gspread` calls are wrapped in `_sheets_call_with_timeout()` (10s) so a 503 doesn't freeze the trading loop. Same pattern applied to Secret Manager (10s) and file locks (10s polling on `LOCK_NB`).
+
+14. **Profit target must not exceed credit received.** Otherwise it's literally unreachable. `_calculate_profit_target` caps the target at credit.
+
+15. **HOMER's fallback chain matters.** When Sheets logging times out, stop events still need to land in the journal. HOMER falls back to log-file parsing of MKT-025 events, then P&L identity derivation for the missing piece.
+
+For the full 86-fix history including all Saxo-era bugs and resolutions, see `bots/hydra/__init__.py` Version History.
 
 ---
 
 ## Documentation
 
-### Quick Reference by Problem Type
+### By problem type
 
-| Problem | Document | Key Sections |
+| Problem | Document | Key sections |
 |---------|----------|--------------|
-| P&L incorrect | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 2: Extracting Fill Prices |
-| Orders stuck/unknown | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 6: Order Status Handling |
-| VIX fallback to Yahoo | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 3: Price Data Extraction |
-| Wrong asset type errors | [SAXO_API_PATTERNS.md](docs/SAXO_API_PATTERNS.md) | Section 4: Asset Type Mapping |
-| WebSocket 401 errors | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 8.5: WebSocket Token Refresh |
-| Entry filter questions | [IRON_FLY_CODE_AUDIT.md](docs/IRON_FLY_CODE_AUDIT.md) | Section 6: Filter Implementation |
-| Edge case handling | [IRON_FLY_EDGE_CASES.md](docs/IRON_FLY_EDGE_CASES.md) | All 64 documented cases |
-| **Iron Fly strategy** | [IRON_FLY_STRATEGY_SPECIFICATION.md](docs/IRON_FLY_STRATEGY_SPECIFICATION.md) | Wing width rules, profit targets, Doc Severson + Jim Olson |
-| **Delta Neutral strategy** | [DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md](docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md) | Roll mechanics, credit/debit logic, full spec |
-| **MEIC strategy spec** | [MEIC_STRATEGY_SPECIFICATION.md](docs/MEIC_STRATEGY_SPECIFICATION.md) | Full MEIC implementation details |
-| **HYDRA strategy spec** | [HYDRA_STRATEGY_SPECIFICATION.md](docs/HYDRA_STRATEGY_SPECIFICATION.md) | Full HYDRA spec: decision flows, MKT rules, performance data |
-| **HYDRA trading journal** | [HYDRA_TRADING_JOURNAL.md](docs/HYDRA_TRADING_JOURNAL.md) | Daily results, analysis, what-if projections |
-| **MEIC edge cases** | [MEIC_EDGE_CASES.md](docs/MEIC_EDGE_CASES.md) | 79 edge cases for MEIC bot |
-| Telegram/Email alerts | [ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Full deployment and testing guide |
-| **Next bots to build** | [THETA_PROFITS_STRATEGY_ANALYSIS.md](docs/THETA_PROFITS_STRATEGY_ANALYSIS.md) | Top 3: MEIC, METF, SPX Put Credit |
-| **Capital allocation** | [PORTFOLIO_ALLOCATION_ANALYSIS.md](docs/PORTFOLIO_ALLOCATION_ANALYSIS.md) | $50K optimal split: MEIC + Delta Neutral |
-| **Multi-bot same underlying** | [MULTI_BOT_POSITION_MANAGEMENT.md](docs/MULTI_BOT_POSITION_MANAGEMENT.md) | Position Registry design for SPX multi-bot |
-
-### Full Documentation List
-
-| Document | Purpose |
-|----------|---------|
-| `docs/SAXO_API_PATTERNS.md` | **START HERE for Saxo API issues** - Proven patterns for orders, fills, prices |
-| `docs/THETA_PROFITS_STRATEGY_ANALYSIS.md` | **20 strategies analyzed** - Next bots to implement (MEIC, METF, etc.) |
-| `docs/PORTFOLIO_ALLOCATION_ANALYSIS.md` | **Capital allocation** - $50K optimal split across bots |
-| `docs/MULTI_BOT_POSITION_MANAGEMENT.md` | **Position Registry** - Running multiple bots on same underlying |
-| `docs/DELTA_NEUTRAL_STRATEGY_SPECIFICATION.md` | **Delta Neutral strategy** - Full Brian Terry spec with roll mechanics |
-| `docs/IRON_FLY_STRATEGY_SPECIFICATION.md` | **Iron Fly strategy** - Doc Severson + Jim Olson rules, wing width calculation |
-| `docs/IRON_FLY_CODE_AUDIT.md` | Comprehensive code audit with post-deployment fixes |
-| `docs/IRON_FLY_EDGE_CASES.md` | 64 edge cases analyzed for Iron Fly bot |
-| `docs/MEIC_STRATEGY_SPECIFICATION.md` | **MEIC strategy** - Full Tammy Chambless MEIC implementation spec |
-| `docs/HYDRA_STRATEGY_SPECIFICATION.md` | **HYDRA strategy** - Full spec: decision flows, MKT rules, stop math, performance data |
-| `docs/HYDRA_TRADING_JOURNAL.md` | **HYDRA journal** - 10 days of live trading results and analysis |
-| `docs/HYDRA_EARLY_CLOSE_ANALYSIS.md` | **Early close research** - ROC vs credit-based thresholds, slippage analysis |
-| `docs/MEIC_EDGE_CASES.md` | 79 edge cases analyzed for MEIC bot |
-| `docs/DELTA_NEUTRAL_EDGE_CASES.md` | **55 edge cases** for Delta Neutral bot (updated 2026-01-28) |
-| `docs/ROLLING_PUT_DIAGONAL_EDGE_CASES.md` | Edge cases for Rolling Put Diagonal bot |
-| `docs/ALERTING_SETUP.md` | Telegram/Email alert system deployment guide |
-| `docs/DEPLOYMENT.md` | Deployment procedures |
-| `docs/GOOGLE_SHEETS.md` | Google Sheets logging setup |
-| `docs/VM_COMMANDS.md` | VM administration commands |
-| `.claude/settings.local.json` | Full command reference (also readable)
-
-### Key Lessons Learned (Updated 2026-04-30)
-
-These mistakes cost real money and debugging time. **READ BEFORE MAKING CHANGES:**
-
-1. **P&L Must Use Actual Fill Prices** - Never use quoted bid/ask for P&L calculation. Extract `FilledPrice` from activities/order response. (Cost: ~$20 P&L error per trade)
-
-2. **"Unknown" Order Status = Usually Filled** - Market orders fill instantly and disappear from /orders/. Check activities endpoint immediately. (Cost: Hours of debugging "stuck" orders)
-
-3. **VIX Needs PriceInfoDetails** - VIX is an index with no bid/ask. Must include `"PriceInfoDetails"` in WebSocket FieldGroups. (Cost: Unnecessary Yahoo Finance fallbacks)
-
-4. **Config Options Need Code** - Just because a config exists doesn't mean it's implemented! Verify code actually uses the config. (Cost: Bad trade entry)
-
-5. **Clear Python Cache After Deploy** - `__pycache__` can persist old code. Always clear after git pull. (Cost: Hours debugging "fixed" code that wasn't running)
-
-6. **Saxo WebSocket Uses Binary Frames, Not JSON Text** - See WebSocket Binary Parsing section below. Previous code tried `json.loads(message.decode('utf-8'))` which silently failed. (Cost: Stale cached prices, unnecessary REST API calls)
-
-7. **Daily Summary Only at Market Close, Not Calendar Day Reset** - Calendar days change at midnight UTC (7 PM EST), but trading days end at 4 PM EST. Never send daily summaries from `reset_for_new_day()` - only from main.py after-hours check. (Cost: Duplicate alert spam, user confusion)
-
-8. **WebSocket Streaming Updates Use ref_id Format** - Initial snapshot wraps data in `{"Data": [{"Uic": 123, ...}]}` but streaming updates use `{"Quote": {...}}` with UIC in ref_id as `ref_<UIC>`. Must handle both formats in `_handle_streaming_message()`. (Cost: SPY/VIX prices stuck at stale values, fixed 2026-01-27)
-
-9. **WebSocket Cache Must Be Invalidated on Disconnect (Fix #1, 2026-01-28)** - When WebSocket disconnects, always clear `_price_cache`. Without this, bot uses stale cached data after reconnection. (Cost: 2026-01-27 order failures with DATA-004 errors)
-
-10. **Cache Needs Timestamps for Staleness Detection (Fix #2, 2026-01-28)** - Each cache entry now stores `{'data': {...}, 'timestamp': datetime}`. `get_quote()` rejects cached data older than 60 seconds and forces REST API fallback. (Cost: Using outdated prices for order placement)
-
-11. **Limit Order Price $0 Bug (Fix #3, 2026-01-28)** - The check `if order_type == OrderType.LIMIT and limit_price:` evaluated False when `limit_price=0.0`. Changed to `if limit_price is None or limit_price <= 0`. (Cost: "OrderPrice must be set" errors on 2026-01-27)
-
-12. **Never Use $0.00 Fallback Price (Fix #4, 2026-01-28)** - In Delta Neutral strategy, if quote is invalid AND `leg_price` is $0, skip to next retry instead of placing order at $0.00. (Cost: 2026-01-27 order rejections)
-
-13. **WebSocket Thread Health Monitoring (Fix #5, 2026-01-28)** - Added `is_websocket_healthy()` that checks: thread alive, last message < 60s ago, last heartbeat < 60s ago. `get_quote()` now forces REST fallback if WebSocket unhealthy. (Cost: Using stale cache when WebSocket silently died)
-
-14. **Heartbeat Timeout Detection (Fix #6, 2026-01-28)** - Track `_last_heartbeat_time` on every heartbeat. If no heartbeat in 60+ seconds, connection is zombie. Saxo sends heartbeats every ~15 seconds. (Cost: Zombie connections going undetected)
-
-15. **VIX NoAccess Requires Session Capability Recovery (Fix #11, 2026-01-29)** - When another Saxo session (SaxoTraderGO, Token Keeper) connects with `FullTradingAndChat`, the bot's session gets downgraded and VIX returns `NoAccess` (CBOE data requires premium capabilities). Solution: Detect `PriceTypeAsk: NoAccess` in REST response, auto-upgrade session via `PATCH /root/v1/sessions/capabilities`, retry VIX request. Yahoo Finance fallback works as safety net. (Cost: Unnecessary Yahoo fallbacks, potential stale VIX data)
-
-16. **Strike Selection Must Use Fresh Quotes, Not Cached (Fix #12, 2026-01-30)** - The strike selection code was using cached prices to decide if a multiplier met the target return. If cached return < target, it never fetched fresh quotes (which might be higher). Solution: Two-phase scan that always fetches fresh quotes before making decisions. (Cost: Bot selected 1.35x strikes instead of 1.5x+ on 2026-01-29, reducing cushion/safety)
-
-17. **Dynamic Strike Range, Not Hardcoded (Fix #13, 2026-01-30)** - Strike fetching used hardcoded ±20 points, but at 2.0x expected move with EM=$12.37, the required range is $24.74. Solution: `max_range = expected_move * max_mult * 1.2` dynamically scales with market conditions. (Cost: Strikes at 1.6x-2.0x were never even fetched from the API)
-
-18. **Activities Endpoint Uses "FilledPrice", Not "Price" (Fix #14, 2026-01-31)** - The `check_order_filled_by_activity()` function was extracting `activity.get("Price", 0)` but Saxo's activities endpoint returns fill price as `"FilledPrice"`. This caused all fills to return price=0, falling back to quoted prices for P&L. (Cost: Iron Fly P&L showed +$160 instead of actual +$10 on 2026-01-30)
-
-19. **Order Fill Verification Timeout Too Long (Fix #15, 2026-01-31)** - Market orders fill in ~3 seconds but `_verify_order_fill()` had 30-second timeout. When order not found in /orders/ (because it filled and was removed), code polled for 30s before checking activities. Solution: Reduced timeout to 10s, check activities after 3 consecutive "not found", break early. (Cost: 30 seconds per leg = 2+ minutes wasted on entry)
-
-20. **Profit Target Should Be Dynamic, Not Fixed (Fix #16, 2026-01-31)** - Fixed $75 profit target doesn't scale with credit received. A $25 credit with $75 target requires 300% return - unrealistic. Solution: Added `profit_target_percent` config (default 30% of credit) with `profit_target_min` floor. For $25 credit at 30%, target = $7.50. (Cost: Profit targets never hit, always TIME_EXIT)
-
-21. **Commission Must Be Tracked for Accurate P&L (Fix #17, 2026-02-01)** - Iron Fly has 4 legs × $5 round-trip = $20 commission per trade. Bot was showing gross P&L only. Solution: Added `commission_per_leg` config, `_calculate_total_commission()`, `_calculate_net_pnl()` methods. Profit targets now add commission to ensure net profit. Logs/alerts show both gross and net P&L. (Cost: Jan 30 trade showed +$30 gross but actual net was +$10)
-
-22. **Activities Endpoint May Have Sync Delay (Fix #18, 2026-02-01)** - When order fills, activities endpoint may not immediately have fill data. Previous code returned "assumed_filled" with no price, falling back to quoted prices. Solution: Retry up to 3 times with 1s delay to get fill price from activities before giving up. Log warning if fallback to quotes. (Cost: P&L accuracy depends on getting actual fill prices)
-
-23. **Activities FilledPrice Sync Takes 5-10 Seconds (Fix #19, 2026-02-02)** - Friday 2026-01-30 Iron Fly trade showed entry credit of $24.80 (quoted) vs $23.50 (actual) - a $1.30 error causing wrong P&L display during the trade. Root cause: `check_order_filled_by_activity()` had 3 retries × 1s = 3s total, but Saxo's FilledPrice field may take 5-10s to populate. Bot returned `fill_price=0` and fell back to quoted bid/ask prices. Solution: Increased to 4 retries × 1.5s = 6s in client (Iron Fly has its own 3-attempt loop on top = ~18s worst case). Also added position lookup for `PositionBase.OpenPrice` as secondary fill price source (NOTE: Originally documented as AverageOpenPrice but that was wrong - see Fix #21), and fixed `place_limit_order_with_timeout()` to handle `fill_price=0` by falling back to limit price. (Cost: Friday showed $1.60 P&L during trade, actual was $10 net)
-
-24. **Option Expiration Selection Must Prefer Exact DTE (Fix #20, 2026-02-02)** - Monday 2026-02-02 Iron Fly bot used 1 DTE options (expiring Tuesday 2026-02-03) instead of 0 DTE (expiring same day). Root cause: `get_iron_fly_options()` and `get_expected_move_from_straddle()` used `target_dte_min=0, target_dte_max=1` and took the FIRST expiration matching this range. Saxo's option chain API returned expirations in an order where 1 DTE came before 0 DTE. Solution: Modified both functions to explicitly prefer exact 0 DTE, only falling back to 1 DTE if no 0 DTE exists. (Cost: Reduced theta decay benefit - 1 DTE options have less time decay than 0 DTE, hurting Iron Fly profitability)
-
-25. **Short Position Fill Price in PositionBase.OpenPrice, Not PositionView.AverageOpenPrice (Fix #21, 2026-02-02)** - Iron Fly bot showed -$22 P&L but actual Saxo P&L was -$150. Root cause: When activities endpoint returned `FilledPrice=0`, code fell back to position lookup but used `PositionView.AverageOpenPrice` which is NOT populated for short (negative amount) positions. Investigation of Saxo position data revealed that `PositionBase.OpenPrice` contains the actual fill price for BOTH long and short positions. The code was using quoted bid/ask prices as fallback instead of actual fills. Solution: Changed position lookup to use `PositionBase.OpenPrice` instead of `PositionView.AverageOpenPrice`. (Cost: $128 P&L error on 2026-02-02 trade - showed -$22 instead of -$150)
-
-26. **Profit Target Must Not Exceed Max Possible Profit (Fix #22, 2026-02-02)** - Iron Fly profit target calculation had a bug where `$25 floor + $20 commission = $45 gross target`, but if credit received was only $30, the maximum possible profit is $30 (100% of credit). Asking for $45 from a $30 credit is impossible - the target would never be reached. Solution: Cap the profit target at the credit received. If calculated target exceeds credit, log a warning and use credit as the target. This ensures the profit target is always achievable. (Cost: Profit targets never hit when credit was small, always fell through to TIME_EXIT)
-
-27. **DELETE Endpoint Returns 404 for SPX Options (Fix #23, 2026-02-03)** - MEIC bot stop losses failed silently because `DELETE /trade/v2/positions/{position_id}` returns 404 "File or directory not found" for StockIndexOption (SPX) positions. The bot marked positions as "stopped" but they remained open, causing ~$1,000 unrealized loss. Solution: Use `place_emergency_order()` with `to_open_close="ToClose"` instead of the DELETE endpoint. This is the same pattern used by Iron Fly and Delta Neutral bots. (Cost: 2026-02-03 MEIC stop losses failed, positions remained open until fix deployed)
-
-28. **SaxoClient.__init__ Can Corrupt Token Cache with Stale Config Tokens (Fix #24, 2026-02-03)** - When `SaxoClient` is instantiated, it was calling `token_coordinator.update_cache()` with whatever tokens were loaded from the config file - even if those tokens were older than tokens already in the cache (maintained fresh by Token Keeper). This meant running a diagnostic script that loaded stale config data would overwrite the fresh tokens, causing authentication failures. Root cause: 2026-02-03 at 4:01 PM EST, a diagnostic script loaded Jan 13 expiry tokens from config and wrote them to cache, corrupting fresh tokens. Token Keeper then failed all refresh attempts with 401. Solution: Before updating cache in `__init__`, compare `token_expiry` timestamps - only update if config tokens are NEWER than cached tokens. (Cost: Complete auth failure requiring manual re-authentication, potential missed trades during market hours)
-
-29. **Margin Settlement Delay Needed Between Close and Enter (Fix #25, 2026-02-03)** - Delta Neutral recenter failed at 2:01 PM EST because after closing the long straddle ($10,180 received), the bot immediately tried to enter new longs (~$10,534). Saxo rejected with `WouldExceedMargin` because the cash from the close wasn't immediately available for margin. Solution: Add 3-second delay after closing positions before entering new positions. Applied to: execute_recenter, roll_weekly_shorts, all partial straddle recovery paths. (Cost: Recenter failed, left bot with shorts-only exposure for remainder of session)
-
-30. **Retry Attempts Need Delay to Avoid 409 Conflicts (Fix #26, 2026-02-03)** - Same recenter failure showed rapid 409 Conflict errors when the bot retried placing orders immediately after previous cancellation. Saxo API hadn't fully processed the cancellation. Solution: Add 1.5-second delay between retry attempts in `_place_protected_multi_leg_order`. (Cost: Multiple rapid rejections consuming all 7 retry attempts without meaningful progress)
-
-31. **Quote Fetch Must Retry on Invalid (Fix #27, 2026-02-03)** - During recenter, fresh quotes returned `Bid=0, Ask=0` immediately after closing positions. The code fell back to stale `leg_price` from original order creation, causing `PriceExceedsAggressiveTolerance` errors when the stale price was far from current market. Solution: Retry quote fetch up to 3 times with 1.5s delay if invalid (Bid=0/Ask=0). Only use leg_price as last resort with warning about staleness. (Cost: Orders placed at stale prices rejected by exchange)
-
-32. **Floating Point Tick Size Rounding (Fix #28, 2026-02-04)** - MEIC orders rejected with `PriceNotInTickSizeIncrements` because `round(2.55 / 0.05) * 0.05 = 2.5500000000000003` due to floating point arithmetic. Saxo API is strict about tick sizes and won't accept prices with floating point artifacts. Solution: Add final `round(result, 2)` after tick size calculation in `round_to_spx_tick()`. (Cost: Multiple entry failures for MEIC Entry #2 on 2026-02-03)
-
-33. **Clear UICs When Positions Settle/Missing (Fix #29, 2026-02-04)** - After options settle or positions are marked as missing, the code only cleared `position_id` but not `uic`. This caused `_update_entry_prices()` to try fetching prices for expired options (UICs still set), generating 40+ `IllegalInstrumentId` (404) errors. Solution: Clear BOTH `position_id` AND `uic` when positions settle in `check_after_hours_settlement()` and when positions are marked missing in `_reconcile_positions()`. (Cost: 2026-02-03 MEIC got stuck in error loop trying to fetch prices for expired options)
-
-34. **Skip Orphan Cleanup in Dry-Run Mode (Fix #30, 2026-02-04)** - Dry-run positions use synthetic IDs like "DRY_xxx" that don't exist in Saxo. When `cleanup_orphans()` was called with real Saxo positions (empty set in dry-run), all DRY_ positions were incorrectly removed as "orphans", causing `STATE-002: Position count mismatch: expected 4, registry has 0` errors. Solution: Skip `cleanup_orphans()` calls when `self.dry_run` is True. (Cost: 2026-02-03 MEIC repeatedly failed recovery, generating 30+ STATE-002 errors)
-
-35. **Zero/Low Credit Causes Immediate False Stop Trigger (Fix #31, STOP-007, 2026-02-04)** - If `_get_fill_price()` returns 0 due to API sync issues, credit becomes 0, making stop_level = 0. With the check `spread_value >= stop_level` and `stop_level = 0`, the condition is always true, causing immediate false stop triggers on every monitoring cycle. Solution: Add MIN_STOP_LEVEL = $50 safety floor in `_calculate_stop_levels()`, skip stop check in `_check_stop_losses()` if levels < $50, and apply same protection in `_recover_entry_from_positions()`. Defense-in-depth with CRITICAL logging for investigation. (Cost: Would have caused all MEIC positions to be stopped immediately on any fill price sync failure)
-
-36. **P&L Double-Counting in Stop Loss Tracking (Fix #32, 2026-02-04)** - MEIC stop losses were recording gross cost-to-close instead of net loss, overstating losses by the credit amount. Example: Entry collects $250 credit, stop_level = $250. Old code: `realized_pnl -= $250`. Actual loss = `stop_level - credit_for_side = $250 - $125 = $125`. The bug affected `total_realized_pnl`, `entry.unrealized_pnl`, `_calculate_side_pnl()`, and alert messages. Solution: All P&L tracking now uses `net_loss = stop_level - credit_for_that_side`. (Cost: P&L displays were overstated by ~50% on stop days)
-
-37. **Spread Credit Recorded as Gross Short Fill Instead of Net (Fix #33, 2026-02-04)** - MEIC was recording spread credits as only the short leg fill price, not subtracting the long leg cost. Example: Short Call fills @ $3.20 ($320), Long Call fills @ $0.25 ($25). Code recorded `call_spread_credit = $320` instead of correct net `$320 - $25 = $295`. This caused: (1) inflated total credits (Entry #1 showed $1090 instead of $845), (2) incorrect stop levels (set at inflated credit), (3) DATA-003 sanity check triggering (P&L > max possible profit), (4) stop monitoring skipped for affected entries. Solution: Track long leg debits separately, subtract from short credits: `entry.call_spread_credit = short_call_credit - long_call_debit`. (Cost: Entry #1 stop monitoring was disabled for ~1 hour due to DATA-003 sanity check)
-
-38. **Recovery Logic Position Order Bug (Fix #38, 2026-02-05)** - When MEIC recovered entries from positions after restart, the code processed positions in iteration order and assumed short legs came before long legs. If positions arrived in order `[long_call, short_call]`, then: (1) `long_call` subtracted from 0 → credit = -20, (2) `short_call` OVERWROTE → credit = 210 (wrong, should be 190). This caused $410 P&L discrepancy on Feb 4. Solution: Use dictionary approach - collect ALL entry prices in first pass, then calculate NET credit in second pass: `call_spread_credit = entry_prices["short_call"] - entry_prices["long_call"]`. (Cost: Feb 4 bot reported -$1285 P&L instead of actual -$875 from Saxo)
-
-39. **One-Sided Entry Stop Level Triggers Immediately (Fix #40, 2026-02-06)** - HYDRA one-sided entries (put-only or call-only from trend filtering) were being closed ~10 seconds after entry. Root cause: Stop level was set to `credit` received, but `spread_value` (cost-to-close at mid prices) approximately equals credit at entry time. Due to bid-ask spread, mid prices are slightly HIGHER than fill prices, so `spread_value >= stop_level` became true immediately. Full ICs didn't have this issue because stop_level = total_credit (2× per-side credit), giving each side ~2× headroom. Solution: For one-sided entries, use `stop_level = 2 × credit` to match full IC behavior. This means stop triggers when cost-to-close = 2× credit, i.e., P&L = -credit (lost what you collected). Fixed in both `_calculate_stop_levels_hydra()` and recovery path. (Later unified to call + theo $2.50 put + buffer for MKT-040.) (Cost: All one-sided entries on Feb 5-6 were immediately stopped out, losing real premium)
-
-40. **State File History Lost on Restart with No Positions (Fix #41, 2026-02-06)** - When HYDRA restarted and found no active positions (e.g., all entries stopped out), it would "start fresh" and reset the state file, losing the day's P&L history, completed entries count, and stop counters. Root cause: The recovery logic returned early with `return False` when no positions were found in the registry, without first loading historical data from the state file. Solution: Added `_load_state_file_history()` helper that loads today's state file data (stopped entries, realized P&L, commission totals, entry counters) before returning False. Now the bot preserves the day's history even when all positions have been closed. (Cost: Lost -$75 P&L tracking from Entry #1 on Feb 6 restart)
-
-41. **Merged Position Stop Loss Closes Wrong Amount and Breaks Registry (Fix #45, 2026-02-06)** - When two entries share the same strike (e.g., Entry #4 and Entry #5 both have short calls at 6950), Saxo merges them into a single position with Amount=-2. When one entry's stop is triggered, the bot was: (1) Closing only 1 contract with `amount=contracts_per_entry`, (2) `_verify_position_closed()` returning False because position still exists with Amount=-1, (3) Retrying 5 times then giving up, (4) `registry.unregister()` removing the position for ALL shared entries, breaking the remaining entry's tracking. Solution: Added `_is_position_shared()` to check registry metadata for `shared_entries`, `_get_position_amount()` to get current Amount before closing, updated `_verify_position_closed()` to verify Amount decreased (not position gone) for partial closes, added `_update_registry_for_partial_close()` to update `shared_entries` metadata, and added `get_position_info()` to PositionRegistry. (Cost: Stop losses on merged positions would fail verification, potentially leaving positions open or breaking registry for remaining entries)
-
-42. **Pre-Entry Credit Estimation Prevents Illiquid Trades (MKT-011, 2026-02-08)** - On Friday Feb 7, Entry #4 placed with illiquid wings resulted in $1.55 credit instead of expected ~$2.50. The entry was placed blindly without checking if credit was viable. Solution: Added `_estimate_entry_credit()` that fetches option quotes BEFORE placing orders and calculates expected credit. Added `_check_minimum_credit_gate()` (MEIC base) and `_check_credit_gate()` (HYDRA) to validate credit against `min_viable_credit_per_side` (default $0.50). MEIC skips entry entirely if non-viable; HYDRA can convert to one-sided entry if one side is viable. MKT-010 (illiquidity check) becomes fallback-only when MKT-011 can't get quotes. (Cost: Would have prevented ~$100 loss from Friday Entry #4's poor credit)
-
-43. **MKT-011 Must Respect Trend Filter (Fix #43, 2026-02-09)** - Original MKT-011 implementation could override trend direction inappropriately. Example: BULLISH trend + put credit non-viable → old code forced CALL-only, placing calls in an uptrend. This contradicts the trend filter's safety purpose. Solution: Added `original_trend` tracking and hybrid logic: In NEUTRAL markets, convert to one-sided entry (same as before). In BULLISH markets with put non-viable, skip entry entirely (don't place calls that contradict trend). In BEARISH markets with call non-viable, skip entry entirely (don't place puts). New safety event `MKT-011_TREND_CONFLICT` logs when skipping due to trend conflict. Same logic applied to MKT-010 fallback. (Cost: Prevented potential losses from trading against detected trend direction)
-
-44. **Strike Conflict Detection Prevents Long/Short Same Strike (Fix #44, 2026-02-09)** - Entry #5 failed with "cannot open positions in opposite directions" because its long put at 6885 conflicted with Entry #1's short put at 6885. Saxo doesn't allow both long and short positions at the same strike. Root cause: When market is range-bound, later entries calculate similar strikes to earlier entries, and the long wing of a new entry can land on the short strike of an existing entry. Solution: Added `_get_occupied_short_strikes()` to collect all short strikes from active entries, then `_adjust_for_strike_conflicts()` to detect if new long strikes would conflict and offset them by 5 points if needed. Check runs after all other strike adjustments in `_calculate_strikes()`. (Cost: Entry #5 and #6 failed on Feb 9, missing 2 potential entries)
-
-45. **Expired Position P&L Not Added to Realized P&L (Fix #46, 2026-02-10)** - Feb 9 daily summary showed **-$360** when actual Saxo P&L was **+$170** - a $530 error! Root cause: When 0DTE positions expire worthless at settlement, `check_after_hours_settlement()` only unregistered them from the registry without adding their credit (now profit) to `total_realized_pnl`. The daily summary calculated `total_pnl = realized_pnl + unrealized`, but `_get_total_saxo_pnl()` returns 0 after settlement (positions are gone from Saxo). The code also incorrectly marked expired positions as "stopped" when they should be "expired". Solution: (1) Added `call_side_expired`/`put_side_expired` flags to `IronCondorEntry` to distinguish from stopped. (2) In settlement, before marking a side as done, check if it was already stopped - if not, it expired and we add its credit to `total_realized_pnl`. (3) Updated state serialization/deserialization to persist the new flags. (4) Applied same fix to HYDRA's override of `check_after_hours_settlement()`. (Cost: Feb 9 reported -$360 instead of +$170 - would have shown first winning day as massive loss)
-
-46. **One-Sided Entry Non-Opened Side Marked as "Stopped" Instead of "Skipped" (Fix #47, 2026-02-10)** - HYDRA one-sided entries (e.g., BULLISH → put-only) were incorrectly marking the non-opened side as "stopped" (`call_side_stopped = True`). This is semantically incorrect - "stopped" implies a loss was incurred, but the side was never opened. This caused: (1) Incorrect P&L interpretation (skipped sides counted as losses), (2) Confusing logs showing sides as "stopped" that never existed, (3) Potential recovery issues when determining entry status. Solution: Added `call_side_skipped`/`put_side_skipped` flags to `IronCondorEntry` to properly distinguish three states: **Stopped** (side was opened but hit stop loss = LOSS), **Expired** (side was opened and expired worthless = PROFIT), **Skipped** (side was never opened = NO P&L IMPACT). Updated all entry creation, recovery, and "is_done" checks to use the appropriate flag. (Cost: Incorrect status tracking for HYDRA one-sided entries)
-
-47. **Log Messages Showed Wrong Trend Label for MKT-011 Overrides (Fix #49, 2026-02-10)** - When MKT-011 credit gate triggered a conversion (e.g., NEUTRAL → put-only because call credit was non-viable), logs showed "BULLISH trend → placing PUT spread only" and "Entry #1 [BULLISH] complete" even though the actual trend was NEUTRAL. The heartbeat also showed "Call: 0% cushion⚠️" for sides that were never opened (SKIPPED). Solution: (1) Added `override_reason` field to `HydraIronCondorEntry` to track "mkt-011", "mkt-010", or "trend". (2) Log messages now show actual reason: "MKT-011 override → placing PUT spread only (actual trend: neutral)". (3) Completion messages show correct label: "[MKT-011]" not "[BULLISH]". (4) Heartbeat cushion display shows "SKIPPED" for never-opened sides. (5) Google Sheets entries tagged with correct reason. (Cost: Confusing logs made it hard to diagnose entry decisions)
-
-48. **Same-Strike Entries Cause Position Merging and Tracking Loss (Fix #50, 2026-02-10)** - Feb 10: Entry #1 and Entry #2 both landed on same strikes (Put 6935/6885) because SPX only moved 0.72 points in 30 minutes. Saxo merged the positions into a single position with Amount=2, but DELETED Entry #1's position IDs. Result: Entry #1's P&L showed $0 constantly, its position IDs were "missing", and it was incorrectly marked as "stopped (external close)". If Entry #2's stop triggered, it would only close 1 contract, leaving 1 orphaned. Root cause: VIX-adjusted delta calculation produces identical strikes when SPX barely moves. Saxo merges positions at same strike by keeping the NEWER position ID and deleting the older one. Solution: Added `_adjust_for_same_strike_overlap()` (MKT-013) that detects when new entry's short strikes match existing entries and offsets them by 5 points further OTM. Applied after Fix #44's long strike conflict check. (Cost: Feb 10 Entry #1 P&L tracking broken, potential orphaned contract if stop triggered)
-
-49. **Stop Loss Fill Price Lookup Too Slow (Fix #51, 2026-02-10)** - After stop loss closes a position, `_get_close_fill_price()` was doing 3 retries × 1s delay to get FilledPrice from Saxo's activities endpoint. But this function is called AFTER `_verify_position_closed()` confirms the position is closed - we KNOW the order filled. The 3 retries wasted ~3 seconds per leg (~6 seconds for a spread close) when FilledPrice=0 due to Saxo's sync delay. Solution: Reduced `max_retries=1` and `retry_delay=0.5` since we already verified the fill. If FilledPrice isn't populated yet, use quote fallback immediately instead of waiting. (Cost: ~6 seconds wasted per stop loss execution)
-
-50. **MKT-013 Overlap Adjustment May Land on Illiquid Strike (MKT-014, 2026-02-11)** - MKT-007 moves shorts **closer to ATM** to find liquid strikes. MKT-013 moves shorts **further OTM** to avoid overlap. These work in **opposite directions**. If MKT-007 moved a strike from 6940→6935 (closer, better liquidity), and MKT-013 then moved it 6935→6940 (further OTM, to avoid overlap), we end up at 6940 which was deemed illiquid. This is NOT an infinite loop (code is sequential), but MKT-013 can undo MKT-007's optimization. Solution: Added `_warn_if_strike_illiquid()` (MKT-014) that checks liquidity AFTER MKT-013 adjustment. If the new strike is illiquid, logs a warning. MKT-011 credit gate will still catch low-credit entries - MKT-014 adds early visibility into the conflict. (Cost: Potential suboptimal strikes; MKT-014 provides visibility)
-
-51. **Google Sheets API Hang Freezes Entire Bot (Fix #64, 2026-02-11)** - HYDRA bot froze for 3+ minutes at 13:09 ET while Entry #6 cushion went from 11% to 0%. Stop loss couldn't trigger because main loop was blocked. Root cause: Google Sheets API returned 503 Service Unavailable and the synchronous `gspread` call (`worksheet.append_row()`) hung indefinitely waiting for response. The bot's main trading loop was blocked during this time. Solution: Added `_sheets_call_with_timeout()` wrapper in `logger_service.py` that runs all Google Sheets API calls in a daemon thread with 10-second timeout. If call exceeds timeout, wrapper logs warning and returns `None` instead of blocking. All 30+ gspread calls (`append_row`, `get_all_values`, `get_all_records`, `update`, `delete_rows`, `format`) now wrapped with timeout protection. Trading operations continue even if logging fails. (Cost: Entry #6 stop loss delayed by ~3 minutes, -$135 net loss instead of potentially smaller loss if stopped earlier)
-
-53. **MKT-013 Overlap Adjustment Creates New Long-vs-Short Strike Conflict (Fix #66, 2026-02-12)** - Entry #5 failed all 15 order attempts with "cannot open positions in opposite directions". Root cause: Fix #44 (long-vs-short conflict check) runs BEFORE MKT-013 (short-short overlap adjustment). MKT-013 shifts BOTH short AND long strikes further OTM, but the new long strike can land on an existing entry's short strike. Example: Entry #5 calculated Long Call 6980 (passed Fix #44), then MKT-013 shifted it to 6985 to avoid short-short overlap — but 6985 was Entry #2's short call. No re-check ran after MKT-013. Solution: Re-run `_adjust_for_strike_conflicts()` after `_adjust_for_same_strike_overlap()` in `_calculate_strikes()`. (Cost: Entry #5 failed on Feb 12, missed entry until fix deployed mid-day)
-
-54. **Long-Long Strike Overlap Causes Position Merge and Tracking Loss (Fix #67/MKT-015, 2026-02-12)** - Entry #5 (LC=6975) and Entry #6 (LC=6975) had the same long call strike. Saxo merged both long call positions into a single position (Amount=2), DELETING Entry #5's original position ID. On recovery, `_reconstruct_entry_from_positions()` could only match the merged position to Entry #6 (newer). Entry #5 showed `long_call_uic=null, long_call_strike=0`, causing DATA-004 errors ("partial zero prices") and disabled stop monitoring. MKT-013 (Fix #50) only prevented SHORT-SHORT overlap; LONG-LONG overlap was unhandled. Solution: (1) Added `_adjust_for_long_strike_overlap()` (MKT-015) in `_calculate_strikes()` as the final check — offsets long calls +5pt or long puts -5pt if they collide with existing entries' longs. (2) Added UIC keys to `preserved_entry_credits` dict so state file recovery can restore missing long leg UICs. (3) Strike calculation order is now: Fix #44 → MKT-013 → Fix #66 (re-run Fix #44) → MKT-015. (Cost: Entry #5 stop monitoring disabled for ~1 hour on Feb 12, bot got stuck on restart until fix deployed)
-
-55. **Comprehensive Timeout Protection for All Blocking Calls (Fix #68, 2026-02-12)** - Audit of all code paths that HYDRA uses (own code, inherited MEIC base, shared modules) found 5 blocking calls that could freeze the bot indefinitely, preventing stop loss monitoring. The Feb 11 freeze (Fix #64) was caused by one such call (Google Sheets API hang). Fix #68 hardens ALL remaining paths: (1) `saxo_client.py` token exchange/refresh `requests.post` - added `timeout=30` (HIGH risk: called during trading when Token Keeper is down). (2) `logger_service.py` Google Sheets startup initialization - wrapped all worksheet setup in daemon thread with 30s timeout (MEDIUM risk: mid-day restart with degraded Sheets API). (3) `secret_manager.py` `access_secret_version` - added `timeout=10` (MEDIUM risk: startup only). (4) `position_registry.py` file locks - changed from blocking `fcntl.flock` to non-blocking `LOCK_NB` with 10s timeout polling loop (LOW risk: locks held for microseconds). All changes are backwards-compatible - the bot gracefully degrades (returns False/None/empty) rather than hanging. (Cost: Prevention - no incident, but Feb 11 freeze proved this class of bug is real)
-
-52. **Recovery Misclassifies Full IC Entries with Stopped Sides (Fix #65, 2026-02-12)** - After bot restart, `_reconstruct_entry_from_positions()` only sees live positions. A full IC with a stopped put side (closed) appears as call-only positions. The code at lines 2221-2228 set `call_only=True` and `put_side_skipped=True`, then the state file restoration only set flags to `True` but never cleared incorrect ones to `False`. This caused 4 cascading bugs: (1) Entry type wrong (full IC → call-only), (2) `total_credit_received` recalculated from wrong entry types ($860 vs $1170), (3) Signal counts used entry type instead of `trend_signal` field (MKT-011 neutral entries counted as bearish/bullish), (4) Account Summary and Performance Metrics only logged pre-settlement. Solution: State file restoration now uses authoritative assignment (always set from state file, not just when True). Total credit preserved from state file instead of recalculated. Signal counting uses `entry.trend_signal`. Post-settlement logging added for Account Summary and Performance Metrics. Also fixed missing `override_reason` restoration and missing preservation of `entries_failed`, `entries_skipped`, `one_sided_entries`, `trend_overrides`, `credit_gate_skips` counters. (Cost: Feb 11 showed wrong total credit, signal counts, win rate, and incomplete post-settlement metrics across 3 Google Sheets tabs)
-
-56. **Accurate Fill Price Tracking (Fix #70, 2026-02-12)** - Bot reported $375 gross / $305 net P&L while Saxo showed $430 gross / $360 net - a $55 discrepancy. Two root causes: (1) **Entry prices ($25 error):** `check_order_filled_by_activity()` returns `FilledPrice` from activities endpoint which is the submitted limit price, not the actual execution price when Saxo gives price improvement. `PositionBase.OpenPrice` has the real price but was only checked when `FilledPrice=0`. (2) **Stop prices ($30 error):** Emergency market orders return `FilledPrice=0` from activities due to sync delay, and Fix #51's speed optimization (1 retry, 0.5s) falls back to current bid/ask quotes. Solution Part A: New `_verify_entry_fill_prices()` method calls `get_positions()` after all legs fill and compares `PositionBase.OpenPrice` against recorded credits, updating if price improvement detected. Called from 3 locations (full IC, call-only, put-only). Solution Part B: New `_deferred_stop_fill_lookup()` waits 3s after both stop legs close and re-checks activities with 3 retries × 1.5s delay. `_close_position_with_retry()` now returns order_id as 3rd tuple element. (Cost: $55 P&L understatement per day, compounding over trading days)
-
-57. **Duplicate Daily Summary After Restart (Fix #71, 2026-02-12)** - After deploying Fix #70 and restarting the bot at 18:46 ET (post-settlement), the bot wrote a SECOND daily summary row for Feb 12, double-counting $375 P&L in cumulative metrics ($1225 → $1600). Root cause: `daily_summary_sent_date` in `main.py`'s `run_bot()` is a LOCAL variable that resets to `None` on restart. The guard check `daily_summary_sent_date != today_date` passes because `None != date` is True. The `log_daily_summary()` method in strategy.py unconditionally incremented all cumulative metrics (P&L, entries, stops, winning_days). Solution: Added idempotency guard at the top of `log_daily_summary()` that checks `cumulative_metrics["last_updated"]` date against today's ET date. If metrics were already updated today, returns early before any side effects (alert, Sheets row, metric increments). (Cost: Feb 12 showed duplicate Sheets row with cumulative_pnl $1600 instead of correct $1225, winning_days 5 instead of 4, total_entries 23 instead of 17)
-
-58. **Daily Summary Should Use Net P&L, Not Gross (Fix #72, 2026-02-12)** - The Daily Summary tab's P&L columns showed gross P&L (before commissions), but users need NET P&L for accurate tracking. `log_daily_summary()` used `summary["total_pnl"]` (gross) for: daily P&L, cumulative P&L, EUR conversion, cumulative metrics update, and winning/losing day determination. A day with $30 gross profit and $45 commission is a NET loss, but was counted as a winning day. Solution: Changed all 5 uses of gross P&L to use `net_pnl = summary["total_pnl"] - summary["total_commission"]`. Now cumulative_pnl tracks net P&L, EUR conversion uses net P&L, and winning/losing day determination uses net P&L. (Cost: Cumulative P&L was overstated by total historical commissions, winning day counts potentially wrong)
-
-59. **Active Entries Property Doesn't Check Expired/Skipped Flags (Fix #73, 2026-02-12)** - After settlement, `active_entries` property only checked `call_side_stopped`/`put_side_stopped` flags to determine if an entry was done. Entries where sides expired (worthless at settlement) or were skipped (one-sided entries) were still counted as "active". This caused a false CRITICAL warning on shutdown: "6 ACTIVE positions remaining" when all entries were actually complete. Solution: Updated `active_entries` to check all three flags per side: `stopped`, `expired` (via `getattr` for backwards compatibility), and `skipped` (via `getattr`). An entry is only active if at least one side has none of these flags set. (Cost: False CRITICAL alerts on shutdown, confusing log output)
-
-60. **Stop Loss Quote Fallback Bypasses Deferred Fill Lookup (Fix #74, 2026-02-13)** - Feb 13 P&L was $75 lower than Saxo's actual figures ($600 net vs $675 net). Root cause: `_get_close_fill_price()` returns `FilledPrice` from activities endpoint, but emergency market orders return `FilledPrice=0` due to Saxo sync delay. Fix #70 Part B added `_deferred_stop_fill_lookup()` (waits 3s, retries 3×1.5s) to handle this, but the old code never reached it because `_get_close_fill_price()` fell back to current bid/ask quotes and returned them as fill prices (non-None). Since `fill_price is not None`, the leg was never added to `deferred_legs`, so `_deferred_stop_fill_lookup()` never ran. Quote-based prices consistently overstate losses: shorts show higher ask, longs show lower bid, compared to actual execution prices where market orders often get price improvement. Solution: Changed `_get_close_fill_price()` to return `None` when activities returns `FilledPrice=0`, instead of falling back to quote prices. This causes the leg to be added to `deferred_legs` and triggers the deferred lookup which waits for Saxo to sync the actual execution price. (Cost: $75 P&L understatement on Feb 13 across 3 stops: $25 + $35 + $15)
-
-61. **Deferred Stop Fill Lookup Blocks Main Loop (Fix #75, 2026-02-13)** - `_deferred_stop_fill_lookup()` blocks the main loop for 10-15s per stop (3s sleep + up to 3 retries × 1.5s per leg). During this time, no other entries' stop levels are monitored. In a fast-moving market where multiple entries breach simultaneously, the delay stacks (10s × N stops). The positions being stopped are already closed - deferred lookup is purely for P&L accounting accuracy. Solution: Use theoretical P&L immediately (within ~$15 of actual based on Feb 13 data), spawn a daemon thread that does the deferred lookup and applies a P&L correction to `daily_state.total_realized_pnl`. Cleanup gate in `log_daily_summary()` and graceful shutdown ensures corrections are applied before final accounting. Thread safety relies on CPython GIL for atomic float assignment. (Cost: Prevention - avoids potential cascading stop delays in fast markets)
-
-62. **Wrong Field Name "FilledPrice" Caused 17 Days of fill_price=0 (Fix #76, 2026-02-17)** - Every stop loss market order since Jan 31 returned `fill_price=0` from Saxo's activities endpoint. Root cause: Fix #14 (Jan 31) stated the field was "FilledPrice" but this field **does not exist** in Saxo's API. Live diagnostic on Feb 17 confirmed the correct fields are `AveragePrice` and `ExecutionPrice`. The field `Price` only exists on limit orders (submitted limit price, not execution price). Our code at `saxo_client.py:3031` was doing `activity.get("FilledPrice") or activity.get("Price", 0)` — both returned None/0 for market orders (no FilledPrice field, no Price field). All 5 deferred async lookups (Fix #75) also failed because they called the same broken function. Solution: (1) Changed field lookup order to `AveragePrice → ExecutionPrice → Price` in `check_order_filled_by_activity()`. (2) Added `get_closed_position_price()` method using `/port/v1/closedpositions` endpoint as authoritative fallback — returns `ClosingPrice` for any recently closed position (available immediately with Intraday netting mode). (3) Updated `_get_close_fill_price()` and `_deferred_stop_fill_lookup()` to use two-tier lookup: activities first, closedpositions fallback. Account netting mode confirmed as `AverageRealTime` (Intraday). (Cost: 17 days of theoretical P&L instead of actual — cumulative P&L accuracy unknown, estimated $15-75/day discrepancy based on Feb 13 data)
-
-63. **Post-Restart Settlement Skips Expired Credits When Registry Empty (Fix #77, 2026-02-18)** - Feb 17 daily summary logged -$1,400 net instead of correct -$740 net ($660 error). Two cascading bugs: (1) `_load_state_file_history()` only restored "fully done" entries — entries with surviving sides (e.g., IC with call stopped but put still live) were silently dropped from `daily_state.entries`. (2) `check_after_hours_settlement()` returned True immediately when registry was empty, skipping the expired credit processing loop. Fix #71 then blocked all subsequent corrected summaries. Solution: (1) `_load_state_file_history()` now restores ALL entries, not just fully-done ones. Entries with surviving sides are restored but not marked `is_complete`. (2) Extracted expired credit processing into `_process_expired_credits()` helper method. (3) `check_after_hours_settlement()` now calls `_process_expired_credits()` even when registry is empty, before returning True. Same fix applied to both HYDRA override and MEIC base class. (Cost: Feb 17 daily summary and cumulative metrics had $660 error requiring manual correction)
-
-64. **Stop Loss Debits Uses Theoretical Stop Level Instead of Actual Close Cost (Fix #78, 2026-02-18)** - Feb 18 daily summary showed Stop Loss Debits=$200 when actual was $260 ($60 error). Root cause: `get_daily_summary()` calculated `stop_loss_debits += entry.call_side_stop - entry.call_spread_credit` where `call_side_stop` is the theoretical TRIGGER level, not the actual cost-to-close. Market orders get slippage (Entry #4 had 29% slippage: $220 actual vs $170 theoretical). The P&L identity `Expired Credits - Stop Loss Debits - Commission = Net P&L` was broken: $610-$200-$35=$375 != $315. Solution: Derive `stop_loss_debits` from the P&L identity instead: `stop_loss_debits = expired_credits - total_realized_pnl`. This is always accurate because `total_realized_pnl` already tracks actual close costs (including async fill corrections from Fix #75). (Cost: Stop Loss Debits column in daily summary was understated, P&L identity broken)
-
-65. **MKT-011 "Both Non-Viable" Skip Path Missing Counter Increments (Fix #79, 2026-02-18)** - Feb 18 Entry #5 was skipped by MKT-011 (both sides below minimum credit) but `entries_skipped` showed 0. Root cause: The "skip" gate result path at `_initiate_entry()` returned without incrementing `entries_skipped` or `credit_gate_skips`. All OTHER skip paths (trend conflict, illiquidity, etc.) correctly incremented both counters. Solution: Added `self.daily_state.entries_skipped += 1` and `self.daily_state.credit_gate_skips += 1` before the return statement. (Cost: Incorrect entries_skipped count in daily summary and state file)
-
-66. **~~Daily Loss Limit (MKT-017)~~ REMOVED in v1.3.3 (2026-02-23)** - MKT-016 (stop cascade breaker) and MKT-017 (daily loss limit) were both removed. Bot now always attempts all entries (5 in v1.6.0) regardless of stop count or realized P&L. Base MEIC's percentage-based loss limit also overridden to return False in HYDRA.
-
-67. **Midnight Settlement Gate Lock Prevents Post-Market Settlement (Fix #82, 2026-02-23)** - Feb 23 bot failed to auto-reset for Feb 24 trading day. Root cause: At midnight ET, the main loop detects new day → `_reset_for_new_day()` clears registry → settlement check finds empty registry → returns True → `daily_summary_sent_date = today_date` (via "no trading activity, skipping" path). This **locks the settlement gate for the entire day**. At 4 PM when market closes, the gate check `daily_summary_sent_date != today_date` evaluates to `False` and settlement is completely skipped. Positions expire at settlement but registry still has stale IDs. At next midnight, `_reset_for_new_day()` finds stale registry entries → HALT. Bug was hidden because near-daily deployments reset `daily_summary_sent_date = None`. Three-part fix: (1) main.py: Don't set `daily_summary_sent_date` when `had_trading_activity=False AND is_after_market_close=False` — keep gate open pre-market. (2) `check_after_hours_settlement()`: When `_settlement_reconciliation_complete=True`, check if registry has new positions; if so, reset flag for proper settlement. (3) `_reset_for_new_day()`: When registry has positions, verify against Saxo API before halting — if positions are gone, clean up stale registry and proceed with normal reset. (Cost: Bot stuck in HALT loop requiring manual restart, missed Feb 24 trading day start)
-
-68. **Emergency Close Fails on Worthless Long Legs (Fix #83, 2026-03-09)** - Entry #4's long call at strike 6815 had bid=$0 (deep OTM, worthless on 0DTE). Saxo required limit orders at 14:34 ET but `get_quote()` returned no valid price for the worthless option. All 15 close attempts failed (5 outer × 3 inner), creating an orphaned position and generating 409 Conflict errors from zombie pending orders. Four-part fix: (a) Skip closing worthless long legs (bid=$0) during stop loss — same pattern as Fix #81 in early close. 0DTE options at $0 expire worthless, no need to close. (b) $0.05 minimum tick fallback in `place_emergency_order()` when quote fails entirely. (c) Cancel zombie pending orders after 409 Conflict before retry. (d) Removed narrow `is_limit_only_period` time check (3:45+ PM only) from `_close_position_with_retry()` — Saxo can restrict market orders at any time, `place_emergency_order()` handles this dynamically. Also fixed commission tracking to count only actually-closed legs instead of hardcoded 2. (Cost: Mar 9 Entry #4 long_call orphaned, $2.50 commission discrepancy per occurrence)
-
-69. **Dashboard P&L History Missing Post-Settlement Point (Fix #84, 2026-03-09)** - Dashboard showed stale pre-settlement P&L (-$690) instead of final settled P&L (-$712.50). Root cause: `pnl_history` array in state file only had pre-settlement snapshots from heartbeat. After `check_after_hours_settlement()` adjusted `total_realized_pnl` with expired credits, no final P&L point was written. Dashboard's last data point was from before settlement. Fix: Add final P&L history point after settlement completes, in both empty-registry and normal settlement paths, then save state to disk. (Cost: Dashboard History page showed wrong final P&L for every trading day)
-
-70. **Pre-Entry Margin Check Was a No-Op — Wrong Saxo Field Names (Fix #85, 2026-03-16)** - `_check_buying_power()` (ORDER-004) never actually validated margin. The code checked for field names `["AvailableMargin", "CashAvailable", "MarginAvailable", "NetEquityForMargin"]` in the Saxo `/port/v1/balances` response. The first three DON'T EXIST in Saxo's API. The fourth (`NetEquityForMargin`) exists but represents TOTAL equity (~$39,854), not AVAILABLE margin (~$22,354). Since total equity always exceeds $5,000, the check always passed — even when margin was nearly exhausted. Live VM diagnostic confirmed the correct Saxo field names: `MarginAvailableForTrading` ($22,354.67 = actual available margin), `SpendingPower` (same value), `CashAvailableForTrading`, `MarginUsedByCurrentPositions` (-$17,500 = margin locked by positions), `MarginUtilizationPct` (43.91%). Solution: Updated field priority to `["MarginAvailableForTrading", "SpendingPower", "CashAvailableForTrading", "NetEquityForMargin"]`. Added margin snapshot logging (available, used, utilization%, account total) at each entry. Also discovered `_is_daily_loss_limit_reached()` uses `get_account_info()` which returns NO financial data — falls back to hardcoded $50K default. Not fixed because HYDRA overrides to always return False (MKT-016/017 removed). (Cost: ORDER-004 margin gate was non-functional for all 23+ trading days — no incident because account had sufficient margin at 1 contract, but would have been dangerous at 2+ contracts)
-
-71. **Stop Loss Leaves Stale Position IDs on Entry — False "Position Mismatch" Alerts (Fix #86, 2026-04-09)** - After every stop loss, the hourly POS-003 reconciliation fired a false "Position Mismatch Detected" HIGH alert on Telegram. Root cause: `_execute_stop_loss()` closed positions via `_close_position_with_retry()` (which unregistered them from the Position Registry), but did NOT clear the position IDs on the entry object (`entry.short_call_position_id`, etc.). The `all_position_ids` property still returned the closed IDs, so POS-003 reconciliation saw them as "expected" but missing from Saxo. `_handle_missing_positions()` cleaned them up AFTER the alert fired. Solution: Clear both position IDs and UICs for the stopped side immediately after closing in `_execute_stop_loss()`. Base MEIC path (both legs closed): clears all 4 fields. HYDRA MKT-025 path (short-only stop): clears only short position_id and short UIC — long stays intact for settlement/MKT-033 salvage. (Cost: False CRITICAL_INTERVENTION Telegram alerts after every stop loss — 3 alerts on Apr 8 alone)
-
-72. **ThetaData Backtest Is Systematically Optimistic vs Live Saxo (2026-04-13)** - Full 38-day backtest (Feb 10 - Apr 10) showed backtest +$8,895 vs live -$1,490 — a $10,385 gap. Recent apples-to-apples days (Apr 1-10, same 3-entry config): backtest +$2,105 vs live +$715 (~3x optimism, live earns ~34% of backtest). Two root causes: (a) ThetaData uses aggregated OPRA feeds with tight spreads; Saxo is a single-broker retail feed with wider spreads, especially during volatility. Apr 8 Entry #1 put stopped in live at 10:56:48 when Saxo cost-to-close spiked >$957, but ThetaData max was $845 ($100-175 gap). (b) ThetaData strike grid has gaps (e.g., 6780 → 6790 missing 6785) and phantom-low bids that MKT-011 accepts but Saxo rejects. Solution: Added `entry_slippage_per_leg` and `broker_spread_markup` config options (default 0.0) for calibration. Schema v6 adds 8 bid/ask columns to `spread_snapshots` so HYDRA captures Saxo quotes every ~10s for future calibration. Also fixed 3 data quality bugs in backtest engine (missing long strike = free long, phantom bid guard, forced one-sided entries skipping primary credit threshold). Remaining gap after fixes is ~$940/week — accept as inherent limit of ThetaData-based backtesting; use for relative strategy comparison, not absolute P&L prediction. **Rough rule**: expected live P&L ≈ 34% of backtest (or backtest − ~$200/day). (Cost: Prevention — understanding the calibration factor prevents overconfidence in backtest claims)
-
-73. **Entry #1 (10:15) Underperforms at All VIX ≥18 + Shadow Logging for OTM Counterfactual (2026-04-13)** - Per-entry analysis of 37 days revealed Entry #1 (10:15 ET) has 24% WR and -$79/entry avg across all VIX regimes vs Entry #3 (11:15) at 42% WR and -$14/entry. Entry #1 at VIX 22-25 specifically: **0% WR, -$202/entry**. Cause: morning volatility + directional uncertainty at 10:15 vs clearer signals by 11:15. Separately, call strikes at 80-100pt OTM (VIX 25-28 period) had **7% stop rate vs 36% at the bot's typical 40-60pt OTM zone**. Current MKT-011 credit thresholds ($2.00/$2.75) force strikes too close to ATM. Deployed VIX-adaptive fix: (a) breakpoints changed [14,20,30]→[18,22,28], (b) `max_entries` [2,null,null,1]→[null,2,2,1] drops E#1 at VIX 18+, (c) per-regime credit thresholds min_call/put_credit lowered at VIX 22+ to push strikes 60-100pt OTM, (d) code fix `strategy.py:7588` drops EARLIEST entries when capped (previously kept them, dropping best-performing E#3). Also added schema v7 `shadow_entries` table that logs what fixed-OTM-per-regime strike selection WOULD have chosen alongside actual credit-based selection — observation only, zero trading behavior change. After 2-4 weeks of shadow data, can validate whether pure OTM-based strategy outperforms credit-based. **Rough rule**: MKT-011 credit-based scanning is one of several ways to pick strikes; direct OTM targeting (Tammy MEIC's 8-delta equivalent) may be simpler and better. Caveat: 80-100pt data is small (n=13) and all from VIX 25-28; low-VIX performance untested. (Cost: Prevention — the credit-based vs OTM-based question needs more data before fundamentally rearchitecting strike selection)
-
-74. **HYDRA Scale-to-2-Contracts + Effective Entry Renumber + Non-HYDRA Kill-Switches (v1.24.0, 2026-04-21)** - Three bundled changes enabling safe `contracts_per_entry: 2` live flip: (a) Every per-contract dollar constant that participates in a contracts-scaled comparison now multiplies by contracts at the USE site — `call_stop_buffer`, `put_stop_buffer`, `downday_theoretical_put_credit`, `MIN_STOP_LEVEL`, `MKT-042` buffer decay, MKT-018/025/033 commissions, MKT-033 long_salvage_min_profit, MIN_BUYING_POWER_PER_IC. Live path uses `self.contracts_per_entry`; recovery path uses `entry.contracts` (stamped value preserves semantic across mid-day config flips). Invariant `stop(2c) == 2 × stop(1c)` verified for full IC, call-only, put-only, MKT-042 decay, MIN_STOP_LEVEL floor. **DB schema v8**: new `contracts` column on trade_entries/trade_stops/spread_snapshots/shadow_entries and `contracts_per_entry` on daily_summaries — transactional migration with rollback, inline on fresh-DB CREATE, idempotent retry. Metrics file `daily_returns` record gains `contracts_per_entry` so HERMES per-contract normalization works across mixed history. State file persists contracts_per_entry at both top level and per entry (null-safe `.get() or fallback` handles JSON null from crash-mid-write). `_close_position_with_retry(contracts=)` + `_verify_position_closed(close_contracts=)` fix mid-day-flip partial-close bugs (legacy 1c entry under 2c config must close amount=1, not 2). (b) **Phase 2 telemetry**: AlertService auto-prefixes `[Nc]` on title when contracts>1 — 14 HYDRA call sites pass `contracts=entry.contracts`. Dashboard `/api/hydra/summary` + `/api/hydra/bot-config` + `/api/widget` expose contracts_per_entry with 3-level fallback. Google Sheets Daily Summary appends Contracts column (backwards compatible — historical rows blank). HERMES cheat_sheet gains `net_pnl_per_contract`, `avg_win_pnl_per_contract`, `avg_loss_pnl_per_contract`; CLIO prompt has mixed-week per-contract rule; HOMER Section 2 has Contracts row; all 4 agent system prompts (HERMES/CLIO/HOMER/APOLLO) + `hydra_strategy_context.md` updated. 8 Telegram builders (/snapshot, /lastday, /account, /status, /week, /entry, /stops, /config) route through new `_with_contracts_footer` helper; `/config` prepends prominent `⚠️ CONTRACTS/ENTRY = N` warning when >1. (c) **Effective entry renumber**: live code (`entry_number`, logs, Telegram, heartbeat) uses post-VIX-regime effective numbering `Entry #1 = 10:45, #2 = 11:15, #3 = 14:00` instead of canonical `E#1 = 10:15` (always-dropped). New `_effective_total_entry_count()` helper used in all user-facing displays. Pre-2026-04-17 historical records still use canonical numbering — all agent prompts instruct Claude to use `entry_time` as authoritative slot ID when reading old data. (d) **Kill-switches on non-HYDRA bots**: `DISABLED_FOR_SAFETY=True` + `_check_disabled_kill_switch()` in `delta_neutral/main.py`, `iron_fly_0dte/main.py`, `meic/main.py`, `rolling_put_diagonal/main.py`. Exits with `sys.exit(2)` before any config load / Saxo client / DB access. MEIC `strategy.py` module remains importable (HYDRA inherits from `MEICStrategy`). 55/55 regression tests across 9 new test scripts. (Cost: Prevention — enables safe 2c flip without blowing up stops at the wrong moment, and hardens against accidental `systemctl start` on paused bots)
-
-75. **Path-B Dry-Mode Bookkeeping + MKT-024 Multiplier Tuning + Variant Comparison + 4 SAFETY-DRY Gates (v1.25.0, 2026-04-30)** — Five bundled changes for the dry-run experiment infrastructure. (a) **`_process_expired_credits` DRY_* fix**: Apr 28-29 reported net_pnl=-$20 on winning days (entries expired worthless, credit kept). Root cause: dry-mode `_simulate_entry` populates `DRY_*` synthetic position IDs (truthy strings), but `_process_expired_credits` checked `not entry.short_call_position_id` to detect "positions gone from Saxo" — DRY_* IDs failed that check, so sides were never marked expired and credit was never added to total_realized_pnl. New `MEICStrategy._position_is_settled(pid)` helper treats None/empty AND `DRY_*` as settled. Live mode behavior unchanged (real Saxo IDs never start with "DRY_"). DB + metrics file backfilled for Apr 28 (gross 0→$295, net -$20→+$275) and Apr 29 (0→$290, -$20→+$270); cumulative -$2,035 → -$1,450; winning_days 27→29; losing_days 24→22. (b) **MKT-024 multiplier tuning**: 3.5×/4.0× → **2.5×/2.75×** with **180pt clamp** (was 240pt). Empirical analysis of 159 full-IC entries Feb 10 - Apr 29: max settled call OTM 116pt (Mar 3 VIX 26.5), max settled put OTM 110pt (Apr 2 VIX 24.7). Old clamp wasted ~125pt of MKT-020/022 inward scan per entry. New values give 30-90pt margin over historical max at every VIX regime. Theoretical 8-delta strike at VIX 50 = ~133pt, well under 180pt cap. Same final strikes (MKT-020/022 still walks inward to credit minimum); ~40-50% less wasted scan distance. (c) **`dry_run_force_normal_day` flag**: When True AND dry_run is True, all DATE/EVENT-based skip rules are bypassed (FOMC announcement skip, FOMC T+1 skip, MKT-038 FOMC T+1 call-only force). Live mode unaffected. New `MEICStrategy._force_normal_day()` helper. Reason: variant-comparison experiments need full 252-day-per-year sample; without bypass, FOMC weeks (announce + T+1 + T+2) produce 0-3 entries vs normal 6-9. NOT bypassed: market-condition skips (whipsaw, MKT-011, MKT-040 put-non-viable, conditional Up/Down-day) — those reflect what live would do. Both VM configs have flag set true. (d) **Variant comparison feature**: `HYDRA_VARIANT_ID=b` env var keys data paths to `data/variant_b/*` so a parallel HYDRA process (`hydra_variant_b.service`) runs in dry mode with a different `max_spread_width` (110pt vs A's 50pt). Same MKT-024 multipliers and clamp so the only changing variable is wing width. Variant B has `alerts.enabled=false` and `google_sheets.enabled=false` so it doesn't pollute records. Dashboard `/api/variants/{health,list,comparison,{id}/state,{id}/summary,{id}/daily,aggregate}` endpoints + `/comparison` SPA page (gated by `DASHBOARD_COMPARISON_MODE_ENABLED=true` env on dashboard service). Page polls `/comparison` every 2s and `/aggregate` every 30s. End-of-day `VARIANT_COMPARISON_DAILY` Telegram alert from variant A (idempotent via `cumulative_metrics["variant_comparison_sent_date"]`), `/compare` on-demand command (16th Telegram command). `kill_existing_instances` reads `/proc/<pid>/environ` to match same-variant siblings only — A and B coexist. (e) **4 SAFETY-DRY defense-in-depth gates**: Audit found 3 strategy methods (`_handle_naked_short`, `_unwind_partial_entry`, `_close_position_with_retry`) that bypass the canonical `_simulate_entry`/`_execute_entry` fork and rely solely on upstream config flags (`early_close_enabled=False`, `short_only_stop=False/None`) for dry-run safety. Plus `_place_option_order` for entries. Added `if self.dry_run: log + return` at the top of all four — every Saxo-order entry point self-protects. With these, NO upstream gating bug can produce a real order in dry mode. Each fires `logger.critical`/`logger.warning` if ever reached so journalctl shows it instantly. **`saxo_api.environment = live` on both configs is intentional** — Path-B uses real Saxo quotes for credit estimation; only the WRITE path is blocked. (Cost: Apr 28-29 reported wrong P&L (cosmetic — backfilled); MKT-024 tightening saves ~3-4s per entry placement; variant comparison is the foundation for the 50pt-vs-110pt experiment that will inform live config decisions over the coming weeks.)
+| IBKR migration history | [docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md](docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md) | F1–F7 + P1–P7 phases |
+| P7 audit findings (49 issues, all closed) | [docs/migration/P7_AUDIT_FINDINGS.md](docs/migration/P7_AUDIT_FINDINGS.md) | Round 1 register + Round 2/3 verifications |
+| Credentials setup | [deploy/IBKR_CREDENTIALS_SETUP.md](deploy/IBKR_CREDENTIALS_SETUP.md) | One-time setup + pre-start checklist |
+| HYDRA strategy spec | [docs/HYDRA_STRATEGY_SPECIFICATION.md](docs/HYDRA_STRATEGY_SPECIFICATION.md) | Full spec: decision flows, MKT rules, stop math |
+| HYDRA trading journal | [docs/HYDRA_TRADING_JOURNAL.md](docs/HYDRA_TRADING_JOURNAL.md) | Daily results (updated by HOMER) |
+| Buffer optimization | [docs/HYDRA_BUFFER_OPTIMIZATION.md](docs/HYDRA_BUFFER_OPTIMIZATION.md) | Per-VIX-regime buffer study |
+| Early close analysis | [docs/HYDRA_EARLY_CLOSE_ANALYSIS.md](docs/HYDRA_EARLY_CLOSE_ANALYSIS.md) | Why MKT-018 is disabled |
+| MEIC base strategy | [docs/MEIC_STRATEGY_SPECIFICATION.md](docs/MEIC_STRATEGY_SPECIFICATION.md) | Tammy Chambless's MEIC |
+| Variant testing | [docs/HYDRA_VARIANT_TESTING_PLAN.md](docs/HYDRA_VARIANT_TESTING_PLAN.md) | Adding new variants |
+| Alert system | [docs/ALERTING_SETUP.md](docs/ALERTING_SETUP.md) | Pub/Sub + Cloud Function deploy |
+| Multi-bot Position Registry | [docs/MULTI_BOT_POSITION_MANAGEMENT.md](docs/MULTI_BOT_POSITION_MANAGEMENT.md) | Vestigial on this branch but still loaded |
+| Scripts inventory | [scripts/README.md](scripts/README.md) | Which script to use for which task |
+
+### Saxo-era docs (historical, on `main`)
+
+| Document | Note |
+|---|---|
+| `docs/SAXO_API_PATTERNS.md` | Saxo-era API patterns — superseded by this file's "IBKR Integration" section |
+| `docs/IRON_FLY_*.md` | Iron Fly bot (kill-switched on this branch) |
+| `docs/DELTA_NEUTRAL_*.md` | Delta Neutral bot (kill-switched) |
+| `docs/MEIC_EDGE_CASES.md` | 79 MEIC edge cases (still relevant — HYDRA inherits from MEIC) |
+
+---
+
+## Important Notes
+
+1. **Git on VM:** must run as `calypso`: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
+2. **Service names use underscores:** `hydra`, `hydra_variant_b`, `hydra_variant_c`, `dashboard`
+3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{b,c}/`
+4. **State files:** `data/hydra_state.json`, `data/variant_b/hydra_state.json`, `data/variant_c/hydra_state.json`
+5. **Position Registry:** `data/position_registry.json` — vestigial on IBKR (always empty), kept loaded for back-compat
+6. **Token Keeper:** dead on this branch. The `services/token_keeper/` and `deploy/token_keeper.service` files exist for back-compat with `main` but should never be started. IBKR OAuth 1.0a is unattended.
+7. **All four sibling bots:** kill-switched at the top of each `bots/*/main.py` with `DISABLED_FOR_SAFETY=True` + `_check_disabled_kill_switch()` → exits with code 2 before any config load. Do not start them.
+8. **The legacy `--live` CLI flag:** retained for back-compat as a no-op. The bot logs a NOTE at startup if it sees the flag.
+9. **Branch policy:** non-trivial work happens on a feature branch off `hydra-ibkr-standalone`. Merge back via PR. Pre-merge: full test suite (`python -m pytest tests/ -q`) must pass.
+10. **Memory:** `bots/hydra/__init__.py` Version History is the authoritative log of behavior changes. CLAUDE.md (this file) is the operator reference and intentionally summarizes — historical fix detail belongs in the version history, not here.
