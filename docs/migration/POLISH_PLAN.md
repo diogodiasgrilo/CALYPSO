@@ -449,3 +449,38 @@ Item 11 deferred to paper-validation phase (operator step, not a code change).
 ## Plan v2: PROCEED
 
 All amendments folded in. Execution begins with the 6 doc items (8, 9, 3, 6, 7, 10), then code items (12, 5, 4, A-X1, A-X2), then the alert + ARGUS pair (1, 2). Final multi-agent audit gate before the polish pass is declared complete.
+
+---
+
+# Polish pass — final audit (2026-05-24)
+
+All 12 items executed across 11 commits between `5fdf850` (plan) and HEAD.
+Three parallel domain agents + senior overseer re-audit.
+
+| Agent | Domain | Verdict | New findings |
+|---|---|---|---|
+| Code + tests | shared/ + bots/hydra/ + new test files | ✅ PASS | 0 |
+| Docs + ops | docs/migration/, deploy/, CLAUDE.md, README.md | ✅ PASS | 0 |
+| Integration + risk | money-path preservation + new code risk | ✅ PASS | 0; net risk DECREASED |
+| Senior overseer | final gate | ✅ **PROCEED** | 0 blockers |
+
+**Test count progression:** 885 (plan baseline) → **918** (post-polish), +33 new tests, 15 skipped (paper-required integration), zero regressions.
+
+**Money-path verification:** All 49 P7-audit fixes (4 C / 13 H / 17 M / 15 L) re-verified intact. `IBClient.connect()`, `place_and_wait_for_fill`, `_execute_stop_loss`, `check_after_hours_settlement`, and the F4 conid-quantity reconciliation are byte-unchanged by the polish pass.
+
+**New code paths (alert hooks + heartbeat write + ARGUS rewrite + snapshot script) ALL READ-ONLY for the broker; zero new IBKR API calls in the hot loop.**
+
+**Senior-overseer "house bet" question — re-asked:**
+"Would I bet my house on a full week of paper trading without manual intervention starting Monday/Tuesday?"
+
+**Round 3 answer:** YES, 85% confidence, conditional on Step 1 (data-sharing toggle) + Step 2 (probe) clearing.
+
+**Post-polish answer (2026-05-24):** YES, **90%** confidence. The 5% improvement comes from:
+- A1.1: Intraday session loss now immediately alerted (was silent).
+- A1.3: Stuck-OPEN breaker reminders prevent the "operator dismissed and forgot" failure mode.
+- A2.1 + A2.4: ARGUS false-positives eliminated (no more dead-Saxo-check spam).
+- A5: State-file corruption recovery via 50-snapshot retention.
+
+**The Step 1 / Step 2 caveat is unchanged.** External IBKR data-sharing + probe-confirmed real-time data are still gating before paper trading.
+
+**Merge gate: PROCEED.** The branch is deployment-ready. No code changes required before VM deploy (Step 5) or paper validation. The remaining items in the migration are all operator-side: Tuesday probe re-run, VM deploy, paper smoke test, final merge to main.
