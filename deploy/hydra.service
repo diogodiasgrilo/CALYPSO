@@ -36,7 +36,20 @@ LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/dhparam.pem.cred
 # config enables the Brandon stack). Leading dash → file is optional.
 EnvironmentFile=-/etc/calypso/polygon.env
 
+# ─── Pre-start state-file snapshot (Polish Item 5) ──────────────────────
+# Before each (re)start, snapshot data/hydra_state.json to
+# data/state_snapshots/ so a corruption-on-restart (mid-write crash,
+# partial JSON) is recoverable per RUNBOOKS.md RB-5. The script
+# always exits 0 — a snapshot failure must NOT block bot start.
+# Runs as User=calypso (no `+` prefix) since calypso has rw on data/.
+ExecStartPre=/opt/calypso/scripts/pre_start_snapshot.sh
+
 ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main
+
+# ExecStartPre timeout — default 90s. Snapshot should complete in <1s
+# on a healthy disk; 120s gives headroom if disk IO is degraded but
+# not enough that a hanging script blocks the bot for too long.
+TimeoutStartSec=120
 
 # Restart policy — matches the CALYPSO convention. A full restart cleanly
 # re-runs IBClient.connect() (fresh live session token + Tickler), which
