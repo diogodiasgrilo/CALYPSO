@@ -1,7 +1,7 @@
 # CALYPSO — HYDRA on Interactive Brokers
 
 > **Branch state (this branch only — `hydra-ibkr-standalone`).**
-> Bot: **HYDRA** v`2.0.0-rc.1` (IBKR-standalone). Broker: **Interactive Brokers Web API** (ibind OAuth 1.0a, no gateway). Account: **paper only** on this branch — there is no live-money path. The legacy Saxo Bank integration plus the 4 sibling bots (Iron Fly, Delta Neutral, Rolling Put Diagonal, MEIC) are removed or kill-switched (`DISABLED_FOR_SAFETY=True`) here. Migration history lives in [`docs/migration/`](docs/migration/). Pre-migration code is preserved on `main`.
+> Bot: **HYDRA** v`2.0.0-rc.1` (IBKR-standalone). Broker: **Interactive Brokers Web API** (ibind OAuth 1.0a, no gateway). Account: **paper only** on this branch — there is no live-money path. The legacy Saxo Bank integration plus the 4 sibling bots (Iron Fly, Delta Neutral, Rolling Put Diagonal, MEIC) are **deleted on this branch** (commits P5a + P5b removed `bots/iron_fly_0dte/`, `bots/delta_neutral/`, `bots/rolling_put_diagonal/`, and `bots/meic/` from the tree — `git ls-tree HEAD bots/` shows only `__init__.py` + `hydra/`). Pre-migration code is preserved on `main` where the same 4 bots live as kill-switched (`DISABLED_FOR_SAFETY=True`) modules. Migration history lives in [`docs/migration/`](docs/migration/).
 
 ---
 
@@ -30,7 +30,7 @@ This branch trades the IBKR **paper account** only. The systemd unit's `LoadCred
 2. **Is this change surgical or broad?** Fix the specific bug, don't "improve" surrounding code.
 3. **Will it survive the ibind upgrade path?** Anything that depends on internal ibind shapes should have a regression test.
 
-The 4 sibling bots' `main.py` files are kill-switched at module top with `DISABLED_FOR_SAFETY = True` + `_check_disabled_kill_switch()` (added in v1.24.0). They cannot be `systemctl start`ed accidentally. Their code is preserved for back-compat / future restoration on `main`.
+The 4 sibling bots (Iron Fly, Delta Neutral, Rolling Put Diagonal, MEIC) were **deleted on this branch** (P5a + P5b commits). They live on `main` as kill-switched (`DISABLED_FOR_SAFETY=True` + `_check_disabled_kill_switch()` at module top, added in v1.24.0) for back-compat / future restoration. On this branch they cannot be `systemctl start`ed because the unit files and module dirs no longer exist.
 
 ---
 
@@ -48,16 +48,15 @@ CALYPSO on this branch is a single 0DTE SPX iron-condor trading bot (**HYDRA**) 
 
 ```
 bots/
-  hydra/                      # the only active bot on this branch
+  __init__.py
+  hydra/                      # the ONLY bot on this branch — sibling bot dirs were deleted in P5a/P5b
     main.py                   # entry point, monitoring loop, signal handlers
-    strategy.py               # HYDRA subclass (IBKR-aware overrides)
-    base_strategy.py          # MEICStrategy (IBKR-native; F1–F7 ports applied)
+    strategy.py               # HydraStrategy subclass (IBKR-aware overrides)
+    base_strategy.py          # MEICStrategy (HYDRA-owned base, IBKR-native; F1–F7 ports applied)
     brandon/                  # Brandon Trojan Horse variants (B/C only)
-    config/                   # config.json + config_variant_{b,c}.json
-  iron_fly_0dte/              # KILL-SWITCHED — DISABLED_FOR_SAFETY = True
-  delta_neutral/              # KILL-SWITCHED
-  rolling_put_diagonal/       # KILL-SWITCHED
-  meic/                       # KILL-SWITCHED (importable as HYDRA's parent class)
+    config/                   # config.json + config_variant_{b,c}.json (config.json gitignored)
+  # On `main` only: iron_fly_0dte/, delta_neutral/, rolling_put_diagonal/, meic/
+  # (kill-switched there). Not on this branch.
 
 shared/
   ib_client.py                # IBClient — OAuth + REST + write path + reconcile (Saxo replacement)
@@ -937,7 +936,7 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 4. **State files:** `data/hydra_state.json`, `data/variant_b/hydra_state.json`, `data/variant_c/hydra_state.json`
 5. **Position Registry:** `data/position_registry.json` — vestigial on IBKR (always empty), kept loaded for back-compat
 6. **Token Keeper:** dead on this branch. The `services/token_keeper/` and `deploy/token_keeper.service` files exist for back-compat with `main` but should never be started. IBKR OAuth 1.0a is unattended.
-7. **All four sibling bots:** kill-switched at the top of each `bots/*/main.py` with `DISABLED_FOR_SAFETY=True` + `_check_disabled_kill_switch()` → exits with code 2 before any config load. Do not start them.
+7. **All four sibling bots:** **deleted on this branch** (P5a/P5b). `git ls-tree HEAD bots/` shows only `__init__.py` + `hydra/`. The kill-switched versions live on `main`.
 8. **The legacy `--live` CLI flag:** retained for back-compat as a no-op. The bot logs a NOTE at startup if it sees the flag.
 9. **Branch policy:** non-trivial work happens on a feature branch off `hydra-ibkr-standalone`. Merge back via PR. Pre-merge: full test suite (`python -m pytest tests/ -q`) must pass.
 10. **Memory:** `bots/hydra/__init__.py` Version History is the authoritative log of behavior changes. CLAUDE.md (this file) is the operator reference and intentionally summarizes — historical fix detail belongs in the version history, not here.
