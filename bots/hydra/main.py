@@ -22,16 +22,16 @@ Strategy Summary:
 
 Usage:
 ------
-    python -m bots.hydra.main              # Run in SIM environment
-    python -m bots.hydra.main --live       # Run in LIVE environment
-    python -m bots.hydra.main --dry-run    # Simulate without orders
-    python -m bots.hydra.main --status     # Show current status only
+    python -m bots.hydra.main              # Connect to IBKR paper, place real paper orders
+    python -m bots.hydra.main --dry-run    # Connect to IBKR paper, simulate orders only
+    python -m bots.hydra.main --status     # Show current status and exit
 
-Author: Trading Bot Developer
-Date: 2026-02-04
+This branch is IBKR-paper only. The legacy `--live` flag is a no-op
+(retained for CLI back-compat).
 
 See docs/HYDRA_STRATEGY_SPECIFICATION.md for full HYDRA details.
-See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
+See docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md for the Saxo→IBKR
+migration history.
 """
 
 import os
@@ -195,7 +195,7 @@ def print_banner():
     ║         #2: 11:15 ET (base)                                   ║
     ║         #3: 14:00 ET (conditional Up/Down-day)                ║
     ║                                                               ║
-    ║         Version: 1.24.0                                       ║
+    ║         Version: 2.0.0-rc.1 (IBKR-standalone)                 ║
     ║         Broker: Interactive Brokers (paper)                   ║
     ║                                                               ║
     ╚═══════════════════════════════════════════════════════════════╝
@@ -844,14 +844,17 @@ def main():
     kill_existing_instances()
 
     parser = argparse.ArgumentParser(
-        description="HYDRA 0DTE Trading Bot - Multi-Entry Iron Condors",
+        description="HYDRA 0DTE Trading Bot — Multi-Entry Iron Condors (IBKR paper)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m bots.hydra.main              Run in SIM environment
-  python -m bots.hydra.main --live       Run in LIVE environment
-  python -m bots.hydra.main --dry-run    Simulate without orders
-  python -m bots.hydra.main --status     Show current status only
+  python -m bots.hydra.main              Connect to IBKR paper, place real paper orders
+  python -m bots.hydra.main --dry-run    Connect to IBKR paper, simulate orders (no placement)
+  python -m bots.hydra.main --status     Show current status and exit
+
+The IBKR-standalone branch trades the paper account only — there is no
+live-money path. The legacy `--live` flag is retained for CLI back-compat
+and is a no-op.
         """
     )
 
@@ -863,7 +866,7 @@ Examples:
     parser.add_argument(
         "--dry-run", "-d",
         action="store_true",
-        help="Run in simulation mode without placing real trades"
+        help="Simulate orders against live IBKR paper quotes (no placement)"
     )
     parser.add_argument(
         "--status", "-s",
@@ -884,7 +887,11 @@ Examples:
     parser.add_argument(
         "--live", "-l",
         action="store_true",
-        help="Use LIVE environment (real money trading)"
+        # P7-audit L10: kept for back-compat (no-op). The IBKR-standalone
+        # branch does NOT support live trading — it talks to IBKR paper
+        # only. Removing the flag would break any caller still passing
+        # it; the runtime emits a NOTE that it has no effect.
+        help="(DEPRECATED, no-op) Pre-migration flag retained for CLI back-compat."
     )
 
     args = parser.parse_args()

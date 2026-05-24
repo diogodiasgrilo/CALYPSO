@@ -28,7 +28,7 @@ from bots.hydra.strategy import HydraStrategy
 # MEICState comes from HYDRA's own base now (post-P1 reparent) — importing
 # it from bots.meic.strategy would yield a DIFFERENT enum class object,
 # making `s.state == MEICState.MONITORING` a cross-class comparison.
-from bots.hydra.base_strategy import MEICState
+from bots.hydra.base_strategy import MEICDailyState, MEICState
 from shared.ib_client import IBClient
 
 
@@ -1132,7 +1132,11 @@ class TestTrySellLongLegReconciliation:
         s.registry = MagicMock()
         s.dry_run = False
         s._save_state_to_disk = MagicMock()
-        s.daily_state = MagicMock()
+        # P7-audit L15: spec= restricts attribute access to fields
+        # actually defined on MEICDailyState. A bare MagicMock would
+        # fabricate any attribute lookup (including typos), letting
+        # tests pass against code that reads a non-existent field.
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.total_realized_pnl = 0.0
         s.daily_state.total_commission = 0.0
         s.commission_per_leg = 2.5
@@ -1220,7 +1224,8 @@ class TestCheckLongLegSalvageRewire:
         s = self._make_strategy()
         positions = [{"instrument_id": 111, "right": "C", "quantity": 1}]
         s._read_open_positions = MagicMock(return_value=positions)
-        s.daily_state = MagicMock()
+        # P7-audit L15: spec= prevents fabricated-attribute false-positives.
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.entries = [self._entry()]
         # force market hours so the time-gate doesn't skip
         market_open = get_us_market_time_stub()
@@ -1236,7 +1241,8 @@ class TestCheckLongLegSalvageRewire:
     def test_empty_positions_skips_salvage(self):
         s = self._make_strategy()
         s._read_open_positions = MagicMock(return_value=[])
-        s.daily_state = MagicMock()
+        # P7-audit L15: spec= prevents fabricated-attribute false-positives.
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.entries = [self._entry()]
         market_open = get_us_market_time_stub()
         with patch("bots.hydra.strategy.get_us_market_time",
@@ -1277,7 +1283,7 @@ class TestExpectedPositionQuantities:
 
     def _strategy(self, entries):
         s = HydraStrategy.__new__(HydraStrategy)
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.active_entries = entries
         return s
 
@@ -1349,7 +1355,7 @@ class TestHandlePositionDiscrepancies:
 
     def _strategy(self, entries):
         s = HydraStrategy.__new__(HydraStrategy)
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.active_entries = entries
         return s
 
@@ -1400,7 +1406,7 @@ class TestHourlyReconciliationBody:
         s._last_reconciliation_time = None
         s.BOT_NAME = "HYDRA"
         s.contracts_per_entry = 1
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.active_entries = entries
         s.alert_service = MagicMock()
         s._save_state_to_disk = MagicMock()
@@ -1547,7 +1553,7 @@ class TestCheckAfterHoursSettlement:
         s.BOT_NAME = "HYDRA"
         s.registry = MagicMock()
         s._settlement_reconciliation_complete = False
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.entries = entries
         s.daily_state.active_entries = entries
         s.daily_state.total_realized_pnl = 100.0
@@ -1681,7 +1687,7 @@ class TestReconcileRecoveredEntriesWithBroker:
     def _make(self, entries):
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = None
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.active_entries = entries
         s._handle_position_discrepancies = MagicMock()
         s._save_state_to_disk = MagicMock()
@@ -1739,7 +1745,7 @@ class TestRecoverPositions:
         s.BOT_NAME = "HYDRA"
         s.contracts_per_entry = 1
         s._next_entry_index = 0
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.total_realized_pnl = 0.0
         s.daily_state.date = None
         s.alert_service = MagicMock()
@@ -1870,7 +1876,7 @@ class TestBatchUpdateEntryPrices:
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = None
         s.dry_run = dry_run
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s._simulate_hydra_entry_prices = MagicMock()
         return s
 
@@ -2005,7 +2011,7 @@ class TestVerifySettlementPnl:
         s.broker = broker
         s.dry_run = dry_run
         s.client = MagicMock()
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.total_realized_pnl = 500.0
         s.daily_state.total_commission = 20.0
         return s
@@ -2562,7 +2568,7 @@ class TestMkt033GateDef3:
         entry.put_side_stopped = False
         entry.long_call_uic = 111
         entry.long_call_position_id = None  # IBKR: no per-leg id
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.entries = [entry]
         market_open = get_us_market_time_stub()
         with patch("bots.hydra.strategy.get_us_market_time",
@@ -2858,7 +2864,7 @@ class TestGetTotalBrokerPnl:
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = MagicMock()
         s.client = None
-        s.daily_state = MagicMock()
+        s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.active_entries = entries
         return s
 

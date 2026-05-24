@@ -729,7 +729,11 @@ class TestGetVixPrice:
         mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([{
             "conid": 13455, FIELD_BID: "18.0", FIELD_ASK: "18.2",
         }])
-        assert client.get_vix_price() == 18.1
+        # P7-audit L14: pytest.approx for float comparisons — exact ==
+        # would have been brittle to any future refactor that changed
+        # the mid-price computation order ((bid+ask)/2 vs (bid+ask)*0.5
+        # round differently in floating point on some inputs).
+        assert client.get_vix_price() == pytest.approx(18.1)
 
     def test_falls_back_to_last_when_no_bid_ask(self, connected_client):
         client, mock_ibkr = connected_client
@@ -737,7 +741,7 @@ class TestGetVixPrice:
         mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([{
             "conid": 13455, FIELD_LAST: "17.95",
         }])
-        assert client.get_vix_price() == 17.95
+        assert client.get_vix_price() == pytest.approx(17.95)
 
     def test_falls_back_to_mark_when_no_bid_ask_no_last(self, connected_client):
         """Fix 2026-05-18 Monday paper smoke: IBKR's snapshot endpoint
@@ -751,7 +755,7 @@ class TestGetVixPrice:
         mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([{
             "conid": 13455, FIELD_MARK: "18.69",
         }])
-        assert client.get_vix_price() == 18.69
+        assert client.get_vix_price() == pytest.approx(18.69)
 
     def test_returns_none_when_all_price_fields_missing(self, connected_client):
         """Defensive: if IBKR returns no usable price field at all,

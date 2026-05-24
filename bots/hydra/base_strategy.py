@@ -155,7 +155,7 @@ NORMAL_CHECK_INTERVAL_SECONDS = 5    # Far from stops: 5s detection (was 10s pre
 
 # ORDER-004: Pre-entry margin check
 MIN_BUYING_POWER_PER_IC = 5000  # Minimum BP required per iron condor ($5000)
-MARGIN_CHECK_ENABLED = True  # Can be disabled if Saxo margin API unavailable
+MARGIN_CHECK_ENABLED = True  # Can be disabled if the broker margin API is unavailable
 
 # MKT-005: Market circuit breaker halt detection
 MARKET_HALT_CHECK_ENABLED = True  # Check for trading halts before entry
@@ -902,15 +902,13 @@ class MEICStrategy:
             logger.critical(error_msg)
             raise ValueError(error_msg)
 
-        # Underlying (SPX via US500.I CFD)
-        self.underlying_symbol = self.strategy_config.get("underlying_symbol", "US500.I")
-        self.underlying_uic = self.strategy_config.get("underlying_uic", 4913)
-
-        # Options (SPXW)
-        self.option_root_uic = self.strategy_config.get("option_root_uic", 128)
-
-        # VIX for filtering
-        self.vix_uic = self.strategy_config.get("vix_spot_uic", 10606)
+        # Underlying (SPX). P7-audit L5: `underlying_uic`,
+        # `option_root_uic`, `vix_spot_uic` are vestigial Saxo identifiers
+        # — IBKR resolves instruments by conid via `_read_option_chain`
+        # / `IBClient.qualify_contract`, not these JSON-pinned IDs.
+        # `underlying_symbol` is still meaningful (it's the lookup key
+        # for `qualify_contract("SPX", sec_type="IND")`).
+        self.underlying_symbol = self.strategy_config.get("underlying_symbol", "SPX")
 
         # Entry parameters
         self._parse_entry_times()
@@ -1060,7 +1058,7 @@ class MEICStrategy:
             self._validate_system_clock()
 
         logger.info(f"MEICStrategy initialized - State: {self.state.value}")
-        logger.info(f"  Underlying: {self.underlying_symbol} (UIC: {self.underlying_uic})")
+        logger.info(f"  Underlying: {self.underlying_symbol}")
         logger.info(f"  Entry times: {[t.strftime('%H:%M') for t in self.entry_times]}")
         min_spread = self.strategy_config.get("min_spread_width", 25)
         max_spread = self.strategy_config.get("max_spread_width", 100)
@@ -2324,8 +2322,16 @@ class MEICStrategy:
                 time.sleep(0.5)
                 continue
 
-            bid = quote.get("bid") or 0
-            ask = quote.get("ask") or 0
+            # P7-audit L1: explicit None check distinguishes "no bid
+            # field" from "bid=0.0" (legitimate worthless option). The
+            # ORDER-006 branch below behaves identically for both (the
+            # `if bid > 0:` guard sends both to the exempt path), but the
+            # explicit form prevents a future refactor from accidentally
+            # treating a real 0.0 bid as "missing data".
+            _bid_raw = quote.get("bid")
+            _ask_raw = quote.get("ask")
+            bid = _bid_raw if _bid_raw is not None else 0
+            ask = _ask_raw if _ask_raw is not None else 0
             spread = abs(ask - bid) if bid and ask else 0
 
             # ORDER-006: bid-ask spread guard (identical math to the Saxo path).
@@ -3657,96 +3663,15 @@ class MEICStrategy:
             self.market_data.update_vix(vix)
             self.current_vix = vix
 
-    def _extract_price(self, quote: Dict, context: str = "price") -> Optional[float]:
-        """
-        Extract price from quote response with freshness check.
-
-        DATA-001: Checks quote staleness and logs warnings if data is old.
-
-        Args:
-            quote: Quote response from Saxo API
-            context: Description for logging (e.g., "SPX", "short_call")
-
-        Returns:
-            Mid price, last traded, or None if no valid price
-        """
-        # DATA-001: Check quote freshness
-        self._check_quote_freshness(quote, context)
-
-        # Try mid price first
-        bid = quote.get("Quote", {}).get("Bid")
-        ask = quote.get("Quote", {}).get("Ask")
-        if bid and ask:
-            return (bid + ask) / 2
-
-        # Fallback to last traded
-        last = quote.get("Quote", {}).get("LastTraded")
-        if last:
-            return last
-
-        return None
-
-    def _check_quote_freshness(self, quote: Dict, context: str = "quote") -> bool:
-        """
-        DATA-001: Check if quote data is fresh (< 60 seconds old).
-
-        Logs warnings when quotes are stale, which could indicate API issues
-        or slow data feeds that might affect trading decisions.
-
-        Args:
-            quote: Quote response from Saxo API
-            context: Description for logging
-
-        Returns:
-            True if quote is fresh, False if stale or unknown
-        """
-        # Try to extract timestamp from quote
-        # Saxo returns timestamps in various fields
-        timestamp_str = None
-
-        # Check common timestamp locations
-        quote_block = quote.get("Quote", {})
-        price_info = quote.get("PriceInfo", {})
-        price_info_details = quote.get("PriceInfoDetails", {})
-
-        # Try different timestamp fields
-        for block in [quote_block, price_info, price_info_details]:
-            for field in ["LastUpdated", "LastTradedAt", "DateTime"]:
-                if field in block:
-                    timestamp_str = block[field]
-                    break
-            if timestamp_str:
-                break
-
-        if not timestamp_str:
-            # No timestamp found - can't determine freshness
-            logger.debug(f"DATA-001: No timestamp in quote for {context}, cannot verify freshness")
-            return True  # Assume fresh if we can't check
-
-        try:
-            # Parse ISO format timestamp
-            from datetime import datetime, timezone
-            if timestamp_str.endswith('Z'):
-                timestamp_str = timestamp_str[:-1] + '+00:00'
-
-            quote_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-            now = datetime.now(timezone.utc)
-            age_seconds = (now - quote_time).total_seconds()
-
-            if age_seconds > MAX_DATA_STALENESS_SECONDS:
-                logger.warning(
-                    f"DATA-001 STALE QUOTE: {context} quote is {age_seconds:.1f}s old "
-                    f"(max {MAX_DATA_STALENESS_SECONDS}s). Consider refreshing."
-                )
-                self._log_safety_event("STALE_QUOTE", f"{context}: {age_seconds:.1f}s old")
-                return False
-
-            logger.debug(f"DATA-001: {context} quote is {age_seconds:.1f}s old (fresh)")
-            return True
-
-        except Exception as e:
-            logger.debug(f"DATA-001: Could not parse quote timestamp for {context}: {e}")
-            return True  # Assume fresh if parsing fails
+    # P7-audit L4: removed dead Saxo-shaped `_extract_price` and
+    # `_check_quote_freshness`. They read `quote["Quote"]["Bid"]` /
+    # `quote["PriceInfo"]["LastUpdated"]` — Saxo response shapes that
+    # IBKR's `IBClient.get_quote()` doesn't populate. Zero production
+    # callers remain (verified via repo-wide grep on 2026-05-22). The
+    # IBKR equivalent for "extract a usable price" is the explicit
+    # `is not None` ladder in `strategy._read_index_price` / `_read_option_quote`;
+    # freshness on IBKR is handled by the broker (real-time vs delayed
+    # via the `availability` field on each quote — `'R'`/`'D'`/`'Z'`).
 
     # =========================================================================
     # CIRCUIT BREAKER
@@ -3942,15 +3867,23 @@ class MEICStrategy:
     @staticmethod
     def _position_is_settled(pid) -> bool:
         """
-        Position is "settled / gone from Saxo" when the ID is missing OR is a
-        Path-B dry-run synthetic ID (DRY_*).
+        Position is "settled / gone from the broker" when the ID is missing
+        OR is a Path-B dry-run synthetic ID (DRY_*).
+
+        On the IBKR path `pid` is always None for live entries (IBKR has no
+        per-leg position id — see F4 design doc), so the first branch fires
+        unconditionally and settlement is gated on the conid-quantity
+        reconciliation (`_expected_position_quantities`) instead. On legacy
+        Saxo state-file rehydration `pid` may still carry a Saxo UUID; the
+        same "missing/empty" test applies.
 
         DRY_* IDs are populated by _simulate_entry() so heartbeat monitoring
         treats the entry as live during the day. At settlement, they should
-        be treated as gone — no real Saxo position ever existed to look up.
-        Without this, _process_expired_credits() never marked dry-run sides
-        as expired and credit was never added to total_realized_pnl, leaving
-        winning dry-run days reporting net_pnl = -$commission (Apr 28-29).
+        be treated as gone — no real broker position ever existed to look
+        up. Without this, _process_expired_credits() never marked dry-run
+        sides as expired and credit was never added to total_realized_pnl,
+        leaving winning dry-run days reporting net_pnl = -$commission
+        (Apr 28-29 backfill).
         """
         if not pid:
             return True

@@ -1,8 +1,12 @@
 """
-HYDRA 0DTE Trading Bot
+HYDRA 0DTE Trading Bot — IBKR Web API
 
 Multi-Entry Iron Condors (SPX 0DTE) with credit gates, progressive OTM
 tightening, and hold-to-expiry. Based on Tammy Chambless's MEIC strategy.
+
+Broker: Interactive Brokers Web API (ibind OAuth 1.0a, no gateway).
+Account: paper only on this branch. Saxo Bank has been removed end-to-end
+— see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars.
 The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
@@ -32,6 +36,27 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2.0.0-rc.1 (2026-05-22, branch: hydra-ibkr-standalone): IBKR-standalone
+  migration. Saxo Bank → Interactive Brokers Web API (ibind OAuth 1.0a,
+  no gateway, no local container). All seven phases F1–F7 are
+  code-complete (see docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md):
+  F1 auth + LST handshake, F2 contract qualification, F3 option chain
+  via probed secdef behavior, F4 conid-quantity reconciliation (IBKR
+  has no per-leg position id), F5 closedpositions + activities for
+  fill-price authority, F6 order write-path with cOID dedup safety,
+  F7 broker-agnostic strategy read helpers + account balance. All
+  five P1–P7 cleanups: P1 imports + module purges, P2 dead Saxo
+  helper removal, P3 method ranges audit, P4 broker abstraction
+  flattening, P5 streaming subsystem, P6 retry + per-family circuit
+  breakers, P7 go-live (re-auth gate, systemd LoadCredentialEncrypted=
+  credentials, multi-agent code audit). The P7 audit found and fixed
+  4 Critical + 13 High + 17 Medium + 15 Low/Nit issues across the
+  branch — see docs/migration/P7_AUDIT_FINDINGS.md. This branch trades
+  IBKR paper only — there is no live-money path. The legacy `--live`
+  CLI flag is retained as a no-op for back-compat. Saxo client +
+  token_keeper service are kept on the main branch unchanged; HYDRA
+  uses neither on this branch.
+
 - 1.27.2 (2026-05-05 PM): Hedge position tracking for the defensive overlay.
   Closes the dry-run gap where overlay placements were logged but not journaled.
   New `bots/hydra/brandon/hedge_position.py` module: HedgeLeg dataclass,

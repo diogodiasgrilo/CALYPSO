@@ -51,6 +51,7 @@ against ibind/client/ibkr_definitions.py):
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -530,7 +531,20 @@ class IBClient:
                 )
         except Exception as exc:
             err_str = str(exc).lower()
-            if any(k in err_str for k in ("401", "unauthorized", "invalid consumer", "invalid_token")):
+            # P7-audit L7: `"401" in err_str` was too loose — would match
+            # "error 4017" or a URL containing the substring. Use a word-
+            # boundary regex for the HTTP code; keep the longer keyword
+            # phrases as substring matches since collision is implausible.
+            looks_like_auth = (
+                bool(re.search(r"\b401\b", err_str))
+                or any(k in err_str for k in (
+                    "unauthorized",
+                    "invalid consumer",
+                    "invalid_token",
+                    "invalid token",
+                ))
+            )
+            if looks_like_auth:
                 raise IBAuthError(
                     f"LST handshake failed (pre-activation OR wrong consumer key): {exc}"
                 ) from exc
@@ -1036,14 +1050,22 @@ class IBClient:
                     "IBConfig if this is the wrong contract.",
                     symbol, underlying_sec_type, len(chosen), chosen[0],
                 )
-            underlying_conid = (
-                chosen[0].get("conid")
-                or chosen[0].get("conidEx")
-                if isinstance(chosen[0], dict) else None
-            )
+            # P7-audit L6: only accept the canonical numeric `conid`.
+            # The prior `chosen[0].get("conid") or chosen[0].get("conidEx")`
+            # had two problems: (a) the `if isinstance(...)` ternary was
+            # mis-bound with `or`, so `chosen[0].get(...)` was called
+            # unconditionally — would raise AttributeError if `chosen[0]`
+            # wasn't a dict; (b) `conidEx` is the *compound* identifier
+            # form (e.g. "12345;0;;" for combos) — callers downstream do
+            # `int(underlying_conid)` or pass it to single-leg APIs, both
+            # of which would fail on a compound form. Fall back to nothing
+            # — if conid is missing, fail loudly.
+            chosen0 = chosen[0] if isinstance(chosen[0], dict) else {}
+            underlying_conid = chosen0.get("conid")
             if not underlying_conid:
                 raise IBClientError(
-                    f"Unexpected contract search response shape: {candidates!r}"
+                    f"Unexpected contract search response shape "
+                    f"(no 'conid' key): {candidates!r}"
                 )
 
             # Step 2: for options, walk the secdef chain to the specific strike
@@ -1501,7 +1523,16 @@ class IBClient:
 
         bid = f(FIELD_BID)
         ask = f(FIELD_ASK)
-        mid = (bid + ask) / 2 if (bid is not None and ask is not None) else None
+        # P7-audit L9: do NOT compute mid on a crossed market (bid > ask).
+        # Crossed quotes are a transient IBKR state during fast moves /
+        # quote-staleness and (bid+ask)/2 of a crossed quote is a
+        # nonsense price that downstream callers (credit estimation,
+        # stop-monitoring) would treat as authoritative. Setting mid=None
+        # forces callers to fall back to last/mark or skip this tick.
+        if bid is not None and ask is not None and bid <= ask:
+            mid = (bid + ask) / 2
+        else:
+            mid = None
 
         out = {
             "conid": conid or row.get("conid"),
@@ -1890,9 +1921,19 @@ class IBClient:
             exchange="CBOE",
         ) or {}
         # Response shape: {"call": [strikes], "put": [strikes]}
+        # P7-audit L8: coerce each side to a list explicitly — `calls + puts`
+        # would raise TypeError if either side came back as a single
+        # scalar (we've seen IBKR return one strike as a bare number on
+        # very thin chains) or a dict instead of a list.
         if isinstance(data, dict):
-            calls = data.get("call") or data.get("calls") or []
-            puts = data.get("put") or data.get("puts") or []
+            def _as_list(v):
+                if v is None:
+                    return []
+                if isinstance(v, list):
+                    return v
+                return [v]  # scalar or unexpected shape — treat as one entry
+            calls = _as_list(data.get("call") or data.get("calls"))
+            puts = _as_list(data.get("put") or data.get("puts"))
             return sorted({float(s) for s in (calls + puts)})
         if isinstance(data, list):
             return sorted({float(s) for s in data})

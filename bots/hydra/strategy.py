@@ -1500,7 +1500,21 @@ class HydraStrategy(MEICStrategy):
             if period_minutes <= 30:
                 period_arg = f"{period_minutes}min"
             else:
-                period_hours = min((period_minutes + 59) // 60, 8)
+                period_hours_unclamped = (period_minutes + 59) // 60
+                period_hours = min(period_hours_unclamped, 8)
+                # P7-audit L2: log when the IBKR 8-hour ceiling clamps
+                # the requested window — silent clamping would mask a
+                # caller asking for more history than IBKR's CP API can
+                # serve (which on a Monday morning could mean missing
+                # Friday's session entirely).
+                if period_hours_unclamped > 8:
+                    logger.warning(
+                        "_read_recent_bars: requested lookback "
+                        "%d minutes (~%dh) exceeds IBKR's 8h ceiling — "
+                        "clamping to 8h. Caller may receive fewer bars "
+                        "than requested.",
+                        period_minutes, period_hours_unclamped,
+                    )
                 period_arg = f"{period_hours}h"
             raw_bars = self.broker.get_chart_data(
                 symbol="SPX", bar=bar_arg, period=period_arg,
@@ -1612,10 +1626,12 @@ class HydraStrategy(MEICStrategy):
             for start in range(0, len(conids), 100):
                 chunk = conids[start:start + 100]
                 rows = self.broker.get_quotes_batch(chunk) or []
+                rows_with_conid = 0
                 for row in rows:
                     cid = row.get("conid")
                     if cid is None:
                         continue
+                    rows_with_conid += 1
                     out[int(cid)] = {
                         "bid": _f(row.get("bid")),
                         "ask": _f(row.get("ask")),
@@ -1623,6 +1639,29 @@ class HydraStrategy(MEICStrategy):
                         "mid": _f(row.get("mid")),
                         "mark": _f(row.get("mark")),
                     }
+                # P7-audit L3: surface row drops. Two distinct shapes:
+                # (a) rows we got but couldn't key (no `conid` field) —
+                # signals an ibind response-shape change. (b) chunk size
+                # vs returned rows — signals IBKR didn't quote some
+                # requested conids (illiquid, halted, stale conid). Both
+                # are diagnostically useful; debug-level so steady-state
+                # quiet, but operators can flip to DEBUG when investigating.
+                rows_dropped = len(rows) - rows_with_conid
+                if rows_dropped:
+                    logger.warning(
+                        "_read_option_quotes_batch: %d/%d rows had no "
+                        "conid field (ibind response-shape change?). "
+                        "Investigate first row sample: %r",
+                        rows_dropped, len(rows), rows[0] if rows else None,
+                    )
+                if rows_with_conid < len(chunk):
+                    logger.debug(
+                        "_read_option_quotes_batch: requested %d conids, "
+                        "broker returned %d quoted rows — %d missing "
+                        "(illiquid / halted / invalid conid).",
+                        len(chunk), rows_with_conid,
+                        len(chunk) - rows_with_conid,
+                    )
             return out
         except Exception as e:
             logger.warning(
