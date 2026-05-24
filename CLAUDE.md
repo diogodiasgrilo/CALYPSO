@@ -735,6 +735,62 @@ It tests SPY (control US equity) before SPX/VIX (indices). Output interpretation
 
 ---
 
+## Backups (Polish Item 4)
+
+Three files are backed up daily to Google Cloud Storage. A fourth (state file) gets sub-daily snapshots via `ExecStartPre` (Polish Item 5).
+
+### Daily GCS backups via `db_backup.service` + `db_backup.timer`
+
+Runs daily at **23:00 UTC** (= 7 PM EDT / 6 PM EST — after market close + after HOMER's journal write). Backs up:
+
+| Source on VM | GCS destination (under `gs://calypso-backups/`) |
+|---|---|
+| `/opt/calypso/data/backtesting.db` | `backtesting_YYYYMMDD.db` |
+| `/opt/calypso/data/hydra_metrics.json` | `hydra_metrics_YYYYMMDD.json` |
+| `/opt/calypso/data/hydra_state.json` | `hydra_state_YYYYMMDD.json` |
+
+`deploy/db_backup.service` shells `gsutil cp` per file. Failure of metrics/state copies is non-fatal (the `|| true` at the end of the `ExecStartPost`) — the DB copy is the primary; the JSON files are best-effort because they're tiny + can be re-synthesized from the DB in the worst case.
+
+### Verify the timer is enabled
+
+```bash
+# Check the timer's next + last run
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="systemctl list-timers db_backup.timer --no-pager"
+# Expected: NEXT = today 23:00 UTC (or tomorrow if already fired today); LAST = yesterday's 23:00 UTC
+
+# Confirm the service is enabled
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="systemctl is-enabled db_backup.timer"
+# Expected: enabled
+
+# Test gsutil works as the calypso user (read-only check)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso gsutil ls gs://calypso-backups/ | tail -5"
+# Expected: 3-15 files visible (recent backtesting/metrics/state)
+```
+
+### Sub-daily state-file snapshots
+
+`hydra.service`'s `ExecStartPre=` invokes `scripts/pre_start_snapshot.sh` before EVERY (re)start. Snapshots land in:
+
+- HYDRA main: `/opt/calypso/data/state_snapshots/hydra_state.pre_restart_<UTC>.json`
+- Variant B: `/opt/calypso/data/variant_b/state_snapshots/...`
+- Variant C: `/opt/calypso/data/variant_c/state_snapshots/...`
+
+Retention: 50 most recent snapshots per dir (~500 KB ceiling). Older are deleted by the retention sweep. The script ALWAYS exits 0 — a snapshot failure never blocks bot start.
+
+### Restore procedure
+
+See [`docs/migration/RUNBOOKS.md`](docs/migration/RUNBOOKS.md) **RB-5** (state-file corruption → restore from local snapshot) and **RB-7** (GCS-backed restore). RB-7's rehearsal cadence is once every 30 days; record the run in the trading journal per `LIVE_READINESS_CHECKLIST.md` Gate 7.
+
+### Operator one-liner — confirm yesterday's backup landed
+
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso gsutil ls gs://calypso-backups/hydra_state_$(date -u -d yesterday +%Y%m%d).json 2>&1"
+# Expected: gs://calypso-backups/hydra_state_YYYYMMDD.json (single line, the path)
+# If missing: gsutil prints 'BucketNotFoundException' or 'AccessDeniedException' or 'matched no objects'.
+```
+
+---
+
 ## VM System Commands
 
 ```bash

@@ -1,7 +1,16 @@
 [Unit]
-Description=HYDRA Variant C (Brandon Trojan Horse stack: TP@80% live, GEX/overlay/breach shadow; Brandon 5/10pt narrow widths; dry-run)
-After=network.target token_keeper.service
-Wants=token_keeper.service
+Description=HYDRA Variant C (Brandon Trojan Horse stack — narrow widths + canonical 3-slot grid + 10c — dry-run paper)
+# OAuth 1.0a is gateway-free and headless — no IB Gateway, no token-keeper
+# service. network-online.target so the OAuth handshake to api.ibkr.com
+# has DNS+TLS available at startup. P7-audit / Polish A-X2: the previous
+# version of this file depended on token_keeper.service which is dead on
+# this branch — variant would have failed to start on a clean VM.
+After=network-online.target
+Wants=network-online.target
+# Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst MUST be in
+# [Unit]; in [Service] systemd silently ignores them (P7-audit H5).
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -10,21 +19,48 @@ Group=calypso
 WorkingDirectory=/opt/calypso
 Environment="HYDRA_VARIANT_ID=c"
 Environment="PYTHONUNBUFFERED=1"
-# Polygon API key for the Brandon GEX features. Create /etc/calypso/polygon.env
-# with:  POLYGON_API_KEY=pk_xxxxxxxxxxxxxxxxxxxxxxxx
-# The leading dash makes it optional — if the file is absent, GEX features
-# silently disable (logged warning, no crash) and only TP + narrow_spread
-# stay active.
+
+# Variant-isolated state file paths (Polish Item 5 — pre-start snapshot).
+Environment="STATE_FILE=/opt/calypso/data/variant_c/hydra_state.json"
+Environment="SNAPSHOT_DIR=/opt/calypso/data/variant_c/state_snapshots"
+
+# ─── IBKR OAuth 1.0a credentials (P7 Step 4) ────────────────────────────
+# Variant C talks to IBKR's paper account (same credentials as the canonical
+# bot — same paper account; C is dry-run so no real orders, but it does
+# need real-time data via the same OAuth session). Polish A-X2: previous
+# version had NO LoadCredentialEncrypted entries → variant would have
+# failed on the first load_credentials call.
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/dhparam.pem.cred
+
 EnvironmentFile=-/etc/calypso/polygon.env
+
+# Pre-start state-file snapshot (Polish Item 5). Variant-aware.
+ExecStartPre=/opt/calypso/scripts/pre_start_snapshot.sh
+
 ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main --config bots/hydra/config/config_variant_c.json
+
+TimeoutStartSec=120
 Restart=always
 RestartSec=30
-StartLimitInterval=600
-StartLimitBurst=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=hydra_variant_c
-TimeoutStopSec=30
+
+# ─── Sandboxing (defense-in-depth, parity with hydra.service) ────────────
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ReadWritePaths=/opt/calypso
 
 [Install]
 WantedBy=multi-user.target
