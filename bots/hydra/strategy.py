@@ -9413,10 +9413,20 @@ class HydraStrategy(MEICStrategy):
         Also saves trend-following specific fields (call_only, put_only, trend_signal).
         """
         try:
+            # Polish Item 2: ARGUS Check 2 reads `last_heartbeat_at` to
+            # detect bot-process-alive-but-frozen. Written here so EVERY
+            # state-write (status_interval ~10s + every entry/stop/
+            # settlement event) refreshes the timestamp. ARGUS threshold
+            # is 5 min, so even a slow ~10s cadence stays well under.
+            # ISO-8601 UTC for portability across timezones / json parsers.
+            from datetime import datetime as _dt, timezone as _tz
+            last_heartbeat_at = _dt.now(_tz.utc).isoformat().replace("+00:00", "Z")
+
             state_data = {
                 "bot_type": "hydra",  # Identify this as HYDRA state
                 "date": self.daily_state.date,
                 "state": self.state.value,
+                "last_heartbeat_at": last_heartbeat_at,  # Polish Item 2 (ARGUS)
                 "next_entry_index": self._next_entry_index,
                 # Phase 2 X-1: top-level contract count for dashboard / agents / HOMER.
                 # Individual entries already carry their own `contracts` (written inside
