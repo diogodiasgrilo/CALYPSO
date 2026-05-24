@@ -130,3 +130,62 @@ clarity concerns from Agent 3 were addressed post-audit:
   and notes that `install -d -m 0700` sets both in one step.
 
 Round 3 (senior-overseer full-branch verification) is the next gate.
+
+## Round 3 senior-overseer — 2026-05-22, branch tip `bd0f44f`
+
+A single senior overseer with the full Round 1 register + Round 2
+reports + branch diff did a 7-section pre-deployment verification.
+The sections cover: (1) money-path trace (connect → qualify →
+quote → place → monitor → stop → settle), (2) 8 failure modes (token
+expiry, 429, breaker trip, partial fill, stale order_id, naked
+short, WS disconnect, systemd-creds failure), (3) operability
+(startup banner, heartbeat logs, docs completeness, alert messages),
+(4) test trustworthiness, (5) Saxo residue check, (6) pre-VM-deploy
+gating, (7) final verdict.
+
+**Round 3 result: ✅ PASS across all 7 sections.**
+
+  • Money-path: every critical action gates on `*_uic` (conid), not
+    `*_position_id`. Settlement uses the conid-quantity model. No
+    Saxo assumptions survive on the IBKR path.
+  • Failure modes: every scenario has an explicit handler — no silent
+    failures, no double-positions, no orphaned orders.
+  • Operability: a cold operator can deploy via
+    `IBKR_CREDENTIALS_SETUP.md`, start the service, and read `journalctl`
+    to know exactly what's happening. Alerts name the leg + uic + action.
+  • Saxo residue: zero active imports / instantiations of Saxo code.
+    All remaining `Saxo`/`saxo` strings are intentional historical
+    context (design rationale, migration trail) inside comments and
+    docstrings.
+  • Pre-deploy: code+docs+systemd+pre-flight checklist all complete.
+    The only blockers are external: Step 1 (user-side IBKR data-sharing
+    toggle propagation, ~24h) and Step 2 (probe re-run to verify
+    real-time data flows).
+
+**Minor non-blocking observations (3 items, all documented as deferred
+or operator-watch):**
+
+  • DEF-7 (POS-003 mid-session reconciliation still keyed on
+    `position_id` in one code path) — documented in
+    `docs/migration/DEFERRED_WORK.md` as accepted post-merge work.
+    Doesn't affect paper-validation correctness; affects only the
+    mid-day reconciliation safety net.
+  • Snapshot subscription re-priming (~15-min topic TTL) — code's
+    warmup-poll handles empty responses, but the explicit re-prime
+    cadence is not coded. Flagged as operator-watch during Step 5.
+  • OS-level test mocks (`platform.system()` mocks in a few unit
+    tests) — low-risk, intentional for cross-platform CI.
+
+**Money question — "Would I bet my house on this bot trading correctly
+on paper for a full week without manual intervention starting Monday?"**
+
+**Answer: YES**, with one caveat: Step 1 (IBKR subscriptions +
+data-sharing toggle) MUST complete and propagate fully, AND Step 2
+(probe) MUST confirm real-time quotes, BEFORE paper trading begins.
+If the paper account gets only delayed (15-min) data, the bot will
+place trades at wrong strikes and miss stop opportunities — a
+prerequisite issue, not a code issue.
+
+**Branch is cleared for Step 5 (VM deploy + paper smoke test).**
+The remaining P7 steps are Steps 1–2 (user-side, external) and 5–6
+(operator-side, the VM deploy + the CLAUDE.md rewrite + final merge).
