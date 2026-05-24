@@ -1,19 +1,9 @@
 {
   "bot_name": "HYDRA",
-  "saxo_api": {
-    "environment": "live",
-    "app_key": "FROM_SECRET_MANAGER",
-    "app_secret": "FROM_SECRET_MANAGER",
-    "redirect_uri": "http://localhost:8000/callback"
-  },
+  "_comment_credentials": "IBKR OAuth credentials are NOT in this file. They are loaded by shared/ib_oauth.load_credentials('paper') from systemd's $CREDENTIALS_DIRECTORY on the VM (LoadCredentialEncrypted= in hydra.service), or from env vars + ~/ibkr-oauth/paper/ in the dev path. See deploy/IBKR_CREDENTIALS_SETUP.md.",
   "strategy": {
-    "_comment_underlying": "US500.I is a CFD that tracks SPX - provides real-time prices",
-    "underlying_symbol": "US500.I",
-    "underlying_uic": 4913,
-    "_comment_options": "SPXW are SPX weekly options (0DTE)",
-    "option_root_uic": 128,
-    "_comment_vix": "VIX spot for volatility filtering",
-    "vix_spot_uic": 10606,
+    "_comment_underlying": "SPX index — resolved at runtime via IBClient.qualify_contract('SPX', sec_type='IND'). The legacy Saxo UIC keys (underlying_uic, option_root_uic, vix_spot_uic) are not needed on IBKR — instruments are looked up by conid. underlying_symbol is read only for the startup log line.",
+    "underlying_symbol": "SPX",
     "_comment_entry_times": "Entry times in HH:MM format (US Eastern). Configured slots are :15/:45 starting at 10:15 AM, but the active VIX regime caps max_entries (currently [2,2,2,1] \u2014 drops EARLIEST entries first, so E#1 at 10:15 is dropped at ALL VIX levels). Effective live schedule = 10:45 + 11:15. MKT-031 smart entry scouting starts 10min before each time. Only used when vix_time_shift.enabled=false.",
     "entry_times": [
       "10:15",

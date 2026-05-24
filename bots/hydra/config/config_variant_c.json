@@ -2,18 +2,10 @@
   "_comment_variant": "HYDRA Variant C — Brandon Trojan Horse stack with Brandon's narrow 5/10pt spread widths (his actual rule from the interview). Same Brandon feature stack as variant B; only spread width differs. Dry-run for the first 4 weeks. After observation: B vs C tells us whether narrow widths help on top of Brandon's additions.",
   "bot_name": "HYDRA",
   "dry_run": true,
-  "saxo_api": {
-    "environment": "live",
-    "app_key": "FROM_SECRET_MANAGER",
-    "app_secret": "FROM_SECRET_MANAGER",
-    "redirect_uri": "http://localhost:8000/callback"
-  },
+  "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
   "strategy": {
     "_comment_widths": "MKT-027 settings here are unused at runtime — strategy.brandon.narrow_spread.enabled=true overrides _get_vix_adjusted_spread_width with Brandon's 5/10pt rule. Values kept aligned with variant A's VM config (max=75pt) for consistency / debugging clarity.",
-    "underlying_symbol": "US500.I",
-    "underlying_uic": 4913,
-    "option_root_uic": 128,
-    "vix_spot_uic": 10606,
+    "underlying_symbol": "SPX",
     "entry_times": ["10:15", "10:45", "11:15"],
     "entry_window_minutes": 5,
     "spread_vix_multiplier": 6.0,

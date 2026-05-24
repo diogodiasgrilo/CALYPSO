@@ -831,7 +831,7 @@ Conids are not stable across IBKR's environments and can change without notice. 
 |--------|----------|-------------------|-------------|
 | SPX | IND | 416904 | S&P 500 index (cash-settled) |
 | SPXW | OPT trading_class | — | SPX Weekly options (0DTE PM-settled) |
-| VIX | IND | 13455 | CBOE VIX index |
+| VIX | IND | 13455763 | CBOE VIX index (verified via Step 2 probe 2026-05-24) |
 | SPY | STK | 756733 | SPDR S&P 500 ETF (used as control instrument in probes) |
 
 The `IBClient._conid_cache` keys on `(symbol, expiry_iso, strike, right, trading_class, sec_type)` and is cleared on `disconnect()`.

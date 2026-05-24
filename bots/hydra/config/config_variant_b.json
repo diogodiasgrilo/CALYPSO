@@ -2,18 +2,10 @@
   "_comment_variant": "HYDRA Variant B — Brandon Trojan Horse stack with NARROW 5/10pt widths (same as variant C) but a denser 4-slot entry grid (09:45 / 10:45 / 11:15 / 11:45) instead of C's 3 morning slots. 2026-05-13 cut from 7 slots → 4 after 5/4-5/12 review: B went 0-for-4 days at the original 7-slot × 15c sizing, commission drag dominated (each Brandon narrow-spread entry pays $2.50/leg × 4 legs × 15c = $150 round-trip; 7 slots = $1,050/day in fees alone). Dropped the 09:31 opening tick (high whipsaw), the 10:15 between-slot (low marginal info vs neighbors), and the 12:15 late slot (GEX walls already in motion). Same 2026-05-13 change: contracts_per_entry 15 → 10 (same commission-drag logic). Pre-2026-05-05 design used HYDRA wide widths; that experiment was retired because Brandon GEX-ADJ + put-only VIX gate combined to skip B on most days. Dry-run only.",
   "bot_name": "HYDRA",
   "dry_run": true,
-  "saxo_api": {
-    "environment": "live",
-    "app_key": "FROM_SECRET_MANAGER",
-    "app_secret": "FROM_SECRET_MANAGER",
-    "redirect_uri": "http://localhost:8000/callback"
-  },
+  "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
   "strategy": {
     "_comment_widths": "MKT-027 settings here are unused at runtime — strategy.brandon.narrow_spread.enabled=true overrides _get_vix_adjusted_spread_width with Brandon's 5/10pt rule. Values kept aligned with variant A's VM config (max=75pt) for consistency / debugging clarity.",
-    "underlying_symbol": "US500.I",
-    "underlying_uic": 4913,
-    "option_root_uic": 128,
-    "vix_spot_uic": 10606,
+    "underlying_symbol": "SPX",
     "entry_times": ["09:45", "10:45", "11:15", "11:45"],
     "entry_window_minutes": 5,
     "spread_vix_multiplier": 6.0,
