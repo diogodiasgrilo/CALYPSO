@@ -61,6 +61,8 @@ from shared.market_hours import (
 from shared.config_loader import ConfigLoader
 from shared.secret_manager import is_running_on_gcp
 from shared.alert_service import AlertType, AlertPriority
+# Polish Item 1: Telegram alert hooks for IBKR-specific failure modes.
+from bots.hydra.alert_hooks import IBKRAlertHooks
 
 # Import bot-specific strategy
 from bots.hydra.strategy import HydraStrategy
@@ -345,6 +347,16 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     last_intraday_session_check = datetime.min  # P7-audit H6: periodic re-check
     INTRADAY_SESSION_CHECK_INTERVAL_S = 15 * 60  # 15 min
 
+    # Polish Item 1: IBKR-specific Telegram alert bridge. Polls the broker's
+    # circuit-breaker state + snapshot warmup exhaustion counter once per
+    # iteration. Idempotent per state transition (each CLOSED→OPEN fires
+    # ONE alert; stuck-OPEN reminders every 15 min, capped 4/day per
+    # family). main.py calls on_ensure_connected_failed() at both
+    # ensure_connected() gates so the operator doesn't see the bot
+    # vanish silently.
+    alert_hooks = IBKRAlertHooks(broker, strategy.alert_service)
+    trade_logger.log_event("IBKR alert hooks initialized (breaker / warmup / re-auth)")
+
     try:
         while not shutdown_requested:
             try:
@@ -355,6 +367,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     strategy._reset_for_new_day()
                     last_day = today
                     last_snapshot_time = None
+                    # Polish Item 1: reset per-day alert flags (first-of-day
+                    # warmup-exhaustion alert + 25+ severe alert + per-day
+                    # stuck-OPEN reminder counts).
+                    alert_hooks.mark_new_day()
+
+                # Polish Item 1: poll IBKR-specific signals → Telegram on
+                # state transitions. Cheap when nothing changes (dict +
+                # int comparison per family). Wrapped in its own
+                # exception-handler inside the hook so a bug here cannot
+                # propagate.
+                alert_hooks.poll()
 
                 # Check if market is open
                 if not is_market_open():
@@ -452,6 +475,13 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 if last_session_check_date != today:
                     trade_logger.log_event("Verifying IBKR session for the trading day...")
                     if not broker.ensure_connected():
+                        # Polish Item 1 (A1.3 — highest-value alert):
+                        # the bot is about to break for systemd restart;
+                        # Telegram the operator so the disappearance is
+                        # explained.
+                        alert_hooks.on_ensure_connected_failed(
+                            reason="morning daily re-auth gate"
+                        )
                         trade_logger.log_error(
                             "IBKR session could not be re-established — "
                             "exiting for systemd restart (fresh connect)."
@@ -471,6 +501,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 now_ = datetime.now()
                 if (now_ - last_intraday_session_check).total_seconds() >= INTRADAY_SESSION_CHECK_INTERVAL_S:
                     if not broker.ensure_connected():
+                        # Polish Item 1 (A1.3): see comment at the
+                        # morning-gate site above.
+                        alert_hooks.on_ensure_connected_failed(
+                            reason="intraday session re-check (every 15 min)"
+                        )
                         trade_logger.log_error(
                             "Intraday IBKR session check failed — "
                             "exiting for systemd restart."

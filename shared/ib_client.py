@@ -491,6 +491,17 @@ class IBClient:
             family: CircuitBreaker(name=f"ib.{family}")
             for family in ("oauth", "session", "portfolio", "market", "orders")
         }
+        # Polish Item 1: monotonically-increasing counter incremented in
+        # _snapshot_with_preflight whenever the warmup-poll loop exits
+        # without populated data (i.e., the snapshot stays metadata-only
+        # for the full warmup budget). Exposed via the
+        # `snapshot_warmup_exhausted_count` read-only property. main.py
+        # polls this between iterations to fire a DATA_QUALITY Telegram
+        # alert on the first occurrence of the day (one alert per day
+        # per process; reset on day boundary in main.py, not here).
+        # NEVER reset within a session — the day-rollover dedup logic
+        # lives in main.py to keep IBClient broker-agnostic.
+        self._snapshot_warmup_exhausted_count = 0
 
     # ─── Connection lifecycle ──────────────────────────────────────────────
 
@@ -933,6 +944,35 @@ class IBClient:
         future calls.
         """
         return dict(self._breakers)
+
+    @property
+    def snapshot_warmup_exhausted_count(self) -> int:
+        """Polish Item 1: number of times ``_snapshot_with_preflight`` exited
+        its warmup-poll loop without populated data, since this IBClient
+        instance was constructed.
+
+        Each "exhaustion" means one snapshot endpoint call where the
+        ~6-second warmup budget elapsed and the response was still
+        metadata-only or empty. That's almost always one of: no
+        real-time entitlement for the conid, a stale conid (e.g.
+        expired option), or IBKR snapshot service degradation.
+
+        ``main.py`` polls this between iterations to fire:
+
+        - ONE MEDIUM ``DATA_QUALITY`` Telegram on the first
+          exhaustion of the trading day (so the operator notices
+          early degradation without flooding on a single illiquid
+          chain read).
+        - ONE additional HIGH ``DATA_QUALITY`` alert once the
+          per-day count crosses 25 (severe data-flow degradation
+          warranting investigation).
+
+        The day-boundary reset of the "alerted today" flag lives in
+        main.py, not here, so IBClient stays broker-agnostic. The
+        counter itself is monotonic for the life of the process —
+        a session reconnect does NOT reset it.
+        """
+        return self._snapshot_warmup_exhausted_count
 
     # ─── Contract qualification (conid cache) ─────────────────────────────
 
@@ -1385,6 +1425,11 @@ class IBClient:
         # "no entitlement" from "preflight bug" from "no quote", and
         # always return a list (never None) so callers can iterate
         # without a type check.
+        # Polish Item 1: increment the exhaustion counter exactly once
+        # per exhausted call (regardless of metadata-only vs empty-list).
+        # main.py polls this to fire a per-day Telegram alert on first
+        # exhaustion + a follow-up alert at 25+ exhaustions/day.
+        self._snapshot_warmup_exhausted_count += 1
         if data:
             logger.warning(
                 "snapshot warmup exhausted for conids=%s — returning "

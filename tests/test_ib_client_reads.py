@@ -1511,3 +1511,78 @@ class TestPlaceOrderCoidRetrySafety:
             "two independent place_order calls got the same cOID — "
             "IBKR will reject the second as a duplicate"
         )
+
+
+# ─── Polish Item 1: snapshot warmup exhaustion counter ─────────────────────
+
+
+class TestSnapshotExhaustionCounter:
+    """Polish Item 1: IBClient.snapshot_warmup_exhausted_count is the
+    DATA_QUALITY signal main.py polls to fire a per-day Telegram alert
+    when the snapshot endpoint stops returning real prices. Pin the
+    counter contract here so a future refactor of _snapshot_with_preflight
+    cannot silently break the alert pipeline."""
+
+    def test_counter_starts_at_zero(self, connected_client):
+        client, _ = connected_client
+        assert client.snapshot_warmup_exhausted_count == 0
+
+    def test_counter_increments_on_metadata_only_warmup(self, connected_client):
+        """Polish Item 1 contract: the counter increments when the warmup
+        loop exits without any non-metadata fields populated.
+
+        We force exhaustion by mocking live_marketdata_snapshot to ALWAYS
+        return a metadata-only row (just `conid` + `_updated`). The
+        warmup loop will poll _SNAPSHOT_MAX_WARMUP_POLLS times, find no
+        price fields, log the WARNING, increment the counter, return."""
+        client, mock_ibkr = connected_client
+        # Metadata-only row — no price field keys at all
+        meta_row = {"conid": 999, "_updated": 12345}
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([meta_row])
+
+        # Patch sleep so the test runs in <100ms instead of ~6s
+        with patch("shared.ib_client.time.sleep"):
+            result = client._snapshot_with_preflight("999", DEFAULT_QUOTE_FIELDS)
+
+        assert client.snapshot_warmup_exhausted_count == 1, (
+            f"expected counter=1 after one exhausted call, got "
+            f"{client.snapshot_warmup_exhausted_count}"
+        )
+        assert isinstance(result, list)  # always a list, never None
+
+    def test_counter_does_NOT_increment_on_successful_snapshot(self, connected_client):
+        """The counter is incremented ONLY on warmup exhaustion. A
+        successful first-or-second-poll response (populated row with at
+        least one price field) must NOT bump the counter."""
+        client, mock_ibkr = connected_client
+        # First poll metadata-only (priming), second poll has a bid → success
+        mock_ibkr.live_marketdata_snapshot.side_effect = [
+            _mk_result([{"conid": 1, "_updated": 1}]),       # preflight (returns no data)
+            _mk_result([{"conid": 1, "_updated": 2}]),       # poll 1: metadata-only
+            _mk_result([{"conid": 1, "_updated": 3,
+                         FIELD_BID: "5.10", FIELD_ASK: "5.20"}]),  # poll 2: success
+        ]
+        with patch("shared.ib_client.time.sleep"):
+            result = client._snapshot_with_preflight("1", DEFAULT_QUOTE_FIELDS)
+
+        assert client.snapshot_warmup_exhausted_count == 0, (
+            f"counter must NOT increment on success; got "
+            f"{client.snapshot_warmup_exhausted_count}"
+        )
+        # Result has the price data
+        assert any(
+            isinstance(r, dict) and FIELD_BID in r for r in result
+        ), "expected populated row to be returned"
+
+    def test_counter_increments_per_exhaustion(self, connected_client):
+        """Multiple exhaustion events accumulate. Two illiquid chain reads
+        in the same iteration should produce count=2."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result(
+            [{"conid": 7, "_updated": 1}]
+        )
+        with patch("shared.ib_client.time.sleep"):
+            client._snapshot_with_preflight("7", DEFAULT_QUOTE_FIELDS)
+            client._snapshot_with_preflight("7", DEFAULT_QUOTE_FIELDS)
+            client._snapshot_with_preflight("7", DEFAULT_QUOTE_FIELDS)
+        assert client.snapshot_warmup_exhausted_count == 3
