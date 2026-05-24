@@ -1,11 +1,40 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-05-01
-**Version:** 1.26.0 (Directional pivot strategy + spx_open 9:30 anchor + 75pt × 2c baseline)
+**Last Updated:** 2026-05-24
+**Version:** 2.0.0-rc.1 (IBKR-standalone — Saxo→IBKR migration complete; paper-only)
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
-**Status:** DRY-RUN since 2026-04-27 — variants A/B/C running 75pt × 2c in parallel comparison; sole active HYDRA-family bot.
+**Broker:** Interactive Brokers Web API via [`ibind`](https://github.com/Voyz/ibind) 0.1.23 (OAuth 1.0a, no gateway). See `CLAUDE.md` "IBKR Integration" section for the broker mechanics.
+**Status:** DRY-RUN against IBKR paper since 2026-04-27 — variants A/B/C running in parallel comparison; sole active HYDRA-family bot on the `hydra-ibkr-standalone` branch.
+
+> **2026-05-24 version note**: this spec covers the strategy logic, which
+> survived the Saxo→IBKR broker migration unchanged. The migration replaced
+> the SaxoClient read+write paths with an IBClient-backed broker abstraction
+> (`shared/ib_client.py`), but every entry rule, stop formula, conditional
+> trigger, and VIX-regime adaptation described below is identical to the
+> pre-migration v1.26.0 spec. Where the spec references "Saxo" historically
+> (e.g., Fix #-numbered bugs from 2026-Q1, or the explanation of position
+> merging that motivated MKT-013/MKT-015), those references are KEPT —
+> they're the historical reason the rule exists, not the current
+> implementation. The dual-naming note below explains what the field names
+> mean today.
+>
+> **Field-naming dual identity (per P7-audit H13):**
+> The state file + DB schema retain the legacy field names `*_uic` and
+> `*_position_id`. On the IBKR path:
+>
+> - `*_uic` now stores the IBKR conid (integer instrument id) — the
+>   same field name, different broker's identifier. Code reads it as
+>   the canonical instrument key.
+> - `*_position_id` is always `None` — IBKR has no per-leg position id.
+>   F4 reconciliation keys on `(conid, quantity)` instead. See
+>   `docs/migration/F4_POSITION_FLOW_DESIGN.md`.
+>
+> Anywhere this spec says "UIC" or "Saxo UIC" in operational language,
+> read it as "the broker's instrument id, currently the IBKR conid."
+> The rename to broker-neutral names was abandoned (would have churned
+> the state file format for no gain).
 
 > **2026-05-01 update**: variants B and C run a new **directional pivot strategy**
 > in addition to the canonical entry/exit logic described below. Variant A is
@@ -251,7 +280,7 @@ This ensures the account is never momentarily exposed with a naked short positio
 
 Before each entry (when `recheck_each_entry = true`), the bot:
 
-1. Fetches 50 bars of SPX 1-minute data via Saxo's chart API (uses US500.I CFD for real-time prices)
+1. Fetches 50 bars of SPX 1-minute data via the broker's chart API (`IBClient.get_chart_data` on the SPX index conid; historically `US500.I` Saxo CFD on the Saxo era)
 2. Calculates EMA(20) and EMA(40) on close prices
 3. Computes `diff_pct = (ema_short - ema_long) / ema_long`
 
@@ -438,7 +467,7 @@ SPX options use 5-point strike increments.
 
 ### Strike Adjustment Pipeline (Exact Order)
 
-This pipeline prevents Saxo from rejecting orders or merging positions:
+This pipeline prevents the broker from rejecting orders or merging positions (originally motivated by Saxo-era position-merging on identical strikes; IBKR exhibits the same merge behavior on same `(conid, side)` so the pipeline is still required):
 
 | Step | Rule | What It Does | Why It Exists |
 |------|------|-------------|---------------|
@@ -503,7 +532,7 @@ stop_level = call_credit + theoretical_put + call_stop_buffer (MKT-035 call-only
 
 This is offset by saved slippage ($5-$15) and saved commission ($2.50). Net impact is roughly neutral for call stops and slightly negative for put stops — acceptable given the execution simplicity and community validation.
 
-**Settlement handling:** The orphaned long leg is cleaned up automatically at settlement. `check_after_hours_settlement()` detects positions in registry but gone from Saxo (expired), clears position_ids and UICs, and runs `_process_expired_credits()`. The expired credit logic correctly skips stopped sides (`if not entry.call_side_stopped`), so there is no double-counting risk.
+**Settlement handling:** The orphaned long leg is cleaned up automatically at settlement. `check_after_hours_settlement()` detects positions in state but gone from the broker (expired) — on IBKR via the conid-quantity model (`_expected_position_quantities` vs `_read_open_positions`), not the always-empty Position Registry. Clears position_ids and UICs, then runs `_process_expired_credits()`. The expired credit logic correctly skips stopped sides (`if not entry.call_side_stopped`), so there is no double-counting risk.
 
 **Stop trigger is unchanged:** `spread_value >= stop_level` still uses BOTH leg mid prices (short - long) for the trigger condition. Only the close execution changes.
 
@@ -703,7 +732,7 @@ The following three rules work together when enabled:
 
 **ROC formula:**
 ```
-unrealized_pnl = Saxo live mark-to-market
+unrealized_pnl = broker live mark-to-market (IBKR positions endpoint)
 total_pnl = realized_pnl + unrealized_pnl
 net_pnl = total_pnl - commission
 close_cost = active_legs × $5.00   ($2.50 commission + $2.50 slippage)
@@ -807,7 +836,7 @@ Entry #1 → #2 → #3 placed normally
 | MKT-042 | Buffer Decay | v1.22.0 | Time-decaying stop buffer: starts at 2.50× normal buffer, linearly decays to 1× over 4h. Wider stops early, normal later. Config: `buffer_decay_start_mult`, `buffer_decay_hours`. |
 | MKT-043 | Calm Entry Filter | v1.22.0 | Delays entry up to 5 min when SPX moved >15pt in last 3 min. Prevents spike entries. Config: `calm_entry_lookback_min`, `calm_entry_threshold_pts`, `calm_entry_max_delay_min`. |
 | MKT-044 | Post-Overlap Chain Re-Snap | v1.23.0 | After MKT-013/015 overlap adjustments inside MKT-020/022, re-snap BOTH call and put sides to the actual option chain. Prevents cross-side contamination from 5pt shifts landing on non-existent strikes. |
-| MKT-045 | Final Chain Strike Snap | v1.23.0 | After all tightening + overlap adjustments, snap all 4 strikes to nearest actual Saxo chain strike (max 25pt tolerance). Re-runs overlap checks once after snapping. Prevents entries from using strikes that don't exist in the 0DTE chain (far OTM uses 10-25pt intervals, not 5pt). |
+| MKT-045 | Final Chain Strike Snap | v1.23.0 | After all tightening + overlap adjustments, snap all 4 strikes to nearest actual broker chain strike (max 25pt tolerance). Re-runs overlap checks once after snapping. Prevents entries from using strikes that don't exist in the 0DTE chain (far OTM uses 10-25pt intervals, not 5pt). |
 | MKT-046 | Stop Anti-Spike Filter | v1.23.0 | Requires stop breach to persist for 10 seconds before executing. Filters momentary bid/ask spikes that inflate mid-price (confirmed cause of 80% of false call stops). On first breach, starts timer + logs full bid/ask detail. If spread recovers below trigger before 10s, timer resets and stop is avoided. |
 | Whipsaw | Whipsaw Filter | v1.19.0 | Skip entries when intraday range > 1.75× expected move. High whipsaw = bad for iron condors. |
 | Upday-035 | Up-Day Put-Only | v1.17.0 | E6 (14:00) fires as put-only when SPX rises >= 0.25% above session open. Stop = credit + put_stop_buffer. |
@@ -886,7 +915,7 @@ Any → HALTED                         (critical: overnight positions, stale reg
 
 If the bot restarts mid-day:
 
-1. Query Saxo API for all open positions
+1. Query the broker API (`IBClient.get_positions`) for all open positions
 2. Filter by Position Registry (bot name = "HYDRA")
 3. Group by entry number using registry metadata
 4. Load state file for today's date
@@ -991,7 +1020,7 @@ Commission = $2.50 per leg per transaction. Expired options incur no close commi
 | `min_spread_width` | `60` | MKT-008 liquidity fallback floor (universal) |
 | `call_min_spread_width` | `25` | MKT-028: Call spread floor (v1.19.0, was 60) |
 | `put_min_spread_width` | `25` | MKT-028: Put spread floor (v1.19.0, was 75) |
-| `max_spread_width` | `110` | Maximum spread width (v1.19.0, must be multiple of 5 for Saxo strikes) |
+| `max_spread_width` | `110` | Maximum spread width (v1.19.0, must be multiple of 5 — both Saxo and IBKR SPX chains use 5pt strike intervals near ATM, 10-25pt far OTM) |
 | `spread_vix_multiplier` | `6.0` | MKT-027: VIX × multiplier for spread width (v1.19.0, was 3.5) |
 | `target_delta` | `8` | Target delta for short strikes |
 | `min_delta` | `5` | Minimum acceptable delta |
@@ -1103,7 +1132,7 @@ Current schema version: **v7** (2026-04-13).
 | `trade_entries` | Iron condor entries (strikes, credits, signals, OTM distances, Greeks, bid-ask width, slippage, margin) |
 | `trade_stops` | Stop loss events (debit, P&L, trigger level, quoted mid, slippage, salvage) |
 | `daily_summaries` | End-of-day totals (SPX OHLC, VIX, P&L, entry/stop counts) |
-| `spread_snapshots` | Per-entry cost-to-close every ~10s during monitoring; v5 adds individual leg mid prices; v6 adds Saxo bid/ask per leg for ThetaData-vs-Saxo calibration |
+| `spread_snapshots` | Per-entry cost-to-close every ~10s during monitoring; v5 adds individual leg mid prices; v6 adds broker bid/ask per leg for ThetaData-vs-live calibration (originally Saxo-era for Saxo-vs-ThetaData; now IBKR-vs-ThetaData on the IBKR-standalone branch) |
 | `skipped_entries` | Counterfactual tracking of entries rejected by MKT-011 (theoretical strikes + credit) |
 | `entry_mae_mfe` | Max Adverse / Max Favorable Excursion per entry side |
 | `shadow_entries` | **v7**: Shadow strikes that OTM-based selection WOULD have placed, recorded alongside actual credit-based entries. Observation only, zero trading behavior change. Used to compare credit-based vs OTM-based selection after sufficient data accumulates. |
@@ -1143,9 +1172,9 @@ Put premiums are typically 2-7× higher than call premiums at the same delta. Th
 - MKT-022 with the active regime put minimum forces closer-to-ATM puts
 - Total_credit stop (shared by both sides) is adequate because MKT-020/022 keeps skew at 1-2x
 
-### Saxo Position Merging
+### Broker Position Merging
 
-Saxo merges positions at the same strike and direction into a single position, deleting the older position ID. This breaks position tracking. MKT-013 (shorts) and MKT-015 (longs) prevent this, but the strike adjustment pipeline adds 5pt offsets that can accumulate across entries.
+Both Saxo (historical) and IBKR (current) merge positions at the same strike + direction into a single position. On Saxo the older position ID was deleted; on IBKR there's no per-leg position ID at all so the merge surfaces as the broker's `position quantity` going from 1 to 2 on the same conid. Either way, this breaks per-entry position tracking. MKT-013 (shorts) and MKT-015 (longs) prevent this on both brokers, but the strike adjustment pipeline adds 5pt offsets that can accumulate across entries.
 
 ### 0DTE Gamma Risk
 
@@ -1172,7 +1201,9 @@ One-sided entries (put-only via MKT-011/MKT-032/MKT-039, call-only via MKT-035/M
 | [HYDRA Trading Journal](HYDRA_TRADING_JOURNAL.md) | Daily results, analysis, what-if projections |
 | [HYDRA Early Close Analysis](HYDRA_EARLY_CLOSE_ANALYSIS.md) | MKT-018 research: ROC vs credit-based thresholds |
 | [HYDRA README](../bots/hydra/README.md) | Operational guide: config, deployment, version history |
-| [Saxo API Patterns](SAXO_API_PATTERNS.md) | Fill prices, order handling, WebSocket |
+| [CLAUDE.md "IBKR Integration"](../CLAUDE.md) | Current broker integration: OAuth, preflight, retry+breaker, fill prices, conid model, cOID dedup |
+| [`docs/migration/F5_SETTLEMENT_FX_FLOW_DESIGN.md`](migration/F5_SETTLEMENT_FX_FLOW_DESIGN.md) | Settlement P&L + FX + closed-position price flow (IBKR-era replacement for Saxo activities/closedpositions) |
+| [Saxo API Patterns](SAXO_API_PATTERNS.md) | (Historical, Saxo-era) Fill prices, order handling, WebSocket — preserved on `main` |
 
 ### Key Source Files
 
