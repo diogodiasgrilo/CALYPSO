@@ -26,7 +26,11 @@
 # broker-session-alive.
 #
 # Usage: /opt/calypso/services/argus/health_check.sh
-# Requires: bash, systemctl, jq (preferred) or python3 (fallback), gsutil (Check 8)
+# Requires: bash, systemctl, python3 (the venv at /opt/calypso/.venv —
+#           used for JSON parsing in Check 2 + Check 7), gsutil
+#           (Check 8 only; gracefully degrades if absent).
+# AUD2-L3: prior comment listed `jq (preferred) or python3 (fallback)`
+# but the script always uses Python (no jq calls anywhere).
 
 set -uo pipefail
 

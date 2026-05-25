@@ -39,14 +39,25 @@ Backtest / analysis scripts read the local `data/backtesting.db`
 | `compare_live_vs_backtest.py` | ThetaData-vs-live calibration |
 | `audit_all_configs.py` + `config_audit_lib.py` | Config drift audit (VM vs template) |
 
-## Migration (Saxo → IBKR rewrite)
+## Migration (Saxo → IBKR rewrite — historical, completed 2026-05-22)
 
-| Script | Purpose |
-|--------|---------|
-| `p2_method_ranges.py` | Verify unreachable-method deletion set (AST) |
-| `p2_delete_methods.py` | Delete named methods from `base_strategy.py` |
-| `p4_collapse.py` | Collapse broker-branched methods to IBKR-only |
-| `probe_ibkr_chain.py` / `probe_ibkr_trades.py` | Read-only IBKR paper-account probes |
+> **These scripts are migration artifacts.** P2 + P4 + F5.1 phases are
+> complete. They are kept under `scripts/` for the audit trail but
+> should NOT be run on the live bot or against production data. Their
+> behavior was designed for the migration window, not steady-state ops.
+
+| Script | Purpose (historical) | Status |
+|--------|---------|---|
+| `p2_method_ranges.py` | Verify unreachable-method deletion set (AST) | Frozen — migration P2 complete |
+| `p2_delete_methods.py` | Delete named methods from `base_strategy.py` | Frozen — migration P2 complete |
+| `p4_collapse.py` | Collapse broker-branched methods to IBKR-only | Frozen — migration P4 complete |
+| `probe_ibkr_chain.py` | Phase A.10 IBKR option-chain probe | Read-only; safe to re-run for diagnostics |
+| `probe_ibkr_trades.py` | F5.1 IBKR /iserver/account/trades probe | Read-only; safe to re-run for diagnostics |
+| `probe_ibkr_market_data.py` | P7 Step 2 IBKR market-data verification (SPY/SPX/VIX) | Read-only; the canonical re-run script (CLAUDE.md "Running Diagnostic Scripts on VM") |
+
+**For current operator probes, use `probe_ibkr_market_data.py`** —
+see CLAUDE.md "Running Diagnostic Scripts on VM" for the canonical
+invocation.
 
 ## Maintenance
 

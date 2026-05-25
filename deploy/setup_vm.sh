@@ -1,7 +1,42 @@
 #!/bin/bash
 # =============================================================================
-# Calypso Trading Bot - GCP VM Setup Script
+# Calypso Trading Bot - GCP VM Setup Script (LEGACY — Saxo-era)
 # =============================================================================
+#
+# AUD2-M2 (2026-05-24): THIS SCRIPT IS LEGACY AND WILL FAIL ON THIS BRANCH.
+#
+# It was written for the Saxo-era Delta Neutral bot and references:
+#   - `calypso.service` (does NOT exist on this branch; HYDRA's unit is
+#     `hydra.service` and friends, with `LoadCredentialEncrypted=` for the
+#     6 IBKR OAuth credentials)
+#   - `calypso-saxo-credentials` Secret Manager secret (does NOT exist)
+#   - `token_keeper`-style setup (Saxo-only; OAuth 1.0a on IBKR is
+#     unattended — no refresh service needed)
+#
+# DO NOT RUN THIS SCRIPT on a fresh VM provisioning the IBKR-standalone
+# branch. It will install dead units and silently leave the VM in a
+# half-configured state.
+#
+# CORRECT VM PROVISIONING PROCEDURE:
+#   1. Follow `deploy/IBKR_CREDENTIALS_SETUP.md` for the 6 IBKR OAuth creds.
+#   2. Copy active units per `deploy/README.md` "How to install on a
+#      fresh VM" section.
+#   3. Run the mandatory 3-check pre-start verification before
+#      `systemctl enable hydra`.
+#
+# This script is preserved as a historical reference for the Saxo-era
+# bootstrap. When a fresh IBKR-era bootstrap script is written, it
+# should live alongside this one (e.g. `setup_vm_ibkr.sh`), NOT replace
+# this file.
+#
+# Hard exit so accidental sudo-runs fail loudly with this guidance.
+echo "AUD2-M2: setup_vm.sh is the LEGACY Saxo-era bootstrap and will FAIL" >&2
+echo "         on the hydra-ibkr-standalone branch. See the header for" >&2
+echo "         the correct procedure (deploy/IBKR_CREDENTIALS_SETUP.md +" >&2
+echo "         deploy/README.md). Aborting." >&2
+exit 99
+
+# ─── Original Saxo-era body retained below for historical reference ──
 # This script sets up a fresh GCP Compute Engine VM for running the
 # Calypso Delta Neutral Trading Bot.
 #

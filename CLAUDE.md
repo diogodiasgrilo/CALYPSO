@@ -978,8 +978,8 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 | Document | Note |
 |---|---|
 | `docs/SAXO_API_PATTERNS.md` | Saxo-era API patterns — superseded by this file's "IBKR Integration" section |
-| `docs/IRON_FLY_*.md` | Iron Fly bot (kill-switched on this branch) |
-| `docs/DELTA_NEUTRAL_*.md` | Delta Neutral bot (kill-switched) |
+| `docs/IRON_FLY_*.md` | Iron Fly bot — **deleted on this branch** (P5a); kill-switched on `main` |
+| `docs/DELTA_NEUTRAL_*.md` | Delta Neutral bot — **deleted on this branch** (P5a); kill-switched on `main` |
 | `docs/MEIC_EDGE_CASES.md` | 79 MEIC edge cases (still relevant — HYDRA inherits from MEIC) |
 
 ---

@@ -1,6 +1,6 @@
-# HYDRA on IBKR — pip freeze snapshot (Polish Item 12)
+# HYDRA on IBKR — pip freeze snapshot (Polish Item 12 + AUD2-M1)
 # =====================================================
-# Generated: 2026-05-24
+# Generated: 2026-05-24 (AUD2-M1 cleanup — test deps excluded)
 # Branch: hydra-ibkr-standalone
 # Python: 3.11.3 (verify on VM with: .venv/bin/python --version)
 #
@@ -14,16 +14,24 @@
 # To regenerate (after a deliberate dep upgrade):
 #   1. Edit requirements.txt with the new pin
 #   2. pip install -r requirements.txt --upgrade
-#   3. pip freeze --exclude-editable | grep -v 'pip-audit\|CacheControl\|cyclonedx\|license-expression\|sortedcontainers' > requirements-lock.txt
+#   3. pip freeze --exclude-editable | grep -ivE \
+#        '^(pip-audit|pip_audit|CacheControl|cyclonedx|license-expression|sortedcontainers|\
+#         boolean.py|tomli-w|tomli_w|tomli|platformdirs|pip-requirements-parser|pip-api|\
+#         packageurl-python|msgpack|mdurl|markdown-it-py|defusedxml|filelock|py-serializable|\
+#         rich|Pygments|coverage|iniconfig|pluggy|pyparsing|pytest|pytest-asyncio|pytest-cov)\b' \
+#        > requirements-lock.txt
 #   4. Re-run pip-audit on both files; verify zero CVEs
-#   5. Run the full test suite (885+ passed)
+#   5. Run the full test suite (918+ passed)
 #   6. Commit both files together
+#
+# Exclude-list rationale: pip-audit pulls in cyclonedx-python-lib +
+# friends as transitives; pytest pulls in coverage/iniconfig/pluggy/
+# Pygments. None of these belong in a production install.
 #
 # pip-audit clean: zero known vulnerabilities (PyPI + OSV sources).
 certifi==2026.4.22
 cffi==2.0.0
 charset-normalizer==3.4.7
-coverage==7.14.0
 cryptography==48.0.0
 google-api-core==2.30.3
 google-auth==2.52.0
@@ -38,25 +46,17 @@ gspread==6.2.1
 httplib2==0.31.2
 ibind==0.1.23
 idna==3.15
-iniconfig==2.3.0
 msal==1.36.0
 oauthlib==3.3.1
 Office365-REST-Python-Client==2.6.2
 packaging==26.2
-pip_audit==2.10.0
-pluggy==1.6.0
 proto-plus==1.28.0
 protobuf==6.33.6
 pyasn1==0.6.3
 pyasn1_modules==0.4.2
 pycparser==3.0
 pycryptodome==3.23.0
-Pygments==2.20.0
 PyJWT==2.12.1
-pyparsing==3.3.2
-pytest==9.0.3
-pytest-asyncio==1.3.0
-pytest-cov==7.1.0
 python-dateutil==2.9.0.post0
 pytz==2026.2
 requests==2.34.1

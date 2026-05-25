@@ -10,6 +10,12 @@
 
 ## Gate 1 — Branch state
 
+> **Scope note (AUD2-M4):** This gate applies to the **live-money cutover** —
+> live trading must come from `main`. The earlier paper-validation phase
+> (Gate 4's 5 consecutive sessions + chaos test) IS permitted on the
+> `hydra-ibkr-standalone` feature branch BEFORE the merge to main.
+> Do NOT flip the bot live from a feature branch.
+
 - [ ] Bot deployed from **`main`** branch, not a feature branch
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git rev-parse --abbrev-ref HEAD'"

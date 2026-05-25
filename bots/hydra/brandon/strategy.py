@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone  # AUD2-L9: removed unused `timedelta`
 from typing import Optional
 
 from bots.hydra.strategy import HydraStrategy

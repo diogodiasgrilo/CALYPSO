@@ -3812,7 +3812,21 @@ class MEICStrategy:
         else:
             logger.debug("Skipping orphan cleanup in dry-run mode")
 
-        # Check if any of our tracked positions are missing from Saxo
+        # Check if any of our tracked positions are missing from the broker.
+        #
+        # AUD2-M6 / DEF-7: this per-leg loop gates on `*_position_id` which
+        # is Saxo-era. On IBKR `*_position_id` is ALWAYS None (no per-leg
+        # position id), so `if pos_id and pos_id not in valid_ids:` below
+        # never fires — the entire mid-session POS-003 reconciliation is
+        # dormant on IBKR. Settlement reconciliation
+        # (`check_after_hours_settlement` → `_side_positions_gone`) and
+        # the stop monitor both use the conid model and still function.
+        #
+        # DEF-7 trigger (see docs/migration/DEFERRED_WORK.md): if mid-session
+        # manual-close detection becomes a requirement, rewrite this loop
+        # to iterate `*_uic` (conid) and use the `_position_is_open(conid,
+        # side)` predicate. For paper-only single-bot HYDRA, the dormancy
+        # is acceptable.
         for entry in self.daily_state.active_entries:
             missing_legs = []
 

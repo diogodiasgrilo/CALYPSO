@@ -1586,3 +1586,105 @@ class TestSnapshotExhaustionCounter:
             client._snapshot_with_preflight("7", DEFAULT_QUOTE_FIELDS)
             client._snapshot_with_preflight("7", DEFAULT_QUOTE_FIELDS)
         assert client.snapshot_warmup_exhausted_count == 3
+
+
+# ─── AUD2-H1: connect() must NOT log consumer_key value ─────────────────
+
+
+class TestConnectLogDoesNotLeakSecrets:
+    """AUD2-H1 — the connect-time INFO log used to print
+    `consumer_key=%s` which bypassed the Polish #10 IBKRCredentials
+    `repr=False` hardening. A re-audit found the leak in
+    shared/ib_client.py:527. Fixed: log only the length.
+
+    These tests pin the contract:
+      - the consumer_key VALUE never appears in any log record
+        produced by connect()
+      - the length DOES appear (operator can still verify the right
+        credential file was loaded)
+    """
+
+    def test_connect_does_not_log_consumer_key_value(
+        self, paper_creds, caplog
+    ):
+        """A canary consumer_key value must not appear in any log
+        record emitted during connect(). Setting the credential to a
+        recognizable canary string makes a leak unambiguous."""
+        import logging
+        # Make a fresh credentials object with a canary consumer_key
+        canary = "CKLEAKCAN"  # 9 chars, all-uppercase to pass validation
+        creds = IBKRCredentials(
+            environment="paper",
+            consumer_key=canary,
+            access_token="t",
+            access_token_secret="s",
+            private_signature_path=paper_creds.private_signature_path,
+            private_encryption_path=paper_creds.private_encryption_path,
+            dh_param_path=paper_creds.dh_param_path,
+        )
+
+        # Build a connected_client-style mock chain
+        mock_ibkr = MagicMock()
+        auth_status = MagicMock()
+        auth_status.data = {"authenticated": True, "connected": True, "competing": False}
+        auth_status.error = None
+        mock_ibkr.authentication_status.return_value = auth_status
+        portfolio = MagicMock()
+        portfolio.data = [{"accountId": "DU1234567"}]
+        portfolio.error = None
+        mock_ibkr.portfolio_accounts.return_value = portfolio
+        iserver_result = MagicMock()
+        iserver_result.data = {}
+        iserver_result.error = None
+        mock_ibkr.receive_brokerage_accounts.return_value = iserver_result
+
+        cfg = IBConfig(credentials=creds)
+        with caplog.at_level(logging.INFO, logger="shared.ib_client"):
+            with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr):
+                client = IBClient(cfg)
+                client.connect()
+        # Search every emitted log record's message for the canary.
+        full_log = "\n".join(r.getMessage() for r in caplog.records)
+        assert canary not in full_log, (
+            f"AUD2-H1 regression: connect() logged the consumer_key value:\n"
+            f"{full_log}"
+        )
+
+    def test_connect_logs_consumer_key_length(self, paper_creds, caplog):
+        """The fix replaced the value with the length. Pin that the
+        length IS still in the log so operators can confirm the right
+        credential length was loaded (paper = 9 chars on IBKR's portal)."""
+        import logging
+        creds = IBKRCredentials(
+            environment="paper",
+            consumer_key="ABCDEFGHI",  # 9 chars
+            access_token="t",
+            access_token_secret="s",
+            private_signature_path=paper_creds.private_signature_path,
+            private_encryption_path=paper_creds.private_encryption_path,
+            dh_param_path=paper_creds.dh_param_path,
+        )
+        mock_ibkr = MagicMock()
+        auth_status = MagicMock()
+        auth_status.data = {"authenticated": True, "connected": True, "competing": False}
+        auth_status.error = None
+        mock_ibkr.authentication_status.return_value = auth_status
+        portfolio = MagicMock()
+        portfolio.data = [{"accountId": "DU1234567"}]
+        portfolio.error = None
+        mock_ibkr.portfolio_accounts.return_value = portfolio
+        iserver_result = MagicMock()
+        iserver_result.data = {}
+        iserver_result.error = None
+        mock_ibkr.receive_brokerage_accounts.return_value = iserver_result
+
+        cfg = IBConfig(credentials=creds)
+        with caplog.at_level(logging.INFO, logger="shared.ib_client"):
+            with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr):
+                client = IBClient(cfg)
+                client.connect()
+        full_log = "\n".join(r.getMessage() for r in caplog.records)
+        assert "consumer_key_length=9" in full_log, (
+            f"connect() should log the consumer_key LENGTH so operators "
+            f"can sanity-check credential loading. Log lacked it:\n{full_log}"
+        )

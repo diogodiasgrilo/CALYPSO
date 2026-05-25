@@ -521,10 +521,17 @@ class IBClient:
         """
         assert_safe_crypto_backend()
 
+        # AUD2-H1: do NOT log the consumer_key value. The Polish #10
+        # IBKRCredentials `field(repr=False)` hardening means
+        # repr(creds) doesn't leak the secrets — but this %s-format
+        # line was bypassing that. Logging just the length is enough
+        # for the operator to confirm "the right credential file got
+        # loaded" without putting the key into journalctl / Cloud
+        # Logging / operator screenshots.
         logger.info(
-            "IBClient connecting — environment=%s consumer_key=%s",
+            "IBClient connecting — environment=%s consumer_key_length=%d",
             self.cfg.credentials.environment,
-            self.cfg.credentials.consumer_key,
+            len(self.cfg.credentials.consumer_key or ""),
         )
 
         # Stage 1: LST handshake (happens inside IbkrClient.__init__ when

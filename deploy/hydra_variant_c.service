@@ -60,6 +60,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectControlGroups=yes
 ProtectKernelTunables=yes
+ProtectDevices=yes  # AUD2-L4 — see hydra.service for rationale
 ReadWritePaths=/opt/calypso
 
 [Install]

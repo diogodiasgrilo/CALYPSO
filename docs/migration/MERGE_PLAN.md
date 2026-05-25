@@ -1,8 +1,10 @@
 # Merge Plan — `hydra-ibkr-standalone` → `main`
 
-**Status:** PLAN. Do NOT execute any squash, rebase, or merge command without explicit user approval AND a fresh `git push origin hydra-ibkr-standalone:hydra-ibkr-standalone-backup-YYYYMMDD` first.
+**Status:** FROZEN PLAN — squash design approved 2026-05-24 (audited by the polish-pass 3-agent + senior overseer + AUD2 re-audit). The branch tip has advanced since the plan was written (more polish commits and AUD2 fixes); the chunk groupings below cover the original 97 commits + a "Chunk 8 — World-class polish + AUD2 cleanup" group for everything since.
 
-**Branch tip at planning time:** `5fdf850` (97 commits ahead of `main`).
+**Do NOT execute** any squash, rebase, or merge command without explicit user approval AND a fresh `git push origin hydra-ibkr-standalone:hydra-ibkr-standalone-backup-YYYYMMDD` first.
+
+**Branch tip at planning time:** `5fdf850` (97 commits ahead of `main`). **Current branch tip is ahead** of that snapshot — count via `git log --oneline main..HEAD | wc -l` at squash time.
 
 ---
 

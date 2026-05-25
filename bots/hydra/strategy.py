@@ -10744,8 +10744,34 @@ class HydraStrategy(MEICStrategy):
                 logger.info("No state file found - truly starting fresh")
                 return False
 
-            with open(self.state_file, 'r') as f:
-                saved_state = json.load(f)
+            # AUD2-M7: explicit JSONDecodeError handling.
+            #
+            # The state-file write goes through `_save_state_to_disk`'s
+            # atomic temp+rename path, so a torn file should be impossible
+            # under normal POSIX semantics. But if the disk fills up
+            # between the temp-write and the rename (or a SIGKILL hits
+            # mid-`json.dump` BEFORE the rename), the on-disk state could
+            # in theory be partial / invalid JSON. Without this explicit
+            # handler, recovery would crash with an unhandled
+            # JSONDecodeError and the operator would have to figure out
+            # the next step from a backtrace.
+            #
+            # With the handler: log explicitly what happened, point at
+            # the Polish #5 snapshot dir for manual recovery, and fall
+            # through to "no history loaded" (existing graceful path).
+            try:
+                with open(self.state_file, 'r') as f:
+                    saved_state = json.load(f)
+            except json.JSONDecodeError as decode_err:
+                logger.error(
+                    "AUD2-M7: state file %s is corrupt JSON (%s). "
+                    "Check data/state_snapshots/ for the most recent "
+                    "pre-restart snapshot — see RUNBOOKS.md RB-5 for "
+                    "the manual restore procedure. Starting cold "
+                    "without historical state.",
+                    self.state_file, decode_err,
+                )
+                return False
 
             # Only use saved state if it's from today
             if saved_state.get("date") != today:

@@ -4,7 +4,7 @@
 
 **Repository:** https://github.com/diogodiasgrilo/CALYPSO
 
-**Operator reference:** [`CLAUDE.md`](CLAUDE.md) — the authoritative single-file reference for this branch (~940 lines, 24 sections).
+**Operator reference:** [`CLAUDE.md`](CLAUDE.md) — the authoritative single-file reference for this branch (~1,000 lines, 24 sections).
 
 **Migration plan + audit:** [`docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`](docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md), [`docs/migration/P7_AUDIT_FINDINGS.md`](docs/migration/P7_AUDIT_FINDINGS.md).
 

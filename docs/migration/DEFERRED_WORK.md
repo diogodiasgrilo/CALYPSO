@@ -16,6 +16,8 @@ code.
 
 ## DEF-1: `IBClient.get_closed_position_price(conid, buy_or_sell)`
 
+**Status: ✅ IMPLEMENTED (F5.2, 2026-05-21).** See `shared/ib_client.py:get_closed_position_price` + `docs/migration/F5_SETTLEMENT_FX_FLOW_DESIGN.md` §F5.2. Original deferral text retained below for historical context.
+
 **Why HYDRA needs it**: Called from 3 sites in current HYDRA strategy
 (grep `get_closed_position_price(` — currently ~lines 2670, 6224,
 10415; strategy.py churns, so use the grep anchor not the numbers) to
@@ -51,6 +53,8 @@ unit tests, once we have the verified endpoint + response shape).
 ---
 
 ## DEF-2: `IBClient.get_closed_positions_report(from_date, to_date)`
+
+**Status: ✅ IMPLEMENTED (F5.5, 2026-05-21).** Settlement P&L verification now uses the IBKR portfolio + trades endpoints; the Saxo `/closedPositions` per-period rollup was superseded. See `bots/hydra/strategy.py:_verify_settlement_pnl_from_broker` + `docs/migration/F5_SETTLEMENT_FX_FLOW_DESIGN.md` §F5.5. Original deferral text retained below for historical context.
 
 **Why HYDRA needs it**: Fix #87 (settlement P&L verification) sums
 `PnLAccountCurrency` across all closed positions for the day to

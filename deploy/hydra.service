@@ -83,6 +83,12 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectControlGroups=yes
 ProtectKernelTunables=yes
+# AUD2-L4: ProtectDevices=yes blocks the service from accessing
+# /dev/* nodes (other than /dev/null, /dev/zero, /dev/random, etc.).
+# Defense-in-depth for a service holding decrypted OAuth private
+# keys — even if a code-execution bug surfaces, the attacker can't
+# read /dev/tpm0 or the host's random pool directly.
+ProtectDevices=yes
 # The bot writes only inside its own tree (data/, logs/, state files).
 ReadWritePaths=/opt/calypso
 
