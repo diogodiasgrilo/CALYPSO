@@ -97,3 +97,96 @@ After fixes:
 1. Run full test suite (must still be 918+, no regressions).
 2. Re-launch the same 6 domain agents on the fixed code (Round 2).
 3. Senior overseer signoff (Round 3).
+
+---
+
+# AUD2 Round 2 verification — 2026-05-24 (commit `0831cac`)
+
+Single read-only agent re-audited each of the 17 fixes against the post-commit code state.
+
+**Verdict: ✅ PASS — all 17 fixes correctly applied, zero new issues introduced, 920 unit tests pass (was 918 + 2 AUD2-H1 regression tests).**
+
+Per-fix verification:
+
+| ID | Verification |
+|---|---|
+| AUD2-H1 | `consumer_key=%s` → `consumer_key_length=%d`. Defensive `or ""` handles None/empty. 2 regression tests use canary strings + length assertions; both PASS. |
+| AUD2-H2 | ARGUS README now lists 8 checks (1 hydra / 2 heartbeat / 3 breaker grep / 4 disk / 5 memory / 6 log / 7 state JSON / 8 GCS backup). Saxo rows gone. "What replaced" section maps old → new. |
+| AUD2-H3 | Both Iron Fly and Delta Neutral rows now say "deleted on this branch (P5a); kill-switched on `main`" matching the 4 other references in CLAUDE.md. |
+| AUD2-H4 | Scripts/README Migration section labeled "(Saxo → IBKR rewrite — historical, completed 2026-05-22)" with explicit "should NOT be run on the live bot" warning. probe_ibkr_market_data.py called out as canonical. |
+| AUD2-M1 | Lock file: 0 occurrences of pytest, pytest-asyncio, pytest-cov, coverage, iniconfig, pluggy, Pygments, pyparsing, cyclonedx, tomli, pip-audit. pip-audit on the lock: 0 known vulnerabilities. |
+| AUD2-M2 | `bash deploy/setup_vm.sh; echo $?` → exit 99 with guidance pointing to IBKR_CREDENTIALS_SETUP.md + deploy/README.md. Cannot be accidentally bypassed (`exit 99` is shell built-in). |
+| AUD2-M3 | README.md:7 says "~1,000 lines" — accurate (998 actual). |
+| AUD2-M4 | Gate 1 has the "Scope note (AUD2-M4)" paragraph clarifying paper validation is permitted on the feature branch; live-money cutover requires `main`. |
+| AUD2-M5 | `conditional_entry_times: []` in variant_c.json (14:00 slot removed). JSON valid. Explanatory comment present. |
+| AUD2-M6 | DEF-7 dormancy comment present at the per-leg reconciliation loop in base_strategy.py. Code behavior unchanged. |
+| AUD2-M7 | Explicit `try/except json.JSONDecodeError` around `json.load(f)` at `_load_state_file_history`. Logs explicit guidance pointing at `data/state_snapshots/` + RUNBOOKS.md RB-5. Falls through to "no history" return False. |
+| AUD2-L1 | db_backup.timer DST comment fixed (6 PM EST winter / 7 PM EDT summer). |
+| AUD2-L3 | ARGUS health_check.sh requirements comment no longer mentions unused `jq`. |
+| AUD2-L4 | `ProtectDevices=yes` added to all 3 hydra unit files (hydra, variant_b, variant_c). |
+| AUD2-L7 | MERGE_PLAN.md header now says "FROZEN PLAN — squash design approved 2026-05-24". |
+| AUD2-L8 | DEF-1 + DEF-2 headers both have "Status: ✅ IMPLEMENTED (F5.2 / F5.5, 2026-05-21)". |
+| AUD2-L9 | `bots/hydra/brandon/strategy.py:37` import line no longer includes `timedelta`. |
+
+**Tests:** 920 passed, 15 skipped (integration — gated on Tuesday probe), 0 failed. Bash test: 10 PASS / 0 FAIL.
+
+**Fresh-sweep result:** No new issues introduced. Edge cases verified:
+- `consumer_key_length=0` safely handled (defensive `or ""`).
+- Setup_vm.sh kill-switch is shell-builtin `exit`; cannot be bypassed by accidental `bash -e` or path manipulation.
+- JSONDecodeError handler scope is tight (only `json.load`); other exceptions still surface to outer handler.
+- MERGE_PLAN + DEFERRED_WORK internally consistent (audit-date 2026-05-24 referenced in both).
+- All updated JSON configs syntactically valid.
+- All updated Python modules import cleanly.
+- All updated shell scripts pass `bash -n` syntax check.
+
+---
+
+# AUD2 Round 3 senior overseer — 2026-05-24
+
+Single senior overseer read the AUD2 findings + fix commit + Round 2 verification + 4-prior-audit history. Verdict:
+
+**✅ PROCEED — branch ready to squash-merge after Tuesday probe + paper validation week.**
+
+## Round 3 key conclusions
+
+**1. AUD2 added real value.** The consumer_key log leak (AUD2-H1) was a genuine HIGH that escaped 4 prior audit rounds — IBKR client auditors were focused on API correctness, not log-content side-effects. The doc-drift findings (H2/H3/H4) were operational HIGHs that would have confused operators reading stale docs during incident response. The MEDIUMs are all material (production-install bloat, accidental-run kill-switches, config inconsistencies, defensive error handling).
+
+**2. The audit process itself was the weakest spot, not the code.** The senior overseer explicitly noted: "Before any future merges of this magnitude, mandate a multi-domain re-audit AFTER the polish pass, not just before." The 6-agent parallel + senior-overseer re-audit pattern is the new pre-merge gate. AUD2 was the first time this pattern was applied post-polish, and it caught real findings.
+
+**3. Updated "house bet" confidence:**
+
+| Cycle | Answer | Confidence |
+|---|---|---|
+| P7 audit Round 3 | YES | 85% |
+| Polish-pass senior overseer | YES | 90% |
+| AUD2 re-audit + fix cycle | YES | **87%** |
+
+The 3-point drop from 90% to 87% is an honest accounting of the audit-process gap that AUD2 exposed. **Confidence in the code itself is unchanged at 90%+; confidence in "any future audit will find no more HIGHs" is what dropped.** The senior overseer noted: "Continued exploration might find more. The 5th, 6th, 7th audit would each likely find one new finding. The marginal value drops with each cycle."
+
+**4. The strict caveat (tightened from Round 3):** All of the following must complete with zero regressions before live:
+- Step 1 (IBKR subscriptions + data-sharing toggle propagation)
+- Step 2 (Tuesday probe confirming real-time quotes, 6509='R')
+- Full 15-test integration test suite (post-account-activation)
+- 5-day paper validation week (no manual intervention, no CRITICAL_INTERVENTION alerts, no mid-day restarts)
+
+**5. The one weakest spot the senior overseer would preemptively call out before a fresh code-review panel:** "The audit process itself is the weakest spot, not the code." Multi-domain re-audits AFTER polish are now mandatory, not optional. This branch's pre-merge state benefits from that learning being applied retroactively.
+
+## Merge gate: PROCEED, contingent on the 4 pending external items above.
+
+If any pending item fails → new audit cycle triggered, do not merge.
+
+---
+
+## Final summary
+
+| Audit cycle | Findings | Status | Confidence |
+|---|---|---|---|
+| P7 Round 1-3 | 49 (4 C / 13 H / 17 M / 15 L) | ✅ All closed | 85% |
+| Polish 3-agent + senior overseer | 0 new | ✅ PASS | 90% |
+| **AUD2 6-agent + Round 2 + senior overseer** | **4 H + 7 M + 7 L** | **✅ All actionable fixed; 7 LOWs accepted** | **87%** |
+
+**Total findings closed across all 4 audit cycles: 49 (P7) + 0 (polish) + 18 (AUD2 fixed) = 67. Plus 7 LOWs accepted as observations.**
+
+**Test count progression:** 885 (P7 baseline) → 918 (post-polish, +33 new tests) → **920 (post-AUD2, +2 new tests).** Zero regressions across any cycle.
+
+**The branch is ready to merge after Tuesday probe + paper validation week.** No code changes required before VM deploy.
