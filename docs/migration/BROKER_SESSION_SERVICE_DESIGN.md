@@ -7,15 +7,13 @@ funneled (well under the ~10/s cap). Supersedes the Option-2 (per-username) plan
 **Context doc:** [`IBKR_MULTI_SESSION.md`](./IBKR_MULTI_SESSION.md) (the
 one-session-per-username constraint, from 5-agent research).
 
-> **Open follow-up (P5a):** breaker/warmup ALERTING is temporarily silenced.
-> `BrokerClient.circuit_breakers` is an empty mapping (the real per-family
-> breakers live in the broker process now), so the strategy-side `IBKRAlertHooks`
-> breaker/warmup poll is a no-op. **The breakers still fully protect** the
-> order/market/session paths inside the broker — only the Telegram *alerts* on
-> trips/warmup-exhaustion don't fire. Fix: run `IBKRAlertHooks` (breaker +
-> warmup) inside `calypso-broker` (one alerter, where the breakers are) before
-> relying on those notifications. `ensure_connected`-failure alerts are
-> unaffected (still fire from each strategy via the broker's /health).
+> **P5a — DONE (2026-05-29):** breaker/warmup alerting now runs INSIDE
+> `calypso-broker`. `IBKRAlertHooks(ib, AlertService({}, "HYDRA"))` is polled
+> every 10s in the maintenance loop (breaker-transition / stuck-open / warmup),
+> with `mark_new_day()` on the ET rollover and an `on_ensure_connected_failed`
+> alert on the 15-min re-auth gate. Strategy-side `BrokerClient.circuit_breakers`
+> stays empty (no duplicate alerts); strategies still emit their own
+> `ensure_connected`/broker-reachability alerts. Deployed + verified clean.
 
 ---
 
