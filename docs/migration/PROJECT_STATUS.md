@@ -2,10 +2,11 @@
 
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
-**Last updated:** 2026-05-24
-**Last commit on branch:** `a4382a1` (use `git rev-parse HEAD` to verify)
-**Commits ahead of `main`:** 111 (use `git log --oneline main..HEAD | wc -l` to verify)
-**Test suite:** 920 unit tests pass, 15 integration tests skipped pending live paper account
+**Last updated:** 2026-05-29
+**Last commit on branch:** `2e276af` (use `git rev-parse HEAD` to verify)
+**Commits ahead of `main`:** 115 (use `git log --oneline main..HEAD | wc -l` to verify)
+**Test suite:** 953 unit tests pass, 16 integration/optional tests skipped pending live paper account. The suite is now deterministic at any wall-clock hour (the intraday-OHLC tests were time-gated; fixed 2026-05-28).
+**Branch is pushed to `origin`** (github.com/diogodiasgrilo/CALYPSO) as of 2026-05-29 — no longer laptop-only.
 
 ---
 
@@ -62,9 +63,17 @@ Full migration history: `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 | **P7 Round 2** | 4 parallel verify-fixes agents | 0 new | PASS | 885 |
 | **P7 Round 3** | Senior overseer | 0 blockers | PASS, "house bet" 85% confidence | 885 |
 | **Polish pass** | 12 items + 17 amendments + 3-agent re-audit + senior overseer | 0 new | PASS, confidence raised to 90% | 918 |
-| **AUD2 (this cycle)** | 6 parallel domain agents + Round 2 verify + senior overseer | 4 H + 7 M + 17 L | All H+M fixed with regression tests; 7 L fixed; 10 L accepted as observations | **920** |
+| **AUD2** | 6 parallel domain agents + Round 2 verify + senior overseer | 4 H + 7 M + 17 L | All H+M fixed with regression tests; 7 L fixed; 10 L accepted as observations | **920** |
+| **AUD3 — preflight (2026-05-28)** | 20 parallel domain agents + per-finding adversarial verify + Claude adjudication (web-search enabled) | 81 raw → 74 confirmed (1 C + 7 H + 14 M + 46 L + 6 I), 7 false-positive | 20 cutover-relevant findings fixed w/ regression tests (3 commits: `6882e82`, `09e1641`, `2e276af`); rest triaged (see below) | **953** |
 
-Cumulative findings closed: **67**. Zero regressions across any cycle.
+Cumulative findings closed: **87**. Zero regressions across any cycle.
+
+**AUD3 detail** — full register + per-finding adjudication in [`PREFLIGHT_AUDIT_FINDINGS.md`](./PREFLIGHT_AUDIT_FINDINGS.md). The 20 fixed: cOID uniqueness (#1 critical + M2), partial-fill flatten (M3), warmup metadata (#2/M4), retry token-match (#4), durable state write (M11), breaker outage alerting (M7/M10), streaming lock (#3), dashboard path-traversal (#6) + API-key auth (M12) + Telegram token redaction (#5), streaming staleness (M5), retry-policy preservation (M6), `/config` buffer (M8), variant-unit hardening (AUD2-L4 regression), a latent settlement `NameError`, plus stale-deploy-file deletion (#7/#8) and operator-doc accuracy. **None were real-money risks** (IBKR paper account; variants B/C dry-run).
+
+**Consciously deferred (not gold-plated pre-cutover):**
+- Internal config-comment Saxo cosmetics (`$50,741 margin pool`, `external_price_feed` rationale, Brandon/IBConfig docstrings) → one mechanical `/simplify` sweep post-cutover.
+- **POS-004 same-conid short+long settlement-merge misclassification** (strategy.py ~L10586-10609) — a real reconciliation-logic bug rated low; deliberately not touched in a pre-cutover doc pass. **Fix before relying on multi-leg settlement P&L.**
+- `connection_timeout_seconds` is documented but still not enforced as a hard cap (a true watchdog is a tracked follow-up; bounded today by ibind per-request timeouts + systemd StartLimit).
 
 **Honest assessment from the AUD2 senior overseer:** "The audit process itself is the weakest spot, not the code." 4 prior single-domain audits missed the `consumer_key` log leak (AUD2-H1) because IBKR-client auditors focused on API correctness, not log-content side-effects. The 6-agent multi-domain pattern caught it. Future major branches must mandate this pattern AFTER any polish pass, not just before.
 
@@ -92,12 +101,12 @@ Cumulative findings closed: **67**. Zero regressions across any cycle.
 
 The branch is **production-ready code-wise** — the merge is gated on external operator actions, not more code changes.
 
-### Gate 1 — Tuesday probe re-run (external — user runs)
+### Gate 1 — regular-session market-data probe (external — user runs)
 
-**Status:** ⏳ pending Tuesday 2026-05-26 ~09:35 ET (Memorial Day Monday closes the market)
+**Status:** ⏳ still pending a valid regular-session run. History: the Sunday 2026-05-24 probe showed `6509='Z'` (frozen — expected weekend/holiday); a 2026-05-28 ~21:09 ET run was **inconclusive** (market closed → all instruments NO DATA, incl. the SPY control) — auth + contract qualification worked, only live data-entitlement is unconfirmed. Next opportunity: **any regular session, ~09:35 ET or later** (Friday 2026-05-29).
 
-The Sunday 2026-05-24 probe showed `6509='Z'` (frozen — expected for weekend + holiday). Re-running during Tuesday's regular session will show:
-- ✅ `6509='R'` on SPX/VIX → cleared for VM deploy (Step 5)
+Re-running during a regular session will show:
+- ✅ `6509='R'` on SPX/VIX → cleared for the cutover (Gate 2)
 - ⚠️ `6509='D'` → IBKR account has delayed-only entitlement; do NOT trade live; fix subscription before proceeding
 - ❌ Bid/ask still missing during market hours → broader subscription issue; investigate
 
@@ -110,14 +119,21 @@ python scripts/probe_ibkr_market_data.py 2>&1 | tee scripts/probe_mktdata_$(date
 
 Expected: paste the output to the Claude session for interpretation.
 
-### Gate 2 — VM deploy + paper smoke (operator + Claude pair)
+### Gate 2 — Saxo→IBKR cutover on `calypso-bot` (operator + Claude pair)
 
-**Status:** ⏳ blocked on Gate 1 passing
+**Status:** ⏳ blocked on Gate 1 passing. **Full runbook: [`GATE2_DEPLOY_RUNBOOK.md`](./GATE2_DEPLOY_RUNBOOK.md).**
 
-Procedure:
-1. Follow `deploy/IBKR_CREDENTIALS_SETUP.md` for the 6 IBKR OAuth credentials.
-2. Run the mandatory 3-check pre-start verification before `systemctl enable hydra`.
-3. Watch `journalctl -u hydra -f` through the first connection + a full morning of dry-run + a full afternoon of paper trading.
+**Operator decision (2026-05-28):** completely replace the live deployment on `calypso-bot` — remove all Saxo bots + the Saxo token-keeper (code preserved on `main`), and run the IBKR HYDRA strategies A/B/C, with dashboard + Telegram + DB + Google Sheets rewired to the IBKR bot. Verified safe: no real money on either side (the current Saxo bot runs `[DRY RUN]`; the IBKR account is paper-only via hardcoded `load_credentials("paper")`; B/C are dry-run). This supersedes the parallel `_ibkr`-suffixed Phase D/E/F plan — the `hydra-ibkr-standalone` branch *is* the Saxo-removed end-state, so we deploy it wholesale.
+
+Reality discovered on the VM (folded into the runbook): `calypso-bot` currently runs the **live Saxo** stack on `main`; the IBKR branch is now pushed so the VM can fetch it. Secrets are in GCP Secret Manager (`calypso-trading-bot`) — Telegram/Sheets carry over unchanged; only the 6 IBKR OAuth creds are new (systemd `LoadCredentialEncrypted=`).
+
+Procedure (abbrev — see runbook for the full ordered steps + rollback):
+1. Push done ✅. Back up live state to `gs://calypso-backups/precutover_*`.
+2. Stop + remove the Saxo units (token_keeper + 4 siblings); `git checkout hydra-ibkr-standalone` + rebuild venv.
+3. Encrypt the 6 IBKR OAuth creds; run the mandatory 3-check before `systemctl enable hydra`.
+4. Start A, then B/C (dry-run) + dashboard + agent timers; verify each component is IBKR-wired (zero `saxo` log lines).
+5. **Dashboard lockdown (audit M12):** nginx now binds `127.0.0.1:8080` (reach via SSH tunnel); the `calypso-dashboard-api-key` secret + frontend key-shim are staged for optional app-layer auth.
+6. Watch the first connection + a morning dry-run + an afternoon paper session + the next morning's re-auth gate.
 
 ### Gate 3 — Full integration test suite (post-account-activation)
 
@@ -157,11 +173,11 @@ Procedure: `docs/migration/MERGE_PLAN.md` (8-chunk squash, backup branch, byte-i
 
 ## Active work (none — branch is at a stable rest point)
 
-No code work is in flight. The branch is in a deployment-ready pre-flight state. **A Claude session should not start new code work unless the user explicitly requests it.**
+No code work is in flight. The AUD3 preflight audit + its 20 fixes are committed (`6882e82`, `09e1641`, `2e276af`) and pushed; the suite is green at any hour. The branch is in a deployment-ready pre-flight state, gated on the Gate 1 probe. **A Claude session should not start new code work unless the user explicitly requests it** — but note the deferred items under "AUD3 detail" (the POS-004 settlement-merge bug especially) if asked what's left.
 
-If the user asks "what's next" or "where are we", point them at the Gates above + their corresponding external timing.
+If the user asks "what's next" or "where are we", point them at the Gates above + their external timing, and the cutover runbook (`GATE2_DEPLOY_RUNBOOK.md`).
 
-If the user pastes the Tuesday probe output:
+If the user pastes the probe output:
 1. Interpret 6509 (`R`/`D`/`Z`)
 2. Check that bid/ask fields are present
 3. If all green → recommend Gate 2 (VM deploy)
@@ -181,7 +197,9 @@ Read these for context as needed:
 | `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md` | Full F1-F7 + P1-P7 migration plan | When you need migration design rationale |
 | `docs/migration/P7_AUDIT_FINDINGS.md` | 49 P7 findings + 3 round verdicts | When you need the P7 audit history |
 | `docs/migration/POLISH_PLAN.md` | 12 polish items + amendments + 3-agent audit | When you need the polish-pass design rationale |
-| `docs/migration/AUDIT2_FINDINGS.md` | The most recent (4th) audit cycle | When you need the AUD2 findings + verification |
+| `docs/migration/AUDIT2_FINDINGS.md` | The 4th audit cycle | When you need the AUD2 findings + verification |
+| `docs/migration/PREFLIGHT_AUDIT_FINDINGS.md` | AUD3 — the 20-agent preflight audit: all 81 findings, adjudication, fixes | When you need the latest audit detail or the deferred-items list |
+| `docs/migration/GATE2_DEPLOY_RUNBOOK.md` | The full Saxo→IBKR production cutover runbook (Gate 2) | When executing the cutover after Gate 1 is green |
 | `docs/migration/MERGE_PLAN.md` | 8-chunk squash plan for merge to main | When the merge is approved |
 | `docs/migration/LIVE_READINESS_CHECKLIST.md` | 10-gate go/no-go for live trading | Before any live flip (not on this branch) |
 | `docs/migration/RUNBOOKS.md` | RB-1..RB-7 incident runbooks | When an alert fires |
@@ -204,12 +222,12 @@ Read these for context as needed:
 # Confirm you're on the right branch
 git rev-parse --abbrev-ref HEAD          # → hydra-ibkr-standalone
 
-# Confirm tests still pass
+# Confirm tests still pass (now deterministic at any wall-clock hour)
 python -m pytest tests/ -q --ignore=tests/test_dashboard 2>&1 | tail -3
-#  → 920 passed, 15 skipped
+#  → 953 passed, 16 skipped
 
 # Confirm commit count is at/ahead of where this doc was written
-git log --oneline main..HEAD | wc -l     # → ≥ 111
+git log --oneline main..HEAD | wc -l     # → ≥ 115
 
 # Confirm zero open audit findings
 grep -c "| OPEN |" docs/migration/P7_AUDIT_FINDINGS.md       # → 0
