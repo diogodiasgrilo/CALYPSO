@@ -30,6 +30,16 @@ class BrokerClient:
     """Loopback RPC stub. Exposes exactly the allowlisted broker surface via
     ``__getattr__``; any other attribute access raises AttributeError as normal."""
 
+    # IBKRAlertHooks (when constructed against the broker) polls
+    # ``broker.circuit_breakers``. The real per-family breakers live in the
+    # broker PROCESS now (it owns the IBClient), so expose an empty mapping
+    # here → the strategy-side breaker poll is a harmless no-op and never
+    # AttributeErrors. The breakers still protect the order/market/session
+    # paths inside the broker; breaker-transition ALERTING is owned by the
+    # broker (see BROKER_SESSION_SERVICE_DESIGN.md — breaker/warmup alert hooks
+    # run in calypso-broker, not in each strategy).
+    circuit_breakers: dict = {}
+
     def __init__(self, base_url: str = "http://127.0.0.1:8788", *,
                  timeout: float = 35.0,
                  transport: Optional[Callable[[str, list, dict], dict]] = None):

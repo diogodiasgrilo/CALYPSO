@@ -88,6 +88,13 @@ class TestBrokerContract:
             with pytest.raises(AttributeError):
                 getattr(client, bad)
 
+    def test_circuit_breakers_is_empty_mapping(self):
+        # alert_hooks polls broker.circuit_breakers — must be present + empty
+        # (real breakers live in the broker process), never AttributeError.
+        _, client = _make()
+        assert client.circuit_breakers == {}
+        assert dict(client.circuit_breakers.items()) == {}
+
     def test_ibclient_exception_surfaces_as_broker_error(self):
         ib = MagicMock()
         ib.get_quote.side_effect = RuntimeError("IBKR 503 Service Unavailable")
