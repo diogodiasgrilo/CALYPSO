@@ -4,6 +4,8 @@
   "dry_run": true,
   "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
   "strategy": {
+    "_comment_commission": "IBKR all-in SPX cost ~$1.15/leg/contract (~$0.65 IBKR Pro base + ~$0.45 CBOE index fee + ~$0.05 ORF/OCC/CAT) — replaces the Saxo-era $2.50 default. Display/reported-P&L only; does NOT affect entry/stop logic. Critical for B: at 10c × 4 legs × 4 slots, the Saxo-vs-IBKR gap is ~$200-450/day — judging B's dry-run at $2.50 would wrongly book phantom fees. Set 2026-05-29 at the IBKR cutover.",
+    "commission_per_leg": 1.15,
     "_comment_widths": "MKT-027 settings here are unused at runtime — strategy.brandon.narrow_spread.enabled=true overrides _get_vix_adjusted_spread_width with Brandon's 5/10pt rule. Values kept aligned with variant A's VM config (max=75pt) for consistency / debugging clarity.",
     "underlying_symbol": "SPX",
     "entry_times": ["09:45", "10:45", "11:15", "11:45"],
