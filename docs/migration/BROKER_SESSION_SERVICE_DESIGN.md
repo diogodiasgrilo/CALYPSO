@@ -1,9 +1,21 @@
 # ADR + Design — `calypso-broker`: a single shared IBKR session service
 
-**Status:** PROPOSED (2026-05-29) — supersedes the Option-2 (per-username) plan
-for running A/B/C concurrently. Awaiting sign-off before implementation.
+**Status:** ✅ IMPLEMENTED + DEPLOYED 2026-05-29. `calypso-broker` is live on
+`calypso-bot`; strategies A, B, C all run via `BrokerClient` against the broker's
+single IBKR session — zero contention, NRestarts=0 all round, ~0.9 IBKR req/s
+funneled (well under the ~10/s cap). Supersedes the Option-2 (per-username) plan.
 **Context doc:** [`IBKR_MULTI_SESSION.md`](./IBKR_MULTI_SESSION.md) (the
 one-session-per-username constraint, from 5-agent research).
+
+> **Open follow-up (P5a):** breaker/warmup ALERTING is temporarily silenced.
+> `BrokerClient.circuit_breakers` is an empty mapping (the real per-family
+> breakers live in the broker process now), so the strategy-side `IBKRAlertHooks`
+> breaker/warmup poll is a no-op. **The breakers still fully protect** the
+> order/market/session paths inside the broker — only the Telegram *alerts* on
+> trips/warmup-exhaustion don't fire. Fix: run `IBKRAlertHooks` (breaker +
+> warmup) inside `calypso-broker` (one alerter, where the breakers are) before
+> relying on those notifications. `ensure_connected`-failure alerts are
+> unaffected (still fire from each strategy via the broker's /health).
 
 ---
 
