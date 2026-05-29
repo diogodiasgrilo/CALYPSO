@@ -8,6 +8,14 @@
 **Test suite:** 953 unit tests pass, 16 integration/optional tests skipped pending live paper account. The suite is now deterministic at any wall-clock hour (the intraday-OHLC tests were time-gated; fixed 2026-05-28).
 **Branch is pushed to `origin`** (github.com/diogodiasgrilo/CALYPSO) as of 2026-05-29 — no longer laptop-only.
 
+> ## ⚡ CUTOVER EXECUTED 2026-05-29 (~12:40 ET) — read this first
+> Gate 1 passed (probe at 12:08 ET: SPX `6509='R'`, VIX `6509='R'`, real-time). The Saxo→IBKR cutover was run on `calypso-bot`:
+> - **Saxo fully removed** — `token_keeper` + the 4 sibling units deleted; VM switched to `hydra-ibkr-standalone`; venv rebuilt (`ibind` 0.1.23).
+> - **Strategy A is LIVE on IBKR paper** (account `DUR049068`), **dry-run**, fresh daily state, real-time SPX/VIX, `NRestarts=0`. Telegram + Google Sheets working. Dashboard locked to `127.0.0.1:8080` (SSH-tunnel only). Backups: `gs://calypso-backups` created + VM SA granted write (fixes the long-broken `db_backup`); pre-cutover state archived locally + off-site.
+> - **🛑 B and C are DISABLED — open blocker.** Running A+B+C simultaneously thrashes because **OAuth 1.0a issues one Live Session Token per consumer key and the IBKR brokerage session is one-per-account with `compete:True`** — 3 processes on consumer key `CALYPSOPP` perpetually kick each other (`ssodh/init :: 410 Gone`, `Invalid_username_or_password`). Saxo hid this via the deleted `token_keeper`/coordinator. **Decision needed before B/C can run:** (a) a shared-session/token coordinator, (b) a separate IBKR consumer key/sub-account per variant, or (c) accept A-only (B/C are dry-run shadows anyway). The 5 agents (apollo/argus/clio/hermes/homer) do NOT open IBKR sessions, so they don't contend.
+> - **Notes:** A runs **dry-run** (inherited config) — flip `dry_run:false` to place real paper orders when ready. `ProtectDevices=yes` is silently unsupported on this Debian systemd 252 build (other 5 sandbox directives + the 6 `LoadCredentialEncrypted` apply) — minor defense-in-depth gap. Rollback anchor: `main` @ `a77027f` + `~/cutover_backup_*` + `gs://calypso-backups/`.
+> - **Now = Gate 2 paper-smoke watch:** observe A through the session + overnight + tomorrow's morning re-auth gate + entry windows before flipping to live-paper or merging.
+
 ---
 
 ## TL;DR for a Claude session continuing this work
