@@ -32,7 +32,7 @@ import re
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import wraps
 from typing import Callable, Optional
@@ -290,13 +290,11 @@ def retry_with_backoff(
             f"retry_with_backoff: max_attempts must be >= 1, got {pol.max_attempts}"
         )
     if breaker is not None:
-        pol = RetryPolicy(
-            max_attempts=pol.max_attempts,
-            base_delay_s=pol.base_delay_s,
-            max_delay_s=pol.max_delay_s,
-            jitter_fraction=pol.jitter_fraction,
-            breaker=breaker,
-        )
+        # Only swap in the breaker — preserve the caller's RetryPolicy type
+        # and any overridden is_retryable(). Rebuilding a base RetryPolicy
+        # here silently dropped custom is_retryable predicates from a
+        # subclass (audit M6); dataclasses.replace returns type(pol).
+        pol = replace(pol, breaker=breaker)
 
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)

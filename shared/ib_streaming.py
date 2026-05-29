@@ -446,6 +446,12 @@ class StreamingManager:
             k: v for k, v in msg.items()
             if isinstance(k, str) and (k.isdigit() or k == "6509")
         }
+        # A market-data message with no field codes (e.g. a system/heartbeat
+        # row carrying only conid/_updated/topic) is NOT a fresh quote —
+        # recording received_at on it would mask staleness in is_stale /
+        # is_healthy and keep the bot trading on stale data (audit M5).
+        if not fields:
+            return
         with self._lock:
             snap = self._snapshots.get(conid)
             if snap is None:

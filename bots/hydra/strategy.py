@@ -8795,9 +8795,12 @@ class HydraStrategy(MEICStrategy):
         min_credit_call = self.min_viable_credit_per_side / 100
         min_credit_put = self.min_viable_credit_put_side / 100
 
-        # Stop buffer
-        stop_buffer_dollars = self.strategy_config.get("call_stop_buffer", 0.10)
-        put_buffer_dollars = self.strategy_config.get("put_stop_buffer", stop_buffer_dollars)
+        # Stop buffer — read the LIVE attributes (in cents), which reflect
+        # both the $0.75 default and any in-force VIX-regime override. The
+        # static strategy_config showed a stale pre-regime value and a wrong
+        # $0.10 default (audit M8).
+        stop_buffer_dollars = self.call_stop_buffer / 100
+        put_buffer_dollars = self.put_stop_buffer / 100
         if put_buffer_dollars != stop_buffer_dollars:
             stop_buffer_str = f"call +${stop_buffer_dollars:.2f} / put +${put_buffer_dollars:.2f}"
         else:

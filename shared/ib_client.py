@@ -1,25 +1,25 @@
-"""IB adapter for CALYPSO — Phase A standalone module.
+"""IB adapter for CALYPSO — the production IBKR broker for HYDRA.
 
 Wraps Voyz/ibind 0.1.23 against IBKR's Client Portal Web API using OAuth 1.0a
 (no IB Gateway, no IBC, no weekly phone tap — per the architecture pivot
 documented in docs/migration/SAXO_TO_IB_MIGRATION_PLAN.md).
 
-Phase A scope (this file's current state):
-  ✓ Connection lifecycle: connect / disconnect / is_connected
-  ✓ 3-stage auth: LST → ssodh/init → auth/status (verified per migration plan)
-  ✓ Account discovery
-  ✓ pyCrypto fast-fail safety assertion
-  ✓ Saxo-compat properties (`client_key`)
+Status — F1-F7 + P1-P7 complete (see docs/migration/PROJECT_STATUS.md):
+  ✓ Connection lifecycle: connect / disconnect / is_connected, Tickler,
+    once-per-day morning re-auth gate
+  ✓ 3-stage auth: LST → ssodh/init → auth/status
+  ✓ Account discovery + pyCrypto fast-fail safety assertion
   ✓ Contract qualification with conid cache (qualify_contract)
   ✓ Read methods (quotes, positions, chains, greeks, orders, history, fx)
-  ─ Write methods (place_order, place_iron_condor) — Phase A.4
-  ─ WebSocket streaming with smd refresh    — Phase A.5
-  ─ Order-state reconcile on reconnect      — Phase A.7
-  ─ Retry + circuit breaker                 — Phase A.8
+  ✓ Write methods (place_order, place_and_wait_for_fill, place_iron_condor)
+    with cOID dedup safety
+  ✓ WebSocket streaming with smd refresh (shared/ib_streaming.py)
+  ✓ Order-state / position reconcile (shared/ib_reconcile.py)
+  ✓ Retry + per-family circuit breakers (shared/ib_retry.py)
 
-Phase B will introduce shared/broker/{interface,saxo_adapter,ibkr_adapter}.py
-to give HYDRA a single broker-agnostic interface. Until then this module is
-standalone — NOT imported by HYDRA, NOT importable into the production bot.
+This is the LIVE broker: HYDRA's strategy layer calls it via `self.broker`
+(see bots/hydra/base_strategy.py). The Saxo adapter is retired on this
+branch — the broker-abstraction reparent landed in P1–P4.
 
 Mapping from SaxoClient methods (kept in module-level docstring so Phase B
 authors don't have to chase it down): see
@@ -426,8 +426,14 @@ class IBConfig:
       tickle_interval_seconds: ibind's Tickler thread cadence to keep the
                   brokerage session warm (default 60s; IBKR idle timeout
                   is ~6 minutes)
-      connection_timeout_seconds: hard cap on initial connect handshake;
-                  beyond this we raise IBConnectionError
+      connection_timeout_seconds: advisory connect-handshake budget (default
+                  30s). NOT YET enforced as a hard cap in connect() (audit M1):
+                  a hung handshake is bounded instead by ibind's own
+                  per-request socket timeouts, and a crash-loop on connect is
+                  bounded by systemd StartLimitIntervalSec/Burst
+                  (deploy/hydra.service). Wiring a true watchdog cap that
+                  raises IBConnectionError on expiry is a tracked follow-up;
+                  until then do not rely on this as a guaranteed ceiling.
       debug_log_payloads: if True, log full IBKR responses at DEBUG level.
                   NEVER enable in production (responses may contain account
                   values, order IDs, etc.)
