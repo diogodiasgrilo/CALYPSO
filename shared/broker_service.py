@@ -94,19 +94,17 @@ def create_app(dispatcher: BrokerDispatcher):
     FastAPI installed. The /rpc endpoint is sync `def` → FastAPI runs it in a
     threadpool, so a slow place_and_wait_for_fill doesn't head-of-line-block
     other strategies' quote reads (IBClient's own locks serialize IBKR access)."""
-    from fastapi import FastAPI
-    from pydantic import BaseModel
-
-    class RpcRequest(BaseModel):
-        method: str
-        args: list = []
-        kwargs: dict = {}
+    from fastapi import Body, FastAPI
 
     app = FastAPI(title="calypso-broker", version="1.0.0")
 
     @app.post("/rpc")
-    def rpc(req: RpcRequest):  # sync → threadpool
-        return dispatcher.dispatch(req.method, req.args, req.kwargs)
+    def rpc(body: dict = Body(...)):  # sync → threadpool; explicit JSON body
+        return dispatcher.dispatch(
+            body.get("method", ""),
+            body.get("args") or [],
+            body.get("kwargs") or {},
+        )
 
     @app.get("/health")
     def health():
