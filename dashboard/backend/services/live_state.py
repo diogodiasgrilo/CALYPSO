@@ -75,44 +75,46 @@ class LiveStateProvider:
 
         net_pnl = gross_pnl - commission
 
-        # Get SPX/VIX from first and last entry or pnl_history
+        # Today's SPX/VIX. Prefer the bot's tracked intraday OHLC, which is
+        # ALWAYS written to state.market_data_ohlc. The per-entry
+        # spx_at_entry/vix_at_entry are NOT written by the bot (audit FP6), so
+        # the old reads were always None and relied on the DB fallback. Close/
+        # current has no state field → take the last pnl_history/market_tick.
+        ohlc = state.get("market_data_ohlc", {}) or {}
         pnl_history = state.get("pnl_history", [])
-        spx_open = entries[0].get("spx_at_entry") if entries else None
-        spx_close = pnl_history[-1].get("spx") if pnl_history else spx_open
-        spx_values = [e.get("spx_at_entry", 0) for e in entries if e.get("spx_at_entry")]
-        if pnl_history:
-            spx_values.extend(p.get("spx", 0) for p in pnl_history if p.get("spx"))
-        spx_high = max(spx_values) if spx_values else None
-        spx_low = min(spx_values) if spx_values else None
+        spx_open = ohlc.get("spx_open") or (entries[0].get("spx_at_entry") if entries else None)
+        spx_high = ohlc.get("spx_high")
+        spx_low = ohlc.get("spx_low")
+        spx_close = pnl_history[-1].get("spx") if pnl_history else None
+        vix_open = ohlc.get("vix_open") or (entries[0].get("vix_at_entry") if entries else None)
+        vix_close = pnl_history[-1].get("vix") if pnl_history else None
 
-        vix_open = entries[0].get("vix_at_entry") if entries else None
-        vix_close = (pnl_history[-1].get("vix") if pnl_history else vix_open) or vix_open
-
-        # Fallback: if SPX/VIX still None, try market_ticks from DB
-        if (spx_open is None or spx_close is None) and self._db_reader:
+        # Fill any STILL-missing SPX/VIX (esp. close) from today's market_ticks.
+        # Uses `or` so the exact OHLC above is preserved when present.
+        if (spx_close is None or spx_open is None or vix_close is None) and self._db_reader:
             try:
                 import sqlite3
                 conn = sqlite3.connect(self._db_reader.db_path)
                 conn.row_factory = sqlite3.Row
-                today = get_today_et()
                 rows = conn.execute(
                     "SELECT spx_price, vix_level FROM market_ticks WHERE timestamp LIKE ? ORDER BY timestamp",
-                    (f"{today}%",),
+                    (f"{get_today_et()}%",),
                 ).fetchall()
                 conn.close()
-                if rows:
-                    spx_prices = [r["spx_price"] for r in rows if r["spx_price"]]
-                    vix_levels = [r["vix_level"] for r in rows if r["vix_level"]]
-                    if spx_prices:
-                        spx_open = spx_open or spx_prices[0]
-                        spx_close = spx_prices[-1]
-                        spx_high = max(spx_prices)
-                        spx_low = min(spx_prices)
-                    if vix_levels:
-                        vix_open = vix_open or vix_levels[0]
-                        vix_close = vix_levels[-1]
+                spx_prices = [r["spx_price"] for r in rows if r["spx_price"]]
+                vix_levels = [r["vix_level"] for r in rows if r["vix_level"]]
+                if spx_prices:
+                    spx_open = spx_open or spx_prices[0]
+                    spx_close = spx_close or spx_prices[-1]
+                    spx_high = spx_high or max(spx_prices)
+                    spx_low = spx_low or min(spx_prices)
+                if vix_levels:
+                    vix_open = vix_open or vix_levels[0]
+                    vix_close = vix_close or vix_levels[-1]
             except Exception as e:
                 logger.debug(f"SPX/VIX tick fallback failed: {e}")
+        spx_close = spx_close or spx_open
+        vix_close = vix_close or vix_open
 
         today = get_today_et()
         try:
