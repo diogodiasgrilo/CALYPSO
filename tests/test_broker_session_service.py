@@ -84,7 +84,7 @@ class TestBrokerContract:
 
     def test_disallowed_method_raises_attribute_error(self):
         _, client = _make()
-        for bad in ("connect", "disconnect", "_ib_call", "place_order", "get_secdef"):
+        for bad in ("disconnect", "_ib_call", "place_order", "get_secdef", "foobar"):
             with pytest.raises(AttributeError):
                 getattr(client, bad)
 
@@ -102,6 +102,27 @@ class TestBrokerContract:
         client = BrokerClient(transport=dead_transport)
         with pytest.raises(BrokerError):
             client.get_vix_price()
+
+    def test_connect_ok_when_broker_holds_session(self):
+        _, client = _make()
+        client.health = lambda: {"status": "ok", "connected": True}
+        assert client.connect() is True
+
+    def test_connect_raises_when_broker_has_no_session(self):
+        _, client = _make()
+        client.health = lambda: {"status": "degraded", "connected": False}
+        with pytest.raises(BrokerError):
+            client.connect()
+
+    def test_ensure_connected_reflects_health_and_never_raises(self):
+        _, client = _make()
+        client.health = lambda: {"connected": True}
+        assert client.ensure_connected() is True
+
+        def boom():
+            raise ConnectionError("broker down")
+        client.health = boom
+        assert client.ensure_connected() is False  # never raises → gate handles it
 
     def test_dispatcher_health_never_raises(self):
         ib = MagicMock()

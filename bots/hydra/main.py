@@ -53,6 +53,7 @@ from shared.ib_client import (
     IBClient, IBConfig, IBClientError, IBAuthError, IBConnectionError,
 )
 from shared.ib_oauth import load_credentials
+from shared.broker_client import BrokerClient, BrokerError
 from shared.logger_service import setup_logging
 from shared.market_hours import (
     is_market_open, get_market_status_message, calculate_sleep_duration,
@@ -205,6 +206,23 @@ def print_banner():
     print(banner)
 
 
+def _build_broker():
+    """Construct the broker the strategy talks to.
+
+    If CALYPSO_BROKER_URL is set, return a BrokerClient that proxies to the
+    shared calypso-broker service (which owns the ONE IBKR session — see
+    docs/migration/BROKER_SESSION_SERVICE_DESIGN.md), so this process opens NO
+    IBKR session of its own. This is how A/B/C run concurrently without the
+    one-session-per-username eviction war. Otherwise (unset), return a direct
+    IBClient that owns its own session (legacy / single-bot mode). Either object
+    is a drop-in: it answers connect()/ensure_connected() + the 16 data methods.
+    """
+    broker_url = os.environ.get("CALYPSO_BROKER_URL")
+    if broker_url:
+        return BrokerClient(broker_url)
+    return IBClient(IBConfig(credentials=load_credentials("paper")))
+
+
 def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config_path: str = "bots/hydra/config/config.json"):
     """Run the main trading bot loop."""
     global shutdown_requested
@@ -223,9 +241,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     # Catch the real exception, shut the logger down cleanly, exit.
     trade_logger.log_event("Connecting to Interactive Brokers (paper)...")
     try:
-        broker = IBClient(IBConfig(credentials=load_credentials("paper")))
+        broker = _build_broker()
         broker.connect()
-    except (IBAuthError, IBConnectionError, IBClientError) as e:
+    except (IBAuthError, IBConnectionError, IBClientError, BrokerError) as e:
         trade_logger.log_error(f"Failed to connect to IBKR: {e}")
         trade_logger.shutdown()
         return
@@ -817,9 +835,9 @@ def show_status(config: dict):
     trade_logger = setup_logging(config, bot_name="HYDRA")
     # P7-audit H4: connect() raises on failure — it never returns False.
     try:
-        broker = IBClient(IBConfig(credentials=load_credentials("paper")))
+        broker = _build_broker()
         broker.connect()
-    except (IBAuthError, IBConnectionError, IBClientError) as e:
+    except (IBAuthError, IBConnectionError, IBClientError, BrokerError) as e:
         print(f"Failed to connect to IBKR: {e}")
         trade_logger.shutdown()
         return

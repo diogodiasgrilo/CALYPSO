@@ -1,0 +1,63 @@
+[Unit]
+Description=CALYPSO broker — single shared IBKR session service (ibind OAuth 1.0a)
+# Owns the ONE IBKR brokerage session; HYDRA A/B/C reach it over loopback so
+# they don't fight over the one-session-per-username limit. See
+# docs/migration/BROKER_SESSION_SERVICE_DESIGN.md.
+After=network-online.target
+Wants=network-online.target
+# Crash-loop limiter (these are [Unit] directives — ignored in [Service]).
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+Environment="GCP_PROJECT=calypso-trading-bot"
+# Loopback-only bind (single-tenant VM). Override here if ever needed.
+Environment="CALYPSO_BROKER_HOST=127.0.0.1"
+Environment="CALYPSO_BROKER_PORT=8788"
+
+# ─── IBKR OAuth 1.0a credentials — ONLY the broker holds these now ──────────
+# (the hydra* strategy units drop LoadCredentialEncrypted once cut over to the
+# BrokerClient; the broker is the single OAuth identity / session owner.)
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/dhparam.pem.cred
+
+ExecStart=/opt/calypso/.venv/bin/python -m services.broker.main
+
+# A full restart cleanly re-runs connect() (fresh LST + Tickler) — also the
+# fallback if the daily re-auth loop ever can't recover.
+Restart=always
+RestartSec=30
+TimeoutStartSec=120
+
+# Graceful stop: the FastAPI shutdown hook runs ib.disconnect() (stop Tickler +
+# logout) so the IBKR session is released cleanly rather than left competing.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-broker
+
+# ─── Sandboxing (defense-in-depth for a brokerage-credential service) ───────
+# Note: ProtectDevices is silently unsupported on the deploy host's systemd
+# build (252) — the rest apply. Verify with `systemd-analyze security calypso-broker`.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectDevices=yes
+ReadWritePaths=/opt/calypso
+
+[Install]
+WantedBy=multi-user.target

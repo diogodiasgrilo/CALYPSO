@@ -80,6 +80,31 @@ class BrokerClient:
                 f"broker unreachable for {method}: {type(e).__name__}: {e}"
             ) from e
 
+    # ── session-lifecycle drop-ins (main.py calls these on the broker object;
+    #    they are NOT part of the 16-method data surface — the broker owns the
+    #    real IBKR session, so here they just reflect/await the broker's health)
+    def connect(self) -> bool:
+        """Drop-in for IBClient.connect(): the strategy owns NO IBKR session —
+        calypso-broker does. Verify the broker is up and holding a session;
+        raise BrokerError (so the strategy fails to start, exactly like
+        IBClient.connect raising) if it is not."""
+        h = self.health()
+        if not h.get("connected"):
+            raise BrokerError(f"broker is not holding an IBKR session: {h}")
+        logger.info("BrokerClient connected to calypso-broker at %s (%s)",
+                    self._base_url, h)
+        return True
+
+    def ensure_connected(self) -> bool:
+        """Drop-in for IBClient.ensure_connected(): report the broker's session
+        health (the broker maintains the session — daily re-auth + 15-min
+        re-check live there). Returns False, never raises, so the strategy's
+        session gate handles a broker/session problem gracefully."""
+        try:
+            return bool(self.health().get("connected"))
+        except Exception:
+            return False
+
     def health(self) -> dict:
         import requests
         r = requests.get(f"{self._base_url}/health", timeout=5)
