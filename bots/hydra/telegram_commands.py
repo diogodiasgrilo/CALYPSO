@@ -48,6 +48,34 @@ from shared.market_hours import is_market_open, get_us_market_time, is_weekend, 
 
 logger = logging.getLogger(__name__)
 
+
+class _TokenRedactingFilter(logging.Filter):
+    """Redact the Telegram bot token from any log record this module emits.
+
+    Every Telegram API call embeds the token in the URL path
+    (``api.telegram.org/bot<TOKEN>/...``), so a ``requests`` connection /
+    timeout exception stringifies the token into the message we log — which
+    then ships to Cloud Logging (audit #5: the token is the sole credential
+    gating /stop, /restart and config edits). This filter rewrites the
+    formatted message in place so the token never lands in a log sink.
+    """
+
+    def __init__(self, token: str):
+        super().__init__()
+        self._token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._token:
+            try:
+                msg = record.getMessage()
+                if self._token in msg:
+                    record.msg = msg.replace(self._token, "***REDACTED***")
+                    record.args = ()
+            except Exception:
+                pass
+        return True
+
+
 POLL_INTERVAL = 5       # seconds between getUpdates calls
 REQUEST_TIMEOUT = 10    # HTTP timeout for Telegram API calls
 MAX_MESSAGE_LENGTH = 4096  # Telegram message limit
@@ -310,6 +338,16 @@ class TelegramCommandHandler:
             creds = json.loads(secret_value)
             self._bot_token = creds.get("bot_token", "")
             self._chat_id = str(creds.get("chat_id", ""))
+
+            if self._bot_token:
+                # audit #5: scrub the token from every record this module's
+                # logger emits. Drop any prior instance first so a creds
+                # reload doesn't stack duplicate filters.
+                logger.filters = [
+                    flt for flt in logger.filters
+                    if not isinstance(flt, _TokenRedactingFilter)
+                ]
+                logger.addFilter(_TokenRedactingFilter(self._bot_token))
 
             if self._bot_token and self._chat_id:
                 self._enabled = True

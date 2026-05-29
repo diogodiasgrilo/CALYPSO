@@ -108,9 +108,17 @@ from shared.ib_retry import (  # noqa: E402
 # rate (~2/s, even batched) well under IBKR's 10 req/s global limit.
 _SNAPSHOT_MAX_WARMUP_POLLS = 12
 _SNAPSHOT_POLL_INTERVAL_S = 0.5
-# Keys IBKR returns in the snapshot row that are pure metadata (not market
-# data). If a snapshot row contains ONLY these keys, the cache isn't warm.
-_SNAPSHOT_METADATA_KEYS = frozenset({"conid", "conidEx", "_updated"})
+# Keys IBKR returns in the snapshot row that are routing/availability
+# metadata, NOT price/Greek data. If a snapshot row contains ONLY these
+# keys, the cache isn't warm. IBKR populates these alongside the conid
+# BEFORE any quote arrives, so counting them as "data" made warmup exit
+# early and return None VIX/SPX (silently degrading VIX-regime + stop
+# logic). "6509" is the availability flag (R/D/Z); "server_id"/"6119" are
+# server-routing fields. Erring toward more keys here is safe — worst case
+# warmup polls a little longer; the bug was exiting too soon.
+_SNAPSHOT_METADATA_KEYS = frozenset(
+    {"conid", "conidEx", "_updated", "server_id", "6119", "6509"}
+)
 
 
 def _snapshot_has_data(payload) -> bool:

@@ -200,7 +200,9 @@ class TestStuckOpenReminders:
         # One reminder fired
         assert alert_svc.send_alert.call_count == 1
         kwargs = alert_svc.send_alert.call_args.kwargs
-        assert "still OPEN" in kwargs["title"]
+        # Wording covers a breaker that is OPEN or flapping OPEN↔HALF_OPEN
+        # on failing probes (audit M7/M10).
+        assert "still degraded" in kwargs["title"]
 
     def test_reminders_capped_per_day(self, broker, alert_svc, monkeypatch):
         clock = [1000.0]

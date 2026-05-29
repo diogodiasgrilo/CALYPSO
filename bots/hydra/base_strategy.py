@@ -40,6 +40,7 @@ import math
 import os
 import time
 import threading
+import uuid
 from collections import deque
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional, Dict, List, Any, Tuple, Deque, Set
@@ -2310,10 +2311,22 @@ class MEICStrategy:
 
         side = "BUY" if buy_sell == BuySell.BUY else "SELL"
 
+        # ORDER-009b: fresh client-order-id base per placement invocation.
+        # external_ref is stable per (day, entry, leg), so reusing it as the
+        # cOID makes every progressive-slippage rung AND any same-day
+        # unwind-and-re-enter collide on IBKR's server-side cOID dedup —
+        # which silently rejected the retries/re-entries as duplicate orders.
+        # A per-call nonce + the attempt index gives every distinct order
+        # submission a unique cOID, while a network-level retry WITHIN a
+        # single attempt still reuses that attempt's cOID (so a timed-out
+        # place that secretly succeeded is still deduped, not double-filled).
+        placement_nonce = uuid.uuid4().hex[:6]
+
         # Progressive retry sequence (same as the Saxo path).
         for attempt, (slippage_percent, is_market) in enumerate(
             PROGRESSIVE_RETRY_SEQUENCE
         ):
+            attempt_coid = f"{external_ref}_{placement_nonce}{attempt}"
             quote = self._read_option_quote(conid)
             if not quote:
                 logger.warning(
@@ -2372,7 +2385,7 @@ class MEICStrategy:
                 result = self._place_leg_order(
                     instrument_id=conid, side=side,
                     quantity=self.contracts_per_entry,
-                    order_type="MKT", coid=external_ref,
+                    order_type="MKT", coid=attempt_coid,
                 )
             else:
                 if slippage_percent > 0:
@@ -2394,7 +2407,7 @@ class MEICStrategy:
                     instrument_id=conid, side=side,
                     quantity=self.contracts_per_entry,
                     order_type="LMT", limit_price=limit_price,
-                    coid=external_ref,
+                    coid=attempt_coid,
                 )
 
             if result and result.get("filled"):
@@ -2418,6 +2431,39 @@ class MEICStrategy:
                     "debit": fill_price * qty_mult if buy_sell == BuySell.BUY else 0,
                     "fill_price": fill_price,
                 }
+
+            # ORDER-010: partial fill. The leg filled SOME but not all
+            # contracts. We must NOT fall through to cancel-and-retry the
+            # full quantity — the already-filled contracts are real, so a
+            # retry would overfill. Cancel the working remainder and flatten
+            # the filled portion with an opposite market order, so we never
+            # carry an untracked naked leg into a 0DTE position. Return None
+            # so the IC builder unwinds cleanly (this leg ends flat).
+            partial_qty = (result or {}).get("filled_quantity") or 0
+            if result and 0 < partial_qty < self.contracts_per_entry:
+                logger.critical(
+                    f"  ORDER-010: PARTIAL FILL {partial_qty}/"
+                    f"{self.contracts_per_entry} on {leg_description} "
+                    f"(order {result.get('order_id')}) — cancelling remainder "
+                    f"+ flattening the {partial_qty} filled contract(s)"
+                )
+                if result.get("order_id"):
+                    self._cancel_order(result["order_id"])
+                close_side = "SELL" if side == "BUY" else "BUY"
+                flat = self._place_leg_order(
+                    instrument_id=conid, side=close_side, quantity=partial_qty,
+                    order_type="MKT",
+                    coid=f"{external_ref}_{placement_nonce}flat{attempt}",
+                )
+                if not (flat and flat.get("filled")):
+                    logger.critical(
+                        "  ORDER-010: FAILED to flatten partial fill on "
+                        f"{leg_description} — MANUAL INTERVENTION REQUIRED"
+                    )
+                    self._add_orphaned_order(
+                        result.get("order_id") or f"PARTIAL_{conid}"
+                    )
+                return None
 
             # Not filled. The order may still be WORKING in IBKR's book
             # (place_and_wait_for_fill leaves a timed-out order live) —

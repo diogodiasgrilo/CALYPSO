@@ -3,11 +3,12 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
+from dashboard.backend.auth import require_api_key
 from dashboard.backend.config import settings
 from dashboard.backend.ws.manager import ConnectionManager
 from dashboard.backend.ws.broadcaster import Broadcaster
@@ -58,13 +59,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# REST routers
-app.include_router(hydra.router)
-app.include_router(metrics.router)
-app.include_router(market.router)
-app.include_router(agents.router)
-app.include_router(widget.router)
-app.include_router(variants.router)
+# REST routers — guarded by the optional API key (audit M12). When no
+# DASHBOARD_API_KEY is configured the dependency is a no-op (dev/local);
+# /api/health and the static frontend below stay open either way.
+_api_guard = [Depends(require_api_key)]
+app.include_router(hydra.router, dependencies=_api_guard)
+app.include_router(metrics.router, dependencies=_api_guard)
+app.include_router(market.router, dependencies=_api_guard)
+app.include_router(agents.router, dependencies=_api_guard)
+app.include_router(widget.router, dependencies=_api_guard)
+app.include_router(variants.router, dependencies=_api_guard)
 
 # WebSocket router
 app.include_router(ws_router_module.router)

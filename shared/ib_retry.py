@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -35,6 +36,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from typing import Callable, Optional
+
+# HTTP status codes that signal a transient, retryable server condition.
+# Matched as standalone alphanumeric tokens (``\b...\b``) — NOT bare
+# substrings — so digit runs embedded in conids/strikes/order-ids/notionals
+# (e.g. "conid 5031", "order 504123", "$5,025") can't masquerade as a 5xx.
+_HTTP_RETRYABLE_CODE_RE = re.compile(r"\b(?:429|500|502|503|504)\b")
 
 
 logger = logging.getLogger(__name__)
@@ -216,9 +223,15 @@ class RetryPolicy:
             if permanent_pattern in msg:
                 return False
 
+        # HTTP 429/5xx — matched as standalone tokens (see
+        # _HTTP_RETRYABLE_CODE_RE). The previous bare-substring test
+        # (`"503" in msg`) misclassified permanent rejects whose message
+        # merely embedded a digit run (conids, strikes, order-ids,
+        # notionals) as retryable, causing retry storms + false orders-
+        # breaker trips on the safety-critical order path.
+        if _HTTP_RETRYABLE_CODE_RE.search(msg) or "rate limit" in msg:
+            return True
         if any(t in msg for t in (
-            "429", "rate limit",
-            "500", "502", "503", "504",
             "timeout", "timed out",
             "connection reset", "connection refused", "connection aborted",
             "broken pipe", "remote end closed",

@@ -2021,6 +2021,12 @@ class HydraStrategy(MEICStrategy):
         return {
             "success": bool(res.get("order_id")),
             "filled": filled_qty >= int(quantity),
+            # Surface the partial-fill count so callers can detect a leg
+            # that filled SOME but not all contracts (ORDER-010) instead of
+            # treating it as a clean miss and silently dropping the filled
+            # contracts into an untracked naked position.
+            "filled_quantity": int(filled_qty),
+            "requested_quantity": int(quantity),
             "order_id": res.get("order_id"),
             "fill_price": res.get("avg_fill_price"),
             "position_id": None,  # IBKR has no per-leg position id
@@ -9405,6 +9411,41 @@ class HydraStrategy(MEICStrategy):
     # (hydra_state.json) instead of sharing with MEIC (meic_state.json).
     # This is necessary when both bots may run simultaneously.
 
+    def _atomic_write_json(self, path: str, data) -> None:
+        """Write ``data`` as JSON to ``path`` atomically and durably.
+
+        Writes to ``path + ".tmp"``, flushes Python buffers + ``fsync``s the
+        file data to disk, atomically renames over ``path``, then ``fsync``s
+        the parent directory. A power-loss / SIGKILL mid-write therefore
+        leaves the prior file intact rather than a truncated or empty one —
+        RUNBOOKS RB-5 crash recovery assumes the on-disk state is
+        whole-or-absent. The temp file is removed if the write fails.
+        Directory fsync is best-effort (not all platforms support it).
+        """
+        temp_file = path + ".tmp"
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        try:
+            with open(temp_file, "w") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, path)
+            try:
+                dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        except Exception:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except OSError:
+                pass
+            raise
+
     def _save_state_to_disk(self):
         """
         Save current daily state to disk for crash recovery.
@@ -9677,14 +9718,8 @@ class HydraStrategy(MEICStrategy):
 
             state_data["last_saved"] = get_us_market_time().isoformat()
 
-            # Write atomically using temp file (uses self.state_file set in __init__)
-            temp_file = self.state_file + ".tmp"
-            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-
-            with open(temp_file, 'w') as f:
-                json.dump(state_data, f, indent=2)
-
-            os.replace(temp_file, self.state_file)
+            # Write atomically + durably (temp → fsync → rename → dir fsync).
+            self._atomic_write_json(self.state_file, state_data)
             logger.debug(f"HYDRA state saved to {self.state_file}")
 
         except Exception as e:

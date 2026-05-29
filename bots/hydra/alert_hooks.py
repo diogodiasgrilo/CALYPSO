@@ -156,29 +156,43 @@ class IBKRAlertHooks:
         for family, breaker in breakers.items():
             current = breaker.state
             previous = self._last_breaker_states.get(family)
-            if current == previous:
-                # No transition — check if it's stuck-OPEN for a reminder.
-                if self._is_open(current):
-                    self._maybe_fire_stuck_open_reminder(family)
-                continue
-            # State changed — fire transition alert.
-            self._handle_breaker_transition(family, previous, current)
-            self._last_breaker_states[family] = current
+            if current != previous:
+                self._handle_breaker_transition(family, previous, current)
+                self._last_breaker_states[family] = current
+            # Outage reminder fires on a TIME cadence whenever the family is
+            # in an active outage — independent of transitions. This covers a
+            # breaker stuck OPEN *and* one flapping OPEN↔HALF_OPEN on failing
+            # probes. The old code only reminded when current==previous AND
+            # only fired the opened-alert on CLOSED→OPEN, so a re-trip after a
+            # failed probe (HALF_OPEN→OPEN) and a flapping breaker went silent
+            # after the first alert (audit M7 + M10).
+            if family in self._stuck_open_since:
+                self._maybe_fire_stuck_open_reminder(family)
 
     def _handle_breaker_transition(self, family: str, prev: Any, curr: Any) -> None:
-        """A breaker changed state — translate to an alert."""
-        if self._is_closed_to_open(prev, curr):
-            # Started tracking stuck-OPEN duration NOW.
-            self._stuck_open_since[family] = time.monotonic()
-            self._stuck_open_last_reminder[family] = time.monotonic()
+        """Translate a breaker state change into an alert.
+
+        Outage is tracked by membership in ``_stuck_open_since`` rather than
+        by an exact edge: entering OPEN *or* HALF_OPEN (the latter catches an
+        OPEN missed between polls, e.g. CLOSED→HALF_OPEN) starts the outage
+        once; an OPEN↔HALF_OPEN flap inside an outage does NOT re-fire the
+        opened-alert (the cadence reminder reports "still degraded"); and the
+        first return to CLOSED ends it (audit M7 + M10).
+        """
+        in_outage = family in self._stuck_open_since
+        if self._is_degraded(curr) and not in_outage:
+            now = time.monotonic()
+            self._stuck_open_since[family] = now
+            self._stuck_open_last_reminder[family] = now
             self._stuck_open_reminders_today[family] = 0
             self._fire_breaker_opened(family)
-        elif self._is_recovered(prev, curr):
-            # OPEN → HALF_OPEN → CLOSED transition (or direct OPEN → CLOSED).
+        elif self._is_closed(curr) and in_outage:
+            # Recovered to CLOSED (covers OPEN→CLOSED and HALF_OPEN→CLOSED).
             self._stuck_open_since.pop(family, None)
             self._stuck_open_last_reminder.pop(family, None)
             self._fire_breaker_recovered(family)
-        # Other transitions (CLOSED → HALF_OPEN etc.) don't fire alerts.
+        # else: OPEN↔HALF_OPEN flap inside an outage, or CLOSED→CLOSED — no
+        # per-transition alert; the cadence reminder covers "still degraded".
 
     def _maybe_fire_stuck_open_reminder(self, family: str) -> None:
         """If this family has been OPEN long enough and we haven't sent
@@ -198,9 +212,10 @@ class IBKRAlertHooks:
             elapsed_min = int((now - since) / 60)
             self._alerts.send_alert(
                 alert_type=_alert_type("API_ERROR"),
-                title=f"HYDRA — {family} breaker still OPEN ({elapsed_min}m)",
+                title=f"HYDRA — {family} breaker still degraded ({elapsed_min}m)",
                 message=(
-                    f"The IBKR {family} circuit breaker has been OPEN for "
+                    f"The IBKR {family} circuit breaker has been OPEN (or "
+                    f"flapping OPEN↔HALF_OPEN on failing probes) for "
                     f"~{elapsed_min} minutes. This is reminder "
                     f"{count + 1}/{STUCK_OPEN_REMINDERS_PER_DAY} today. "
                     f"See RUNBOOKS.md RB-2."
@@ -318,18 +333,15 @@ class IBKRAlertHooks:
         return getattr(state, "value", str(state)).lower() == "open"
 
     @staticmethod
-    def _is_closed_to_open(prev: Any, curr: Any) -> bool:
-        prev_v = getattr(prev, "value", str(prev)).lower() if prev else None
-        curr_v = getattr(curr, "value", str(curr)).lower()
-        return prev_v == "closed" and curr_v == "open"
+    def _is_degraded(state: Any) -> bool:
+        """OPEN or HALF_OPEN — the family is not fully healthy. Used to
+        detect outage entry by state rather than by an exact edge, so an
+        OPEN missed between polls (CLOSED→HALF_OPEN) still registers."""
+        return getattr(state, "value", str(state)).lower() in ("open", "half_open")
 
     @staticmethod
-    def _is_recovered(prev: Any, curr: Any) -> bool:
-        """OPEN → CLOSED transition (covers OPEN → HALF_OPEN → CLOSED too,
-        because we only see the CLOSED state on poll)."""
-        prev_v = getattr(prev, "value", str(prev)).lower() if prev else None
-        curr_v = getattr(curr, "value", str(curr)).lower()
-        return prev_v in ("open", "half_open") and curr_v == "closed"
+    def _is_closed(state: Any) -> bool:
+        return getattr(state, "value", str(state)).lower() == "closed"
 
 
 # ─── Lazy AlertType / AlertPriority lookups ────────────────────────────────
