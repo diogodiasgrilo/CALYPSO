@@ -1,8 +1,11 @@
 # Running A/B/C concurrently on IBKR — the one-session-per-username constraint
 
-**Status:** decided 2026-05-29. Chosen approach for paper: **Option 2 — one IBKR
-paper username per strategy.** Target for live / shared-capital: **Option 1 —
-single shared broker-session service** (deferred).
+**Status:** decided 2026-05-29. Chosen approach: **Option 1 — single shared
+broker-session service** (`calypso-broker`). Design + rollout in
+[`BROKER_SESSION_SERVICE_DESIGN.md`](./BROKER_SESSION_SERVICE_DESIGN.md).
+Option 2 (one paper username per strategy) is retained below as the rejected
+alternative — it works for paper but splits accounts/P&L and gives no single
+funnel for live risk/reconciliation.
 
 ## The problem (observed at cutover, 2026-05-29)
 

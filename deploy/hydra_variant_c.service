@@ -25,20 +25,17 @@ Environment="STATE_FILE=/opt/calypso/data/variant_c/hydra_state.json"
 Environment="SNAPSHOT_DIR=/opt/calypso/data/variant_c/state_snapshots"
 
 # ─── IBKR OAuth 1.0a credentials (P7 Step 4) ────────────────────────────
-# Variant C uses its OWN IBKR paper username + OAuth registration, delivered
-# from /etc/calypso/ibkr-c/. IBKR allows only ONE brokerage session per
-# username, so B/C CANNOT share A's session — three ssodh/init on one
-# username evict each other (observed at cutover, 2026-05-29; see
-# PROJECT_STATUS + docs/migration/IBKR_MULTI_SESSION.md). Each variant gets
-# its own username/consumer key; the credential IDs below are unchanged
-# (ib_oauth reads them by ID from $CREDENTIALS_DIRECTORY) — only the source
-# paths differ per account.
-LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr-c/consumer_key.cred
-LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr-c/access_token.cred
-LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr-c/access_token_secret.cred
-LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr-c/signature.pem.cred
-LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr-c/encryption.pem.cred
-LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr-c/dhparam.pem.cred
+# Variant C talks to IBKR's paper account (same credentials as the canonical
+# bot — same paper account; C is dry-run so no real orders, but it does
+# need real-time data via the same OAuth session). Polish A-X2: previous
+# version had NO LoadCredentialEncrypted entries → variant would have
+# failed on the first load_credentials call.
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/dhparam.pem.cred
 
 EnvironmentFile=-/etc/calypso/polygon.env
 
