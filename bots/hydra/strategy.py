@@ -9609,23 +9609,34 @@ class HydraStrategy(MEICStrategy):
                                    and not entry.call_side_expired)
                     put_active = (not entry.put_side_stopped and not entry.put_side_skipped
                                   and not entry.put_side_expired)
-                    # Skip a side's unrealized contribution when its spread_value
-                    # is 0 with non-trivial credit. That pattern means the bot
-                    # hasn't refreshed prices for this side yet (just-placed
-                    # entry, default IronCondorEntry.{call,put}_spread_value =
-                    # 0.0), and naively computing credit-0 would produce a
-                    # phantom +credit unrealized that vanishes on the next tick
-                    # — visible as a misleading first-point spike on the
-                    # dashboard's pnl_history chart. Wait one tick, get a real
-                    # mark, then contribute. (2026-05-05 fix; same pattern as
+                    # Stale-mark guard: when spread_value is 0 with non-trivial
+                    # credit on a JUST-PLACED entry, the bot hasn't refreshed
+                    # prices yet (default IronCondorEntry.{call,put}_spread_value
+                    # = 0.0), so credit-0 would produce a phantom +credit
+                    # unrealized that vanishes on the next tick — visible as a
+                    # misleading first-point spike on the dashboard's chart.
+                    # (2026-05-05 fix; same pattern as
                     # bots/hydra/brandon/take_profit.py:evaluate.)
+                    #
+                    # The original guard `credit>0 and value==0` also misfired
+                    # at expiration / TP close, when value LEGITIMATELY hits 0
+                    # before _process_expired_credits flips the *_side_expired
+                    # flags and books the credit into realized. That window
+                    # caused a chart cliff down to ~realized-commission (e.g.
+                    # 2026-05-28 variant A: chart ended at -$10 while TODAY
+                    # tile correctly read +$237.50). Restrict the guard to
+                    # entries placed within the last 60s so post-placement zero
+                    # is treated as stale, but post-expiration zero contributes
+                    # the credit normally.
+                    entry_age = (now - entry.entry_time).total_seconds() if entry.entry_time else 999.0
+                    is_fresh = entry_age < 60.0
                     if call_active:
-                        if entry.call_spread_credit > 0 and (entry.call_spread_value or 0) == 0:
+                        if entry.call_spread_credit > 0 and (entry.call_spread_value or 0) == 0 and is_fresh:
                             pass  # stale — contribute 0 this minute
                         else:
                             net_pnl += entry.call_spread_credit - (entry.call_spread_value or 0)
                     if put_active:
-                        if entry.put_spread_credit > 0 and (entry.put_spread_value or 0) == 0:
+                        if entry.put_spread_credit > 0 and (entry.put_spread_value or 0) == 0 and is_fresh:
                             pass
                         else:
                             net_pnl += entry.put_spread_credit - (entry.put_spread_value or 0)

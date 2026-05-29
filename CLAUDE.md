@@ -1,5 +1,7 @@
 # CALYPSO — HYDRA on Interactive Brokers
 
+> **🧭 New here / Claude session continuing prior work?** Read [`docs/migration/PROJECT_STATUS.md`](docs/migration/PROJECT_STATUS.md) FIRST. It's the single-source-of-truth for *current project state* (what's been done, what's in flight, what's blocked on external gates). THIS file (`CLAUDE.md`) is the *operator reference* (what the bot does, how to deploy, how to troubleshoot). Different purposes — read the status doc first so you know whether to act or wait.
+
 > **Branch state (this branch only — `hydra-ibkr-standalone`).**
 > Bot: **HYDRA** v`2.0.0-rc.1` (IBKR-standalone). Broker: **Interactive Brokers Web API** (ibind OAuth 1.0a, no gateway). Account: **paper only** on this branch — there is no live-money path. The legacy Saxo Bank integration plus the 4 sibling bots (Iron Fly, Delta Neutral, Rolling Put Diagonal, MEIC) are **deleted on this branch** (commits P5a + P5b removed `bots/iron_fly_0dte/`, `bots/delta_neutral/`, `bots/rolling_put_diagonal/`, and `bots/meic/` from the tree — `git ls-tree HEAD bots/` shows only `__init__.py` + `hydra/`). Pre-migration code is preserved on `main` where the same 4 bots live as kill-switched (`DISABLED_FOR_SAFETY=True`) modules. Migration history lives in [`docs/migration/`](docs/migration/).
 
