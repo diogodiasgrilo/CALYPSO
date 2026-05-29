@@ -30,6 +30,7 @@ import base64
 import json
 import logging
 import os
+import re
 import smtplib
 import time
 from datetime import datetime, timezone
@@ -274,6 +275,15 @@ def send_email(to_email: str, subject: str, body_html: str, body_text: str) -> b
         return False
 
 
+def _md_escape(text) -> str:
+    """Escape Telegram legacy-Markdown special chars in DYNAMIC alert content
+    so an unbalanced _ / * / ` / [ (e.g. snake_case fields like
+    ``min_call_credit``) can't 400 the send and force the plain-text fallback.
+    The function's own *bold* / _italic_ markup is applied OUTSIDE this on the
+    already-escaped values, so structure renders while content stays literal."""
+    return re.sub(r"([_*`\[])", r"\\\1", str(text))
+
+
 def format_telegram_message(alert: Dict[str, Any]) -> str:
     """
     Format alert for Telegram (rich Markdown formatting).
@@ -318,12 +328,12 @@ def format_telegram_message(alert: Dict[str, Any]) -> str:
     # Build Telegram message
     lines = []
 
-    # Compact header: emoji + bot name + title
-    lines.append(f"{emoji} *{bot_name}* | {title}")
+    # Compact header: emoji + bot name + title (values escaped; *bold* kept)
+    lines.append(f"{emoji} *{_md_escape(bot_name)}* | {_md_escape(title)}")
     lines.append("")
 
     # Main message (already contains the key info)
-    lines.append(message)
+    lines.append(_md_escape(message))
 
     # Add supplementary details (only info NOT already in message)
     message_lower = message.lower()
@@ -378,12 +388,12 @@ def format_telegram_message(alert: Dict[str, Any]) -> str:
             else:
                 value_str = str(value)
 
-            lines.append(f"• {display_key}: {value_str}")
+            lines.append(f"• {_md_escape(display_key)}: {_md_escape(value_str)}")
 
     # Minimal footer with timestamp only
     if time_str:
         lines.append("")
-        lines.append(f"_{time_str}_")
+        lines.append(f"_{_md_escape(time_str)}_")
 
     return "\n".join(lines)
 
