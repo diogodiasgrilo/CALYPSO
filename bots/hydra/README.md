@@ -356,13 +356,15 @@ cp bots/hydra/config/config.json.template bots/hydra/config/config.json
 # Edit config.json with your settings
 ```
 
-2. Install systemd service:
-```bash
-sudo cp bots/hydra/hydra.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable hydra
-sudo systemctl start hydra
-```
+2. Install the systemd service.
+   Install the **canonical** unit `deploy/hydra.service` — it carries the six
+   IBKR OAuth `LoadCredentialEncrypted=` entries, the pre-start state snapshot,
+   and the sandboxing block. Do NOT `cp` an in-tree copy (the old
+   `bots/hydra/hydra.service` was a credential-less, sandbox-less Saxo/MEIC-era
+   unit and has been removed). The credential setup + mandatory 3-check is in
+   [`deploy/IBKR_CREDENTIALS_SETUP.md`](../../deploy/IBKR_CREDENTIALS_SETUP.md);
+   the full production cutover is
+   [`docs/migration/GATE2_DEPLOY_RUNBOOK.md`](../../docs/migration/GATE2_DEPLOY_RUNBOOK.md).
 
 3. Monitor:
 ```bash

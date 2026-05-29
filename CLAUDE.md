@@ -99,7 +99,7 @@ deploy/
   hydra_variant_c.service     # parallel dry-run instance (Brandon variant C)
   IBKR_CREDENTIALS_SETUP.md   # one-time-setup + pre-start verification runbook
   hermes/apollo/clio/homer/argus .service + .timer  # agent timers
-  token_keeper.service        # Saxo-only — DEAD on this branch
+  token_keeper.service.disabled-on-this-branch  # Saxo-only — DEAD on this branch
 
 scripts/
   probe_ibkr_market_data.py   # P7 Step 2 — verify real-time data flow (run after credentials toggle)
@@ -993,7 +993,7 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{b,c}/`
 4. **State files:** `data/hydra_state.json`, `data/variant_b/hydra_state.json`, `data/variant_c/hydra_state.json`
 5. **Position Registry:** `data/position_registry.json` — vestigial on IBKR (always empty), kept loaded for back-compat
-6. **Token Keeper:** dead on this branch. The `services/token_keeper/` and `deploy/token_keeper.service` files exist for back-compat with `main` but should never be started. IBKR OAuth 1.0a is unattended.
+6. **Token Keeper:** dead on this branch. The `services/token_keeper/` code and the `deploy/token_keeper.service.disabled-on-this-branch` unit (suffixed so no `deploy/*.service` install loop can pick it up) exist only for back-compat with `main` and must never be started. IBKR OAuth 1.0a is unattended.
 7. **All four sibling bots:** **deleted on this branch** (P5a/P5b). `git ls-tree HEAD bots/` shows only `__init__.py` + `hydra/`. The kill-switched versions live on `main`.
 8. **The legacy `--live` CLI flag:** retained for back-compat as a no-op. The bot logs a NOTE at startup if it sees the flag.
 9. **Branch policy:** non-trivial work happens on a feature branch off `hydra-ibkr-standalone`. Merge back via PR. Pre-merge: full test suite (`python -m pytest tests/ -q`) must pass.

@@ -10676,7 +10676,12 @@ class HydraStrategy(MEICStrategy):
             # Log safety event
             self._log_safety_event(
                 "SETTLEMENT_COMPLETE",
-                f"All {len(settled_conids) if settled_conids else len(my_position_ids)} positions settled after market close",
+                # Was `len(my_position_ids)` in the else branch — a Saxo-era
+                # name undefined in this scope, so an empty settled_conids
+                # raised NameError and the try/except logged a spurious
+                # "settlement failed" (audit: latent NameError). settled_conids
+                # is 0 when nothing needed settling, which reads correctly.
+                f"All {len(settled_conids)} positions settled after market close",
                 "Complete"
             )
 

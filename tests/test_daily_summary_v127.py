@@ -19,10 +19,28 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from unittest.mock import MagicMock, patch, PropertyMock
 
+import pytest
+
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bots.hydra.base_strategy import MarketData
+
+
+@pytest.fixture(autouse=True)
+def _force_regular_session(monkeypatch):
+    """Make the intraday-OHLC tests deterministic at any wall-clock hour.
+
+    MarketData.update_spx/update_vix capture open/high/low ONLY during the
+    regular session (>= 9:30 ET, gated by _is_regular_session_or_later). These
+    tests exercise that capture, so they implicitly assume RTH — without this
+    they pass when run after 09:30 ET but fail between 00:00 and 09:30 ET (a
+    time-dependent, flaky suite). Forcing the gate True here keeps the tests
+    hermetic; the gate's production logic is unchanged.
+    """
+    monkeypatch.setattr(
+        MarketData, "_is_regular_session_or_later", staticmethod(lambda: True)
+    )
 
 
 # ============================================================

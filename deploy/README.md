@@ -32,7 +32,6 @@ This directory contains the systemd unit files + setup runbooks for HYDRA on Int
 ## Other files
 
 - `dashboard-hydra.json` — Google Cloud Monitoring dashboard config (Saxo-era; kept until dashboard config is re-validated for the IBKR stack)
-- `deploy-hydra-rename.sh` — one-time migration helper (Saxo→IBKR cutover script)
 - `ops-agent-config.yaml` — Google Cloud Ops Agent config for log forwarding
 - `setup_vm.sh` — VM bootstrap script (Saxo-era; needs review before next clean VM provision)
 - `setup-monitoring-dashboard.sh` — sets up the dashboard JSON in Cloud Monitoring

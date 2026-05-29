@@ -343,6 +343,14 @@ Follow `deploy/IBKR_CREDENTIALS_SETUP.md` to re-encrypt the affected credential.
 
 If `journalctl` shows `json.decoder.JSONDecodeError` on `hydra_state.json` load:
 
+> **Per-variant paths.** The commands below use strategy **A**'s paths
+> (`data/hydra_state.json`, `data/state_snapshots/`, unit `hydra`). For a
+> variant, substitute the variant tree and unit: variant **B** →
+> `data/variant_b/hydra_state.json`, `data/variant_b/state_snapshots/`, unit
+> `hydra_variant_b`; variant **C** → `data/variant_c/...`, unit
+> `hydra_variant_c`. Restoring A's file over a variant (or vice-versa)
+> corrupts the wrong bot.
+
 1. **Stop the bot** (it's auto-restarting; interrupt the loop):
    ```bash
    gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"

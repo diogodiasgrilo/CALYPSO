@@ -88,11 +88,14 @@ class IBKRCredentials:
     def validate_secrets(self) -> None:
         """Raise ValueError if any required secret is empty or obviously bad.
 
-        IBKR's self-service portal documents the consumer key as 1-9 chars
-        A-Z (per https://github.com/Voyz/ibind/wiki/OAuth-1.0a). The portal
-        silently uppercases any lowercase input at registration time. We
-        accept A-Z plus 0-9 to leave room for any future relaxation IBKR
-        applies — the actual identity check is server-side.
+        IBKR's self-service portal documents the consumer key as a
+        9-character password whose valid characters are A-Z (per
+        https://github.com/Voyz/ibind/wiki/OAuth-1.0a); it uppercases any
+        lowercase input at registration time. We deliberately keep this a
+        lenient guard — a `<= 9` length bound and an A-Z plus 0-9 charset —
+        rather than hard-requiring exactly 9 A-Z, so a future IBKR relaxation
+        can't lock us out. A genuinely wrong key still fails closed at the
+        server-side OAuth identity check, never silently mis-trading.
         """
         if not self.consumer_key:
             raise ValueError("consumer_key must be non-empty")

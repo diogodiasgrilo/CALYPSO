@@ -78,7 +78,7 @@ calypso/
 │   ├── HYDRA_TRADING_JOURNAL.md   # updated by HOMER
 │   └── migration/                 # F1-F7 + P1-P7 design docs, P7 audit register, runbooks, checklists
 ├── scripts/                       # ~60 utility + analysis scripts (see scripts/README.md)
-└── tests/                         # 900 tests; 885 pass, 15 integration skipped pending paper account
+└── tests/                         # unit suite green; ~15 integration tests skipped pending a live paper account
 ```
 
 ## Tech Stack
@@ -107,7 +107,8 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 # Run the test suite (no IBKR creds needed for unit tests)
 python -m pytest tests/ -q --ignore=tests/test_dashboard
-# Expected: 885 passed, 15 skipped
+# Expected: all unit tests pass; ~15 integration tests skipped
+# (run them against a live paper account with IBIND_INTEGRATION=paper)
 ```
 
 To run the IBKR data-flow probe against your own paper account (requires the 3 OAuth secrets exported from 1Password to the shell):
