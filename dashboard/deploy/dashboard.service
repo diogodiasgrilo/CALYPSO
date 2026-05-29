@@ -22,6 +22,11 @@ Environment=DASHBOARD_HYDRA_METRICS_FILE=/opt/calypso/data/hydra_metrics.json
 Environment=DASHBOARD_BACKTESTING_DB=/opt/calypso/data/backtesting.db
 Environment=DASHBOARD_HYDRA_LOG_FILE=/opt/calypso/logs/hydra/bot.log
 Environment=DASHBOARD_AGENT_INTEL_DIR=/opt/calypso/intel
+# Expose the A-vs-B-vs-C comparison view (/api/variants/*). The variant
+# readers point at data/variant_{b,c}/ state + metrics + backtesting.db, which
+# the broker-backed B/C now populate. (Off on Saxo too — this enables the full
+# multi-strategy functionality now that B/C run.)
+Environment=DASHBOARD_COMPARISON_MODE_ENABLED=true
 
 # Resource limits
 MemoryMax=256M
